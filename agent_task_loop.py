@@ -1576,6 +1576,7 @@ class AgentTaskLoop:
         requested_tool: str = "",
         requested_kind: str = "write",
         requested_arguments: Mapping[str, Any] | None = None,
+        requested_action_id: str = "",
         continue_after_approval: bool = True,
         provider_request_count: int | None = None,
         provider_usage: Mapping[str, Any] | None = None,
@@ -1650,7 +1651,7 @@ class AgentTaskLoop:
             "requestedTool": effective_tool,
             "requestedKind": effective_kind,
             "requestedArguments": effective_arguments,
-            "requestedActionId": (
+            "requestedActionId": _bounded_text(requested_action_id, 80) or (
                 canonical_action_id(effective_kind, effective_tool, effective_arguments)
                 if effective_tool
                 else ""
@@ -2132,6 +2133,11 @@ class AgentTaskLoop:
             gated["task"] = self.snapshot()
             return gated
 
+        claim = gated.get("completionClaim")
+        honest_incomplete_reply = (
+            str(gated.get("reply") or "").strip()
+            if isinstance(claim, Mapping) and claim.get("satisfied") is False else ""
+        )
         completed_ids = self.completed_action_ids()
         missing_requirements: list[str] = []
         for requirement in self._requirements.values():
@@ -2157,14 +2163,14 @@ class AgentTaskLoop:
             gated.update(
                 {
                     "summary": "The required task action has not completed.",
-                    "reply": (
+                    "reply": honest_incomplete_reply or (
                         "A prerequisite or partial tool action returned, but the required task action "
                         "has not completed, so I cannot mark the task done."
                     ),
                     "continueLoop": False,
                     "nextStep": "completion_unverified",
                     "completionGate": {
-                        "status": "needs_user_action",
+                        "status": "failed",
                         "reason": "required_action_missing",
                         "requirementIds": missing_requirements,
                     },
@@ -2181,7 +2187,7 @@ class AgentTaskLoop:
                 gated["nextStep"] = "completion_unverified"
                 gated["task"] = self.snapshot("completion_unverified")
                 gated["completionGate"] = {
-                    "status": "needs_user_action",
+                    "status": "failed",
                     "reason": "completion_evidence_missing",
                 }
                 return gated
@@ -2202,14 +2208,14 @@ class AgentTaskLoop:
                 gated.update(
                     {
                         "summary": "The final completion claim was not bound to the executed actions.",
-                        "reply": (
+                        "reply": honest_incomplete_reply or (
                             "The tool actions returned, but I cannot honestly mark the task complete "
                             "because the final claim did not confirm success or cited uncompleted action evidence."
                         ),
                         "continueLoop": False,
                         "nextStep": "completion_unverified",
                         "completionGate": {
-                            "status": "needs_user_action",
+                            "status": "failed",
                             "reason": "completion_claim_unbound",
                         },
                     }
@@ -2227,14 +2233,14 @@ class AgentTaskLoop:
                 gated.update(
                     {
                         "summary": "The deterministic completion decision was not bound to the executed actions.",
-                        "reply": (
+                        "reply": honest_incomplete_reply or (
                             "The tool actions returned, but the runtime did not bind an exact completion "
                             "decision to those actions, so this task is not marked done."
                         ),
                         "continueLoop": False,
                         "nextStep": "completion_unverified",
                         "completionGate": {
-                            "status": "needs_user_action",
+                            "status": "failed",
                             "reason": "runtime_completion_unbound",
                         },
                     }

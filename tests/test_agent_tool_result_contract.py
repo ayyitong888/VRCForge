@@ -552,3 +552,13 @@ def test_internal_planner_observation_keeps_domain_cause_and_commit_facts() -> N
     assert observation.count('"<redacted>"') >= 4
     assert '"code":"avatar_upload_readiness_blocked"' in observation
     assert len(observation) <= RUNTIME_PLANNER_CAUSAL_OBSERVATION_MAX_CHARS
+
+
+def test_real_human_request_is_not_replaced_by_model_negative_reply():
+    gate = completion_gate_plan(
+        {"reply": "Cannot finish the whole task.", "nextStep": "done", "completionClaim": {"satisfied": False}},
+        {"status": "needs_user_action", "summary": "Which outfit should I use?"},
+    )
+    assert gate["reply"] == "Which outfit should I use?"
+    assert gate["nextStep"] == "needs_user_action"
+    assert "modelFailureReplyPreserved" not in gate["completionGate"]

@@ -2484,6 +2484,83 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(result["plan"]["nextStep"], "done")
         self.assertEqual(result["plan"]["taskCompletion"]["status"], "completed")
 
+    def test_native_negative_final_never_overwrites_live_human_question(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        prompt = "Which outfit should I use?"
+        pending = {"tool": "vrcforge_ask_user", "ok": True, "status": "needs_user_action",
+                   "result": {"question": {"questionId": "test-question", "question": prompt}},
+                   "outcome": {"status": "needs_user_action", "summary": prompt}}
+        with patch.object(gateway.runtime_planner, "native_conversation_binding", return_value="test-native-binding"), patch.object(
+            gateway.runtime_planner, "plan_agent_turn", return_value={"planner": "llm", "reply": "I cannot finish yet.",
+                "nextStep": "done", "completionClaim": {"satisfied": False}}
+        ), patch("agent_gateway.find_current_pending_question", return_value=pending):
+            result = gateway.runtime_message({"message": "Inspect this project.", "projectRoot": str(project),
+                                              "session_id": "native-human-final-session", "_projectContextActive": True})
+        assert result["plan"]["reply"] == prompt
+        assert result["plan"]["completionGate"]["reason"] == "question_pending"
+        assert result["plan"]["nextStep"] == "needs_user_action"
+
+    def test_honest_incomplete_explanation_is_a_visible_failed_final(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        reply = "衣柜未完成：左肩仍有穿模，当前没有可用的网格修改工具。"
+        plans = [
+            {"planner": "llm", "shellNeeded": True, "shellCommand": "Get-ChildItem -LiteralPath Assets",
+             "shellParams": {"cwd": str(project)}, "continueLoop": True, "nextStep": "call_shell"},
+            {"planner": "llm", "reply": reply, "completionClaim": {"satisfied": False},
+             "continueLoop": False, "nextStep": "done"},
+        ]
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plans) as planner, patch.object(
+            gateway.shell, "execute", return_value={
+                "ok": True, "status": "executed", "sessionId": "honest-final-shell",
+                "session": {"sessionId": "honest-final-shell", "status": "finished"},
+                "classification": {"risk": "low", "protectionScope": "unity_project"},
+                "result": {"ok": True, "exitCode": 0, "stdout": "Assets"},
+            },
+        ):
+            result = gateway.runtime_message({"message": "Inspect this project.", "projectRoot": str(project),
+                                              "session_id": "honest-final-session", "_projectContextActive": True})
+        assert planner.call_count == 2
+        assert result["plan"]["reply"] == reply
+        assert result["plan"]["completionGate"]["status"] == "failed"
+        finals = [event["payload"] for event in result["timeline"]
+                  if event.get("kind") == "assistant" and event.get("payload", {}).get("phase") == "final_answer"]
+        assert any(event.get("status") == "failed" and event.get("summary") == reply for event in finals)
+        assert "taskCompletion" not in result["plan"]
+
+    def test_public_honest_incomplete_final_is_failed_and_not_duplicated(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        reply = "衣柜未完成：左肩仍有穿模，当前没有可用的网格修改工具。"
+        plans = [
+            {"planner": "llm", "shellNeeded": True, "shellCommand": "Get-ChildItem -LiteralPath Assets",
+             "shellParams": {"cwd": str(project)}, "continueLoop": True, "nextStep": "call_shell"},
+            {"planner": "llm", "reply": reply, "completionClaim": {"satisfied": False},
+             "continueLoop": False, "nextStep": "done",
+             "publicMessages": [{"phase": "commentary", "text": "Checking", "id": "progress-1"},
+                                {"phase": "final_answer", "text": reply, "id": "final-1"}]},
+        ]
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plans) as planner, patch.object(
+            gateway.shell, "execute", return_value={
+                "ok": True, "status": "executed", "sessionId": "honest-final-shell",
+                "session": {"sessionId": "honest-final-shell", "status": "finished"},
+                "classification": {"risk": "low", "protectionScope": "unity_project"},
+                "result": {"ok": True, "exitCode": 0, "stdout": "Assets"},
+            },
+        ):
+            result = gateway.runtime_message({"message": "Inspect this project.", "projectRoot": str(project),
+                                              "session_id": "honest-final-session", "_projectContextActive": True})
+        assert planner.call_count == 2
+        assert result["plan"]["reply"] == reply
+        assert result["plan"]["completionGate"]["status"] == "failed"
+        finals = [event["payload"] for event in result["timeline"]
+                  if event.get("kind") == "assistant" and event.get("payload", {}).get("phase") == "final_answer"]
+        assert any(event.get("status") == "failed" and event.get("summary") == reply for event in finals)
+        assert len([event for event in finals if event.get("summary") == reply]) == 1
+        assert any(event.get("payload", {}).get("status") == "progress" for event in result["timeline"] if event.get("payload", {}).get("messageId") == "progress-1")
+        assert "taskCompletion" not in result["plan"]
+
     def test_project_completion_claim_correction_still_fails_closed(self) -> None:
         gateway = self.gateway
         project = self._unity_project()

@@ -6787,18 +6787,23 @@ class AgentGateway:
                 and not (plan.get("writeNeeded") and plan.get("writeTool"))
                 and not (plan.get("skillNeeded") and plan.get("skillTool"))
                 and not completion_claim_correction_attempted
-                and not (native_binding and not plan.get("nativeCallIds"))
+                and not (ensure_dict(plan.get("completionClaim")).get("satisfied") is False and planner_reply)
                 and str(plan.get("planner") or "").strip().casefold() == "llm"
                 and task_loop.completed_action_ids()
                 and ensure_dict(
                     task_loop.gate_terminal(plan).get("completionGate")
-                ).get("reason") == "completion_claim_unbound"
+                ).get("reason") in {"completion_claim_unbound", "required_action_missing"}
+            )
+            honest_failed_final = (
+                ensure_dict(plan.get("completionClaim")).get("satisfied") is False
+                and ensure_dict(task_loop.gate_terminal(plan).get("completionGate")).get("status") == "failed"
             )
             for public_message in public_messages:
                 message_phase = public_message.get("phase") or ""
                 append_timeline_event(
                     "assistant", label="Assistant", summary=public_message["text"],
                     status=("progress" if message_phase == "commentary" else
+                            "failed" if message_phase == "final_answer" and honest_failed_final else
                             "completion_unverified" if message_phase == "final_answer" and needs_completion_claim_correction else "done"),
                     phase=message_phase, message_id=public_message["id"],
                 )
@@ -6894,6 +6899,8 @@ class AgentGateway:
             elif needs_completion_claim_correction:
                 completed_action_ids = task_loop.completed_action_ids()
                 correction_summary = (
+                    "The completion gate has unresolved obligations. Inspect the task requirements; "
+                    "perform any remaining authorized actions or explain the specific blocker honestly. "
                     "If complete: action=reply, completion_claim.satisfied=true; omit optional "
                     "evidence_action_ids. Otherwise inspect/report incomplete. "
                     "action=correct retries failed tools only. Host binds IDs."
@@ -7344,6 +7351,7 @@ class AgentGateway:
                                 exposure_layer=runtime_exposure_layer,
                                 requested_tool=step_tool,
                                 requested_arguments=action_arguments,
+                                requested_action_id=planned_action_id,
                                 provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
                                 provider_usage=task_seed_provider_usage(),
                                 continue_after_approval=bool(plan.get("continueLoop")),
@@ -8295,7 +8303,9 @@ class AgentGateway:
         elif isinstance(top_plan, dict):
             top_plan = task_loop.gate_terminal(top_plan)
             if (native_binding and last_plan.get("nextStep") == "done"
-                    and not last_plan.get("nativeCallIds")):
+                    and not last_plan.get("nativeCallIds")
+                    and top_plan.get("nextStep") == "done"
+                    and not top_plan.get("completionGate")):
                 # A native final ends conversation; canonical gates above still
                 # decide task completion independently of its displayed text.
                 for field in ("reply", "summary"):
@@ -8327,10 +8337,16 @@ class AgentGateway:
             top_plan["visionStatus"] = vision_payload.get("status")
 
         final_reply = str(top_plan.get("reply") or top_plan.get("summary") or "").strip()
+        final_reply_status = (
+            "failed"
+            if ensure_dict(top_plan.get("completionClaim")).get("satisfied") is False
+            and ensure_dict(top_plan.get("completionGate")).get("status") == "failed"
+            else str(top_plan.get("nextStep") or "done")
+        )
         public_final_already_emitted = any(
             event.get("kind") == "assistant"
             and event.get("payload", {}).get("summary") == final_reply
-            and event.get("payload", {}).get("status") == "done"
+            and event.get("payload", {}).get("status") == final_reply_status
             and event.get("payload", {}).get("messageId")
             for event in timeline
         )
@@ -8342,7 +8358,7 @@ class AgentGateway:
                 "assistant",
                 label="Assistant",
                 summary=final_reply,
-                status=str(top_plan.get("nextStep") or "done"),
+                status=final_reply_status,
                 phase="final_answer",
             )
 

@@ -628,7 +628,8 @@ def completion_gate_plan(
         completion_claim = gated.get("completion_claim")
     honest_failure_reply = (
         gated["reply"].strip()
-        if isinstance(completion_claim, Mapping)
+        if outcome_status == "failed"
+        and isinstance(completion_claim, Mapping)
         and completion_claim.get("satisfied") is False
         and isinstance(gated.get("reply"), str)
         and gated["reply"].strip()
