@@ -321,9 +321,10 @@ def _install_generic(*, config_path: str | None, options: ExternalAgentConnector
 
 
 def deepseek_harness_config_path() -> Path:
+    """Target the desktop profile, not preferences shared by every CLI profile."""
     value = os.environ.get("DSH_HOME", "").strip()
     root = Path(value).expanduser() if value else Path.home() / ".dsh"
-    return root / "cordis.patch.yml"
+    return root / "profiles" / "desktop" / "cordis.patch.yml"
 
 
 def _install_deepseek_harness(*, bridge: StdioBridgeSpec, options: ExternalAgentConnectorOptions) -> dict[str, Any]:

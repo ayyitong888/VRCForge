@@ -39,7 +39,7 @@ def test_deepseek_harness_install_preserves_other_mcp_rows_and_uninstalls_exact_
     root = make_source_root(tmp_path)
     dsh_home = tmp_path / "dsh-home"
     monkeypatch.setenv("DSH_HOME", str(dsh_home))
-    patch_path = dsh_home / "cordis.patch.yml"
+    patch_path = dsh_home / "profiles" / "desktop" / "cordis.patch.yml"
     patch_path.parent.mkdir(parents=True)
     existing = [
         {
@@ -76,7 +76,7 @@ def test_deepseek_harness_rejects_non_insert_operation_targeting_managed_id(
     root = make_source_root(tmp_path)
     dsh_home = tmp_path / "dsh-home"
     monkeypatch.setenv("DSH_HOME", str(dsh_home))
-    patch_path = dsh_home / "cordis.patch.yml"
+    patch_path = dsh_home / "profiles" / "desktop" / "cordis.patch.yml"
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(
         yaml.safe_dump([{"id": "mcp-vrcforge", "config": {"toolCallTimeoutMs": 1}}], sort_keys=False),
@@ -676,3 +676,33 @@ def test_appx_package_probe_does_not_shell_out(monkeypatch: pytest.MonkeyPatch, 
 
     assert probe["ok"] is True
     assert probe["matches"] == [str(package_root)]
+
+
+def test_deepseek_desktop_config_ignores_other_profile_and_root_patch(tmp_path, monkeypatch):
+    root = make_source_root(tmp_path)
+    home = tmp_path / "dsh"
+    monkeypatch.setenv("DSH_HOME", str(home))
+    desktop = home / "profiles" / "desktop" / "cordis.patch.yml"
+    other = home / "profiles" / "web" / "cordis.patch.yml"
+    legacy = home / "cordis.patch.yml"
+    other.parent.mkdir(parents=True)
+    legacy.write_text("# shared preferences\n[]\n", encoding="utf-8")
+    other.write_text("# another profile\n[]\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in (legacy, other)}
+    installed = install_connector("deepseekHarness", root_dir=root, run_self_test=False)
+    assert installed["ok"] is True
+    assert Path(installed["configPath"]) == desktop
+    assert desktop.is_file()
+    status = connector_installer._deepseek_harness_status({})
+    assert status["installed"] is True
+    assert Path(status["configPath"]) == desktop
+    removed = uninstall_connector("deepseekHarness", root_dir=root)
+    assert removed["ok"] is True
+    assert connector_installer._deepseek_harness_status({})["installed"] is False
+    assert all(p.read_bytes() == content for p, content in before.items())
+
+
+def test_deepseek_desktop_default_home(tmp_path, monkeypatch):
+    monkeypatch.delenv("DSH_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert connector_installer.deepseek_harness_config_path() == tmp_path / ".dsh" / "profiles" / "desktop" / "cordis.patch.yml"
