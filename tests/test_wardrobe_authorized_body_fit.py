@@ -36,3 +36,21 @@ def test_body_fit_workflow_requires_authority_and_preserves_baseline():
     assert "vrcforge_apply_blendshapes" in step["tools"]
     assert step["optional"] and step["runtimeApprovalRequired"] and step["runtimePermissionGateRequired"]
     assert workflow["checkpoint"]["required"]
+
+
+def test_fit_tradeoff_requires_current_user_choice_in_projected_skill(tmp_path):
+    skill = parse_skill_markdown(ROOT / "SKILL.md")
+    projected = tmp_path / "SKILL.md"
+    projected.write_text(render_skill_markdown({**skill, "instructions": skill["body"]}), encoding="utf-8")
+    body = parse_skill_markdown(projected)["body"]
+    for text in (body, (ROOT / "references/workflow.md").read_text(encoding="utf-8")):
+        assert "保留这套并调整衣服／身体" in text
+        assert "删除这套衣服" in text
+        assert "不能仅凭旧偏好替用户作出取舍" in text
+        assert "已有针对当前问题的明确选择时直接执行，不重复询问" in text
+    workflow = json.loads((ROOT / "workflows/wardrobe-authoring.json").read_text(encoding="utf-8"))
+    choice = workflow["communityWardrobeContract"]["bodyShapeFitting"]["fitTradeoff"]
+    assert choice["askUserBeforeChoosing"] is True
+    assert choice["priorPreferencesAreContextNotDecision"] is True
+    assert choice["reuseExplicitCurrentChoice"] is True
+    assert choice["deleteSourceAssetsByDefault"] is False

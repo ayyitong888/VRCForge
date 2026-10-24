@@ -280,6 +280,14 @@
       }
     },
     "bodyShapeFitting": {
+      "fitTradeoff": {
+        "askUserBeforeChoosing": true,
+        "priorPreferencesAreContextNotDecision": true,
+        "reuseExplicitCurrentChoice": true,
+        "choices": ["retain_and_fit_clothing_or_authorized_body", "remove_this_outfit"],
+        "deletionScope": "exact_outfit_instance_and_exclusive_wardrobe_references_through_existing_approval_checkpoint_and_reference_checks",
+        "deleteSourceAssetsByDefault": false
+      },
       "defaultPreserveBody": true,
       "requiresExplicitBodySizeAuthorization": true,
       "existingScannedShapesOnly": true,
@@ -604,7 +612,7 @@
       "writes": true,
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true,
-      "conditional": "user_explicitly_requested_replacement_cleanup_and_reference_closure_is_complete",
+      "conditional": "user_explicitly_requested_replacement_cleanup_or_chose_exact_outfit_removal_and_reference_closure_is_complete",
       "optional": true
     }
   ],
