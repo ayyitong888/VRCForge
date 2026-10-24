@@ -51,12 +51,14 @@ function PendingQueuedTurnCard({
   onEdit,
   onRemove,
   onSteer,
+  onResume,
 }: {
   turn: QueuedChatTurn;
   sending: boolean;
   onEdit?: (turnId: string, patch: { text?: string; attachments?: ChatAttachment[] }) => void | Promise<unknown>;
   onRemove?: (turnId: string) => void;
   onSteer?: (turnId: string) => void;
+  onResume?: () => void;
 }) {
   const { t } = useTranslation();
   const [draftText, setDraftText] = useState(turn.text);
@@ -75,8 +77,8 @@ function PendingQueuedTurnCard({
     }
   }
   return (
-    <div className="relative flex items-start gap-2 rounded-lg border border-border/60 bg-background/80 p-2" data-chat-pending-turn={turn.id}>
-      <div className="min-w-0 flex-1 space-y-1.5">
+    <div className="relative flex items-center gap-2 px-3 py-1" data-chat-pending-turn={turn.id}>
+      <div className="min-w-0 flex-1">
         {editing ? (
           <textarea
             className="app-scrollbar min-h-10 w-full resize-y rounded-md bg-transparent px-1 py-1 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -87,9 +89,9 @@ function PendingQueuedTurnCard({
             data-chat-pending-turn-text
           />
         ) : (
-          <p className="whitespace-pre-wrap break-words px-1 py-1 text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
+          <p className="truncate px-1 py-1 text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
         )}
-        {turn.attachments.length ? (
+        {turn.attachments.length && editing ? (
           <div className="flex flex-wrap gap-1.5">
             {turn.attachments.map((attachment) => (
               <span key={attachment.id} className="inline-flex max-w-full items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs" data-chat-pending-turn-attachment={attachment.id}>
@@ -115,11 +117,12 @@ function PendingQueuedTurnCard({
           </Button>
         ) : null}
         {sending ? (
-          <Button type="button" variant="outline" className="h-8 shrink-0 px-2 text-xs" disabled={editing && dirty} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
+          <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={editing && dirty} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
             <ArrowUp className="mr-1 h-3 w-3" />
             {t("chat.guideNow")}
           </Button>
         ) : null}
+        {!sending && onResume ? <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" onClick={onResume} data-chat-resume-followups><Play className="mr-1 h-3 w-3" />{t("chat.resumeFollowups")}</Button> : null}
         <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("chat.removeQueued")} title={t("chat.removeQueued")} onClick={() => onRemove?.(turn.id)} data-chat-pending-turn-remove={turn.id}>
           <X className="h-4 w-4" />
         </Button>
@@ -127,7 +130,7 @@ function PendingQueuedTurnCard({
           <MoreHorizontal className="h-4 w-4" />
         </Button>
         {menuOpen ? (
-          <div role="menu" className="absolute right-2 top-11 z-20 min-w-36 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md" data-chat-pending-turn-menu={turn.id}>
+          <div role="menu" className="absolute right-2 bottom-full mb-1 z-20 min-w-36 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md" data-chat-pending-turn-menu={turn.id}>
             <button type="button" role="menuitem" className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent" onClick={() => { setEditing(true); setMenuOpen(false); }} data-chat-pending-turn-edit={turn.id}>
               {t("chat.editQueuedMessage")}
             </button>
@@ -457,11 +460,7 @@ export function ChatWorkspace({
     />
   );
   const pendingQueue = queued.length ? (
-    <section className="mb-3 space-y-2 rounded-xl border border-border/70 bg-muted/30 p-2.5" aria-label={t("chat.pendingQueue")} data-chat-pending-queue>
-      <div className="flex items-center gap-2 px-1 text-xs font-medium text-muted-foreground">
-        <span>{t("chat.pendingQueue")}</span>
-        <span aria-label={String(queued.length)} className="rounded-full bg-muted px-1.5 py-0.5">{queued.length}</span>
-      </div>
+    <section className="mx-3 rounded-t-2xl border border-b-0 border-border/70 bg-background" aria-label={t("chat.pendingQueue")} data-chat-pending-queue>
       {queued.map((turn) => (
         <PendingQueuedTurnCard
           key={turn.id}
@@ -470,6 +469,7 @@ export function ChatWorkspace({
           onEdit={onEditQueuedTurn}
           onRemove={onRemoveQueuedTurn}
           onSteer={onSteerQueuedTurn}
+          onResume={queued.length === 1 ? onResumeQueue : undefined}
         />
       ))}
     </section>
@@ -484,7 +484,7 @@ export function ChatWorkspace({
       onModifyApproval={onModifyApproval}
     />
   ) : null;
-  const queueControls = queued.length && !sending ? (
+  const queueControls = queued.length > 1 && !sending ? (
     <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-xs" data-chat-followup-controls>
       <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
         <Pause className="h-3.5 w-3.5 shrink-0" />

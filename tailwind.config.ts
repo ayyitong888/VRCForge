@@ -31,6 +31,11 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        popover: {
+          DEFAULT: "hsl(var(--card))",
+          foreground: "hsl(var(--card-foreground))",
+        },
+        accent: "hsl(var(--muted))",
         sidebar: "hsl(var(--sidebar))",
         workspace: "hsl(var(--workspace))",
       },
