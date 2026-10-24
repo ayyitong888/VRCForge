@@ -1,6 +1,10 @@
 """The question contract reaches both aliases and both planner transports."""
+import ast
+from pathlib import Path
 import pytest
 
+import agent_question_service
+from agent_gateway import AgentGateway
 from runtime_planner_service import planner_tool_input_schema
 from unity_tool_schema_projection import canonical_unity_read_tool_input_schema
 from tests.native_planner_fixture import NativePlannerFixture
@@ -40,3 +44,38 @@ def test_actual_planner_request_guides_all_user_question_text(layer, native):
     assert "why the user's help is needed" in prompt
     assert "exact visible names" in prompt
     assert "diagnostic details" in prompt
+    assert "specific capability or permission gap" in prompt
+
+
+def test_call_user_requires_a_verified_need_for_human_help():
+    instruction = planner_tool_input_schema("vrcforge_call_user")["properties"]["question"]["description"]
+    assert "exceptional human handoff" in instruction
+    assert "specific capability or permission gap" in instruction
+    assert "A failed tool call alone" in instruction
+    assert "confirm the requested control and action exist" in instruction
+    assert "routine technical checks" in instruction
+    assert "same unresolved issue" in instruction
+    assert "independent work" in instruction
+
+
+@pytest.mark.parametrize("tool", ["vrcforge_ask_user", "vrcforge_call_user"])
+def test_registered_tool_description_carries_guidance_through_real_projection(tmp_path, tool):
+    source = ast.parse((Path(__file__).resolve().parents[1] / "dashboard_server.py").read_text(encoding="utf-8"))
+    registration = next(node for node in ast.walk(source) if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute) and node.func.attr == "register_tool"
+                        and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == tool)
+    description = eval(compile(ast.Expression(registration.args[1]), "registered-question-description", "eval"), vars(agent_question_service))
+    gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+    gateway.register_tool(tool, description, "plan/preview", lambda params: {})
+    descriptor = gateway.shared_agent_tool_descriptor(tool, write=False, config=config)
+    assert "everyday language" in descriptor["description"]
+    assert descriptor["whenToUse"] and descriptor["whenNotToUse"]
+    if tool == "vrcforge_call_user":
+        assert "specific capability or permission gap" in descriptor["description"]
+        assert "A failed tool call alone" in descriptor["description"]
+        assert "confirm the requested control and action exist" in descriptor["description"]
+        external = next(row for row in gateway.build_external_mcp_tools() if row["name"] == tool)
+        assert "specific capability or permission gap" in external["description"]

@@ -23,6 +23,15 @@ AGENT_QUESTION_SCHEMA = "vrcforge.agent_question.v1"
 AGENT_QUESTION_MAX_ITEMS = 60
 QUESTION_KINDS = frozenset({"decision", "visual_checkpoint"})
 VISUAL_RESOLUTIONS = frozenset({"pass", "fail", "uncertain", "later"})
+CALL_USER_USAGE_INSTRUCTION = (
+    "Treat call_user as an exceptional human handoff. First inspect current evidence and relevant supported tools, "
+    "and identify the specific capability or permission gap requiring a human action or judgment. "
+    "A failed tool call alone does not establish this gap. Do not use call_user for routine technical checks, "
+    "untested UI guesses, progress acknowledgments, or work the agent can complete. "
+    "Before requesting clicks, confirm the requested control and action exist; do not invent UI instructions. "
+    "Consolidate the same unresolved issue into one pending request rather than repeatedly interrupting. "
+    "Continue independent work without assuming an answer; existing approval and checkpoint requirements remain authoritative. "
+)
 QUESTION_LANGUAGE_INSTRUCTION = (
     "For both ask_user and call_user, write the heading, question and choices in the user's language, using everyday language. "
     "Briefly explain what is blocked and why the user's help is needed, then ask for one concrete decision or action. "
@@ -39,7 +48,7 @@ QUESTION_INPUT_SCHEMA = {
         "kind": {"type": "string", "enum": ["decision", "visual_checkpoint"]},
         "question": {
             "type": "string", "minLength": 1, "maxLength": 1000,
-            "description": QUESTION_LANGUAGE_INSTRUCTION + "Put alternatives in options, not in a long diagnosis here.",
+            "description": QUESTION_LANGUAGE_INSTRUCTION + CALL_USER_USAGE_INSTRUCTION + "Put alternatives in options, not in a long diagnosis here.",
         },
         "options": {
             "type": "array",
