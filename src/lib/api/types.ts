@@ -1040,6 +1040,9 @@ export type AgentQuestion = {
   schema?: string;
   id?: string;
   questionId: string;
+  originClientTurnId?: string;
+  originTurnId?: string;
+  blocking?: boolean;
   kind?: string;
   sourceTool?: string;
   tool?: string;
@@ -1059,6 +1062,8 @@ export type AgentQuestion = {
   createdAt?: string;
   updatedAt?: string;
   runtimeContinuationStatus?: "queued" | "claimed" | "delivered" | "interrupted" | string;
+  runtimeContinuationClientTurnId?: string;
+  runtimeContinuationTurnId?: string;
   runtimeContinuation?: AgentRuntimeContinuation;
 };
 

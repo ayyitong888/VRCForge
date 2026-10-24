@@ -32,7 +32,8 @@ try {
   assert.ok(storedAnswer, "answer survives chat persistence");
   assert.equal(storedAnswer.questionId, "q-persist");
   assert.equal(storedAnswer.text, "The left side is clear.");
-  assert.equal(storedAnswer.header, "Review image", "a concise supplied question header labels the answer");
+  assert.equal(storedAnswer.header, "Review image", "the existing short header remains available as metadata");
+  assert.equal(storedAnswer.question, "What do you see?", "the complete original question survives persistence for the user answer bubble");
   const answerWithoutHeader = questionAnswerItem({ questionId: "q-no-header" }, "An answer");
   assert.equal(answerWithoutHeader.header, undefined, "an absent short header does not copy the full question into the answer row");
   const feedbackOne = questionAnswerItem({ questionId: "q-revision", questionFeedbackRevision: 1, updatedAt: "2026-10-23T01:01:00.000001+00:00" }, "Not sure yet");

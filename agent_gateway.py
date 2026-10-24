@@ -1681,6 +1681,14 @@ class AgentGateway:
         It opens no listener and never borrows a later turn's scope.
         """
         stable_id = str(question_id or "").strip()
+        if task_seed.get("_questionBlocking") is False:
+            routed = self._route_async_question_answer(stable_id, task_seed, continuation_prompt)
+            if routed is not None:
+                return routed
+            marker = ":question:" + stable_id
+            target_cid = str(task_seed.get("clientTurnId") or "")[:240 - len(marker)] + marker
+            self.questions.record_runtime_continuation(stable_id, "queued",
+                runtimeContinuationClientTurnId=target_cid, runtimeContinuationTurnId="")
         with self._lock:
             if not self._runtime_continuation_accepting or stable_id in self._question_continuations_inflight:
                 return {"ok": False, "status": "deferred", "questionId": stable_id}
@@ -1742,7 +1750,71 @@ class AgentGateway:
                 self._question_continuations_inflight.discard(stable_id)
                 self._runtime_continuation_condition.notify_all()
             raise
-        return {"ok": True, "status": "queued", "questionId": stable_id}
+        return {"ok": True, "status": "queued", "questionId": stable_id,
+                **({"sessionId": str(task_seed.get("sessionId") or ""), "clientTurnId": target_cid, "turnId": ""}
+                   if task_seed.get("_questionBlocking") is False else {})}
+
+    def _settle_async_question_steers(self, input_ids: list[str], *, session_id: str, client_turn_id: str, **fields: Any) -> None:
+        """Only consumption or a durable queue receipt settles a hot answer."""
+        for input_id in input_ids:
+            question_id = self._async_question_input_owner(input_id, session_id=session_id, client_turn_id=client_turn_id)
+            if question_id:
+                if fields.get("deliveryMode") == "followup":
+                    fields = {**fields, "runtimeContinuationClientTurnId": input_id, "runtimeContinuationTurnId": ""}
+                self.questions.record_runtime_continuation(question_id, "delivered", answerDeliveryConfirmed=True, **fields)
+
+    def _async_question_input_owner(self, input_id: str, *, session_id: str, client_turn_id: str) -> str:
+        if not str(input_id).startswith("question-answer:"):
+            return ""
+        question_id = str(input_id)[len("question-answer:"):]
+        question = self.questions._project(include_answered=True).get(question_id, {})
+        seed = ensure_dict(question.get("runtimeTaskSeed"))
+        return question_id if (question.get("blocking", True) is False and question.get("status") == "answered"
+            and seed.get("sessionId") == session_id and seed.get("clientTurnId") == client_turn_id) else ""
+
+    def _route_async_question_answer(self, question_id: str, seed: Mapping[str, Any], prompt: str) -> dict[str, Any] | None:
+        session_id = str(seed.get("sessionId") or "")
+        origin = str(seed.get("clientTurnId") or "")
+        input_id = "question-answer:" + question_id
+        lane = str(seed.get("followupLaneId") or session_id)
+        attachments = seed.get("_authenticatedUserAttachments")
+        with self._lock:
+            if not self._runtime_continuation_accepting:
+                return {"ok": False, "status": "deferred", "questionId": question_id}
+            # A crash may occur after durable spill but before the Question's
+            # delivery marker. Reuse the exact receipt instead of dispatching again.
+            existing = next((item for item in self._runtime_followup_queue.list(session_id=lane)
+                             if item.get("clientTurnId") == input_id), None)
+            if existing:
+                if existing.get("questionId") != question_id or existing.get("continuationSource") != "question_answered":
+                    return {"ok": False, "status": "backpressure", "reason": "answer_queue_identity_mismatch", "questionId": question_id}
+                self._settle_async_question_steers([input_id], session_id=session_id, client_turn_id=origin,
+                    deliveryMode="followup", followupQueueId=existing.get("queueId"))
+                return {"ok": True, "mode": "followup", "status": existing.get("status"), "questionId": question_id,
+                        "queueId": existing.get("queueId"), "deduped": True}
+            result = {} if attachments else self.submit_runtime_steer({
+                "sessionId": session_id, "targetClientTurnId": origin,
+                "clientTurnId": input_id, "message": prompt, "laneId": lane,
+            })
+            if result.get("accepted") is True:
+                self.questions.record_runtime_continuation(question_id, "queued",
+                    runtimeContinuationClientTurnId=origin, runtimeContinuationTurnId=str(seed.get("turnId") or ""))
+                return {"ok": True, "mode": "steer", "status": "steered", "questionId": question_id,
+                        "sessionId": session_id, "clientTurnId": origin, "turnId": seed.get("turnId"), "inputId": input_id}
+            state = self._runtime_session_state.final_response(session_id=session_id, client_turn_id=origin)
+            if state.get("status") == "running" or self._runtime_session_state.session_busy(session_id):
+                queued = self._runtime_followup_queue.enqueue(
+                    session_id=lane, client_turn_id=input_id, target_client_turn_id=origin,
+                    message=prompt, attachments=attachments if isinstance(attachments, list) else [],
+                    envelope={"questionId": question_id, "continuationSource": "question_answered", "runtimeSessionId": session_id, "projectRoot": seed.get("projectRoot"),
+                              "projectPath": seed.get("projectRoot"), "provider": seed.get("provider"),
+                              "providerLabel": seed.get("providerLabel"), "model": seed.get("model"),
+                              "planMode": seed.get("planMode") is True},
+                )
+                if queued.get("accepted") is True:
+                    self._settle_async_question_steers([input_id], session_id=session_id, client_turn_id=origin, deliveryMode="followup", followupQueueId=queued.get("queueId"))
+                return {"ok": queued.get("accepted") is True, **queued, "questionId": question_id}
+        return None
 
     def _dispatch_runtime_task_after_question(
         self,
@@ -1752,6 +1824,7 @@ class AgentGateway:
     ) -> Mapping[str, Any] | None:
         """Resume one foreground task through the existing planner continuation path."""
         seed = dict(task_seed or {})
+        asynchronous = seed.get("_questionBlocking") is False
         feedback_pending = bool(seed.pop("_authenticatedQuestionFeedbackPending", False))
         try:
             feedback_revision = int(seed.pop("_questionFeedbackRevision", 0) or 0)
@@ -1779,13 +1852,17 @@ class AgentGateway:
         if prepared is None:
             return None
         params = ensure_dict(prepared.get("params"))
-        client_turn_id = str(seed.get("clientTurnId") or "") + ":question:" + question_id
+        marker = ":question:" + question_id
+        prefix = str(seed.get("clientTurnId") or "")
+        client_turn_id = prefix[:240 - len(marker)] + marker if asynchronous else prefix + marker
         # Visual checkpoint feedback can be submitted more than once for the
         # same durable Question.  Keep ordinary ask_user compatibility while
         # giving each visual revision a distinct provider turn identity.
         if feedback_revision > 0 and str(seed.get("_questionKind") or seed.get("requestedKind") or "") == "visual_checkpoint":
             client_turn_id += ":feedback:" + str(feedback_revision)
         params["clientTurnId"] = client_turn_id[:240]
+        if seed.get("followupLaneId"):
+            params["followupLaneId"] = str(seed["followupLaneId"])
         params["message"] = str(seed.get("objective") or "") + "\n" + continuation_prompt
         if feedback_pending:
             params["_questionFeedbackPending"] = True
@@ -1811,6 +1888,14 @@ class AgentGateway:
             "tool": "vrcforge_ask_user", "kind": "skill", "status": "completed",
             "result": {"questionId": question_id, "answer": continuation_prompt},
         }
+        if asynchronous:
+            # A completed asynchronous ask has no pending native call to resume.
+            # Keep task obligations, but append to the current conversation.
+            context = dict(ensure_dict(continuation.get("context")))
+            context.pop("_nativeConversation", None)
+            context.pop("_nativeAdmittedToolNames", None)
+            continuation["context"] = context
+            params["_questionAnswerRequireIdle"] = True
         self._signal_background_activity("question_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
@@ -5174,12 +5259,18 @@ class AgentGateway:
             for item in late_steers:
                 input_id = str(item.get("inputId") or "")[:180]
                 followup_lane_id = str(item.get("followupLaneId") or resolved_session_id)[:180]
+                question_id = self._async_question_input_owner(input_id, session_id=resolved_session_id, client_turn_id=resolved_client_turn_id)
+                question_seed = ensure_dict(self.questions._project(include_answered=True).get(question_id, {}).get("runtimeTaskSeed")) if question_id else {}
                 try:
                     queued = self._runtime_followup_queue.enqueue(
                         session_id=followup_lane_id,
                         client_turn_id=input_id,
                         target_client_turn_id=resolved_client_turn_id,
                         message=str(item.get("message") or ""),
+                        envelope={"questionId": question_id, "continuationSource": "question_answered", "runtimeSessionId": resolved_session_id,
+                                  "projectRoot": question_seed.get("projectRoot"), "projectPath": question_seed.get("projectRoot"),
+                                  "provider": question_seed.get("provider"), "providerLabel": question_seed.get("providerLabel"),
+                                  "model": question_seed.get("model"), "planMode": question_seed.get("planMode") is True} if question_id else None,
                     )
                 except Exception:  # noqa: BLE001 - persistence failure becomes an authoritative bounded outcome.
                     queued = {
@@ -5188,6 +5279,7 @@ class AgentGateway:
                         "reason": "durable_store_unavailable",
                     }
                 if queued.get("accepted") is True:
+                    self._settle_async_question_steers([input_id], session_id=resolved_session_id, client_turn_id=resolved_client_turn_id, deliveryMode="followup", followupQueueId=queued.get("queueId"))
                     deferred.append({
                         "inputId": input_id,
                         "queueId": queued.get("queueId"),
@@ -5331,6 +5423,7 @@ class AgentGateway:
             session_id=session_id,
             turn_id=turn_id,
             client_turn_id=client_turn_id,
+            exclusive=params.get("_questionAnswerRequireIdle") is True,
         ):
             raise AgentGatewayError(
                 "A runtime turn with this sessionId and clientTurnId is already active.",
@@ -5601,10 +5694,10 @@ class AgentGateway:
                 continuation_completion, continuation_observation,
                 initial_history=history, client_turn_id=client_turn_id,
                 project_context_active=project_context_active,
-                on_steer_consumed=lambda ids: self._runtime_status_changed({
+                on_steer_consumed=lambda ids: (self._settle_async_question_steers(ids, session_id=session_id, client_turn_id=client_turn_id), self._runtime_status_changed({
                     "sessionId": session_id, "turnId": turn_id,
                     "clientTurnId": client_turn_id, "consumedSteerInputIds": ids,
-                }),
+                })),
             )
         except ValueError as exc:
             raise AgentGatewayError(str(exc), status_code=409) from exc
@@ -5640,6 +5733,8 @@ class AgentGateway:
             nonlocal checkpoint_skip_authority
             kwargs.setdefault("usage_parent_turn_id", turn_id)
             seed = native_turn.approval_seed(task_loop.approval_seed(**kwargs))
+            seed["clientTurnId"] = client_turn_id
+            seed["followupLaneId"] = str(params.get("followupLaneId") or chat_id or continuation_context.get("followupLaneId") or session_id)
             if checkpoint_user_policy:
                 seed["checkpointUserPolicy"] = dict(checkpoint_user_policy)
                 if checkpoint_skip_authority is None:
@@ -6110,6 +6205,8 @@ class AgentGateway:
                     required_memory_tool = requested_memory_tool(memory_request_text)
                     if required_memory_tool:
                         task_loop.require_action(kind="write", tool=required_memory_tool)
+            if not native_binding:
+                self._settle_async_question_steers([str(item.get("inputId") or "") for item in items], session_id=session_id, client_turn_id=client_turn_id)
         tool_calls_used = task_loop.tool_calls_used if continuation_context else 0
         runtime_exposure_layer = EXPOSURE_LAYER_PLANNING if task_loop.plan_mode else task_loop.exposure_layer
         params["planMode"] = task_loop.plan_mode
@@ -8055,7 +8152,7 @@ class AgentGateway:
                 "已有进展和会话记录已保留；可在当前聊天发送“继续”接着处理。）"
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
-        pending_question = find_current_pending_question(steps)
+        pending_question = find_current_pending_question(steps, self.questions)
         pending_question_boundary = bool(pending_question) and str(
             top_plan.get("nextStep") or ""
         ).strip() not in {
@@ -8155,6 +8252,13 @@ class AgentGateway:
                 "nextStep": "needs_user_action",
                 "completionGate": {"status": "needs_user_action", "reason": "question_pending"},
             }
+        if pending_question:
+            self.questions.refresh_pending_runtime_tasks(session_id=session_id, client_turn_id=client_turn_id,
+                task_seed=runtime_approval_seed(
+                    tool_calls_used=tool_calls_used, exposure_layer=runtime_exposure_layer,
+                    provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                    provider_usage=task_seed_provider_usage(), continue_after_approval=True,
+                ))
         self._emit_runtime_status(
             "verifying",
             session_id=session_id,
@@ -10245,7 +10349,7 @@ def ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def find_current_pending_question(steps: Any) -> dict[str, Any] | None:
+def find_current_pending_question(steps: Any, questions: AgentQuestionService | None = None) -> dict[str, Any] | None:
     """Find a question created by this turn, excluding resumed history."""
 
     if not isinstance(steps, list):
@@ -10255,12 +10359,16 @@ def find_current_pending_question(steps: Any) -> dict[str, Any] | None:
             continue
         if str(step.get("tool") or "") not in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}:
             continue
-        if str(ensure_dict(step.get("outcome")).get("status") or "") != "needs_user_action":
+        if questions is None and str(ensure_dict(step.get("outcome")).get("status") or "") != "needs_user_action":
             continue
         question_id = str(
             ensure_dict(ensure_dict(step.get("result")).get("question")).get("questionId")
             or ""
         ).strip()
+        if question_id and questions is not None:
+            current = questions._project(include_answered=True).get(question_id, {})
+            if current.get("status") != "pending":
+                continue
         if question_id or str(step.get("tool") or "") == PROJECT_SELECTION_TOOL:
             return step
     return None

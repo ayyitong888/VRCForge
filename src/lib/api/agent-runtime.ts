@@ -406,6 +406,8 @@ export type AgentRuntimeFollowup = {
   sessionId: string;
   clientTurnId: string;
   targetClientTurnId?: string;
+  questionId?: string;
+  continuationSource?: string;
   message: string;
   attachments?: AgentMessageAttachment[];
   status: string;

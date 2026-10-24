@@ -231,11 +231,11 @@ export function ConversationCard({
     return (
       <div className="group flex min-w-0 justify-end" data-question-answer={item.questionId} data-question-continuation-input>
         <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
-          <div className="text-[10px] text-muted-foreground">{t("questionCard.answer")}{item.header ? ` · ${item.header}` : ""}</div>
           {images.length ? <UserImageAttachments messageId={item.id} attachments={images} onImport={onImportAttachment} /> : null}
-          {item.text ? (
-            <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-question-answer-text data-chat-quote-content>
-              <ChatMarkdown text={item.text} />
+          {item.question || item.text ? (
+            <div className="min-w-0 max-w-full space-y-2 rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-question-answer-text data-chat-quote-content>
+              {item.question ? <div data-question-answer-question><ChatMarkdown text={`**${item.question}**`} /></div> : null}
+              {item.text ? <div className="font-normal" data-question-answer-value><ChatMarkdown text={item.text} /></div> : null}
             </div>
           ) : null}
           {otherAttachments.length ? <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm"><AttachmentStrip attachments={otherAttachments} onImport={onImportAttachment} compact /></div> : null}

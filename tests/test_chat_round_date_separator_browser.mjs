@@ -12,6 +12,8 @@ const replayPath = process.env.VRCFORGE_ROUND_REPLAY_PATH;
 const replay = replayPath ? JSON.parse(readFileSync(replayPath, "utf8")) : null;
 const overlayPath = process.env.VRCFORGE_ROUND_OVERLAY_PATH;
 const overlay = overlayPath ? JSON.parse(readFileSync(overlayPath, "utf8")) : null;
+const taskReplayPath = process.env.VRCFORGE_TASK_REPLAY_PATH;
+const taskReplay = taskReplayPath ? JSON.parse(readFileSync(taskReplayPath, "utf8")) : null;
 const { chromium } = createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
 const css = (await postcss([tailwindcss(resolve(root, "tailwind.config.ts"))]).process(
   readFileSync(resolve(root, "src/styles.css"), "utf8").replace(
@@ -33,9 +35,11 @@ import { initializeI18n } from "./src/i18n";
 const noop = () => {};
 function Fixture() {
   const [conversation, setConversation] = useState([]);
+  const [questions, setQuestions] = useState([]);
   const [draft, setDraft] = useState("");
   const conversationEndRef = useRef(null);
   window.setConversation = setConversation;
+  window.setQuestions = setQuestions;
   return <ChatWorkspace
     projectPromptTitle="New task welcome"
     conversationPending={false}
@@ -45,7 +49,7 @@ function Fixture() {
     attachments={[]} onAttachFiles={noop} onRemoveAttachment={noop}
     providerLabel="" model="" activeGoal={null} onGoalChanged={noop} goalEndpoint=""
     projects={[]} onBindProject={noop} conversation={conversation} queued={[]}
-    agentQuestions={[]} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
+    agentQuestions={questions} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
     onBackgroundGoalCatchUpRendered={noop} onBackgroundGoalProviderWarningsRendered={noop}
     onBackgroundGoalCatchUpDismiss={noop} onAnswerQuestion={noop}
     conversationEndRef={conversationEndRef} onConversationMouseUp={noop} onConversationScroll={noop}
@@ -102,6 +106,7 @@ try {
     await page.waitForTimeout(80);
   };
   await page.waitForFunction(() => typeof window.setConversation === "function");
+  if (process.env.VRCFORGE_TASK_REPLAY_ONLY !== "1") {
   await render([user("first", start), stream("running", nextDay, "first")]);
   assert.equal(await separators.count(), 0, "first task and its long-running model request have no between-task separator");
   await render([user("first", start), agent("pending", later, "needs_user_action", "first"),
@@ -110,6 +115,12 @@ try {
   await render([user("first", start), agent("approval", later, "approval", "first"),
     { id: "approval-result", type: "result", approvalId: "approval", createdAt: nextDay }, stream("approval-continuation", nextDay)]);
   assert.equal(await separators.count(), 0, "approval and result do not create a new task boundary");
+  await render([user("first", start), { ...agent("interrupted", later, "interrupted", "first"),
+    response: { ...agent("interrupted", later, "interrupted", "first").response, continuationSource: "foreground_interrupted", status: "interrupted" } },
+    user("followup-after-transport", nextDay), stream("resumed-after-transport", nextDay, "followup-after-transport")]);
+  assert.equal(await separators.count(), 0, "transport interruption does not finish the logical Agent task");
+  await render([user("first", start), agent("failed", later, "failed", "first"), user("followup-after-failure", nextDay)]);
+  assert.equal(await separators.count(), 0, "runtime failure is not Agent task completion");
   await render([user("first", start), agent("done", later, "done", "first"), user("next", nextDay), stream("next-running", nextDay, "next")]);
   assert.equal(await separators.count(), 1, "completed task followed by next user task receives one date separator");
   const markerOwner = await separators.first().evaluate((node) => node.parentElement.getAttribute("data-conversation-item-id"));
@@ -144,6 +155,43 @@ try {
       const beforeRestore = await separators.count();
       await render(JSON.parse(JSON.stringify([...snapshots, live, { ...live, id: "runtime-activity:" + overlay.run.clientTurnId }])));
       assert.equal(await separators.count(), beforeRestore, "duplicate restore overlay cannot introduce a date marker");
+    }
+  }
+  }
+  if (taskReplay) {
+    await page.evaluate((questions) => window.setQuestions(questions), taskReplay.questions);
+    await render(taskReplay.items);
+    const humanAnswer = page.locator("[data-question-answer]");
+    assert.equal(await humanAnswer.locator("[data-user-message-bubble]").count(), 1, "human answer is one user bubble within the existing task");
+    const fullQuestion = humanAnswer.locator("[data-question-answer-question] strong");
+    assert.equal(await fullQuestion.count(), 1, "the complete original question is bold on the first line of the answer bubble");
+    assert.equal(await fullQuestion.innerText(), taskReplay.questions[0].question, "legacy answer uses the full exact-qid question without truncating to its header");
+    assert.equal(await humanAnswer.locator("[data-question-answer-value] strong").count(), 0, "the answer's ordinary text is not made bold with the question");
+    assert.ok(await fullQuestion.evaluate((node) => Number(getComputedStyle(node).fontWeight) >= 600), "the question is visibly bold");
+    assert.ok(await humanAnswer.locator("[data-question-answer-value]").evaluate((node) => Number(getComputedStyle(node).fontWeight) < 600), "the answer retains ordinary font weight");
+    const questionBounds = await humanAnswer.locator("[data-question-answer-question]").boundingBox();
+    const answerValueBounds = await humanAnswer.locator("[data-question-answer-value]").boundingBox();
+    assert.ok(questionBounds.y + questionBounds.height <= answerValueBounds.y, "the complete question occupies the line above the answer");
+    assert.ok((await humanAnswer.locator("[data-question-answer-value]").innerText()).includes(taskReplay.questions[0].answer.slice(0, 20)), "the next line retains the actual answer");
+    const answerBlock = page.locator("[data-conversation-item-id]").filter({ has: page.locator("[data-question-answer]") });
+    const continuationBlock = page.locator("[data-conversation-item-id]").filter({ has: page.locator("[data-conversation-streaming-turn]") });
+    const answerBounds = await answerBlock.boundingBox();
+    const continuationBounds = await continuationBlock.boundingBox();
+    assert.ok(continuationBounds.y - answerBounds.y - answerBounds.height <= 16,
+      "answer and continuation use continuous task spacing instead of the gap reserved for a new task");
+    const tasks = page.locator("[data-chat-task]");
+    const taskOwners = await tasks.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-chat-task")));
+    assert.equal(new Set(taskOwners).size, 1, "original question, answer, and exact runtime continuation stay in one visible logical task");
+    assert.equal(taskOwners.length, 3, "original run, answer, and continuation retain their separate runtime presentation");
+    assert.equal(await tasks.locator("[data-vrcforge-agent-client-turn]").count(), 1, "original asking run remains inside its logical task");
+    assert.equal(await tasks.locator("[data-question-answer]").count(), 1, "actual user answer stays visible in the same logical task");
+    assert.equal(await tasks.locator("[data-conversation-streaming-turn]").count(), 1, "the actual question continuation does not start a second task card");
+    assert.equal(await separators.count(), 0, "the actual answer does not insert a completed-task separator");
+    assert.ok((await page.locator("main").innerText()).includes(taskReplay.questions[0].answer.slice(0, 20)), "actual answer content is retained");
+    assert.equal(await tasks.locator("[data-turn-initial-user]").count(), 1, "answering does not duplicate the original user prompt");
+    assert.equal(await page.locator("[data-chat-task-continuation]").count(), 2, "answer and follow-on run keep visibly continuous task spacing");
+    if (process.env.VRCFORGE_TASK_EVIDENCE_DIR) {
+      await page.locator("main").screenshot({path:process.env.VRCFORGE_TASK_EVIDENCE_DIR + "/question-task-continuation.png"});
     }
   }
   assert.deepEqual(errors, [], "real ChatWorkspace renders without browser errors");

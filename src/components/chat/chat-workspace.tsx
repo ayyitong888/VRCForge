@@ -27,6 +27,7 @@ import { projectConversationSteeringMessages } from "../../lib/chat-steering-pro
 import { conversationItemRenderKey } from "../../lib/conversation-utils";
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { conversationRoundDateSeparators } from "../../lib/message-time";
+import { projectConversationTasks } from "../../lib/chat-task-projection";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -340,13 +341,12 @@ export function ChatWorkspace({
   developerOptionsEnabled?: boolean;
 }) {
   const { t } = useTranslation();
-  const pendingAgentQuestions = useMemo(
+  const projectedAgentQuestions = useMemo(
     () =>
-      agentQuestions.map((question) => projectAgentQuestionContinuation(question, runtimeRuns)).filter(
-        (question) => questionContinuationDisplay(question) !== "settled",
-      ),
+      agentQuestions.map((question) => projectAgentQuestionContinuation(question, runtimeRuns)),
     [agentQuestions, runtimeRuns],
   );
+  const pendingAgentQuestions = projectedAgentQuestions.filter((question) => questionContinuationDisplay(question) !== "settled");
   const activeQuestionContinuation = pendingAgentQuestions.find(
     (question) => questionContinuationDisplay(question) === "active",
   );
@@ -372,8 +372,13 @@ export function ChatWorkspace({
   const steeringProjection = projectConversationSteeringMessages(mergeConversationTimelineItems(conversation.filter(
     (item) => item.type !== "user" || item.composerQueued !== true,
   )));
-  const conversationItems = steeringProjection.items;
-  const roundDateSeparators = conversationRoundDateSeparators(conversationItems, steeringProjection.initialUsersByTurnId);
+  const conversationItems = steeringProjection.items.map((item) => {
+    if (item.type !== "question_answer" || item.question !== undefined) return item;
+    const question = projectedAgentQuestions.find((candidate) => candidate.questionId === item.questionId)?.question;
+    return question ? { ...item, question } : item;
+  });
+  const taskProjection = projectConversationTasks(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions);
+  const roundDateSeparators = conversationRoundDateSeparators(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions);
   const activeStreamingItems = conversationItems.filter((item): item is Extract<ConversationItem, { type: "streaming" }> => item.type === "streaming");
   const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -607,8 +612,11 @@ export function ChatWorkspace({
             onDismiss={onBackgroundGoalCatchUpDismiss}
           />
           {(() => {
-            return conversationItems.map((item) => {
+            return conversationItems.map((item, itemIndex) => {
             const roundStartedAt = roundDateSeparators.get(item);
+            const taskId = taskProjection.taskIdByItem.get(item);
+            const previous = conversationItems[itemIndex - 1];
+            const taskContinuation = previous && taskProjection.taskIdByItem.get(previous) === taskId;
             if (item.type === "handoff_card") {
               return (
                 <div key={item.id}>
@@ -643,7 +651,9 @@ export function ChatWorkspace({
               ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
               : null;
             return (
-              <div key={conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={item.id}>
+              <div key={conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={item.id}
+                data-chat-task={taskId} data-chat-task-continuation={taskContinuation || undefined}
+                style={taskContinuation ? { marginTop: "0.75rem" } : undefined}>
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <ConversationCard
                 item={item}

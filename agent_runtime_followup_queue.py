@@ -110,7 +110,7 @@ class AgentRuntimeFollowupQueue:
                     return {"accepted": True, "mode": "followup", "status": old.get("status"), "deduped": True, "queueId": old["queueId"], "sequence": old["sequence"]}
             self._sequence += 1
             item = {"queueId": f"followup_{self._sequence:08d}", "sequence": self._sequence, "sessionId": session_id,
-                    "targetClientTurnId": str(target_client_turn_id or "")[:180], "clientTurnId": client_turn_id,
+                    "targetClientTurnId": str(target_client_turn_id or "")[:240], "clientTurnId": client_turn_id,
                     "message": message, "attachments": compact, "status": "pending"}
             for k, v in (envelope or {}).items():
                 if k not in {"message", "attachments", "sessionId", "clientTurnId"} and v not in (None, ""):

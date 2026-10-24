@@ -99,7 +99,8 @@ export function questionContinuationDisplay(
   question: Pick<AgentQuestion, "status" | "runtimeContinuation">,
 ): "pending" | "active" | "settled" {
   const continuation = String(question.runtimeContinuation?.status || "").toLowerCase();
-  if (["queued", "running", "claimed", "cancelling"].includes(continuation)) return "active";
+  if (["queued", "running", "claimed", "cancelling"].includes(continuation)
+    && (question.runtimeContinuation?.clientTurnId || question.runtimeContinuation?.turnId)) return "active";
   return String(question.status || "pending").toLowerCase() === "pending" ? "pending" : "settled";
 }
 
@@ -132,8 +133,12 @@ export function projectAgentQuestionContinuation(
   const raw = String(question.runtimeContinuationStatus || question.runtimeContinuation?.status || "").toLowerCase();
   if (!raw) return question;
   const marker = `:question:${question.questionId}`;
+  const targetClientTurnId = question.runtimeContinuation?.clientTurnId || question.runtimeContinuationClientTurnId;
+  const targetTurnId = question.runtimeContinuation?.turnId || question.runtimeContinuationTurnId;
   const run = runs.find((candidate) => candidate.sessionId === question.sessionId
-    && String(candidate.clientTurnId || "").endsWith(marker));
+    && (targetClientTurnId ? candidate.clientTurnId === targetClientTurnId && (!targetTurnId || candidate.turnId === targetTurnId)
+      : targetTurnId ? candidate.turnId === targetTurnId
+        : String(candidate.clientTurnId || "").endsWith(marker)));
   const runStatus = String(run?.status || "").toLowerCase();
   const nextStep = String(run?.nextStep || "").toLowerCase();
   const status = questionContinuationStatus(runStatus || raw, nextStep);
@@ -144,8 +149,8 @@ export function projectAgentQuestionContinuation(
       questionId: question.questionId,
       status,
       sessionId: question.sessionId,
-      turnId: run?.turnId || question.runtimeContinuation?.turnId,
-      clientTurnId: run?.clientTurnId || question.runtimeContinuation?.clientTurnId,
+      turnId: run?.turnId || targetTurnId,
+      clientTurnId: run?.clientTurnId || targetClientTurnId,
     },
   };
 }

@@ -570,7 +570,7 @@ class AgentRuntimeQueueRequest(BaseModel):
     session_id: str | None = Field(default=None, alias="sessionId", min_length=1, max_length=180)
     lane_id: str | None = Field(default=None, alias="laneId", min_length=1, max_length=180)
     client_turn_id: str = Field(alias="clientTurnId", min_length=1, max_length=180)
-    target_client_turn_id: str | None = Field(default=None, alias="targetClientTurnId", min_length=1, max_length=180)
+    target_client_turn_id: str | None = Field(default=None, alias="targetClientTurnId", min_length=1, max_length=240)
     message: str = Field(default="", max_length=4000)
     attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     provider: str | None = None
@@ -755,6 +755,8 @@ class AgentProgressReplaceRequest(BaseModel):
 
 
 class AgentQuestionCreateRequest(BaseModel):
+    blocking: bool = True
+    kind: Literal["decision", "visual_checkpoint"] = "decision"
     header: str = ""
     question: str = ""
     prompt: str = ""

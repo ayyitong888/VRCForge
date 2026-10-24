@@ -44,6 +44,7 @@ class AgentRuntimeSessionState:
         "_cancelled_targets",
         "_active_turns",
         "_finalizing_turns",
+        "_exclusive_turns",
         "_final_responses",
         "_steer_mailboxes",
         "_steer_seen_ids",
@@ -62,6 +63,7 @@ class AgentRuntimeSessionState:
         self._cancelled_targets: set[tuple[str, str, str]] = set()
         self._active_turns: dict[tuple[str, str], str] = {}
         self._finalizing_turns: set[tuple[str, str]] = set()
+        self._exclusive_turns: set[tuple[str, str]] = set()
         self._final_responses: dict[str, list[dict[str, Any]]] = {}
         self._steer_mailboxes: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._steer_seen_ids: dict[tuple[str, str], set[str]] = {}
@@ -122,6 +124,7 @@ class AgentRuntimeSessionState:
             self._cancelled_targets.clear()
             self._active_turns.clear()
             self._finalizing_turns.clear()
+            self._exclusive_turns.clear()
             self._final_responses.clear()
             self._steer_mailboxes.clear()
             self._steer_seen_ids.clear()
@@ -155,6 +158,7 @@ class AgentRuntimeSessionState:
             for key in {key for key in (*self._active_turns.keys(), *self._finalizing_turns) if key[0] == session_id}:
                 self._active_turns.pop(key, None)
                 self._finalizing_turns.discard(key)
+                self._exclusive_turns.discard(key)
                 self._steer_mailboxes.pop(key, None)
                 self._steer_seen_ids.pop(key, None)
             self._cancelled_targets = {
@@ -1011,14 +1015,19 @@ class AgentRuntimeSessionState:
         session_id: str,
         turn_id: str,
         client_turn_id: str,
+        exclusive: bool = False,
     ) -> bool:
         if not session_id or not client_turn_id:
             return True
         with self._ports.shared_state_lock:
             key = (session_id, client_turn_id)
-            if key in self._active_turns:
+            if key in self._active_turns or any(owner[0] == session_id for owner in self._exclusive_turns):
+                return False
+            if exclusive and any(owner[0] == session_id for owner in (*self._active_turns, *self._finalizing_turns)):
                 return False
             self._active_turns[key] = turn_id
+            if exclusive:
+                self._exclusive_turns.add(key)
             self._finalizing_turns.discard(key)
             self._steer_mailboxes.setdefault(key, [])
             return True
@@ -1054,6 +1063,10 @@ class AgentRuntimeSessionState:
             }
             return undrained
 
+    def session_busy(self, session_id: str) -> bool:
+        with self._ports.shared_state_lock:
+            return any(key[0] == session_id for key in (*self._active_turns, *self._finalizing_turns))
+
     def owns_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> bool:
         with self._ports.shared_state_lock:
             return self._active_turns.get((session_id, client_turn_id)) == turn_id
@@ -1084,6 +1097,7 @@ class AgentRuntimeSessionState:
         key = (session_id, client_turn_id)
         with self._ports.shared_state_lock:
             self._finalizing_turns.discard(key)
+            self._exclusive_turns.discard(key)
             entries = self._final_responses.setdefault(session_id, [])
             entries[:] = [entry for entry in entries if entry.get("clientTurnId") != client_turn_id]
             entries.append(item)
@@ -1094,7 +1108,9 @@ class AgentRuntimeSessionState:
         """Close a finalization marker when recovery bookkeeping cannot be stored."""
 
         with self._ports.shared_state_lock:
-            self._finalizing_turns.discard((str(session_id or "").strip(), str(client_turn_id or "").strip()))
+            key = (str(session_id or "").strip(), str(client_turn_id or "").strip())
+            self._finalizing_turns.discard(key)
+            self._exclusive_turns.discard(key)
 
     def final_response(
         self, *, session_id: str, client_turn_id: str,
@@ -1156,7 +1172,7 @@ class AgentRuntimeSessionState:
         followup_lane_id: str = "",
     ) -> dict[str, Any]:
         session_id = str(session_id or "").strip()[:180]
-        target_client_turn_id = str(target_client_turn_id or "").strip()[:180]
+        target_client_turn_id = str(target_client_turn_id or "").strip()[:240]
         input_id = str(input_id or "").strip()[:180]
         message = str(message or "").strip()[:4000]
         if not session_id or not target_client_turn_id or not input_id or not message:

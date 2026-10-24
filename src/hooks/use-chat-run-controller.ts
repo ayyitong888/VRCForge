@@ -44,10 +44,9 @@ import {
   requestChatTitle,
   sendAgentMessage,
 } from "../lib/api";
-import { DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS } from "../lib/api/agent-runtime";
+import { DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS, type AgentRuntimeFollowup } from "../lib/api/agent-runtime";
 import { projectVisionFailureNotice } from "../lib/vision-failure-notice";
 import { createSteerDeliveryTrace, type SteerDeliveryTraceEvent } from "../lib/chat-steer-delivery";
-import { questionContinuationDisplay } from "./use-runtime-turn-continuation";
 import {
   applyGeneratedChatTitle,
   chatTitleRunSucceeded,
@@ -85,6 +84,7 @@ export type QueuedTurn = {
   queueLaneId?: string;
   queueSequence?: number;
   queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled";
+  questionId?: string;
 };
 
 export type CurrentTurn = {
@@ -145,6 +145,31 @@ const CANCELLABLE_QUEUE_STATUSES = new Set([
   "waiting_for_resources",
   "paused",
 ]);
+
+/** Queue lanes may contain a chat id or an older runtime session id. */
+export function resolveFollowupRestoreOwner(
+  entry: AgentRuntimeFollowup,
+  chats: ChatThread[],
+  existingChatId?: string,
+): { chat?: ChatThread; allowFallback: boolean } {
+  const laneOwner = chats.find((chat) => chat.id === entry.sessionId)
+    || chats.find((chat) => chat.id === existingChatId);
+  if (laneOwner) return { chat: laneOwner, allowFallback: false };
+  const ownsTurn = (chat: ChatThread, cid: string) => chat.items.some((item) =>
+    ((item.type === "user" || item.type === "streaming") && (item.clientTurnId === cid || item.id === `user-${cid}`))
+    || (item.type === "agent" && item.response.clientTurnId === cid));
+  const runtimeSession = entry.runtimeSessionId || entry.sessionId;
+  const sessionOwners = chats.filter((chat) => chat.sessionId === runtimeSession);
+  const exactInputOwners = sessionOwners.filter((chat) => ownsTurn(chat, entry.clientTurnId));
+  if (exactInputOwners.length === 1) return { chat: exactInputOwners[0], allowFallback: false };
+  const targetOwners = entry.targetClientTurnId
+    ? sessionOwners.filter((chat) => ownsTurn(chat, entry.targetClientTurnId!)) : [];
+  if (targetOwners.length === 1) return { chat: targetOwners[0], allowFallback: false };
+  if (sessionOwners.length === 1) return { chat: sessionOwners[0], allowFallback: false };
+  return { allowFallback: !sessionOwners.length && !entry.runtimeSessionId && !entry.targetClientTurnId
+    && !entry.questionId && entry.continuationSource !== "question_answered"
+    && !entry.clientTurnId.startsWith("question-answer:") };
+}
 
 type UseChatRunControllerParams = {
   endpoint: string;
@@ -261,19 +286,29 @@ export function useChatRunController({
         if (!entry.queueId || !entry.clientTurnId || !entry.sessionId) continue;
         const existingTurn = next.find((candidate) => candidate.id === entry.clientTurnId);
         const laneId = entry.sessionId;
-        let chat = (chats || []).find((candidate) => candidate.id === laneId)
-          || (existingTurn?.chatId ? getChatById(existingTurn.chatId) : undefined);
-        if (!chat) {
+        const owner = resolveFollowupRestoreOwner(entry, chats || [], existingTurn?.chatId);
+        let chat = owner.chat;
+        if (!chat && owner.allowFallback) {
           const createdChatId = ensureActiveChat();
           chat = getChatById(createdChatId);
         }
-        if (!chat) continue;
+        if (!chat) {
+          setError("Queued work could not be matched to one existing chat.");
+          continue;
+        }
         const savedItem = chat.items.find((item): item is Extract<ConversationItem, { type: "user" }> => (
           item.type === "user" && item.clientTurnId === entry.clientTurnId
         ));
-        const attachments = savedItem?.attachments || (entry.attachments || []) as ChatAttachment[];
+        const questionId = entry.questionId || (entry.clientTurnId.startsWith("question-answer:")
+          ? entry.clientTurnId.slice("question-answer:".length) : undefined);
+        const savedAnswer = questionId ? chat.items.find((item): item is Extract<ConversationItem, { type: "question_answer" }> => item.type === "question_answer" && item.questionId === questionId) : undefined;
+        if ((!entry.questionId && questionId && !savedAnswer) || (entry.continuationSource === "question_answered" && !questionId)) {
+          setError("The queued reply could not be matched to its saved question answer.");
+          continue;
+        }
+        const attachments = savedItem?.attachments || savedAnswer?.attachments || (entry.attachments || []) as ChatAttachment[];
         const unresolvedAttachment = attachments.some((attachment) => (
-          !savedItem && attachment.payloadKind !== "vault_file"
+          !savedItem && !savedAnswer && attachment.payloadKind !== "vault_file"
         ));
         const pending = entry.status === "pending";
         const status: QueuedTurn["queueStatus"] = pending
@@ -296,11 +331,12 @@ export function useChatRunController({
           queueLaneId: laneId,
           queueSequence: entry.sequence,
           queueStatus: status,
+          questionId: entry.questionId || (savedAnswer ? questionId : undefined),
         };
         const oldIndex = next.findIndex((candidate) => candidate.id === turn.id);
         if (oldIndex >= 0) next.splice(oldIndex, 1);
         next.push(turn);
-        if (!savedItem) {
+        if (!savedItem && !turn.questionId) {
           updateChat(chat.id, (current) => ({
             ...touchChat(current),
             sessionId: turn.sessionId || current.sessionId,
@@ -463,10 +499,15 @@ export function useChatRunController({
         sessionId: targetSessionId,
         projectRoot: turn.projectPath || undefined,
       });
-      return result.questions.some((question) => (
-        (question.runtimeContinuation?.sessionId || question.sessionId) === targetSessionId
-        && questionContinuationDisplay(question) !== "settled"
-      ));
+      return result.questions.some((question) => {
+        if ((question.runtimeContinuation?.sessionId || question.sessionId) !== targetSessionId) return false;
+        const continuation = question.runtimeContinuation;
+        const status = continuation?.status || question.runtimeContinuationStatus || "";
+        const active = ["running", "claimed", "cancelling"].includes(status)
+          || (status === "queued" && Boolean(continuation?.clientTurnId || continuation?.turnId
+            || question.runtimeContinuationClientTurnId || question.runtimeContinuationTurnId));
+        return active || (question.status === "pending" && (question.blocking !== false || question.needsUserAction === true));
+      });
     } catch {
       // Do not start another native turn when question state cannot be verified.
       return true;
@@ -588,7 +629,7 @@ export function useChatRunController({
       const existing = ownerChat?.items.some(
         (item) => item.type === "user" && item.clientTurnId === turn.id,
       );
-      if (!existing) {
+      if (!existing && !turn.questionId) {
         updateChat(ownerChatId, (current) => {
           const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
           const storedAttachments = turn.attachments.map((attachment) => (
@@ -852,7 +893,7 @@ export function useChatRunController({
     });
     trace("submit_received", { pendingDispatches: queueDispatchPendingRef.current, requestedDeliveryMode: "queue" });
     const existing = ownerChat?.items.some((item) => item.type === "user" && item.clientTurnId === turn.id);
-    if (!existing) {
+    if (!existing && !turn.questionId) {
       updateChat(ownerChatId, (current) => {
         const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
         const storedAttachments = turn.attachments.map((attachment) => persistAttachmentReference(attachment, attachmentPayloads));
@@ -1246,7 +1287,7 @@ export function useChatRunController({
               ...stripTransientConversationItems(options?.baseItems ?? current.items).filter(
                 (item) => item.id !== userItem.id && item.id !== turn.goalDelivery?.agentItemId,
               ),
-              storedUserItem,
+              ...(turn.questionId ? [] : [storedUserItem]),
               streamingItem,
             ],
           };
@@ -1373,9 +1414,11 @@ export function useChatRunController({
       const responseRecovery = mergeCompactionRecovery(response.contextCompaction?.recovery);
       // Persist runtime facts and its original reply; localization belongs to the card.
       const durableTimeline = materializeRuntimeTimeline(response);
-      const durableResponse = response.timeline
-        ? { ...response, timeline: durableTimeline }
-        : response;
+      const durableResponse = {
+        ...response,
+        ...(response.timeline ? { timeline: durableTimeline } : {}),
+        ...(turn.questionId ? { continuationSource: "question_answered" } : {}),
+      };
       if (background) {
         const responseItemId = turn.goalDelivery?.agentItemId || response.turnId || response.turn_id;
         updateChat(chatId, (current) => {
@@ -1403,7 +1446,7 @@ export function useChatRunController({
                   && item.id !== responseItemId
                   && !(item.type === "streaming" && item.clientTurnId === turn.id),
               ),
-              storedUserItem,
+              ...(turn.questionId ? [] : [storedUserItem]),
               {
                 id: responseItemId,
                 type: "agent",

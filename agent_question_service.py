@@ -26,6 +26,7 @@ VISUAL_RESOLUTIONS = frozenset({"pass", "fail", "uncertain", "later"})
 QUESTION_INPUT_SCHEMA = {
     "type": "object", "required": ["question"], "additionalProperties": True,
     "properties": {
+        "blocking": {"type": "boolean", "default": True, "description": "Use false for a decision you can ask while continuing independent work. Visual acceptance and Goal gates always block. Never continue actions that depend on an unanswered decision."},
         "header": {"type": "string", "maxLength": 120},
         "kind": {"type": "string", "enum": ["decision", "visual_checkpoint"]},
         "question": {
@@ -242,17 +243,22 @@ class AgentQuestionService:
         if source_tool:
             event["sourceTool"] = source_tool
         runtime_seed = values.get("_runtimeTaskSeed")
+        event["blocking"] = not (values.get("blocking") is False and kind == "decision" and not event["goalDeliveryId"])
         if isinstance(runtime_seed, Mapping) and runtime_seed:
             event["runtimeTaskSeed"] = dict(runtime_seed)
             event["runtimeSessionId"] = str(values.get("_runtimeSessionId") or values.get("sessionId") or "").strip()
             event["runtimeClientTurnId"] = str(values.get("_runtimeClientTurnId") or "").strip()
             event["runtimeTaskId"] = str(runtime_seed.get("taskId") or "").strip()
+            event["originClientTurnId"] = str(runtime_seed.get("clientTurnId") or "")
+            event["originTurnId"] = str(runtime_seed.get("turnId") or "")
         with _locked(self._persistence.shared_state_lock):
             if source_tool == "call_user":
                 for existing in self._project(include_answered=False).values():
                     if (
                         str(existing.get("sourceTool") or "") == source_tool
                         and str(existing.get("kind") or "decision") == kind
+                        and existing.get("blocking", True) == event["blocking"]
+                        and (event["blocking"] or existing.get("originClientTurnId") == event.get("originClientTurnId"))
                         and str(existing.get("question") or "") == question
                         and str(existing.get("sessionId") or "") == session_id
                         and self._scope.normalize_path(str(existing.get("projectRoot") or ""))
@@ -267,9 +273,9 @@ class AgentQuestionService:
         if (isinstance(runtime_seed, Mapping) and runtime_seed) or event["goalDeliveryId"]:
             payload.update(
                 {
-                    "status": "needs_user_action",
+                    "status": "needs_user_action" if event["blocking"] else "completed",
                     "outcome": {
-                        "status": "needs_user_action",
+                        "status": "needs_user_action" if event["blocking"] else "completed",
                         "summary": self._summarize(question, 600),
                         "questionId": question_id,
                     },
@@ -413,6 +419,7 @@ class AgentQuestionService:
             # redacted answer, while the trusted runtime handoff can bind an
             # explicit user instruction to the resumed action.
             dispatch_seed = dict(runtime_seed) if isinstance(runtime_seed, Mapping) else {}
+            dispatch_seed["_questionBlocking"] = existing.get("blocking", True)
             if continuation_answer:
                 dispatch_seed["_authenticatedUserAnswer"] = continuation_answer
             if feedback_attachments:
@@ -433,6 +440,26 @@ class AgentQuestionService:
             )
         return payload
 
+    def refresh_pending_runtime_tasks(self, *, session_id: str, client_turn_id: str, task_seed: Mapping[str, object]) -> int:
+        """Refresh pending async obligations without changing answer ownership."""
+        refreshed = 0
+        with _locked(self._persistence.shared_state_lock):
+            for question_id, question in self._project(include_answered=True).items():
+                previous = question.get("runtimeTaskSeed")
+                if (question.get("status") != "pending" or question.get("blocking", True) is not False
+                        or not isinstance(previous, Mapping)
+                        or previous.get("sessionId") != session_id or previous.get("clientTurnId") != client_turn_id
+                        or task_seed.get("sessionId") != session_id or task_seed.get("clientTurnId") != client_turn_id
+                        or self._scope.normalize_path(str(previous.get("projectRoot") or "")) != self._scope.normalize_path(str(task_seed.get("projectRoot") or ""))):
+                    continue
+                seed = dict(task_seed)
+                for key in ("requestedTool", "requestedKind", "requestedArguments", "requestedActionId"):
+                    if key in previous:
+                        seed[key] = previous[key]
+                self._persistence.append({"event": "question_context_refreshed", "questionId": question_id, "runtimeTaskSeed": seed})
+                refreshed += 1
+        return refreshed
+
     def record_runtime_continuation(self, question_id: str, status: str, **fields: object) -> None:
         """Persist the lifecycle marker used by the app-owned dispatcher."""
         # A newer answer may have queued another continuation while the prior
@@ -440,7 +467,7 @@ class AgentQuestionService:
         # an older worker must not overwrite it with delivered.
         if str(status or "") == "delivered":
             current = self._project(include_answered=True).get(str(question_id or "").strip(), {})
-            if current.get("runtimeContinuationStatus") == "queued":
+            if current.get("runtimeContinuationStatus") == "queued" and fields.get("answerDeliveryConfirmed") is not True:
                 return
         self._persistence.append({
             "event": "question_runtime_continuation_" + str(status or "unknown"),
@@ -512,6 +539,7 @@ class AgentQuestionService:
         if self._runtime_resolution is None:
             return False
         seed = dict(question.get("runtimeTaskSeed") or {})
+        seed["_questionBlocking"] = question.get("blocking", True)
         attachments = question.get("attachments")
         if isinstance(attachments, list) and attachments:
             seed["_authenticatedUserAttachments"] = deepcopy(attachments)
@@ -632,6 +660,7 @@ class AgentQuestionService:
         # Publish only whether this question holds an owned task for a human.
         # Caller-supplied urgency cannot turn an ordinary question into an alert.
         source = value if isinstance(value, Mapping) else {}
+        result["blocking"] = source.get("blocking", True) is not False
         result["needsUserAction"] = bool(
             source.get("status") == "pending"
             and (source.get("runtimeTaskSeed") or source.get("goalDeliveryId"))
