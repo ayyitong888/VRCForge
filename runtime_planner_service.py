@@ -35,6 +35,7 @@ from agent_tool_result_contract import _views
 from agent_completion_verifier import _normalize_diagnostics
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_TOOL_SCHEMAS
 from agent_scan_result_policy import is_scan_result_policy_message, restored_scan_result_policy
+from agent_question_service import QUESTION_LANGUAGE_INSTRUCTION
 from native_request_composition import (
     attach_native_request_composition,
     attach_native_request_origin,
@@ -62,6 +63,7 @@ RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
     "During longer tasks, after tool results return, give a concise progress update if about a minute has passed since your last update. "
     "Group related work; do not narrate every tool call or repeat preparation, reveal private reasoning, or invent progress. "
     "Make the final answer self-contained and complete, so the user need not read earlier progress updates. "
+    + QUESTION_LANGUAGE_INSTRUCTION
 )
 RUNTIME_SCOPE_UNITY_INSTRUCTION = (
     "A Unity project is explicitly bound to this turn. Use the project tool catalog when it is relevant. "

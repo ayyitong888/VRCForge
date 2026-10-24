@@ -23,25 +23,33 @@ AGENT_QUESTION_SCHEMA = "vrcforge.agent_question.v1"
 AGENT_QUESTION_MAX_ITEMS = 60
 QUESTION_KINDS = frozenset({"decision", "visual_checkpoint"})
 VISUAL_RESOLUTIONS = frozenset({"pass", "fail", "uncertain", "later"})
+QUESTION_LANGUAGE_INSTRUCTION = (
+    "For both ask_user and call_user, write the heading, question and choices in the user's language, using everyday language. "
+    "Briefly explain what is blocked and why the user's help is needed, then ask for one concrete decision or action. "
+    "For a manual action, use short numbered steps: where to click, what to change, important limits, and how to report the result. "
+    "Keep exact visible names needed to find an object, component or button; explain unavoidable technical terms beside them. "
+    "Leave API names, internal IDs, diagnostic details and the agent's verification plan out of the question. "
+    "Use short choices describing the user's decision or observed result, including an unable-to-find/unsure choice when relevant. "
+)
 QUESTION_INPUT_SCHEMA = {
     "type": "object", "required": ["question"], "additionalProperties": True,
     "properties": {
         "blocking": {"type": "boolean", "default": True, "description": "Use false for a decision you can ask while continuing independent work. Visual acceptance and Goal gates always block. Never continue actions that depend on an unanswered decision."},
-        "header": {"type": "string", "maxLength": 120},
+        "header": {"type": "string", "maxLength": 120, "description": "A short heading in the user's language describing the help needed, without technical jargon."},
         "kind": {"type": "string", "enum": ["decision", "visual_checkpoint"]},
         "question": {
             "type": "string", "minLength": 1, "maxLength": 1000,
-            "description": "One short decision question. Put alternatives in options, not in a long diagnosis here.",
+            "description": QUESTION_LANGUAGE_INSTRUCTION + "Put alternatives in options, not in a long diagnosis here.",
         },
         "options": {
             "type": "array",
-            "description": "Two or more distinct choice cards, recommended first. Omit only for an open-ended question; a custom reply is always available.",
+            "description": "Two or more distinct choices in everyday language, recommended first. Describe what the user chooses or has observed. Omit only for an open-ended question; a custom reply is always available.",
             "items": {"anyOf": [
                 {"type": "string", "minLength": 1, "maxLength": 160},
                 {"type": "object", "required": ["label"], "properties": {
                     "id": {"type": "string", "maxLength": 120},
-                    "label": {"type": "string", "minLength": 1, "maxLength": 160},
-                    "description": {"type": "string", "maxLength": 500},
+                    "label": {"type": "string", "minLength": 1, "maxLength": 160, "description": "A short answer in everyday language, such as completed, could not find the button, or unsure; no implementation jargon."},
+                    "description": {"type": "string", "maxLength": 500, "description": "If needed, explain the consequence of this choice in the user's language; omit diagnostic details."},
                     "value": {"type": "string", "maxLength": 500},
                 }},
             ]},
