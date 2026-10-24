@@ -1333,7 +1333,7 @@ def finalize_add_modular_avatar_component_verification(
 
     The Core write receipt is intentionally not treated as verification.  The
     inspector and property reader are independent read paths for the target
-    component, references, scene state, and requested scalar fields.
+    component, references, scene state, and requested scalar and structured fields.
     """
     source = dict(result) if isinstance(result, dict) else {"result": result}
     fields = arguments.get("fields")
@@ -1434,9 +1434,10 @@ def finalize_add_modular_avatar_component_verification(
     if save_scene and type(inspected.get("sceneDirty")) is not bool:
         return {**source, "ok": False, "error": "Independent Modular Avatar readback could not determine the scene save state."}
     field_readback = {}
+    field_enum_readback = {}
     if fields:
         if read_property is None:
-            return {**source, "ok": False, "error": "Independent Modular Avatar readback cannot verify scalar fields."}
+            return {**source, "ok": False, "error": "Independent Modular Avatar readback cannot verify fields."}
         for property_path, expected in fields.items():
             max_items = max(50, len(expected)) if isinstance(expected, list) else 50
             field_result = read_property({
@@ -1453,11 +1454,13 @@ def finalize_add_modular_avatar_component_verification(
                 or field_result.get("valueTruncated") is True
                 or field_result.get("valueIncomplete") is True
             ):
-                return {**source, "ok": False, "error": f"Independent scalar readback failed for field '{property_path}'."}
+                return {**source, "ok": False, "error": f"Independent field readback failed for field '{property_path}'."}
             observed = field_result["propertyValue"]
-            if not _requested_value_matches(observed, expected):
-                return {**source, "ok": False, "error": f"Independent scalar readback mismatched field '{property_path}'."}
+            if not _requested_value_matches(observed, expected, field_result.get("enumValues")):
+                return {**source, "ok": False, "error": f"Independent field readback mismatched field '{property_path}'."}
             field_readback[str(property_path)] = observed
+            if isinstance(field_result.get("enumValues"), dict) and field_result["enumValues"]:
+                field_enum_readback[str(property_path)] = field_result["enumValues"]
     readback = {
         "gameObjectPath": inspected.get("gameObjectPath"),
         "componentType": inspected.get("type"),
@@ -1467,6 +1470,7 @@ def finalize_add_modular_avatar_component_verification(
         "referenceReadback": reference_readback,
         "sceneDirty": inspected.get("sceneDirty"),
         "fields": field_readback,
+        "enumValues": field_enum_readback,
     }
     # ExecuteAlways components may update the scene after the Core save. Exact
     # configuration readback is still valid; expose pending persistence so the
@@ -1500,7 +1504,9 @@ def _direct_unity_object_matches(observed: Any, expected: Any) -> bool:
     )
 
 
-def _requested_value_matches(observed: Any, expected: Any) -> bool:
+def _requested_value_matches(
+    observed: Any, expected: Any, enum_values: Any = None, pointer: str = "",
+) -> bool:
     """Compare requested field content while allowing typed default members.
 
     Component property reads describe the complete CLR value.  A write request
@@ -1514,17 +1520,29 @@ def _requested_value_matches(observed: Any, expected: Any) -> bool:
         if any(observed.get(marker) is True for marker in ("__incomplete", "__truncated", "__cycle")):
             return False
         return all(
-            key in observed and _requested_value_matches(observed[key], value)
+            key in observed and _requested_value_matches(
+                observed[key], value, enum_values,
+                pointer + "/" + str(key).replace("~", "~0").replace("/", "~1"),
+            )
             for key, value in expected.items()
         )
     if isinstance(expected, list):
         return (
             isinstance(observed, list)
             and len(observed) == len(expected)
-            and all(_requested_value_matches(actual, wanted) for actual, wanted in zip(observed, expected))
+            and all(_requested_value_matches(actual, wanted, enum_values, pointer + "/" + str(index))
+                    for index, (actual, wanted) in enumerate(zip(observed, expected)))
         )
     if isinstance(expected, bool):
         return isinstance(observed, bool) and observed is expected
+    # Enum names remain the public display value. Numeric equivalence requires
+    # independent CLR metadata from this exact property read, never a name map
+    # inferred from the write receipt or from a particular component package.
+    if type(expected) is int and isinstance(observed, str):
+        enum = enum_values.get(pointer) if isinstance(enum_values, dict) else None
+        return (isinstance(enum, dict) and isinstance(enum.get("type"), str)
+                and bool(enum["type"]) and enum.get("name") == observed
+                and type(enum.get("value")) is int and enum["value"] == expected)
     if isinstance(expected, (int, float)) and not isinstance(expected, bool):
         return isinstance(observed, (int, float)) and not isinstance(observed, bool) and observed == expected
     return observed == expected

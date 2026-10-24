@@ -140,7 +140,7 @@ def test_registered_read_handler_returns_scope_without_getter_and_keeps_default_
     parameters = method(getter, "public class GetPropertyParameters")
     handler = method(getter, "public static object HandleCommand(JObject @params)")
     program = r'''
-using System;using System.Reflection;using Newtonsoft.Json.Linq;
+using System;using System.Reflection;using System.Collections.Generic;using Newtonsoft.Json.Linq;
 class VRCForgeInput:Attribute {public bool IsRequired{get;set;}public VRCForgeInput(string text){}}
 class Component {public GameObject gameObject;public int value=7;}
 class GameObject {public object transform;public Component component;}
@@ -155,7 +155,7 @@ static class ComponentCrudCore {
  public static object ResolveSavedSceneFor(GameObject g)=>new object();
  public static object BuildPropertyCheckpointScope(Component c,MemberInfo m,int i,string p,object scene){scopes++;if(rejectScope)throw new InvalidOperationException("unsupported owner");return new{schema="vrcforge.component_property_checkpoint.v1",scenePath="Assets/Actual.unity"};}
  public static object GetReadOnlyMemberValue(Component c,MemberInfo m){reads++;return c.value;}
- public static object DescribeValue(object value,int max,out int returned,out int total,out bool truncated,out bool incomplete){returned=total=-1;truncated=incomplete=false;return value;}
+ public static object DescribeValue(object value,int max,out int returned,out int total,out bool truncated,out bool incomplete,Dictionary<string,object> enums=null){returned=total=-1;truncated=incomplete=false;return value;}
  public static string GetHierarchyPath(object t)=>"Actual/Component";
  public static Type GetMemberType(MemberInfo m)=>typeof(int);
 }

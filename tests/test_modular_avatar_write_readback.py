@@ -208,7 +208,7 @@ def test_scalar_fields_are_not_marked_verified_without_independent_readback() ->
         lambda _arguments: _inspection(),
     )
     assert result["ok"] is False
-    assert "scalar fields" in result["error"]
+    assert "cannot verify fields" in result["error"]
     assert "verified" not in result
 
 
@@ -487,3 +487,32 @@ def test_verified_sync_pending_save_does_not_fail_approval_or_create_recovery_lo
     assert not gateway.approval_transactions._ports.checkpoint.active_apply_recoveries()
     assert not any(entry.get("event") == "approval_apply_failed"
                    for entry in gateway.approval_transactions.recent_audit_logs())
+
+
+@pytest.mark.parametrize("expected", [1, "Set"])
+def test_nested_enum_field_uses_independent_clr_identity(expected):
+    result = finalize_add_modular_avatar_component_verification(
+        {"componentType": "ShapeChanger", "fields": {"Shapes": [{"ChangeType": expected, "Value": 0}]}},
+        _write_result(), lambda _: _inspection(),
+        lambda _: {"ok": True, "propertyValue": [{"ChangeType": "Set", "Value": 0.0}],
+                   "enumValues": {"/0/ChangeType": {"type": "Fixture.ChangeKind", "name": "Set", "value": 1}}},
+    )
+    assert result.get("verified") is True, result
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {"/0/ChangeType": {"type": "Fixture.Kind", "name": "Other", "value": 1}}, {"/0/ChangeType": {"type": "Fixture.Kind", "name": "Set", "value": 2}}])
+def test_numeric_enum_does_not_guess_missing_or_mismatched_type_evidence(metadata):
+    result = finalize_add_modular_avatar_component_verification(
+        {"fields": {"Shapes": [{"ChangeType": 1}]}}, _write_result(), lambda _: _inspection(),
+        lambda _: {"ok": True, "propertyValue": [{"ChangeType": "Set"}], "enumValues": metadata},
+    )
+    assert result.get("verified") is not True
+
+
+def test_scalar_enum_and_escaped_member_pointer_share_comparison():
+    from wardrobe_outfit_workflow_service import _requested_value_matches
+    evidence = {"": {"type": "Fixture.Kind", "name": "FlagsA, FlagsB", "value": 3}}
+    assert _requested_value_matches("FlagsA, FlagsB", 3, evidence)
+    assert not _requested_value_matches("FlagsA, FlagsB", True, evidence)
+    evidence = {"/a~1b~0c": {"type": "Fixture.Kind", "name": "Set", "value": 1}}
+    assert _requested_value_matches({"a/b~c": "Set"}, {"a/b~c": 1}, evidence)

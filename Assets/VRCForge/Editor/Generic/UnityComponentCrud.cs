@@ -573,7 +573,8 @@ namespace VRCForge.Editor
             out int returnedItemCount,
             out int valueItemCount,
             out bool valueTruncated,
-            out bool valueIncomplete)
+            out bool valueIncomplete,
+            Dictionary<string, object> enumValues = null)
         {
             returnedItemCount = -1;
             valueItemCount = -1;
@@ -583,7 +584,7 @@ namespace VRCForge.Editor
             var activeObjects = new HashSet<object>(ReferenceEqualityComparer.Instance);
             // UnityEngine.Object values remain scalar; preserve the existing
             // collection dispatch contract: value is UnityEngine.Object || !(value is IEnumerable enumerable) || value is string.
-            var described = DescribeValueBounded(value, maxItems, 0, ref nodesRemaining, activeObjects, ref valueTruncated, ref valueIncomplete);
+            var described = DescribeValueBounded(value, maxItems, 0, ref nodesRemaining, activeObjects, ref valueTruncated, ref valueIncomplete, enumValues, "");
             if (value is IEnumerable && !(value is string) && !(value is UnityEngine.Object))
             {
                 var collection = value as ICollection;
@@ -616,13 +617,24 @@ namespace VRCForge.Editor
             ref int nodesRemaining,
             HashSet<object> activeObjects,
             ref bool truncated,
-            ref bool incomplete)
+            ref bool incomplete,
+            Dictionary<string, object> enumValues,
+            string pointer)
         {
             if (nodesRemaining-- <= 0)
             {
                 truncated = true;
                 incomplete = true;
                 return new Dictionary<string, object> { ["__incomplete"] = true, ["__truncated"] = true };
+            }
+            if (value is Enum enumValue && enumValues != null)
+            {
+                enumValues[pointer] = new Dictionary<string, object>
+                {
+                    ["type"] = enumValue.GetType().FullName,
+                    ["name"] = enumValue.ToString(),
+                    ["value"] = Convert.ChangeType(enumValue, Enum.GetUnderlyingType(enumValue.GetType()))
+                };
             }
             if (value == null || value is string || value is bool || value is Enum
                 || value.GetType().IsPrimitive || value is Vector2 || value is Vector3
@@ -655,7 +667,7 @@ namespace VRCForge.Editor
                             incomplete = true;
                             break;
                         }
-                        items.Add(DescribeValueBounded(item, maxItems, depth + 1, ref nodesRemaining, activeObjects, ref truncated, ref incomplete));
+                        items.Add(DescribeValueBounded(item, maxItems, depth + 1, ref nodesRemaining, activeObjects, ref truncated, ref incomplete, enumValues, pointer + "/" + items.Count));
                         if (nodesRemaining <= 0)
                             break;
                     }
@@ -686,7 +698,7 @@ namespace VRCForge.Editor
                             fields["__duplicateField"] = field.Name;
                             continue;
                         }
-                        fields[field.Name] = DescribeValueBounded(field.GetValue(value), maxItems, depth + 1, ref nodesRemaining, activeObjects, ref truncated, ref incomplete);
+                        fields[field.Name] = DescribeValueBounded(field.GetValue(value), maxItems, depth + 1, ref nodesRemaining, activeObjects, ref truncated, ref incomplete, enumValues, pointer + "/" + field.Name.Replace("~", "~0").Replace("/", "~1"));
                         if (nodesRemaining <= 0)
                             break;
                     }
@@ -1285,13 +1297,15 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed("maxItems must be between 1 and 2000.");
                 }
+                var enumValues = new Dictionary<string, object>();
                 var propertyValue = ComponentCrudCore.DescribeValue(
                     value,
                     maxItems,
                     out var returnedItemCount,
                     out var valueItemCount,
                     out var valueTruncated,
-                    out var valueIncomplete);
+                    out var valueIncomplete,
+                    enumValues);
 
                 var payload = new
                 {
@@ -1301,6 +1315,7 @@ namespace VRCForge.Editor
                     propertyPath = p.propertyPath,
                     valueType = ComponentCrudCore.GetMemberType(member).FullName,
                     propertyValue,
+                    enumValues,
                     returnedItemCount = returnedItemCount >= 0 ? (int?)returnedItemCount : null,
                     valueItemCount = valueItemCount >= 0 ? (int?)valueItemCount : null,
                     valueTruncated,
