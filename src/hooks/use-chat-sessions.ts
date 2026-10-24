@@ -40,6 +40,7 @@ import {
   groupSidebarChats,
   isStoredChat,
   normalizeChatContextUsage,
+  sortChatsByPin,
   stripSupersededStreamingItems,
   stripTransientConversationItems,
 } from "../lib/chat-thread";
@@ -1038,7 +1039,9 @@ export function useChatSessions({
     setActiveView("chat");
     setActiveProjectPath(projectPath);
     setActiveProjectType?.(projectType);
-    const latest = chats.find((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(projectPath) && !chat.archived);
+    const latest = sortChatsByPin(chats.filter((chat) => (
+      normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(projectPath) && !chat.archived
+    )))[0];
     setActiveChatId(latest ? latest.id : "");
   }
 

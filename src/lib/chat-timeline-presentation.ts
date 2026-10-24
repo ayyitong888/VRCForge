@@ -16,6 +16,12 @@ export type TimelineInvocation = {
 
 export type TimelinePresentationEntry =
   | {
+      type: "captures";
+      id: string;
+      startedAt: string;
+      captures: NonNullable<ChatTimelineEvent["payload"]["captures"]>;
+    }
+  | {
       type: "batch";
       id: string;
       kind: TimelineBatchKind;
@@ -379,7 +385,13 @@ function interleavedTimelineEntries(
       continue;
     }
     const invocation = invocationsByFirstEvent.get(event.id);
-    if (!invocation) continue;
+    if (!invocation) {
+      if (event.kind === "tool_result" && event.payload.captures?.length) {
+        flushBatch();
+        entries.push({ type: "captures", id: event.id, startedAt: event.timestamp, captures: event.payload.captures });
+      }
+      continue;
+    }
     if (currentBatch?.kind !== invocation.kind) {
       flushBatch();
       currentBatch = {
@@ -391,6 +403,10 @@ function interleavedTimelineEntries(
       };
     }
     currentBatch.invocations.push(invocation);
+    if (event.kind === "tool_result" && event.payload.captures?.length) {
+      flushBatch();
+      entries.push({ type: "captures", id: event.id, startedAt: event.timestamp, captures: event.payload.captures });
+    }
   }
   flushBatch();
   return entries;
@@ -457,6 +473,12 @@ export function materializeRuntimeTimeline(response: AgentRuntimeResponse, fallb
         ...(typeof payload.phase === "string" ? { phase: payload.phase.slice(0, 80) } : {}),
         ...(typeof payload.messageId === "string" && payload.messageId ? { messageId: payload.messageId.slice(0, 180) } : {}),
         ...(typeof payload.actionId === "string" ? { actionId: payload.actionId.slice(0, 96) } : {}),
+        ...(Array.isArray(payload.captures) ? { captures: payload.captures.slice(0, 32).filter(capture =>
+          capture?.preview?.schema === "vrcforge.scene_capture_preview.v1" && capture.preview.mimeType === "image/png"
+          && typeof capture.preview.resourceUri === "string" && capture.preview.resourceUri.length <= 2048).map(capture => ({
+            angle: String(capture.angle || "").slice(0, 80), preview: { schema: capture.preview.schema, mimeType: capture.preview.mimeType,
+              captureId: String(capture.preview.captureId || ""), resourceUri: capture.preview.resourceUri },
+          })) } : {}),
         ...(payload.subagentStatus ? { subagentStatus: payload.subagentStatus } : {}),
       },
     } satisfies ChatTimelineEvent;

@@ -2532,6 +2532,8 @@ pub async fn acknowledge_sub_agent_handoff(
 pub async fn fetch_agent_runs(
     request: DesktopAgentListRequest,
 ) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    crate::approval_notification_windows::record_background_notification_stage("runs_requested", None);
     blocking_backend_json_request(move || {
         backend_json_request(
             "GET",
@@ -2539,7 +2541,11 @@ pub async fn fetch_agent_runs(
             None,
             request.timeout_ms,
         )
-        .map(sanitize_webview_response)
+        .map(|value| {
+            #[cfg(windows)]
+            crate::approval_notification_windows::record_background_notification_stage("runs_returned", None);
+            sanitize_webview_response(value)
+        })
     })
     .await
 }
@@ -2592,12 +2598,18 @@ mod agent_run_timeline_tests {
 pub async fn fetch_agent_turn_response(
     request: DesktopAgentTurnResponseRequest,
 ) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    crate::approval_notification_windows::record_background_notification_stage("receipt_requested", None);
     let path = agent_turn_response_path(&request.session_id, &request.client_turn_id)?;
     // Same authenticated loopback backend and request-owned blocking lifetime
     // as the other typed reads; this never starts or retries an Agent turn.
     // The Gateway returns the same public response as send_agent_message.
     blocking_backend_json_request(move || {
-        backend_json_request("GET", path, None, request.timeout_ms.or(Some(10_000)))
+        backend_json_request("GET", path, None, request.timeout_ms.or(Some(10_000))).map(|value| {
+            #[cfg(windows)]
+            crate::approval_notification_windows::record_background_notification_stage("receipt_returned", None);
+            value
+        })
     })
     .await
 }

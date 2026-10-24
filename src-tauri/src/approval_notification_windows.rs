@@ -218,10 +218,23 @@ pub(crate) fn show_background_goal_notification(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        validate_background_goal_notification_request(&request)?;
-        if !bind_approval_notification_identity() { return Err("Unable to bind the VRCForge notification identity.".to_string()); }
-        let executable = std::env::current_exe().map_err(|_| "Unable to resolve the VRCForge notification icon.".to_string())?;
-        let icon_path = approval_notification_icon_path(&executable).filter(|path| path.is_file()).ok_or_else(|| "Unable to resolve the VRCForge notification icon.".to_string())?;
+        record_background_notification_stage("received", None);
+        validate_background_goal_notification_request(&request).map_err(|error| {
+            record_background_notification_stage("validation_failed", Some(&error));
+            error
+        })?;
+        if !bind_approval_notification_identity() {
+            record_background_notification_stage("identity_failed", Some("identity_unavailable"));
+            return Err("Unable to bind the VRCForge notification identity.".to_string());
+        }
+        let executable = std::env::current_exe().map_err(|error| {
+            record_background_notification_stage("executable_failed", Some(&format!("{:?}", error.kind())));
+            "Unable to resolve the VRCForge notification icon.".to_string()
+        })?;
+        let icon_path = approval_notification_icon_path(&executable).filter(|path| path.is_file()).ok_or_else(|| {
+            record_background_notification_stage("icon_failed", Some("icon_unavailable"));
+            "Unable to resolve the VRCForge notification icon.".to_string()
+        })?;
         let callback_app = app.clone();
         tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
             .title(&request.title)
@@ -230,10 +243,35 @@ pub(crate) fn show_background_goal_notification(
             .icon(&icon_path, tauri_winrt_notification::IconCrop::Square, APPROVAL_NOTIFICATION_ICON_ALT_TEXT)
             .on_activated(move |_| { focus_main_window(&callback_app); Ok(()) })
             .show()
-            .map_err(|_| "Unable to show the background goal notification.".to_string())
+            .map(|()| record_background_notification_stage("submitted", None))
+            .map_err(|error| {
+                // Persist only platform error codes, never notification text.
+                let code = match error {
+                    tauri_winrt_notification::Error::Os(error) => format!("HRESULT:{:08X}", error.code().0 as u32),
+                    tauri_winrt_notification::Error::Io(error) => format!("IO:{:?}", error.kind()),
+                };
+                record_background_notification_stage("submission_failed", Some(&code));
+                format!("Unable to show the background goal notification ({code}).")
+            })
     }
     #[cfg(not(windows))]
     { let _ = app; let _ = request; Err("Background goal notifications are only supported on Windows.".to_string()) }
+}
+
+// Current-user profile log, owned by this desktop process. The append-only handle
+// is scoped to one write and immediately closed; no IPC or additional authority.
+#[cfg(windows)]
+pub(crate) fn record_background_notification_stage(stage: &str, error: Option<&str>) {
+    use std::io::Write;
+    let Ok(profile) = crate::backend::user_data_dir() else { return; };
+    let logs = profile.join("logs");
+    if std::fs::create_dir_all(&logs).is_err() { return; }
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true)
+        .open(logs.join("desktop-notifications.jsonl")) else { return; };
+    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis()).unwrap_or_default();
+    let record = serde_json::json!({"timestampMs": timestamp, "stage": stage, "error": error});
+    let _ = writeln!(file, "{record}");
 }
 
 /// Displays a display-only pending question toast. Clicking only wakes the

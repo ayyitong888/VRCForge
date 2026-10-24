@@ -32,8 +32,8 @@ import {
 import { playNotificationSoundOnce } from "../lib/notification-sound-delivery";
 import { isProjectWorkbenchSmokeMode, markdownSmokeGoals, markdownSmokeMemories, markdownSmokeProgress, markdownSmokeRuns } from "../lib/markdown-smoke";
 import { normalizeProjectPathKey } from "../lib/project-path";
-import { fetchAgentTurnResponse } from "../lib/api/agent-runtime";
-import { createRuntimeAttentionDelivery, latestRuntimeAttentionCandidates, runtimeAttentionFromResponse, type RuntimeAttention } from "../lib/runtime-attention";
+import { fetchAgentRuns } from "../lib/api/agent-runtime";
+import { createRuntimeAttentionDelivery, latestRuntimeAttentionCandidates, runtimeAttentionCandidates, runtimeAttentionFromRun, type RuntimeAttention } from "../lib/runtime-attention";
 
 type UseRuntimeWorkspaceParams = {
   endpoint: string;
@@ -101,42 +101,66 @@ export function useRuntimeWorkspace({
   const agentQuestionNotificationInflightRef = useRef<Set<string>>(new Set());
   const agentQuestionNotificationStatusRef = useRef(new Map<string, string>());
   const [verifiedAttention, setVerifiedAttention] = useState<RuntimeAttention[]>([]);
-  const attentionReceipts = useRef(new Map<string, Promise<RuntimeAttention | null>>());
   const deliverAttention = useRef(createRuntimeAttentionDelivery());
-  const attentionCandidates = useMemo(() => latestRuntimeAttentionCandidates(runtimeRuns), [runtimeRuns]);
-  const runtimeAttention = runtimeConnected ? verifiedAttention.filter(item => attentionCandidates.some(run =>
+  const [notificationRuns, setNotificationRuns] = useState<AgentRuntimeRun[]>([]);
+  // Notification observation belongs to the application, not the selected chat.
+  useEffect(() => {
+    if (!runtimeConnected || !isTauriRuntime()) return;
+    let current = true;
+    let busy = false;
+    const sinceBySession = new Map<string, number>();
+    const watched = new Set<string>();
+    const refresh = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const ledger = await fetchAgentRuns(endpoint, { limit: 200 });
+        if (!current) return;
+        const runs = (ledger.runs || []).filter(run => run.sessionId && run.clientTurnId && run.turnId);
+        const started = (run: AgentRuntimeRun) => Date.parse(run.startedAt || run.createdAt || run.updatedAt || "") || 0;
+        // Resume each conversation independently; a newer conversation must not
+        // suppress another conversation's terminal event on application launch.
+        for (const session of new Set(runs.map(run => run.sessionId))) {
+          if (session && !sinceBySession.has(session)) {
+            sinceBySession.set(session, Math.max(0, ...runs.filter(run => run.sessionId === session).map(started)));
+          }
+        }
+        for (const run of runs) {
+          if (started(run) >= (sinceBySession.get(run.sessionId || "") || 0) || ["running", "starting", "cancel_requested"].includes(run.status || "")) {
+            watched.add(JSON.stringify([run.sessionId, run.clientTurnId, run.turnId]));
+          }
+        }
+        setNotificationRuns(runs.filter(run => watched.has(JSON.stringify([run.sessionId, run.clientTurnId, run.turnId]))));
+      } catch (cause) {
+        if (current) setRuntimeNotice(String(cause instanceof Error ? cause.message : cause));
+      } finally { busy = false; }
+    };
+    void refresh();
+    const timer = window.setInterval(() => { void refresh(); }, 15000);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [endpoint, runtimeConnected]);
+  const attentionCandidates = useMemo(() => runtimeAttentionCandidates(notificationRuns), [notificationRuns]);
+  const runtimeAttention = runtimeConnected ? verifiedAttention.filter(item => item.status === "blocked" && item.sessionId === sessionId && latestRuntimeAttentionCandidates(runtimeRuns).some(run =>
     run.sessionId === item.sessionId && run.clientTurnId === item.clientTurnId && run.turnId === item.turnId)) : [];
 
   useEffect(() => {
     let current = true;
     if (!runtimeConnected) return;
-    // Snapshot is shared by local and externally initiated turns. Read each exact
-    // terminal receipt once; ordinary runtime polling does not reload history.
-    void Promise.all(attentionCandidates.map(run => {
-      const key = JSON.stringify([endpoint, run.sessionId, run.clientTurnId, run.turnId]);
-      let receipt = attentionReceipts.current.get(key);
-      if (!receipt) {
-        receipt = fetchAgentTurnResponse(endpoint, run.sessionId!, run.clientTurnId!).then(state => {
-          if (!state.ok || !state.response || !["completed", "failed"].includes(state.status)) {
-            attentionReceipts.current.delete(key);
-            return null;
-          }
-          return runtimeAttentionFromResponse(run, state.response);
-        }).catch(() => { attentionReceipts.current.delete(key); return null; });
-        attentionReceipts.current.set(key, receipt);
-      }
-      return receipt;
-    })).then(results => {
+    const results = attentionCandidates.map(runtimeAttentionFromRun);
+    {
       if (!current) return;
       const attention = results.filter((item): item is RuntimeAttention => item !== null);
       setVerifiedAttention(attention);
       if (!isTauriRuntime()) return;
       for (const item of attention) {
-        void deliverAttention.current(endpoint, item, t("workspace.runtimeReviewTitle"), t("workspace.runtimeReviewBody"), () => current).catch(() => {
-          // Native submission failed: no delivered marker; next snapshot retries.
+        const kind = item.status === "blocked" ? "Blocked" : item.status === "completed" ? "Completed" : item.status === "failed" ? "Failed" : "Stopped";
+        void deliverAttention.current(endpoint, item, t(`workspace.notification${kind}Title`), t(`workspace.notification${kind}Body`), () => current).catch((cause) => {
+          // Failed native submissions remain retryable and visible.
+          if (current) setRuntimeNotice(t("workspace.notificationSendFailed") + String(cause instanceof Error ? cause.message : cause));
         });
       }
-    });
+    }
+
     return () => { current = false; };
   }, [endpoint, runtimeConnected, attentionCandidates, t]);
 

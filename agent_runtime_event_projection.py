@@ -266,6 +266,11 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
                     for key in ("label", "summary", "status", "tool", "phase", "actionId", "messageId", "subagentStatus")
                     if raw_payload.get(key) is not None
                 }
+            if item["kind"] == "tool_result":
+                from chat_resource_image import public_capture_previews
+                captures = public_capture_previews(raw.get("payload"))
+                if captures:
+                    item["payload"]["captures"] = captures
             projected_timeline.append(item)
         if projected_timeline:
             result["timeline"] = projected_timeline

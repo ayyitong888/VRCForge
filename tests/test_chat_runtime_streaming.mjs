@@ -226,7 +226,7 @@ const card = await readFile(resolve(import.meta.dirname, "..", "src", "component
 const controller = await readFile(resolve(import.meta.dirname, "..", "src", "hooks", "use-chat-run-controller.ts"), "utf8");
 const timelinePresentationSource = await readFile(resolve(import.meta.dirname, "..", "src", "lib", "chat-timeline-presentation.ts"), "utf8");
 assert.match(card, /clearInterval\(timer\)/, "terminal replacement and Stop unmount must clear the reconnect clock");
-assert.match(card, /buildDurableTimelineRows[\s\S]*live: true,[\s\S]*suppressTrailingAssistantText: item\.text/,
+assert.match(card, /showLiveText = Boolean\(item\.text && item\.text\.trim\(\) !== lastAssistantText\?\.trim\(\)\)/,
   "the complete live answer must not be rendered a second time from the durable assistant event");
 assert.match(card, /window\.setInterval\(\(\) => setStreamingNowMs\(Date\.now\(\)\), 1_000\)/,
   "the transient card advances elapsed time locally while backend events are quiet");

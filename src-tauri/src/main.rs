@@ -28,6 +28,7 @@ mod backend;
 #[cfg(windows)]
 mod capture_helper;
 mod chat_snapshot_paging;
+mod chat_file_open;
 mod chatgpt_oauth;
 mod commands;
 mod event_bridge;
@@ -49,6 +50,7 @@ mod vsk_open;
 
 use approval_notification_windows::*;
 use backend::*;
+use chat_file_open::open_chat_file;
 use chatgpt_oauth::{
     chatgpt_oauth_activate, chatgpt_oauth_cancel, chatgpt_oauth_login, chatgpt_oauth_logout,
     chatgpt_oauth_models, chatgpt_oauth_status,
@@ -392,6 +394,7 @@ fn main() {
             write_path_to_skill,
             ensure_agent_notes_file,
             open_folder,
+            open_chat_file,
             open_local_folder,
             open_logs_folder,
             select_folder

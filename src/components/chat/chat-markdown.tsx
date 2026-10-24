@@ -12,6 +12,7 @@ import { useTranslation } from "react-i18next";
 
 import { isInternalRuntimeUrl } from "../../lib/runtime-url";
 import { cn } from "../../lib/utils";
+import { chatFileHref, localChatFilePath, openChatFile } from "../../lib/chat-file-link";
 import { MarkdownCodeBlock } from "./markdown-code-block";
 import { loadChatResourceImage, type ChatResourceImageContext as ChatResourceImageRequestContext } from "../../lib/api/chat-resource-image";
 
@@ -33,7 +34,7 @@ export function ChatMarkdown({ text, variant = "agent" }: { text?: string; varia
       data-testid={`chat-markdown-${variant}`}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkMath]}
+        remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkMath, remarkChatFileLinks]}
         remarkRehypeOptions={{ clobberPrefix: "" }}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], [scopeMarkdownFragments, clobberPrefix], [rehypeKatex, { trust: false }]]}
         components={components}
@@ -86,6 +87,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   },
   protocols: {
     ...defaultSchema.protocols,
+    href: [...(defaultSchema.protocols?.href || []), "vrcforge-file"],
     src: [
       ...new Set([...(defaultSchema.protocols?.src || []), "data", "vrcforge"]),
     ],
@@ -97,7 +99,7 @@ function buildChatMarkdownComponents(inverted: boolean): Components {
   const mutedClass = inverted ? "text-primary-foreground/80" : "text-muted-foreground";
   const borderClass = inverted ? "border-primary-foreground/35" : "border-border";
   const softBgClass = inverted ? "bg-primary-foreground/15" : "bg-muted/70";
-  const linkClass = inverted ? "text-primary-foreground underline underline-offset-2" : "text-primary underline underline-offset-2";
+  const linkClass = inverted ? "text-primary-foreground underline underline-offset-2" : "text-blue-600 dark:text-blue-400 underline underline-offset-2";
   return {
     h1: ({ node: _node, ...props }) => <h1 className={cn("mb-3 mt-5 text-xl font-semibold leading-snug first:mt-0", textClass)} {...props} />,
     h2: ({ node: _node, ...props }) => <h2 className={cn("mb-3 mt-5 text-lg font-semibold leading-snug first:mt-0", textClass)} {...props} />,
@@ -107,6 +109,8 @@ function buildChatMarkdownComponents(inverted: boolean): Components {
     h6: ({ node: _node, ...props }) => <h6 className={cn("mb-2 mt-4 text-xs font-semibold uppercase leading-snug first:mt-0", mutedClass)} {...props} />,
     p: ({ node: _node, ...props }) => <p className={cn("my-3 first:mt-0 last:mb-0", inverted && "whitespace-pre-wrap")} {...props} />,
     a: ({ node: _node, href, ...props }) => {
+      const filePath = localChatFilePath(String(href || ""));
+      if (filePath) return <ChatFileLink path={filePath} className={linkClass} {...props} />;
       const safeHref = safeMarkdownUrlTransform(String(href || ""));
       if (!safeHref) {
         return <span {...props} />;
@@ -145,6 +149,31 @@ function buildChatMarkdownComponents(inverted: boolean): Components {
     mark: ({ node: _node, ...props }) => <mark className={inverted ? "rounded bg-primary-foreground px-1 text-primary" : "rounded bg-yellow-200 px-1 text-yellow-950"} {...props} />,
     img: ({ node: _node, ...props }) => <ChatMarkdownImage inverted={inverted} {...props} />,
   };
+}
+
+function remarkChatFileLinks() {
+  return (tree: { children?: Array<Record<string, unknown>> }) => {
+    walkMarkdownTree(tree, node => {
+      if (node.type === "link" && typeof node.url === "string") {
+        const href = chatFileHref(node.url);
+        if (href) node.url = href;
+      }
+    });
+  };
+}
+
+function ChatFileLink({ path, children, className }: ComponentPropsWithoutRef<"a"> & { path: string }) {
+  const context = useContext(ChatResourceImageContext);
+  const [error, setError] = useState("");
+  const [opening, setOpening] = useState(false);
+  if (!context) return <span>{children}</span>;
+  return <><a className={className} href={chatFileHref(path) || undefined} aria-busy={opening} onClick={event => {
+    event.preventDefault();
+    if (opening) return;
+    setOpening(true); setError("");
+    void openChatFile(context, path).catch(cause => setError(String(cause instanceof Error ? cause.message : cause)))
+      .finally(() => setOpening(false));
+  }}>{children}</a>{error && <span role="status" className="ml-2 text-sm text-destructive">{error}</span>}</>;
 }
 
 function ChatMarkdownImage({ inverted, alt, src, ...props }: ComponentPropsWithoutRef<"img"> & { inverted: boolean }) {
@@ -214,6 +243,9 @@ function safeMarkdownUrlTransform(url: string, key?: string, tagName?: string, r
   }
   if (key === "src" && tagName === "img" && resourceContext && isChatResourceImageUri(trimmed)) {
     return trimmed;
+  }
+  if (key === "href" && tagName === "a" && resourceContext && trimmed.startsWith("vrcforge-file:")) {
+    return chatFileHref(trimmed) || "";
   }
   if (isInternalRuntimeUrl(trimmed)) {
     return "";

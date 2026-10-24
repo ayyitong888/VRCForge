@@ -262,30 +262,40 @@ export function ConversationCard({
   }
 
   if (item.type === "streaming") {
+    const captureEvents = (item.timeline || []).filter(event => event.kind === "tool_result" && event.payload.captures?.length);
+    const firstUri = captureEvents[0]?.payload.captures?.[0]?.preview.resourceUri;
+    let captureSessionId = "";
+    try { captureSessionId = new URL(firstUri || "").searchParams.get("context")?.replace(/^runtime:/, "") || ""; } catch { /* No valid capture yet. */ }
+    const liveImageContext = chatResourceImageContext && captureSessionId
+      ? { ...chatResourceImageContext, sessionId: captureSessionId, clientTurnId: item.clientTurnId } : null;
+
     if (item.id.startsWith("question-continuation:") && !item.text && !item.timeline?.length) return null;
     const streamingElapsed = elapsedSecondsSince(item.createdAt, streamingNowMs);
     // Keep public assistant updates at their durable timeline position. The
-    // trailing event is suppressed only when it is the same text as the live
-    // buffer, so progress updates remain visible without duplicating the tail.
+    // live buffer is omitted once the same text has become a durable event.
+    const lastAssistantText = [...(item.timeline || [])].reverse()
+      .find(event => event.kind === "assistant" && event.payload.summary)?.payload.summary;
+    const showLiveText = Boolean(item.text && item.text.trim() !== lastAssistantText?.trim());
     const timelineRows = buildDurableTimelineRows(item.timeline, undefined, "", [], {
       live: true,
       renderElapsed: false,
       processTitleElapsed: streamingElapsed,
       providerLine: "",
-      suppressTrailingAssistantText: item.text,
       interleavedUserMessages,
       interleavedUsersExpanded,
       onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
       renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, onImportAttachment),
     });
     return (
+      <ChatResourceImageContext.Provider value={liveImageContext}>
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
           {initialUserContent}
           {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
-          {item.text ? <div className="leading-relaxed" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null}
+          {showLiveText ? <div className="leading-relaxed" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null}
         </div>
       </div>
+      </ChatResourceImageContext.Provider>
     );
   }
 

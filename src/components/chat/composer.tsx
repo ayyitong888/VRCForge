@@ -371,6 +371,7 @@ export function Composer({
           rows={questionPromptVisible ? 1 : undefined}
           placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
           disabled={Boolean(disabledReason)}
+          title={t(sending ? "chat.runningInputShortcut" : "chat.idleInputShortcut")}
           onKeyDown={(event) => {
             if (paletteOpen && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
               event.preventDefault();
@@ -408,9 +409,10 @@ export function Composer({
               event.preventDefault();
               if (sending && !queueAllowed) return;
               if (sending && (event.ctrlKey || event.metaKey)) {
-                (onSteerNow || onSubmit)();
-              } else if (sending) {
+                // A distinct message follows the current turn through the existing serial queue.
                 (onQueue || onSubmit)();
+              } else if (sending) {
+                (onSteerNow || onSubmit)();
               } else {
                 onSubmit();
               }

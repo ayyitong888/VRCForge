@@ -2816,6 +2816,16 @@ class ChatResourceImageRequest(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
 
+class ChatResourceFileRequest(BaseModel):
+    path: str = Field(..., min_length=1, max_length=4096)
+    chat_id: str = Field(..., alias="chatId", min_length=1, max_length=256)
+    project_path: str = Field(..., alias="projectPath", min_length=1, max_length=4096)
+    session_id: str = Field(..., alias="sessionId", min_length=1, max_length=256)
+    client_turn_id: str = Field(..., alias="clientTurnId", min_length=1, max_length=256)
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+
 def migrate_legacy_runtime_data_on_startup() -> dict[str, Any] | None:
     """One-shot legacy data-root migration entry for the startup path.
 
@@ -3221,10 +3231,30 @@ def app_agent_resource_image(request: ChatResourceImageRequest) -> dict[str, Any
             client_turn_id=request.client_turn_id,
             project_path=request.project_path,
             chat=chat,
+            runtime_timeline_reader=AGENT_GATEWAY.runtime_runs.read_timeline,
         )
     except (ValueError, McpResourceError) as exc:
         raise HTTPException(status_code=404, detail="Chat image Resource is unavailable.") from exc
     return {"ok": True, **image}
+
+
+@app.post("/api/app/agent/resource-file")
+def app_agent_resource_file(request: ChatResourceFileRequest) -> dict[str, Any]:
+    from chat_resource_file import authorize_chat_resource_file
+    try:
+        chat = _load_handoff_chat(request.chat_id, request.project_path)
+    except ChatPortConflict as exc:
+        raise HTTPException(status_code=409, detail="Chat history is not currently readable.") from exc
+    if not isinstance(chat, Mapping):
+        raise HTTPException(status_code=404, detail="Chat file was not found in this project.")
+    try:
+        result = authorize_chat_resource_file(
+            path=request.path, session_id=request.session_id, client_turn_id=request.client_turn_id,
+            project_path=request.project_path, chat=chat, artifact_root=ARTIFACTS_DIR,
+        )
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=404, detail="Chat file is unavailable.") from exc
+    return {"ok": True, **result}
 
 
 @app.get("/api/app/agent/runs")

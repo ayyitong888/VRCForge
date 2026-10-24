@@ -726,6 +726,7 @@ export type AgentRuntimeResponse = {
       phase?: string;
       messageId?: string;
       actionId?: string;
+      captures?: Array<{ angle?: string; preview: { schema: string; mimeType: string; captureId: string; resourceUri: string } }>;
       subagentStatus?: "created" | "started" | "completed" | "failed";
     };
   }>;

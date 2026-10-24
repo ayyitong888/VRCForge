@@ -233,6 +233,7 @@ export function useChatRunController({
   const queueDispatchTailRef = useRef<Promise<void>>(Promise.resolve());
   const queueDispatchPendingRef = useRef(0);
   const queueCancellationGenerationRef = useRef(0);
+  const queueCancellationInFlightRef = useRef(false);
   const steerIntentRef = useRef(new Map<string, QueuedTurn>());
   const streamingTurnChatRef = useRef(new Map<string, string>());
   const activeTurnAbortRef = useRef<AbortController | null>(null);
@@ -435,7 +436,7 @@ export function useChatRunController({
       queueResumeRequestedRef.current = true;
       return;
     }
-    if (sendingRef.current || stopRequestedRef.current || queueRef.current.length === 0) return;
+    if (sendingRef.current || stopRequestedRef.current || queueCancellationInFlightRef.current || queueRef.current.length === 0) return;
     queueResumeInFlightRef.current = true;
     try {
       const head = queueRef.current[0];
@@ -515,36 +516,26 @@ export function useChatRunController({
   }
 
   async function cancelQueuedTurns(): Promise<void> {
+    if (queueCancellationInFlightRef.current) return;
+    queueCancellationInFlightRef.current = true;
     const pending = [...queueRef.current];
     queueCancellationGenerationRef.current += 1;
-    queueRef.current = [];
     queueArbitratorRef.current.stop();
-    setQueued([]);
-    for (const chat of chats || []) {
-      if (!chat.items.some((item) => item.type === "user" && CANCELLABLE_QUEUE_STATUSES.has(item.queueStatus || ""))) continue;
-      updateChat(chat.id, (current) => ({
-        ...touchChat(current),
-        items: current.items.map((item) => item.type === "user" && CANCELLABLE_QUEUE_STATUSES.has(item.queueStatus || "")
-          ? { ...item, queueStatus: "cancelled" }
-          : item),
-      }));
-    }
+    // Stop local draining while cancellation is pending. Only an authoritative
+    // cancelled receipt may remove a durable follow-up from the visible queue.
     for (const turn of pending) {
-      if (turn.queueId && (turn.queueLaneId || turn.chatId)) {
-        await cancelAgentRunFollowup(endpoint, turn.queueId, { sessionId: turn.queueLaneId || turn.chatId || "" }).catch(() => undefined);
-      }
-      for (const chat of chats || []) {
-        if (!chat.items.some((item) => item.type === "user" && item.clientTurnId === turn.id)) continue;
-        updateChat(chat.id, (current) => ({
-          ...touchChat(current),
-          items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id
-            ? { ...item, queueStatus: "cancelled" }
-            : item),
-        }));
-        break;
-      }
+      if (turn.queueStatus !== "delivery_unverified") markQueuedTurnStatus(turn.id, "paused");
     }
-    await persistChatsNow?.().catch(() => undefined);
+    let failed = false;
+    try {
+      for (const turn of pending) {
+        if (!await removeQueuedTurn(turn.id)) failed = true;
+      }
+      if (failed) setError(t("chat.queueCancellationFailed"));
+      await persistChatsNow?.().catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+    } finally {
+      queueCancellationInFlightRef.current = false;
+    }
   }
 
   function applyRuntimeDelta(delta: AgentRuntimeDeltaEvent) {
@@ -739,17 +730,29 @@ export function useChatRunController({
       queueDispatchTailRef.current = dispatch.then(() => undefined, () => undefined);
        let queueResult = await dispatch;
        if (cancellationGeneration !== queueCancellationGenerationRef.current) {
-         if (queueResult?.queueId && queuedTurn.queueLaneId) {
-           await cancelAgentRunFollowup(endpoint, queueResult.queueId, { sessionId: queuedTurn.queueLaneId }).catch(() => undefined);
+         const cancellation = queueResult?.queueId && queuedTurn.queueLaneId
+           ? await cancelAgentRunFollowup(endpoint, queueResult.queueId, { sessionId: queuedTurn.queueLaneId }).catch(() => null)
+           : null;
+         const confirmed = cancellation?.status === "cancelled";
+         if (!confirmed) {
+           // Admission can finish after Cancel all. Preserve that unresolved
+           // delivery instead of claiming the server cancelled it.
+           queuedTurn.queueId = queueResult?.queueId;
+           queuedTurn.queueSequence = queueResult?.sequence;
+           queuedTurn.queueStatus = queuedTurn.queueId ? "paused" : "delivery_unverified";
+           queueRef.current = [...queueRef.current.filter(item => item.id !== turn.id), queuedTurn];
+           setQueued([...queueRef.current]);
+           setError(t("chat.queueCancellationFailed"));
          }
          updateChat(ownerChatId, (current) => ({
            ...touchChat(current),
            items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id
-             ? { ...item, queueStatus: "cancelled" }
-              : item),
-          }));
-          steerIntentRef.current.delete(turn.id);
-          await reservation.decision;
+             ? { ...item, queueStatus: confirmed ? "cancelled" : queuedTurn.queueStatus,
+                 queueEnvelope: { ...item.queueEnvelope, queueId: queuedTurn.queueId, sequence: queuedTurn.queueSequence } }
+             : item),
+         }));
+         steerIntentRef.current.delete(turn.id);
+         await reservation.decision;
          return "failed";
        }
        // A steer accepted concurrently with Stop would otherwise disappear

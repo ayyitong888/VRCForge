@@ -6063,6 +6063,7 @@ class AgentGateway:
             subagent_status: str = "",
             action_id: str = "",
             message_id: str = "",
+            capture_result: object = None,
         ) -> None:
             """Persist the visible runtime order without prompts, CoT, or raw arguments."""
 
@@ -6088,6 +6089,11 @@ class AgentGateway:
                     bounded = summarize_text(str(value or ""), limit)
                 if bounded:
                     payload[key] = bounded
+            if kind == "tool_result" and capture_result is not None:
+                from chat_resource_image import public_capture_previews
+                captures = public_capture_previews(capture_result)
+                if captures:
+                    payload["captures"] = captures
             event = {
                 "id": f"timeline-{turn_id}-{sequence}",
                 "sequence": sequence,
@@ -7766,6 +7772,7 @@ class AgentGateway:
                 status=result_status,
                 tool=step_tool,
                 action_id=planned_action_id,
+                capture_result=steps[-1].get("result"),
             )
 
             from checkpoint_unity_evidence import restore_failure_terminal_plan
