@@ -5,7 +5,9 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 import runtime_planner_service as planner_policy
-from mcp_tool_descriptor import read_runtime_identity_required, write_runtime_identity_required
+from mcp_tool_descriptor import (
+    read_runtime_identity_required, write_runtime_identity_required, with_execution_target_scope_guidance,
+)
 from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
 from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
 
@@ -57,11 +59,12 @@ def _read_uses_runtime_identity(name: str) -> bool:
     return read_runtime_identity_required(name)
 
 
-def _with_execution_target_schema(schema: Mapping[str, Any], *, required: bool) -> dict[str, Any]:
+def _with_execution_target_schema(schema: Mapping[str, Any], *, required: bool, name: str = "", write: bool = False) -> dict[str, Any]:
     projected = deepcopy(dict(schema))
     properties = dict(projected.get("properties") or {})
     if "projectPath" not in properties:
-        return projected
+        return with_execution_target_scope_guidance(projected, name=name, write=write)
+    original_description = str(dict(properties.get("executionTarget") or {}).get("description") or "")
     properties["executionTarget"] = {
         "oneOf": [
             {
@@ -87,13 +90,15 @@ def _with_execution_target_schema(schema: Mapping[str, Any], *, required: bool) 
             "are display-only and never substitute for GlobalObjectId identity."
         ),
     }
+    if original_description:
+        properties["executionTarget"]["description"] = original_description + " " + properties["executionTarget"]["description"]
     projected["properties"] = properties
     if required:
         required_fields = list(projected.get("required") or [])
         if "executionTarget" not in required_fields:
             required_fields.append("executionTarget")
         projected["required"] = required_fields
-    return projected
+    return with_execution_target_scope_guidance(projected, name=name, write=write)
 
 
 def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
@@ -107,13 +112,13 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
         # A retained checkpoint supplies its own project/restore scope, including
         # local-state recovery when no Editor is running.
         if name == "vrcforge_preview_restore_checkpoint":
-            return deepcopy(dict(registered))
+            return with_execution_target_scope_guidance(registered, name=name, write=False)
         return (
-            _with_execution_target_schema(registered, required=True)
+            _with_execution_target_schema(registered, required=True, name=name)
             if name in {"vrcforge_get_property"} or name.startswith("vrcforge_preview_")
-            else _with_execution_target_schema(registered, required=False)
+            else _with_execution_target_schema(registered, required=False, name=name)
             if _read_uses_runtime_identity(name)
-            else deepcopy(dict(registered))
+            else with_execution_target_scope_guidance(registered, name=name, write=False)
         )
     if name.startswith("vrcforge_preview_"):
         write_name = (
@@ -125,15 +130,15 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
         )
         paired = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS.get(write_name)
         if isinstance(paired, Mapping):
-            return _with_execution_target_schema(paired, required=True)
+            return _with_execution_target_schema(paired, required=True, name=write_name)
     hinted = planner_policy.planner_tool_input_schema(name)
     if hinted:
         return (
-            _with_execution_target_schema(hinted, required=True)
+            _with_execution_target_schema(hinted, required=True, name=name)
             if name in {"vrcforge_get_property"}
-            else _with_execution_target_schema(hinted, required=False)
+            else _with_execution_target_schema(hinted, required=False, name=name)
             if _read_uses_runtime_identity(name)
-            else deepcopy(dict(hinted))
+            else with_execution_target_scope_guidance(hinted, name=name, write=False)
         )
     return {
         "type": "object",
@@ -162,5 +167,5 @@ def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
     # decoration. Internal and external Agents must reason over the exact same
     # namespace lock contract even though their visible Tool projections differ.
     return _with_execution_target_schema(
-        schema, required=write_runtime_identity_required(name),
+        schema, required=write_runtime_identity_required(name), name=name, write=True,
     )

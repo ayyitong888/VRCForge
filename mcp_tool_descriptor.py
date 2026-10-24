@@ -194,6 +194,126 @@ def _result_schema(write: bool) -> dict[str, Any]:
     }
 
 
+def tool_identity_metadata(name: str, *, write: bool, input_schema: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Shared descriptor policy used by every model-facing schema projection."""
+
+    identity = standard_identity_metadata(scope=identity_scope(name, write=write), write=write)
+    runtime_identity_required = write_runtime_identity_required(name) if write else read_runtime_identity_required(name)
+    if write and not runtime_identity_required:
+        identity = {
+            "scope": "project",
+            "required": list(dict(input_schema or {}).get("required") or []),
+            "writeBinding": "handler_managed",
+            "validation": "request_preparer_or_receipt",
+        }
+    conditional_identity = None
+    if "renderer_material_slot" in name:
+        conditional_identity = {"if": {"required": ["assignments"]}, "then": {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["scene", "avatar"]}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "component"}}}}}}
+    elif name.endswith("set_material_shader") or name.endswith("preview_material_shader_assignment"):
+        conditional_identity = {
+            "if": {
+                "anyOf": [
+                    {"required": ["assignments"]},
+                    {"required": ["materialAssetPath"], "properties": {"materialAssetPath": {"minLength": 1}}},
+                ],
+                "not": {"anyOf": [{"required": [key]} for key in ("rendererPath", "rendererComponentId", "slotIndex")]},
+            },
+            "then": {
+                "if": {"required": ["assignments"]},
+                "then": {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["project", "scene", "avatar", "object", "component"]}}}}},
+                "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "project"}}}}},
+            },
+            "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "component"}}}}},
+        }
+    if "material_texture" in name or "texture_import_settings" in name:
+        conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["project", "scene", "avatar", "object", "component"]}}}}}
+    elif name.endswith("scene_transition"):
+        identity["actionAwareScope"] = {
+            "when": {"action": "open_single"},
+            "minimumScope": "project",
+            "otherwise": "scene",
+        }
+    elif name.endswith("create_gameobject"):
+        identity["actionAwareScope"] = {
+            "when": {"resolvedNonEmpty": ["parent_path", "parentPath"]},
+            "minimumScope": "object",
+            "otherwise": "scene",
+        }
+    elif "flatten_material_variant" in name or "preview_material_variant_flatten" in name:
+        conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"const": "project"}}}}}
+    elif name.endswith(("apply_shader_tuning", "restore_shader_tuning", "reapply_shader_tuning_history", "apply_shader_tuning_preset")):
+        conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["avatar", "object", "component"]}}}}}
+    if conditional_identity:
+        identity["parameterScope"] = conditional_identity
+    return identity
+
+
+def _identity_condition_text(condition: Mapping[str, Any]) -> str:
+    terms = [str(key) + " is present" for key in condition.get("required", [])]
+    if "anyOf" in condition:
+        terms.append("(" + " or ".join(_identity_condition_text(item) for item in condition["anyOf"]) + ")")
+    for key, value in condition.get("properties", {}).items():
+        if value.get("minLength") == 1:
+            terms.append(str(key) + " is non-empty")
+    if "not" in condition:
+        terms.append("none of (" + _identity_condition_text(condition["not"]) + ")")
+    return " and ".join(terms)
+
+
+def _identity_parameter_scope_text(rule: Mapping[str, Any]) -> str:
+    if "if" in rule:
+        return ("if " + _identity_condition_text(rule["if"]) + ": "
+                + _identity_parameter_scope_text(rule["then"]) + "; otherwise: "
+                + _identity_parameter_scope_text(rule["else"]))
+    scope = rule["properties"]["executionTarget"]["properties"]["scope"]
+    values = scope.get("enum") or [scope["const"]]
+    return "accepted scope: " + " or ".join(values)
+
+
+def execution_target_scope_guidance(name: str, *, write: bool, required: bool,
+                                    identity: Mapping[str, Any] | None = None) -> str:
+    """Render the shared identity policy into provider-preserved field prose."""
+
+    policy = identity if identity is not None else tool_identity_metadata(name, write=write)
+    prefix = "Identity scope: "
+    if name in _READ_IDENTITY_BOOTSTRAP_TOOLS:
+        return prefix + "identity bootstrap or refresh; preserve the supplied reference at its own bound scope, without binding an unrelated target."
+    if policy.get("writeBinding") == "handler_managed":
+        return prefix + "handler-managed preparation or receipt; no runtime executionTarget binding is required."
+    if not write and not required:
+        return prefix + "optional read reference; if supplied, it is validated at its own bound scope, not required to reach the tool's scope."
+    if policy.get("actionAwareScope"):
+        action = policy["actionAwareScope"]
+        condition = action["when"]
+        when = ("str(" + " or ".join(condition["resolvedNonEmpty"]) + " or '').strip() is non-empty"
+                if "resolvedNonEmpty" in condition else ", ".join(f"{key}={value}" for key, value in condition.items()))
+        return prefix + f"when {when}, minimum scope: {action['minimumScope']}; otherwise minimum scope: {action['otherwise']}. Select this scope when binding the exact target."
+    if policy.get("parameterScope"):
+        return prefix + _identity_parameter_scope_text(policy["parameterScope"]) + ". Bind a reference for the selected operation and exact target."
+    scope = str(policy["scope"])
+    text = prefix + "minimum scope: " + scope + ". Bind a reference at this scope or a more specific scope before calling."
+    if scope == "object":
+        text += " Bind the existing host object; an avatar reference is insufficient."
+    elif scope == "component":
+        text += " Bind the exact existing component; an avatar or object reference is insufficient."
+    return text
+
+
+def with_execution_target_scope_guidance(schema: Mapping[str, Any], *, name: str, write: bool,
+                                        identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Append scope prose while retaining the original field and schema constraints."""
+
+    projected = deepcopy(dict(schema))
+    target = projected.get("properties", {}).get("executionTarget")
+    if isinstance(target, dict):
+        description = str(target.get("description") or "")
+        guidance = execution_target_scope_guidance(name, write=write,
+            required="executionTarget" in projected.get("required", []), identity=identity)
+        if guidance not in description:
+            target["description"] = (description + " " + guidance).strip()
+    return projected
+
+
 def standardize_tool_descriptor(
     tool: Mapping[str, Any],
     *,
@@ -208,7 +328,6 @@ def standardize_tool_descriptor(
     result = deepcopy(dict(tool))
     name = str(result.get("name") or "").strip()
     canonical = canonical_tool_name(name)
-    scope = identity_scope(name, write=write)
     runtime_identity_required = write_runtime_identity_required(name) if write else read_runtime_identity_required(name)
     metadata = dict(result.get("_meta") or {}) if isinstance(result.get("_meta"), Mapping) else {}
     description = str(result.get("description") or name)
@@ -228,7 +347,7 @@ def standardize_tool_descriptor(
         "sideEffects": ["Unity project state may change"] if write else [],
         "idempotency": "tool-defined; operationId is required for transaction correlation",
         "syncMode": "async-capable" if write else "synchronous-or-readback",
-        "requiredIdentity": standard_identity_metadata(scope=scope, write=write),
+        "requiredIdentity": tool_identity_metadata(name, write=write, input_schema=result.get("inputSchema")),
         "requiredResources": [],
         "producedResources": [],
         "approval": {"required": bool(write), "mode": "risk_based" if write else "none"},
@@ -237,32 +356,7 @@ def standardize_tool_descriptor(
         "freshReadback": {"required": bool(write), "mustUseExactTarget": True},
         "errorModel": "vrcforge.tool_result.v1 with fail-closed identity errors",
     })
-    if write and not runtime_identity_required:
-        result["requiredIdentity"] = {
-            "scope": "project",
-            "required": list(dict(result.get("inputSchema") or {}).get("required") or []),
-            "writeBinding": "handler_managed",
-            "validation": "request_preparer_or_receipt",
-        }
-    conditional_identity = None
-    if "renderer_material_slot" in name:
-        conditional_identity = {"if": {"required": ["assignments"]}, "then": {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["scene", "avatar"]}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "component"}}}}}}
-    elif name.endswith("set_material_shader") or name.endswith("preview_material_shader_assignment"):
-        conditional_identity = {"if": {"anyOf": [{"required": ["assignments"]}, {"required": ["materialAssetPath"], "not": {"anyOf": [{"required": [key]} for key in ("rendererPath", "rendererComponentId", "slotIndex")]}}]}, "then": {"if": {"required": ["assignments"]}, "then": {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["project", "scene", "avatar", "object", "component"]}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "project"}}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "component"}}}}}}
-    if "material_texture" in name or "texture_import_settings" in name:
-        conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["project", "scene", "avatar", "object", "component"]}}}}}
-    elif name.endswith("scene_transition"):
-        result["requiredIdentity"]["actionAwareScope"] = {
-            "when": {"action": "open_single"},
-            "minimumScope": "project",
-            "otherwise": "scene",
-        }
-    elif "flatten_material_variant" in name or "preview_material_variant_flatten" in name:
-        conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"const": "project"}}}}}
-    elif name.endswith(("apply_shader_tuning", "restore_shader_tuning", "reapply_shader_tuning_history", "apply_shader_tuning_preset")):
-        conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["avatar", "object", "component"]}}}}}
-    if conditional_identity:
-        result["requiredIdentity"]["parameterScope"] = conditional_identity
+    conditional_identity = result["requiredIdentity"].get("parameterScope")
     metadata.update({
         "canonicalName": canonical,
         "mcpName": name,
@@ -292,14 +386,14 @@ def standardize_tool_descriptor(
     if catalog_generation is not None:
         result["catalogGeneration"] = int(catalog_generation)
         metadata["catalogGeneration"] = int(catalog_generation)
-    if add_identity_schema:
+    if add_identity_schema and name not in _READ_IDENTITY_BOOTSTRAP_TOOLS:
         schema = deepcopy(dict(result.get("inputSchema") or {}))
         properties = dict(schema.get("properties") or {})
-        properties["executionTarget"] = {
+        properties.setdefault("executionTarget", {
             "type": "object",
             "description": "Exact Stage 1 identity envelope; hierarchy paths are display/navigation only.",
             "$ref": "#/$defs/vrcforge.execution_target.v1",
-        }
+        })
         schema["properties"] = properties
         schema.setdefault("$defs", {})["vrcforge.execution_target.v1"] = {
             "type": "object",
@@ -332,7 +426,7 @@ def standardize_tool_descriptor(
         },
         "additionalProperties": True,
     }
-    result["inputSchema"] = schema
+    result["inputSchema"] = with_execution_target_scope_guidance(schema, name=name, write=write, identity=result["requiredIdentity"])
     result["outputSchema"] = _result_schema(write)
     result["_meta"] = metadata
     return result
