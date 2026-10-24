@@ -27032,17 +27032,17 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_ask_user",
-        "when-to-use: ask the user for a missing decision during the active Agent task; options may be omitted for free text. "
+        "When to use: ask the user for a missing decision during the active Agent task; options may be omitted for free text. "
         + QUESTION_LANGUAGE_INSTRUCTION
-        + "Set blocking=false when independent work can continue while the user answers; the answer joins the same active turn, or resumes the parked task. The default blocking=true pauses for dependent decisions. Never perform actions depending on an unanswered decision. when-NOT-to-use: do not use for ordinary conversation, hypothetical examples, already known decisions, or to bypass approval/checkpoint protection.",
+        + "Set blocking=false when independent work can continue while the user answers; the answer joins the same active turn, or resumes the parked task. The default blocking=true pauses for dependent decisions. Never perform actions depending on an unanswered decision. When NOT to use: do not use for ordinary conversation, hypothetical examples, already known decisions, or to bypass approval/checkpoint protection. Negative example: do not ask again for a decision already present in the task.",
         "plan/preview",
         AGENT_GATEWAY.create_runtime_question,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_call_user",
-        "when-to-use: request a specific human action or judgment unavailable to tools. "
+        "When to use: request a specific human action or judgment unavailable to tools. "
         + CALL_USER_USAGE_INSTRUCTION + QUESTION_LANGUAGE_INSTRUCTION
-        + "Use kind=visual_checkpoint for visual acceptance with pass, fail, uncertain, and later; this gate always blocks and only explicit pass/fail resolves it. For an ordinary decision with independent work available, set blocking=false and continue only that independent work; approval and checkpoint requirements remain authoritative. Include the view or location and preserve the task. Consolidate related questions and reuse a pending request. when-NOT-to-use: do not request routine checks, progress acknowledgments, already granted approval, or work available tools can complete. Negative example: do not call after every tool, transfer a single tool failure to the user, invent a component switch, or treat silence, dismissal, or uncertainty as acceptance.",
+        + "Use kind=visual_checkpoint for visual acceptance with pass, fail, uncertain, and later; this gate always blocks and only explicit pass/fail resolves it. For an ordinary decision with independent work available, set blocking=false and continue only that independent work; approval and checkpoint requirements remain authoritative. Include the view or location and preserve the task. Consolidate related questions and reuse a pending request. When NOT to use: do not request routine checks, progress acknowledgments, already granted approval, or work available tools can complete. Negative example: do not call after every tool, transfer a single tool failure to the user, invent a component switch, or treat silence, dismissal, or uncertainty as acceptance.",
         "plan/preview",
         AGENT_GATEWAY.call_user,
     )

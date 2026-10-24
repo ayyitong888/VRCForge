@@ -73,6 +73,8 @@ def test_registered_tool_description_carries_guidance_through_real_projection(tm
     descriptor = gateway.shared_agent_tool_descriptor(tool, write=False, config=config)
     assert "everyday language" in descriptor["description"]
     assert descriptor["whenToUse"] and descriptor["whenNotToUse"]
+    assert "already known decisions" in descriptor["whenNotToUse"] if tool == "vrcforge_ask_user" else "routine checks" in descriptor["whenNotToUse"]
+    assert "without inspecting the current project" not in descriptor["description"]
     if tool == "vrcforge_call_user":
         assert "specific capability or permission gap" in descriptor["description"]
         assert "A failed tool call alone" in descriptor["description"]
