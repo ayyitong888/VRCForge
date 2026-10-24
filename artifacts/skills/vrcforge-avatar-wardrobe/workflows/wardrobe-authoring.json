@@ -279,6 +279,22 @@
         "mustNotDuplicateCurvesPerMaterialSlot": true
       }
     },
+    "bodyShapeFitting": {
+      "defaultPreserveBody": true,
+      "requiresExplicitBodySizeAuthorization": true,
+      "existingScannedShapesOnly": true,
+      "preserveUnrelatedBodyFacePhysicsAndManualEdits": true,
+      "outfitSpecificFitRequiresBaselineRestore": true,
+      "globalChangeOnlyWhenExplicitlyRequested": true,
+      "valuesSource": "actual_renderer_shapes_author_evidence_and_targeted_visual_preview",
+      "whenBodyLocked": "explain_fit_tradeoff_and_ask_once_for_missing_authorization_only",
+      "validationOrder": [
+        "targeted_problem_view",
+        "independent_readback",
+        "final_required_views"
+      ],
+      "routineFittingIsNotHumanAction": true
+    },
     "protectedSystems": {
       "preserveAllUserConfiguredPhysics": true,
       "preserveVendorPhysBonesConstraintsAndColliders": true
@@ -487,6 +503,18 @@
         "vrcforge_ensure_animator_state",
         "vrcforge_preview_manage_fx_animator",
         "vrcforge_manage_fx_animator"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "optional": true
+    },
+    {
+      "name": "apply_authorized_existing_body_shapes",
+      "guidance": "Only when the user explicitly permits body size adjustment: inspect exact existing shapes and current values; preview the smallest relevant change, then apply within approval and checkpoint scope. Distinguish explicitly global body changes from outfit-specific animation and baseline restoration. Preserve unrelated shapes, physics and manual edits. Validate the problem view before final required views. Do not invent shape names or weights.",
+      "tool": "vrcforge_preview_blendshape_apply",
+      "tools": [
+        "vrcforge_apply_blendshapes"
       ],
       "writes": true,
       "runtimePermissionGateRequired": true,
