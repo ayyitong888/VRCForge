@@ -20,8 +20,9 @@ e('b',3,'tool_call',{actionId:'b',tool:'vrcforge_read_text_file',status:'started
 e('final',5,'assistant',{summary:'The follow-up inspection completed.',phase:'final_answer',status:'done'})];
 const item={id:'history',type:'agent',response:{clientTurnId:'history-turn',plan:{nextStep:'done',reply:'The follow-up inspection completed.'},timeline}};
 const pending={id:'pending',type:'streaming',clientTurnId:'pending-turn',text:'',timeline:[e('p',0,'tool_call',{actionId:'p',tool:'vrcforge_write_file',status:'prepared'})]};
+const recovered={id:'recovered',type:'streaming',clientTurnId:'recovered-turn',text:'',timeline:[e('r1',0,'tool_call',{actionId:'r1',tool:'unity_bind_execution_target',status:'started'}),e('r1r',1,'tool_result',{actionId:'r1',tool:'unity_bind_execution_target',status:'ok'}),e('r2',2,'tool_call',{actionId:'r2',tool:'unity_get_gameobject',status:'started'}),e('r2r',190,'tool_result',{actionId:'r2',tool:'unity_get_gameobject',status:'ok'})]};
 const interrupted={id:'interrupted',type:'agent',response:{clientTurnId:'interrupted-turn',status:'interrupted',continuationSource:'foreground_interrupted',plan:{nextStep:'interrupted',reply:'Accepted partial model text.'},timeline:[e('earlier',0,'assistant',{summary:'Earlier public update.',phase:'commentary'})]}};
-void initializeI18n().then(()=>createRoot(document.getElementById('root')).render(<><section id="history"><ConversationCard item={item}/></section><section id="pending"><ConversationCard item={pending}/></section><section id="interrupted"><ConversationCard item={interrupted}/></section></>));
+void initializeI18n().then(()=>createRoot(document.getElementById('root')).render(<><section id="history"><ConversationCard item={item}/></section><section id="pending"><ConversationCard item={pending}/></section><section id="interrupted"><ConversationCard item={interrupted}/></section><section id="recovered"><ConversationCard item={recovered}/></section></>));
 ` }, bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", plugins: baseline ? [{name:'frozen-timeline-baseline',setup(plugin){plugin.onLoad({filter:/conversation-timeline\.tsx$/},()=>({loader:'tsx',contents:execFileSync('git',['show',baseline+':src/components/chat/conversation-timeline.tsx'],{encoding:'utf8'})}));}}] : [] });
 const server = createServer((_, response) => { response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(`<style>${css}</style><div id="root" style="width:720px"></div><script>${result.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script>`); });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -30,6 +31,10 @@ try {
   browser = await chromium.launch({headless:true,channel:process.env.VRCFORGE_BROWSER_CHANNEL || "msedge"});
   const page = await browser.newPage(); const errors=[]; page.on('pageerror',e=>errors.push(e.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);
+  const recovered=page.locator('#recovered');
+  await recovered.locator('[data-agent-turn-process-title]').waitFor();
+  assert.match(await recovered.locator('[data-agent-turn-process-title]').innerText(), /3m 10s/, 'restored timeline keeps its known elapsed duration in the process heading');
+  assert.doesNotMatch(await recovered.locator('[data-agent-tool-group-title]').first().innerText(), /unity_|vrcforge_/, 'folded tool headings stay readable while exact tool names remain in detail');
   const interrupted=page.locator('#interrupted'); await interrupted.locator('[data-vrcforge-agent-client-turn]').waitFor();
   assert.ok((await interrupted.innerText()).includes('Accepted partial model text.'),'transport interruption retains accepted partial words outside a false final answer');
   assert.equal(await interrupted.locator('[data-agent-transport-interrupted]').count(),1,'transport interruption has an unconfirmed-status notice');
@@ -48,6 +53,7 @@ try {
   await group.locator('button').first().click(); await group.locator('button.group\\/run').last().click();
   assert.ok((await group.locator('[data-agent-invocation-output-card]').innerText()).includes('Historical read failure'),'exact error detail stays inspectable');
   const pending=page.locator('#pending');
+  assert.match(await pending.locator('[data-agent-turn-process-title]').innerText(), /Handled in —/, 'missing duration stays explicitly unknown instead of changing the process heading');
   const pendingGroup=pending.locator('[data-agent-tool-call-group]'); await pendingGroup.locator('button').first().click();
   await pendingGroup.locator('button.group\\/run').click();
   assert.doesNotMatch(await pendingGroup.locator('[data-agent-invocation-output-card]').innerText(),/Done|已完成/,'prepared request is not a completed write');

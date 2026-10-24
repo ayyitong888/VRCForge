@@ -235,7 +235,7 @@ export function buildAgentTimelineRows({
     const processRows = rows.splice(0);
     rows.push(
       <div key="agent-turn-process" data-agent-turn-process-group>
-        <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, [], t)} statusLabel="" statusTone="muted" processHeader>
+        <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, t)} statusLabel="" statusTone="muted" processHeader>
           {processRows}
         </WorkSegmentRow>
       </div>,
@@ -356,7 +356,7 @@ export function buildDurableTimelineRows(
       <div key={`tools-${calls[0].invocation.id}`} data-agent-tool-call-group>
         <WorkSegmentRow
           kind="tool"
-          title={[...new Set(calls.map(({ invocation }) => invocationOperationTitle(invocation, i18n.t)))].slice(0, 2).join(" · ")}
+          title={[...new Set(calls.map(({ invocation }) => invocationOperationTitle(invocation, i18n.t, true)))].slice(0, 2).join(" · ")}
           summaryMeta={i18n.t("agent.timeline.callTools", { count: calls.length })}
           statusLabel={historicalFailureLabel(calls.map(({ invocation }) => invocation))}
           showStatus={calls.some(({ invocation }) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
@@ -368,7 +368,7 @@ export function buildDurableTimelineRows(
     );
   };
   const includeAssistant = options.includeAssistant !== false;
-  const turnElapsed = options.processTitleElapsed ?? (options.renderElapsed === false ? undefined : presentation.elapsedSeconds);
+  const turnElapsed = options.processTitleElapsed ?? presentation.elapsedSeconds;
   const finalAssistant = [...presentation.entries].reverse().find((entry) => (
     (entry.type === "assistant" && entry.status !== "completion_unverified"
       && !entry.phase && Boolean(terminalFailureCode))
@@ -429,7 +429,7 @@ export function buildDurableTimelineRows(
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow
           kind="process"
-          title={turnProcessDisplayTitle(turnElapsed, processInvocations, i18n.t)}
+          title={turnProcessDisplayTitle(turnElapsed, i18n.t)}
           summaryMeta={toolCallCount ? i18n.t("agent.timeline.callTools", { count: toolCallCount }) : undefined}
           summary={lastPublicUpdate}
           statusLabel={historicalFailureLabel(processInvocations)}
@@ -525,18 +525,21 @@ function invocationTarget(detail: unknown): string {
   return typeof path === "string" ? path.trim().replace(/\\/g, "/").split("/").filter(Boolean).pop() || "" : "";
 }
 
-function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n.t): string {
+function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n.t, compact = false): string {
   const tool = timelineInvocationDisplayLabel(invocation.label);
   const normalizedStatus = invocation.status.toLowerCase();
-  if (normalizedStatus === "prepared") return t("agent.timeline.preparedTool", { tool });
-  if (["failed", "error"].some((value) => normalizedStatus.includes(value))) {
+  if (!compact && normalizedStatus === "prepared") return t("agent.timeline.preparedTool", { tool });
+  if (!compact && ["failed", "error"].some((value) => normalizedStatus.includes(value))) {
     return invocation.kind === "tool" && ["failed", "error"].includes(normalizedStatus)
       ? tool
       : t("agent.timeline.failedTool", { tool });
   }
-  if (["started", "running", "pending"].includes(normalizedStatus)) {
+  if (!compact && ["started", "running", "pending"].includes(normalizedStatus)) {
     return t("agent.timeline.runningTool", { tool });
   }
+  if (compact && invocation.kind === "command") return t("agent.timeline.runCommand");
+  if (compact && invocation.kind === "file_edit") return t("agent.timeline.editFile");
+  if (compact && invocation.kind === "subagent") return t("agent.timeline.runSubagent");
   switch (tool) {
     case "read_text_file": return t("agent.timeline.readFile");
     case "list_directory": return t("agent.timeline.listDirectory");
@@ -549,7 +552,7 @@ function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n
     case "apply_patch": return t("agent.timeline.applyPatch");
     case "execute_shell": return t("agent.timeline.runCommand");
     case "delegate_subagent": return t("agent.timeline.runSubagent");
-    default: return t("agent.timeline.callTool", { tool });
+    default: return compact ? t("agent.callTool") : t("agent.timeline.callTool", { tool });
   }
 }
 
@@ -560,20 +563,9 @@ function historicalFailureLabel(invocations: TimelineInvocation[]): string {
 
 function turnProcessDisplayTitle(
   elapsedSeconds: number | undefined,
-  invocations: TimelineInvocation[],
   t: typeof i18n.t,
 ): string {
-  if (Number.isFinite(elapsedSeconds)) return t("agent.turnDuration", { duration: formatDuration(elapsedSeconds || 0) });
-  const kind = invocations[0]?.kind || "process";
-  const failed = invocations.filter((invocation) => ["failed", "error", "rejected", "cancelled", "canceled"].some((value) => invocation.status.toLowerCase().includes(value))).length;
-  if (invocations.length === 1 && !failed) return invocationOperationTitle(invocations[0], t);
-  if (kind === "tool" && invocations.every((invocation) => timelineInvocationDisplayLabel(invocation.label) === "read_text_file")) {
-    return t("agent.timeline.readFiles", { count: invocations.length });
-  }
-  if (kind === "command") return t("agent.timeline.runCommands", { count: invocations.length });
-  if (kind === "subagent") return t("agent.timeline.runSubagents", { count: invocations.length });
-  if (kind === "file_edit") return t("agent.timeline.editFiles", { count: invocations.length });
-  return t("agent.timeline.process");
+  return t("agent.turnDuration", { duration: Number.isFinite(elapsedSeconds) ? formatDuration(elapsedSeconds || 0) : "—" });
 }
 
 function renderTurnMetadataRow(elapsedSeconds?: number, providerLine?: string): ReactNode {

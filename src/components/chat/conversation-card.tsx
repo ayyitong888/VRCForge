@@ -582,7 +582,7 @@ export function StreamingPhaseStatus({ item, nowMs, showElapsed }: { item: Extra
         : t("chat.runtimePhase.waitingForModelDetail")
       : t("chat.runtimePhase.reconnectingDetail");
   return (
-    <div className="chat-current-activity text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase={item.phase || "unknown"} role="status" aria-live="polite" aria-atomic="true">
+    <div className="chat-current-activity mt-5 text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase={item.phase || "unknown"} role="status" aria-live="polite" aria-atomic="true">
       {reconnecting || waiting ? (
         <details className="group">
           <summary className="group flex cursor-pointer list-none items-center gap-2 text-left [&::-webkit-details-marker]:hidden">

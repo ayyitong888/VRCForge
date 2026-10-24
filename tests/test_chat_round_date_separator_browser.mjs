@@ -107,6 +107,13 @@ try {
   };
   await page.waitForFunction(() => typeof window.setConversation === "function");
   if (process.env.VRCFORGE_TASK_REPLAY_ONLY !== "1") {
+  for (const phase of ["preparing", "waiting_for_model", "running_tool", "waiting_for_approval", "verifying"]) {
+    await render([{ ...stream("status-spacing", start), phase, text: "Complete the requested editor action, then reply so the inspection can continue." }]);
+    const body = await page.locator("[data-conversation-streaming-turn]").boundingBox();
+    const status = await page.locator("[data-chat-current-activity]").boundingBox();
+    const gap = status.y - body.y - body.height;
+    assert.ok(gap >= 16 && gap <= 32, `${phase}: current activity needs breathing room below the preceding reply (gap=${gap})`);
+  }
   await render([user("first", start), stream("running", nextDay, "first")]);
   assert.equal(await separators.count(), 0, "first task and its long-running model request have no between-task separator");
   await render([user("first", start), agent("pending", later, "needs_user_action", "first"),

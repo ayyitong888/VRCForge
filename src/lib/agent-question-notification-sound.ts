@@ -1,5 +1,7 @@
 const STORAGE_KEY = "vrcforge.agent-question.notification-sound.v1";
 const MAX_DATA_URL_LENGTH = 4 * 1024 * 1024;
+// Optional audio must not keep a native notification waiting for media loading.
+const SOUND_START_TIMEOUT_MS = 1500;
 
 export type AgentQuestionNotificationSoundKind = "ordinary" | "blocking";
 export type AgentQuestionNotificationSound = { enabled: boolean; dataUrl: string; name: string };
@@ -77,19 +79,41 @@ export function readAgentQuestionNotificationSoundFile(file: File): Promise<Agen
 }
 
 export async function playAgentQuestionNotificationSound(kind: AgentQuestionNotificationSoundKind = "blocking"): Promise<boolean> {
-  const sound = loadAgentQuestionNotificationSound(kind);
-  if (!sound.enabled || !sound.dataUrl || typeof Audio === "undefined") return false;
-  stopAgentQuestionNotificationSound();
-  const audio = new Audio(sound.dataUrl);
-  activePreview = audio;
-  audio.volume = 1;
-  audio.onended = () => { if (activePreview === audio) activePreview = null; };
-  try { await audio.play(); return true; } catch { if (activePreview === audio) activePreview = null; return false; }
+  let audio: HTMLAudioElement | null = null;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const sound = loadAgentQuestionNotificationSound(kind);
+    if (!sound.enabled || !sound.dataUrl || typeof Audio === "undefined") return false;
+    stopAgentQuestionNotificationSound();
+    audio = new Audio(sound.dataUrl);
+    activePreview = audio;
+    audio.volume = 1;
+    audio.onended = () => { if (activePreview === audio) activePreview = null; };
+    const started = await Promise.race([
+      audio.play().then(() => true, () => false),
+      new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), SOUND_START_TIMEOUT_MS); }),
+    ]);
+    if (!started) stopNotificationAudio(audio);
+    return started;
+  } catch {
+    if (audio) stopNotificationAudio(audio);
+    return false;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+function stopNotificationAudio(audio: HTMLAudioElement): void {
+  // A newer notification already stopped a superseded element.
+  if (activePreview !== audio) return;
+  activePreview = null;
+  // A detached/failed media element may throw during teardown as well as setup.
+  try { audio.pause(); } catch { /* Continue native delivery. */ }
+  try { audio.currentTime = 0; } catch { /* Continue native delivery. */ }
 }
 
 export function stopAgentQuestionNotificationSound(): void {
-  if (!activePreview) return;
-  activePreview.pause(); activePreview.currentTime = 0; activePreview = null;
+  if (activePreview) stopNotificationAudio(activePreview);
 }
 
 export const AGENT_QUESTION_NOTIFICATION_SOUND_STORAGE_KEY = STORAGE_KEY;
