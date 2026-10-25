@@ -20,8 +20,28 @@ namespace VRCForge.Editor
     public static class CheckpointPrepareTool
     {
         public const bool SavesDirtyAssets = false;
-        internal static HashSet<string> ExactFileScope(JToken token, bool allowEmpty = false)
+        private static bool IsSourceOnlyAssetPath(string path)
         {
+            if (string.IsNullOrEmpty(path)) return false;
+            switch (Path.GetExtension(path).ToLowerInvariant())
+            {
+                // Source files whose only writable state IS the disk file;
+                // a disk checkpoint captures their full content as-is.
+                case ".shader":
+                case ".hlsl":
+                case ".cginc":
+                case ".compute":
+                case ".glslinc":
+                case ".usf":
+                case ".ush":
+                case ".template":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        internal static HashSet<string> ExactFileScope(JToken token, bool allowEmpty = false)        {
             if (token == null) return null;
             if (!(token is JArray rows) || (!allowEmpty && rows.Count == 0)) throw new InvalidOperationException("Exact checkpoint file scope is empty.");
             var paths = new HashSet<string>(StringComparer.Ordinal);
@@ -106,6 +126,18 @@ namespace VRCForge.Editor
                     .Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray();
                 var fileScope = ExactFileScope(@params?["checkpointFiles"]);
                 var blockingDirtyAssetPaths = dirtyAssetPaths.Where(path => fileScope == null || fileScope.Contains(path)).ToArray();
+                // Shader/compiled-source assets report IsDirty whenever the
+                // import pipeline re-marks them (lilToon on Unity 2022.3 does
+                // this after every import), yet their disk file is always the
+                // authoritative content a disk snapshot reads — there is no
+                // unsaved in-memory payload for them to lose. Treating them as
+                // blocking would permanently deadlock any full-project
+                // checkpoint on projects using those shaders. They stay in the
+                // diagnostics so the evidence keeps the full picture.
+                var benignDirtyAssetPaths = blockingDirtyAssetPaths
+                    .Where(IsSourceOnlyAssetPath).ToArray();
+                blockingDirtyAssetPaths = blockingDirtyAssetPaths
+                    .Where(path => !IsSourceOnlyAssetPath(path)).ToArray();
                 // A dirty scene outside the declared file scope is neither captured
                 // by this checkpoint nor touched by the write; only in-scope (or
                 // unscoped) dirty scenes block, mirroring the dirty-asset rule.
@@ -124,7 +156,7 @@ namespace VRCForge.Editor
                     {
                         message = "A disk checkpoint cannot preserve unsaved editor state. Save intended changes explicitly before this asset write; open scenes must be under Assets.",
                         nextAction, blocking = true, recoverable = false, unsavedScenes, unsupportedScenes,
-                        dirtyScenePaths, blockingDirtyScenePaths, dirtyAssetPaths, blockingDirtyAssetPaths, ignoredTransientScenes,
+                        dirtyScenePaths, blockingDirtyScenePaths, dirtyAssetPaths, blockingDirtyAssetPaths, benignDirtyAssetPaths, ignoredTransientScenes,
                         snapshotIncludesUnsavedState = false, saved = false,
                         mutationStarted = false, committed = false, commitState = "not_started"
                     });

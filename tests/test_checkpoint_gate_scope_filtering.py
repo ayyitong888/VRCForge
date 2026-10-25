@@ -37,3 +37,19 @@ def test_success_path_still_reports_all_dirty_scenes_as_diagnostics():
         SOURCE,
         re.DOTALL,
     )
+
+
+def test_source_only_shader_dirty_is_benign_in_the_gate():
+    # The gate classifies shader/compiled-source assets as benign: their disk
+    # file is the only writable state a disk checkpoint captures, so a
+    # re-import dirty flag (lilToon on 2022.3) must not deadlock full-project
+    # checkpoints.
+    assert "IsSourceOnlyAssetPath" in SOURCE
+    for extension in ('".shader"', '".hlsl"', '".cginc"', '".compute"'):
+        assert extension in SOURCE
+    assert "benignDirtyAssetPaths" in SOURCE
+    # Blocking decision excludes the benign set.
+    assert re.search(
+        r"blockingDirtyAssetPaths\s*=\s*blockingDirtyAssetPaths\s*\.Where\(path => !IsSourceOnlyAssetPath",
+        SOURCE,
+    ), "benign exclusion missing"
