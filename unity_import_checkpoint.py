@@ -152,10 +152,14 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
                             selected_paths={str(selected["path"])},
                             max_uncompressed_bytes=None,
                         )
-                        if manifest != facts.get("manifest") or not any(
+                        # The seal is the selected entry itself: path, raw zip
+                        # name, CRC, sizes, content hash and ratio.  Whole-list
+                        # manifest equality broke across producer versions and
+                        # companion files the import never touches.
+                        if not any(
                             selected == {**entry, "targetName": target_name} for entry in manifest
                         ):
-                            raise ValueError("The nested package ZIP member drifted from its sealed manifest.")
+                            raise ValueError("The nested package ZIP member drifted from its sealed identity.")
                         # The executor owns the future materialization. Inspection uses only an
                         # auto-closed spool in the already-owned temp directory, never that path.
                         spool = resources.enter_context(tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, dir=parent))
