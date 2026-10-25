@@ -24,7 +24,18 @@ def _plans(arguments, calls, preview):
         if (not isinstance(result, dict) or result.get("ok") is not True or result.get("preview") is not True
                 or not isinstance(plan, dict) or plan.get("action") != tool.removeprefix("vrc_")
                 or plan.get("avatarPath") != request.get("avatarPath")):
-            raise ValueError("The wardrobe primitive preview did not prove its exact Avatar effect.")
+            detail = ""
+            if isinstance(result, dict):
+                detail = str(result.get("error") or result.get("code") or "")[:300]
+                mismatch = (
+                    f"; plan.action={plan.get('action')!r} plan.avatarPath={plan.get('avatarPath')!r}"
+                    f" vs request.avatarPath={request.get('avatarPath')!r}"
+                ) if isinstance(plan, dict) else "; plan missing"
+                detail = (detail + mismatch)[:400]
+            raise ValueError(
+                "The wardrobe primitive preview did not prove its exact Avatar effect."
+                + (f" Preview failure: {detail}" if detail else "")
+            )
         paths = plan.get("checkpointAssetPaths")
         if not isinstance(paths, list) or not paths or len(paths) > 2048 or any(not isinstance(p, str) for p in paths):
             raise ValueError("The loaded Core has no complete wardrobe checkpoint paths; load the current Core.")

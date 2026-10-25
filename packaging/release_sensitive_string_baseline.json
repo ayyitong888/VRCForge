@@ -314,6 +314,21 @@
       "path": "tests/test_session_store_integrity.py",
       "rule": "credential_assignment",
       "sha256": "394c885e34da21b8b10e420117515ecbe614a2f86c37c49d5d846f754522bdf2"
+    },
+    {
+      "path": "src-tauri/src/sanitize.rs",
+      "rule": "bearer_token",
+      "sha256": "30eb52d42ce26278b13eff3214e1abfa02a8b9a99b2c398fa7d6b0e544aa3a6e"
+    },
+    {
+      "path": "src-tauri/src/sanitize.rs",
+      "rule": "bearer_token",
+      "sha256": "6b7f24a82ff3b8683c6b4b731f8b4c8d6db2596c83a3bec79873f7cdc84f9ff9"
+    },
+    {
+      "path": "src-tauri/src/sanitize.rs",
+      "rule": "bearer_token",
+      "sha256": "88f2eaa7616bdb257f59bcce647e8baba0c2e20bf847befb243cfbe9adf16d50"
     }
   ]
 }
