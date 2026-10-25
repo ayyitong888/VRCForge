@@ -21421,7 +21421,9 @@ def prepare_authoritative_unity_checkpoint_sync(
     if checkpoint_target in {"vrcforge_setup_outfit", "vrcforge_instantiate_prefab",
                              "vrcforge_unpack_prefab", "vrcforge_create_gameobject",
                              "vrcforge_set_gameobject_active", "vrcforge_add_modular_avatar_component",
-                             "vrcforge_create_component_feature"}:
+                             "vrcforge_create_component_feature", "vrcforge_rename_gameobject",
+                             "vrcforge_reparent_gameobject", "vrcforge_delete_gameobject",
+                             "vrcforge_duplicate_scene_object"}:
         from unity_scene_workflow_checkpoint import prepare_scene_workflow_checkpoint
 
         return prepare_scene_workflow_checkpoint(

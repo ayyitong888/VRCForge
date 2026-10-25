@@ -14,6 +14,10 @@ _CORE_TOOLS = {
     "vrcforge_set_gameobject_active": "vrc_set_gameobject_active",
     "vrcforge_add_modular_avatar_component": "vrc_add_modular_avatar_component",
     "vrcforge_create_component_feature": "vrc_create_component_feature",
+    "vrcforge_rename_gameobject": "vrc_rename_gameobject",
+    "vrcforge_reparent_gameobject": "vrc_reparent_gameobject",
+    "vrcforge_delete_gameobject": "vrc_delete_gameobject",
+    "vrcforge_duplicate_scene_object": "vrc_duplicate_scene_object",
 }
 
 
@@ -179,7 +183,11 @@ def prepare_scene_workflow_checkpoint(
     )
     if not valid_identity:
         return reject("The approved write does not identify one complete saved-scene session.")
-    if scope in {"avatar", "object", "component"} and (
+    # An object being reparented into an Avatar is, by definition, outside
+    # the Avatar before the write: Core discovery then reports avatar=null.
+    # Require the Avatar section only when this target actually carries one;
+    # scene and object identity stay strictly validated either way.
+    if avatar and scope in {"avatar", "object", "component"} and (
         not avatar.get("globalObjectId") or not _hierarchy_path(avatar.get("exactHierarchyPath"))
     ):
         return reject("The approved write has no exact Avatar identity.")
@@ -217,7 +225,7 @@ def prepare_scene_workflow_checkpoint(
                 or request.get("expectedHostObjectId") != obj.get("globalObjectId")
                 or expected_project != project_root.resolve()):
             return reject("The frozen component feature call does not match its exact scene, project, and host identities.")
-    selector_error = _selector_error(checkpoint_target, request, scope, avatar, obj)
+    selector_error = _selector_error(checkpoint_target, request, scope, avatar, obj, discover=discover)
     if selector_error:
         return reject(selector_error)
 
@@ -268,6 +276,8 @@ def _selector_error(
     scope: str,
     avatar: dict[str, Any],
     obj: dict[str, Any],
+    *,
+    discover=None,
 ) -> str:
     avatar_path = _hierarchy_path(avatar.get("exactHierarchyPath"))
     object_path = _hierarchy_path(obj.get("exactHierarchyPath"))
@@ -307,6 +317,28 @@ def _selector_error(
         ):
             return "Setup Outfit must save one strict descendant of the bound Avatar."
         return ""
+    if checkpoint_target == "vrcforge_reparent_gameobject":
+        # Reparenting INTO an Avatar moves an object that lives outside it;
+        # Core discovery for such a source object reports avatar=null, so the
+        # destination is proven against a live Avatar discovery instead of the
+        # (absent) target section. In-subtree destinations still validate
+        # against the bound Avatar identity.
+        new_parent = _hierarchy_path(request.get("newParentPath"))
+        if not new_parent:
+            return "Reparent requires an exact non-empty newParentPath."
+        if avatar_path and (new_parent == avatar_path or new_parent.startswith(avatar_path + "/")):
+            return ""
+        if scope in {"object", "component"} and new_parent == object_path:
+            return ""
+        if not avatar:
+            avatars = discover({"projectPath": str(project_root), "scope": "avatar"}).get("targets") or []
+            exact_roots = [
+                str((t.get("object") or t).get("exactHierarchyPath") or "")
+                for t in avatars if isinstance(t, dict)
+            ]
+            if len(exact_roots) == 1 and new_parent == exact_roots[0]:
+                return ""
+        return "The reparent destination is outside the exact freshly bound Avatar or object."
     if checkpoint_target == "vrcforge_unpack_prefab":
         selected_path = _hierarchy_path(request.get("gameObjectPath"))
         if not selected_path or selected_path != (object_path or avatar_path):
