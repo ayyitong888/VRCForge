@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from atomic_file_replace import replace_with_retry
 import secrets
 import tempfile
 import time
@@ -61,7 +62,7 @@ class AgentRuntimeFollowupQueue:
                 json.dump(self._entries, handle, ensure_ascii=False, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp, self._ports.path)
+            replace_with_retry(tmp, self._ports.path)
         except Exception:
             try:
                 os.close(fd)

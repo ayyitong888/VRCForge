@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from atomic_file_replace import replace_with_retry
 import re
 import secrets
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -143,7 +144,7 @@ class AutomaticMemoryPolicy:
                     json.dump(value, handle, ensure_ascii=False, sort_keys=True)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temporary, path)
+                replace_with_retry(temporary, path)
             except OSError as exc:
                 raise AutomaticMemoryPolicyError("Automatic Memory watermark could not be saved.") from exc
             finally:

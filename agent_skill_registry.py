@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from atomic_file_replace import replace_with_retry
 import secrets
 import shutil
 import tempfile
@@ -556,7 +557,7 @@ class AgentSkillRegistryService:
                     f"Refusing to overwrite an unsafe user skill file: {skill_id}",
                     status_code=400,
                 )
-            os.replace(temporary_path, skill_file)
+            replace_with_retry(temporary_path, skill_file)
             temporary_path = None
             fsync_directory_best_effort(skill_dir)
         finally:
@@ -635,7 +636,7 @@ class AgentSkillRegistryService:
                     "Refusing to restore through an unsafe user skill file.",
                     status_code=400,
                 )
-            os.replace(temporary_path, skill_file)
+            replace_with_retry(temporary_path, skill_file)
             temporary_path = None
             fsync_directory_best_effort(skill_file.parent)
         finally:

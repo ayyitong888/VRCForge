@@ -31,6 +31,7 @@ import hmac
 import json
 import math
 import os
+from atomic_file_replace import replace_with_retry
 import re
 import secrets
 import shutil
@@ -9987,7 +9988,7 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     with temp_path.open("w", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
         flush_and_fsync(handle)
-    temp_path.replace(path)
+    replace_with_retry(temp_path, path)
     fsync_directory_best_effort(path.parent)
 
 

@@ -4,6 +4,7 @@ import hashlib
 import ipaddress
 import json
 import os
+from atomic_file_replace import replace_with_retry
 import re
 import socket
 import stat
@@ -714,7 +715,7 @@ def _atomic_replace_bytes(path: Path, content: bytes, *, expected_current: bytes
                 raise _ConcurrentConfigWrite("configuration changed during repair") from exc
             if current != expected_current:
                 raise _ConcurrentConfigWrite("configuration changed during repair")
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
         _fsync_directory(path.parent)
     finally:
         try:

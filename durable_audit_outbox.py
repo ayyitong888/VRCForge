@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from atomic_file_replace import replace_with_retry
 import secrets
 import threading
 from datetime import datetime, timezone
@@ -314,7 +315,7 @@ class DurableMetadataAudit:
             if [self.validate_prepared(row) for row in verified] != materialized:
                 raise OSError("Durable audit rewrite verification failed.")
             _assert_regular_or_absent(path, label="Durable audit outbox")
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
             verified = self._read(path, label="Durable audit outbox")
             if [self.validate_prepared(row) for row in verified] != materialized:
                 raise OSError("Durable audit outbox verification failed.")

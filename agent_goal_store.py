@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+from atomic_file_replace import replace_with_retry
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
@@ -314,7 +315,7 @@ class AgentGoalStore:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
         finally:
             try:
                 temporary.unlink(missing_ok=True)
@@ -1216,7 +1217,7 @@ class AgentGoalStore:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
         finally:
             try:
                 temporary.unlink(missing_ok=True)

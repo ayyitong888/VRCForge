@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from atomic_file_replace import replace_with_retry
 import tempfile
 import time
 from pathlib import Path
@@ -67,16 +68,12 @@ class NativeHistoryStore:
                 stream.flush()
                 os.fsync(stream.fileno())
             target = self._path(session_id, snapshot["binding"])
-            for attempt in range(3):
-                try:
-                    os.replace(temporary, target)
-                    break
-                except OSError as exc:
-                    # Retry only the same already-written private file, never
-                    # a Provider request or a tool whose side effects occurred.
-                    if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 2:
-                        raise NativeHistoryPersistenceError("Could not persist local native history.") from exc
-                    time.sleep(0.025 * (attempt + 1))
+            try:
+                # Retry only the same already-written private file, never
+                # a Provider request or a tool whose side effects occurred.
+                replace_with_retry(temporary, target)
+            except OSError as exc:
+                raise NativeHistoryPersistenceError("Could not persist local native history.") from exc
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

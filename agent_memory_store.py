@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+from atomic_file_replace import replace_with_retry
 import re
 import secrets
 import stat
@@ -764,7 +765,7 @@ class AgentMemoryStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             _assert_regular_or_absent(path, label="Accepted Memory store target")
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
             _assert_regular_or_absent(path, label="Accepted Memory store target")
         finally:
             try:

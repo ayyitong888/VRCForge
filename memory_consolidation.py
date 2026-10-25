@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+from atomic_file_replace import replace_with_retry
 import re
 import secrets
 import threading
@@ -1853,7 +1854,7 @@ class MemoryReviewStore:
             )
             os.close(verification_descriptor)
             _assert_regular_or_absent(path, label="Memory Review store target")
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
             verification_descriptor = _open_regular_file(
                 path,
                 os.O_RDONLY,

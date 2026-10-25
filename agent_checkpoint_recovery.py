@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+from atomic_file_replace import replace_with_retry
 import re
 import secrets
 import shutil
@@ -760,7 +761,7 @@ class AgentCheckpointRecoveryService:
         if changed:
             tmp = path.with_suffix(path.suffix + ".tmp")
             tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
-            os.replace(tmp, path)
+            replace_with_retry(tmp, path)
         return changed
 
     def _remove_old_relocate_parents(self, start: Path, root: Path) -> None:
@@ -2040,7 +2041,7 @@ class AgentCheckpointRecoveryService:
                 if source_existed:
                     archive.writestr(PROJECT_CHAT_CHECKPOINT_MEMBER, source_bytes)
             fsync_file_path(temp_path)
-            os.replace(temp_path, archive_path)
+            replace_with_retry(temp_path, archive_path)
             fsync_directory_best_effort(archive_path.parent)
         except Exception as exc:  # noqa: BLE001
             try:
@@ -2173,7 +2174,7 @@ class AgentCheckpointRecoveryService:
                     file_count += 1
                     total_bytes += source.stat().st_size
             fsync_file_path(temp_path)
-            os.replace(temp_path, archive_path)
+            replace_with_retry(temp_path, archive_path)
             fsync_directory_best_effort(archive_path.parent)
         except Exception as exc:  # noqa: BLE001
             try:
@@ -2276,7 +2277,7 @@ class AgentCheckpointRecoveryService:
                         }
                     )
             fsync_file_path(temp_path)
-            os.replace(temp_path, archive_path)
+            replace_with_retry(temp_path, archive_path)
             fsync_directory_best_effort(archive_path.parent)
         except Exception as exc:  # noqa: BLE001
             try:
@@ -2441,7 +2442,7 @@ class AgentCheckpointRecoveryService:
                     with temporary.open("xb") as handle:
                         handle.write(archived)
                         flush_and_fsync(handle)
-                    os.replace(temporary, source)
+                    replace_with_retry(temporary, source)
                     fsync_directory_best_effort(source.parent)
                 finally:
                     temporary.unlink(missing_ok=True)
