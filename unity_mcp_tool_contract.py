@@ -7,7 +7,7 @@ from typing import Any
 
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
-PRODUCT_VERSION = "1.9.2"
+PRODUCT_VERSION = "1.10.0"
 TOOL_CONTRACT_VERSION = "177"
 PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "87"
 

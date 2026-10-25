@@ -225,7 +225,7 @@ def prepare_scene_workflow_checkpoint(
                 or request.get("expectedHostObjectId") != obj.get("globalObjectId")
                 or expected_project != project_root.resolve()):
             return reject("The frozen component feature call does not match its exact scene, project, and host identities.")
-    selector_error = _selector_error(checkpoint_target, request, scope, avatar, obj, discover=discover)
+    selector_error = _selector_error(checkpoint_target, request, scope, avatar, obj, discover=discover, project_root=project_root)
     if selector_error:
         return reject(selector_error)
 
@@ -278,6 +278,7 @@ def _selector_error(
     obj: dict[str, Any],
     *,
     discover=None,
+    project_root: Path | None = None,
 ) -> str:
     avatar_path = _hierarchy_path(avatar.get("exactHierarchyPath"))
     object_path = _hierarchy_path(obj.get("exactHierarchyPath"))
@@ -317,6 +318,19 @@ def _selector_error(
         ):
             return "Setup Outfit must save one strict descendant of the bound Avatar."
         return ""
+    if checkpoint_target == "vrcforge_delete_gameobject":
+        # Deletion proves the object being removed, not a parent.
+        selected = _hierarchy_path(request.get("gameObjectPath"))
+        if scope in {"object", "component"} and selected and selected == object_path:
+            return ""
+        if scope == "avatar" and selected and avatar_path and selected.startswith(avatar_path + "/"):
+            return ""
+        return "Delete must select the exact freshly bound object or an Avatar descendant."
+    if checkpoint_target == "vrcforge_rename_gameobject":
+        selected = _hierarchy_path(request.get("gameObjectPath"))
+        if scope in {"object", "component"} and selected and selected == object_path and _hierarchy_path(request.get("newName")):
+            return ""
+        return "Rename must select the exact freshly bound object with a non-empty new name."
     if checkpoint_target == "vrcforge_reparent_gameobject":
         # Reparenting INTO an Avatar moves an object that lives outside it;
         # Core discovery for such a source object reports avatar=null, so the
@@ -333,7 +347,7 @@ def _selector_error(
         if not avatar:
             avatars = discover({"projectPath": str(project_root), "scope": "avatar"}).get("targets") or []
             exact_roots = [
-                str((t.get("object") or t).get("exactHierarchyPath") or "")
+                str(((t.get("avatar") or t) if isinstance(t.get("avatar"), dict) else t).get("exactHierarchyPath") or "")
                 for t in avatars if isinstance(t, dict)
             ]
             if len(exact_roots) == 1 and new_parent == exact_roots[0]:
