@@ -376,6 +376,10 @@ class AgentGatewayConfig:
     allow_roslyn_advanced: bool = False
     approval_timeout_seconds: int = 600
     execution_mode: str = "approval"
+    # Visibility-only exposure entry for external stdio MCP sessions; writes
+    # remain gated by allow_write_requests plus the per-operation approval chain.
+    # Literal because the exposure constants are defined after this dataclass.
+    external_mcp_exposure_layer: str = "planning"
     roslyn_risk_acknowledged: bool = False
     developer_options_enabled: bool = False
     developer_options_ever_enabled: bool = False
@@ -2234,6 +2238,7 @@ class AgentGateway:
                 "allow_roslyn_advanced": False,
                 "approval_timeout_seconds": 600,
                 "execution_mode": "approval",
+                "external_mcp_exposure_layer": "planning",
                 "roslyn_risk_acknowledged": False,
                 "developer_options_enabled": False,
                 "developer_options_ever_enabled": False,
@@ -2263,6 +2268,12 @@ class AgentGateway:
                 allow_roslyn_advanced=bool(raw.get("allow_roslyn_advanced", False)),
                 approval_timeout_seconds=int(raw.get("approval_timeout_seconds", 600)),
                 execution_mode=normalize_execution_mode(raw.get("execution_mode")),
+                external_mcp_exposure_layer=(
+                    raw.get("external_mcp_exposure_layer")
+                    if str(raw.get("external_mcp_exposure_layer") or "").strip().lower()
+                    in {EXPOSURE_LAYER_PLANNING, EXPOSURE_LAYER_EXECUTION}
+                    else EXPOSURE_LAYER_PLANNING
+                ),
                 roslyn_risk_acknowledged=bool(raw.get("roslyn_risk_acknowledged", False)),
                 developer_options_enabled=bool(raw.get("developer_options_enabled", False)),
                 developer_options_ever_enabled=bool(raw.get("developer_options_ever_enabled", False)),
@@ -2308,6 +2319,9 @@ class AgentGateway:
                 "allow_roslyn_advanced": bool(config.allow_roslyn_advanced),
                 "approval_timeout_seconds": int(config.approval_timeout_seconds),
                 "execution_mode": normalize_execution_mode(config.execution_mode),
+                "external_mcp_exposure_layer": normalize_exposure_layer(
+                    config.external_mcp_exposure_layer
+                ),
                 "roslyn_risk_acknowledged": bool(config.roslyn_risk_acknowledged),
                 "developer_options_enabled": bool(config.developer_options_enabled),
                 "developer_options_ever_enabled": bool(config.developer_options_ever_enabled),
@@ -2633,7 +2647,24 @@ class AgentGateway:
         )["status"] == "failed" or ensure_dict(result.get("outcome")).get("status") == "failed":
             target = None
         public_reference = target if is_execution_target_reference(target) else None
-        target_digest = str(result.get("executionTargetDigest") or "")
+        # Tool handlers report the digest inside their nested result; the outer
+        # envelope never carries it. Without the nested fallback every ref-form
+        # anchor publishes an empty digest and can never re-validate.
+        target_digest = str(
+            result.get("executionTargetDigest")
+            or nested.get("executionTargetDigest")
+            or ""
+        )
+        if public_reference is not None and not target_digest:
+            try:
+                target_digest = execution_target_digest(
+                    self._execution_target_bindings.resolve_in_current_session(
+                        public_reference,
+                        session_context=self.execution_target_session_context(),
+                    )
+                )
+            except (ExecutionTargetError, AgentGatewayError):
+                target_digest = ""
         if public_reference is not None:
             identity = {
                 "executionTarget": dict(public_reference),

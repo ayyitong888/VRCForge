@@ -246,7 +246,13 @@ class McpPromptRegistry:
         if identity_lock_uri and self._resource_validate:
             identity_resource = self._resource_validate(identity_lock_uri, "session_identity_lock", None)
             identity = identity_resource.get("identity") if isinstance(identity_resource, Mapping) else None
-            if not isinstance(identity, Mapping) or not any(identity.get(key) for key in ("projectId", "namespace", "projectRoot", "coreInstanceId")):
+            # The Gateway publishes either flat identity anchors or an
+            # executionTarget reference; both are bound states.
+            bound = isinstance(identity, Mapping) and bool(
+                identity.get("executionTarget")
+                or any(identity.get(key) for key in ("projectId", "namespace", "projectRoot", "coreInstanceId"))
+            )
+            if not bound:
                 raise McpPromptError("Identity Lock Resource is unbound")
         elif identity_lock_uri:
             missing.append("identityLockUri")

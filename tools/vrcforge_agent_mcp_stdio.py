@@ -191,6 +191,41 @@ def external_rejection(
     return payload
 
 
+def gateway_rejection(exc: BaseException, *, operation: str) -> dict[str, Any]:
+    """Project a gateway JSON-RPC rejection instead of an opaque internal error."""
+    # Prompts/resources method callbacks re-raise gateway rejections as
+    # ValueError(str(exc)) from exc; unwrap to keep the structured facts.
+    source = exc
+    seen = 0
+    while getattr(source, "__cause__", None) is not None and seen < 4:
+        source = source.__cause__
+        seen += 1
+    status_code = getattr(source, "status_code", None)
+    raw_result = getattr(source, "raw_result", None)
+    if raw_result is None:
+        raw_result = getattr(exc, "raw_result", None)
+    return external_rejection(
+        status="gateway_rejection",
+        error=str(exc),
+        error_code=str(
+            getattr(source, "cause_code", "")
+            or (f"http_{status_code}" if status_code else "")
+            or "external_gateway_error"
+        ),
+        failure_layer="external_stdio_gateway_bridge",
+        failure_phase="gateway_request",
+        operation_kind="tool",
+        tool=f"vrcforge_{operation}",
+        tool_routing_started=False,
+        mutation_started=False,
+        committed=False,
+        retryable=False,
+        raw_result=raw_result,
+        exception=exc,
+        details={"httpStatus": status_code} if status_code else None,
+    )
+
+
 def main() -> int:
     configure_utf8_stdio()
     args = parse_args()
@@ -205,7 +240,11 @@ def main() -> int:
         print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    run_stdio_server(bridge, protocol_profile=args.protocol_profile, exposure_layer=args.exposure_layer)
+    run_stdio_server(
+        bridge,
+        protocol_profile=args.protocol_profile,
+        exposure_layer=bridge.resolve_exposure_layer(args.exposure_layer),
+    )
     return 0
 
 
@@ -238,8 +277,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--exposure-layer",
         choices=("planning", "execution"),
-        default=os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER", "planning"),
-        help="Pin the tool catalogue exposed to this stdio client.",
+        default=os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER") or None,
+        help=(
+            "Pin the tool catalogue exposed to this stdio client. When omitted, "
+            "the Gateway config key external_mcp_exposure_layer decides; planning is the fallback."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -266,6 +308,23 @@ class VRCForgeBridge:
         self._mcp_session_owner = ""
         self._mcp_session_last_used = 0.0
 
+    def resolve_exposure_layer(self, cli_value: str | None) -> str:
+        """CLI pin > env > Gateway config key > planning.
+
+        The Gateway config is the durable, App-owned execution entry for
+        external stdio sessions; it only changes tool visibility, while every
+        write remains subject to Gateway approval and checkpoint policy.
+        """
+        explicit = str(cli_value or os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER", "") or "").strip().lower()
+        if explicit in {"planning", "execution"}:
+            return explicit
+        configured = str(
+            read_json_file(self.resolve_config_path()).get("external_mcp_exposure_layer") or ""
+        ).strip().lower()
+        if configured in {"planning", "execution"}:
+            return configured
+        return "planning"
+
     def preflight(self) -> dict[str, Any]:
         config_path = self.resolve_config_path()
         config = read_json_file(config_path)
@@ -284,6 +343,7 @@ class VRCForgeBridge:
             "manifestToolCount": 0,
             "advertisesRequestApply": False,
             "advertisesDirectApply": False,
+            "externalMcpExposureLayer": self.resolve_exposure_layer(None),
             "error": "",
         }
 
@@ -1384,7 +1444,14 @@ def run_stdio_server(
                 raise ValueError("cursor must be a string no longer than 512 characters")
             if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 100:
                 raise ValueError("pageSize must be an integer between 1 and 100")
-            return list_prompts({"cursor": cursor, "pageSize": page_size})
+            try:
+                return list_prompts({"cursor": cursor, "pageSize": page_size})
+            except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
+                return gateway_rejection(exc, operation="list_prompts")
+            except ValueError as exc:
+                # Gateway rejections converted for the prompts/* method surface
+                # must still reach tool hosts as structured payloads.
+                return gateway_rejection(exc, operation="list_prompts")
         if tool_name == "vrcforge_get_prompt":
             name = arguments.get("name")
             prompt_arguments = arguments.get("arguments", {})
@@ -1392,7 +1459,14 @@ def run_stdio_server(
                 raise ValueError("name must be a non-empty string no longer than 240 characters")
             if not isinstance(prompt_arguments, Mapping):
                 raise ValueError("arguments must be an object")
-            return get_prompt(name.strip(), prompt_arguments)
+            try:
+                return get_prompt(name.strip(), prompt_arguments)
+            except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
+                return gateway_rejection(exc, operation="get_prompt")
+            except ValueError as exc:
+                # Gateway rejections converted for the prompts/* method surface
+                # must still reach tool hosts as structured payloads.
+                return gateway_rejection(exc, operation="get_prompt")
         if tool_name == "vrcforge_list_tool_blocks":
             return block_inventory(arguments.get("block"))
         if tool_name == "vrcforge_invoke_loaded_read_tool":
@@ -1572,10 +1646,13 @@ def run_stdio_server(
         callback = getattr(bridge, "resources", None)
         if not callable(callback):
             return {"resources": [], "resourceGeneration": 0}
-        return callback(
-            cursor=str(params.get("cursor") or ""),
-            page_size=int(params.get("pageSize") or 100),
-        )
+        try:
+            return callback(
+                cursor=str(params.get("cursor") or ""),
+                page_size=int(params.get("pageSize") or 100),
+            )
+        except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
+            raise ValueError(str(exc)) from exc
 
     def list_resource_templates(_params: Mapping[str, Any]) -> dict[str, Any]:
         callback = getattr(bridge, "resource_templates", None)
@@ -1585,7 +1662,10 @@ def run_stdio_server(
         callback = getattr(bridge, "read_resource", None)
         if not callable(callback):
             raise ValueError("Resource registry is unavailable")
-        return callback(uri)
+        try:
+            return callback(uri)
+        except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
+            raise ValueError(str(exc)) from exc
 
     def resource_generation() -> int | None:
         if catalogue_backend_unavailable:
@@ -1597,16 +1677,22 @@ def run_stdio_server(
         callback = getattr(bridge, "prompts", None)
         if not callable(callback):
             return {"prompts": [], "promptGeneration": ""}
-        return callback(
-            cursor=str(params.get("cursor") or ""),
-            page_size=int(params.get("pageSize") or 100),
-        )
+        try:
+            return callback(
+                cursor=str(params.get("cursor") or ""),
+                page_size=int(params.get("pageSize") or 100),
+            )
+        except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
+            raise ValueError(str(exc)) from exc
 
     def get_prompt(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         callback = getattr(bridge, "get_prompt", None)
         if not callable(callback):
             raise ValueError("Prompt registry is unavailable")
-        result = callback(name, arguments)
+        try:
+            result = callback(name, arguments)
+        except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
+            raise ValueError(str(exc)) from exc
         if not isinstance(result, Mapping):
             raise ValueError("Prompt registry returned an invalid response")
         projected = dict(result)

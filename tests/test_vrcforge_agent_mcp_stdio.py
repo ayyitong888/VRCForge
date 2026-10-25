@@ -243,7 +243,9 @@ def test_stdio_bridge_protocol_profile_and_exposure_are_explicit() -> None:
 
     defaults = module.parse_args([])
     assert defaults.protocol_profile == "auto"
-    assert defaults.exposure_layer == "planning"
+    # An omitted exposure layer defers to VRCForgeBridge.resolve_exposure_layer
+    # (env pin, then the Gateway config key, then planning).
+    assert defaults.exposure_layer is None
     assert defaults.timeout == 30.0
     assert defaults.tool_timeout == 360.0
 

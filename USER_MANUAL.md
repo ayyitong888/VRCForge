@@ -115,8 +115,16 @@ user-data config; plaintext gateway tokens are not written into client config.
 The external-agent success path is:
 
 ```text
-MCP read/plan -> vrcforge_request_apply -> VRCForge approval -> checkpoint -> apply -> validation -> restore request -> VRCForge approval -> rollback proof
+MCP read/plan -> execution exposure (Gateway config external_mcp_exposure_layer=execution) -> supervised write Tool call -> VRCForge approval -> checkpoint -> apply -> validation -> restore request -> VRCForge approval -> rollback proof
 ```
+
+`vrcforge_request_apply` and the other wrapper Tools are internal to the
+VRCForge App agent loop and are never advertised to external clients. External
+stdio sessions start in the planning layer; moving them to execution is a
+Gateway config decision (`external_mcp_exposure_layer` in the Gateway config
+file, or an explicit `--exposure-layer` / `VRCFORGE_MCP_EXPOSURE_LAYER` pin at
+bridge launch). Exposure only changes Tool visibility: every write still
+requires VRCForge approval and a checkpoint.
 
 Developers and release testers can run:
 
@@ -125,8 +133,9 @@ npm run smoke:external-agent
 npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject --parent-path Avatar
 ```
 
-A passing live smoke must show that `vrcforge_request_apply` is available,
-direct apply tools are hidden, a checkpoint was created, rollback completed,
+A passing live smoke must show that `vrcforge_request_apply` stays hidden,
+direct apply wrappers are hidden, supervised write Tools are reachable through
+the execution catalogue, a checkpoint was created, rollback completed,
 the temporary object is gone, and Unity compile errors stayed at zero.
 The preflight smoke does not write Unity; the live smoke does.
 

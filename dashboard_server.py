@@ -29644,8 +29644,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--exposure-layer",
         choices=("planning", "execution"),
-        default=os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER", "planning"),
-        help="Tool exposure layer pinned for --agent-mcp-stdio.",
+        default=os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER") or None,
+        help=(
+            "With --agent-mcp-stdio, pin the tool catalogue for this stdio client. "
+            "When omitted, the Gateway config key external_mcp_exposure_layer decides; planning is the fallback."
+        ),
     )
     parser.add_argument("--cli", action="store_true", help="Run the VRCForge CLI against the local desktop runtime.")
     parser.add_argument("--cleanup-user-data", action="store_true", help="Installer helper: remove VRCForge user data and known project chat transcripts.")
@@ -29785,7 +29788,11 @@ def main() -> int:
         if args.preflight:
             print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))
             return 0
-        run_stdio_server(bridge, protocol_profile=args.protocol_profile, exposure_layer=args.exposure_layer)
+        run_stdio_server(
+            bridge,
+            protocol_profile=args.protocol_profile,
+            exposure_layer=bridge.resolve_exposure_layer(args.exposure_layer),
+        )
         return 0
     adoption_requested = backend_listener_adoption_requested()
     if not adoption_requested and backend_bind_target_occupied(args.host, args.port):
