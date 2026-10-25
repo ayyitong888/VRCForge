@@ -3545,10 +3545,13 @@ class AgentGateway:
     ) -> dict[str, Any] | None:
         """Require and verify the Stage 1 namespace for Unity-bound calls."""
 
+        # Preview writes resolve too: the Core's external_mcp_write lane
+        # validates the full envelope for every routed write, so skipping the
+        # reference resolution for preview=True left the raw ref shape to be
+        # rejected by the Core as execution_target_invalid.
         required = bool(
             write_handler
             and write_handler.requires_approved_execution_context
-            and arguments.get("preview") is not True
         )
         required = required or tool_name in {"vrcforge_get_property"}
         target = arguments.get("executionTarget")
