@@ -305,3 +305,26 @@ def test_exception_cause_chain_messages_are_bounded():
     for entry in chain:
         assert len(entry["message"]) <= 308
     assert any(entry["message"].endswith("…") for entry in chain)
+
+
+def test_budget_pause_cancels_waiting_turn_questions(tmp_path):
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "cfg.json", tmp_path / "audit")
+    gateway.questions.create({
+        "question": "选择哪套方案?",
+        "sourceTool": "vrcforge_ask_user",
+        "sessionId": "s-budget",
+        "_runtimeTaskSeed": {"sessionId": "s-budget", "turnId": "t-budget", "clientTurnId": "ct-budget"},
+    })
+    assert gateway.questions.list(session_id="s-budget")
+    gateway._cancel_turn_questions_at_pause("s-budget", "t-budget", "ct-budget")
+    statuses = {
+        str(item.get("status"))
+        for item in gateway.questions._project(include_answered=True).values()
+        if isinstance(item, dict)
+    }
+    assert statuses == {"cancelled"}, statuses
+    # Idempotent on repeat pauses and harmless without questions.
+    gateway._cancel_turn_questions_at_pause("s-budget", "t-budget", "ct-budget")
+    gateway._cancel_turn_questions_at_pause("other", "none", "none")

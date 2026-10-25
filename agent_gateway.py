@@ -6518,6 +6518,7 @@ class AgentGateway:
                     "planner": "runtime",
                     **budget_decision,
                 }
+                self._cancel_turn_questions_at_pause(session_id, turn_id, client_turn_id)
                 break
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
@@ -6649,6 +6650,7 @@ class AgentGateway:
                 last_plan = {"summary": "Runtime paused at a bounded budget.",
                              "reply": "Runtime paused before the next model request; the task is not complete.",
                              "planner": "runtime", **budget_decision}
+                self._cancel_turn_questions_at_pause(session_id, turn_id, client_turn_id)
                 break
             plan = self.runtime_planner.plan_agent_turn(
                 message,
@@ -8780,6 +8782,20 @@ class AgentGateway:
         return self._cancel_runtime_owned_work(
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id, reason=reason,
         )
+
+    def _cancel_turn_questions_at_pause(self, session_id: str, turn_id: str, client_turn_id: str) -> None:
+        """Budget pause is terminal for this turn; settle its waiting questions."""
+        try:
+            cancelled = self.questions.cancel_runtime_questions(
+                session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id
+            )
+        except Exception:
+            return
+        for seed in cancelled:
+            try:
+                NativeRuntimeTurn.cancel_question(self._runtime_session_state, seed)
+            except Exception:
+                continue
 
     def _cancel_runtime_owned_work(
         self, *, session_id: str, turn_id: str, client_turn_id: str, reason: str,
