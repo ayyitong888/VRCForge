@@ -10385,70 +10385,15 @@ def _unity_core_tree_identity(root: Path) -> dict[str, Any]:
 
 
 def _verified_unity_core_source_identity(source_assets: Path) -> dict[str, Any]:
-    """Verify packaged payload integrity and fingerprint the Core source tree."""
+    """Read compiled Core compatibility identity and fingerprint its install tree."""
 
-    payload_manifest_path = runtime_paths.ROOT_DIR / "payload-integrity.json"
-    desktop_path = runtime_paths.ROOT_DIR / "VRCForge.exe"
-    backend_path = runtime_paths.ROOT_DIR / "backend" / "vrcforge_backend.exe"
     required = (
-        (payload_manifest_path, "packaged payload integrity manifest"),
-        (desktop_path, "packaged VRCForge desktop"),
-        (backend_path, "packaged VRCForge backend"),
         (source_assets / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs", "Unity Core server source"),
         (source_assets / "Editor" / "MCP" / "VRCForgeMcpToolContract.cs", "Unity Core tool contract"),
     )
     for path, label in required:
         if not path.is_file():
             raise RuntimeError(f"The {label} is missing: {path}")
-    try:
-        payload = json.loads(payload_manifest_path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"The packaged payload integrity metadata is invalid: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("schema") != "vrcforge.payload-integrity.v1":
-        raise RuntimeError("The packaged payload integrity manifest schema is invalid.")
-    files = payload.get("files") if isinstance(payload.get("files"), dict) else {}
-    expected = {
-        "desktop": (
-            desktop_path,
-            "VRCForge.exe",
-        ),
-        "backend": (
-            backend_path,
-            "backend/vrcforge_backend.exe",
-        ),
-    }
-    identities: dict[str, Any] = {}
-    for key, (path, relative_path) in expected.items():
-        entry = files.get(key) if isinstance(files.get(key), dict) else {}
-        manifest_sha256 = str(entry.get("sha256") or "")
-        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
-        if (
-            not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
-            or entry.get("relativePath") != relative_path
-            or actual_sha256 != manifest_sha256
-        ):
-            raise UnityMcpError(
-                f"The packaged {key} integrity does not match this exact VRCForge payload.",
-                cause_code="packaged_payload_integrity_mismatch",
-                failure_layer="packaged_payload_integrity",
-                failure_phase="source_identity_verification",
-                operation_kind="read",
-                tool_routing_started=False,
-                mutation_started=False,
-                committed=False,
-                commit_state="not_started",
-                details={
-                    "payloadKey": key,
-                    "expectedRelativePath": relative_path,
-                    "manifestRelativePath": entry.get("relativePath"),
-                    "manifestSha256": manifest_sha256,
-                    "actualSha256": actual_sha256,
-                },
-            )
-        identities[key] = {
-            "relativePath": relative_path,
-            "sha256": actual_sha256,
-        }
     contract_text = (source_assets / "Editor" / "MCP" / "VRCForgeMcpToolContract.cs").read_text(
         encoding="utf-8-sig"
     )
@@ -10476,8 +10421,6 @@ def _verified_unity_core_source_identity(source_assets: Path) -> dict[str, Any]:
     return {
         "schema": "vrcforge.unity_core_source.v1",
         "sourceAssets": str(source_assets),
-        "payloadManifestPath": str(payload_manifest_path),
-        "files": identities,
         "coreTree": _unity_core_tree_identity(source_assets),
         "compiledIdentity": compiled_identity,
     }

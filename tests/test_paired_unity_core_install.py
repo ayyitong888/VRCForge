@@ -132,7 +132,7 @@ def test_verified_unity_core_install_preserves_generated_and_unmanaged_project_a
     assert "Editor/UserExtension.txt" in preservation["paths"]
 
 
-def test_invalid_payload_integrity_is_rejected_before_project_write(
+def test_backend_payload_hash_drift_does_not_block_core_install(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -146,16 +146,13 @@ def test_invalid_payload_integrity_is_rejected_before_project_write(
         lambda value: str(Path(value).resolve()),
     )
 
-    with pytest.raises(RuntimeError, match="integrity does not match"):
-        dashboard_server.install_verified_unity_core_sync(
-            {"projectPath": str(project)}
-        )
-
-    assert (project / "Assets" / "VRCForge" / "old-core.txt").read_text(encoding="utf-8") == "old"
-    assert not (project / ".vrcforge").exists()
+    result = dashboard_server.install_verified_unity_core_sync({"projectPath": str(project)})
+    assert result["ok"] is True
+    assert result["sourceIdentity"]["compiledIdentity"]["coreVersion"] == "1.7.10"
+    assert (Path(result["backupPath"]) / "old-core.txt").read_text(encoding="utf-8") == "old"
 
 
-def test_packaged_generic_project_install_requires_verified_core_source(
+def test_packaged_generic_project_install_ignores_backend_payload_hash_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -164,11 +161,37 @@ def test_packaged_generic_project_install_requires_verified_core_source(
     project = _write_project(tmp_path / "project")
     monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
 
-    with pytest.raises(RuntimeError, match="integrity does not match"):
-        dashboard_server.install_vrcforge_into_unity_project(
-            project,
-            require_verified_source=True,
-        )
+    result = dashboard_server.install_vrcforge_into_unity_project(project, require_verified_source=True)
+    assert result["backups"]["vrcforge"]
+    assert (project / "Assets" / "VRCForge" / "new-core.txt").read_text(encoding="utf-8") == "new"
+
+
+@pytest.mark.parametrize("metadata", [None, "invalid json"])
+def test_core_identity_does_not_require_executable_integrity_metadata(monkeypatch, tmp_path, metadata):
+    source = _write_verified_payload(tmp_path)
+    manifest = tmp_path / "payload-integrity.json"
+    if metadata is None:
+        manifest.unlink()
+    else:
+        manifest.write_text(metadata, encoding="utf-8")
+    (tmp_path / "VRCForge.exe").unlink()
+    (tmp_path / "backend/vrcforge_backend.exe").unlink()
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", tmp_path)
+    identity = dashboard_server._verified_unity_core_source_identity(source)
+    assert identity["compiledIdentity"]["coreVersion"] == "1.7.10"
+    assert len(identity["coreTree"]["sha256"]) == 64
+
+
+def test_missing_core_version_is_rejected_before_project_write(monkeypatch, tmp_path):
+    payload = tmp_path / "payload"
+    source = _write_verified_payload(payload, integrity_valid=False)
+    contract = source / "Editor/MCP/VRCForgeMcpToolContract.cs"
+    contract.write_text(contract.read_text().replace('internal const string ProductVersion = "1.7.10";', ""))
+    project = _write_project(tmp_path / "project")
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
+    monkeypatch.setattr(dashboard_server, "resolve_target_project", lambda value: str(Path(value).resolve()))
+    with pytest.raises(RuntimeError, match="missing ProductVersion"):
+        dashboard_server.install_verified_unity_core_sync({"projectPath": str(project)})
 
     assert (project / "Assets" / "VRCForge" / "old-core.txt").read_text(encoding="utf-8") == "old"
     assert not (project / ".vrcforge").exists()
