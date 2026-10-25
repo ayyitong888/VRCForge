@@ -575,6 +575,24 @@ def export_blendshapes(settings: Settings) -> dict[str, Any]:
             settings.export_tool_name,
             {"outputPath": "", "refreshAssets": False, "returnPayloadOnly": True},
         )
+        if isinstance(result.payload, dict) and result.payload.get("isError") is True:
+            structured = result.payload.get("structuredContent")
+            detail = structured.get("error") if isinstance(structured, dict) else None
+            message = str(detail or "Unity MCP Core rejected the read-only blendshape inventory.").strip()
+            raise UnityMcpError(
+                f"Unity MCP Core rejected the read-only blendshape inventory: {message}",
+                cause_code=str(structured.get("code") or "unity_core_tool_rejected")
+                if isinstance(structured, dict) else "unity_core_tool_rejected",
+                core_tool=settings.export_tool_name,
+                raw_result=result.payload,
+                failure_layer="unity_core_tool",
+                failure_phase="blendshape_export",
+                operation_kind="read",
+                tool_routing_started=True,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
+            )
         candidate: Any = result.payload
         for key in ("structuredContent", "data"):
             if isinstance(candidate, dict) and isinstance(candidate.get(key), dict):
@@ -3939,8 +3957,20 @@ def invoke_unity_mcp(
             claim_context,
         )
         try:
+            # Approved writes routinely outlast the interactive read window
+            # (large package imports, full-project checkpoints). Losing the
+            # receipt after the Core has already mutated the project is worse
+            # than waiting: the agent cannot tell success from failure and the
+            # durable recovery record would contradict reality. Long-window
+            # floor applies only inside an approved execution claim.
+            write_window_floor = 300 if claim_context.get("lane") in {
+                "external_mcp_write", "approved_write"
+            } else 1
             core_client_kwargs: dict[str, Any] = {
-                "timeout_seconds": max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
+                "timeout_seconds": max(
+                    write_window_floor,
+                    min(int(settings.unity_mcp_timeout_seconds or 30), 600),
+                ),
             }
             if allow_previous_contract:
                 core_client_kwargs["allow_previous_contract"] = True

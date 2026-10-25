@@ -21407,7 +21407,12 @@ def prepare_authoritative_unity_checkpoint_sync(
                 "vrc_ensure_expression_parameter": ensure_expression_parameter_sync,
                 "vrc_ensure_animator_state": ensure_animator_state_sync,
                 "vrc_ensure_expression_menu_control": ensure_expression_menu_control_sync,
-                "vrc_add_wardrobe_outfit": lambda query, preview: WARDROBE_OUTFIT_WORKFLOWS.preview_add_wardrobe_outfit(query),
+                # _plans requires preview=True on every callback result; the
+                # service payload carries ok but not the preview marker.
+                "vrc_add_wardrobe_outfit": lambda query, preview: {
+                    **WARDROBE_OUTFIT_WORKFLOWS.preview_add_wardrobe_outfit(query),
+                    "preview": True,
+                },
             }[tool](values, preview=True), prepare=prepare_unity_checkpoint_sync,
             operation=checkpoint_target.removeprefix("vrcforge_"),
         )
