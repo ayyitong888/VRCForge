@@ -394,6 +394,17 @@ def canonical_result_facts(
     return facts
 
 
+def _bounded_cause_message(value: str, limit: int = 300) -> str:
+    if len(value) <= limit:
+        return value
+    window = value[:limit]
+    for separator in (". ", "。"):
+        cut = window.rfind(separator)
+        if cut >= limit // 2:
+            return window[: cut + 1].rstrip() + " …"
+    return window.rstrip() + " …"
+
+
 def external_exception_details(exc: BaseException) -> dict[str, Any]:
     """Serialize a bounded exception chain without inventing a new reason."""
 
@@ -410,7 +421,9 @@ def external_exception_details(exc: BaseException) -> dict[str, Any]:
 
         entry: dict[str, Any] = {
             "type": type(current).__name__,
-            "message": str(current),
+            # Cause chains repeat the boundary message; keep each entry
+            # bounded so one verbose exception cannot dominate the object.
+            "message": _bounded_cause_message(str(current)),
         }
         for source_name, target_name in (
             ("cause_code", "errorCode"),
@@ -845,7 +858,15 @@ def build_external_tool_error(
         shared_facts.setdefault("nextAction", resolved_write_facts.get("nextAction"))
         shared_facts.setdefault("recovery", resolved_write_facts.get("recovery"))
     result.update(shared_facts)
+    # One structured cause is enough: rootCause duplicates failureCause
+    # whenever both come from the same boundary source.
+    if result.get("rootCause") == result.get("failureCause"):
+        result.pop("rootCause", None)
     if exception_details is not None:
+        # The exception chain repeats the boundary message; the type and code
+        # stay traceable without restating it a third time.
+        if str(exception_details.get("message") or "") == str(result.get("error")):
+            exception_details = {k: v for k, v in exception_details.items() if k != "message"}
         result["exception"] = exception_details
     if raw:
         result["rawResult"] = raw

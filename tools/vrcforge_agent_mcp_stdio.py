@@ -118,7 +118,14 @@ class ExternalHttpBridgeError(RuntimeError):
         except json.JSONDecodeError:
             parsed = {"body": body}
         raw_result = dict(parsed) if isinstance(parsed, Mapping) else {"body": body}
-        message = str(raw_result.get("error") or raw_result.get("message") or f"HTTP {status_code} from {path}")
+        # A JSON-RPC envelope carries the human-readable reason in
+        # error.message; the envelope itself stays in raw_result for
+        # provenance instead of becoming the message text.
+        error_value = raw_result.get("error")
+        if isinstance(error_value, Mapping):
+            message = str(error_value.get("message") or f"HTTP {status_code} from {path}")
+        else:
+            message = str(error_value or raw_result.get("message") or f"HTTP {status_code} from {path}")
         super().__init__(message)
         self.status_code = int(status_code)
         self.raw_result = raw_result
@@ -171,10 +178,14 @@ def external_rejection(
         exception=exception,
         details=details,
     )
+    error_field = error_object["error"]
+    if isinstance(error_field, Mapping):
+        # Hosts get one readable line; the structured envelope stays in errorDetails.
+        error_field = str(error_field.get("message") or status)
     payload = {
         "ok": False,
         "status": status,
-        "error": error_object["error"],
+        "error": error_field,
         "errorDetails": error_object,
         "failureLayer": error_object["failureLayer"],
         "errorCode": error_object["errorCode"],

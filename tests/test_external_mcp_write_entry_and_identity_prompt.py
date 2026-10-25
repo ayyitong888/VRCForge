@@ -277,3 +277,31 @@ def test_gateway_config_persists_external_mcp_exposure_layer(tmp_path):
         json.dumps({"enabled": True, "token": "t", "external_mcp_exposure_layer": "sudo"}), encoding="utf-8"
     )
     assert gateway.ensure_config().external_mcp_exposure_layer == "planning"
+
+
+def test_http_bridge_error_extracts_jsonrpc_message_not_envelope_repr():
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": "x", "error": {
+            "code": -32602,
+            "message": "Identity Resource anchors do not match its ExecutionTarget",
+            "data": {"schema": "vrcforge.external_tool_error.v1", "errorCode": "mcp_jsonrpc_-32602"},
+        }}
+    )
+    exc = ExternalHttpBridgeError(status_code=400, path="/mcp", body=body)
+    assert str(exc) == "Identity Resource anchors do not match its ExecutionTarget"
+    assert exc.raw_result["error"]["code"] == -32602
+
+
+def test_exception_cause_chain_messages_are_bounded():
+    from external_tool_result_contract import external_exception_details
+
+    inner = ValueError("x" * 2000)
+    outer = RuntimeError("boundary failure")
+    outer.__cause__ = inner
+    details = external_exception_details(outer)
+    messages = [entry["message"] for entry in details.get("causes", details.get("chain", []))] or None
+    chain = details.get("causeChain") or details.get("causes") or []
+    assert chain, details.keys()
+    for entry in chain:
+        assert len(entry["message"]) <= 308
+    assert any(entry["message"].endswith("…") for entry in chain)

@@ -294,7 +294,9 @@ def test_external_error_exposes_shared_cause_facts_without_dropping_raw_result()
     assert write_failure["success"] is False
     assert write_failure["status"] == "failed"
     assert write_failure["failureCause"] == error["failureCause"]
-    assert write_failure["rootCause"] == error["rootCause"]
+    # rootCause is only kept when it differs from failureCause; the compat
+    # view mirrors the canonical object instead of re-adding the duplicate.
+    assert write_failure.get("rootCause") == error.get("rootCause")
 
 
 def test_successful_gameobject_layer_is_not_misclassified_as_failure_layer() -> None:
