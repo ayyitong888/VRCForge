@@ -55,6 +55,10 @@ MAX_USAGE_RECORDS = 512
 MAX_USAGE_TOKENS = 1_000_000_000_000
 
 _LANES = frozenset({"background", "interactive"})
+# Process-local leases have no durable reconciliation; holders that die
+# between acquire and release are retired after this TTL instead of holding
+# capacity until process restart.
+LEASE_TTL_SECONDS = 1800.0
 _LOCAL_PROVIDER_IDS = frozenset({"local"})
 _DEFAULT_LOCAL_PROVIDER_BASE_URL = "http://127.0.0.1:11434"
 
@@ -320,6 +324,14 @@ class RuntimeLaneBudget:
 
         callback: Callable[[str], Any] | None = None
         with self._lock:
+            now = float(self._clock())
+            if self._leases:
+                for stale_token in [
+                    token
+                    for token, lease in self._leases.items()
+                    if now - lease.acquired_at >= LEASE_TTL_SECONDS
+                ]:
+                    self._leases.pop(stale_token, None)
             existing = self._leases.get(normalized_token)
             if existing is not None:
                 return "duplicate"
@@ -331,7 +343,7 @@ class RuntimeLaneBudget:
 
             self._leases[normalized_token] = _LaneLease(
                 lane=normalized_lane,
-                acquired_at=float(self._clock()),
+                acquired_at=now,
             )
             if normalized_lane == "interactive":
                 callback = self._interactive_acquire_callback
