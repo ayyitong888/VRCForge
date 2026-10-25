@@ -31,6 +31,37 @@ RESULT_PRESENTATION = {
     "modes": ["compact", "full"],
     "expansion": "Read operationResource with resources/read for the original receipt. Never replay a write to expand its result.",
 }
+# Compact tool presentation bounds per-property prose at a sentence boundary.
+# Tool-level descriptions stay complete; they carry the mandatory when-to-use
+# and negative-example contract.
+COMPACT_PROPERTY_DESCRIPTION_LIMIT = 160
+# These _meta blocks restate the tool description's guidance text; the full
+# descriptor keeps them available through resultMode=full.
+COMPACT_TOOL_GUIDANCE_META_KEYS = ("whenToUse", "whenNotToUse", "negativeExample")
+
+
+def _bound_description_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    window = value[:limit]
+    for separator in (". ", "。"):
+        cut = window.rfind(separator)
+        if cut >= limit // 2:
+            return window[: cut + 1].rstrip() + " …"
+    return window.rstrip() + " …"
+
+
+def _bound_schema_descriptions(value: Any, limit: int) -> Any:
+    if isinstance(value, Mapping):
+        bounded: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "description" and isinstance(item, str) and len(item) > limit:
+                item = _bound_description_text(item, limit)
+            bounded[str(key)] = _bound_schema_descriptions(item, limit)
+        return bounded
+    if isinstance(value, list):
+        return [_bound_schema_descriptions(item, limit) for item in value]
+    return value
 
 
 def result_mode(params: Mapping[str, Any]) -> str:
@@ -323,12 +354,23 @@ def project_tool(tool: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
     result = dict(tool)
     meta = dict(result.get("_meta") or {})
     if mode != "full":
-        # Standard schemas remain authoritative and unchanged. Exact duplicate metadata is removable.
+        # Standard schemas remain authoritative; only their prose is bounded.
+        # Exact duplicate metadata is removable.
         if meta.get("resultContract") == result.get("outputSchema"):
             meta.pop("resultContract", None)
         for key in tuple(result):
             if key not in {"name", "title", "description", "inputSchema", "outputSchema", "annotations", "_meta"} and key in meta and result[key] == meta[key]:
                 del result[key]
+        # Compact tool presentation bounds per-property prose and drops the
+        # guidance blocks that duplicate the tool description. Types, enums,
+        # required lists and value constraints stay authoritative; the full
+        # descriptor remains available with resultMode=full.
+        result["inputSchema"] = _bound_schema_descriptions(
+            result.get("inputSchema"), COMPACT_PROPERTY_DESCRIPTION_LIMIT
+        )
+        for key in COMPACT_TOOL_GUIDANCE_META_KEYS:
+            meta.pop(key, None)
+        result.pop("negativeExamples", None)
     meta["resultPresentation"] = RESULT_PRESENTATION
     result["_meta"] = meta
     return result

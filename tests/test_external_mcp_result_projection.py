@@ -337,3 +337,72 @@ def test_prompt_projection_requires_text_content_type():
         "structuredContent": structured,
     }
     assert project_prompt(value, mode="compact") == value
+
+
+def test_compact_tool_projection_bounds_property_prose_and_drops_duplicate_guidance():
+    from external_mcp_result_projection import (
+        COMPACT_PROPERTY_DESCRIPTION_LIMIT,
+        project_tool,
+    )
+
+    long_prose = (
+        "Import an approved UnityPackage or copy external prefab, material, PNG/JPG texture "
+        "files into the Unity project Assets folder. Texture-only and single-FBX folders are "
+        "supported without a prefab. A code-bearing package requires the established "
+        "full-project checkpoint because Unity import callbacks and compilation can write "
+        "beyond its pathname list."
+    )
+    tool = {
+        "name": "vrcforge_fixture_write",
+        "title": "Fixture Write",
+        "description": "When to use: fixture. When NOT to use: never. Negative example: none.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["packagePath", "dependencyMode"],
+            "properties": {
+                "packagePath": {"type": "string", "minLength": 1, "description": long_prose},
+                "dependencyMode": {
+                    "type": "string",
+                    "enum": ["auto", "selected_only"],
+                    "default": "auto",
+                    "description": "Dependency handling.",
+                },
+            },
+        },
+        "outputSchema": {"type": "object"},
+        "annotations": {"readOnlyHint": False},
+        "negativeExamples": ["fixture negative"],
+        "_meta": {
+            "permission": "Write",
+            "toolBlock": "project_environment/assets_packages",
+            "whenToUse": "duplicate guidance",
+            "whenNotToUse": "duplicate guidance",
+            "negativeExample": "duplicate guidance",
+        },
+    }
+
+    compact = project_tool(tool, mode="compact")
+    schema = compact["inputSchema"]
+    bounded = schema["properties"]["packagePath"]["description"]
+    assert len(bounded) <= COMPACT_PROPERTY_DESCRIPTION_LIMIT + 8
+    assert bounded.endswith("…")
+    assert "full-project checkpoint" not in bounded
+    # Structure and value constraints remain authoritative.
+    assert schema["required"] == ["packagePath", "dependencyMode"]
+    assert schema["properties"]["dependencyMode"]["enum"] == ["auto", "selected_only"]
+    assert schema["properties"]["packagePath"]["minLength"] == 1
+    # Guidance duplicates are dropped; routing and permission metadata stay.
+    meta = compact["_meta"]
+    assert meta["permission"] == "Write"
+    assert meta["toolBlock"] == "project_environment/assets_packages"
+    for key in ("whenToUse", "whenNotToUse", "negativeExample"):
+        assert key not in meta
+    assert "negativeExamples" not in compact
+    # The tool description keeps the mandatory when-to-use contract.
+    assert "Negative example" in compact["description"]
+
+    full = project_tool(tool, mode="full")
+    assert full["inputSchema"]["properties"]["packagePath"]["description"] == long_prose
+    assert full["_meta"]["whenToUse"] == "duplicate guidance"
+    assert full["negativeExamples"] == ["fixture negative"]
