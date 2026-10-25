@@ -406,3 +406,34 @@ def test_compact_tool_projection_bounds_property_prose_and_drops_duplicate_guida
     assert full["inputSchema"]["properties"]["packagePath"]["description"] == long_prose
     assert full["_meta"]["whenToUse"] == "duplicate guidance"
     assert full["negativeExamples"] == ["fixture negative"]
+
+
+def test_compact_result_view_omits_empty_shell_slots():
+    from external_mcp_result_projection import project_result
+
+    value = {
+        "ok": True,
+        "operationId": "op-1",
+        "status": "success",
+        "operationStatus": "success",
+        "commitState": "not_started",
+        "mutationStarted": False,
+        "retryable": False,
+        "nextAction": None,
+        "beforeResource": None,
+        "afterResource": None,
+        "diffResource": None,
+        "operationResource": "vrcforge://operation/op-1/receipt?revision=1&store=x",
+        "resources": {"schema": "vrcforge.resource_provenance.v1", "status": "unavailable", "uri": None, "handle": None},
+        "promptSkillProvenance": {"schema": "vrcforge.prompt_skill_provenance.v1", "status": "unavailable", "skillId": None},
+    }
+    compact = project_result(value, mode="compact", resource_readable=True)
+    for key in ("nextAction", "beforeResource", "afterResource", "diffResource", "resources", "promptSkillProvenance"):
+        assert key not in compact
+    assert compact["operationResource"].startswith("vrcforge://")
+    assert compact["mutationStarted"] is False
+    assert compact["commitState"] == "not_started"
+
+    full = project_result(value, mode="full", resource_readable=True)
+    assert full["nextAction"] is None
+    assert full["resources"]["status"] == "unavailable"

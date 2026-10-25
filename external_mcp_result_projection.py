@@ -264,6 +264,15 @@ def project_result(value: Mapping[str, Any], *, mode: str, resource_readable: bo
     # Existing callers without captured resources must continue receiving full data.
     if mode == "full" or not resource_readable or not isinstance(uri, str) or not uri.startswith("vrcforge://"):
         return result
+    # The operation shell declares every transport slot; the compact model
+    # view omits slots that carry no data (nulls and unavailable stubs).
+    # operationResource itself stays: it is the expansion pointer.
+    result = {
+        key: item
+        for key, item in result.items()
+        if item is not None
+        and not (isinstance(item, Mapping) and item.get("status") == "unavailable")
+    }
     omitted = []
     result = _without_transport_copies(result, "", omitted)
     for key in ("result", "preview"):
