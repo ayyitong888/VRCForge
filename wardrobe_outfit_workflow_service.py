@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 
 class WardrobeOutfitWorkflowError(RuntimeError):
@@ -1494,6 +1494,31 @@ def _normalize_reference_path(value: Any) -> str:
     return str(value or "").replace("\\", "/").strip("/")
 
 
+def _object_reference_intent_matches(observed: Any, expected: Mapping[str, Any]) -> bool:
+    """True when expected states only Unity-object identity the observed description carries.
+
+    The request may name the target by referencePath (scene hierarchy or asset
+    path) or by exact globalObjectId.  The readback describes the stored object
+    with assetPath/hierarchyPath/globalObjectId.  An identity channel must match
+    exactly; an observed object without identity never matches.
+    """
+    if not isinstance(observed, dict) or not isinstance(expected, Mapping):
+        return False
+    keys = {str(key) for key in expected}
+    if not keys or not keys <= {"referencePath", "globalObjectId"}:
+        return False
+    expected_oid = str(expected.get("globalObjectId") or "").strip()
+    if expected_oid:
+        return str(observed.get("globalObjectId") or "").strip() == expected_oid
+    expected_path = _normalize_reference_path(expected.get("referencePath"))
+    if not expected_path:
+        return False
+    return (
+        _normalize_reference_path(observed.get("hierarchyPath")) == expected_path
+        or _normalize_reference_path(observed.get("assetPath")) == expected_path
+    )
+
+
 def _direct_unity_object_matches(observed: Any, expected: Any) -> bool:
     if not isinstance(observed, dict) or not isinstance(expected, str):
         return False
@@ -1519,6 +1544,13 @@ def _requested_value_matches(
             return False
         if any(observed.get(marker) is True for marker in ("__incomplete", "__truncated", "__cycle")):
             return False
+        # A structured member holding a Unity object reference is written by
+        # referencePath/globalObjectId but read back as the object description
+        # (assetPath/hierarchyPath/globalObjectId).  Match through those exact
+        # identity channels instead of requiring the write vocabulary to equal
+        # the read vocabulary key-for-key.
+        if _object_reference_intent_matches(observed, expected):
+            return True
         return all(
             key in observed and _requested_value_matches(
                 observed[key], value, enum_values,
