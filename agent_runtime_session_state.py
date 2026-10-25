@@ -470,7 +470,23 @@ class AgentRuntimeSessionState:
             if existing is not None:
                 pending = self._native_pending(existing)
                 if pending:
-                    raise ValueError("native conversation has pending tool calls")
+                    # A completed turn settles its calls, so pending calls at
+                    # a new user turn are crash-window orphans. Settle them as
+                    # interrupted instead of wedging the session behind a
+                    # raise that no caller can recover from.
+                    orphan = copy.deepcopy(existing)
+                    for call_id in sorted(pending):
+                        orphan["messages"].append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": json.dumps(
+                                {"status": "not_executed", "reason": "runtime_interrupted", "observations": []},
+                                ensure_ascii=False,
+                            ),
+                        })
+                    self._native_size_ok(orphan)
+                    self._save_native(session_id, orphan)
+                    existing = orphan
                 if existing["binding"] == binding and existing["turnId"] == turn_id:
                     return copy.deepcopy(existing)
                 if existing["binding"] == binding:

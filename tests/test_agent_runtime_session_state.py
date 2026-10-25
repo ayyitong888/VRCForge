@@ -555,8 +555,10 @@ def test_native_conversation_is_private_and_tracks_pending_calls() -> None:
     assert state.native_conversation("native-1", binding="project|model|protocol|endpoint")["messages"][-1]["reasoning_content"] == "private reasoning"
     assert state.session_summary("native-1") == {"turnCount": 0, "restoredFromTranscript": False}
     assert state.get_session("native-1") is None
-    with pytest.raises(ValueError, match="pending"):
-        state.begin_native_turn("native-1", binding="other", turn_id="turn-2", message="blocked")
+    # Crash-window orphans are settled instead of blocking a new turn. The
+    # same-binding heal is covered by the orphan-settlement test; here the
+    # new binding simply starts without the old wedge raising.
+    state.begin_native_turn("native-1", binding="other", turn_id="turn-2", message="next")
 
 
 def test_native_conversation_settles_multiple_calls_and_rejects_orphans_and_duplicates() -> None:
@@ -817,9 +819,8 @@ def test_native_new_binding_hydrates_without_old_private_reasoning_and_pending_o
             {"id": "pending", "type": "function", "function": {"name": "f", "arguments": "raw"}},
         ]}
     )
-    with pytest.raises(ValueError, match="pending"):
-        state.begin_native_turn("s", binding="new", turn_id="new", message="new", initial_history=[])
-    state.settle_native_call("s", binding="old", call_id="pending", content="ok")
+    # The pending call is settled as an interrupted orphan inside the new
+    # binding's first turn instead of rejecting it.
     fresh = state.begin_native_turn(
         "s", binding="new", turn_id="new", message="new", initial_history=[
             {"role": "agent", "text": "visible old answer", "reasoning_content": "ignored"}
@@ -830,3 +831,23 @@ def test_native_new_binding_hydrates_without_old_private_reasoning_and_pending_o
         {"role": "assistant", "content": "visible old answer"},
         {"role": "user", "content": "new"},
     ]
+
+
+def test_new_user_turn_settles_crash_window_orphan_calls() -> None:
+    state, _ = make_state()
+    state.begin_native_turn("orphan", binding="b1", turn_id="turn-1", message="first")
+    receipt = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "call_a", "type": "function",
+                        "function": {"name": "vrcforge_scan", "arguments": "{}"}}],
+    }
+    state.append_native_assistant("orphan", binding="b1", message=receipt)
+    # Crash window: the receipt persisted but no tool result was ever settled.
+    restarted = state.begin_native_turn("orphan", binding="b1", turn_id="turn-2", message="next message")
+    tool_results = [m for m in restarted["messages"] if m.get("role") == "tool"]
+    assert any(
+        m.get("tool_call_id") == "call_a" and "runtime_interrupted" in str(m.get("content"))
+        for m in tool_results
+    )
+    assert not state._native_pending(state.native_conversation("orphan", binding="b1") or {})
