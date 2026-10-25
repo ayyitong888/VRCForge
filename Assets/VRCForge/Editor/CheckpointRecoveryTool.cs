@@ -106,16 +106,25 @@ namespace VRCForge.Editor
                     .Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray();
                 var fileScope = ExactFileScope(@params?["checkpointFiles"]);
                 var blockingDirtyAssetPaths = dirtyAssetPaths.Where(path => fileScope == null || fileScope.Contains(path)).ToArray();
+                // A dirty scene outside the declared file scope is neither captured
+                // by this checkpoint nor touched by the write; only in-scope (or
+                // unscoped) dirty scenes block, mirroring the dirty-asset rule.
+                var blockingDirtyScenePaths = dirtyScenePaths.Where(path => fileScope == null || fileScope.Contains(path)).ToArray();
                 var code = unsavedScenes.Length > 0 ? "unsaved_open_scene"
                     : unsupportedScenes.Length > 0 ? "scene_outside_project_assets"
-                    : dirtyScenePaths.Length > 0 || blockingDirtyAssetPaths.Length > 0 ? "dirty_editor_state" : "";
+                    : blockingDirtyScenePaths.Length > 0 || blockingDirtyAssetPaths.Length > 0 ? "dirty_editor_state" : "";
                 if (code.Length > 0)
                 {
+                    var nextAction = code == "unsaved_open_scene"
+                        ? "Save the untitled scene under Assets with the scene save tool, then retry this write."
+                        : code == "scene_outside_project_assets"
+                            ? "Close or save the setup scene outside Assets, then retry this write."
+                            : "Save the blocking dirty scenes or assets with the scene save tool, then retry this write.";
                     return VRCForgeToolResult.Failed(code, new
                     {
                         message = "A disk checkpoint cannot preserve unsaved editor state. Save intended changes explicitly before this asset write; open scenes must be under Assets.",
-                        blocking = true, recoverable = false, unsavedScenes, unsupportedScenes,
-                        dirtyScenePaths, dirtyAssetPaths, blockingDirtyAssetPaths, ignoredTransientScenes,
+                        nextAction, blocking = true, recoverable = false, unsavedScenes, unsupportedScenes,
+                        dirtyScenePaths, blockingDirtyScenePaths, dirtyAssetPaths, blockingDirtyAssetPaths, ignoredTransientScenes,
                         snapshotIncludesUnsavedState = false, saved = false,
                         mutationStarted = false, committed = false, commitState = "not_started"
                     });
