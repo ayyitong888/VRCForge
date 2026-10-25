@@ -295,6 +295,38 @@ def normalize_compaction_recovery(value: Any) -> dict[str, Any]:
     }
 
 
+def _tool_call_skeleton(tool_calls: Any, limit: int = 240) -> str:
+    """Render one bounded prose line for a tool-call batch.
+
+    The compaction summarizer only reads text; without this skeleton the
+    summary loses which tools were invoked and with which argument keys.
+    """
+    parts: list[str] = []
+    calls = tool_calls if isinstance(tool_calls, list) else []
+    for call in calls:
+        if not isinstance(call, Mapping):
+            continue
+        function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
+        name = str(function.get("name") or call.get("name") or "tool")
+        arguments = function.get("arguments")
+        summary = ""
+        if isinstance(arguments, Mapping):
+            summary = "{" + ", ".join(str(key) for key in list(arguments)[:8]) + "}"
+        elif isinstance(arguments, str) and arguments.strip():
+            try:
+                parsed = json.loads(arguments)
+            except ValueError:
+                summary = arguments[:60]
+            else:
+                summary = (
+                    "{" + ", ".join(str(key) for key in list(parsed)[:8]) + "}"
+                    if isinstance(parsed, Mapping)
+                    else arguments[:60]
+                )
+        parts.append(f"{name}({summary})" if summary else f"{name}()")
+    return "; ".join(parts)[:limit]
+
+
 def _normalize_entries(
     history: Sequence[Mapping[str, Any]],
     redactor: _Redactor,
@@ -307,10 +339,16 @@ def _normalize_entries(
         if raw_text is None:
             raw_text = item.get("content")
         text = str(raw_text or "").strip()
-        if not text:
-            continue
         raw_role = str(item.get("role") or "user").strip().lower()
         role = _ROLE_ALIASES.get(raw_role, "assistant")
+        skeleton = _tool_call_skeleton(item.get("tool_calls"))
+        if not text:
+            if not skeleton:
+                continue
+            entries.append({"role": role, "text": redactor.redact(f"[tool calls: {skeleton}]")})
+            continue
+        if skeleton:
+            text = f"{text}\n[tool calls: {skeleton}]"
         entries.append({"role": role, "text": redactor.redact(text)})
     return entries
 
