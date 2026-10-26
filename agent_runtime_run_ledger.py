@@ -571,6 +571,8 @@ class AgentRuntimeRunLedger:
         self, *, cache_key: tuple[Any, ...], session_id: str,
         client_turn_id: str, project_matches: Callable[[str], bool],
         event_approval_ids: Callable[[dict[str, Any]], set[str]], limit: int,
+        event_matches: Callable[[dict[str, Any]], bool] | None = None,
+        raw_line_matches: Callable[[bytes], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str], set[str]]:
         """Read one query window once, then consume only appended JSONL rows.
 
@@ -622,6 +624,8 @@ class AgentRuntimeRunLedger:
                     pending = lines.pop()
                     for line_bytes in lines:
                         ordinal += 1
+                        if raw_line_matches is not None and not raw_line_matches(line_bytes):
+                            continue
                         try:
                             event = json.loads(line_bytes.decode("utf-8", errors="replace"))
                         except json.JSONDecodeError:
@@ -632,7 +636,8 @@ class AgentRuntimeRunLedger:
                                 and event.get("sessionId") and event.get("turnId")
                                 and event.get("createdAt")):
                             start_times[(str(event["sessionId"]), str(event["turnId"]))] = str(event["createdAt"])
-                        direct = ((not session_id or event.get("sessionId") == session_id)
+                        direct = ((event_matches is None or event_matches(event))
+                                  and (not session_id or event.get("sessionId") == session_id)
                                   and (not client_turn_id or event.get("clientTurnId") == client_turn_id)
                                   and project_matches(str(event.get("projectRoot") or "")))
                         event_ids = event_approval_ids(event)
@@ -670,10 +675,24 @@ class AgentRuntimeRunLedger:
     def list_runtime_continuations(self, *, limit: int = 64) -> list[dict[str, Any]]:
         """Return bounded durable chat projections for reconnect replay."""
 
-        self.recover_interrupted_runs()
-        # Count durable continuations, not the intervening live progress rows.
-        start_times: dict[tuple[str, str], str] = {}
-        events = self.read_events(limit=max(limit * 8, 100), contains='"continuationEvent"', start_times=start_times)
+        # Recovery is an explicit startup lifecycle step. Ordinary dashboard
+        # polling must remain read-only and must not scan/rewrite the ledger.
+        # Reuse the byte-cursor reader so repeated continuation projections do
+        # not rescan the complete JSONL file.
+        with self._ports.shared_state_lock:
+            continuation_window = max(int(limit) * 8, 100)
+            events, start_times, _ = self._list_runs_events(
+                cache_key=("continuations", "", "", "", continuation_window),
+                session_id="",
+                client_turn_id="",
+                project_matches=lambda _value: True,
+                event_approval_ids=lambda event: set(),
+                limit=continuation_window,
+                event_matches=lambda event: isinstance(event.get("continuationEvent"), dict),
+                raw_line_matches=lambda line: (
+                    b'"continuationEvent"' in line or b'"runtime_turn_started"' in line
+                ),
+            )
         by_key: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for event in events:

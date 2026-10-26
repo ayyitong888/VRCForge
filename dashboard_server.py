@@ -216,7 +216,9 @@ from chat_transcript_archive import (
     DOCUMENT_VERSIONS as CHAT_DOCUMENT_VERSIONS,
     blob_path as chat_archive_blob_path,
     decode_chats as decode_archived_chats,
+    decode_chats_with_reuse as decode_archived_chats_with_reuse,
     encode_chats as encode_archived_chats,
+    is_archived_item as is_archived_transcript_item,
 )
 from chat_attachment_vault import (
     ARCHIVE_MAX_BYTES,
@@ -2109,6 +2111,10 @@ async def on_startup() -> None:
         )
     _RUNTIME_PLANNER_MODEL.start()
     AGENT_GATEWAY.start_runtime_continuations()
+    # Recovery belongs to startup; ordinary status reads must not replay the
+    # complete ledger or mutate interrupted-run state on every refresh.
+    if BACKEND_OWNER_LEASE.owned:
+        await asyncio.to_thread(AGENT_GATEWAY.runtime_runs.recover_interrupted_runs)
     AGENT_GATEWAY.shell.start()
     BACKGROUND_GOAL_COORDINATOR.start()
     PROJECT_SNAPSHOT_SELECTION.load_project_snapshot_cache()
@@ -4803,6 +4809,7 @@ def load_chat_transcript_file(
     *,
     scope: str,
     self_heal_app_owned: bool = False,
+    _transaction: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
     """Load one chat source without allowing it to poison healthy sources."""
 
@@ -4820,6 +4827,12 @@ def load_chat_transcript_file(
         "digest": scan.get("digest"),
         "status": scan.get("status"),
     }
+    transaction_key = str(target.path.resolve(strict=False)).casefold()
+    cached = _transaction.get(transaction_key) if _transaction is not None else None
+    if (cached is not None and scan.get("status") in {"ok", "missing"}
+            and bool(cached.get("source", {}).get("exists")) == bool(source.get("exists"))
+            and hmac.compare_digest(str(cached.get("source", {}).get("digest") or ""), str(source.get("digest") or ""))):
+        return cached["chats"], source, recovery_notice
     if scan.get("status") == "missing":
         return [], source, recovery_notice
     if scan.get("status") != "ok":
@@ -4835,7 +4848,11 @@ def load_chat_transcript_file(
         source["status"] = "unsupported"
         return [], source, chat_recovery_marker(marker, scope=scope)
     try:
-        complete_chats = decode_archived_chats(payload["chats"], target.path)
+        if _transaction is not None:
+            complete_chats, archive_reuse = decode_archived_chats_with_reuse(payload["chats"], target.path)
+        else:
+            complete_chats = decode_archived_chats(payload["chats"], target.path)
+            archive_reuse = None
         if any(not is_valid_chat_record(chat) for chat in complete_chats):
             raise ValueError("Invalid archived chat record")
     except (OSError, ValueError):
@@ -4849,6 +4866,12 @@ def load_chat_transcript_file(
         for sanitized in [sanitize_chat_transcript(item)]
         if not is_empty_chat_transcript(sanitized)
     ]
+    if _transaction is not None:
+        _transaction[transaction_key] = {
+            "source": dict(source),
+            "chats": chats,
+            "archiveReuse": archive_reuse,
+        }
     return chats, source, recovery_notice
 
 
@@ -5209,11 +5232,29 @@ def _assert_chat_source_writable(
     *,
     scope: str,
     revisions: dict[str, dict[str, Any]],
+    _transaction: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if target.store_id == "chat.project-index":
         source, recovery = inspect_chat_project_index()
     else:
-        _ignored, source, recovery = load_chat_transcript_file(target, scope=scope)
+        transaction_key = str(target.path.resolve(strict=False)).casefold()
+        cached = _transaction.get(transaction_key) if _transaction is not None else None
+        if cached is None:
+            _ignored, source, recovery = load_chat_transcript_file(target, scope=scope)
+        else:
+            scan = scan_session_store(target)
+            source = {
+                "storeId": scan.get("storeId"),
+                "scope": scope,
+                "exists": scan.get("exists"),
+                "digest": scan.get("digest"),
+                "status": scan.get("status"),
+            }
+            recovery = None if scan.get("status") in {"ok", "missing"} else chat_recovery_marker(scan, scope=scope)
+            cached_source = cached.get("source", {})
+            if (bool(cached_source.get("exists")) != bool(source.get("exists"))
+                    or not hmac.compare_digest(str(cached_source.get("digest") or ""), str(source.get("digest") or ""))):
+                raise HTTPException(status_code=409, detail={"code": "chat_store_snapshot_changed", "storeId": target.store_id})
     if recovery:
         raise HTTPException(
             status_code=409,
@@ -5248,6 +5289,8 @@ def _assert_chat_source_writable(
 def _assert_no_current_chat_source_id_conflicts(
     app_path: Path,
     project_sources: list[tuple[Path, str]],
+    *,
+    _transaction: dict[str, Any] | None = None,
 ) -> None:
     """Fail before any write when durable sources disagree on one chat id."""
 
@@ -5269,10 +5312,12 @@ def _assert_no_current_chat_source_id_conflicts(
             )
         seen[chat_id] = fingerprint
 
-    app_chats, _source, app_recovery = load_chat_transcript_file(
-        chat_store_target(app_path, scope="app"),
-        scope="app",
-    )
+    app_target = chat_store_target(app_path, scope="app")
+    app_cached = _transaction.get(str(app_target.path.resolve(strict=False)).casefold()) if _transaction is not None else None
+    if app_cached is not None:
+        app_chats, app_recovery = app_cached["chats"], None
+    else:
+        app_chats, _source, app_recovery = load_chat_transcript_file(app_target, scope="app")
     if app_recovery:
         raise HTTPException(status_code=409, detail={"code": "chat_store_recovery_required", "recovery": app_recovery})
     for chat in app_chats:
@@ -5284,7 +5329,11 @@ def _assert_no_current_chat_source_id_conflicts(
         unique_projects[key] = (path, project_path)
     for path, project_path in unique_projects.values():
         target = chat_store_target(path, scope="project", project_path=project_path)
-        project_chats, _source, project_recovery = load_chat_transcript_file(target, scope="project")
+        project_cached = _transaction.get(str(target.path.resolve(strict=False)).casefold()) if _transaction is not None else None
+        if project_cached is not None:
+            project_chats, project_recovery = project_cached["chats"], None
+        else:
+            project_chats, _source, project_recovery = load_chat_transcript_file(target, scope="project")
         if project_recovery:
             raise HTTPException(status_code=409, detail={"code": "chat_store_recovery_required", "recovery": project_recovery})
         source_project_path = str(resolve_chat_project_root(project_path) or project_path)
@@ -5294,6 +5343,8 @@ def _assert_no_current_chat_source_id_conflicts(
 
 def write_chat_transcripts_storage(
     request: ChatTranscriptsRequest,
+    *,
+    _transaction: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[tuple[MemoryScope, str, list[dict[str, Any]]]]]:
     # Delta requests are materialized from raw server records while holding
     # the same lock as the existing whole-snapshot CAS writer.  The recursive
@@ -5303,6 +5354,7 @@ def write_chat_transcripts_storage(
     if request.chat_patches is not None:
         from chat_storage_delta import ChatStoragePatchError, materialize_chat_patches
 
+        transaction = _transaction if _transaction is not None else {}
         with CHAT_TRANSCRIPTS_LOCK:
             app_path = chat_transcripts_path()
             app_target = chat_store_target(app_path, scope="app")
@@ -5310,6 +5362,7 @@ def write_chat_transcripts_storage(
                 app_target,
                 scope="app",
                 self_heal_app_owned=False,
+                _transaction=transaction,
             )
             if app_recovery:
                 raise HTTPException(
@@ -5346,6 +5399,7 @@ def write_chat_transcripts_storage(
                     project_target,
                     scope="project",
                     self_heal_app_owned=False,
+                    _transaction=transaction,
                 )
                 if project_recovery:
                     raise HTTPException(
@@ -5369,7 +5423,8 @@ def write_chat_transcripts_storage(
                     },
                 ) from exc
             return write_chat_transcripts_storage(
-                ChatTranscriptsRequest(chats=materialized, sourceRevisions=request.source_revisions)
+                ChatTranscriptsRequest(chats=materialized, sourceRevisions=request.source_revisions),
+                _transaction=transaction,
             )
 
     if len(request.chats) > CHAT_TRANSCRIPTS_MAX_CHATS:
@@ -5410,10 +5465,19 @@ def write_chat_transcripts_storage(
     stored_chats_for_digest: list[dict[str, Any]] = []
 
     def archive_document(records: list[dict[str, Any]], path: Path, **fields: Any) -> str:
-        packed, blobs = encode_archived_chats(records)
+        cache_key = str(path.resolve(strict=False)).casefold()
+        cached = _transaction.get(cache_key) if _transaction is not None else None
+        reuse = cached.get("archiveReuse") if cached is not None else None
+        packed, blobs = encode_archived_chats(records, reuse=reuse)
         for digest, blob in blobs.items():
             archive_writes[chat_archive_blob_path(path, digest)] = blob["data"]
-        return json.dumps({"version": 2 if blobs else 1, **fields, "chats": packed},
+        has_archived_items = any(
+            isinstance(item, dict) and is_archived_transcript_item(item)
+            for chat in packed if isinstance(chat, dict)
+            for items in [chat.get("items")]
+            for item in (items if isinstance(items, list) else [])
+        )
+        return json.dumps({"version": 2 if blobs or has_archived_items else 1, **fields, "chats": packed},
                           ensure_ascii=False, allow_nan=False)
 
     try:
@@ -5462,23 +5526,27 @@ def write_chat_transcripts_storage(
             chat_store_target(app_path, scope="app"),
             scope="app",
             revisions=revisions,
+            _transaction=_transaction,
         )
         _assert_chat_source_writable(
             chat_project_index_target(),
             scope="app-index",
             revisions=revisions,
+            _transaction=_transaction,
         )
         for group in project_groups.values():
             _assert_chat_source_writable(
                 chat_store_target(group["path"], scope="project", project_path=group["projectPath"]),
                 scope="project",
                 revisions=revisions,
+                _transaction=_transaction,
             )
         for project_path, project_file in stale_project_files:
             _assert_chat_source_writable(
                 chat_store_target(project_file, scope="project", project_path=project_path),
                 scope="project",
                 revisions=revisions,
+                _transaction=_transaction,
             )
 
         _assert_no_current_chat_source_id_conflicts(
@@ -5487,6 +5555,7 @@ def write_chat_transcripts_storage(
                 *[(group["path"], group["projectPath"]) for group in project_groups.values()],
                 *[(project_file, project_path) for project_path, project_file in stale_project_files],
             ],
+            _transaction=_transaction,
         )
 
         index_path = chat_project_index_path()
@@ -5556,23 +5625,21 @@ def write_chat_transcripts_storage(
                 pass
 
         source_revisions: list[dict[str, Any]] = []
-        _app_chats, app_source, _app_recovery = load_chat_transcript_file(
-            chat_store_target(app_path, scope="app"),
-            scope="app",
-        )
-        stored_chats_for_digest.extend(_app_chats)
+        app_target = chat_store_target(app_path, scope="app")
+        app_scan = scan_session_store(app_target)
+        app_source = {"storeId": app_scan.get("storeId"), "scope": "app", "exists": app_scan.get("exists"), "digest": app_scan.get("digest"), "status": app_scan.get("status")}
+        stored_chats_for_digest.extend(app_chats)
         source_revisions.append(app_source)
         index_source, _index_recovery = inspect_chat_project_index()
         source_revisions.append(index_source)
         for group in project_groups.values():
-            _group_chats, source, _recovery = load_chat_transcript_file(
-                chat_store_target(group["path"], scope="project", project_path=group["projectPath"]),
-                scope="project",
-            )
+            project_target = chat_store_target(group["path"], scope="project", project_path=group["projectPath"])
+            project_scan = scan_session_store(project_target)
+            source = {"storeId": project_scan.get("storeId"), "scope": "project", "exists": project_scan.get("exists"), "digest": project_scan.get("digest"), "status": project_scan.get("status")}
             source_project_path = str(resolve_chat_project_root(str(group["projectPath"])) or group["projectPath"])
             stored_chats_for_digest.extend(
                 {**chat, "projectPath": source_project_path}
-                for chat in _group_chats
+                for chat in group["chats"]
             )
             source_revisions.append(source)
 

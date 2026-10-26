@@ -9,6 +9,7 @@ import os
 import re
 import stat
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 ARCHIVE_SCHEMA = "vrcforge.chat_transcript_archive.v1"
@@ -22,6 +23,15 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 class ChatTranscriptArchiveError(ValueError):
     """Raised when an archive reference or blob fails integrity/scope checks."""
+
+
+class _ValidatedArchiveReuse:
+    """Transaction-local references captured while validating archived blobs."""
+
+    __slots__ = ("_refs",)
+
+    def __init__(self, refs: Mapping[str, Mapping[str, Any]]) -> None:
+        self._refs = MappingProxyType({digest: MappingProxyType(dict(ref)) for digest, ref in refs.items()})
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -122,13 +132,19 @@ def _reject_input_ref(item: Any) -> None:
         raise ChatTranscriptArchiveError("encode_chats accepts hydrated items, not archive references")
 
 
-def encode_chats(chats: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+def encode_chats(
+    chats: Sequence[Mapping[str, Any]],
+    *,
+    reuse: _ValidatedArchiveReuse | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     """Pack oversized agent items and return `(index_chats, pending_blobs)`.
 
     The function is pure: it only returns bytes and does not create directories or files.
     """
     packed_chats: list[dict[str, Any]] = []
     pending: dict[str, dict[str, Any]] = {}
+    if reuse is not None and not isinstance(reuse, _ValidatedArchiveReuse):
+        raise ChatTranscriptArchiveError("archive reuse must come from validated source records")
     for chat_value in chats:
         if not isinstance(chat_value, Mapping):
             raise ChatTranscriptArchiveError("chat must be an object")
@@ -160,7 +176,6 @@ def encode_chats(chats: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any
             if "createdAt" in item_copy and not isinstance(item_copy["createdAt"], str):
                 raise ChatTranscriptArchiveError("archived agent createdAt is invalid")
             digest = _archive_digest(chat_id, raw)
-            compressed = gzip.compress(raw, compresslevel=9, mtime=0)
             metadata = {
                 "schema": ARCHIVE_SCHEMA,
                 "digest": digest,
@@ -169,14 +184,23 @@ def encode_chats(chats: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any
                 "itemType": "agent",
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "uncompressedBytes": len(raw),
-                "compressedBytes": len(compressed),
                 "codec": "gzip",
             }
-            _validate_ref(metadata)
+            reusable = reuse._refs.get(digest) if reuse is not None else None
+            if reusable is not None:
+                validated_reusable = _validate_ref(reusable)
+                if any(validated_reusable[field] != metadata[field] for field in metadata):
+                    raise ChatTranscriptArchiveError("validated archive reuse metadata mismatch")
+                metadata = validated_reusable
+            else:
+                compressed = gzip.compress(raw, compresslevel=9, mtime=0)
+                metadata["compressedBytes"] = len(compressed)
+                _validate_ref(metadata)
             existing = pending.get(digest)
-            if existing is not None and existing["data"] != compressed:
-                raise ChatTranscriptArchiveError("archive digest collision")
-            pending[digest] = {**metadata, "data": compressed}
+            if reusable is None:
+                if existing is not None and existing["data"] != compressed:
+                    raise ChatTranscriptArchiveError("archive digest collision")
+                pending[digest] = {**metadata, "data": compressed}
             ref_item: dict[str, Any] = {"id": item_id, "type": "agent", ARCHIVE_REF_KEY: metadata}
             if "createdAt" in item_copy:
                 ref_item["createdAt"] = item_copy["createdAt"]
@@ -219,9 +243,12 @@ def _read_blob(store_path: str | Path, ref: Mapping[str, Any]) -> dict[str, Any]
     return item
 
 
-def decode_chats(chats: Sequence[Mapping[str, Any]], store_path: str | Path) -> list[dict[str, Any]]:
-    """Hydrate packed chats, validating every referenced blob and scope."""
+def decode_chats_with_reuse(
+    chats: Sequence[Mapping[str, Any]], store_path: str | Path,
+) -> tuple[list[dict[str, Any]], _ValidatedArchiveReuse]:
+    """Hydrate packed chats and capture verified refs for one storage transaction."""
     hydrated: list[dict[str, Any]] = []
+    reusable_refs: dict[str, dict[str, Any]] = {}
     for chat_value in chats:
         if not isinstance(chat_value, Mapping):
             raise ChatTranscriptArchiveError("chat must be an object")
@@ -244,6 +271,13 @@ def decode_chats(chats: Sequence[Mapping[str, Any]], store_path: str | Path) -> 
             sentinel = object()
             if item.get("createdAt", sentinel) != full.get("createdAt", sentinel):
                 raise ChatTranscriptArchiveError("archive index createdAt mismatch")
+            reusable_refs[str(ref["digest"])] = _validate_ref(ref)
             result_items.append(full)
         chat["items"] = result_items; hydrated.append(chat)
+    return hydrated, _ValidatedArchiveReuse(reusable_refs)
+
+
+def decode_chats(chats: Sequence[Mapping[str, Any]], store_path: str | Path) -> list[dict[str, Any]]:
+    """Hydrate packed chats, validating every referenced blob and scope."""
+    hydrated, _reuse = decode_chats_with_reuse(chats, store_path)
     return hydrated

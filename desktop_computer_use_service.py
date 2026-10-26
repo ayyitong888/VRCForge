@@ -107,6 +107,7 @@ class DesktopComputerUseService:
         self._desktop_bridges: dict[str, dict[str, Any]] = {}
         self._desktop_action_payloads: dict[str, dict[str, Any]] = {}
         self._desktop_action_results: dict[str, dict[str, Any]] = {}
+        self._desktop_action_projection_cache: dict[str, Any] | None = None
         self._runtime_computer_use_context = threading.local()
         self._desktop_action_condition = threading.Condition(self._lock)
         self._computer_use_turn_grants: dict[str, dict[str, str]] = {}
@@ -133,6 +134,7 @@ class DesktopComputerUseService:
             self._desktop_bridges.clear()
             self._desktop_action_payloads.clear()
             self._desktop_action_results.clear()
+            self._desktop_action_projection_cache = None
             self._computer_use_turn_grants.clear()
 
     @staticmethod
@@ -815,7 +817,61 @@ class DesktopComputerUseService:
 
     def _project_desktop_action_rows(self, *, limit_events: int = 1000) -> list[dict[str, Any]]:
         """Merge lifecycle events sharing an actionId into one row; legacy rows pass through."""
-        events = self._ports.read_jsonl(self.desktop_action_log_path, limit_events)
+        path = self.desktop_action_log_path
+        with self._lock:
+            if not path.exists():
+                self._desktop_action_projection_cache = None
+                events: list[dict[str, Any]] = []
+            else:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    return []
+                cached = self._desktop_action_projection_cache
+                identity = (stat.st_dev, stat.st_ino)
+                same_identity = bool(cached and cached["identity"] == identity)
+                unchanged = bool(
+                    same_identity
+                    and stat.st_size == cached["offset"]
+                    and stat.st_mtime_ns == cached["mtime_ns"]
+                )
+                incremental = bool(same_identity and stat.st_size > cached["offset"])
+                if unchanged:
+                    events = cached["events"]
+                else:
+                    offset = cached["offset"] if incremental else 0
+                    events = list(cached["events"]) if incremental else []
+                    try:
+                        with path.open("rb") as source:
+                            source.seek(offset)
+                            pending = b""
+                            remaining = stat.st_size - offset
+                            while remaining > 0:
+                                chunk = source.read(min(1024 * 1024, remaining))
+                                if not chunk:
+                                    break
+                                remaining -= len(chunk)
+                                pending += chunk
+                                lines = pending.split(b"\n")
+                                pending = lines.pop()
+                                for line_bytes in lines:
+                                    try:
+                                        payload = json.loads(line_bytes.decode("utf-8"))
+                                    except (UnicodeDecodeError, json.JSONDecodeError):
+                                        continue
+                                    if isinstance(payload, dict):
+                                        events.append(payload)
+                            new_offset = source.tell() - len(pending)
+                    except OSError:
+                        return []
+                    self._desktop_action_projection_cache = {
+                        "identity": identity,
+                        "mtime_ns": stat.st_mtime_ns,
+                        "offset": new_offset,
+                        "events": events,
+                    }
+        if limit_events > 0:
+            events = events[-max(1, min(int(limit_events), 5000)) :]
         rows: list[dict[str, Any]] = []
         by_action: dict[str, dict[str, Any]] = {}
         for event in events:

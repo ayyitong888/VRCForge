@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -61,6 +64,66 @@ def test_configure_paths_rebinds_owner_and_clears_transient_authority(tmp_path: 
     assert owner._desktop_action_payloads == {}  # noqa: SLF001
     assert owner._desktop_action_results == {}  # noqa: SLF001
     assert owner._computer_use_turn_grants == {}  # noqa: SLF001
+
+
+def test_desktop_action_projection_reuses_cursor_and_invalidates_on_reset(tmp_path: Path) -> None:
+    gateway = _enabled_gateway(tmp_path)
+    owner = gateway.desktop
+    first_event = {
+        "event": "desktop_action", "actionId": "action-one", "status": "requested",
+        "action": "computer_use", "createdAt": "2026-01-01T00:00:00Z",
+    }
+    owner._append_desktop_action_event(first_event)  # noqa: SLF001
+    first = owner._project_desktop_action_rows(limit_events=0)  # noqa: SLF001
+    assert first[0]["status"] == "requested"
+
+    # An unchanged claim poll must not call the generic full-file reader.
+    with patch.object(Path, "read_bytes", side_effect=AssertionError("desktop action ledger rescanned")):
+        assert owner._project_desktop_action_rows(limit_events=0) == first  # noqa: SLF001
+
+    owner._append_desktop_action_event({  # noqa: SLF001
+        "event": "desktop_action_claimed", "actionId": "action-one", "status": "claimed",
+        "action": "computer_use", "bridgeId": "bridge-one",
+        "createdAt": "2026-01-01T00:00:01Z",
+    })
+    appended = owner._project_desktop_action_rows(limit_events=0)  # noqa: SLF001
+    assert appended[0]["status"] == "claimed"
+
+    owner.desktop_action_log_path.write_bytes(json.dumps(first_event, separators=(",", ":")).encode("utf-8"))
+    assert owner._project_desktop_action_rows(limit_events=0) == []  # noqa: SLF001
+    with owner.desktop_action_log_path.open("ab") as handle:
+        handle.write(
+            b"\n" + json.dumps({
+                "event": "desktop_action", "actionId": "action-two", "status": "requested",
+                "action": "computer_use", "createdAt": "2026-01-01T00:00:02Z",
+            }, separators=(",", ":")).encode("utf-8") + b"\n"
+        )
+    completed_tail = owner._project_desktop_action_rows(limit_events=0)  # noqa: SLF001
+    assert [row["id"] for row in completed_tail] == ["action-one", "action-two"]
+
+    same_size_rewrite = dict(first_event, status="cancelled")
+    original_bytes = (json.dumps(first_event, separators=(",", ":")) + "\n").encode("utf-8")
+    rewritten_bytes = (json.dumps(same_size_rewrite, separators=(",", ":")) + "\n").encode("utf-8")
+    assert len(original_bytes) == len(rewritten_bytes)
+    owner.desktop_action_log_path.write_bytes(rewritten_bytes)
+    rewritten = owner._project_desktop_action_rows(limit_events=0)  # noqa: SLF001
+    assert rewritten[0]["status"] == "cancelled"
+
+    owner.desktop_action_log_path.write_text(
+        json.dumps({"actionId": "action-one", "status": "requested"}) + "\n",
+        encoding="utf-8",
+    )
+    truncated = owner._project_desktop_action_rows(limit_events=0)  # noqa: SLF001
+    assert truncated[0]["status"] == "requested"
+
+    replacement = owner.desktop_action_log_path.with_suffix(".replacement")
+    replacement.write_text(json.dumps({
+        "event": "desktop_action", "actionId": "action-two", "status": "requested",
+        "action": "computer_use", "createdAt": "2026-01-01T00:00:02Z",
+    }) + "\n", encoding="utf-8")
+    os.replace(replacement, owner.desktop_action_log_path)
+    replaced = owner._project_desktop_action_rows(limit_events=0)  # noqa: SLF001
+    assert [row["id"] for row in replaced] == ["action-two"]
 
 
 def test_composed_owner_error_preserves_gateway_and_worker_status_contract(tmp_path: Path) -> None:

@@ -101,6 +101,7 @@ def test_timeline_event_is_durable_before_projection_and_recovers_after_rebuild(
     )
 
     restarted, _ = make_ledger(tmp_path)
+    assert restarted.recover_interrupted_runs() == 1
     continuations = restarted.list_runtime_continuations()
     assert len(continuations) == 1
     assert continuations[0]["continuationSource"] == "foreground_interrupted"
@@ -126,6 +127,46 @@ def test_live_ledger_is_not_interrupted_and_terminal_supersedes_recovery(tmp_pat
     assert ledger.list_runtime_continuations()[0]["continuationSource"] == "foreground_completed"
 
 
+def test_list_runtime_continuations_is_read_only_until_explicit_recovery(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    ledger.append({
+        "event": "runtime_turn_started", "status": "running",
+        "sessionId": "s", "turnId": "t", "clientTurnId": "c",
+    })
+
+    # Dashboard polling must not turn an ordinary read into a lifecycle write.
+    restarted, _ = make_ledger(tmp_path)
+    assert restarted.list_runtime_continuations() == []
+    assert not any(row.get("event") == "runtime_turn_interrupted" for row in ledger.read_events(limit=0))
+
+    assert restarted.recover_interrupted_runs() == 1
+    assert restarted.list_runtime_continuations()[0]["continuationSource"] == "foreground_interrupted"
+
+
+def test_continuation_projection_reuses_incremental_reader_without_read_events_scan(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    ledger.append({
+        "event": "runtime_turn_completed", "status": "completed",
+        "sessionId": "s", "turnId": "t1", "clientTurnId": "c1",
+        "continuationEvent": {
+            "schema": "vrcforge.runtime_turn_event.v1", "continuationSource": "foreground_completed",
+            "sessionId": "s", "turnId": "t1", "clientTurnId": "c1", "plan": {"reply": "one"},
+        },
+    })
+    assert ledger.list_runtime_continuations()[0]["turnId"] == "t1"
+    ledger.append({
+        "event": "runtime_turn_completed", "status": "completed",
+        "sessionId": "s", "turnId": "t2", "clientTurnId": "c2",
+        "continuationEvent": {
+            "schema": "vrcforge.runtime_turn_event.v1", "continuationSource": "foreground_completed",
+            "sessionId": "s", "turnId": "t2", "clientTurnId": "c2", "plan": {"reply": "two"},
+        },
+    })
+    with patch.object(AgentRuntimeRunLedger, "read_events", side_effect=AssertionError("continuation poll rescanned JSONL")):
+        projected = ledger.list_runtime_continuations()
+    assert [item["turnId"] for item in projected] == ["t1", "t2"]
+
+
 def test_long_incomplete_turn_keeps_earlier_visible_messages(tmp_path: Path) -> None:
     ledger, _ = make_ledger(tmp_path)
     ledger.append({"event": "runtime_turn_started", "sessionId": "s", "turnId": "t", "clientTurnId": "c"})
@@ -135,6 +176,7 @@ def test_long_incomplete_turn_keeps_earlier_visible_messages(tmp_path: Path) -> 
             "payload": {"summary": f"Message {index}"},
         })
     restored, _ = make_ledger(tmp_path)
+    assert restored.recover_interrupted_runs() == 1
     timeline = restored.list_runtime_continuations()[0]["timeline"]
     assert [item["id"] for item in timeline] == [f"visible-{index}" for index in range(300)]
 
@@ -170,6 +212,7 @@ time.sleep(30)
         process.kill()
         process.wait(timeout=5)
         restored, _ = make_ledger(tmp_path)
+        assert restored.recover_interrupted_runs() == 1
         events = restored.list_runtime_continuations()
         assert len(events) == 1
         assert events[0]["timeline"] == [visible]

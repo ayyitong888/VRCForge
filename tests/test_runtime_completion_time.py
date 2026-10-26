@@ -219,9 +219,8 @@ def test_poll_projection_extracts_start_times_without_a_second_scan(tmp_path, mo
     result = getattr(ledger, projection)()
     projected = result["runs"][0] if projection == "list_runs" else result[0]
     assert projected["startedAt"] == started["createdAt"]
-    # list_runs now advances its own append cursor and does not call the
-    # legacy full-file read_events path; continuation projection still uses
-    # that path once for its durable scan.
-    assert len(scans) == (0 if projection == "list_runs" else 1)
+    # Both projections now advance their own append cursor and avoid the
+    # legacy full-file read_events path.
+    assert len(scans) == 0
     if scans:
         assert scans[0]["start_times"][("session", "turn")] == started["createdAt"]

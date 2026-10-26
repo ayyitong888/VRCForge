@@ -2,6 +2,8 @@ from pathlib import Path
 import copy
 import pytest
 import chat_transcript_archive as archive
+from chat_snapshot_transport import chat_content_digest
+from chat_storage_delta import materialize_chat_patches
 from chat_transcript_archive import (
     ARCHIVE_REF_KEY, ChatTranscriptArchiveError, blob_path, decode_chats,
     encode_chats, is_archived_item,
@@ -32,6 +34,58 @@ def test_roundtrip_full_item_and_metadata(tmp_path):
     assert is_archived_item(packed[0]["items"][0])
     write_pending(store, pending)
     assert decode_chats(packed, store) == chats
+
+
+def test_transaction_reuse_skips_archive_recompression_and_blob_read(tmp_path, monkeypatch):
+    store = tmp_path / "chat-transcripts.json"
+    original = large_chat()
+    packed, pending = encode_chats(original)
+    write_pending(store, pending)
+    hydrated, reuse = archive.decode_chats_with_reuse(packed, store)
+    current = hydrated[0]
+    patch = {
+        "baseDigest": chat_content_digest(current),
+        "metadataPatch": [{"op": "add", "path": "/title", "value": "metadata-only update"}],
+        "itemOrder": [item["id"] for item in current["items"]],
+        "itemPatches": {},
+        "newItems": {},
+    }
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unchanged archived item must be reused without recompression or blob read")
+
+    monkeypatch.setattr(archive.gzip, "compress", unexpected)
+    monkeypatch.setattr(archive, "_read_blob", unexpected)
+    changed = materialize_chat_patches(
+        hydrated,
+        [{"id": current["id"]}],
+        {current["id"]: patch},
+    )
+    rewritten, new_blobs = encode_chats(changed, reuse=reuse)
+
+    assert rewritten[0]["items"][0] == packed[0]["items"][0]
+    assert new_blobs == {}
+
+
+def test_transaction_reuse_does_not_reuse_changed_item(tmp_path, monkeypatch):
+    store = tmp_path / "chat-transcripts.json"
+    packed, pending = encode_chats(large_chat())
+    write_pending(store, pending)
+    hydrated, reuse = archive.decode_chats_with_reuse(packed, store)
+    hydrated[0]["items"][0]["response"]["plan"]["reply"] = "changed"
+    calls = []
+    original_compress = archive.gzip.compress
+
+    def tracked_compress(*args, **kwargs):
+        calls.append(1)
+        return original_compress(*args, **kwargs)
+
+    monkeypatch.setattr(archive.gzip, "compress", tracked_compress)
+    rewritten, new_blobs = encode_chats(hydrated, reuse=reuse)
+
+    assert calls == [1]
+    assert rewritten[0]["items"][0][ARCHIVE_REF_KEY]["digest"] != packed[0]["items"][0][ARCHIVE_REF_KEY]["digest"]
+    assert len(new_blobs) == 1
 
 
 def test_identical_item_is_content_addressed_once(tmp_path):
