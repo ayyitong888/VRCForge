@@ -2058,8 +2058,12 @@ namespace VRCForge.Editor
                 failureCode = string.Empty;
                 return true;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                // Surface the exact failing field through the rejection code so
+                // external agents can self-correct instead of guessing among
+                // scene/editor/namespace drift possibilities.
+                failureCode = "execution_target_invalid:" + ex.GetType().Name + ":" + ex.Message;
                 return false;
             }
         }
