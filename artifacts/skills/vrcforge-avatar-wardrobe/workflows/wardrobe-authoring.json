@@ -344,7 +344,10 @@
     },
     "perOutfitGate": {
       "scope": "actual_approved_change_and_affected_dependencies",
-      "independentReadbackRequired": true
+      "independentReadbackRequired": true,
+      "editModeDefaultStateEnforcement": true,
+      "editModeDefaultStateScope": "managed_wardrobe_only",
+      "editModeDefaultStateEvidence": ["approved_default_outfit", "affected_object_active_state", "affected_animation_bindings"]
     },
     "replacementCleanup": {
       "legacyFxLayerDeletionByExactNameOnly": true,

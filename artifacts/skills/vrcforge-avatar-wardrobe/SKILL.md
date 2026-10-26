@@ -71,6 +71,7 @@ allowed-tools:
 support-files:
   - workflows/wardrobe-authoring.json
   - references/workflow.md
+  - references/physbone-preset-integration.md
 ---
 
 ## 三维资产的观察与验收时机
@@ -181,3 +182,11 @@ support-files:
 清理需要精确对象或资产、完整引用证据及单独批准；不得因未出现在某张表中就删除。回滚也需单独批准。只读任务回答后结束，不自动进入这些修改步骤。
 
 工具契约与安全细节见 [参考](references/workflow.md) 和 [工作流描述](workflows/wardrobe-authoring.json)。
+
+## 作者 PhysBone / Marshmallow 集成
+
+当衣服或 Avatar 的适配依赖作者提供的 PhysBone、Modular Avatar 或 NDMF 组件时，先读取作者的安装说明和当前对象上的实际组件；不要把作者 prefab 已经包含的组件当成缺失，也不要仅凭对象名、骨骼名或一张截图新增组件。Marshmallow PB 的官方资料指出，安装工具会按预设配置胸部骨骼与碰撞器，预设路径和 `breast_L_position` / `breast_L_scale` 是作者配置的一部分；先正常运行作者的初始化/预设选择，再针对实际读回的错位或参数做最小调整。初始化可能覆盖 PhysBone 字段，初始化前不要先写细调值。
+
+当前已核实的 Marshmallow 菜单/对象示例是 `wataameya → MarshmallowPB`、`marshmallow_PB_Setup`、`For Unsupported Avatar/marshmallow_PB_L`、`marshmallow_PB_L/R`；owned Marshmallow PB 2.0.3 的实际组件类型是 `wataameya.marshmallow_PB.ndmf.marshmallow_PB_MA`，序列化引用字段为 `_avatar`、`_Breast_L`、`_Breast_R`。当前 Milltina/作者 prefab 也能看到 `Breast_L` / `Breast_R` 骨骼名。它们只作为该产品与当前项目读回时的定位线索，不是通用骨骼路径或适配表；写入版本必须先由现场 package evidence 确认，不能把这些字段扩大成其他产品的适配规则。
+
+需要详细的初始化顺序、preset 覆盖风险和读回边界时，读取 [PhysBone / preset 集成参考](references/physbone-preset-integration.md)。

@@ -61,12 +61,15 @@ def test_avatar_domain_skills_are_agentic_bounded_and_use_real_tools(
     assert manifest["execution"] == "agentic"
     assert "executionPlan" not in manifest["entrypoints"]
     assert not (root / "workflows" / "execution-plan.json").exists()
-    assert len(skill["supportFiles"]) == 2
+    assert len(skill["supportFiles"]) == (3 if slug == "vrcforge-avatar-wardrobe" else 2)
     assert len(skill["supportFiles"]) <= RUNTIME_SKILL_SUPPORT_MAX_FILES
-    assert set(skill["supportFiles"]) == {
+    expected_support_files = {
         manifest["entrypoints"]["workflow"],
         manifest["entrypoints"]["guide"],
     }
+    if slug == "vrcforge-avatar-wardrobe":
+        expected_support_files.add("references/physbone-preset-integration.md")
+    assert set(skill["supportFiles"]) == expected_support_files
     assert set(skill["allowedTools"]) <= external_execution
     assert workflow["schema"] == "vrcforge.skill-package.workflow.v1"
     assert workflow["selfContained"] is True
@@ -124,7 +127,7 @@ def test_wardrobe_skill_preserves_capabilities_without_project_presets() -> None
     manifest = _json(root / "manifest.json")
     workflow = _json(root / manifest["entrypoints"]["workflow"])
     skill = parse_skill_markdown(root / "SKILL.md")
-    assert manifest["version"] == "1.1.31"
+    assert manifest["version"] == "1.1.32"
     assert {
         "vrcforge_setup_outfit", "vrcforge_add_wardrobe_outfit",
         "vrcforge_ensure_expression_parameter", "vrcforge_ensure_animator_state",
@@ -147,6 +150,8 @@ def test_wardrobe_skill_preserves_capabilities_without_project_presets() -> None
     assert contract["replacementCleanup"]["deleteRequiresSeparateApproval"] is True
     assert contract["replacementCleanup"]["neverDeleteSourceAvatarOrSourceAsset"] is True
     assert contract["runtimeEvidence"]["observationLifecycle"]["completedDoesNotMeanVisualAcceptance"] is True
+    assert contract["perOutfitGate"]["editModeDefaultStateEnforcement"] is True
+    assert contract["perOutfitGate"]["editModeDefaultStateScope"] == "managed_wardrobe_only"
     assert workflow["requiresOtherSkills"] == []
 
 
@@ -218,6 +223,24 @@ def test_new_wardrobe_guidance_requires_reference_and_bounded_delivery_checks() 
     assert "检查、扩展、修复不进入此分支" in guide
     assert "读取失败或未找到结构不能触发本分支" in guide
     assert "不是整套成品已验证的证明" in guide
+
+
+def test_wardrobe_physbone_reference_preserves_author_initialization_boundary() -> None:
+    root = ARTIFACTS / "vrcforge-avatar-wardrobe"
+    body = (root / "SKILL.md").read_text(encoding="utf-8")
+    reference = (root / "references/physbone-preset-integration.md").read_text(encoding="utf-8")
+    assert "references/physbone-preset-integration.md" in body
+    assert "wataameya → MarshmallowPB" in reference
+    assert "marshmallow_PB_Setup" in reference
+    assert "marshmallow_PB_L" in reference and "marshmallow_PB_R" in reference
+    assert "Breast_L" in reference and "Breast_R" in reference
+    assert "wataameya.marshmallow_PB.ndmf.marshmallow_PB_MA" in reference
+    assert "_avatar" in reference and "_Breast_L" in reference and "_Breast_R" in reference
+    assert "4A0AB2945F54312B2DAB47F1736CCD4407B85DCA8A5706C47E241E13DF40BF0C" in reference
+    assert "初始化可能覆盖 PhysBone 字段" in body
+    assert "Run the author's normal initialization or preset selection first" in reference
+    assert "不要添加另一个副本" in reference
+    assert "C# component namespace" in reference
 
 
 def test_animation_replacement_guidance_requires_driver_retirement_and_runtime_checks() -> None:

@@ -17,7 +17,8 @@ namespace VRCForge.Editor
     // scanner reads (Int parameter + menu toggle values + FX Any-State Equals N),
     // then performs an ADD-ONLY edit:
     //   - assigns the next free int value N,
-    //   - sets the new outfit objects scene-default OFF,
+    //   - aligns scene-default activeSelf for wardrobe-managed objects with the
+    //     Int parameter default, preserving that outfit and disabling alternates,
     //   - authors one clip that turns the new objects ON and "strips" the other
     //     outfits' objects OFF (default off-set = union of sibling on-objects),
     //   - adds an FX state (Write Defaults matched to the wardrobe convention) to
@@ -26,10 +27,10 @@ namespace VRCForge.Editor
     //     a nested SubMenu under the wardrobe menu when the home menu is full).
     // It NEVER rewrites existing clips/states (per-clip author choices are
     // intentional). Exclusivity for previously-authored outfits is preserved by the
-    // wardrobe's Write Defaults + scene-default-off convention. Supports preview.
+    // wardrobe's Write Defaults + scene-default convention. Supports preview.
     [VRCForgeCommand(
         toolId: "vrc_add_wardrobe_outfit",
-        Summary = "Add one outfit to an existing int-exclusive wardrobe: assign next int value, set new objects scene-default off, author a clip (own objects on, sibling objects off), add an FX state with Any-State Equals N (Write Defaults matched), and a menu toggle (nested SubMenu overflow). Add-only, never rewrites existing clips. Supports preview."
+        Summary = "Add one outfit to an existing int-exclusive wardrobe: assign next int value, align scene defaults for wardrobe-managed objects with the Int default selection, author a clip (own objects on, sibling objects off), add an FX state with Any-State Equals N (Write Defaults matched), and a menu toggle (nested SubMenu overflow). Add-only, never rewrites existing clips. Supports preview."
     )]
     public static class WardrobeOutfitWriter
     {
@@ -50,7 +51,7 @@ namespace VRCForge.Editor
             public bool? preview { get; set; } = false;
             [VRCForgeInput("Create a matching expression-menu toggle when capacity permits.", IsRequired = false)]
             public bool? addMenuToggle { get; set; } = true;
-            [VRCForgeInput("Set new outfit objects inactive before authoring the clip.", IsRequired = false)]
+            [VRCForgeInput("Align scene-default activeSelf for wardrobe-managed objects with the Int parameter default selection.", IsRequired = false)]
             public bool? setObjectsDefaultOff { get; set; } = true;
             [VRCForgeInput("Permit a nested submenu when the menu is full.", IsRequired = false)]
             public bool? subMenuOverflow { get; set; } = true;
@@ -269,6 +270,30 @@ namespace VRCForge.Editor
                     offObjects = siblingOnObjects.Where(p => !onObjects.Contains(p)).OrderBy(p => p, StringComparer.Ordinal).ToList();
                 }
 
+                // Scene defaults are derived only from objects already owned by this
+                // int wardrobe's state clips, plus the newly supplied outfit roots.
+                // Keep the expression parameter's selected default outfit active.
+                var wardrobeDefaultValue = Mathf.RoundToInt(intParam.defaultValue);
+                var defaultWardrobeStateNames = existingEquals
+                    .Where(item => item != null && item.value == wardrobeDefaultValue)
+                    .Select(item => item.stateName ?? "")
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(name => name, StringComparer.Ordinal)
+                    .ToArray();
+                var sceneDefaultActiveByPath = setObjectsDefaultOff
+                    ? BuildSceneDefaultActiveStates(
+                        wardrobeDefaultValue, newValue, onObjects,
+                        siblingOnObjects, existingEquals, stateByName)
+                    : new Dictionary<string, bool>(StringComparer.Ordinal);
+                var sceneDefaultChanges = new Dictionary<string, Transform>(StringComparer.Ordinal);
+                foreach (var desired in sceneDefaultActiveByPath)
+                {
+                    var target = ResolveUnderRoot(avatarRoot, desired.Key);
+                    if (target != null && target != avatarRoot && target.gameObject.activeSelf != desired.Value)
+                        sceneDefaultChanges[desired.Key] = target;
+                }
+
                 var stateName = MakeUniqueStateName(stateByName, Sanitize(outfitName, "Outfit"));
                 var clipFileName = $"{Sanitize(descriptor.name, "Avatar")}_{Sanitize(parameterName, "Wardrobe")}_{stateName}.anim";
                 var clipPath = GeneratedAssetPaths.UniqueAssetPath($"{clipDir}/{clipFileName}");
@@ -283,6 +308,10 @@ namespace VRCForge.Editor
                 if (!writeDefaultsConsistent)
                 {
                     warnings.Add("Existing wardrobe states have inconsistent Write Defaults; new state uses " + newWriteDefaults + ". Verify exclusivity in-editor.");
+                }
+                if (newValue != wardrobeDefaultValue && defaultWardrobeStateNames.Length > 1)
+                {
+                    warnings.Add("Multiple existing FX states match the wardrobe Int default value; scene defaults preserve on-object roots from each matching state.");
                 }
                 if (!newWriteDefaults && offObjects.Count == 0 && siblingOnObjects.Count > 0)
                 {
@@ -299,7 +328,7 @@ namespace VRCForge.Editor
                     checkpointPaths.AddRange(ExpressionWritePersistence.Capture(descriptor.expressionsMenu).Keys);
                     if (!string.IsNullOrWhiteSpace(menuAssetPath)) checkpointPaths.Add(menuAssetPath);
                 }
-                if (setObjectsDefaultOff && resolvedTargets.Any(item => item.gameObject.activeSelf))
+                if (sceneDefaultChanges.Count > 0)
                 {
                     checkpointPaths.Add(descriptor.gameObject.scene.path);
                 }
@@ -320,10 +349,13 @@ namespace VRCForge.Editor
                     writeDefaults = newWriteDefaults,
                     wardrobeWriteDefaults,
                     writeDefaultsConsistent,
+                    wardrobeDefaultValue,
+                    defaultWardrobeStateNames,
                     onObjects,
                     objectGlobalObjectIds,
                     offObjects,
                     setObjectsDefaultOff,
+                    sceneDefaultActiveByPath,
                     addMenuToggle = addMenuToggle && menuPlan.menu != null,
                     menuPath = menuPlan.menuPathDisplay,
                     menuAssetDir,
@@ -354,11 +386,12 @@ namespace VRCForge.Editor
                 var sceneReceipts = new Dictionary<string, TransactionReceipt>(StringComparer.Ordinal);
                 var sceneObjectIds = new Dictionary<string, ulong>(StringComparer.Ordinal);
                 var prefabObjectIds = new Dictionary<string, PrefabSceneDefaultIdentity>(StringComparer.Ordinal);
-                if (setObjectsDefaultOff)
+                if (sceneDefaultChanges.Count > 0)
                 {
-                    foreach (var targetTransform in resolvedTargets.Where(item => item.gameObject.activeSelf))
+                    foreach (var target in sceneDefaultChanges)
                     {
-                        var targetPath = GetTransformPath(targetTransform);
+                        var targetTransform = target.Value;
+                        var targetPath = target.Key;
                         var sceneGuid = AssetDatabase.AssetPathToGUID(descriptor.gameObject.scene.path);
                         if (PrefabUtility.IsPartOfPrefabInstance(targetTransform.gameObject))
                         {
@@ -424,7 +457,7 @@ namespace VRCForge.Editor
                 var saveScope = new WardrobeAssetSaveScope(fxController,
                     addMenuToggle ? descriptor.expressionsMenu : null);
                 var sceneSaveScope = new WardrobeSceneSaveScope(
-                    setObjectsDefaultOff && resolvedTargets.Any(item => item.gameObject.activeSelf)
+                    sceneDefaultChanges.Count > 0
                         ? descriptor.gameObject : null);
                 if (!string.IsNullOrWhiteSpace(approvedObjectReceiptNonce))
                 {
@@ -443,20 +476,18 @@ namespace VRCForge.Editor
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Add wardrobe outfit '{outfitName}'");
 
-                // a. New objects scene-default OFF.
-                if (setObjectsDefaultOff)
+                // a. Apply the exact managed wardrobe scene defaults from the preview.
+                if (sceneDefaultChanges.Count > 0)
                 {
-                    foreach (var t in resolvedTargets.Where(item => item.gameObject.activeSelf))
+                    foreach (var item in sceneDefaultChanges)
                     {
-                        var go = t.gameObject;
-                        Undo.RecordObject(go, "Wardrobe outfit default off");
-                        if (go.activeSelf)
-                        {
-                            go.SetActive(false);
-                            if (PrefabUtility.IsPartOfPrefabInstance(go))
-                                PrefabUtility.RecordPrefabInstancePropertyModifications(go);
-                        }
-                        var objectPath = GetTransformPath(t);
+                        var go = item.Value.gameObject;
+                        var desiredActive = sceneDefaultActiveByPath[item.Key];
+                        Undo.RecordObject(go, "Set wardrobe scene default state");
+                        go.SetActive(desiredActive);
+                        if (PrefabUtility.IsPartOfPrefabInstance(go))
+                            PrefabUtility.RecordPrefabInstancePropertyModifications(go);
+                        var objectPath = item.Key;
                         if (sceneReceipts.TryGetValue(objectPath, out var sceneReceipt))
                         {
                             sceneReceipt.After = new { activeSelf = go.activeSelf };
@@ -567,7 +598,9 @@ namespace VRCForge.Editor
                     menuReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(rootMenuPath));
                     menuReceipt.Status = "succeeded";
                 }
-                var sceneReadback = VerifySceneDefaultReadback(sceneReceipts, sceneObjectIds, prefabObjectIds, descriptor.gameObject.scene.path);
+                var sceneReadback = VerifySceneDefaultReadback(
+                    sceneReceipts, sceneObjectIds, prefabObjectIds, sceneDefaultActiveByPath,
+                    avatarRoot, descriptor.gameObject.scene.path);
                 foreach (var receipt in sceneReceipts.Values) receipt.Status = "succeeded";
 
                 return VRCForgeToolResult.Completed(
@@ -593,6 +626,9 @@ namespace VRCForge.Editor
                         objectGlobalObjectIds,
                         offObjects,
                         setObjectsDefaultOff,
+                        wardrobeDefaultValue,
+                        defaultWardrobeStateNames,
+                        sceneDefaultActiveByPath,
                         menuToggleAdded,
                         menuPath = appliedMenuPath,
                         continuationConsumed,
@@ -704,14 +740,58 @@ namespace VRCForge.Editor
             if (found.Count != 1) throw new InvalidOperationException("Persisted wardrobe menu toggle/value differs.");
         }
 
-        private static object VerifySceneDefaultReadback(Dictionary<string, TransactionReceipt> receipts, Dictionary<string, ulong> objectIds, Dictionary<string, PrefabSceneDefaultIdentity> prefabObjectIds, string scenePath)
+        private static Dictionary<string, bool> BuildSceneDefaultActiveStates(
+            int defaultValue,
+            int newValue,
+            IEnumerable<string> newOnObjects,
+            HashSet<string> siblingOnObjects,
+            List<EqualsInfo> existingEquals,
+            Dictionary<string, AnimatorState> stateByName)
+        {
+            var defaultOnObjects = new HashSet<string>(StringComparer.Ordinal);
+            if (defaultValue == newValue)
+            {
+                defaultOnObjects.UnionWith(newOnObjects ?? Enumerable.Empty<string>());
+            }
+            else
+            {
+                var defaultStateNames = (existingEquals ?? new List<EqualsInfo>())
+                    .Where(item => item != null && item.value == defaultValue)
+                    .Select(item => item.stateName ?? "")
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Distinct(StringComparer.Ordinal);
+                foreach (var stateName in defaultStateNames)
+                {
+                    if (stateByName != null && stateByName.TryGetValue(stateName, out var state) && state != null)
+                        defaultOnObjects.UnionWith(ReadClipOnObjects(state.motion as AnimationClip));
+                }
+            }
+
+            var result = new Dictionary<string, bool>(StringComparer.Ordinal);
+            foreach (var path in (siblingOnObjects ?? new HashSet<string>(StringComparer.Ordinal)).OrderBy(item => item, StringComparer.Ordinal))
+                if (!string.IsNullOrWhiteSpace(path)) result[path] = defaultOnObjects.Contains(path);
+            foreach (var path in newOnObjects ?? Enumerable.Empty<string>())
+                if (!string.IsNullOrWhiteSpace(path)) result[path] = defaultOnObjects.Contains(path);
+            return result;
+        }
+
+        private static object VerifySceneDefaultReadback(
+            Dictionary<string, TransactionReceipt> receipts,
+            Dictionary<string, ulong> objectIds,
+            Dictionary<string, PrefabSceneDefaultIdentity> prefabObjectIds,
+            Dictionary<string, bool> expectedStates,
+            Transform avatarRoot,
+            string scenePath)
         {
             if (receipts == null || receipts.Count == 0) return null;
             foreach (var item in receipts)
             {
                 var receipt = item.Value;
-                if (receipt.After == null || JObject.FromObject(receipt.After)["activeSelf"].Value<bool>())
-                    throw new InvalidOperationException("Wardrobe scene default-off state differs: " + item.Key);
+                var target = ResolveUnderRoot(avatarRoot, item.Key);
+                if (target == null || !expectedStates.TryGetValue(item.Key, out var expectedActive)
+                    || target.gameObject.activeSelf != expectedActive)
+                    throw new InvalidOperationException("Wardrobe scene default state readback differs: " + item.Key);
+                receipt.After = new { activeSelf = target.gameObject.activeSelf };
             }
             var sceneGuid = AssetDatabase.AssetPathToGUID(scenePath);
             var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scenePath, "wardrobe scene default persisted readback", (path, meta) =>
@@ -719,10 +799,11 @@ namespace VRCForge.Editor
                 var yaml = File.ReadAllText(path);
                 foreach (var item in objectIds)
                 {
+                    var expectedValue = expectedStates[item.Key] ? "1" : "0";
                     var blocks = System.Text.RegularExpressions.Regex.Matches(yaml,
                         @"(?m)^--- !u!1 &" + item.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + @"\r?\n(?<body>[\s\S]*?)(?=^--- !u!|\z)");
-                    if (blocks.Count != 1 || System.Text.RegularExpressions.Regex.Matches(blocks[0].Groups["body"].Value, @"(?m)^  m_IsActive: 0\s*$").Count != 1)
-                        throw new InvalidOperationException("Persisted wardrobe scene default-off YAML differs: " + item.Key);
+                    if (blocks.Count != 1 || System.Text.RegularExpressions.Regex.Matches(blocks[0].Groups["body"].Value, @"(?m)^  m_IsActive: " + expectedValue + @"\s*$").Count != 1)
+                        throw new InvalidOperationException("Persisted wardrobe scene default YAML differs: " + item.Key);
                 }
                 foreach (var item in prefabObjectIds)
                 {
@@ -739,11 +820,12 @@ namespace VRCForge.Editor
                         @"(?ms)^\s*- target: \{fileID:\s*" + identity.sourceFileId.ToString(System.Globalization.CultureInfo.InvariantCulture)
                         + @",\s*guid:\s*" + System.Text.RegularExpressions.Regex.Escape(identity.sourceGuid)
                         + @",\s*type:\s*\d+\}\r?\n(?<fields>(?:(?!^\s*- target:)[\s\S])*)");
+                    var expectedValue = expectedStates[item.Key] ? "1" : "0";
                     var matching = modifications.Cast<System.Text.RegularExpressions.Match>().Count(match =>
                         System.Text.RegularExpressions.Regex.IsMatch(match.Groups["fields"].Value,
-                            @"(?m)^\s+propertyPath: m_IsActive\s*$[\r\n]+\s+value: 0\s*$"));
+                            @"(?m)^\s+propertyPath: m_IsActive\s*$[\r\n]+\s+value: " + expectedValue + @"\s*$"));
                     if (matching != 1)
-                        throw new InvalidOperationException("Persisted wardrobe prefab m_IsActive override differs: " + item.Key);
+                        throw new InvalidOperationException("Persisted wardrobe prefab m_IsActive state differs: " + item.Key);
                 }
             });
             if (evidence.Guid != sceneGuid) throw new InvalidOperationException("Wardrobe scene GUID differs.");

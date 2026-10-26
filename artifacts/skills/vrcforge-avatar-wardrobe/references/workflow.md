@@ -64,6 +64,10 @@
 
 依据：[MA Blendshape Sync 官方文档](https://modular-avatar.nadena.dev/docs/reference/blendshape-sync)。
 
+## 作者 PhysBone 与预设组件
+
+涉及 PhysBone、Marshmallow PB、Modular Avatar 或 NDMF 的衣服适配时，先读取作者官方安装说明、当前 prefab/场景组件和 preset 状态。作者 prefab 已带有组件时，默认保留并验证，不重复添加；作者工具的初始化/预设选择必须先完成并读回，再进行局部细调，因为初始化可能重置 PB 字段。`marshmallow_PB`、`marshmallow_PB_L`、`marshmallow_PB_R`、`_avatar`、`Breast_L`、`Breast_R` 等名称只能作为当前作者资料中的候选线索，不能变成跨 Avatar 的硬编码路径或插件适配表。具体证据边界见 [PhysBone / preset 集成参考](physbone-preset-integration.md)。
+
 ## 通用写入约束
 
 - 修改前保存受影响事实和 checkpoint，执行权限与精确 preview 批准缺一不可。

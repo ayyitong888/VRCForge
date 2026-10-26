@@ -85,7 +85,9 @@ def test_wardrobe_verifier_calls_match_types_and_checks_prefab_override_identity
     assert capture < mutation
     verifier = _extract_method(source, "VerifySceneDefaultReadback")
     assert "!u!1001 &" in verifier
-    assert "sourceFileId" in verifier and "m_IsActive" in verifier and "value: 0" in verifier
+    assert "sourceFileId" in verifier and "m_IsActive" in verifier
+    assert 'expectedStates[item.Key] ? "1" : "0"' in verifier
+    assert '" + expectedValue' in verifier
 
 
 def _capture_prefab_instance_id(object_id: int, prefab_id: int):
