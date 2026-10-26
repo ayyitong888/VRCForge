@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 from context_compaction import MAX_SUMMARY_CHARS, normalize_compaction_recovery
+from agent_task_loop import _running_state
 from planner_structured_tool_evidence import project_structured_tool_evidence
 from provider_runtime_adapters import ProviderTokenLimitError
 from responses_native_protocol import public_assistant_messages
@@ -3547,7 +3548,19 @@ class RuntimePlannerService:
                         break
                     status = str(step.get("status") or "")
                     outcome_status = str(ensure_dict(step.get("outcome")).get("status") or "")
-                    if status not in terminal_statuses and outcome_status not in terminal_statuses:
+                    if status == "pending" or _running_state(step):
+                        break
+                    # A returned error also closes its invocation. The
+                    # normalized outcome is the
+                    # authority for pending work, even if dispatch succeeded.
+                    # Legacy observations without one keep their prior status
+                    # contract; phase records are completed transitions.
+                    settled = (
+                        outcome_status in {"ok", "failed"}
+                        if outcome_status
+                        else status in terminal_statuses or step.get("kind") == "phase"
+                    )
+                    if not settled:
                         break
                     completed_prefix += 1
                 # Reserve the existing summary contract and fixed prompt blocks;
