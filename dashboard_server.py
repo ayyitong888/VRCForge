@@ -21531,9 +21531,13 @@ def prepare_authoritative_unity_checkpoint_sync(
         obj = ensure_dict(target.get("object"))
         component = ensure_dict(target.get("component"))
         scene_path = ensure_dict(target.get("scene")).get("assetPath")
+        # Generic component writes are scene-only mutations on one exact
+        # bound object; the component type itself is not restricted, but the
+        # CanvasGroup-only shortcut keeps its stricter component checks.
+        canvas_group_only = request.get("componentType") == "UnityEngine.CanvasGroup"
         proven = (
-            request.get("componentType") == "UnityEngine.CanvasGroup"
-            and target.get("scope") in {"object", "component"}
+            target.get("scope") in {"object", "component"}
+            and bool(request.get("componentType"))
             and obj.get("globalObjectId")
             and request.get("gameObjectPath") == obj.get("exactHierarchyPath")
             and Path(str(ensure_dict(target.get("project")).get("root") or "")).resolve() == project_root.resolve()
@@ -21542,11 +21546,20 @@ def prepare_authoritative_unity_checkpoint_sync(
             and all(part not in {"", ".", ".."} for part in scene_path.split("/"))
             and (checkpoint_target != "vrcforge_remove_component" or (
                 target.get("scope") == "component" and component.get("globalObjectId")
-                and component.get("type") == "UnityEngine.CanvasGroup"))
+                and component.get("type")))
         )
         if not proven:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                     "error": "The approved component write did not establish an exact checkpoint scene scope."}
+        # Live revalidation against the exact bound object (the mature
+        # component-property pattern): the object must still resolve to the
+        # same identity right before the checkpoint is taken.
+        live_query = {"projectPath": str(project_root), "scope": target["scope"],
+                      "objectGlobalObjectId": obj["globalObjectId"]}
+        live = list_execution_targets_sync(live_query)
+        if live.get("ok") is not True or live.get("targets") != [target]:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved component target changed before checkpointing."}
         query = {"projectPath": str(project_root), "scope": target["scope"],
                  "objectGlobalObjectId": obj["globalObjectId"]}
         if ensure_dict(target.get("avatar")).get("globalObjectId"):
