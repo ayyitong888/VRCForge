@@ -14,7 +14,9 @@ from vrchat_blendshape_agent import (
     BlendshapePlan,
     McpResult,
     Settings,
+    UnityMcpError,
     create_blendshape_plan,
+    export_blendshapes,
     filter_plan_by_instruction_relevance,
     filter_planning_payload_to_face_blendshapes,
     build_planning_payload,
@@ -136,6 +138,38 @@ class FakeGoogleClient:
         self.kwargs = kwargs
         self.models = FakeGoogleModels()
         FakeGoogleClient.instances.append(self)
+
+
+class BlendshapeExportErrorReplayTests(unittest.TestCase):
+    def test_core_rejection_payload_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            descriptor = project / "Library" / "VRCForge" / "mcp-core.json"
+            descriptor.parent.mkdir(parents=True)
+            descriptor.write_text("{}", encoding="utf-8")
+            settings = make_llm_settings("ollama")
+            settings.unity_project_path = str(project)
+            raw_payload = {
+                "content": [{"type": "text", "text": "Core exporter failed"}],
+                "isError": True,
+                "structuredContent": {
+                    "success": False,
+                    "code": "blendshape_export_failed",
+                    "error": "Avatar hierarchy path is ambiguous across loaded scene objects",
+                },
+            }
+            with patch(
+                "vrchat_blendshape_agent.invoke_unity_mcp",
+                return_value=McpResult(1, "", "", raw_payload),
+            ):
+                with self.assertRaisesRegex(
+                    UnityMcpError,
+                    "Avatar hierarchy path is ambiguous across loaded scene objects",
+                ) as raised:
+                    export_blendshapes(settings)
+
+            self.assertEqual(raised.exception.cause_code, "blendshape_export_failed")
+            self.assertEqual(raised.exception.raw_result, raw_payload)
 
 
 class ProviderStreamingTests(unittest.TestCase):
