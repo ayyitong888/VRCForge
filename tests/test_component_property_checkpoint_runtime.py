@@ -40,14 +40,13 @@ def run(tmp_path, program, references=()):
 
 def test_scope_uses_resolved_component_scene_identity_and_rejects_unknown_owner(tmp_path):
     raw = source()
-    signatures = ["private static bool IsEngineComponentAssembly("]
-    for signature in (
-        "private static bool IsPlainSerializedFieldType(",
+    signatures = [
+        "private static bool IsEngineComponentAssembly(",
+        "private static bool IsPlainSerializedFieldType(Type type, bool allowCollection = true)",
+        "private static bool IsPlainSerializedFieldType(Type type, bool allowCollection, HashSet<Type> visiting)",
         "private static bool IsPlainSceneDataField(",
-    ):
-        if signature in raw:
-            signatures.append(signature)
-    signatures += [
+        "internal static string ResolvePropertyPath(",
+        "internal static FieldInfo ResolveSerializedRootField(",
         "internal static object BuildPropertyCheckpointScope(",
         "internal static void RecordPropertyPrefabOverride(",
     ]
@@ -57,7 +56,7 @@ using System;using System.Linq;using System.Collections.Generic;using System.Ref
 namespace UnityEngine {
  public class Object {}
  public struct Scene {public string path;public int handle;}
- public class GameObject {public Scene scene;public string id="object";}
+ public class GameObject:Object {public Scene scene;public string id="object";}
  public class Component {public GameObject gameObject;public string id="component";public int value;}
  public class MonoBehaviour:Component {public static int setterCalls;public int custom {get{return 0;}set{setterCalls++;}}}
  public interface ISerializationCallbackReceiver {void OnBeforeSerialize();void OnAfterDeserialize();}
@@ -74,6 +73,15 @@ namespace UnityEditor {
  public static class PrefabUtility {public static bool instance;public static int calls;public static bool IsPartOfPrefabInstance(Component c)=>instance;public static void RecordPrefabInstancePropertyModifications(Component c){calls++;}}
 }
 class SavedSceneSnapshot {public string Path="Assets/Actual.unity",Guid="guid",FileDigest="digest";public int Handle=17;}
+[Serializable] class FixtureSettings {public int count;}
+[Serializable] class FixtureEntry {public float weight;public UnityEngine.GameObject reference;}
+class FixtureDataComponent:UnityEngine.MonoBehaviour {
+ [UnityEngine.SerializeField] public FixtureSettings settings;
+ [UnityEngine.SerializeField] public List<FixtureEntry> entries;
+ [UnityEngine.SerializeField] public UnityEngine.GameObject linkedObject;
+}
+[Serializable] class RecursiveFixtureData {public RecursiveFixtureData next;}
+class RecursiveFixtureComponent:UnityEngine.MonoBehaviour {[UnityEngine.SerializeField] public RecursiveFixtureData recursive;}
 class Probe {
  HELPERS
  static void Check(bool value,string message){if(!value)throw new Exception(message);}
@@ -85,6 +93,17 @@ class Probe {
   Check((string)scope["objectGlobalObjectId"]=="object"&&(string)scope["componentGlobalObjectId"]=="component"&&(int)scope["componentIndex"]==0&&(string)scope["propertyPath"]=="value","component identity");
   Check(scope["archiveAssetPaths"].ToString()==new JArray("Assets/Actual.unity").ToString(),"exact footprint");
   var custom=new MonoBehaviour{gameObject=go};Reject(custom,typeof(MonoBehaviour).GetProperty("custom"),scene);Check(MonoBehaviour.setterCalls==0,"custom setter not called");
+  var data=new FixtureDataComponent{gameObject=go};
+  foreach(var name in new[]{"settings","entries","linkedObject"}){
+   var leaf=name=="settings"?"settings.count":name=="entries"?"entries.Array.data[1].weight":"linkedObject";
+   var field=typeof(FixtureDataComponent).GetField(name);
+   var serializedScope=JObject.FromObject(BuildPropertyCheckpointScope(data,field,0,leaf,scene,true));
+   Check((string)serializedScope["propertyPath"]==name&&(string)serializedScope["serializedPropertyPath"]==leaf,"serialized root and leaf scope: "+leaf);
+  }
+  var recursive=new RecursiveFixtureComponent{gameObject=go};Reject(recursive,typeof(RecursiveFixtureComponent).GetField("recursive"),scene);
+  Check(ResolvePropertyPath(null,"settings.count")=="settings.count"&&ResolvePropertyPath("value",null)=="value","direct and serialized path resolution");
+  try{ResolvePropertyPath("value","settings.count");throw new Exception("mixed paths accepted");}catch(InvalidOperationException){}
+  Check(ResolveSerializedRootField(typeof(FixtureDataComponent),"settings.count").Name=="settings","serialized path root field resolution");
   go.scene=new Scene{path="Assets/Caller.unity",handle=17};Reject(component,member,scene);go.scene=new Scene{path=scene.Path,handle=18};Reject(component,member,scene);go.scene=new Scene{path=scene.Path,handle=17};
   GlobalObjectId.sceneGuid="other";Reject(component,member,scene);GlobalObjectId.sceneGuid="guid";GlobalObjectId.localId=0;Reject(component,member,scene);GlobalObjectId.localId=1;GlobalObjectId.kind=1;Reject(component,member,scene);
   PrefabUtility.instance=false;RecordPropertyPrefabOverride(component);Check(PrefabUtility.calls==0,"ordinary scene no prefab write");PrefabUtility.instance=true;RecordPropertyPrefabOverride(component);Check(PrefabUtility.calls==1,"prefab override recorded");
@@ -139,11 +158,23 @@ def test_registered_read_handler_returns_scope_without_getter_and_keeps_default_
     getter = source().split("public static class GetPropertyTool", 1)[1]
     parameters = method(getter, "public class GetPropertyParameters")
     handler = method(getter, "public static object HandleCommand(JObject @params)")
+    raw = source()
+    path_helpers = "\n".join(method(raw, signature) for signature in (
+        "internal static string ResolvePropertyPath(",
+        "internal static FieldInfo ResolveSerializedRootField(",
+        "internal static SerializedProperty ResolveSerializedProperty(",
+    ))
     program = r'''
 using System;using System.Reflection;using System.Collections.Generic;using Newtonsoft.Json.Linq;
 class VRCForgeInput:Attribute {public bool IsRequired{get;set;}public VRCForgeInput(string text){}}
-class Component {public GameObject gameObject;public int value=7;}
+class Component {public GameObject gameObject;public int value=7;public Settings settings=new Settings();}
+[Serializable] class Settings {public int count=12;}
 class GameObject {public object transform;public Component component;}
+enum SerializedPropertyType {Integer}
+class SerializedProperty {public string propertyPath;public string type="int";public SerializedPropertyType propertyType=SerializedPropertyType.Integer;public int intValue=12;}
+class SerializedObject:IDisposable {
+ public static int constructed;public SerializedObject(Component c){constructed++;}public void UpdateIfRequiredOrScript(){}public SerializedProperty FindProperty(string path)=>path=="settings.count"?new SerializedProperty{propertyPath=path}:null;public void Dispose(){}
+}
 static class VRCForgeToolResult {public static object Failed(string error)=>new JObject{["error"]=error};public static object Completed(string text,object payload)=>JObject.FromObject(payload);}
 static class UnityComponentPropertyBatch {public static int calls;public static object Handle(JObject p){calls++;return new JObject{["batch"]=true};}}
 static class ComponentCrudCore {
@@ -153,8 +184,10 @@ static class ComponentCrudCore {
  public static Component ResolveComponent(GameObject g,Type t,int i)=>g.component;
  public static MemberInfo ResolveMember(Type t,string p)=>t.GetField(p);
  public static object ResolveSavedSceneFor(GameObject g)=>new object();
- public static object BuildPropertyCheckpointScope(Component c,MemberInfo m,int i,string p,object scene){scopes++;if(rejectScope)throw new InvalidOperationException("unsupported owner");return new{schema="vrcforge.component_property_checkpoint.v1",scenePath="Assets/Actual.unity"};}
+ PATH_HELPERS
+ public static object BuildPropertyCheckpointScope(Component c,MemberInfo m,int i,string p,object scene,bool serializedProperty=false){scopes++;if(rejectScope)throw new InvalidOperationException("unsupported owner");return new{schema="vrcforge.component_property_checkpoint.v1",scenePath="Assets/Actual.unity",propertyPath=serializedProperty?m.Name:p,serializedPropertyPath=serializedProperty?p:null};}
  public static object GetReadOnlyMemberValue(Component c,MemberInfo m){reads++;return c.value;}
+ public static object ReadSerializedPropertyValue(SerializedProperty p){reads++;return p.intValue;}
  public static object DescribeValue(object value,int max,out int returned,out int total,out bool truncated,out bool incomplete,Dictionary<string,object> enums=null){returned=total=-1;truncated=incomplete=false;return value;}
  public static string GetHierarchyPath(object t)=>"Actual/Component";
  public static Type GetMemberType(MemberInfo m)=>typeof(int);
@@ -167,11 +200,16 @@ class Probe {
  static void Main(){var p=Args();p["includeCheckpointScope"]=true;var scoped=Call(p);
   Check((string)scoped["checkpointScope"]?["scenePath"]=="Assets/Actual.unity","missing authoritative read scope");
   Check((string)scoped["gameObjectPath"]=="Actual/Component"&&ComponentCrudCore.reads==0&&ComponentCrudCore.scopes==1,"scope must bypass getter and use actual owner");
-  var normal=Call(Args());Check((int)normal["propertyValue"]==7&&ComponentCrudCore.reads==1&&ComponentCrudCore.scopes==1&&normal["checkpointScope"]==null,"default read changed");
-  ComponentCrudCore.rejectScope=true;var rejected=Call(p);Check(rejected["error"]!=null&&ComponentCrudCore.reads==1,"failed scope must never reach getter");
+  var serialized=Args();serialized.Remove("propertyPath");serialized["serializedPropertyPath"]="settings.count";serialized["includeCheckpointScope"]=true;var serializedScope=Call(serialized);
+  Check((string)serializedScope["checkpointScope"]?["propertyPath"]=="settings"&&(string)serializedScope["checkpointScope"]?["serializedPropertyPath"]=="settings.count","serialized checkpoint root and leaf");
+  Check(ComponentCrudCore.reads==0&&SerializedObject.constructed==0,"serialized checkpoint must not instantiate a SerializedObject or read a property");
+  var serializedRead=Args();serializedRead.Remove("propertyPath");serializedRead["serializedPropertyPath"]="settings.count";var serializedValue=Call(serializedRead);
+  Check((int)serializedValue["propertyValue"]==12&&SerializedObject.constructed==1&&ComponentCrudCore.reads==1,"serialized scalar read path");
+  var normal=Call(Args());Check((int)normal["propertyValue"]==7&&ComponentCrudCore.reads==2&&ComponentCrudCore.scopes==2&&normal["checkpointScope"]==null,"default read changed");
+  ComponentCrudCore.rejectScope=true;var rejected=Call(p);Check(rejected["error"]!=null&&ComponentCrudCore.reads==2,"failed scope must never reach getter");
   var batch=new JObject{["queries"]=new JArray(),["includeCheckpointScope"]=true};Check(Call(batch)["error"]!=null&&UnityComponentPropertyBatch.calls==0,"batch silently ignored scope");
   batch.Remove("includeCheckpointScope");Check((bool)Call(batch)["batch"]&&UnityComponentPropertyBatch.calls==1,"default batch changed");
   Console.WriteLine("read scope and defaults passed");}
 }
-'''.replace("PARAMETERS", parameters).replace("HANDLER", handler)
+'''.replace("PARAMETERS", parameters).replace("HANDLER", handler).replace("PATH_HELPERS", path_helpers)
     assert "read scope and defaults passed" in run(tmp_path, program)

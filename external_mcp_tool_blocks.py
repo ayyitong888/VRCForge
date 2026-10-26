@@ -77,6 +77,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_core_upgrade_status",
             "vrcforge_package_install_plan",
             "vrcforge_package_manager_status",
+            "vrcforge_inspect_editor_capabilities",
             "vrcforge_inspect_unity_editor_dialogs",
             "vrcforge_project_lifecycle_status",
             "vrcforge_project_create_plan",
@@ -145,6 +146,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_list_shader_tuning_history",
             "vrcforge_list_shader_tuning_presets",
             "vrcforge_scan_materials",
+            "vrcforge_inspect_material_properties",
             "vrcforge_preview_texture_import_settings",
         }
     ),
@@ -257,6 +259,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_restore_unity_core",
             "vrcforge_install_vpm_package",
             "vrcforge_refresh_asset_database",
+            "vrcforge_execute_unity_editor_menu",
             "vrcforge_register_project",
             "vrcforge_register_project_catalog",
             "vrcforge_rollback_project_catalog_registration",

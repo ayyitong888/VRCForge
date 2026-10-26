@@ -233,7 +233,11 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
             return [("vrc_add_component", {"gameObjectPath": path, "componentType": component, "preview": False})]
         request = {"gameObjectPath": path, "componentType": component, "componentIndex": int(params.get("component_index", params.get("componentIndex", 0)) or 0), "preview": False}
         if target_name == "vrcforge_set_property":
-            request["propertyPath"] = _text(params.get("property_path") or params.get("propertyPath"))
+            direct = _text(params.get("property_path") or params.get("propertyPath"))
+            serialized = _text(params.get("serialized_property_path") or params.get("serializedPropertyPath"))
+            if bool(direct) == bool(serialized):
+                raise ValueError("Provide exactly one of propertyPath and serializedPropertyPath.")
+            request["propertyPath" if direct else "serializedPropertyPath"] = direct or serialized
             request["value"] = params.get("value")
             return [("vrc_set_property", request)]
         return [("vrc_remove_component", request)]

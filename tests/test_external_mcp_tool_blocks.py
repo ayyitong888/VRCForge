@@ -30,6 +30,17 @@ def test_tool_blocks_keep_one_definition_and_existing_exports() -> None:
         assert getattr(agent_gateway, name) is getattr(external_mcp_tool_blocks, name)
         node = definitions[name]
         if name in {"EXTERNAL_MCP_READ_TOOL_BLOCKS", "EXTERNAL_MCP_WRITE_TOOL_BLOCKS"}:
+            extensions = ({"vrcforge_inspect_editor_capabilities", "vrcforge_inspect_material_properties"}
+                          if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS" else {"vrcforge_execute_unity_editor_menu"})
+            memberships = getattr(external_mcp_tool_blocks, name)
+            assert extensions <= set().union(*memberships.values())
+            class _RemoveReviewedEditorExtensions(ast.NodeTransformer):
+                def visit_Set(self, current):
+                    current.elts = [item for item in current.elts if not (
+                        isinstance(item, ast.Constant) and item.value in extensions)]
+                    return self.generic_visit(current)
+            node = _RemoveReviewedEditorExtensions().visit(node)
+        if name in {"EXTERNAL_MCP_READ_TOOL_BLOCKS", "EXTERNAL_MCP_WRITE_TOOL_BLOCKS"}:
             dialog_tool = "vrcforge_inspect_unity_editor_dialogs" if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS" else "vrcforge_handle_unity_editor_dialog"
             assert dialog_tool in getattr(external_mcp_tool_blocks, name)["project"]
             class _RemoveReviewedDialogAddition(ast.NodeTransformer):

@@ -797,6 +797,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_import_chat_image",
         "vrcforge_import_chat_archive",
         "vrcforge_refresh_asset_database",
+        "vrcforge_execute_unity_editor_menu",
         "vrcforge_add_component",
         "vrcforge_remove_component",
         "vrcforge_set_property",
@@ -21357,7 +21358,7 @@ def prepare_authoritative_unity_checkpoint_sync(
         except AgentGatewayError as exc:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                     "error": str(exc), "mutationStarted": False, "saved": False}
-    if checkpoint_target == "vrcforge_refresh_asset_database":
+    if checkpoint_target in {"vrcforge_refresh_asset_database", "vrcforge_execute_unity_editor_menu"}:
         # Package resolution may reinstall/remove packages and importer repair
         # may update metadata. Their existing conditional policy requires the
         # full project snapshot; no exact asset list can describe that scope.
@@ -24579,9 +24580,33 @@ def build_component_target(params: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def inspect_editor_capabilities_sync(params: dict[str, Any]) -> dict[str, Any]:
+    request = {key: params[key] for key in ("kind", "search", "offset", "limit") if key in params}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    return ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(
+        settings, "vrc_inspect_editor_capabilities", request)), "inspect editor capabilities")
+
+
+def inspect_material_properties_sync(params: dict[str, Any]) -> dict[str, Any]:
+    request = {key: params[key] for key in ("materialAssetPath", "search", "offset", "limit") if key in params}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    return ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(
+        settings, "vrc_inspect_material_properties", request)), "inspect material properties")
+
+
+def execute_unity_editor_menu_sync(params: dict[str, Any]) -> dict[str, Any]:
+    from unity_editor_extension_tools import editor_menu_request
+    request = editor_menu_request(params)
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    return ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(
+        settings, "vrc_execute_unity_editor_menu", request, preserve_tool_error=True)), "execute editor menu")
+
+
 def read_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     if "queries" in params:
+        if "serialized_property_path" in params or "serializedPropertyPath" in params:
+            return {"ok": False, "error": "serializedPropertyPath cannot be combined with batch queries."}
         from component_property_batch import prepare_component_property_batch
         request = prepare_component_property_batch(params)
         settings = load_dashboard_settings(build_agent_connection_request(params))
@@ -24594,9 +24619,10 @@ def read_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "gameObjectPath is required."}
     if not comp_type:
         return {"ok": False, "error": "componentType is required."}
-    prop = str(params.get("property_path") or params.get("propertyPath") or "").strip()
-    if not prop:
-        return {"ok": False, "error": "propertyPath is required."}
+    direct = str(params.get("property_path") or params.get("propertyPath") or "").strip()
+    serialized = str(params.get("serialized_property_path") or params.get("serializedPropertyPath") or "").strip()
+    if bool(direct) == bool(serialized):
+        return {"ok": False, "error": "Provide exactly one of propertyPath and serializedPropertyPath."}
     try:
         max_items = int(params.get("max_items", params.get("maxItems", 50)))
     except (TypeError, ValueError):
@@ -24606,10 +24632,10 @@ def read_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
     request = {
         "gameObjectPath": go_path,
         "componentType": comp_type,
-        "propertyPath": prop,
         "componentIndex": int(params.get("component_index", params.get("componentIndex", 0)) or 0),
         "maxItems": max_items,
     }
+    request["propertyPath" if direct else "serializedPropertyPath"] = direct or serialized
     if params.get("includeCheckpointScope") is True:
         request["includeCheckpointScope"] = True
     settings = load_dashboard_settings(build_agent_connection_request(params))
@@ -25493,20 +25519,22 @@ def set_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "gameObjectPath is required."}
     if not comp_type:
         return {"ok": False, "error": "componentType is required."}
-    prop = str(params.get("property_path") or params.get("propertyPath") or "").strip()
-    if not prop:
-        return {"ok": False, "error": "propertyPath is required."}
+    direct = str(params.get("property_path") or params.get("propertyPath") or "").strip()
+    serialized = str(params.get("serialized_property_path") or params.get("serializedPropertyPath") or "").strip()
+    if bool(direct) == bool(serialized):
+        return {"ok": False, "error": "Provide exactly one of propertyPath and serializedPropertyPath."}
+    prop_key, prop = ("propertyPath", direct) if direct else ("serializedPropertyPath", serialized)
     if "value" not in params:
         return {"ok": False, "error": "value is required."}
     preview = bool(params.get("preview", False))
     request = {
         "gameObjectPath": go_path,
         "componentType": comp_type,
-        "propertyPath": prop,
         "componentIndex": int(params.get("component_index", params.get("componentIndex", 0)) or 0),
         "preview": preview,
         "value": params.get("value"),
     }
+    request[prop_key] = prop
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_set_property", request, preserve_tool_error=True)),
@@ -25528,8 +25556,13 @@ def set_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
             "scenePath": payload.get("scenePath"),
             "affected": payload.get("affected"),
         }
+        if serialized:
+            payload["readback"]["serializedPropertyPath"] = payload.get("serializedPropertyPath") or serialized
     if not preview and payload.get("ok") is not False:
-        emit_log("info", "component", "Component property set.", {"gameObjectPath": go_path, "componentType": comp_type, "propertyPath": prop})
+        log_fields = {"gameObjectPath": go_path, "componentType": comp_type, "propertyPath": prop}
+        if serialized:
+            log_fields["serializedPropertyPath"] = serialized
+        emit_log("info", "component", "Component property set.", log_fields)
     return payload
 
 
@@ -27471,7 +27504,9 @@ def register_agent_gateway_tools() -> None:
         "plan/preview",
         preview_unity_constraint_conversion_sync,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_get_property", "When to use: Read or inspect a component field/property before editing it, including a bone Transform's localPosition, localRotation, localScale and lossyScale for body proportions, head/neck size, leg length or breast scale. This is the existing read-only position/rotation/scale (TRS) reader; get_gameobject supplies component identities, not property values. Bind the exact component identity, then read one public property, or use queries for up to 128 exact bound components and 512 simple properties in one synchronous sample. Batch results include per-property success/failure and precise identity. When NOT to use: Do not write, guess missing values, use nested paths or collections in queries, mix scalar/batch arguments, or read across bound namespaces. Negative example: 'set every renderer enabled' requires an approved write.", "read/debug", read_component_property_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_get_property", "When to use: read a bound component using propertyPath for a direct field/property, or serializedPropertyPath for a nested serialized leaf or Array.data[n] element; object references retain exact identities. Use queries for one sample of simple properties across bound components. When NOT to use: do not write, mix scalar and batch arguments, or use nested paths inside queries. Negative example: assigning a renderer value requires the approved setter.", "read/debug", read_component_property_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_inspect_editor_capabilities", "When to use: discover loaded Unity plugin MenuItem metadata or open Editor windows before selecting an exact entry point. When NOT to use: do not invoke callbacks or treat discovery as completed setup. Negative example: triggering a listed setup menu requires approval.", "read/debug", inspect_editor_capabilities_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_inspect_material_properties", "When to use: inspect actual Shader property names, types and values of one exact material, including dirty or variant assets. When NOT to use: do not assign values or infer fields from plugin names. Negative example: enabling a second texture layer requires the approved material writer after inspection.", "read/debug", inspect_material_properties_sync)
     AGENT_GATEWAY.register_tool(
         "vrcforge_scan_inbound_reference_closure",
         "When to use: prove which serialized object references, animation binding paths, framework paths, and PhysBone/Contact parameter consumers still point into exact scene roots or components before cleanup. "
@@ -28199,12 +28234,19 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_set_property",
-        "Set a single field/property on a component of a scene GameObject through VRCForge.",
+        "When to use: assign one component value through approval, using propertyPath for a direct field/property or serializedPropertyPath for a serialized nested scalar, Array.data[n] element or object-reference leaf. Read the exact component first. When NOT to use: do not mix both paths, invoke methods or edit unknown fields. Negative example: use the discovered menu execution tool for a plugin setup callback.",
         "medium",
         set_component_property_sync,
         verification_profile="persisted_scene_write_console",
         verification_prepare_handler=prepare_persisted_scene_console_verification,
         verification_finalize_handler=finalize_persisted_scene_console_verification,
+    )
+    from unity_editor_extension_tools import editor_menu_request
+    register_write_handler(
+        "vrcforge_execute_unity_editor_menu",
+        "When to use: after inspecting editor capabilities, trigger one exact discovered plugin menu with explicit selection identities through approval and a project checkpoint. This reports dispatch only; inspect the resulting objects, assets or window separately. When NOT to use: do not assume dispatch completed plugin setup or bypass a supported property writer. Negative example: opening a setup window is not a completed avatar configuration. Plugin callbacks may leave partial effects on failure; preserve the scene and checkpoint for explicit recovery.",
+        "high", execute_unity_editor_menu_sync,
+        approved_execution_plan_builder=lambda args: [("vrc_execute_unity_editor_menu", editor_menu_request(args))],
     )
     register_write_handler(
         "vrcforge_create_gameobject",

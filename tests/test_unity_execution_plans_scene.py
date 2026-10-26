@@ -30,6 +30,21 @@ def test_scene_handler_argument_projection(target, arguments, expected):
     assert build_scene_execution_plan(target, arguments) == [expected]
 
 
+def test_set_property_projects_serialized_property_path_and_rejects_ambiguity():
+    call = build_scene_execution_plan("vrcforge_set_property", {
+        "gameObjectPath": "Root", "componentType": "Example",
+        "serializedPropertyPath": "settings.entries.Array.data[2].weight", "value": 0.5,
+    })[0]
+    assert call[1]["serializedPropertyPath"] == "settings.entries.Array.data[2].weight"
+    assert "propertyPath" not in call[1]
+    for args in (
+        {"gameObjectPath": "Root", "componentType": "Example", "value": 0},
+        {"gameObjectPath": "Root", "componentType": "Example", "propertyPath": "enabled", "serializedPropertyPath": "enabled", "value": 0},
+    ):
+        with pytest.raises(ValueError, match="exactly one"):
+            build_scene_execution_plan("vrcforge_set_property", args)
+
+
 def test_ensure_animator_state_freezes_time_parameter_fields() -> None:
     plan = build_scene_execution_plan(
         "vrcforge_ensure_animator_state",

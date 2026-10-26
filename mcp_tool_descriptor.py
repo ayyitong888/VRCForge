@@ -47,6 +47,8 @@ def canonical_mcp_tool_name(name: str) -> str:
 
 def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, Any] | None = None) -> str:
     normalized = str(name or "").casefold()
+    if normalized.endswith(("inspect_editor_capabilities", "execute_unity_editor_menu", "inspect_material_properties")):
+        return "project"
     # Prepared calls execute their nested arguments; idle outer fields cannot choose scope.
     values = arguments or {}
     for key in ("arguments", "params"):

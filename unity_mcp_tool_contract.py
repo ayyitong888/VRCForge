@@ -8,11 +8,12 @@ from typing import Any
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
 PRODUCT_VERSION = "1.10.0"
-TOOL_CONTRACT_VERSION = "177"
+TOOL_CONTRACT_VERSION = "190"
 PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "87"
 
 EXPECTED_TOOL_NAMES = frozenset(
     {
+        "vrc_inspect_editor_capabilities", "vrc_inspect_material_properties", "vrc_execute_unity_editor_menu",
         "vrc_start_runtime_observation", "vrc_get_runtime_observation",
         "vrc_add_component", "vrc_add_modular_avatar_component", "vrc_add_outfit_part", "vrc_add_wardrobe_outfit",
         "vrc_apply_blendshapes", "vrc_apply_clothing_fx", "vrc_apply_material_tuning", "vrc_apply_parameter_optimization",
@@ -35,7 +36,7 @@ EXPECTED_TOOL_NAMES = frozenset(
     }
 )
 SCAN_SCOPE_TOOL_NAMES = frozenset({"vrc_capture_scan_scope", "vrc_validate_scan_scope"})
-EXPECTED_TOOL_COUNT = 97
+EXPECTED_TOOL_COUNT = 100
 
 # Contract revisions describe the discovered tool surface; protocol-range
 # negotiation decides whether the App and Core can communicate. Revision 88
@@ -53,6 +54,7 @@ PREVIOUS_CORE_TOOL_COUNT = len(PREVIOUS_CORE_TOOL_NAMES)
 # even when its name sounds observational.
 READ_ONLY_TOOL_NAMES = frozenset(
     {
+        "vrc_inspect_editor_capabilities", "vrc_inspect_material_properties",
         "vrc_get_runtime_observation",
         "vrc_find_assets",
         "vrc_get_asset_info",

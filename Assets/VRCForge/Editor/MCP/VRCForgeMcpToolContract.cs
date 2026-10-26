@@ -15,12 +15,15 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.10.0";
-        internal const string ToolContractVersion = "189";
-        internal const int ToolCount = 99;
+        internal const string ToolContractVersion = "190";
+        internal const int ToolCount = 102;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
+                { "vrc_inspect_editor_capabilities", "VRCForge.Editor.Generic.UnityEditorCapabilityDiscovery" },
+                { "vrc_inspect_material_properties", "VRCForge.Editor.Generic.UnityMaterialPropertyInspect" },
+                { "vrc_execute_unity_editor_menu", "VRCForge.Editor.Generic.UnityEditorMenuExecuteTool" },
                 { "vrc_capture_scan_scope", "VRCForge.Editor.CaptureScanScopeTool" },
                 { "vrc_validate_scan_scope", "VRCForge.Editor.ValidateScanScopeTool" },
                 { "vrc_add_component", "VRCForge.Editor.AddComponentTool" },
@@ -125,6 +128,8 @@ namespace VRCForge.Editor
         private static readonly HashSet<string> ExpectedReadOnlyNames =
             new HashSet<string>(StringComparer.Ordinal)
             {
+                "vrc_inspect_editor_capabilities",
+                "vrc_inspect_material_properties",
                 "vrc_capture_scan_scope",
                 "vrc_validate_scan_scope",
                 "vrc_find_assets",

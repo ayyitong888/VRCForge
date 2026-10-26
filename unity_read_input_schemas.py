@@ -378,9 +378,14 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "additionalProperties": False,
         "required": ["projectPath"],
         "oneOf": [
-            {"required": ["gameObjectPath", "componentType", "propertyPath"], "not": {"required": ["queries"]}},
+            {"required": ["gameObjectPath", "componentType", "propertyPath"], "not": {"anyOf": [
+                {"required": ["queries"]}, {"required": ["serializedPropertyPath"]},
+            ]}},
+            {"required": ["gameObjectPath", "componentType", "serializedPropertyPath"], "not": {"anyOf": [
+                {"required": ["queries"]}, {"required": ["propertyPath"]},
+            ]}},
             {"required": ["queries", "executionTarget"], "not": {"anyOf": [
-                {"required": [field]} for field in ("gameObjectPath", "componentType", "propertyPath", "componentIndex", "maxItems")
+                {"required": [field]} for field in ("gameObjectPath", "componentType", "propertyPath", "serializedPropertyPath", "componentIndex", "maxItems")
             ]}},
         ],
         "properties": {
@@ -389,7 +394,8 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "executionTarget": {**COMPONENT_PROPERTY_TARGET_SCHEMA, "description": "Exact component identity. For queries this is a same-namespace anchor only; every query still requires its own bound component identity."},
             "gameObjectPath": {"type": "string"},
             "componentType": {"type": "string"},
-            "propertyPath": {"type": "string"},
+            "propertyPath": {"type": "string", "description": "Direct public field/property name. Provide exactly one of this and serializedPropertyPath."},
+            "serializedPropertyPath": {"type": "string", "minLength": 1, "description": "Serialized leaf path, including nested fields and Array.data[index] elements; mutually exclusive with propertyPath."},
             "componentIndex": {"type": "integer", "minimum": 0, "default": 0},
             "maxItems": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 50},
         },
@@ -1142,4 +1148,10 @@ UNITY_READ_TOOL_INPUT_SCHEMAS.update({
         "properties": {name: _PROGRESS_ITEM_PROPERTIES[name] for name in ("progressId", "id")},
         "anyOf": [{"required": ["progressId"]}, {"required": ["id"]}],
     },
+})
+
+from unity_editor_extension_tools import EDITOR_CAPABILITIES_SCHEMA, MATERIAL_PROPERTIES_SCHEMA
+UNITY_READ_TOOL_INPUT_SCHEMAS.update({
+    "vrcforge_inspect_editor_capabilities": EDITOR_CAPABILITIES_SCHEMA,
+    "vrcforge_inspect_material_properties": MATERIAL_PROPERTIES_SCHEMA,
 })

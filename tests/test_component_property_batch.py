@@ -5,6 +5,7 @@ import jsonschema
 import pytest
 
 from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
+from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
 
 
 def target(index=0):
@@ -35,6 +36,25 @@ def test_batch_schema_accepts_bound_components_and_preserves_scalar_requirements
     for key in scalar:
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate({k: v for k, v in scalar.items() if k != key}, schema)
+
+
+def test_scalar_serialized_path_schema_is_mutually_exclusive_with_direct_and_batch():
+    schema = UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_get_property"]
+    scalar = {"projectPath": "Project", "gameObjectPath": "Avatar/Part0", "componentType": "Example",
+              "serializedPropertyPath": "settings.entries.Array.data[2].weight"}
+    jsonschema.validate(scalar, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**scalar, "propertyPath": "weight"}, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**request(), "serializedPropertyPath": "settings.value"}, schema)
+
+    write_schema = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_set_property"]
+    write = {"projectPath": "Project", "gameObjectPath": "Avatar/Part0", "componentType": "Example",
+             "serializedPropertyPath": "settings.entries.Array.data[2].weight", "value": 0.5}
+    jsonschema.validate(write, write_schema)
+    jsonschema.validate({k: v for k, v in {**write, "propertyPath": "weight"}.items() if k != "serializedPropertyPath"}, write_schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**write, "propertyPath": "weight"}, write_schema)
 
 
 @pytest.mark.parametrize("field,value", [("propertyPath", "position"), ("gameObjectPath", "Avatar"), ("componentIndex", 0), ("maxItems", 10)])

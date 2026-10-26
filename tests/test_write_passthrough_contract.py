@@ -31,8 +31,14 @@ def test_set_property_returns_persisted_before_after_and_bounded_affected() -> N
 
     assert "AssetDatabase.SaveAssets();" not in block
     save_index = block.index("ComponentCrudCore.SaveAndResolveScene(beforeScene)")
-    readback_index = block.index("var readbackValue = ComponentCrudCore.GetMemberValue")
-    assert save_index < readback_index
+    member_readback_index = block.index("ComponentCrudCore.GetMemberValue(readbackComponent, readbackMember)")
+    assert save_index < member_readback_index
+    serialized_apply_index = block.index("serialized.ApplyModifiedProperties()")
+    serialized_update_index = block.index("serialized.Update();", serialized_apply_index)
+    serialized_readback_index = block.index("ComponentCrudCore.ReadSerializedPropertyValue", serialized_update_index)
+    assert serialized_apply_index < serialized_update_index < serialized_readback_index
+    assert "ComponentCrudCore.ResolvePropertyPath(p.propertyPath, p.serializedPropertyPath)" in block
+    assert 'scope["serializedPropertyPath"] = propertyPath' in source
     helper_start = source.index("internal static SavedSceneSnapshot SaveAndResolveScene(")
     scene_save = source.index("EditorSceneManager.SaveScene(beforeScene.Scene)", helper_start)
     scene_readback = source.index("var afterScene = SceneObjectCopyCore.ResolveSavedScene(", scene_save)
@@ -42,6 +48,18 @@ def test_set_property_returns_persisted_before_after_and_bounded_affected() -> N
     assert "after = ComponentCrudCore.DescribeValue(unchangedReadbackValue)" in block
     assert "items = new[] { goPath }" in block
     assert "handle = objectId" in block
+
+
+def test_get_property_reads_serialized_leaf_paths_without_reflection() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/Generic/UnityComponentCrud.cs").read_text(
+        encoding="utf-8"
+    )
+    block = _tool_block(source, "GetPropertyTool", "public static class SetPropertyTool")
+    assert "ComponentCrudCore.ResolvePropertyPath(p.propertyPath, p.serializedPropertyPath)" in block
+    assert "new SerializedObject(component)" in block
+    assert "ComponentCrudCore.ResolveSerializedProperty(serialized, propertyPath)" in block
+    assert "ComponentCrudCore.ReadSerializedPropertyValue(serializedProperty)" in block
+    assert "serializedPropertyPath requires one scalar component property" in block
 
 
 def test_duplicate_project_asset_returns_fresh_readback_and_bounded_affected() -> None:

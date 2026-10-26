@@ -13999,6 +13999,27 @@ class DashboardServerTests(unittest.TestCase):
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
+    def test_get_property_forwards_serialized_leaf_path(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0, stdout="ok", stderr="", payload={"data": {
+                "serializedPropertyPath": "settings.entries.Array.data[2].weight", "propertyValue": 0.5,
+            }},
+        )
+        result = dashboard_server.read_component_property_sync({
+            "gameObjectPath": "Root", "componentType": "Example",
+            "serializedPropertyPath": "settings.entries.Array.data[2].weight",
+        })
+        self.assertTrue(result["ok"])
+        self.assertEqual(mock_invoke.call_args.args[2]["serializedPropertyPath"], "settings.entries.Array.data[2].weight")
+        self.assertNotIn("propertyPath", mock_invoke.call_args.args[2])
+        self.assertFalse(dashboard_server.read_component_property_sync({
+            "gameObjectPath": "Root", "componentType": "Example", "propertyPath": "weight",
+            "serializedPropertyPath": "settings.weight",
+        })["ok"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
     def test_inspect_skinned_mesh_bone_usage_forwards_exact_read_arguments(
         self,
         mock_load_settings,
@@ -14132,6 +14153,32 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(result["verified"])
         self.assertEqual(result["readback"]["value"], False)
         self.assertEqual(result["readback"]["propertyPath"], "enabled")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_set_property_forwards_serialized_leaf_and_readback(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0, stdout="ok", stderr="", payload={"data": {
+                "action": "set_property", "gameObjectPath": "Root", "componentType": "Example",
+                "componentIndex": 0, "serializedPropertyPath": "settings.entries.Array.data[2].weight",
+                "newValue": 0.75, "after": 0.75, "scenePath": "Assets/Scene.unity", "persistedReadback": True,
+            }},
+        )
+        result = dashboard_server.set_component_property_sync({
+            "gameObjectPath": "Root", "componentType": "Example",
+            "serializedPropertyPath": "settings.entries.Array.data[2].weight", "value": 0.75,
+        })
+        self.assertTrue(result["verified"])
+        args = mock_invoke.call_args.args[2]
+        self.assertEqual(args["serializedPropertyPath"], "settings.entries.Array.data[2].weight")
+        self.assertNotIn("propertyPath", args)
+        self.assertEqual(result["readback"]["serializedPropertyPath"], "settings.entries.Array.data[2].weight")
+        self.assertEqual(result["readback"]["propertyPath"], "settings.entries.Array.data[2].weight")
+        self.assertFalse(dashboard_server.set_component_property_sync({
+            "gameObjectPath": "Root", "componentType": "Example", "propertyPath": "weight",
+            "serializedPropertyPath": "settings.weight", "value": 0.75,
+        })["ok"])
 
     def test_generic_gameobject_crud_tool_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"

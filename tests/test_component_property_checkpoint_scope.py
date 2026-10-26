@@ -49,6 +49,48 @@ def test_property_write_derives_exact_scene_before_checkpoint(case):
     assert args == before
 
 
+def test_serialized_leaf_checkpoint_matches_root_owner_and_exact_leaf(case):
+    root, _, args, scope, calls = case
+    serialized = 'settings.entries.Array.data[2].weight'
+    args.pop('propertyPath')
+    args['serializedPropertyPath'] = serialized
+    scope['propertyPath'] = 'settings'
+    scope['serializedPropertyPath'] = serialized
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is True, result
+    assert calls == [(root, ['Assets/Main.unity'])]
+
+
+def test_serialized_checkpoint_rejects_different_leaf_with_same_root(case):
+    root, _, args, scope, calls = case
+    args.pop('propertyPath')
+    args['serializedPropertyPath'] = 'settings.value'
+    scope['propertyPath'] = 'settings'
+    scope['serializedPropertyPath'] = 'settings.other'
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is False
+    assert calls == []
+
+
+@pytest.mark.parametrize('other_path', ['missing', 'propertyPath'])
+def test_serialized_checkpoint_rejects_missing_or_mixed_path(case, other_path):
+    root, _, args, scope, calls = case
+    args.pop('propertyPath')
+    args['serializedPropertyPath'] = 'settings.value'
+    scope['propertyPath'] = 'settings'
+    scope['serializedPropertyPath'] = 'settings.value'
+    if other_path == 'missing':
+        args.pop('serializedPropertyPath')
+    else:
+        args[other_path] = 'enabled'
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is False
+    assert calls == []
+
+
 def test_internal_property_reference_is_resolved_without_changing_approved_arguments(case, monkeypatch):
     root, target, args, _, calls = case
     reference = {'schema': 'vrcforge.execution_target_ref.v1', 'ref': 'session-bound-reference'}

@@ -252,6 +252,191 @@ namespace VRCForge.Editor
             property.SetValue(target, value);
         }
 
+        internal static string ResolvePropertyPath(string propertyPath, string serializedPropertyPath)
+        {
+            var hasMemberPath = !string.IsNullOrWhiteSpace(propertyPath);
+            var hasSerializedPath = !string.IsNullOrWhiteSpace(serializedPropertyPath);
+            if (hasMemberPath == hasSerializedPath)
+            {
+                throw new InvalidOperationException(
+                    "Provide exactly one of propertyPath or serializedPropertyPath.");
+            }
+            return hasSerializedPath ? serializedPropertyPath.Trim() : propertyPath;
+        }
+
+        internal static FieldInfo ResolveSerializedRootField(Type componentType, string serializedPropertyPath)
+        {
+            var rootName = (serializedPropertyPath ?? string.Empty).Split('.')[0];
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            for (var current = componentType; current != null; current = current.BaseType)
+            {
+                var field = current.GetField(rootName, flags | BindingFlags.DeclaredOnly);
+                if (field != null)
+                {
+                    return field;
+                }
+            }
+            throw new InvalidOperationException(
+                $"SerializedProperty path '{serializedPropertyPath}' does not start with a serialized field on '{componentType.FullName}'.");
+        }
+
+        internal static SerializedProperty ResolveSerializedProperty(SerializedObject serialized, string path)
+        {
+            if (serialized == null || string.IsNullOrWhiteSpace(path))
+            {
+                throw new InvalidOperationException("serializedPropertyPath is required.");
+            }
+            serialized.UpdateIfRequiredOrScript();
+            var property = serialized.FindProperty(path);
+            if (property == null)
+            {
+                throw new InvalidOperationException($"SerializedProperty '{path}' was not found.");
+            }
+            return property;
+        }
+
+        internal static object ReadSerializedPropertyValue(SerializedProperty property)
+        {
+            if (property == null)
+            {
+                throw new InvalidOperationException("SerializedProperty is unavailable.");
+            }
+            switch (property.propertyType)
+            {
+                case SerializedPropertyType.Boolean: return property.boolValue;
+                case SerializedPropertyType.Integer:
+                    return property.type == "long" || property.type == "ulong"
+                        ? (object)property.longValue
+                        : property.intValue;
+                case SerializedPropertyType.Float:
+                    return property.type == "double" ? (object)property.doubleValue : property.floatValue;
+                case SerializedPropertyType.String: return property.stringValue;
+                case SerializedPropertyType.Enum:
+                    return property.enumValueIndex >= 0 && property.enumValueIndex < property.enumNames.Length
+                        ? property.enumNames[property.enumValueIndex]
+                        : property.enumValueIndex.ToString(CultureInfo.InvariantCulture);
+                case SerializedPropertyType.ObjectReference: return property.objectReferenceValue;
+                case SerializedPropertyType.ExposedReference: return property.exposedReferenceValue;
+                case SerializedPropertyType.Color: return property.colorValue;
+                case SerializedPropertyType.Vector2: return property.vector2Value;
+                case SerializedPropertyType.Vector3: return property.vector3Value;
+                case SerializedPropertyType.Vector4: return property.vector4Value;
+                case SerializedPropertyType.Quaternion: return property.quaternionValue;
+                case SerializedPropertyType.ArraySize: return property.intValue;
+                default:
+                    throw new InvalidOperationException(
+                        $"SerializedProperty '{property.propertyPath}' has unsupported non-leaf type '{property.propertyType}'. Address a nested scalar or an array element leaf.");
+            }
+        }
+
+        internal static object ConvertSerializedPropertyValue(JToken token, SerializedProperty property)
+        {
+            if (property == null)
+            {
+                throw new InvalidOperationException("SerializedProperty is unavailable.");
+            }
+            switch (property.propertyType)
+            {
+                case SerializedPropertyType.Boolean: return token.ToObject<bool>();
+                case SerializedPropertyType.Integer:
+                case SerializedPropertyType.ArraySize:
+                    return property.type == "long" || property.type == "ulong"
+                        ? (object)token.ToObject<long>()
+                        : token.ToObject<int>();
+                case SerializedPropertyType.Float:
+                    return property.type == "double" ? (object)token.ToObject<double>() : token.ToObject<float>();
+                case SerializedPropertyType.String: return token.Type == JTokenType.Null ? null : token.ToString();
+                case SerializedPropertyType.Enum:
+                    if (token.Type == JTokenType.Integer)
+                    {
+                        var index = token.ToObject<int>();
+                        if (index < 0 || index >= property.enumNames.Length)
+                            throw new InvalidOperationException("Enum index is outside the serialized enum range.");
+                        return property.enumNames[index];
+                    }
+                    var enumName = token.ToString();
+                    var enumIndex = Array.IndexOf(property.enumNames, enumName);
+                    if (enumIndex < 0)
+                        throw new InvalidOperationException($"'{enumName}' is not a serialized enum member.");
+                    return enumName;
+                case SerializedPropertyType.ObjectReference:
+                case SerializedPropertyType.ExposedReference:
+                    return ResolveObjectReference(token, ResolveSerializedObjectReferenceType(property));
+                case SerializedPropertyType.Color:
+                    return ConvertValue(token, typeof(Color));
+                case SerializedPropertyType.Vector2:
+                    return ConvertValue(token, typeof(Vector2));
+                case SerializedPropertyType.Vector3:
+                    return ConvertValue(token, typeof(Vector3));
+                case SerializedPropertyType.Vector4:
+                    return ConvertValue(token, typeof(Vector4));
+                case SerializedPropertyType.Quaternion:
+                    return ConvertValue(token, typeof(Quaternion));
+                default:
+                    throw new InvalidOperationException(
+                        $"SerializedProperty '{property.propertyPath}' has unsupported non-leaf type '{property.propertyType}'. Address a nested scalar or an array element leaf.");
+            }
+        }
+
+        internal static void WriteSerializedPropertyValue(SerializedProperty property, object value)
+        {
+            switch (property.propertyType)
+            {
+                case SerializedPropertyType.Boolean: property.boolValue = (bool)value; return;
+                case SerializedPropertyType.Integer:
+                    if (property.type == "long" || property.type == "ulong") property.longValue = Convert.ToInt64(value, CultureInfo.InvariantCulture);
+                    else property.intValue = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                    return;
+                case SerializedPropertyType.ArraySize: property.intValue = Convert.ToInt32(value, CultureInfo.InvariantCulture); return;
+                case SerializedPropertyType.Float:
+                    if (property.type == "double") property.doubleValue = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+                    else property.floatValue = Convert.ToSingle(value, CultureInfo.InvariantCulture);
+                    return;
+                case SerializedPropertyType.String: property.stringValue = (string)value; return;
+                case SerializedPropertyType.Enum:
+                    var enumName = Convert.ToString(value, CultureInfo.InvariantCulture);
+                    var enumIndex = Array.IndexOf(property.enumNames, enumName);
+                    if (enumIndex < 0) throw new InvalidOperationException($"'{enumName}' is not a serialized enum member.");
+                    property.enumValueIndex = enumIndex;
+                    return;
+                case SerializedPropertyType.ObjectReference: property.objectReferenceValue = (UnityEngine.Object)value; return;
+                case SerializedPropertyType.ExposedReference: property.exposedReferenceValue = (UnityEngine.Object)value; return;
+                case SerializedPropertyType.Color: property.colorValue = (Color)value; return;
+                case SerializedPropertyType.Vector2: property.vector2Value = (Vector2)value; return;
+                case SerializedPropertyType.Vector3: property.vector3Value = (Vector3)value; return;
+                case SerializedPropertyType.Vector4: property.vector4Value = (Vector4)value; return;
+                case SerializedPropertyType.Quaternion: property.quaternionValue = (Quaternion)value; return;
+                default:
+                    throw new InvalidOperationException(
+                        $"SerializedProperty '{property.propertyPath}' has unsupported non-leaf type '{property.propertyType}'. Address a nested scalar or an array element leaf.");
+            }
+        }
+
+        private static Type ResolveSerializedObjectReferenceType(SerializedProperty property)
+        {
+            var serializedType = property.type ?? string.Empty;
+            var start = serializedType.IndexOf("<$", StringComparison.Ordinal);
+            var end = serializedType.LastIndexOf('>');
+            if (start >= 0 && end > start + 2)
+            {
+                var shortName = serializedType.Substring(start + 2, end - start - 2);
+                var resolved = FindType(shortName) ?? FindType("UnityEngine." + shortName);
+                if (resolved == null)
+                {
+                    var matches = AppDomain.CurrentDomain.GetAssemblies()
+                        .Select(assembly => { try { return assembly.GetTypes(); } catch (ReflectionTypeLoadException ex) { return ex.Types.Where(type => type != null).ToArray(); } catch { return Type.EmptyTypes; } })
+                        .SelectMany(types => types)
+                        .Where(type => type != null && string.Equals(type.Name, shortName, StringComparison.Ordinal))
+                        .Distinct().Take(2).ToList();
+                    if (matches.Count == 1) resolved = matches[0];
+                    else if (matches.Count > 1) throw new InvalidOperationException($"Serialized object-reference type '{shortName}' is ambiguous.");
+                }
+                if (resolved != null && typeof(UnityEngine.Object).IsAssignableFrom(resolved)) return resolved;
+            }
+            return typeof(UnityEngine.Object);
+        }
+
+
         // Convert an arbitrary JSON token into the target CLR/Unity type.
         internal static object ConvertValue(JToken token, Type targetType)
         {
@@ -808,6 +993,12 @@ namespace VRCForge.Editor
 
         private static bool IsPlainSerializedFieldType(Type type, bool allowCollection = true)
         {
+            return IsPlainSerializedFieldType(type, allowCollection, new HashSet<Type>());
+        }
+
+        private static bool IsPlainSerializedFieldType(Type type, bool allowCollection, HashSet<Type> visiting)
+        {
+            if (type == null) return false;
             if (type == typeof(string) || type == typeof(bool) || type == typeof(byte)
                 || type == typeof(sbyte) || type == typeof(short) || type == typeof(ushort)
                 || type == typeof(int) || type == typeof(uint) || type == typeof(long)
@@ -819,16 +1010,51 @@ namespace VRCForge.Editor
             {
                 return true;
             }
-            if (!allowCollection)
+            if (!visiting.Add(type)) return false;
+            try
             {
-                return false;
+                if (type.IsArray)
+                {
+                    return allowCollection && type.GetArrayRank() == 1
+                        && IsPlainSerializedFieldType(type.GetElementType(), false, visiting);
+                }
+                if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>))
+                {
+                    return allowCollection
+                        && IsPlainSerializedFieldType(type.GetGenericArguments()[0], false, visiting);
+                }
+                if ((!type.IsClass && !type.IsValueType)
+                    || !type.GetCustomAttributesData().Any(attribute => attribute.AttributeType == typeof(SerializableAttribute))
+                    || typeof(ISerializationCallbackReceiver).IsAssignableFrom(type))
+                {
+                    return false;
+                }
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public
+                    | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+                for (var current = type; current != null && current != typeof(object); current = current.BaseType)
+                {
+                    foreach (var field in current.GetFields(flags))
+                    {
+                        if (field.IsStatic || field.IsInitOnly || field.IsLiteral || field.IsNotSerialized
+                            || (!field.IsPublic && !field.GetCustomAttributesData().Any(
+                                attribute => attribute.AttributeType == typeof(SerializeField))))
+                        {
+                            continue;
+                        }
+                        if (field.GetCustomAttributesData().Any(
+                                attribute => attribute.AttributeType == typeof(SerializeReference))
+                            || !IsPlainSerializedFieldType(field.FieldType, true, visiting))
+                        {
+                            return false;
+                        }
+                    }
+                }
+                return true;
             }
-            if (type.IsArray)
+            finally
             {
-                return type.GetArrayRank() == 1 && IsPlainSerializedFieldType(type.GetElementType(), false);
+                visiting.Remove(type);
             }
-            return type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>)
-                && IsPlainSerializedFieldType(type.GetGenericArguments()[0], false);
         }
 
         private static bool IsPlainSceneDataField(Component component, MemberInfo member)
@@ -884,7 +1110,7 @@ namespace VRCForge.Editor
 
         internal static object BuildPropertyCheckpointScope(
             Component component, MemberInfo member, int componentIndex,
-            string propertyPath, SavedSceneSnapshot scene)
+            string propertyPath, SavedSceneSnapshot scene, bool serializedProperty = false)
         {
             if (component == null || member == null || member.DeclaringType == null || scene == null
                 || (component is MonoBehaviour
@@ -910,20 +1136,25 @@ namespace VRCForge.Editor
             {
                 throw new InvalidOperationException("component_property_checkpoint_owner_invalid: The resolved component and object must belong to the saved scene identity.");
             }
-            return new
+            var scope = new Dictionary<string, object>
             {
-                schema = "vrcforge.component_property_checkpoint.v1",
-                ownerKind = "scene",
-                scenePath = scene.Path,
-                sceneGuid = scene.Guid,
-                sceneDigest = scene.FileDigest,
-                objectGlobalObjectId = objectId.ToString(),
-                componentGlobalObjectId = componentId.ToString(),
-                componentType = component.GetType().FullName,
-                componentIndex,
-                propertyPath,
-                archiveAssetPaths = new[] { scene.Path }
+                ["schema"] = "vrcforge.component_property_checkpoint.v1",
+                ["ownerKind"] = "scene",
+                ["scenePath"] = scene.Path,
+                ["sceneGuid"] = scene.Guid,
+                ["sceneDigest"] = scene.FileDigest,
+                ["objectGlobalObjectId"] = objectId.ToString(),
+                ["componentGlobalObjectId"] = componentId.ToString(),
+                ["componentType"] = component.GetType().FullName,
+                ["componentIndex"] = componentIndex,
+                ["propertyPath"] = serializedProperty ? member.Name : propertyPath,
+                ["archiveAssetPaths"] = new[] { scene.Path }
             };
+            if (serializedProperty)
+            {
+                scope["serializedPropertyPath"] = propertyPath;
+            }
+            return scope;
         }
 
         internal static void RecordPropertyPrefabOverride(Component component)
@@ -1231,7 +1462,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_get_property",
-        Summary = "Read a component field/property, or a bounded batch of exact component identities and simple properties with per-item errors (read-only).",
+        Summary = "when-to-use: read a direct component property, a serialized leaf path, or a bounded batch of exact component identities and simple properties. when-NOT-to-use: do not write or mix scalar paths with batch queries. Negative example: changing a nested value requires the approved setter.",
         Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class GetPropertyTool
@@ -1249,8 +1480,11 @@ namespace VRCForge.Editor
             [VRCForgeInput("Component type. Fully-qualified (e.g. 'UnityEngine.SkinnedMeshRenderer') or unique short name.", IsRequired = true)]
             public string componentType { get; set; } = "";
 
-            [VRCForgeInput("Field or property name to read (e.g. 'enabled', 'sharedMesh').", IsRequired = true)]
-            public string propertyPath { get; set; } = "";
+            [VRCForgeInput("Field/property name or serialized leaf path alternative; provide exactly one of this and serializedPropertyPath.", IsRequired = false)]
+            public string propertyPath { get; set; }
+
+            [VRCForgeInput("Serialized leaf path alternative for private/public serialized fields, nested values, and array elements (e.g. 'settings.enabled' or 'entries.Array.data[0].weight'). Mutually exclusive with propertyPath.", IsRequired = false)]
+            public string serializedPropertyPath { get; set; }
 
             [VRCForgeInput("Which component instance to read when several of the same type exist (default 0).", IsRequired = false)]
             public int? componentIndex { get; set; } = 0;
@@ -1268,6 +1502,8 @@ namespace VRCForge.Editor
             {
                 if (@params.Value<bool?>("includeCheckpointScope") == true)
                     return VRCForgeToolResult.Failed("includeCheckpointScope requires one scalar component property; it cannot be combined with queries.");
+                if (!string.IsNullOrWhiteSpace(@params.Value<string>("serializedPropertyPath")))
+                    return VRCForgeToolResult.Failed("serializedPropertyPath requires one scalar component property; it cannot be combined with queries.");
                 return UnityComponentPropertyBatch.Handle(@params);
             }
             var p = (@params ?? new JObject()).ToObject<GetPropertyParameters>() ?? new GetPropertyParameters();
@@ -1276,22 +1512,42 @@ namespace VRCForge.Editor
                 var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
                 var type = ComponentCrudCore.ResolveComponentType(p.componentType);
                 var component = ComponentCrudCore.ResolveComponent(go, type, p.componentIndex ?? 0);
-                var member = ComponentCrudCore.ResolveMember(component.GetType(), p.propertyPath);
+                var propertyPath = ComponentCrudCore.ResolvePropertyPath(p.propertyPath, p.serializedPropertyPath);
+                var serializedPath = !string.IsNullOrWhiteSpace(p.serializedPropertyPath);
+                var member = serializedPath
+                    ? (MemberInfo)ComponentCrudCore.ResolveSerializedRootField(component.GetType(), propertyPath)
+                    : ComponentCrudCore.ResolveMember(component.GetType(), propertyPath);
                 if (p.includeCheckpointScope == true)
                 {
                     var checkpointScope = ComponentCrudCore.BuildPropertyCheckpointScope(
-                        component, member, p.componentIndex ?? 0, p.propertyPath,
-                        ComponentCrudCore.ResolveSavedSceneFor(component.gameObject));
+                        component, member, p.componentIndex ?? 0, propertyPath,
+                        ComponentCrudCore.ResolveSavedSceneFor(component.gameObject), serializedPath);
                     return VRCForgeToolResult.Completed("Read the resolved component property's checkpoint scope without invoking its getter.", new
                     {
                         gameObjectPath = ComponentCrudCore.GetHierarchyPath(component.gameObject.transform),
                         componentType = component.GetType().FullName,
                         componentIndex = p.componentIndex ?? 0,
-                        propertyPath = p.propertyPath,
+                        propertyPath,
+                        serializedPropertyPath = serializedPath ? propertyPath : null,
                         checkpointScope
                     });
                 }
-                var value = ComponentCrudCore.GetReadOnlyMemberValue(component, member);
+                object value;
+                string valueType;
+                if (serializedPath)
+                {
+                    using (var serialized = new SerializedObject(component))
+                    {
+                        var serializedProperty = ComponentCrudCore.ResolveSerializedProperty(serialized, propertyPath);
+                        value = ComponentCrudCore.ReadSerializedPropertyValue(serializedProperty);
+                        valueType = serializedProperty.type;
+                    }
+                }
+                else
+                {
+                    value = ComponentCrudCore.GetReadOnlyMemberValue(component, member);
+                    valueType = ComponentCrudCore.GetMemberType(member).FullName;
+                }
                 var maxItems = p.maxItems ?? 50;
                 if (maxItems < 1 || maxItems > 2000)
                 {
@@ -1312,8 +1568,9 @@ namespace VRCForge.Editor
                     gameObjectPath = ComponentCrudCore.GetHierarchyPath(go.transform),
                     componentType = component.GetType().FullName,
                     componentIndex = p.componentIndex ?? 0,
-                    propertyPath = p.propertyPath,
-                    valueType = ComponentCrudCore.GetMemberType(member).FullName,
+                    propertyPath,
+                    serializedPropertyPath = serializedPath ? propertyPath : null,
+                    valueType,
                     propertyValue,
                     enumValues,
                     returnedItemCount = returnedItemCount >= 0 ? (int?)returnedItemCount : null,
@@ -1323,7 +1580,7 @@ namespace VRCForge.Editor
                 };
 
                 return VRCForgeToolResult.Completed(
-                    $"{component.GetType().Name}.{p.propertyPath} = {payload.propertyValue ?? "null"}",
+                    $"{component.GetType().Name}.{propertyPath} = {payload.propertyValue ?? "null"}",
                     payload);
             }
             catch (Exception ex)
@@ -2246,7 +2503,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_set_property",
-        Summary = "Set a single field/property on a component of a scene GameObject (Undo-registered). Supports preview mode."
+        Summary = "when-to-use: preview or assign one direct property or serialized leaf on a saved scene component through approval and checkpoint. when-NOT-to-use: do not invoke methods or mix direct and serialized paths. Negative example: trigger plugin setup through its discovered menu instead of guessing a field."
     )]
     public static class SetPropertyTool
     {
@@ -2260,8 +2517,11 @@ namespace VRCForge.Editor
             [VRCForgeInput("Component type. Fully-qualified or unique short name.", IsRequired = true)]
             public string componentType { get; set; } = "";
 
-            [VRCForgeInput("Field or property name to set (e.g. 'enabled', 'm_Weight').", IsRequired = true)]
-            public string propertyPath { get; set; } = "";
+            [VRCForgeInput("Field/property name or serialized leaf path alternative; provide exactly one of this and serializedPropertyPath.", IsRequired = false)]
+            public string propertyPath { get; set; }
+
+            [VRCForgeInput("Serialized leaf path alternative for private/public serialized fields, nested values, and array elements. Mutually exclusive with propertyPath.", IsRequired = false)]
+            public string serializedPropertyPath { get; set; }
 
             [VRCForgeInput("JSON value to assign to the field or property.", IsRequired = true)]
             public object value { get; set; }
@@ -2283,6 +2543,8 @@ namespace VRCForge.Editor
             Type type = null;
             MemberInfo member = null;
             object oldValue = null;
+            string propertyPath = null;
+            bool serializedPath = false;
             var componentIndex = p.componentIndex ?? 0;
             var failureStage = "validation";
             bool? mutationApplied = null;
@@ -2307,16 +2569,35 @@ namespace VRCForge.Editor
                 var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
                 type = ComponentCrudCore.ResolveComponentType(p.componentType);
                 var component = ComponentCrudCore.ResolveComponent(go, type, componentIndex);
-                member = ComponentCrudCore.ResolveMember(component.GetType(), p.propertyPath);
-                var memberType = ComponentCrudCore.GetMemberType(member);
+                propertyPath = ComponentCrudCore.ResolvePropertyPath(p.propertyPath, p.serializedPropertyPath);
+                serializedPath = !string.IsNullOrWhiteSpace(p.serializedPropertyPath);
+                member = serializedPath
+                    ? (MemberInfo)ComponentCrudCore.ResolveSerializedRootField(component.GetType(), propertyPath)
+                    : ComponentCrudCore.ResolveMember(component.GetType(), propertyPath);
+                var memberType = serializedPath ? null : ComponentCrudCore.GetMemberType(member);
+                var valueType = serializedPath ? string.Empty : memberType.FullName;
                 goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
                 beforeScene = ComponentCrudCore.ResolveSavedSceneFor(go);
                 var objectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString();
                 var checkpointScope = ComponentCrudCore.BuildPropertyCheckpointScope(
-                    component, member, componentIndex, p.propertyPath, beforeScene);
+                    component, member, componentIndex, propertyPath, beforeScene, serializedPath);
 
-                oldValue = ComponentCrudCore.GetMemberValue(component, member);
-                var newValue = ComponentCrudCore.ConvertValue(valueToken, memberType);
+                object newValue;
+                if (serializedPath)
+                {
+                    using (var serialized = new SerializedObject(component))
+                    {
+                        var serializedProperty = ComponentCrudCore.ResolveSerializedProperty(serialized, propertyPath);
+                        oldValue = ComponentCrudCore.ReadSerializedPropertyValue(serializedProperty);
+                        newValue = ComponentCrudCore.ConvertSerializedPropertyValue(valueToken, serializedProperty);
+                        valueType = serializedProperty.type;
+                    }
+                }
+                else
+                {
+                    oldValue = ComponentCrudCore.GetMemberValue(component, member);
+                    newValue = ComponentCrudCore.ConvertValue(valueToken, memberType);
+                }
 
                 if (p.preview ?? false)
                 {
@@ -2327,14 +2608,15 @@ namespace VRCForge.Editor
                         gameObjectPath = goPath,
                         componentType = component.GetType().FullName,
                         componentIndex = p.componentIndex ?? 0,
-                        propertyPath = p.propertyPath,
+                        propertyPath,
+                        serializedPropertyPath = serializedPath ? propertyPath : null,
                         checkpointScope,
-                        valueType = memberType.FullName,
+                        valueType,
                         oldValue = ComponentCrudCore.DescribeValue(oldValue),
                         newValue = ComponentCrudCore.DescribeValue(newValue)
                     };
                     return VRCForgeToolResult.Completed(
-                        $"Preview: would set {component.GetType().Name}.{p.propertyPath} to {previewPayload.newValue ?? "null"}.",
+                        $"Preview: would set {component.GetType().Name}.{propertyPath} to {previewPayload.newValue ?? "null"}.",
                         previewPayload);
                 }
 
@@ -2351,14 +2633,22 @@ namespace VRCForge.Editor
                         unchangedObject,
                         type,
                         componentIndex);
-                    var unchangedMember = ComponentCrudCore.ResolveMember(
-                        unchangedComponent.GetType(),
-                        p.propertyPath);
-                    var unchangedReadbackValue = ComponentCrudCore.GetMemberValue(
-                        unchangedComponent,
-                        unchangedMember);
+                    var unchangedMember = serializedPath
+                        ? null
+                        : ComponentCrudCore.ResolveMember(unchangedComponent.GetType(), propertyPath);
+                    object unchangedReadbackValue;
+                    if (serializedPath)
+                    {
+                        using (var serialized = new SerializedObject(unchangedComponent))
+                            unchangedReadbackValue = ComponentCrudCore.ReadSerializedPropertyValue(
+                                ComponentCrudCore.ResolveSerializedProperty(serialized, propertyPath));
+                    }
+                    else
+                    {
+                        unchangedReadbackValue = ComponentCrudCore.GetMemberValue(unchangedComponent, unchangedMember);
+                    }
                     return VRCForgeToolResult.Completed(
-                        $"{component.GetType().Name}.{p.propertyPath} already has the requested value on '{goPath}'.",
+                        $"{component.GetType().Name}.{propertyPath} already has the requested value on '{goPath}'.",
                         new
                         {
                             action = "set_property",
@@ -2367,8 +2657,9 @@ namespace VRCForge.Editor
                             gameObjectPath = goPath,
                             componentType = component.GetType().FullName,
                             componentIndex,
-                            propertyPath = p.propertyPath,
-                            valueType = memberType.FullName,
+                            propertyPath,
+                            serializedPropertyPath = serializedPath ? propertyPath : null,
+                            valueType,
                             oldValue = ComponentCrudCore.DescribeValue(oldValue),
                             newValue = ComponentCrudCore.DescribeValue(unchangedReadbackValue),
                             before = ComponentCrudCore.DescribeValue(oldValue),
@@ -2392,10 +2683,28 @@ namespace VRCForge.Editor
                 Undo.IncrementCurrentGroup();
                 undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName("Set VRCForge component property");
-                Undo.RecordObject(component, $"Set {component.GetType().Name}.{p.propertyPath}");
+                Undo.RecordObject(component, $"Set {component.GetType().Name}.{propertyPath}");
                 mutationStarted = true;
                 failureStage = "unity_mutation";
-                ComponentCrudCore.SetMemberValue(component, member, newValue);
+                if (serializedPath)
+                {
+                    using (var serialized = new SerializedObject(component))
+                    {
+                        var serializedProperty = ComponentCrudCore.ResolveSerializedProperty(serialized, propertyPath);
+                        ComponentCrudCore.WriteSerializedPropertyValue(serializedProperty, newValue);
+                        if (!serialized.ApplyModifiedProperties())
+                            throw new InvalidOperationException("SerializedProperty changes were not applied.");
+                        serialized.Update();
+                        var appliedProperty = ComponentCrudCore.ResolveSerializedProperty(serialized, propertyPath);
+                        var appliedReadback = ComponentCrudCore.ReadSerializedPropertyValue(appliedProperty);
+                        if (!ComponentCrudCore.ValuesEqual(appliedReadback, newValue))
+                            throw new InvalidOperationException("SerializedProperty in-memory readback was not exact.");
+                    }
+                }
+                else
+                {
+                    ComponentCrudCore.SetMemberValue(component, member, newValue);
+                }
                 ComponentCrudCore.RecordPropertyPrefabOverride(component);
                 mutationApplied = true;
                 EditorUtility.SetDirty(component);
@@ -2411,10 +2720,18 @@ namespace VRCForge.Editor
                     readbackObject,
                     type,
                     componentIndex);
-                var readbackMember = ComponentCrudCore.ResolveMember(
-                    readbackComponent.GetType(),
-                    p.propertyPath);
-                var readbackValue = ComponentCrudCore.GetMemberValue(readbackComponent, readbackMember);
+                object readbackValue;
+                if (serializedPath)
+                {
+                    using (var serialized = new SerializedObject(readbackComponent))
+                        readbackValue = ComponentCrudCore.ReadSerializedPropertyValue(
+                            ComponentCrudCore.ResolveSerializedProperty(serialized, propertyPath));
+                }
+                else
+                {
+                    var readbackMember = ComponentCrudCore.ResolveMember(readbackComponent.GetType(), propertyPath);
+                    readbackValue = ComponentCrudCore.GetMemberValue(readbackComponent, readbackMember);
+                }
                 if (GlobalObjectId.GetGlobalObjectIdSlow(readbackObject).ToString() != objectId
                     || !ComponentCrudCore.ValuesEqual(readbackValue, newValue)
                     || afterScene.FileDigest == beforeScene.FileDigest)
@@ -2431,8 +2748,9 @@ namespace VRCForge.Editor
                     gameObjectPath = goPath,
                     componentType = component.GetType().FullName,
                     componentIndex,
-                    propertyPath = p.propertyPath,
-                    valueType = memberType.FullName,
+                    propertyPath,
+                    serializedPropertyPath = serializedPath ? propertyPath : null,
+                    valueType,
                     oldValue = ComponentCrudCore.DescribeValue(oldValue),
                     newValue = ComponentCrudCore.DescribeValue(readbackValue),
                     before = ComponentCrudCore.DescribeValue(oldValue),
@@ -2452,7 +2770,7 @@ namespace VRCForge.Editor
                     checkpointRecoveryRequired = false
                 };
                 return VRCForgeToolResult.Completed(
-                    $"Set {component.GetType().Name}.{p.propertyPath} on '{goPath}'.",
+                    $"Set {component.GetType().Name}.{propertyPath} on '{goPath}'.",
                     payload);
             }
             catch (Exception ex)
@@ -2469,12 +2787,16 @@ namespace VRCForge.Editor
                                 restoredObject,
                                 type,
                                 componentIndex);
-                            var restoredMember = ComponentCrudCore.ResolveMember(
-                                restoredComponent.GetType(),
-                                p.propertyPath);
-                            return ComponentCrudCore.ValuesEqual(
-                                ComponentCrudCore.GetMemberValue(restoredComponent, restoredMember),
-                                oldValue);
+                            if (serializedPath)
+                            {
+                                using (var serialized = new SerializedObject(restoredComponent))
+                                    return ComponentCrudCore.ValuesEqual(
+                                        ComponentCrudCore.ReadSerializedPropertyValue(
+                                            ComponentCrudCore.ResolveSerializedProperty(serialized, propertyPath)),
+                                        oldValue);
+                            }
+                            var restoredMember = ComponentCrudCore.ResolveMember(restoredComponent.GetType(), propertyPath);
+                            return ComponentCrudCore.ValuesEqual(ComponentCrudCore.GetMemberValue(restoredComponent, restoredMember), oldValue);
                         });
                     return ComponentCrudCore.FailedMutationResult(
                         "component_property_failed_after_mutation",
@@ -2502,7 +2824,8 @@ namespace VRCForge.Editor
                         gameObjectPath = p.gameObjectPath,
                         componentType = p.componentType,
                         componentIndex,
-                        propertyPath = p.propertyPath,
+                        propertyPath,
+                        serializedPropertyPath = serializedPath ? propertyPath : null,
                         exceptionType = ex.GetType().FullName,
                         reason = ex.Message,
                         recommendedAction = selectedSceneIsDirty

@@ -23,8 +23,15 @@ def prepare_component_property_checkpoint(
     scene = target.get('scene') or {}
     obj = target.get('object') or {}
     component = target.get('component') or {}
-    calls = build_plan('vrcforge_set_property', arguments)
+    try:
+        calls = build_plan('vrcforge_set_property', arguments)
+    except (TypeError, ValueError) as exc:
+        return rejected(str(exc))
     request = calls[0][1] if len(calls) == 1 and calls[0][0] == 'vrc_set_property' else {}
+    direct_path = request.get('propertyPath')
+    serialized_path = request.get('serializedPropertyPath')
+    if bool(direct_path) == bool(serialized_path):
+        return rejected('The approved property write must identify one direct property or serialized property path.')
     scene_path = scene.get('assetPath')
     if (Path(str(project.get('root') or '')).resolve() != project_root.resolve()
             or not obj.get('globalObjectId') or not component.get('globalObjectId')
@@ -57,8 +64,13 @@ def prepare_component_property_checkpoint(
         'objectGlobalObjectId': obj['globalObjectId'],
         'componentGlobalObjectId': component['globalObjectId'],
         'componentType': component['type'], 'componentIndex': request['componentIndex'],
-        'propertyPath': request['propertyPath'], 'archiveAssetPaths': [scene_path],
+        'propertyPath': direct_path if direct_path else serialized_path.split('.', 1)[0],
+        'archiveAssetPaths': [scene_path],
     }
+    if serialized_path:
+        expected['serializedPropertyPath'] = serialized_path
+    elif scope.get('serializedPropertyPath') not in (None, ''):
+        return rejected('The Core checkpoint scope included an unexpected serialized property path.')
     if any(scope.get(key) != value for key, value in expected.items()):
         return rejected('The Core property persistence owner differs from the approved target.')
     prepared = prepare(project_root, checkpoint_files=[scene_path])

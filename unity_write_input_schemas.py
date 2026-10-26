@@ -414,12 +414,17 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "vrcforge_set_property": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["projectPath", "gameObjectPath", "componentType", "propertyPath", "value"],
+        "required": ["projectPath", "gameObjectPath", "componentType", "value"],
+        "oneOf": [
+            {"required": ["propertyPath"], "not": {"required": ["serializedPropertyPath"]}},
+            {"required": ["serializedPropertyPath"], "not": {"required": ["propertyPath"]}},
+        ],
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
             "gameObjectPath": {"type": "string"},
             "componentType": {"type": "string"},
-            "propertyPath": {"type": "string"},
+            "propertyPath": {"type": "string", "description": "Direct public field/property name. Provide exactly one of this and serializedPropertyPath."},
+            "serializedPropertyPath": {"type": "string", "minLength": 1, "description": "Serialized leaf path, including nested fields and Array.data[index] elements; mutually exclusive with propertyPath."},
             "value": {"description": "Exact JSON value to assign to the field or property."},
             "componentIndex": {"type": "integer", "minimum": 0, "default": 0},
         },
@@ -1274,3 +1279,6 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_add_outfit'] = {
         {'anyOf': [{'required': [key]} for key in ('assetPath', 'asset_path', 'guid', 'assetQuery', 'asset_query', 'query')]},
     ],
 }
+
+from unity_editor_extension_tools import EDITOR_MENU_SCHEMA
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_execute_unity_editor_menu"] = EDITOR_MENU_SCHEMA
