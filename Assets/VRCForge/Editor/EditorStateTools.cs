@@ -392,10 +392,81 @@ namespace VRCForge.Editor
         private const string ActivePrefix = "VRCForge.AsyncJob.Active.v1.";
         private static readonly TimeSpan TerminalRetention = TimeSpan.FromMinutes(15);
         private static readonly object Sync = new object();
+        private static readonly Dictionary<string, JObject> McpWriteSnapshots = new Dictionary<string, JObject>(StringComparer.Ordinal);
 
         static UnityAsyncJobRegistry()
         {
             Sweep(DateTime.UtcNow);
+            RecoverMcpWriteSnapshots();
+        }
+
+        internal static JObject CreateMcpWrite(string toolName, string executionId, string projectPath)
+        {
+            if (string.IsNullOrWhiteSpace(executionId)) throw new ArgumentException("executionId is required.", nameof(executionId));
+            lock (Sync)
+            {
+                SweepLocked(DateTime.UtcNow);
+                var existing = FindMcpWriteByExecutionIdLocked(executionId);
+                if (existing != null) return PublicMcpWriteSnapshot(existing);
+                var jobId = Guid.NewGuid().ToString("N").ToLowerInvariant();
+                var now = DateTime.UtcNow;
+                var record = new JObject
+                {
+                    ["schema"] = Schema,
+                    ["job_id"] = jobId,
+                    ["tool"] = toolName,
+                    ["project_path"] = projectPath ?? string.Empty,
+                    ["status"] = "queued",
+                    ["before"] = new JObject(),
+                    ["after"] = JValue.CreateNull(),
+                    ["error"] = JValue.CreateNull(),
+                    ["created_utc"] = now.ToString("O"),
+                    ["started_utc"] = JValue.CreateNull(),
+                    ["completed_utc"] = JValue.CreateNull(),
+                    ["expires_utc"] = now.AddMinutes(15).ToString("O"),
+                    ["purge_after_utc"] = JValue.CreateNull(),
+                    ["operation"] = new JObject
+                    {
+                        ["kind"] = "mcp_write",
+                        ["execution_id"] = executionId,
+                    },
+                };
+                SaveRecordLocked(record);
+                return PublicMcpWriteSnapshot(record);
+            }
+        }
+
+        internal static JObject ReadMcpWriteSnapshot(string executionId)
+        {
+            lock (Sync)
+            {
+                var record = McpWriteSnapshots.TryGetValue(executionId ?? string.Empty, out var value) ? value : null;
+                if (record != null && IsTerminal(record.Value<string>("status"))
+                    && TryReadUtc(record.Value<string>("purge_after_utc"), out var purgeAfter)
+                    && DateTime.UtcNow >= purgeAfter)
+                {
+                    McpWriteSnapshots.Remove(executionId ?? string.Empty);
+                    record = null;
+                }
+                return record == null ? null : PublicMcpWriteSnapshot(record);
+            }
+        }
+
+        internal static void MarkMcpWriteUnknown(string executionId, string reason)
+        {
+            lock (Sync)
+            {
+                if (!McpWriteSnapshots.TryGetValue(executionId ?? string.Empty, out var cached) || cached == null) return;
+                cached["status"] = "unknown";
+                cached["after"] = JValue.CreateNull();
+                cached["error"] = new JObject
+                {
+                    ["code"] = "result_persistence_unknown",
+                    ["message"] = reason ?? "The write result could not be persisted; execution state is unknown.",
+                };
+                cached["completed_utc"] = DateTime.UtcNow.ToString("O");
+                cached["purge_after_utc"] = DateTime.UtcNow.Add(TerminalRetention).ToString("O");
+            }
         }
 
         internal static JObject Create(
@@ -476,6 +547,12 @@ namespace VRCForge.Editor
                 }
                 return PublicPayload(record);
             }
+        }
+
+        internal static JObject CompleteMcpWrite(string jobId, JObject originalToolResult)
+        {
+            if (originalToolResult == null) throw new ArgumentNullException(nameof(originalToolResult));
+            return SetTerminal(jobId, "done", originalToolResult, null);
         }
 
         internal static JObject Complete(string jobId, Func<JObject> readAfter)
@@ -618,7 +695,8 @@ namespace VRCForge.Editor
                     continue;
                 }
                 var status = record.Value<string>("status") ?? string.Empty;
-                if (!IsTerminal(status)
+                var isMcpWrite = string.Equals((string)record["operation"]?["kind"], "mcp_write", StringComparison.Ordinal);
+                if (!isMcpWrite && !IsTerminal(status)
                     && TryReadUtc(record.Value<string>("expires_utc"), out var deadline)
                     && utcNow >= deadline)
                 {
@@ -640,6 +718,8 @@ namespace VRCForge.Editor
                     && TryReadUtc(record.Value<string>("purge_after_utc"), out var purgeAfter)
                     && utcNow >= purgeAfter)
                 {
+                    var executionId = (string)record["operation"]?["execution_id"];
+                    if (!string.IsNullOrEmpty(executionId)) McpWriteSnapshots.Remove(executionId);
                     SessionState.EraseString(RecordPrefix + jobId);
                     continue;
                 }
@@ -692,6 +772,65 @@ namespace VRCForge.Editor
             SessionState.SetString(
                 RecordPrefix + record.Value<string>("job_id"),
                 record.ToString(Newtonsoft.Json.Formatting.None));
+            var executionId = (string)record["operation"]?["execution_id"];
+            if (string.Equals((string)record["operation"]?["kind"], "mcp_write", StringComparison.Ordinal)
+                && !string.IsNullOrEmpty(executionId))
+            {
+                McpWriteSnapshots[executionId] = (JObject)record.DeepClone();
+            }
+        }
+
+        private static void RecoverMcpWriteSnapshots()
+        {
+            lock (Sync)
+            {
+                foreach (var jobId in LoadIndexLocked())
+                {
+                    var record = LoadRecordLocked(jobId);
+                    var operation = record?["operation"] as JObject;
+                    if (operation == null || !string.Equals((string)operation["kind"], "mcp_write", StringComparison.Ordinal)) continue;
+                    var executionId = (string)operation["execution_id"];
+                    if (string.IsNullOrEmpty(executionId)) continue;
+                    if (record.Value<string>("status") == "queued" || record.Value<string>("status") == "running")
+                    {
+                        record["status"] = "unknown";
+                        record["error"] = new JObject { ["code"] = "editor_domain_reloaded", ["message"] = "The Editor domain reloaded before the write result was persisted; execution state is unknown." };
+                        record["completed_utc"] = DateTime.UtcNow.ToString("O");
+                        record["purge_after_utc"] = DateTime.UtcNow.Add(TerminalRetention).ToString("O");
+                        SaveRecordValue(record);
+                    }
+                    else
+                    {
+                        McpWriteSnapshots[executionId] = (JObject)record.DeepClone();
+                    }
+                }
+            }
+        }
+
+        private static JObject FindMcpWriteByExecutionIdLocked(string executionId)
+        {
+            foreach (var jobId in LoadIndexLocked())
+            {
+                var record = LoadRecordLocked(jobId);
+                if (record != null
+                    && string.Equals((string)record["operation"]?["kind"], "mcp_write", StringComparison.Ordinal)
+                    && string.Equals((string)record["operation"]?["execution_id"], executionId, StringComparison.Ordinal)) return record;
+            }
+            return null;
+        }
+
+        private static JObject PublicMcpWriteSnapshot(JObject record)
+        {
+            var result = new JObject
+            {
+                ["jobId"] = record["job_id"]?.DeepClone() ?? JValue.CreateNull(),
+                ["executionId"] = record["operation"]?["execution_id"]?.DeepClone() ?? JValue.CreateNull(),
+                ["status"] = record["status"]?.DeepClone() ?? new JValue("unknown"),
+                ["toolName"] = record["tool"]?.DeepClone() ?? JValue.CreateNull(),
+            };
+            if (string.Equals((string)record["status"], "done", StringComparison.Ordinal)) result["result"] = record["after"]?.DeepClone() ?? JValue.CreateNull();
+            if (record["error"] != null && record["error"].Type != JTokenType.Null) result["error"] = record["error"].DeepClone();
+            return result;
         }
 
         private static List<string> LoadIndexLocked()
@@ -746,7 +885,7 @@ namespace VRCForge.Editor
 
         private static bool IsTerminal(string status)
         {
-            return status == "done" || status == "failed" || status == "expired";
+            return status == "done" || status == "failed" || status == "expired" || status == "unknown";
         }
 
         private static string NormalizeJobId(string value)

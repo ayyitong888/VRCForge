@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -48,6 +48,8 @@ namespace VRCForge.Editor
         private static readonly HashSet<TcpClient> ActiveClients = new HashSet<TcpClient>();
         private static readonly HashSet<Thread> ActiveWorkers = new HashSet<Thread>();
         private static readonly ConcurrentQueue<PendingInvocation> PendingInvocations = new ConcurrentQueue<PendingInvocation>();
+        private static readonly ConcurrentQueue<PendingInvocation> PendingMcpWriteExecutions = new ConcurrentQueue<PendingInvocation>();
+        private static readonly ConcurrentDictionary<string, PendingInvocation> McpWriteSubmissions = new ConcurrentDictionary<string, PendingInvocation>(StringComparer.Ordinal);
         private static readonly Dictionary<string, long> ConsumedExecutionExpirations =
             new Dictionary<string, long>(StringComparer.Ordinal);
         private static readonly Queue<KeyValuePair<string, long>> ConsumedExecutionOrder =
@@ -138,6 +140,10 @@ namespace VRCForge.Editor
             public TcpClient Client;
             public VRCForgeMcpPeerProcessEvidence PeerEvidence;
             public bool Modern;
+            public bool AsyncWrite;
+            public string ExecutionId;
+            public string JobId;
+            public int QueueFrame;
             public readonly ManualResetEventSlim Completion = new ManualResetEventSlim(false);
             public JObject Response;
             public int State;
@@ -149,6 +155,7 @@ namespace VRCForge.Editor
         private static byte[] token;
         private static string descriptorPath;
         private static string descriptorInstanceId;
+        private static string descriptorProjectId;
         private static VRCForgeToolDescriptor[] tools = new VRCForgeToolDescriptor[0];
         private static VRCForgeExcludedToolDescriptor[] excludedExternalTools = new VRCForgeExcludedToolDescriptor[0];
         private static SynchronizationContext editorSynchronizationContext;
@@ -186,6 +193,8 @@ namespace VRCForge.Editor
             // depends on mutating the update delegate during its dispatch.
             EditorApplication.update -= DrainInvocations;
             EditorApplication.update += DrainInvocations;
+            EditorApplication.update -= DrainMcpWriteExecutions;
+            EditorApplication.update += DrainMcpWriteExecutions;
         }
 
         internal static void ScheduleInvocationPumpRegistration()
@@ -400,6 +409,7 @@ namespace VRCForge.Editor
             ClearSecret(ref token);
             descriptorPath = null;
             descriptorInstanceId = null;
+            descriptorProjectId = null;
             CancelPendingInvocations();
         }
 
@@ -911,6 +921,10 @@ namespace VRCForge.Editor
             {
                 return hasId ? Result(id, InvokeTool(parameters, client, true), true) : null;
             }
+            if (string.Equals(method, "server/write-operation", StringComparison.Ordinal))
+            {
+                return hasId ? Result(id, ReadMcpWriteOperation(parameters), true) : null;
+            }
             if (string.Equals(method, "resources/list", StringComparison.Ordinal))
             {
                 var resources = new JObject { ["resources"] = new JArray() };
@@ -1012,7 +1026,7 @@ namespace VRCForge.Editor
             }
             var projectBinding = metadata["io.vrcforge/projectBinding"] as JObject;
             if (projectBinding == null
-                || !string.Equals((string)projectBinding["projectId"], ComputeProjectId(GetProjectRoot()), StringComparison.Ordinal)
+                || !string.Equals((string)projectBinding["projectId"], descriptorProjectId, StringComparison.Ordinal)
                 || !string.Equals((string)projectBinding["instanceId"], descriptorInstanceId, StringComparison.Ordinal))
             {
                 return new VRCForgeMcpMetadataError
@@ -1166,7 +1180,13 @@ namespace VRCForge.Editor
                 return ToolError("app_lane_invalid", "The VRCForge App execution lane is invalid.", modern, true);
             }
 
-            return QueueInvocation(toolName, arguments, executionContext, lane, client, peerEvidence, modern);
+            var asyncWrite = modern
+                && metadata != null
+                && metadata["io.vrcforge/asyncWrite"] != null
+                && metadata["io.vrcforge/asyncWrite"].Type == JTokenType.Boolean
+                && metadata["io.vrcforge/asyncWrite"].Value<bool>()
+                && (lane == InvocationLane.ApprovedWrite || lane == InvocationLane.ExternalMcpWrite);
+            return QueueInvocation(toolName, arguments, executionContext, lane, client, peerEvidence, modern, asyncWrite);
         }
 
         private static bool IsStrictNoWritePayloadRead(string toolName, JObject arguments)
@@ -1348,8 +1368,44 @@ namespace VRCForge.Editor
             InvocationLane lane,
             TcpClient client,
             VRCForgeMcpPeerProcessEvidence peerEvidence,
-            bool modern)
+            bool modern,
+            bool asyncWrite = false)
         {
+            if (asyncWrite)
+            {
+                var executionId = (string)executionContext["executionId"];
+                if (string.IsNullOrWhiteSpace(executionId))
+                    return ToolError("async_execution_id_missing", "An async managed write requires its exact executionId.", modern, true);
+                var cached = UnityAsyncJobRegistry.ReadMcpWriteSnapshot(executionId);
+                if (cached != null) return AsyncWriteSubmissionResponse(cached);
+                var candidate = new PendingInvocation
+                {
+                    ToolName = toolName,
+                    Arguments = (JObject)arguments.DeepClone(),
+                    ExecutionContext = (JObject)executionContext.DeepClone(),
+                    Lane = lane,
+                    Client = client,
+                    PeerEvidence = peerEvidence,
+                    Modern = modern,
+                    AsyncWrite = true,
+                    ExecutionId = executionId,
+                };
+                var pendingAsync = McpWriteSubmissions.GetOrAdd(executionId, candidate);
+                if (ReferenceEquals(candidate, pendingAsync))
+                {
+                    PendingInvocations.Enqueue(pendingAsync);
+                    RequestInvocationDrain();
+                }
+                var asyncDeadline = DateTime.UtcNow.AddMilliseconds(InvocationQueueTimeoutMilliseconds);
+                while (!pendingAsync.Completion.Wait(100))
+                {
+                    if (stopping || DateTime.UtcNow >= asyncDeadline)
+                        return AsyncWriteUnknownResponse(executionId, pendingAsync.JobId);
+                }
+                if (pendingAsync.Response?["schema"] == null)
+                    McpWriteSubmissions.TryRemove(executionId, out _);
+                return pendingAsync.Response ?? AsyncWriteUnknownResponse(executionId, pendingAsync.JobId);
+            }
 
             var pending = new PendingInvocation
             {
@@ -1609,6 +1665,18 @@ namespace VRCForge.Editor
                         true);
                     return;
                 }
+                if (pending.AsyncWrite)
+                {
+                    var operation = UnityAsyncJobRegistry.CreateMcpWrite(
+                        pending.ToolName,
+                        pending.ExecutionId,
+                        GetProjectRoot());
+                    pending.JobId = (string)operation["jobId"];
+                    pending.Response = AsyncWriteSubmissionResponse(operation);
+                    pending.QueueFrame = Time.frameCount;
+                    PendingMcpWriteExecutions.Enqueue(pending);
+                    return;
+                }
                 var result = descriptor.Handler.Invoke(null, new object[] { pending.Arguments });
                 pending.Response = ToolResult(result, pending.Modern);
             }
@@ -1626,6 +1694,111 @@ namespace VRCForge.Editor
                 Volatile.Write(ref pending.State, 2);
                 pending.Completion.Set();
             }
+        }
+
+        private static void DrainMcpWriteExecutions()
+        {
+            if (!PendingMcpWriteExecutions.TryPeek(out var next) || next.QueueFrame >= Time.frameCount) return;
+            if (!PendingMcpWriteExecutions.TryDequeue(out var pending)) return;
+            JObject result;
+            var handlerStarted = false;
+            try
+            {
+                var descriptor = FindTool(pending.ToolName);
+                if (!IsMcpWriteAuthorizedAtExecution(pending, descriptor))
+                {
+                    result = ToolError("async_execution_revalidation_failed", "The queued Unity write no longer matches its approved execution context; the tool handler did not start.", true, true);
+                    UnityAsyncJobRegistry.CompleteMcpWrite(pending.JobId, result);
+                    McpWriteSubmissions.TryRemove(pending.ExecutionId, out _);
+                    return;
+                }
+                UnityAsyncJobRegistry.MarkRunning(pending.JobId);
+                handlerStarted = true;
+                var value = descriptor.Handler.Invoke(null, new object[] { pending.Arguments });
+                result = ToolResult(value, true);
+            }
+            catch (Exception exception)
+            {
+                result = handlerStarted
+                    ? ToolError("tool_handler_exception", "VRCForge tool execution failed in the Unity tool handler.", true, false, exception)
+                    : ToolError("async_job_start_failed", "The queued Unity tool handler did not start.", true, true, exception);
+            }
+            try
+            {
+                UnityAsyncJobRegistry.CompleteMcpWrite(pending.JobId, result);
+            }
+            catch (Exception persistenceFailure)
+            {
+                UnityAsyncJobRegistry.MarkMcpWriteUnknown(
+                    pending.ExecutionId,
+                    "The Unity call returned but its result could not be persisted (" + persistenceFailure.GetType().Name + "); execution state is unknown.");
+            }
+            finally
+            {
+                McpWriteSubmissions.TryRemove(pending.ExecutionId, out _);
+            }
+        }
+
+        private static bool IsMcpWriteAuthorizedAtExecution(PendingInvocation pending, VRCForgeToolDescriptor descriptor)
+        {
+            if (pending == null || descriptor == null || !VRCForgeMcpToolContract.IsExpectedDescriptor(descriptor)
+                || descriptor.Permission == VRCForgeCommandAccess.ReadOnly) return false;
+            if (pending.Lane == InvocationLane.ApprovedWrite)
+                return ValidateApprovedExecutionContext(pending.ExecutionContext, pending.ToolName, pending.Arguments);
+            if (pending.Lane == InvocationLane.ExternalMcpWrite)
+            {
+                string ignoredFailureCode;
+                return ValidateManagedWriteExecutionContext(
+                    pending.ExecutionContext,
+                    pending.ToolName,
+                    pending.Arguments,
+                    externalMcp: true,
+                    validateUnityObjectIdentities: true,
+                    failureCode: out ignoredFailureCode);
+            }
+            return false;
+        }
+
+        private static JObject ReadMcpWriteOperation(JObject parameters)
+        {
+            if (parameters == null
+                || parameters.Properties().Any(property => property.Name != "executionId" && property.Name != "jobId" && property.Name != "_meta")
+                || !HasNonEmptyString(parameters, "executionId")
+                || ((string)parameters["executionId"]).Length > 128
+                || (parameters["jobId"] != null
+                    && (parameters["jobId"].Type != JTokenType.String
+                        || !UnityAsyncJobRegistry.IsValidJobId((string)parameters["jobId"]))))
+                return AsyncWriteUnknownResponse(string.Empty, null);
+            var snapshot = UnityAsyncJobRegistry.ReadMcpWriteSnapshot((string)parameters["executionId"]);
+            if (snapshot == null || (parameters["jobId"] != null
+                && !string.Equals((string)parameters["jobId"], (string)snapshot["jobId"], StringComparison.Ordinal)))
+                return AsyncWriteUnknownResponse((string)parameters["executionId"], (string)parameters["jobId"]);
+            if (string.Equals((string)snapshot["status"], "queued", StringComparison.Ordinal)) snapshot["retryAfterMs"] = 100;
+            return snapshot;
+        }
+
+        private static JObject AsyncWriteSubmissionResponse(JObject snapshot)
+        {
+            var response = new JObject
+            {
+                ["schema"] = "vrcforge.write-operation.v1",
+                ["jobId"] = snapshot["jobId"]?.DeepClone() ?? JValue.CreateNull(),
+                ["executionId"] = snapshot["executionId"]?.DeepClone() ?? JValue.CreateNull(),
+                ["status"] = snapshot["status"]?.DeepClone() ?? new JValue("unknown"),
+            };
+            if (string.Equals((string)snapshot["status"], "queued", StringComparison.Ordinal)) response["retryAfterMs"] = 100;
+            return response;
+        }
+
+        private static JObject AsyncWriteUnknownResponse(string executionId, string jobId)
+        {
+            return new JObject
+            {
+                ["schema"] = "vrcforge.write-operation.v1",
+                ["jobId"] = jobId == null ? JValue.CreateNull() : new JValue(jobId),
+                ["executionId"] = executionId ?? string.Empty,
+                ["status"] = "unknown",
+            };
         }
 
         private static bool IsInvocationStillAuthorized(
@@ -2540,6 +2713,7 @@ namespace VRCForge.Editor
                 ["protocolRange"] = ProtocolRangeResult(),
                 ["toolContractVersion"] = VRCForgeMcpToolContract.ToolContractVersion,
                 ["toolCount"] = VRCForgeMcpToolContract.ToolCount,
+                ["supportsWriteOperationPolling"] = true,
                 ["excludedExternalTools"] = new JArray(excludedExternalTools
                     .OrderBy(item => item.Name, StringComparer.Ordinal)
                     .ThenBy(item => item.TypeName, StringComparer.Ordinal)
@@ -2613,6 +2787,8 @@ namespace VRCForge.Editor
                         ? new JObject { ["action"] = descriptor.PollAction, ["maxSeconds"] = descriptor.MaxPollSeconds }
                         : JValue.CreateNull()
                 };
+                if (writeTool && !SafetyControlTools.Contains(descriptor.Name) && !descriptor.RequiresPolling)
+                    metadata["io.vrcforge/asyncWrite"] = true;
                 result.Add(new JObject
                 {
                     ["name"] = descriptor.Name,
@@ -2710,6 +2886,7 @@ namespace VRCForge.Editor
         private static void WriteDescriptor(IPEndPoint endpoint)
         {
             var root = GetProjectRoot();
+            descriptorProjectId = ComputeProjectId(root);
             var document = new JObject
             {
                 ["schema"] = TransportSchema,

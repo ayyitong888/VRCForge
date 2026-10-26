@@ -465,6 +465,88 @@ class UnityMcpCoreClient:
         execution_context: dict[str, Any] | None,
         request_id: int | None = None,
     ) -> Any:
+        is_write = (method == "tools/call" and isinstance(execution_context, dict)
+                    and execution_context.get("lane") in {"approved_write", "external_mcp_write"})
+        try:
+            result = self._single_modern_request(
+                method, params, execution_context=execution_context, request_id=request_id,
+            )
+        except UnityMcpCoreConnectionError:
+            if not is_write:
+                raise
+            # The submission response can be lost after acceptance. Recover only
+            # by its existing execution id; never replay the tools/call message.
+            result = self.recover_write_operation(
+                params["name"], params.get("arguments") or {}, execution_context=execution_context,
+            )
+            if result is None:
+                raise
+            return result
+        if is_write and isinstance(result, dict) and result.get("schema") == "vrcforge.write-operation.v1":
+            return self._await_write_operation(result, params["name"], params.get("arguments") or {}, execution_context)
+        return result
+
+    def _query_write_operation(self, execution_id: str, job_id: str | None = None) -> dict[str, Any]:
+        # Re-read the descriptor: a package import can reload Core and replace
+        # its instance while this same operation remains in Unity SessionState.
+        reader = UnityMcpCoreClient(
+            self._connection.project_root, timeout_seconds=min(self._timeout_seconds, 5.0),
+        )
+        arguments = {"executionId": execution_id}
+        if job_id:
+            arguments["jobId"] = job_id
+        return reader._request("server/write-operation", arguments)
+
+    def recover_write_operation(
+        self, tool_name: str, arguments: dict[str, Any], *, execution_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """One read-only reconciliation of a lost receipt, without replaying a write."""
+        from unity_write_operation_polling import write_operation_result
+        execution_id = str(execution_context.get("executionId") or "")
+        if not execution_id:
+            return None
+        try:
+            snapshot = self._query_write_operation(execution_id)
+            result = write_operation_result(snapshot, execution_id=execution_id, tool_name=tool_name)
+            if result is not None:
+                _validate_tool_result(result)
+            return result
+        except (UnityMcpCoreError, OSError, ValueError):
+            return None
+
+    def _await_write_operation(self, snapshot, tool_name, arguments, execution_context):
+        from unity_write_operation_polling import write_operation_result
+        execution_id = str(execution_context.get("executionId") or "")
+        deadline = time.monotonic() + self._timeout_seconds
+        job_id = snapshot.get("jobId")
+        while True:
+            result = write_operation_result(snapshot, execution_id=execution_id, tool_name=tool_name)
+            if result is not None:
+                _validate_tool_result(result)
+                return result
+            if snapshot.get("status") in {"unknown", "not_found", "expired", "failed", "done"} or time.monotonic() >= deadline:
+                error = UnityMcpCoreConnectionError("The submitted Unity write outcome is not yet known; its operation can be queried without resubmitting it.")
+                error.cause_code = "unity_write_operation_unresolved"
+                error.details = {"executionId": execution_id, "jobId": job_id, "operationStatus": snapshot.get("status"), "commitState": "unknown"}
+                raise error
+            delay = max(0.25, min(float(snapshot.get("retryAfterMs", 500)) / 1000, 2.0))
+            time.sleep(min(delay, max(0, deadline - time.monotonic())))
+            try:
+                snapshot = self._query_write_operation(execution_id, job_id)
+            except UnityMcpCoreConnectionError:
+                # A domain reload temporarily removes/replaces the descriptor.
+                # The next step is another status read, never another write.
+                if time.monotonic() >= deadline:
+                    raise
+
+    def _single_modern_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        execution_context: dict[str, Any] | None,
+        request_id: int | None = None,
+    ) -> Any:
         try:
             with _project_core_slot(self._connection.project_root):
                 with self._open_connection() as connection:
@@ -522,6 +604,8 @@ class UnityMcpCoreClient:
             approved_execution["projectId"] = self._connection.project_id
             approved_execution["instanceId"] = self._connection.instance_id
             metadata["io.vrcforge/approvedExecution"] = approved_execution
+            if execution_context.get("lane") in {"approved_write", "external_mcp_write"}:
+                metadata["io.vrcforge/asyncWrite"] = True
         operation_context = current_operation_context()
         if operation_context is not None:
             metadata["io.vrcforge/operationId"] = operation_context.get("operationId")
@@ -577,7 +661,11 @@ class UnityMcpCoreClient:
             failure.details = {"kind": "invalid_json_rpc", "missing": "result"}
             raise failure
         result = message["result"]
-        if require_complete and (not isinstance(result, dict) or result.get("resultType") != "complete"):
+        # Write-operation receipts are a distinct modern shape (submit-once,
+        # poll-by-executionId), not tool results; recognize them explicitly.
+        if require_complete and not (isinstance(result, dict) and (
+                result.get("resultType") == "complete"
+                or result.get("schema") == "vrcforge.write-operation.v1")):
             failure = UnityMcpCoreError("Unity MCP Core returned an incomplete modern result.")
             failure.cause_code = "unity_core_invalid_result_shape"
             failure.details = {
