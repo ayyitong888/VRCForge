@@ -143,6 +143,95 @@ def test_list_runtime_continuations_is_read_only_until_explicit_recovery(tmp_pat
     assert restarted.list_runtime_continuations()[0]["continuationSource"] == "foreground_interrupted"
 
 
+def test_recovery_seeds_continuation_reader_and_incrementally_adds_recovered_rows(tmp_path: Path, monkeypatch) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    legacy = {
+        "event": "runtime_turn_completed",
+        "sessionId": "legacy-session",
+        "turnId": "legacy-turn",
+        "clientTurnId": "legacy-client",
+        "continuationEvent": {
+            "schema": "vrcforge.runtime_turn_event.v1",
+            "continuationSource": "foreground_completed",
+            "sessionId": "legacy-session",
+            "turnId": "legacy-turn",
+            "clientTurnId": "legacy-client",
+            "plan": {"reply": "legacy"},
+        },
+    }
+    ledger.log_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.log_path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+    old_owner = AgentRuntimeRunLedger(ledger._ports)
+    old_owner.append({"event": "runtime_turn_started", "status": "running",
+                      "sessionId": "recovered-session", "turnId": "recovered-turn",
+                      "clientTurnId": "recovered-client"})
+    restarted = AgentRuntimeRunLedger(ledger._ports)
+
+    assert restarted.recover_interrupted_runs() == 1
+    cache_key = ("continuations", "", "", "", 512)
+    seeded = restarted._list_runs_cache[cache_key]
+    assert seeded["offset"] < restarted.log_path.stat().st_size
+
+    read_offsets: list[int] = []
+    original_open = Path.open
+
+    class ReadSpy:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+        def seek(self, *args):
+            return self.handle.seek(*args)
+        def tell(self):
+            return self.handle.tell()
+        def read(self, size=-1):
+            read_offsets.append(self.handle.tell())
+            return self.handle.read(size)
+
+    def spy_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        return ReadSpy(handle) if path == restarted.log_path and "b" in mode else handle
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    small = restarted.list_runtime_continuations(limit=10)
+    assert {row["continuationSource"] for row in small} == {
+        "foreground_completed", "foreground_interrupted"
+    }
+    assert read_offsets and min(read_offsets) == seeded["offset"]
+    reads_after_small = len(read_offsets)
+    # A second limit within the seeded default window must reuse the same cursor.
+    large = restarted.list_runtime_continuations(limit=64)
+    assert len(large) == 2
+    assert len(read_offsets) == reads_after_small
+
+
+def test_recovery_seed_leaves_partial_final_row_for_incremental_reader(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    ledger.log_path.parent.mkdir(parents=True, exist_ok=True)
+    complete = {"event": "runtime_turn_completed", "continuationEvent": {
+        "sessionId": "complete", "turnId": "turn", "clientTurnId": "client",
+        "continuationSource": "foreground_completed",
+    }}
+    partial = json.dumps({"event": "runtime_turn_completed", "continuationEvent": {
+        "sessionId": "partial", "turnId": "turn", "clientTurnId": "client",
+        "continuationSource": "foreground_completed",
+    }})
+    prefix = (json.dumps(complete) + "\n").encode()
+    ledger.log_path.write_bytes(prefix + partial.encode())
+    ledger.recover_interrupted_runs()
+    seeded = ledger._list_runs_cache[("continuations", "", "", "", 512)]
+    assert seeded["offset"] == len(prefix)
+    assert [row.get("sessionId") for row in ledger.list_runtime_continuations()] == ["complete"]
+
+    with ledger.log_path.open("ab") as handle:
+        handle.write(b"\n")
+    rows = ledger.list_runtime_continuations()
+    assert {row.get("sessionId") for row in rows} == {"complete", "partial"}
+
+
 def test_continuation_projection_reuses_incremental_reader_without_read_events_scan(tmp_path: Path) -> None:
     ledger, _lock = make_ledger(tmp_path)
     ledger.append({

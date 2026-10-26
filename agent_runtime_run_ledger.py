@@ -219,22 +219,43 @@ class AgentRuntimeRunLedger:
             timelines: dict[str, list[dict[str, Any]]] = {}
             terminals: set[str] = set()
             interrupted: set[str] = set()
+            continuation_rows: deque[tuple[int, dict[str, Any]]] = deque(maxlen=512)
+            start_times: dict[tuple[str, str], str] = {}
+            consumed_offset = 0
+            ordinal = 0
             try:
-                source = self.log_path.open("r", encoding="utf-8")
+                source = self.log_path.open("rb")
             except FileNotFoundError:
                 return 0
             def owned_events():
                 # Existing ledgers can be large. Older records have no live
-                # owner marker; do not parse their full provider/tool payloads.
+                # owner marker; parse only start and continuation rows until
+                # an owned run is found, while preserving legacy continuations.
+                nonlocal consumed_offset, ordinal
                 with source:
+                    byte_offset = 0
                     for line in source:
-                        if not starts and '"runtimeOwnerNonce"' not in line:
+                        byte_offset += len(line)
+                        if not line.endswith(b"\n"):
+                            # Keep the cursor before an unconsumed partial row.
+                            break
+                        consumed_offset = byte_offset
+                        ordinal += 1
+                        if (b'"continuationEvent"' not in line
+                                and b'"runtime_turn_started"' not in line
+                                and not starts and b'"runtimeOwnerNonce"' not in line):
                             continue
                         try:
-                            event = json.loads(line)
+                            event = json.loads(line.decode("utf-8", errors="replace"))
                         except json.JSONDecodeError:
                             continue
                         if isinstance(event, dict):
+                            if isinstance(event.get("continuationEvent"), dict):
+                                continuation_rows.append((ordinal, event))
+                            if (event.get("event") == "runtime_turn_started"
+                                    and event.get("sessionId") and event.get("turnId")
+                                    and event.get("createdAt")):
+                                start_times[(str(event["sessionId"]), str(event["turnId"]))] = str(event["createdAt"])
                             yield event
             for event in owned_events():
                 key = self._turn_key(event)
@@ -286,6 +307,27 @@ class AgentRuntimeRunLedger:
                     "continuationEvent": continuation,
                 })
                 created += 1
+            # Seed the exact default continuation window from this recovery
+            # pass. The cursor remains at the last complete row consumed, so
+            # appended interruption rows and any partial tail are read once
+            # by the ordinary incremental reader.
+            try:
+                stat = self.log_path.stat()
+                direct_events = list(continuation_rows)
+                events = [row for _, row in direct_events[-512:]]
+                self._list_runs_cache[("continuations", "", "", "", 512)] = {
+                    "identity": (stat.st_dev, stat.st_ino),
+                    "mtime_ns": stat.st_mtime_ns,
+                    "offset": consumed_offset,
+                    "events": copy.deepcopy(events),
+                    "start_times": dict(start_times),
+                    "approval_ids": set(),
+                    "direct_events": direct_events[-512:],
+                    "approval_events": [],
+                    "ordinal": ordinal,
+                }
+            except OSError:
+                pass
             return created
 
     def read_events(
@@ -680,7 +722,7 @@ class AgentRuntimeRunLedger:
         # Reuse the byte-cursor reader so repeated continuation projections do
         # not rescan the complete JSONL file.
         with self._ports.shared_state_lock:
-            continuation_window = max(int(limit) * 8, 100)
+            continuation_window = 512 if int(limit) <= 64 else max(int(limit) * 8, 100)
             events, start_times, _ = self._list_runs_events(
                 cache_key=("continuations", "", "", "", continuation_window),
                 session_id="",

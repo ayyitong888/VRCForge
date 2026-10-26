@@ -5698,6 +5698,9 @@ class AgentGateway:
         loop_state: list[dict[str, Any]] = (
             task_loop.planner_observations() if continuation_context else []
         )
+        # Execution observations remain complete. Only the non-native model's
+        # presentation advances past a prefix covered by a validated summary.
+        runtime_compacted_loop_steps = 0
         continuation_observation = ensure_dict(
             ensure_dict(task_continuation).get("plannerObservation")
         )
@@ -6560,7 +6563,7 @@ class AgentGateway:
                         params=params,
                         observe=observe,
                         history=history,
-                        loop_state=loop_state,
+                        loop_state=loop_state[runtime_compacted_loop_steps:],
                         context_usage=context_usage,
                         attempt_compaction=not runtime_compaction_attempted,
                         runtime_exposure_layer=runtime_exposure_layer,
@@ -6568,6 +6571,9 @@ class AgentGateway:
                 if compaction_result is not None:
                     runtime_compaction_attempted = not bool(compaction_result.get("applied"))
                     if compaction_result.get("applied"):
+                        runtime_compacted_loop_steps += int(
+                            compaction_result.get("compactedLoopStepCount") or 0
+                        )
                         if compaction_result.get("recovery"):
                             observe["compactionRecoveryInformation"] = [
                                 retain_compaction_recovery_catalog(native_turn.recoveries())
@@ -6664,6 +6670,8 @@ class AgentGateway:
                 loop_state=loop_state,
                 context_usage=context_usage,
                 reasoning_trace=reasoning_trace,
+                **({"prompt_loop_state": loop_state[runtime_compacted_loop_steps:]}
+                   if not native_binding else {}),
                 exposure_layer=runtime_exposure_layer,
                 provider_retry_callback=lambda retry: self._emit_runtime_status(
                     "waiting_for_model",

@@ -444,6 +444,9 @@ export default function App() {
   const projectRefreshTimerRef = useRef<number | null>(null);
   const bootstrapRequestSequenceRef = useRef(0);
   const bootstrapForegroundRequestRef = useRef(0);
+  const bootstrapSilentRefreshPromiseRef = useRef<Promise<void> | null>(null);
+  const bootstrapSilentPendingTargetRef = useRef<string | null>(null);
+  const bootstrapSilentActiveTargetRef = useRef<string | null>(null);
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
   const desktopEventRuntimeTimerRef = useRef<number | null>(null);
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
@@ -2642,6 +2645,8 @@ export default function App() {
   function handleRuntimeSessionFailure(message: string) {
     bootstrapRequestSequenceRef.current += 1;
     bootstrapForegroundRequestRef.current = 0;
+    bootstrapSilentPendingTargetRef.current = null;
+    bootstrapSilentActiveTargetRef.current = null;
     setBackgroundRuntimeReady(false);
     setAppSessionToken("");
     setBootstrap(null);
@@ -2728,6 +2733,7 @@ export default function App() {
     setError("");
     const sequence = ++bootstrapRequestSequenceRef.current;
     bootstrapForegroundRequestRef.current = sequence;
+    bootstrapSilentPendingTargetRef.current = null;
     try {
       const payload = await fetchBootstrap(target, { ...options, deferAgentCatalog: true });
       if (sequence !== bootstrapRequestSequenceRef.current) {
@@ -2747,36 +2753,92 @@ export default function App() {
     } finally {
       if (bootstrapForegroundRequestRef.current === sequence) {
         bootstrapForegroundRequestRef.current = 0;
+        const pendingTarget = bootstrapSilentPendingTargetRef.current;
+        bootstrapSilentPendingTargetRef.current = null;
+        if (pendingTarget !== null) {
+          void refreshSilently(pendingTarget);
+        }
       }
     }
   }
 
   async function refreshSilently(target = endpoint) {
     if (bootstrapForegroundRequestRef.current !== 0) {
-      return;
+      bootstrapSilentPendingTargetRef.current = target;
+      return bootstrapSilentRefreshPromiseRef.current ?? undefined;
     }
-    const sequence = ++bootstrapRequestSequenceRef.current;
+    const existing = bootstrapSilentRefreshPromiseRef.current;
+    if (existing) {
+      bootstrapSilentPendingTargetRef.current = target;
+      // Repeated same-endpoint polls can arrive faster than bootstrap fetches.
+      // Preserve the active response so a steady polling stream still makes
+      // visible progress; only an endpoint switch makes it stale.
+      if (target !== bootstrapSilentActiveTargetRef.current) {
+        bootstrapRequestSequenceRef.current += 1;
+      }
+      return existing;
+    }
+
+    const runRefreshes = async () => {
+      let nextTarget: string | null = target;
+      while (nextTarget !== null) {
+        if (bootstrapForegroundRequestRef.current !== 0) {
+          bootstrapSilentPendingTargetRef.current = nextTarget;
+          return;
+        }
+        const activeTarget = nextTarget;
+        nextTarget = null;
+        bootstrapSilentActiveTargetRef.current = activeTarget;
+        const sequence = ++bootstrapRequestSequenceRef.current;
+        try {
+          const payload = await fetchBootstrap(activeTarget, { deferAgentCatalog: true });
+          if (sequence === bootstrapRequestSequenceRef.current) {
+            setBootstrap(payload);
+            if (payload.health.projects) {
+              setCachedProjectSnapshot(payload.health.projects);
+              cacheProjectSnapshot(payload.health.projects);
+            }
+            setStartupIssue("");
+            setError((current) => (current.toLowerCase().includes("fetch") ? "" : current));
+          }
+        } catch (cause) {
+          if (sequence === bootstrapRequestSequenceRef.current) {
+            const message = cause instanceof Error ? cause.message : String(cause);
+            if (isRuntimeSessionVerificationError(message)) {
+              handleRuntimeSessionFailure(message);
+            }
+            // Keep the current UI usable; explicit retry remains available.
+          }
+        }
+        bootstrapSilentActiveTargetRef.current = null;
+
+        const pendingTarget = bootstrapSilentPendingTargetRef.current;
+        bootstrapSilentPendingTargetRef.current = null;
+        if (bootstrapForegroundRequestRef.current !== 0) {
+          if (pendingTarget !== null) {
+            bootstrapSilentPendingTargetRef.current = pendingTarget;
+          }
+          return;
+        }
+        nextTarget = pendingTarget;
+      }
+    };
+
+    const promise = runRefreshes();
+    bootstrapSilentRefreshPromiseRef.current = promise;
     try {
-      const payload = await fetchBootstrap(target, { deferAgentCatalog: true });
-      if (sequence !== bootstrapRequestSequenceRef.current) {
-        return;
+      await promise;
+    } finally {
+      if (bootstrapSilentRefreshPromiseRef.current === promise) {
+        bootstrapSilentRefreshPromiseRef.current = null;
+        if (bootstrapForegroundRequestRef.current === 0) {
+          const pendingTarget = bootstrapSilentPendingTargetRef.current;
+          bootstrapSilentPendingTargetRef.current = null;
+          if (pendingTarget !== null) {
+            void refreshSilently(pendingTarget);
+          }
+        }
       }
-      setBootstrap(payload);
-      if (payload.health.projects) {
-        setCachedProjectSnapshot(payload.health.projects);
-        cacheProjectSnapshot(payload.health.projects);
-      }
-      setStartupIssue("");
-      setError((current) => (current.toLowerCase().includes("fetch") ? "" : current));
-    } catch (cause) {
-      if (sequence !== bootstrapRequestSequenceRef.current) {
-        return;
-      }
-      const message = cause instanceof Error ? cause.message : String(cause);
-      if (isRuntimeSessionVerificationError(message)) {
-        handleRuntimeSessionFailure(message);
-      }
-      // Keep the current UI usable; explicit retry remains available.
     }
   }
 
