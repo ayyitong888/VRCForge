@@ -8,8 +8,8 @@ from typing import Any
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
 PRODUCT_VERSION = "1.10.0"
-TOOL_CONTRACT_VERSION = "190"
-PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "87"
+TOOL_CONTRACT_VERSION = "191"
+PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "190"
 
 EXPECTED_TOOL_NAMES = frozenset(
     {
@@ -21,7 +21,7 @@ EXPECTED_TOOL_NAMES = frozenset(
         "vrc_configure_aao_merge_physbone", "vrc_convert_unity_constraint", "vrc_create_component_feature", "vrc_create_gameobject", "vrc_create_safe_backup", "vrc_delete_gameobject",
         "vrc_duplicate_scene_object", "vrc_duplicate_project_asset", "vrc_relocate_generated_assets", "vrc_duplicate_scene_asset", "vrc_ensure_animator_state", "vrc_ensure_expression_menu_control",
         "vrc_ensure_expression_parameter", "vrc_export_blendshapes", "vrc_export_vrm", "vrc_find_assets",
-        "vrc_get_asset_info", "vrc_get_compile_errors", "vrc_get_execution_targets", "vrc_get_gameobject", "vrc_get_property", "vrc_gesture_manager_enter_play_mode", "vrc_gesture_manager_set_parameter", "vrc_import_unitypackage",
+        "vrc_get_asset_info", "vrc_get_compile_errors", "vrc_get_ndmf_errors", "vrc_get_execution_targets", "vrc_get_gameobject", "vrc_get_property", "vrc_gesture_manager_enter_play_mode", "vrc_gesture_manager_set_parameter", "vrc_import_unitypackage",
         "vrc_inspect_modular_avatar_component", "vrc_inspect_primitive_basis_fixture", "vrc_inspect_skinned_mesh_bone_usage", "vrc_inspect_skinned_mesh_deformation", "vrc_remap_skinned_mesh_bone", "vrc_instantiate_prefab",
         "vrc_manage_expression_menu", "vrc_manage_expression_parameters", "vrc_manage_fx_animator", "vrc_manage_wardrobe",
         "vrc_poll_job", "vrc_prepare_checkpoint", "vrc_read_avatar_descriptor", "vrc_read_vrchat_sdk_builder_alerts", "vrc_refresh_asset_database",
@@ -36,7 +36,7 @@ EXPECTED_TOOL_NAMES = frozenset(
     }
 )
 SCAN_SCOPE_TOOL_NAMES = frozenset({"vrc_capture_scan_scope", "vrc_validate_scan_scope"})
-EXPECTED_TOOL_COUNT = 100
+EXPECTED_TOOL_COUNT = 101
 
 # Contract revisions describe the discovered tool surface; protocol-range
 # negotiation decides whether the App and Core can communicate. Revision 88
@@ -44,7 +44,7 @@ EXPECTED_TOOL_COUNT = 100
 # adds renderer-slot assignment; revision 90 adds generated-asset relocation.
 # These tools did not exist in the revision-87 surface.
 PREVIOUS_CORE_UPGRADE_MISSING_TOOLS = frozenset(
-    {"vrc_get_execution_targets", "vrc_set_renderer_material_slot", "vrc_relocate_generated_assets", "vrc_start_runtime_observation", "vrc_get_runtime_observation", "vrc_flatten_material_variant"}
+    {"vrc_get_ndmf_errors", "vrc_get_execution_targets", "vrc_set_renderer_material_slot", "vrc_relocate_generated_assets", "vrc_start_runtime_observation", "vrc_get_runtime_observation", "vrc_flatten_material_variant"}
 )
 PREVIOUS_CORE_TOOL_NAMES = EXPECTED_TOOL_NAMES - PREVIOUS_CORE_UPGRADE_MISSING_TOOLS
 PREVIOUS_CORE_TOOL_COUNT = len(PREVIOUS_CORE_TOOL_NAMES)
@@ -60,6 +60,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "vrc_get_asset_info",
         "vrc_get_compile_errors",
         "vrc_get_execution_targets",
+        "vrc_get_ndmf_errors",
         "vrc_get_gameobject",
         "vrc_get_property",
         "vrc_inspect_skinned_mesh_bone_usage",

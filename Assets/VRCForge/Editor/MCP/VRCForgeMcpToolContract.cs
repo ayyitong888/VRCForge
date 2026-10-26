@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.10.0";
-        internal const string ToolContractVersion = "190";
-        internal const int ToolCount = 102;
+        internal const string ToolContractVersion = "191";
+        internal const int ToolCount = 103;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -58,6 +58,7 @@ namespace VRCForge.Editor
                 { "vrc_find_assets", "VRCForge.Editor.FindAssetsTool" },
                 { "vrc_get_asset_info", "VRCForge.Editor.GetAssetInfoTool" },
                 { "vrc_get_compile_errors", "VRCForge.Editor.CompileErrorReader" },
+                { "vrc_get_ndmf_errors", "VRCForge.Editor.NdmfErrorReader" },
                 { "vrc_get_execution_targets", "VRCForge.Editor.ExecutionTargetInspector" },
                 { "vrc_get_gameobject", "VRCForge.Editor.GetGameObjectTool" },
                 { "vrc_get_property", "VRCForge.Editor.GetPropertyTool" },
@@ -135,6 +136,7 @@ namespace VRCForge.Editor
                 "vrc_find_assets",
                 "vrc_get_asset_info",
                 "vrc_get_compile_errors",
+                "vrc_get_ndmf_errors",
                 "vrc_get_execution_targets",
                 "vrc_get_gameobject",
                 "vrc_get_property",
