@@ -79,8 +79,12 @@ let browser;
 try {
   browser = await chromium.launch({ headless: true, channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge" });
   const page = await browser.newPage();
+  await page.clock.install();
   page.setDefaultTimeout(5000);
   await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.clock.runFor(30_000);
+  assert.equal(await page.getByPlaceholder("Type another answer...").count(), 0, "idle question prompt collapses after 30 seconds");
+  await page.locator("[data-question-reopen='q-one']").click();
   const custom = page.getByPlaceholder("Type another answer...");
   const answerButton = page.getByRole("button", { name: "Send", exact: true });
 

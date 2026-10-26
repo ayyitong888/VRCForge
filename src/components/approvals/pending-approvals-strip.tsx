@@ -1,4 +1,5 @@
 import { AlertTriangle, ChevronDown, X } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { presentApproval } from "../../lib/approval-presentation";
 import type { AgentApproval } from "../../lib/api";
@@ -18,11 +19,20 @@ type PendingApprovalsStripProps = {
 
 export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, onReject, onClose }: PendingApprovalsStripProps) {
   const { t } = useTranslation();
+  const [collapsed, setCollapsed] = useState(false);
   const visibleApprovals = approvals.filter(
     (approval) => approval.status === "pending" && !["approve", "reject"].includes(actions[approval.id] || ""),
   );
+  useEffect(() => {
+    if (loading || Object.values(actions).some(Boolean)) return undefined;
+    const timer = window.setTimeout(() => setCollapsed(true), 30_000);
+    return () => window.clearTimeout(timer);
+  }, [loading, actions, visibleApprovals.length]);
   if (visibleApprovals.length === 0) {
     return null;
+  }
+  if (collapsed) {
+    return <div className="shrink-0 border-t border-amber-500/20 bg-amber-500/5 px-6 py-2"><div className="mx-auto max-w-4xl"><Button variant="ghost" onClick={() => setCollapsed(false)} data-approval-reopen>{t("approval.requestTitle")} · {visibleApprovals.length}</Button></div></div>;
   }
 
   return (

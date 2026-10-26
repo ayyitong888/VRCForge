@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 import copy
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -122,13 +122,17 @@ class AgentRuntimeRunLedgerPorts:
 class AgentRuntimeRunLedger:
     """Persist and project runtime-run events without owning runtime execution."""
 
-    __slots__ = ("_ports", "_instance_nonce")
+    __slots__ = ("_ports", "_instance_nonce", "_list_runs_cache")
 
     def __init__(self, ports: AgentRuntimeRunLedgerPorts) -> None:
         self._ports = ports
         # Process-local ownership marker. It is deliberately never exposed in
         # public projections; a fresh gateway instance cannot claim an old run.
         self._instance_nonce = secrets.token_hex(16)
+        # The desktop snapshot polls this projection frequently.  Keep only
+        # the filtered event window for each query and advance it from the
+        # append boundary; never retain/parse the complete JSONL in memory.
+        self._list_runs_cache: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
 
     @property
     def log_path(self) -> Path:
@@ -376,7 +380,16 @@ class AgentRuntimeRunLedger:
         terminal_captures: dict[tuple[str, str], dict] = {}
         run_fields = ("sessionId", "turnId", "clientTurnId", "status", "provider", "providerLabel",
                       "model", "projectRoot", "createdAt", "updatedAt", "startedAt", "completedAt")
-        for row in self._exact_run_events(session_id, client_turn_id):
+        with self._ports.shared_state_lock:
+            timeline_rows, _, _ = self._list_runs_events(
+                cache_key=("timeline", session_id, client_turn_id, ""),
+                session_id=session_id,
+                client_turn_id=client_turn_id,
+                project_matches=lambda _value: True,
+                event_approval_ids=lambda _event: set(),
+                limit=0,
+            )
+        for row in timeline_rows:
             name = row.get("event")
             if name == "runtime_turn_completed":
                 terminal = _terminal_continuation(row) or {}
@@ -473,7 +486,6 @@ class AgentRuntimeRunLedger:
         project_root: str = "",
         client_turn_id: str = "",
     ) -> dict[str, Any]:
-        start_times: dict[tuple[str, str], str] = {}
         session_id = session_id.strip()
         project_root = project_root.strip()
         client_turn_id = client_turn_id.strip()
@@ -492,23 +504,17 @@ class AgentRuntimeRunLedger:
             ids.update(str(item).strip() for item in _ensure_list(event.get("approvalIds")))
             return {item for item in ids if item}
 
-        related_approval_ids: set[str] = set()
-        if session_id:
-            for event in self._exact_run_events(session_id, ""):
-                related_approval_ids.update(event_approval_ids(event))
-
-        def identity_matches(event: dict[str, Any]) -> bool:
-            related = bool(related_approval_ids.intersection(event_approval_ids(event)))
-            return ((not session_id or event.get("sessionId") == session_id or related)
-                    and (not client_turn_id or event.get("clientTurnId") == client_turn_id)
-                    and project_matches(str(event.get("projectRoot") or "")))
-
-        # A busy unrelated session must not evict this chat before filtering.
-        events = self.read_events(
-            limit=max(limit * 8, 100), start_times=start_times,
-            predicate=identity_matches if session_id or client_turn_id or project_root else None,
-        )
-
+        cache_key = (session_id, normalized_project_root, client_turn_id,
+                     max(1, min(int(limit), 200)))
+        with self._ports.shared_state_lock:
+            events, start_times, related_approval_ids = self._list_runs_events(
+                cache_key=cache_key,
+                session_id=session_id,
+                client_turn_id=client_turn_id,
+                project_matches=project_matches,
+                event_approval_ids=event_approval_ids,
+                limit=max(limit * 8, 100),
+            )
         runs_by_key: dict[str, dict[str, Any]] = {}
         event_count_by_key: dict[str, int] = {}
         filtered_events: list[dict[str, Any]] = []
@@ -560,6 +566,106 @@ class AgentRuntimeRunLedger:
             ],
             "count": len(runs),
         }
+
+    def _list_runs_events(
+        self, *, cache_key: tuple[Any, ...], session_id: str,
+        client_turn_id: str, project_matches: Callable[[str], bool],
+        event_approval_ids: Callable[[dict[str, Any]], set[str]], limit: int,
+    ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str], set[str]]:
+        """Read one query window once, then consume only appended JSONL rows.
+
+        Follow OpenClaw's logging/log-tail.ts cursor pattern: seek by bytes,
+        advance only through complete newlines, and reset on replacement/shrink.
+        Unlike a diagnostic tail, timeline paging must retain its full history.
+        """
+        path = self.log_path
+        if not path.exists():
+            self._list_runs_cache.pop(cache_key, None)
+            return [], {}, set()
+        try:
+            stat = path.stat()
+        except OSError:
+            return [], {}, set()
+        cached = self._list_runs_cache.get(cache_key)
+        identity = (stat.st_dev, stat.st_ino)
+        same_identity = bool(cached and cached["identity"] == identity)
+        incremental = bool(same_identity and stat.st_size > cached["offset"])
+        unchanged = bool(same_identity and stat.st_size == cached["offset"]
+                         and stat.st_mtime_ns == cached["mtime_ns"])
+        if unchanged:
+            self._list_runs_cache.move_to_end(cache_key)
+            return (copy.deepcopy(cached["events"]), dict(cached["start_times"]),
+                    set(cached["approval_ids"]))
+        if incremental:
+            self._list_runs_cache.move_to_end(cache_key)
+            offset = cached["offset"]
+            direct_events = deque(cached["direct_events"], maxlen=limit or None)
+            approval_events = list(cached["approval_events"])
+            start_times = dict(cached["start_times"])
+            approval_ids = set(cached["approval_ids"])
+            ordinal = int(cached["ordinal"])
+        else:
+            offset, start_times = 0, {}
+            direct_events, approval_events, approval_ids, ordinal = deque(maxlen=limit or None), [], set(), 0
+        try:
+            with path.open("rb") as source:
+                source.seek(offset)
+                pending = b""
+                remaining = stat.st_size - offset
+                while remaining > 0:
+                    chunk = source.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    pending += chunk
+                    lines = pending.split(b"\n")
+                    pending = lines.pop()
+                    for line_bytes in lines:
+                        ordinal += 1
+                        try:
+                            event = json.loads(line_bytes.decode("utf-8", errors="replace"))
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        if (event.get("event") == "runtime_turn_started"
+                                and event.get("sessionId") and event.get("turnId")
+                                and event.get("createdAt")):
+                            start_times[(str(event["sessionId"]), str(event["turnId"]))] = str(event["createdAt"])
+                        direct = ((not session_id or event.get("sessionId") == session_id)
+                                  and (not client_turn_id or event.get("clientTurnId") == client_turn_id)
+                                  and project_matches(str(event.get("projectRoot") or "")))
+                        event_ids = event_approval_ids(event)
+                        if session_id and event.get("sessionId") == session_id:
+                            # Approval association is session-wide, even
+                            # when this query targets another client turn.
+                            approval_ids.update(event_ids)
+                        if direct:
+                            direct_events.append((ordinal, event))
+                        if ((session_id or client_turn_id or cache_key[1]) and event_ids and not direct
+                                and (not client_turn_id or event.get("clientTurnId") == client_turn_id)
+                                and project_matches(str(event.get("projectRoot") or ""))):
+                            approval_events.append((ordinal, event))
+                new_offset = source.tell() - len(pending)
+        except OSError:
+            return [], {}, set()
+        if session_id or client_turn_id or cache_key[1]:
+            related = [row for row in approval_events
+                       if approval_ids.intersection(event_approval_ids(row[1]))]
+            ordered = sorted(list(direct_events) + related, key=lambda item: item[0])
+            events = [row for _, row in ordered[-limit:]]
+        else:
+            events = [row for _, row in list(direct_events)[-limit:]]
+        self._list_runs_cache[cache_key] = {
+            "identity": identity, "mtime_ns": stat.st_mtime_ns, "offset": new_offset,
+            "events": copy.deepcopy(events), "start_times": dict(start_times),
+            "approval_ids": set(approval_ids), "direct_events": list(direct_events),
+            "approval_events": approval_events, "ordinal": ordinal,
+        }
+        self._list_runs_cache.move_to_end(cache_key)
+        while len(self._list_runs_cache) > 32:
+            self._list_runs_cache.popitem(last=False)
+        return copy.deepcopy(events), dict(start_times), set(approval_ids)
 
     def list_runtime_continuations(self, *, limit: int = 64) -> list[dict[str, Any]]:
         """Return bounded durable chat projections for reconnect replay."""

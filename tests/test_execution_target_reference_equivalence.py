@@ -409,7 +409,7 @@ def test_resource_snapshot_uses_bound_scope_and_keeps_paths_private(
     _assert_no_project_path(identity_content, project_root)
 
 
-def test_stale_scene_result_publishes_bound_snapshot_then_next_call_rejects_drift(
+def test_scene_content_change_keeps_bound_snapshot_and_next_call_uses_same_reference(
     tmp_path: Path, monkeypatch
 ) -> None:
     project_root = tmp_path / "unity-project"
@@ -478,9 +478,8 @@ def test_stale_scene_result_publishes_bound_snapshot_then_next_call_rejects_drif
     assert snapshot["uri"].startswith("vrcforge://snapshot/avatar/")
     assert snapshot_content["identity"]["executionTarget"] == reference
     _assert_no_project_path(snapshot_content, project_root)
-    assert next_call["status"] == "failed"
-    assert "identity lock rejected" in next_call["error"].casefold()
-    assert domain_calls == ["Root/Avatar"]
+    assert next_call["status"] == "executed", next_call
+    assert domain_calls == ["Root/Avatar", "Root/Avatar"]
     assert unity_calls == []
 
 

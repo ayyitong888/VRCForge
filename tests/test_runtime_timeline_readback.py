@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,25 @@ def add_timeline(ledger, sequence, *, session="session", client="client", **extr
                "timestamp": "2026-10-23T13:00:00Z",
                "payload": {"summary": f"Visible {sequence}", "status": "streaming", **extra}},
     )
+
+
+def test_long_timeline_keeps_first_page_and_run_start(tmp_path):
+    ledger, _ = make_ledger(tmp_path)
+    rows = [{"event": "runtime_turn_started", "status": "running",
+             "sessionId": "session", "turnId": "turn", "clientTurnId": "client",
+             "createdAt": "2026-10-23T13:00:00Z"}]
+    for sequence in range(10_005):
+        rows.append({"event": "runtime_turn_timeline_event", "sessionId": "session",
+                     "turnId": "turn", "clientTurnId": "client",
+                     "timelineEvent": {"id": f"event-{sequence}", "sequence": sequence,
+                                       "kind": "assistant", "payload": {"summary": str(sequence)}}})
+    ledger.log_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.log_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    first = ledger.read_timeline(session_id="session", client_turn_id="client", limit=2)
+    assert [row["sequence"] for row in first["events"]] == [0, 1]
+    assert first["run"]["startedAt"] == rows[0]["createdAt"]
+    last = ledger.read_timeline(session_id="session", client_turn_id="client", after_sequence=10_003)
+    assert [row["sequence"] for row in last["events"]] == [10_003, 10_004]
 
 
 def test_exact_timeline_pages_survive_unrelated_global_churn(tmp_path):
@@ -41,6 +61,42 @@ def test_exact_timeline_pages_survive_unrelated_global_churn(tmp_path):
     assert empty["run"]["status"] == "running"
     add_timeline(ledger, 5)
     assert ledger.read_timeline(session_id="session", client_turn_id="client", after_sequence=5)["events"][0]["sequence"] == 5
+
+
+def test_timeline_append_uses_cached_byte_cursor(tmp_path, monkeypatch):
+    ledger, _ = make_ledger(tmp_path)
+    ledger.append({"event": "runtime_turn_started", "status": "running", "sessionId": "session",
+                   "turnId": "turn", "clientTurnId": "client"})
+    add_timeline(ledger, 0)
+    ledger.read_timeline(session_id="session", client_turn_id="client", limit=2)
+    cache = ledger._list_runs_cache[("timeline", "session", "client", "")]
+    offset = cache["offset"]
+    add_timeline(ledger, 1)
+
+    original_open = Path.open
+    reads = []
+
+    class SpyHandle:
+        def __init__(self, handle): self.handle = handle
+        def __enter__(self): return self
+        def __exit__(self, *args): return self.handle.__exit__(*args)
+        def seek(self, *args): return self.handle.seek(*args)
+        def tell(self): return self.handle.tell()
+        def read(self, size=-1):
+            reads.append((self.handle.tell(), size))
+            return self.handle.read(size)
+
+    def spy_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        return SpyHandle(handle) if path == ledger.log_path and "b" in mode else handle
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    page = ledger.read_timeline(session_id="session", client_turn_id="client", after_sequence=1)
+    assert [event["sequence"] for event in page["events"]] == [1]
+    assert reads and reads[0][0] == offset
+    assert all(0 < size <= 1024 * 1024 for _, size in reads)
+    assert sum(size for _, size in reads) == ledger.log_path.stat().st_size - offset
 
 
 @pytest.mark.parametrize("filters", [{"session_id": "session"}, {"client_turn_id": "client"},

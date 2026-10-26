@@ -27,7 +27,7 @@ const answer = questionAnswerItem({ questionId: "q-browser", header: "Repair ava
   { id: "attachment-1", name: "review.png", size: 42, type: "image/png", dataUrl: "data:image/png;base64,AA==" },
 ]);
 assert.deepEqual(answer, {
-  id: "question-answer-q-browser", type: "question_answer", questionId: "q-browser", header: "Repair avatar", question: "Choose a repair", text: "Safe repair",
+  id: "question-answer-q-browser-0", type: "question_answer", questionId: "q-browser", header: "Repair avatar", question: "Choose a repair", text: "Safe repair", revision: 0,
   attachments: [{ id: "attachment-1", name: "review.png", size: 42, type: "image/png", dataUrl: "data:image/png;base64,AA==" }],
 });
 const bundle = path.join(temp, "bundle.mjs");

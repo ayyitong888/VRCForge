@@ -1036,6 +1036,7 @@ export type AgentQuestionOption = {
   label: string;
   value?: string;
   description?: string;
+  resolution?: "pass" | "fail" | "uncertain" | "later";
 };
 
 export type AgentQuestion = {

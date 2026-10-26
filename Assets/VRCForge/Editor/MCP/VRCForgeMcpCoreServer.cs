@@ -2074,11 +2074,12 @@ namespace VRCForge.Editor
             var expectedAbsolute = Path.GetFullPath(Path.Combine(projectRoot, assetPath.Replace('/', Path.DirectorySeparatorChar)));
             if (!string.Equals(Path.GetFullPath(absolutePath), expectedAbsolute, StringComparison.OrdinalIgnoreCase)
                 || !File.Exists(expectedAbsolute)) return false;
+            var activeScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            if (!activeScene.IsValid() || !activeScene.isLoaded
+                || !string.Equals(activeScene.path.Replace('\\', '/'), assetPath, StringComparison.Ordinal)) return false;
             var guid = ReadUnityMetaGuid(expectedAbsolute + ".meta");
-            var revision = File.GetLastWriteTimeUtc(expectedAbsolute).Ticks.ToString(CultureInfo.InvariantCulture);
-            return string.Equals(RequiredBoundedString(scene, "guid", 64), guid, StringComparison.Ordinal)
-                && string.Equals(RequiredBoundedString(scene, "revision", 64), revision, StringComparison.Ordinal)
-                && string.Equals(RequiredBoundedString(scene, "digest", 64), ComputeFileSha256(expectedAbsolute), StringComparison.Ordinal);
+            // Content revisions belong to write/checkpoint state, not scene identity.
+            return string.Equals(RequiredBoundedString(scene, "guid", 64), guid, StringComparison.Ordinal);
         }
 
         private static string ReadUnityMetaGuid(string metaPath)

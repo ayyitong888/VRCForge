@@ -15,14 +15,15 @@ export function questionAnswerItem(
       : undefined,
   }));
   const visibleAttachments = persistedAttachments?.length ? persistedAttachments : attachments;
+  const revision = Number.isInteger(question.questionFeedbackRevision) ? question.questionFeedbackRevision : 0;
   return {
-    id: `question-answer-${question.questionId}${question.updatedAt ? `-${encodeURIComponent(question.updatedAt)}` : ""}`,
+    id: `question-answer-${question.questionId}-${revision}`,
     type: "question_answer",
     questionId: question.questionId,
     ...(question.header?.trim() ? { header: question.header.trim() } : {}),
     ...(question.question?.trim() ? { question: question.question.trim() } : {}),
     text,
-    ...(Number.isInteger(question.questionFeedbackRevision) ? { revision: question.questionFeedbackRevision } : {}),
+    revision,
     ...(question.updatedAt ? { updatedAt: question.updatedAt } : {}),
     ...(visibleAttachments?.length ? { attachments: visibleAttachments } : {}),
   };

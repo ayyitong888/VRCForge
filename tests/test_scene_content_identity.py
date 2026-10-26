@@ -23,10 +23,11 @@ def identities(tmp_path):
     return target, core
 
 
-def test_same_scene_content_survives_checkpoint_timestamp_change(tmp_path):
+def test_scene_state_change_does_not_change_stable_target_identity(tmp_path):
     target, core = identities(tmp_path)
     frozen = copy.deepcopy(target)
     digest = execution_target_digest(target)
+    core['sceneDigest'] = 'b' * 64
     validated = validate_execution_target(target, project_root=str(tmp_path), core_identity=core, required_scope='scene')
     assert target == frozen
     assert validated['scene']['revision'] == '100'
@@ -34,19 +35,18 @@ def test_same_scene_content_survives_checkpoint_timestamp_change(tmp_path):
 
 
 @pytest.mark.parametrize('observed', ['b' * 64, '', 'short-digest', None])
-def test_changed_or_missing_content_proof_still_rejects_timestamp_drift(tmp_path, observed):
+def test_scene_revision_and_content_are_not_identity_proof(tmp_path, observed):
     target, core = identities(tmp_path)
     core['sceneDigest'] = observed
-    with pytest.raises(ExecutionTargetError) as failure:
-        validate_execution_target(target, core_identity=core, required_scope='scene')
-    assert failure.value.code == 'scene_identity_mismatch'
+    validated = validate_execution_target(target, core_identity=core, required_scope='scene')
+    assert execution_target_digest(validated) == execution_target_digest(target)
 
 
-def test_matching_non_sha_placeholder_cannot_override_revision(tmp_path):
+def test_scene_content_placeholder_does_not_affect_stable_identity(tmp_path):
     target, core = identities(tmp_path)
     target['scene']['digest'] = core['sceneDigest'] = 'placeholder'
-    with pytest.raises(ExecutionTargetError):
-        validate_execution_target(target, core_identity=core, required_scope='scene')
+    validated = validate_execution_target(target, core_identity=core, required_scope='scene')
+    assert execution_target_digest(validated) == execution_target_digest(target)
 
 
 @pytest.mark.parametrize('field,value', [('sceneGuid', 'scene-b'), ('instanceId', 'core-b'), ('processId', 5678)])
@@ -55,3 +55,14 @@ def test_equal_scene_bytes_do_not_allow_replaced_identity(tmp_path, field, value
     core[field] = value
     with pytest.raises(ExecutionTargetError):
         validate_execution_target(target, core_identity=core, required_scope='scene')
+
+
+def test_recreated_object_identity_is_still_rejected(tmp_path):
+    target, core = identities(tmp_path)
+    target['scope'] = 'object'
+    target['object'] = {'globalObjectId': 'object-current', 'exactHierarchyPath': 'Root/Object'}
+    target['namespace'] = canonical_namespace(target)
+    core['objectGlobalObjectId'] = 'object-recreated'
+    with pytest.raises(ExecutionTargetError) as failure:
+        validate_execution_target(target, core_identity=core, required_scope='object')
+    assert failure.value.code == 'object_identity_mismatch'

@@ -59,17 +59,30 @@ type ChatStorageLoadOutcome = {
   shouldPersist: boolean;
 };
 
-function chatSaveErrorMessage(cause: unknown, fallback: string): string {
-  // A 409 is owned by the fetch/merge recovery path, whose marker and message
-  // already describe the durable conflict. Other API failures leave the
-  // in-memory dirty snapshot retryable and should retain their actual detail.
+export function chatSaveErrorMessage(cause: unknown, recoveryFallback: string, conflictFallback = "Chat storage changed in another window. Retry the save."): string {
   if (cause instanceof ApiError && cause.status === 409) {
-    return fallback;
+    const detail = cause.detail;
+    let code = "";
+    if (detail && typeof detail === "object") {
+      const record = detail as { code?: unknown; detail?: unknown };
+      code = String(record.code || (record.detail && typeof record.detail === "object" ? (record.detail as { code?: unknown }).code : "") || "");
+    } else if (typeof detail === "string") {
+      try {
+        const parsed = JSON.parse(detail) as { code?: unknown; detail?: { code?: unknown } };
+        code = String(parsed.code || parsed.detail?.code || "");
+      } catch {
+        code = "";
+      }
+    }
+    if (code === "chat_store_recovery_required") {
+      return recoveryFallback;
+    }
+    return conflictFallback;
   }
   if (cause instanceof Error) {
-    return cause.message.trim() || fallback;
+    return cause.message.trim() || recoveryFallback;
   }
-  return fallback;
+  return recoveryFallback;
 }
 
 function projectDurableChatFingerprint(chat: ChatThread): unknown {
@@ -358,7 +371,7 @@ export function useChatSessions({
     if (chatStorageConflictRef.current) {
       return;
     }
-    setError(chatSaveErrorMessage(cause, fallback));
+    setError(chatSaveErrorMessage(cause, fallback, t("chat.sessionSaveConflict")));
   }
 
   async function reconcileFetchedChatStorage(

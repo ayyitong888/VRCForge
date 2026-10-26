@@ -124,7 +124,7 @@ export function buildAgentTimelineRows({
       <span>{t("chat.cancelled")}</span>
     </div>,
   ] : rows;
-  const finishRows = (rows: ReactNode[]): ReactNode[] => [...finishStatusRows(rows), ...((response.timeline || []).some(event => event.kind === "tool_result") ? [] : buildCaptureImageRows(
+  const finishRows = (rows: ReactNode[]): ReactNode[] => [...finishStatusRows(rows), ...((response.timeline || []).some(event => event.kind === "tool_result" && event.payload?.captures?.length) ? [] : buildCaptureImageRows(
     [...(response.steps || []), ...(response.timeline || []).filter(event => event.kind === "tool_result" && event.payload?.captures?.length)
       .map(event => ({ kind: "tool", result: { captures: event.payload?.captures } }))],
     [response.plan.reply || "", ...(response.timeline || []).filter(event => event.kind === "assistant").map(event => event.payload?.summary || "")].join("\n"),
@@ -424,6 +424,7 @@ export function buildDurableTimelineRows(
           statusLabel={historicalFailureLabel(calls.map(({ invocation }) => invocation))}
           showStatus={calls.some(({ invocation }) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
+          openByDefault={!options.live}
         >
           {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail))}
         </WorkSegmentRow>

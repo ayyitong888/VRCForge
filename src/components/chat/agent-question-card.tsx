@@ -1,21 +1,28 @@
 import { ChevronLeft, ChevronRight, HelpCircle, Pencil, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentQuestion } from "../../lib/api";
 import { cn, formatCount } from "../../lib/utils";
 import { questionContinuationDisplay } from "../../hooks/use-runtime-turn-continuation";
+import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
+import type { ChatResourceImageContext as ChatResourceImageContextValue } from "../../lib/api/chat-resource-image";
+import type { QuestionCapturePreview } from "../../lib/chat-timeline-presentation";
 
 export function AgentQuestionCard({
   questions,
   onAnswerQuestion,
   onStopContinuation,
   onReplyInChat,
+  capturePreviewsForQuestion,
+  resourceImageContextForQuestion,
 }: {
   questions: AgentQuestion[];
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   onStopContinuation?: (question: AgentQuestion) => void | Promise<void>;
   /** Focus the shared composer; the owner should retain this question id and send text/attachments through the normal composer path. */
   onReplyInChat?: (questionId: string) => void;
+  capturePreviewsForQuestion?: (question: AgentQuestion) => QuestionCapturePreview[];
+  resourceImageContextForQuestion?: (question: AgentQuestion) => ChatResourceImageContextValue | undefined;
 }) {
   const { t } = useTranslation();
   const pendingQuestions = useMemo(
@@ -25,6 +32,9 @@ export function AgentQuestionCard({
   const [index, setIndex] = useState(0);
   const [customValues, setCustomValues] = useState<Record<string, string>>({});
   const [busyChoice, setBusyChoice] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [collapsedQuestionId, setCollapsedQuestionId] = useState("");
+  const submittingRef = useRef(false);
   const [questionErrors, setQuestionErrors] = useState<Record<string, string>>({});
   const [retryAnswers, setRetryAnswers] = useState<Record<string, { optionId: string; value: string }>>({});
 
@@ -33,6 +43,11 @@ export function AgentQuestionCard({
   }, [pendingQuestions.length]);
 
   const question = pendingQuestions[index];
+  useEffect(() => {
+    if (!question || busyChoice || editing) return undefined;
+    const timer = window.setTimeout(() => setCollapsedQuestionId(question.questionId), 30_000);
+    return () => window.clearTimeout(timer);
+  }, [question?.questionId, busyChoice, editing]);
   if (!question) {
     return null;
   }
@@ -43,6 +58,15 @@ export function AgentQuestionCard({
   const continuationActive = continuationDisplay === "active";
   const continuationSettled = continuationDisplay === "settled" && Boolean(question.runtimeContinuation);
   const customValue = customValues[question.questionId] || "";
+  if (collapsedQuestionId === question.questionId && !busyChoice) {
+    return (
+      <button type="button" className="w-full rounded-xl border border-border bg-workspace px-3 py-2 text-left text-sm hover:bg-muted/50" onClick={() => setCollapsedQuestionId("")} data-question-reopen={question.questionId}>
+        {t("questionCard.title")} · {question.question || question.questionId}
+      </button>
+    );
+  }
+  const capturePreviews = capturePreviewsForQuestion?.(question) || [];
+  const resourceImageContext = resourceImageContextForQuestion?.(question);
   const isVisualCheckpoint = question.kind === "visual_checkpoint";
   const optionLabel = (option: NonNullable<AgentQuestion["options"]>[number]) => isVisualCheckpoint
     ? t(`questionCard.visualCheckpoint.options.${option.id.toLowerCase()}`, option.label)
@@ -53,9 +77,11 @@ export function AgentQuestionCard({
     return note ? `${label}\n\n${note}` : label;
   };
   const answer = async (optionId: string, value: string) => {
+    if (submittingRef.current) return;
     if (!value.trim() && optionId !== "skip") {
       return;
     }
+    submittingRef.current = true;
     setBusyChoice(optionId);
     setQuestionErrors((current) => ({ ...current, [question.questionId]: "" }));
     setRetryAnswers((current) => ({ ...current, [question.questionId]: { optionId, value } }));
@@ -63,14 +89,16 @@ export function AgentQuestionCard({
       await onAnswerQuestion(question.questionId, optionId, value);
       setCustomValues((current) => ({ ...current, [question.questionId]: "" }));
       setRetryAnswers((current) => { const next = { ...current }; delete next[question.questionId]; return next; });
+      setCollapsedQuestionId(question.questionId);
     } catch (cause) {
       setQuestionErrors((current) => ({ ...current, [question.questionId]: cause instanceof Error ? cause.message : String(cause) }));
     } finally {
+      submittingRef.current = false;
       setBusyChoice("");
     }
   };
 
-  return (
+  const content = (
     <section className="app-scrollbar max-h-[48vh] overflow-y-auto rounded-2xl border border-border bg-workspace p-4" aria-label={t("questionCard.label")}>
       <div className="mb-1.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
         <HelpCircle className="h-4 w-4 shrink-0" />
@@ -110,12 +138,22 @@ export function AgentQuestionCard({
             </button>
           </div>
         ) : null}
-        <button type="button" className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted disabled:opacity-50" aria-label={t("common.close")} title={t("questionCard.skip")} onClick={() => void answer("skip", t("questionCard.skipAnswer"))} disabled={Boolean(busyChoice) || continuationActive || continuationSettled}><X className="h-4 w-4" /></button>
+        <button type="button" className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted disabled:opacity-50" aria-label={t("common.close")} title={t("common.close")} onClick={() => setCollapsedQuestionId(question.questionId)} disabled={Boolean(busyChoice)}><X className="h-4 w-4" /></button>
       </div>
 
       {!continuationActive && !continuationSettled ? <div className="app-scrollbar mb-2 max-h-[20vh] overflow-y-auto whitespace-pre-wrap break-words text-sm font-normal text-foreground">
         {question.question || question.questionId}
       </div> : null}
+
+      {!continuationActive && !continuationSettled && capturePreviews.length ? (
+        <div className="mb-3 flex gap-2 overflow-x-auto" data-question-capture-previews>
+          {capturePreviews.map((capture) => (
+            <div key={capture.resourceUri} className="w-40 shrink-0 rounded-md border border-border p-1 [&_.chat-markdown]:leading-none">
+              <ChatMarkdown text={`![${capture.label || t("chat.imagePreview")}](${capture.resourceUri})`} />
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       {continuationActive || continuationSettled ? (
         <div className="mb-3 flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-2.5 py-2 text-xs" role="status">
@@ -197,6 +235,8 @@ export function AgentQuestionCard({
             <textarea
               value={customValue}
               onChange={(event) => setCustomValues((current) => ({ ...current, [question.questionId]: event.target.value.slice(0, 2000) }))}
+              onFocus={() => setEditing(true)}
+              onBlur={() => setEditing(false)}
               maxLength={2000}
               rows={1}
               className="app-scrollbar h-6 min-w-0 flex-1 resize-none bg-transparent text-base leading-6 outline-none placeholder:text-muted-foreground"
@@ -227,4 +267,7 @@ export function AgentQuestionCard({
       </> : null}
     </section>
   );
+  return resourceImageContext ? (
+    <ChatResourceImageContext.Provider value={resourceImageContext}>{content}</ChatResourceImageContext.Provider>
+  ) : content;
 }

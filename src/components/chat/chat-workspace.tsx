@@ -28,6 +28,7 @@ import { conversationItemRenderKey } from "../../lib/conversation-utils";
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { conversationRoundDateSeparators } from "../../lib/message-time";
 import { projectConversationTasks } from "../../lib/chat-task-projection";
+import { capturePreviewsForQuestion } from "../../lib/chat-timeline-presentation";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -327,6 +328,19 @@ export function ChatWorkspace({
     const question = projectedAgentQuestions.find((candidate) => candidate.questionId === item.questionId)?.question;
     return question ? { ...item, question } : item;
   });
+  const questionCapturePreviews = (question: AgentQuestion) => capturePreviewsForQuestion(question, conversationItems);
+  const questionResourceImageContext = (question: AgentQuestion) => {
+    const capturePreviews = questionCapturePreviews(question);
+    if (!capturePreviews.length || !resourceImageEndpoint || !resourceChatId || !resourceProjectPath) return undefined;
+    const ownerTurn = String(question.originClientTurnId || "").split(":question:", 1)[0] || "";
+    return {
+      endpoint: resourceImageEndpoint,
+      chatId: resourceChatId,
+      projectPath: resourceProjectPath,
+      sessionId: capturePreviews[0].sessionId,
+      clientTurnId: ownerTurn,
+    };
+  };
   const taskProjection = projectConversationTasks(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions);
   const roundDateSeparators = conversationRoundDateSeparators(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions);
   const activeStreamingItems = conversationItems.filter((item): item is Extract<ConversationItem, { type: "streaming" }> => item.type === "streaming");
@@ -527,7 +541,13 @@ export function ChatWorkspace({
             {replyBanner}
             {pendingQuestionPrompts.length && !pendingReplyQuestion ? (
               <div className="mb-3">
-                <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} onReplyInChat={onReplyInChat} />
+                <AgentQuestionCard
+                  questions={pendingQuestionPrompts}
+                  onAnswerQuestion={onAnswerQuestion}
+                  onReplyInChat={onReplyInChat}
+                  capturePreviewsForQuestion={questionCapturePreviews}
+                  resourceImageContextForQuestion={questionResourceImageContext}
+                />
               </div>
             ) : null}
             {pendingQueue}
@@ -604,6 +624,8 @@ export function ChatWorkspace({
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <ConversationCard
                 item={item}
+                reopenQuestionId={item.type === "question_answer" ? pendingQuestionPrompts.find((question) => question.questionId === item.questionId)?.questionId : undefined}
+                onReopenQuestion={onReplyInChat}
                 interleavedUserMessages={turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined}
                 initialUserContent={initialUser ? (
                   <div data-conversation-item-id={initialUser.id} data-turn-initial-user>
@@ -686,7 +708,13 @@ export function ChatWorkspace({
           {replyBanner}
           {pendingQuestionPrompts.length && !pendingReplyQuestion ? (
             <div className="mb-3">
-            <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} onReplyInChat={onReplyInChat} />
+            <AgentQuestionCard
+              questions={pendingQuestionPrompts}
+              onAnswerQuestion={onAnswerQuestion}
+              onReplyInChat={onReplyInChat}
+              capturePreviewsForQuestion={questionCapturePreviews}
+              resourceImageContextForQuestion={questionResourceImageContext}
+            />
             </div>
           ) : null}
           {pendingQueue}

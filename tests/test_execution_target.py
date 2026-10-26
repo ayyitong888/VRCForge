@@ -59,6 +59,11 @@ def _target(tmp_path: Path, *, scope: str = "component") -> dict:
     return target
 
 
+def _replace_scene_guid(target: dict) -> None:
+    target["scene"]["guid"] = "replacement-scene"
+    target["namespace"] = canonical_namespace(target)
+
+
 def test_execution_target_accepts_exact_namespace_and_digest(tmp_path: Path):
     target = _target(tmp_path)
     validated = validate_execution_target(
@@ -75,7 +80,7 @@ def test_execution_target_accepts_exact_namespace_and_digest(tmp_path: Path):
     "mutator,code",
     [
         (lambda value: value["editor"].update({"unityPid": 9999}), "editor_identity_mismatch"),
-        (lambda value: value["scene"].update({"revision": "8"}), "scene_identity_mismatch"),
+        (_replace_scene_guid, "scene_identity_mismatch"),
         (lambda value: value["object"].pop("globalObjectId"), "identity_field_missing"),
         (lambda value: value["scene"].update({"absolutePath": "C:/Other/Other.unity"}), "identity_path_outside_project"),
     ],
@@ -87,7 +92,7 @@ def test_identity_drift_fails_closed(tmp_path: Path, mutator, code: str):
         validate_execution_target(
             target,
             project_root=str(tmp_path),
-            core_identity={"processId": 1234, "processStartTime": "2026-09-02T00:00:00Z", "instanceId": "core-1", "sceneRevision": "7"},
+            core_identity={"processId": 1234, "processStartTime": "2026-09-02T00:00:00Z", "instanceId": "core-1", "sceneGuid": "scene-guid", "sceneRevision": "7"},
             required_scope="component",
         )
     assert exc_info.value.code == code
@@ -163,7 +168,7 @@ def _live_runtime_target(tmp_path: Path) -> dict:
     return target
 
 
-def test_runtime_target_rechecks_descriptor_and_scene_file_identity(tmp_path: Path):
+def test_runtime_target_rechecks_descriptor_and_reports_current_scene_state(tmp_path: Path):
     target = _live_runtime_target(tmp_path)
     assert validate_runtime_execution_target(
         target,
@@ -173,9 +178,11 @@ def test_runtime_target_rechecks_descriptor_and_scene_file_identity(tmp_path: Pa
 
     stale = copy.deepcopy(target)
     stale["scene"]["digest"] = "f" * 64
-    with pytest.raises(ExecutionTargetError) as exc_info:
-        validate_runtime_execution_target(stale, project_root=str(tmp_path), required_scope="avatar")
-    assert exc_info.value.code == "scene_identity_mismatch"
+    refreshed_state = validate_runtime_execution_target(
+        stale, project_root=str(tmp_path), required_scope="avatar",
+    )
+    assert refreshed_state["scene"]["digest"] == target["scene"]["digest"]
+    assert execution_target_digest(refreshed_state) == execution_target_digest(target)
 
 
 def test_runtime_target_resolves_core_asset_path_when_absolute_path_is_omitted(tmp_path: Path):
@@ -264,17 +271,39 @@ def test_binding_refresh_allows_display_change_but_rejects_avatar_replacement(tm
     assert exc_info.value.code == "execution_target_identity_drifted"
 
 
-def test_public_reference_rejects_scene_drift_and_ambiguous_capture(tmp_path: Path):
+def test_public_reference_survives_scene_state_change_and_ambiguous_capture(tmp_path: Path):
     target = _live_runtime_target(tmp_path)
     registry = ExecutionTargetBindingRegistry()
     bound = registry.bind(target, project_root=str(tmp_path), session_context="runtime:session-a")
     scene = Path(target["scene"]["absolutePath"])
-    scene.write_bytes(scene.read_bytes() + b"# changed after binding\n")
+    old_stat = scene.stat()
+    scene.write_bytes(scene.read_bytes() + b"# changed scene bytes after binding\n")
+    os.utime(scene, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns + 10_000_000))
+    resolved = registry.resolve(
+        bound["executionTarget"],
+        project_root=str(tmp_path),
+        session_context="runtime:session-a",
+        required_scope="avatar",
+    )
+    assert resolved["scene"]["revision"] != target["scene"]["revision"]
+    assert resolved["scene"]["digest"] != target["scene"]["digest"]
+    assert execution_target_digest(resolved) == bound["executionTargetDigest"]
+    refreshed = registry.refresh(
+        bound["executionTarget"],
+        target,
+        project_root=str(tmp_path),
+        session_context="runtime:session-a",
+    )
+    assert refreshed["changed"] is False
+    assert refreshed["executionTargetDigest"] == bound["executionTargetDigest"]
+
+    replacement = copy.deepcopy(target)
+    replacement["scene"]["guid"] = "replacement-scene-guid"
+    replacement["namespace"] = canonical_namespace(replacement)
     with pytest.raises(ExecutionTargetError) as exc_info:
-        registry.resolve(
-            bound["executionTarget"],
+        validate_runtime_execution_target(
+            replacement,
             project_root=str(tmp_path),
-            session_context="runtime:session-a",
             required_scope="avatar",
         )
     assert exc_info.value.code == "scene_identity_mismatch"
@@ -311,6 +340,31 @@ def test_public_reference_rejects_core_instance_drift(tmp_path: Path):
             required_scope="avatar",
         )
     assert exc_info.value.code == "editor_identity_mismatch"
+
+
+def test_runtime_target_rejects_active_scene_path_drift(tmp_path: Path):
+    target = _live_runtime_target(tmp_path)
+    other_scene = tmp_path / "Assets" / "Other.unity"
+    other_scene.write_bytes(b"%YAML 1.1\n--- !u!1 &2\n")
+    other_scene.with_suffix(".unity.meta").write_text(
+        "fileFormatVersion: 2\nguid: 0123456789abcdef0123456789abcdef\n",
+        encoding="utf-8",
+    )
+    core = {
+        "processId": os.getpid(),
+        "processStartTime": target["editor"]["processStartTime"],
+        "instanceId": target["editor"]["coreInstanceId"],
+        "scenePath": str(other_scene.resolve()),
+        "sceneGuid": target["scene"]["guid"],
+    }
+    with pytest.raises(ExecutionTargetError) as exc_info:
+        validate_execution_target(
+            target,
+            project_root=str(tmp_path),
+            core_identity=core,
+            required_scope="avatar",
+        )
+    assert exc_info.value.code == "scene_identity_mismatch"
 
 
 def test_public_reference_keeps_paths_private_through_external_read_and_resource(tmp_path: Path, monkeypatch):

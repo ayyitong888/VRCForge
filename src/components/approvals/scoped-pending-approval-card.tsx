@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, Pencil, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { presentApproval } from "../../lib/approval-presentation";
@@ -21,12 +21,21 @@ type ScopedPendingApprovalCardProps = {
 export function ScopedPendingApprovalCard({ approvals, actions, disabled, onApprove, onReject, onModifyApproval }: ScopedPendingApprovalCardProps) {
   const { t } = useTranslation();
   const [editingApprovalId, setEditingApprovalId] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
   const visibleApprovals = approvals.filter(
     (approval) => approval.status === "pending" && !["approve", "reject"].includes(actions[approval.id] || ""),
   );
 
+  useEffect(() => {
+    if (disabled || editingApprovalId || Object.values(actions).some(Boolean)) return undefined;
+    const timer = window.setTimeout(() => setCollapsed(true), 30_000);
+    return () => window.clearTimeout(timer);
+  }, [disabled, editingApprovalId, actions]);
   if (visibleApprovals.length === 0) {
     return null;
+  }
+  if (collapsed) {
+    return <button type="button" className="w-full rounded-xl border border-border bg-card px-4 py-3 text-left text-sm hover:bg-muted/50" onClick={() => setCollapsed(false)} data-approval-reopen>{t("approval.blockingTitle")} · {visibleApprovals.length}</button>;
   }
 
   return (

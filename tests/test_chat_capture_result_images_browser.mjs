@@ -35,6 +35,13 @@ try{
  await page.keyboard.press('Escape');
  await page.waitForFunction(()=>document.querySelectorAll('dialog[open]').length===0);
  assert.equal(await page.locator('[data-agent-capture-image]').count(),unique.size,'each immutable capture renders once, independently of model prose');
+ // A durable tool-result marker without captures must not suppress the persisted step previews.
+ const markerOnly={...response,timeline:[{id:'marker',sequence:0,kind:'tool_result',timestamp:new Date().toISOString(),payload:{tool:'capture',actionId:'capture',status:'ok'}}]};
+ await page.evaluate(({response,context})=>window.mount({id:'marker-only',type:'agent',response},context),{response:markerOnly,context});
+ await page.locator('[data-agent-capture-images]').waitFor();
+ while(await page.locator('[data-agent-capture-images] > button[aria-expanded=false]').count()) await page.locator('[data-agent-capture-images] > button[aria-expanded=false]').first().click();
+ await page.waitForFunction(count=>document.querySelectorAll('[data-agent-capture-image] img').length===count,unique.size);
+ assert.equal(await page.locator('[data-agent-capture-image]').count(),unique.size,'step previews remain visible when a tool-result marker has no captures');
  if(response.timeline?.some(event=>event.kind==='tool_result')) {
    assert.ok(await page.locator('[data-agent-turn-process-group] [data-agent-capture-images]').count()>0,'capture groups remain at tool activity positions');
    assert.ok(await page.locator('[data-agent-capture-images]').evaluateAll(groups=>groups.every(group=>group.previousElementSibling?.hasAttribute('data-agent-tool-call-group'))),'each capture group follows its source tool group');

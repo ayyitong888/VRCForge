@@ -761,6 +761,8 @@
     "inputPlaceholder": "自由に入力",
     "sessionRecoveryBlocked": "{{count}} 件のチャット保存元に復旧が必要です。正常なチャットは読み込みましたが、Doctor が破損元を処理するまで保存を停止します。",
     "sessionSaveBlocked": "チャット保存元に復旧が必要なため、保存を停止しています。先に Doctor を開いてください。",
+    "sessionSaveConflict": "別のウィンドウでチャット保存内容が変更されました。保存を再試行してください。",
+    "sessionSaveFailed": "終了前にチャットの変更を保存できませんでした。保存を再試行してください。",
     "sessionConcurrentConflict": "{{count}} 件のチャットがこの画面と別のウィンドウの両方で変更されました。上書きを防ぐため保存を停止したままにします。",
     "concurrentConflictLocalCopy": "復元したローカルコピー",
     "sessionRestoreFailed": "チャット履歴を復元できませんでした。Doctor を開くか、ローカルランタイムを確認して再試行してください。",

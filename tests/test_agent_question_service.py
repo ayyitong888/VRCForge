@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from agent_question_service import (
     AgentQuestionService,
     AgentQuestionServiceError,
     GoalQuestionResolutionPort,
+    QUESTION_INPUT_SCHEMA,
     RuntimeQuestionResolutionPort,
 )
 
@@ -111,7 +113,7 @@ def test_question_service_preserves_scope_and_answer_exactly_once(tmp_path: Path
 
     assert answered["question"]["answer"] == "[redacted] proof"
     assert repeated["idempotent"] is True
-    assert len(resolutions) == 2  # Existing Goal resolution retries after a durable answer.
+    assert len(resolutions) == 1, "an idempotent answer must not resume the goal twice"
     records = [
         line
         for line in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8").splitlines()
@@ -128,7 +130,12 @@ def test_visual_checkpoint_has_explicit_resolution_and_replays_defer(tmp_path: P
     values = {
         "kind": "visual_checkpoint",
         "question": "Does the avatar preview pass the visual gate?",
-        "options": ["pass", "fail", "uncertain", "later"],
+        "options": [
+            {"id": "pass", "label": "Pass", "resolution": "pass"},
+            {"id": "fail", "label": "Fail", "resolution": "fail"},
+            {"id": "uncertain", "label": "Uncertain", "resolution": "uncertain"},
+            {"id": "later", "label": "Later", "resolution": "later"},
+        ],
         "sessionId": "visual-session",
         "projectRoot": "D:/ProjectA",
         "goalDeliveryId": "visual-delivery",
@@ -146,13 +153,13 @@ def test_visual_checkpoint_has_explicit_resolution_and_replays_defer(tmp_path: P
         {
             "sessionId": "visual-session",
             "projectRoot": "D:/ProjectA",
-            "resolution": "uncertain",
+            "resolution": "later",
             "answer": "The screenshot is ambiguous.",
         },
     )
     assert deferred["deferred"] is True
     assert deferred["question"]["status"] == "pending"
-    assert deferred["question"]["resolution"] == "uncertain"
+    assert deferred["question"]["resolution"] == "later"
     assert resolutions == []
     assert '"event": "question_deferred"' in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
 
@@ -161,13 +168,115 @@ def test_visual_checkpoint_has_explicit_resolution_and_replays_defer(tmp_path: P
         {
             "sessionId": "visual-session",
             "projectRoot": "D:/ProjectA",
-            "resolution": "pass",
-            "answer": "Confirmed by the user.",
+            "selectedOptionId": "pass",
+            "answer": "Pass",
         },
     )
     assert passed["question"]["status"] == "answered"
     assert passed["question"]["resolution"] == "pass"
     assert len(resolutions) == 1
+
+
+def test_legacy_full_owned_pass_label_settles_and_repeats_idempotently(tmp_path: Path) -> None:
+    service = _service(tmp_path, threading.RLock(), [])
+    question = service.create({
+        "kind": "visual_checkpoint",
+        "question": "Confirm the original visual design.",
+        "options": [
+            {"id": "option-1", "label": "通过：这是需要保留的原装设计", "value": "通过：这是需要保留的原装设计"},
+            {"id": "option-2", "label": "不通过：这处是穿模，需要修整", "value": "不通过：这处是穿模，需要修整"},
+            {"id": "option-3", "label": "看不清／不确定，需要局部近景", "value": "看不清／不确定，需要局部近景"},
+        ],
+        "sessionId": "s",
+    })["question"]
+    qid = question["questionId"]
+    # Replays the exact persisted pre-fix card payload: owned option ID plus full label.
+    payload = {"sessionId": "s", "selectedOptionId": "option-1", "answer": "通过：这是需要保留的原装设计"}
+    passed = service.answer(qid, payload)
+    assert passed["question"]["status"] == "answered"
+    assert passed["question"]["resolution"] == "pass"
+    repeated = service.answer(qid, payload)
+    assert repeated["idempotent"] is True
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8").splitlines()
+        if '"questionId": "' + qid + '"' in line
+    ]
+    assert sum(event.get("event") == "question_answered" for event in events) == 1
+
+
+def test_legacy_pending_feedback_with_same_pass_option_can_be_settled(tmp_path: Path) -> None:
+    service = _service(tmp_path, threading.RLock(), [])
+    question = service.create({
+        "kind": "visual_checkpoint", "question": "Confirm the original visual design.",
+        "options": [
+            {"id": "option-1", "label": "通过：这是需要保留的原装设计"},
+            {"id": "option-2", "label": "不通过：这处是穿模，需要修整"},
+        ], "sessionId": "s",
+    })["question"]
+    qid = question["questionId"]
+    # Pre-fix app persisted this exact choice as feedback while leaving it pending.
+    service._persistence.append({
+        "event": "question_feedback", "questionId": qid, "status": "pending",
+        "answer": "通过：这是需要保留的原装设计", "selectedOptionId": "option-1",
+        "questionFeedbackRevision": 1,
+    })
+    payload = {"sessionId": "s", "selectedOptionId": "option-1", "answer": "通过：这是需要保留的原装设计"}
+    answered = service.answer(qid, payload)
+    assert answered["question"]["status"] == "answered"
+    assert answered["question"]["resolution"] == "pass"
+    assert service.answer(qid, payload)["idempotent"] is True
+    records = [json.loads(line) for line in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert sum(event.get("event") == "question_answered" and event.get("questionId") == qid for event in records) == 1
+
+
+def test_visual_fail_and_uncertain_are_distinct_feedback_not_acceptance(tmp_path: Path) -> None:
+    dispatched: list[tuple[str, dict, str]] = []
+    service = AgentQuestionService(
+        AgentQuestionPersistence(AgentQuestionPersistencePorts(
+            log_path=lambda: tmp_path / "agent-questions.jsonl",
+            shared_state_lock=threading.RLock(), redact=lambda value: value,
+        )),
+        AgentQuestionScopePorts(
+            normalize_path=lambda value: value,
+            summarize=_summarize,
+            redact_goal_persistence=lambda value: value,
+        ),
+        GoalQuestionResolutionPort(resolve=lambda _question_id, _prompt: None),
+        RuntimeQuestionResolutionPort(
+            resolve=lambda question_id, seed, prompt: dispatched.append((question_id, dict(seed), prompt)) or {"ok": True},
+        ),
+    )
+    question = service.create({
+        "kind": "visual_checkpoint", "question": "Inspect the capture", "sessionId": "s",
+        "_runtimeTaskSeed": {"taskId": "task-a", "sessionId": "s"},
+        "options": [
+            {"id": "pass", "label": "Pass", "resolution": "pass"},
+            {"id": "fail", "label": "Fail", "resolution": "fail"},
+            {"id": "uncertain", "label": "Uncertain", "resolution": "uncertain"},
+        ],
+    })["question"]
+    qid = question["questionId"]
+    failed = service.answer(qid, {"sessionId": "s", "selectedOptionId": "fail", "answer": "Fail"})
+    assert failed["feedback"] is True
+    assert failed["question"]["status"] == "pending"
+    assert failed["question"]["resolution"] == "fail"
+    duplicate = service.answer(qid, {"sessionId": "s", "selectedOptionId": "fail", "answer": "Fail"})
+    assert duplicate["idempotent"] is True
+    assert len(dispatched) == 1
+    uncertain = service.answer(qid, {"sessionId": "s", "selectedOptionId": "uncertain", "answer": "Uncertain"})
+    assert uncertain["feedback"] is True
+    assert uncertain["question"]["status"] == "pending"
+    assert uncertain["question"]["resolution"] == "uncertain"
+    assert uncertain["question"]["questionFeedbackRevision"] == 2
+    assert len(dispatched) == 2
+    with pytest.raises(AgentQuestionServiceError, match="does not belong"):
+        service.answer(qid, {"sessionId": "s", "selectedOptionId": "option-1", "answer": "Pass"})
+
+
+def test_question_schema_exposes_structured_visual_resolution() -> None:
+    option_schema = QUESTION_INPUT_SCHEMA["properties"]["options"]["items"]["anyOf"][1]["properties"]
+    assert option_schema["resolution"]["enum"] == ["pass", "fail", "uncertain", "later"]
 
 
 def test_visual_checkpoint_rejects_inferred_or_unknown_resolution(tmp_path: Path) -> None:
@@ -468,12 +577,12 @@ def test_queued_idempotent_retry_uses_resubmitted_answer_for_model_context(tmp_p
     retried = service.answer(qid, request)
 
     assert retried["idempotent"] is True
-    assert len(continuation_prompts) == 2
+    assert len(continuation_prompts) == 1, "an identical answer must not resume the task twice"
     assert all("https://example.invalid/items/creator" in prompt for prompt in continuation_prompts)
     assert all("E:/Packages/Creator/CityNoir" in prompt for prompt in continuation_prompts)
 
 
-def test_queued_idempotent_retry_requires_resubmission_if_saved_answer_redacted_location(tmp_path: Path) -> None:
+def test_queued_idempotent_retry_does_not_resume_if_saved_answer_redacted_location(tmp_path: Path) -> None:
     from runtime_planner_service import sanitize_planner_observation_text
 
     continuation_prompts: list[str] = []
@@ -510,7 +619,7 @@ def test_queued_idempotent_retry_requires_resubmission_if_saved_answer_redacted_
         "projectRoot": "E:/unity/TestAvatar",
         "answer": "Package: E:/Packages/Creator/CityNoir.",
     })
-    with pytest.raises(AgentQuestionServiceError, match="Resubmit the original answer"):
-        service.answer(qid, {"sessionId": "session-retry-no-answer", "projectRoot": "E:/unity/TestAvatar"})
+    retried = service.answer(qid, {"sessionId": "session-retry-no-answer", "projectRoot": "E:/unity/TestAvatar"})
 
+    assert retried["idempotent"] is True
     assert len(continuation_prompts) == 1

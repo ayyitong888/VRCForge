@@ -58,7 +58,8 @@ try {
   const title=await group.locator('[data-agent-tool-group-title]').innerText();
   assert.doesNotMatch(title,/Called 2 tools|调用了 2 个工具/,'group heading describes operations rather than only count');
   assert.match(await group.locator('[data-agent-operation-summary-status]').innerText(),/1/,'group preserves failure records while collapsed');
-  await group.locator('button').first().click(); await group.locator('button.group\\/run').last().click();
+  assert.equal(await group.locator('button.group\\/run').count(),2,'opening completed work exposes individual tool calls without another group click');
+  await group.locator('button.group\\/run').last().click();
   assert.ok((await group.locator('[data-agent-invocation-output-card]').innerText()).includes('Historical read failure'),'exact error detail stays inspectable');
   const pending=page.locator('#pending');
   assert.match(await pending.locator('[data-agent-turn-process-title]').innerText(), /Handled in —/, 'missing duration stays explicitly unknown instead of changing the process heading');

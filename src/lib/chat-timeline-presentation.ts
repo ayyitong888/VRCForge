@@ -1,4 +1,4 @@
-import type { AgentRuntimeResponse } from "./api/types";
+import type { AgentQuestion, AgentRuntimeResponse } from "./api/types";
 import type { ChatTimelineEvent, ConversationItem } from "./chat-types";
 
 export type TimelineBatchKind = "command" | "tool" | "file_edit" | "subagent" | "process";
@@ -42,6 +42,67 @@ export type TimelinePresentation = {
   elapsedSeconds?: number;
   entries: TimelinePresentationEntry[];
 };
+
+export type QuestionCapturePreview = {
+  resourceUri: string;
+  label: string;
+  sessionId: string;
+};
+
+/**
+ * Re-associate already-persisted capture previews with their owning Question.
+ * Question records intentionally keep the runtime task seed private, so the
+ * public projection uses the origin client turn and the existing timeline
+ * capture resources.  No latest-image fallback is allowed here.
+ */
+export function capturePreviewsForQuestion(
+  question: Pick<AgentQuestion, "originClientTurnId" | "sessionId">,
+  items: readonly ConversationItem[] = [],
+): QuestionCapturePreview[] {
+  const origin = String(question.originClientTurnId || "").trim();
+  const ownerTurn = origin.split(":question:", 1)[0] || origin;
+  if (!ownerTurn) return [];
+  const questionSession = String(question.sessionId || "").trim();
+  const seen = new Set<string>();
+  const previews: QuestionCapturePreview[] = [];
+  for (const item of items) {
+    let clientTurnId = "";
+    let sessionId = "";
+    let timeline: Array<{ payload?: ChatTimelineEvent["payload"] }> = [];
+    if (item.type === "agent") {
+      clientTurnId = String(item.response.clientTurnId || "").trim();
+      sessionId = String(item.response.sessionId || item.response.session_id || "").trim();
+      timeline = item.timeline || item.response.timeline || [];
+    } else if (item.type === "streaming") {
+      clientTurnId = String(item.clientTurnId || "").trim();
+      timeline = item.timeline || [];
+    } else {
+      continue;
+    }
+    if (clientTurnId !== ownerTurn || (questionSession && sessionId && questionSession !== sessionId)) continue;
+    const candidates = timeline.flatMap(event => event.payload?.captures || []);
+    if (item.type === "agent") {
+      for (const step of item.response.steps || []) {
+        const result = step.result as { captures?: unknown[]; preview?: unknown; angle?: unknown } | undefined;
+        if (!result || typeof result !== "object") continue;
+        const stepCaptures = Array.isArray(result.captures) ? result.captures : [result];
+        candidates.push(...stepCaptures as typeof candidates);
+      }
+    }
+    for (const capture of candidates) {
+        const resourceUri = String(capture.preview?.resourceUri || "").trim();
+        if (!resourceUri || seen.has(resourceUri)) continue;
+        let captureSession = sessionId;
+        try {
+          captureSession = new URL(resourceUri).searchParams.get("context")?.replace(/^runtime:/, "") || captureSession;
+        } catch { /* Invalid resource URIs are ignored by the existing renderer. */ }
+        if (!captureSession) continue;
+        seen.add(resourceUri);
+        previews.push({ resourceUri, label: String(capture.angle || "").trim(), sessionId: captureSession });
+    }
+  }
+  return previews;
+}
 
 /**
  * Keep full persisted tool results outside the bounded safe timeline summary.

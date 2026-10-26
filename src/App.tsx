@@ -71,7 +71,7 @@ import { AppUpdatePopup } from "./components/ui/app-update-popup";
 import type { AppUpdatePromptState, AppUpdateResult } from "./lib/api/app-update";
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
-import { useChatSessions } from "./hooks/use-chat-sessions";
+import { chatSaveErrorMessage, useChatSessions } from "./hooks/use-chat-sessions";
 import { useConversationScroll } from "./hooks/use-conversation-scroll";
 import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
 import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
@@ -1973,7 +1973,7 @@ export default function App() {
       return { ...chat, items };
     });
     void persistChatsNow().catch((cause) => {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(chatSaveErrorMessage(cause, t("chat.sessionSaveBlocked"), t("chat.sessionSaveConflict")));
     });
   };
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
@@ -2478,11 +2478,11 @@ export default function App() {
       ).then((result) => {
         if (result === "persistence_failed") {
           quitRequestedRef.current = false;
-          setError(t("chat.sessionSaveBlocked"));
+          setError(t("chat.sessionSaveFailed"));
         }
       }).catch(() => {
         quitRequestedRef.current = false;
-        setError(t("chat.sessionSaveBlocked"));
+        setError(t("chat.sessionSaveFailed"));
       });
     })
       .then((unlisten) => {

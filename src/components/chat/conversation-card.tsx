@@ -58,6 +58,8 @@ export function ConversationCard({
   saveOperationSummary,
   saveOperationTool,
   onSaveOperationAsSkill,
+  reopenQuestionId,
+  onReopenQuestion,
 }: {
   item: Exclude<ConversationItem, { type: "handoff_card" }>;
   interleavedUserMessages?: Extract<ConversationItem, { type: "user" }>[];
@@ -87,6 +89,8 @@ export function ConversationCard({
   saveOperationSummary?: PathToSkillOperationSummary;
   saveOperationTool?: string;
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
+  reopenQuestionId?: string;
+  onReopenQuestion?: (questionId: string) => void;
 }) {
   const { t } = useTranslation();
   const storedAttachments = item.type === "user" || item.type === "question_answer" ? item.attachments : undefined;
@@ -239,6 +243,11 @@ export function ConversationCard({
             </div>
           ) : null}
           {otherAttachments.length ? <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm"><AttachmentStrip attachments={otherAttachments} onImport={onImportAttachment} compact /></div> : null}
+          {reopenQuestionId && onReopenQuestion ? (
+            <button type="button" className="rounded-md px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:bg-background hover:text-foreground hover:underline" onClick={() => onReopenQuestion(reopenQuestionId)} data-question-reopen={reopenQuestionId}>
+              {t("questionCard.replyInChat")}
+            </button>
+          ) : null}
         </div>
       </div>
     );

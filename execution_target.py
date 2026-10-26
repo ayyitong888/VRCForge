@@ -142,7 +142,7 @@ def canonical_namespace(target: Mapping[str, Any]) -> str:
 
 
 def same_scene_content(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    """Only an equal scene GUID and complete SHA256 supersede file mtime."""
+    """Prove scene bytes are unchanged for checkpoint continuity checks."""
     if not isinstance(left, Mapping) or not isinstance(right, Mapping):
         return False
     digest = left.get("digest")
@@ -154,7 +154,7 @@ def same_scene_content(left: Mapping[str, Any], right: Mapping[str, Any]) -> boo
 
 
 def scene_identity_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    """Retain every scene identity field; equal content may differ only in mtime."""
+    """Compare checkpoint scene snapshots, allowing only proven mtime drift."""
     if not isinstance(left, Mapping) or not isinstance(right, Mapping):
         return False
     if left == right:
@@ -220,18 +220,18 @@ def validate_execution_target(
         _required_string(scene.get("revision"), "scene.revision")
         _required_string(scene.get("digest"), "scene.digest")
         if core_identity is not None:
-            # Checkpoint saving can change the file mtime without changing any
-            # approved bytes. Keep the frozen target/digest intact; only a full
-            # matching SHA256 for the same scene GUID can supersede its mtime.
-            content_matches = same_scene_content(scene, {
-                "guid": core_identity.get("sceneGuid"), "digest": core_identity.get("sceneDigest"),
-            })
-            for target_key, core_key in (("guid", "sceneGuid"), ("revision", "sceneRevision"), ("digest", "sceneDigest")):
-                if target_key == "revision" and content_matches:
-                    continue
+            # Revision and digest describe current scene state, not stable
+            # identity. Saves and writes can change them while the loaded scene
+            # remains the same.
+            for target_key, core_key in (("guid", "sceneGuid"),):
                 expected_scene_value = str(core_identity.get(core_key) or "").strip()
                 if expected_scene_value and str(scene.get(target_key)) != expected_scene_value:
                     raise ExecutionTargetError("scene_identity_mismatch", f"ExecutionTarget scene {target_key} changed.")
+            expected_scene_path = str(core_identity.get("scenePath") or "").strip()
+            if expected_scene_path:
+                expected_scene_path = _under_root(expected_scene_path, root, "scene.absolutePath")
+                if os.path.normcase(scene_path) != os.path.normcase(expected_scene_path):
+                    raise ExecutionTargetError("scene_identity_mismatch", "ExecutionTarget scene path changed.")
         scene["absolutePath"] = scene_path
         target["scene"] = scene
     if scope == "avatar":
@@ -360,12 +360,18 @@ def validate_runtime_execution_target(
                 "sceneDigest": digest,
             }
         )
-    return validate_execution_target(
+    verified = validate_execution_target(
         value,
         project_root=root,
         core_identity=core,
         required_scope=required_scope,
     )
+    # Revision and digest remain visible as current state for previews and
+    # callers, but do not alter stable identity references.
+    if target_scope != "project":
+        verified["scene"]["revision"] = core["sceneRevision"]
+        verified["scene"]["digest"] = core["sceneDigest"]
+    return verified
 
 
 def execution_target_digest(value: Mapping[str, Any]) -> str:
@@ -378,7 +384,7 @@ def execution_target_digest(value: Mapping[str, Any]) -> str:
     for section, fields in (
         ("project", ("root", "projectId")),
         ("editor", ("unityPid", "processStartTime", "coreInstanceId")),
-        ("scene", ("assetPath", "absolutePath", "guid", "revision", "digest")),
+        ("scene", ("assetPath", "absolutePath", "guid")),
         ("avatar", ("globalObjectId",)),
         ("object", ("globalObjectId",)),
         ("component", ("globalObjectId", "type")),
@@ -634,6 +640,8 @@ class ExecutionTargetBindingRegistry:
             ("editor", "unityPid"),
             ("editor", "processStartTime"),
             ("editor", "coreInstanceId"),
+            ("scene", "assetPath"),
+            ("scene", "absolutePath"),
             ("scene", "guid"),
             ("avatar", "globalObjectId"),
             ("object", "globalObjectId"),
@@ -690,7 +698,7 @@ def standard_identity_metadata(*, scope: str, write: bool) -> dict[str, Any]:
         "required": required,
         "failClosedOn": [
             "project_or_editor_drift",
-            "scene_reload_or_revision_change",
+            "scene_path_or_guid_change",
             "avatar_replacement",
             "object_recreation",
             "duplicate_identity",

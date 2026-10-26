@@ -761,6 +761,8 @@
     "inputPlaceholder": "随心输入",
     "sessionRecoveryBlocked": "有 {{count}} 个聊天存储源需要恢复。健康会话已载入，但在 Doctor 处理损坏源前会暂停保存。",
     "sessionSaveBlocked": "聊天存储源需要恢复，保存已暂停。请先打开 Doctor 处理。",
+    "sessionSaveConflict": "聊天存储刚在其他窗口发生变化，请重试保存。",
+    "sessionSaveFailed": "关闭前未能保存聊天更改，请重试保存。",
     "sessionConcurrentConflict": "有 {{count}} 个聊天在当前窗口和其他窗口中都被修改。为避免覆盖任一版本，保存仍保持暂停。",
     "concurrentConflictLocalCopy": "已恢复的本地副本",
     "sessionRestoreFailed": "无法恢复聊天记录。请打开 Doctor，或检查本地运行时后重试。",

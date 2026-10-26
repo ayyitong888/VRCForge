@@ -7,12 +7,12 @@ import ts from "typescript";
 const source = fs.readFileSync("src/hooks/use-chat-sessions.ts", "utf8");
 const saveErrorHelperStart = source.indexOf("function chatSaveErrorMessage(");
 assert.notEqual(saveErrorHelperStart, -1, "chat save errors need an explicit transient classification");
-const saveErrorHelperEnd = source.indexOf("\n}\n", saveErrorHelperStart) + 2;
+const saveErrorHelperEnd = source.indexOf("\nfunction projectDurableChatFingerprint", saveErrorHelperStart);
 const saveErrorHelper = ts.transpileModule(
   source.slice(saveErrorHelperStart, saveErrorHelperEnd),
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
 ).outputText;
-class HelperApiError extends Error { constructor(status, message) { super(message); this.status = status; } }
+class HelperApiError extends Error { constructor(status, message, detail) { super(message); this.status = status; this.detail = detail; } }
 const chatSaveErrorMessage = new Function("ApiError", `${saveErrorHelper}\nreturn chatSaveErrorMessage;`)(HelperApiError);
 assert.equal(
   chatSaveErrorMessage(new HelperApiError(413, "Chat payload exceeds the 16 MiB save limit."), "blocked"),
@@ -25,9 +25,14 @@ assert.equal(
   "temporary failures must remain retryable and accurate",
 );
 assert.equal(
-  chatSaveErrorMessage(new HelperApiError(409, "Concurrent chat update."), "blocked"),
+  chatSaveErrorMessage(new HelperApiError(409, "HTTP 409", { code: "chat_snapshot_conflict" }), "blocked", "conflict"),
+  "conflict",
+  "ordinary CAS conflicts must not be reported as damaged storage",
+);
+assert.equal(
+  chatSaveErrorMessage(new HelperApiError(409, "HTTP 409", { detail: { code: "chat_store_recovery_required" } }), "blocked", "conflict"),
   "blocked",
-  "conflict fallback remains owned by the recovery path",
+  "only the recovery-required error opens Doctor guidance",
 );
 assert.equal(
   chatSaveErrorMessage(new Error("Local bridge temporarily unavailable."), "blocked"),
@@ -97,7 +102,7 @@ function fixture(status, failures = 1) {
   const chatsSaveVersionRef = { current: 1 };
   const error = new ApiError(status);
   const ports = {
-    ApiError, chatsRef, chatsDirtyRef, chatsSaveVersionRef, endpoint: "fixture",
+    ApiError, chatsRef, chatsDirtyRef, chatsSaveVersionRef, chatServerDigestsRef: { current: undefined }, endpoint: "fixture",
     filterPersistableChats: value => value,
     collectChatStorageProjectPaths: () => [],
     enqueueChatStorageOperation: fn => fn(),

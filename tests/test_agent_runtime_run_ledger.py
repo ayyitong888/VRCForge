@@ -291,6 +291,125 @@ def test_queue_event_and_grouped_run_projection_preserve_filters(tmp_path: Path)
     assert str(raised.value) == "clientTurnId is required."
 
 
+def test_list_runs_advances_from_append_and_invalidates_on_replacement(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    identity = {"sessionId": "session-cache", "turnId": "turn-1", "clientTurnId": "client-1"}
+    ledger.append({**identity, "event": "runtime_turn_started", "status": "running"})
+
+    first = ledger.list_runs(session_id="session-cache", limit=10)
+    first_events = list(first["events"])
+    assert [row["event"] for row in first_events] == ["runtime_turn_started"]
+    first_offset = ledger._list_runs_cache[("session-cache", "", "", 10)]["offset"]
+
+    ledger.append({**identity, "event": "runtime_turn_completed", "status": "completed"})
+    second = ledger.list_runs(session_id="session-cache", limit=10)
+    assert [row["event"] for row in second["events"]] == [
+        "runtime_turn_started", "runtime_turn_completed"
+    ]
+    assert ledger._list_runs_cache[("session-cache", "", "", 10)]["offset"] > first_offset
+
+    same_size = ledger.log_path.read_bytes().replace(b'"status": "running"', b'"status": "pending"')
+    assert len(same_size) == ledger.log_path.stat().st_size
+    ledger.log_path.write_bytes(same_size)
+    rewritten_stat = ledger.log_path.stat()
+    os.utime(ledger.log_path, ns=(rewritten_stat.st_atime_ns, rewritten_stat.st_mtime_ns + 2_000_000_000))
+    same_size_rewrite = ledger.list_runs(session_id="session-cache", limit=10)
+    assert same_size_rewrite["events"][0]["status"] == "pending"
+
+    ledger.log_path.write_text(
+        json.dumps({**identity, "event": "runtime_turn_failed", "status": "failed"}) + "\n",
+        encoding="utf-8",
+    )
+    truncated = ledger.list_runs(session_id="session-cache", limit=10)
+    assert [row["event"] for row in truncated["events"]] == ["runtime_turn_failed"]
+
+    replacement = ledger.log_path.with_suffix(".replacement")
+    replacement.write_text(
+        json.dumps({**identity, "event": "runtime_turn_queued", "status": "queued"}) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(replacement, ledger.log_path)
+    replaced = ledger.list_runs(session_id="session-cache", limit=10)
+    assert [row["event"] for row in replaced["events"]] == ["runtime_turn_queued"]
+
+
+def test_list_runs_append_reads_only_new_bytes_and_filters_unrelated_approvals(tmp_path: Path, monkeypatch) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    identity = {"sessionId": "session-isolated", "turnId": "turn-1", "clientTurnId": "client-1"}
+    ledger.append({**identity, "event": "runtime_turn_started", "status": "running"})
+    ledger.list_runs(session_id=identity["sessionId"], limit=10)
+    offset = ledger._list_runs_cache[(identity["sessionId"], "", "", 10)]["offset"]
+
+    for index in range(500):
+        ledger.append({"event": "approval_applied", "status": "completed",
+                       "approvalId": f"unrelated-{index}", "sessionId": "other-session"})
+    ledger.append({**identity, "event": "runtime_turn_completed", "status": "completed",
+                   "approvalIds": ["wanted-approval"]})
+    ledger.append({"event": "approval_applied", "status": "completed",
+                   "approvalId": "wanted-approval"})
+
+    original_open = Path.open
+    reads: list[tuple[int, int]] = []
+
+    class SpyHandle:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+        def seek(self, *args):
+            return self.handle.seek(*args)
+        def tell(self):
+            return self.handle.tell()
+        def read(self, size=-1):
+            reads.append((self.handle.tell(), size))
+            return self.handle.read(size)
+
+    def spy_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        return SpyHandle(handle) if path == ledger.log_path and "b" in (args[0] if args else kwargs.get("mode", "r")) else handle
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    projected = ledger.list_runs(session_id=identity["sessionId"], limit=10)
+    assert {row["event"] for row in projected["events"]} == {
+        "runtime_turn_started", "runtime_turn_completed", "approval_applied"
+    }
+    assert all(row.get("approvalId") != "unrelated-0" for row in projected["events"])
+    assert reads and reads[0][0] == offset
+    assert all(0 < size <= 1024 * 1024 for _, size in reads)
+    assert sum(size for _, size in reads) == ledger.log_path.stat().st_size - offset
+
+
+def test_list_runs_keeps_session_wide_approval_ids_across_client_queries(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    ledger.append({"event": "runtime_turn_completed", "status": "completed",
+                   "sessionId": "session-shared", "clientTurnId": "other-client",
+                   "approvalIds": ["shared-approval"]})
+    ledger.append({"event": "runtime_turn_started", "status": "running",
+                   "sessionId": "session-shared", "clientTurnId": "target-client"})
+    ledger.list_runs(session_id="session-shared", client_turn_id="target-client", limit=10)
+    cache = ledger._list_runs_cache[("session-shared", "", "target-client", 10)]
+    assert "shared-approval" in cache["approval_ids"]
+
+
+def test_related_approvals_are_filtered_before_recent_window(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    ledger.append({"event": "runtime_turn_started", "status": "running",
+                   "sessionId": "owner", "clientTurnId": "wanted", "projectRoot": "project-a"})
+    ledger.append({"event": "runtime_turn_completed", "status": "completed",
+                   "sessionId": "owner", "clientTurnId": "different", "approvalIds": ["shared"]})
+    for index in range(150):
+        ledger.append({"event": "approval_applied", "status": "completed", "approvalId": "shared",
+                       "clientTurnId": "different", "projectRoot": "project-a"})
+        ledger.append({"event": "approval_applied", "status": "completed", "approvalId": "shared",
+                       "clientTurnId": "wanted", "projectRoot": "project-b"})
+    result = ledger.list_runs(session_id="owner", client_turn_id="wanted", project_root="project-a", limit=10)
+    assert len(result["runs"]) == 1
+    assert result["runs"][0]["status"] == "running"
+    assert len(result["events"]) == 1
+
+
 def test_durable_runtime_continuations_replay_once_per_stable_client_turn(tmp_path: Path) -> None:
     ledger, _lock = make_ledger(tmp_path)
     first = {

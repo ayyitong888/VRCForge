@@ -761,6 +761,8 @@
     "inputPlaceholder": "Type anything",
     "sessionRecoveryBlocked": "{{count}} chat storage source(s) need recovery. Healthy chats were loaded, but saving is paused until Doctor resolves the damaged source.",
     "sessionSaveBlocked": "Chat saving is paused because a storage source needs recovery. Open Doctor before continuing.",
+    "sessionSaveConflict": "Chat storage changed in another window. Retry the save.",
+    "sessionSaveFailed": "Chat changes could not be saved before closing. Retry the save.",
     "sessionConcurrentConflict": "{{count}} chat(s) changed both here and in another window. Saving remains paused to prevent overwriting either copy.",
     "concurrentConflictLocalCopy": "Recovered local copy",
     "sessionRestoreFailed": "Chat history could not be restored. Open Doctor or retry after checking the local runtime.",

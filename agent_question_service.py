@@ -39,6 +39,7 @@ QUESTION_LANGUAGE_INSTRUCTION = (
     "Keep exact visible names needed to find an object, component or button; explain unavoidable technical terms beside them. "
     "Leave API names, internal IDs, diagnostic details and the agent's verification plan out of the question. "
     "Use short choices describing the user's decision or observed result, including an unable-to-find/unsure choice when relevant. "
+    "For visual_checkpoint choices, use option objects with unique IDs and an explicit resolution value (pass, fail, uncertain, or later). "
 )
 QUESTION_INPUT_SCHEMA = {
     "type": "object", "required": ["question"], "additionalProperties": True,
@@ -60,6 +61,7 @@ QUESTION_INPUT_SCHEMA = {
                     "label": {"type": "string", "minLength": 1, "maxLength": 160, "description": "A short answer in everyday language, such as completed, could not find the button, or unsure; no implementation jargon."},
                     "description": {"type": "string", "maxLength": 500, "description": "If needed, explain the consequence of this choice in the user's language; omit diagnostic details."},
                     "value": {"type": "string", "maxLength": 500},
+                    "resolution": {"type": "string", "enum": ["pass", "fail", "uncertain", "later"], "description": "For visual_checkpoint options only, bind this choice to its explicit gate result."},
                 }},
             ]},
         },
@@ -230,15 +232,22 @@ class AgentQuestionService:
                 value = label
                 description = ""
                 option_id = f"option-{index + 1}"
+                resolution = ""
             elif isinstance(option, Mapping):
                 label = _question_text(option.get("label") or option.get("value"), "option.label", 160)
                 value = _question_text(option.get("value") or label, "option.value", 500)
                 description = _question_text(option.get("description"), "option.description", 500)
                 option_id = _question_text(option.get("id") or f"option-{index + 1}", "option.id", 120)
+                resolution = str(option.get("resolution") or "").strip().lower()
+                if resolution and resolution not in VISUAL_RESOLUTIONS:
+                    raise AgentQuestionServiceError("Unsupported visual checkpoint option resolution.", status_code=400)
             else:
                 continue
             if label:
-                options.append({"id": option_id, "label": label, "value": value, "description": description})
+                normalized_option = {"id": option_id, "label": label, "value": value, "description": description}
+                if resolution and kind == "visual_checkpoint":
+                    normalized_option["resolution"] = resolution
+                options.append(normalized_option)
         if len(options) == 1:
             raise AgentQuestionServiceError("Question choices require at least two options.", status_code=400)
         project_root = self._scope_text(values, "projectRoot", "project_root", "projectPath")
@@ -329,15 +338,6 @@ class AgentQuestionService:
                     raise AgentQuestionServiceError("settleOnly requires an explicit pass or fail resolution.", status_code=400)
             if str(existing.get("status") or "") == "answered":
                 payload: dict[str, object] = {"ok": True, "question": self._redact(existing), "idempotent": True}
-                if runtime_seed and not goal_delivery_id and str(existing.get("runtimeContinuationStatus") or "") == "queued":
-                    retry_answer = _question_text(values.get("answer") or values.get("value"), "answer", 2000)
-                    if retry_answer:
-                        continuation_answer = self._sanitize_answer_for_model(retry_answer)
-                    elif "<path redacted>" in str(existing.get("answer") or "").casefold():
-                        raise AgentQuestionServiceError(
-                            "This queued answer contains a redacted location. Resubmit the original answer to resume the task.",
-                            status_code=409,
-                        )
             else:
                 selected_option_id = _question_text(
                     values.get("selectedOptionId") or values.get("optionId"),
@@ -357,14 +357,43 @@ class AgentQuestionService:
                     raise AgentQuestionServiceError("An answer is required.", status_code=400)
                 kind = str(existing.get("kind") or "decision").strip().lower()
                 resolution = str(values.get("resolution") or "").strip().lower()
+                selected_option = next(
+                    (option for option in _as_list(existing.get("options"))
+                     if isinstance(option, Mapping) and str(option.get("id") or "") == selected_option_id),
+                    None,
+                ) if selected_option_id else None
+                if selected_option_id and _as_list(existing.get("options")) and selected_option is None:
+                    raise AgentQuestionServiceError("Selected Question option does not belong to this Question.", status_code=400)
                 if kind == "visual_checkpoint":
+                    if resolution and resolution not in VISUAL_RESOLUTIONS:
+                        raise AgentQuestionServiceError("Unsupported visual checkpoint resolution.", status_code=400)
+                    option_resolution = _visual_resolution(selected_option, answer_text)
+                    if not resolution:
+                        resolution = option_resolution
+                    elif selected_option is not None:
+                        declared_resolution = str(selected_option.get("resolution") or "").strip().lower()
+                        if declared_resolution and declared_resolution != resolution:
+                            raise AgentQuestionServiceError("Selected Question option does not match the visual resolution.", status_code=400)
+                        if option_resolution and option_resolution != resolution:
+                            raise AgentQuestionServiceError("Selected Question option does not match the visual resolution.", status_code=400)
+                        if not declared_resolution and not option_resolution:
+                            raise AgentQuestionServiceError("Selected Question option has no declared visual resolution.", status_code=400)
+                    prior_answer = str(existing.get("answer") or "")
+                    safe_answer = str(self._scope.redact_goal_persistence(answer_text) or "")
+                    if (
+                        str(existing.get("status") or "") == "pending"
+                        and prior_answer == safe_answer
+                        and str(existing.get("selectedOptionId") or "") == selected_option_id
+                        and str(existing.get("resolution") or "") == resolution
+                        and _same_json_value(existing.get("attachments") or [], feedback_attachments)
+                        and bool(answer_text or selected_option_id or feedback_attachments)
+                    ):
+                        return {"ok": True, "question": self._redact(existing), "idempotent": True}
                     try:
                         feedback_revision = int(existing.get("questionFeedbackRevision") or 0) + 1
                     except (TypeError, ValueError):
                         feedback_revision = 1
-                    if not resolution:
-                        resolution = _visual_resolution(selected_option_id, answer_text)
-                    if resolution not in VISUAL_RESOLUTIONS:
+                    if not settle_only and (resolution in {"fail", "uncertain"} or resolution not in VISUAL_RESOLUTIONS):
                         feedback_pending = True
                         continuation_answer = self._sanitize_answer_for_model(
                             answer_text or "The user attached feedback without an acceptance decision."
@@ -376,6 +405,8 @@ class AgentQuestionService:
                             "runtimeContinuationStatus": "queued" if runtime_seed and not goal_delivery_id else "",
                             "runtimeQuestionFeedbackPending": bool(runtime_seed and not goal_delivery_id),
                             "answer": str(self._scope.redact_goal_persistence(answer_text) or ""),
+                            "selectedOptionId": selected_option_id,
+                            "resolution": resolution,
                             "attachments": feedback_attachments,
                             "questionFeedbackRevision": feedback_revision,
                         })
@@ -383,13 +414,14 @@ class AgentQuestionService:
                         if pending is None:
                             raise OSError("Question storage did not preserve the pending feedback.")
                         payload = {"ok": True, "question": self._redact(pending), "feedback": True}
-                    if resolution in {"uncertain", "later"}:
+                    if resolution == "later":
                         deferred = {
                             "event": "question_deferred",
                             "status": "pending",
                             "questionId": resolved_id,
                             "resolution": resolution,
                             "answer": str(self._scope.redact_goal_persistence(answer_text) or ""),
+                            "selectedOptionId": selected_option_id,
                         }
                         self._persistence.append(deferred)
                         pending = self._project(include_answered=True).get(resolved_id)
@@ -425,13 +457,13 @@ class AgentQuestionService:
                     if answered is None:
                         raise OSError("Question storage did not preserve the answer.")
                     payload = {"ok": True, "question": self._redact(answered)}
-        if goal_delivery_id:
+        if goal_delivery_id and not payload.get("idempotent"):
             payload["goalDelivery"] = self._goal_resolution.resolve(
                 resolved_id,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
         if (runtime_seed and not goal_delivery_id and not settle_only and self._runtime_resolution is not None
-                and (not payload.get("idempotent") or existing.get("runtimeContinuationStatus") == "queued")):
+                and not payload.get("idempotent")):
             # This copy is ephemeral: durable Question records keep the stricter
             # redacted answer, while the trusted runtime handoff can bind an
             # explicit user instruction to the resumed action.
@@ -698,17 +730,35 @@ def _question_text(value: object, field: str, limit: int) -> str:
     return text
 
 
-def _visual_resolution(option_id: str, answer: str) -> str:
-    """Map only explicit human checkpoint vocabulary; never infer pass/fail from prose."""
-    for candidate in (option_id, answer):
-        value = str(candidate or "").strip().lower().replace("_", "-")
-        if value in VISUAL_RESOLUTIONS:
-            return value
-        if value in {"passed", "成功", "通过"}:
-            return "pass"
-        if value in {"failed", "失败", "不通过"}:
-            return "fail"
+def _visual_resolution(option: Mapping[str, object] | None, answer: str) -> str:
+    """Resolve only a selected option with an explicit or legacy structured result."""
+    if not isinstance(option, Mapping):
+        return ""
+    declared = str(option.get("resolution") or "").strip().lower()
+    if declared in VISUAL_RESOLUTIONS:
+        return declared
+    label = str(option.get("label") or "").strip()
+    value = str(option.get("value") or "").strip()
+    # Legacy persisted questions omit the structured resolution field. Their
+    # full selected label remains valid when its leading token is explicit.
+    if not answer or answer not in {label, value}:
+        return ""
+    prefix = answer.partition(":")[0].partition("：")[0].strip().casefold()
+    if prefix in {"pass", "通过"}:
+        return "pass"
+    if prefix in {"fail", "不通过"}:
+        return "fail"
+    if prefix in {"uncertain", "不确定", "看不清／不确定", "看不清/不确定"}:
+        return "uncertain"
+    if prefix in {"later", "稍后确认", "稍后处理"}:
+        return "later"
     return ""
+
+
+def _same_json_value(left: object, right: object) -> bool:
+    return json.dumps(left, ensure_ascii=False, sort_keys=True, separators=(",", ":")) == json.dumps(
+        right, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
 
 
 def _question_attachments(value: object) -> list[dict[str, object]]:

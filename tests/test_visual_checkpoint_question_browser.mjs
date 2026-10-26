@@ -22,7 +22,8 @@ function Fixture() {
   return React.createElement("main", null,
     React.createElement("output", { "data-answer": true }, answer ? JSON.stringify(answer) : ""),
     React.createElement("output", { "data-reply-question": true }, replyQuestionId),
-    React.createElement(AgentQuestionCard, { questions: [question], onAnswerQuestion, onReplyInChat: setReplyQuestionId }),
+    React.createElement(AgentQuestionCard, { questions: [question], onAnswerQuestion, onReplyInChat: setReplyQuestionId,
+      capturePreviewsForQuestion: () => [{ resourceUri: "vrcforge://scene-capture-preview/8d886299-9be1-4baf-8e1f-e205f3a8e5fc?context=runtime%3Asession-fixture", label: "front", sessionId: "session-fixture" }] }),
   );
 }
 createRoot(document.getElementById("root")).render(React.createElement(Fixture));
@@ -51,6 +52,7 @@ try {
   browser = await chromium.launch({ headless: true, channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge" });
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${server.address().port}`);
+  assert.equal(await page.locator("[data-question-capture-previews]").count(), 1, "question card exposes the related capture preview");
   assert.equal(await page.getByText("Recommended", { exact: true }).count(), 0, "visual checkpoints do not recommend Pass");
   const input = page.getByPlaceholder("Type another answer...");
   assert.equal(await input.count(), 1, "visual checkpoints share the compact text reply row");
@@ -62,6 +64,7 @@ try {
   assert.deepEqual(JSON.parse(await page.locator("[data-answer]").textContent()), {
     questionId: "visual-1", optionId: "custom", value: "Please inspect the shoe opening; I have not decided yet.",
   }, "free text must not fabricate a pass/fail decision");
+  await page.locator("[data-question-reopen='visual-1']").click();
   await page.getByRole("button", { name: "Reply in chat" }).click();
   assert.equal(await page.locator("[data-reply-question]").textContent(), "visual-1", "reply-in-chat keeps the question id");
   await input.fill("Shoulder is clear; feet still need review.");
@@ -70,9 +73,11 @@ try {
   assert.equal(answer.questionId, "visual-1");
   assert.equal(answer.optionId, "fail");
   assert.match(answer.value, /^Fail\n\nShoulder is clear/);
+  await page.locator("[data-question-reopen='visual-1']").click();
   await page.getByRole("button", { name: "Uncertain" }).click();
   const deferredAnswer = JSON.parse(await page.locator("[data-answer]").textContent());
   assert.equal(deferredAnswer.optionId, "uncertain", "a deferred pending checkpoint can be answered again");
+  await page.locator("[data-question-reopen='visual-1']").click();
   await page.getByRole("button", { name: "Skip", exact: true }).click();
   assert.equal(JSON.parse(await page.locator("[data-answer]").textContent()).optionId, "skip");
   console.log("visual checkpoint question UI: translated fixed choices, no default recommendation, question-id reply handoff, explicit decision/note, deferred retry passed");
