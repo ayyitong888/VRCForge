@@ -20,7 +20,7 @@ def read_workflow(package: Path) -> dict:
 def test_transplant_packages_bump_minor_patch_without_author_change():
     for package in (HEAD, PART):
         manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
-        assert manifest["version"] == ("1.0.5" if package is HEAD else "1.0.2")
+        assert manifest["version"] == ("1.0.7" if package is HEAD else "1.0.4")
         assert manifest["author"] == "VRCForge"
 
 
