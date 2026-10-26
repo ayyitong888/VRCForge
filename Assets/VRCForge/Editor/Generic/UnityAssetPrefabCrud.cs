@@ -1184,10 +1184,17 @@ namespace VRCForge.Editor
                 var readbackGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(readbackObject).ToString();
                 var readbackPrefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(readbackObject);
                 var readbackIsPartOfAnyPrefab = PrefabUtility.IsPartOfAnyPrefab(readbackObject);
-                var unpacked = string.IsNullOrEmpty(readbackPrefabPath) && !readbackIsPartOfAnyPrefab;
+                var readbackNestedPrefabInstanceCount = CountNonAssetPrefabInstances(readbackObject);
+                var unpacked = string.IsNullOrEmpty(readbackPrefabPath)
+                    && !readbackIsPartOfAnyPrefab
+                    && (!completely || readbackNestedPrefabInstanceCount == 0);
                 if (!unpacked)
                 {
-                    return CommittedFailure("Prefab unpack readback still reports a prefab instance.", mutatedPath, mutatedGlobalObjectId);
+                    return CommittedFailure(
+                        completely
+                            ? "Completely unpack readback still reports a nested prefab instance."
+                            : "Prefab unpack readback still reports a prefab instance.",
+                        mutatedPath, mutatedGlobalObjectId);
                 }
                 var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
                 var persistedObject = SceneObjectCopyCore.ResolveUniqueGameObject(
@@ -1196,8 +1203,10 @@ namespace VRCForge.Editor
                 var persistedGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(persistedObject).ToString();
                 var persistedPrefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(persistedObject);
                 var persistedIsPartOfAnyPrefab = PrefabUtility.IsPartOfAnyPrefab(persistedObject);
+                var persistedNestedPrefabInstanceCount = CountNonAssetPrefabInstances(persistedObject);
                 if (!IsPersistedUnpackMatch(goPath, readbackGlobalObjectId, persistedPath,
-                    persistedGlobalObjectId, persistedPrefabPath, persistedIsPartOfAnyPrefab))
+                    persistedGlobalObjectId, persistedPrefabPath, persistedIsPartOfAnyPrefab,
+                    completely, persistedNestedPrefabInstanceCount))
                     return CommittedFailure("Saved unpacked prefab readback differs from the committed target.", mutatedPath, mutatedGlobalObjectId);
                 if (continuationConsumed && !string.IsNullOrWhiteSpace(p.approvedObjectReceiptNonce))
                 {
@@ -1212,6 +1221,7 @@ namespace VRCForge.Editor
                     globalObjectId = persistedGlobalObjectId,
                     prefabPath = persistedPrefabPath,
                     isPartOfAnyPrefab = persistedIsPartOfAnyPrefab,
+                    nestedPrefabInstanceCount = persistedNestedPrefabInstanceCount,
                     unpacked
                 };
 
@@ -1227,6 +1237,7 @@ namespace VRCForge.Editor
                     , dependencyHash
                     , scenePath
                     , unpacked
+                    , nestedPrefabInstanceCount = persistedNestedPrefabInstanceCount
                     , continuationConsumed
                     , before
                     , after
@@ -1259,11 +1270,22 @@ namespace VRCForge.Editor
         }
 
         private static bool IsPersistedUnpackMatch(string expectedPath, string expectedId,
-            string actualPath, string actualId, string prefabPath, bool isPartOfAnyPrefab)
+            string actualPath, string actualId, string prefabPath, bool isPartOfAnyPrefab,
+            bool completely, int nestedPrefabInstanceCount)
         {
             return string.Equals(expectedPath, actualPath, StringComparison.Ordinal)
                 && string.Equals(expectedId, actualId, StringComparison.Ordinal)
-                && string.IsNullOrEmpty(prefabPath) && !isPartOfAnyPrefab;
+                && string.IsNullOrEmpty(prefabPath) && !isPartOfAnyPrefab
+                && (!completely || nestedPrefabInstanceCount == 0);
+        }
+
+        private static int CountNonAssetPrefabInstances(GameObject root)
+        {
+            if (root == null)
+                return 0;
+            return root.GetComponentsInChildren<Transform>(true)
+                .Count(item => item != null
+                    && PrefabUtility.IsPartOfNonAssetPrefabInstance(item.gameObject));
         }
 
         private static VRCForgeToolResult CommittedFailure(string message, string gameObjectPath, string globalObjectId)
