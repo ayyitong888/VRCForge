@@ -27,7 +27,7 @@ def test_async_question_does_not_end_independent_runtime_work(tmp_path):
     replies = iter([
         {"action": "skill", "skill_tool": "vrcforge_ask_user", "skill_params": {"question": "Which outfit next?", "blocking": False}},
         {"action": "skill", "skill_tool": "vrcforge_fixture_read", "skill_params": {}},
-        {"action": "reply", "reply": "Independent inspection is complete; awaiting the outfit choice."},
+        {"action": "reply", "reply": "Independent inspection is complete; awaiting the outfit choice.", "completion_claim": {"satisfied": False}},
     ])
     bind_test_runtime_planner(gateway, lambda _p: {"text": json.dumps(next(replies))})
     result = gateway.runtime_message({"message": "Ask about the next outfit and inspect independently while waiting.", "sessionId": "async-session", "clientTurnId": "origin-cid", "projectRoot": str(tmp_path)})

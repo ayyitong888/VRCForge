@@ -50,6 +50,7 @@ const translations = {
   "chat.runtimeTerminal.providerRateLimitedMessage": "LOCALIZED_PROVIDER_RATE_LIMITED",
   "chat.runtimeTerminal.providerCapacityStatus": "LOCALIZED_PROVIDER_CAPACITY_STATUS",
   "chat.runtimeTerminal.providerCapacityMessage": "LOCALIZED_PROVIDER_CAPACITY",
+  "chat.runtimeTerminal.providerPostToolCapacityMessage": "LOCALIZED_POST_TOOL_PROVIDER_CAPACITY",
   "chat.runtimeTerminal.providerRequestFailedStatus": "LOCALIZED_PROVIDER_REQUEST_FAILED_STATUS",
   "chat.runtimeTerminal.providerRequestFailedMessage": "LOCALIZED_PROVIDER_REQUEST_FAILED",
 };
@@ -132,6 +133,27 @@ assert.equal(runtimeTerminalStatusKey("provider_request_failed"),
   "chat.runtimeTerminal.providerRequestFailedStatus");
 assert.equal(genericProviderFailure.timeline.length, 1,
   "generic provider failure must not invent a tool or assistant event");
+
+const postToolCapacity = projectRuntimeResponseForDisplay({
+  ...response,
+  plan: {
+    ...response.plan,
+    reply: "raw overload",
+    plannerFailure: {
+      code: "provider_capacity",
+      phase: "post_tool",
+      providerError: {
+        type: "APIError",
+        message: "Our servers are currently overloaded. Please try again later.",
+        body: { type: "service_unavailable_error", code: "server_is_overloaded" },
+      },
+    },
+  },
+}, (key) => translations[key] || key);
+assert.equal(postToolCapacity.plan.reply,
+  translations["chat.runtimeTerminal.providerPostToolCapacityMessage"]);
+assert.equal(postToolCapacity.timeline.at(-1).payload.summary,
+  translations["chat.runtimeTerminal.providerPostToolCapacityMessage"]);
 
 const unknownResponse = {
   ...response,

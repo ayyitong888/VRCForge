@@ -1499,6 +1499,11 @@ export function formatPayload(value: unknown): string {
 
 function formatDuration(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
+  if (seconds >= 3600) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return String(hours) + "h" + String(minutes) + "m";
+  }
   if (seconds < 60) return String(seconds) + "s";
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;

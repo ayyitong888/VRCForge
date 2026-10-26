@@ -805,6 +805,7 @@
       "providerRequestFailedStatus": "Model request failed · Not complete",
       "providerRequestFailedMessage": "The model request failed, so this turn did not complete. Retry or check the connection.",
       "providerPostToolFailureMessage": "The previous tool ran and its result was retained, but the next model planning request failed after reading that result. No further tools ran after the planning failure. Retry; if it continues to fail, check the provider connection or account status.",
+      "providerPostToolCapacityMessage": "The previous tool ran and its result was retained, but the provider is temporarily overloaded during the next planning request. No further tools ran after the planning failure. Retry later.",
       "missingFinalAnswerNotice": "This turn ended without a final answer. You can send another message to continue."
     },
     "connectProviderBeforeSend": "Connect a provider or external agent before sending.",

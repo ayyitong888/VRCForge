@@ -805,6 +805,7 @@
       "providerRequestFailedStatus": "模型请求失败 · 未完成",
       "providerRequestFailedMessage": "模型请求失败，本轮未完成。请重试或检查连接。",
       "providerPostToolFailureMessage": "上一步工具已经执行，结果也已保留，但读取结果后的下一次模型规划失败。规划失败后未再执行工具，请重试；如果仍然失败，再检查 Provider 连接或账户状态。",
+      "providerPostToolCapacityMessage": "上一步工具已经执行，结果也已保留，但下一次模型规划时 Provider 暂时过载。规划失败后未再执行工具，请稍后重试。",
       "missingFinalAnswerNotice": "本轮结束时没有最终回答。你可以继续发送消息。"
     },
     "connectProviderBeforeSend": "请先连接模型供应商或外部 agent，再发送消息。",

@@ -2346,8 +2346,10 @@ class RuntimePlannerService:
                 return "provider_rate_limited"
             if status_code in {502, 503, 504} and any(marker in message for marker in ("capacity", "overload", "busy", "unavailable")):
                 return "provider_capacity"
+            body = exception_fields.get("body") if isinstance(exception_fields, Mapping) else None
             stream_error_code = str(
-                exception_fields.get("stream_error_code") if isinstance(exception_fields, Mapping) else ""
+                exception_fields.get("stream_error_code")
+                or (body.get("code") if isinstance(body, Mapping) else "")
             ).strip().casefold()
             if stream_error_code in {"rate_limit_exceeded", "rate_limited", "rate_limit"}:
                 return "provider_rate_limited"

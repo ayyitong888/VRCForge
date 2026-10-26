@@ -188,7 +188,9 @@ export function projectRuntimeResponseForDisplay(
   // is unknown, so the code-specific messages must not claim zero execution.
   const messageKey = failureCode.startsWith("provider_")
     && response.plan.plannerFailure?.phase === "post_tool"
-    ? "chat.runtimeTerminal.providerPostToolFailureMessage"
+    ? failureCode === "provider_capacity"
+      ? "chat.runtimeTerminal.providerPostToolCapacityMessage"
+      : "chat.runtimeTerminal.providerPostToolFailureMessage"
     : failureMessageKey;
 
   const providerStatus = response.plan.plannerFailure?.providerError?.statusCode;

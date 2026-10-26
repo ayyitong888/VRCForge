@@ -8224,7 +8224,14 @@ class AgentGateway:
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
         pending_question = find_current_pending_question(steps, self.questions)
-        pending_question_boundary = bool(pending_question) and str(
+        # An asynchronous decision must not hide a later provider failure.
+        pending_question_boundary = bool(pending_question) and not (
+            top_plan.get("plannerFailed") is True
+            and str(top_plan.get("nextStep") or "").strip() == "planner_failed"
+            and ensure_dict(
+                ensure_dict(pending_question.get("result")).get("question")
+            ).get("blocking", True) is False
+        ) and str(
             top_plan.get("nextStep") or ""
         ).strip() not in {
             "cancelled", "context_compaction_required", "loop_suppressed", "paused",
