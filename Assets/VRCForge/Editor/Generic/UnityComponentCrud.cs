@@ -2248,7 +2248,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_add_component",
-        Summary = "Add a component of a given type to a scene GameObject (Undo-registered). Supports preview mode."
+        Summary = "when-to-use: preview or add one exact resolved Unity Component type to a scene GameObject through approval and checkpoint; the gateway uses a full-project checkpoint for types whose callbacks may affect assets. when-NOT-to-use: do not guess an ambiguous short type name or bypass approval/checkpoint. Negative example: do not treat a custom plugin MonoBehaviour add as a scene-only change."
     )]
     public static class AddComponentTool
     {
@@ -2374,7 +2374,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_remove_component",
-        Summary = "Remove a component of a given type from a scene GameObject (Undo-registered). Supports preview mode."
+        Summary = "when-to-use: preview or remove one exact resolved component instance from its scene GameObject through approval and checkpoint; the gateway uses a full-project checkpoint for types whose callbacks may affect assets. when-NOT-to-use: do not guess an ambiguous short type name or remove an unapproved instance. Negative example: do not substitute another component of the same type when the bound GlobalObjectId no longer resolves."
     )]
     public static class RemoveComponentTool
     {

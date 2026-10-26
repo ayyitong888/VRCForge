@@ -1,4 +1,4 @@
-"""CanvasGroup add/remove checkpoint scope through registration and real archive restore."""
+"""Generic component checkpoint scope through registration and real archive restore."""
 from copy import deepcopy
 from dataclasses import replace
 import zipfile
@@ -45,11 +45,10 @@ def test_native_component_archive_and_restore_preserve_unrelated_asset(case,tmp_
     assert (root/'Assets/Unrelated.mat').read_text()=='preserve'
 
 
-@pytest.mark.parametrize('kind',['user_script','path_mismatch','missing_target','remove_wrong_type','project_drift','invalid_scene'])
+@pytest.mark.parametrize('kind',['path_mismatch','missing_target','remove_wrong_type','project_drift','invalid_scene'])
 def test_unproven_component_scope_keeps_full_preparation(case,kind):
     server,root,target,request=case;tool='vrcforge_add_component'
-    if kind=='user_script':request['componentType']='Example.CustomBehaviour'
-    elif kind=='path_mismatch':request['gameObjectPath']='Other'
+    if kind=='path_mismatch':request['gameObjectPath']='Other'
     elif kind=='missing_target':request.pop('executionTarget')
     elif kind=='remove_wrong_type':
         tool='vrcforge_remove_component';target['scope']='component';target['component']={'globalObjectId':'component','type':'Example.CustomBehaviour'}
@@ -57,6 +56,34 @@ def test_unproven_component_scope_keeps_full_preparation(case,kind):
     else:target['scene']['assetPath']='Assets/../Outside.unity'
     result=server.prepare_authoritative_unity_checkpoint_sync(root,{**request,'_checkpointTargetTool':tool})
     assert 'archiveAssetPaths' not in result
+
+
+def test_custom_component_add_uses_full_project_checkpoint_after_identity_revalidation(case,monkeypatch):
+    server,root,target,request=case
+    request['componentType']='Example.PluginBehaviour'
+    calls=[]
+    monkeypatch.setattr(server,'prepare_unity_checkpoint_sync',lambda project,*args,**kwargs:
+        calls.append((project,args,kwargs)) or {'ok':True,'scope':'full_project'})
+    handler=server.AGENT_GATEWAY._write_handlers['vrcforge_add_component']
+    result=handler.checkpoint_prepare_handler(root,{**request,'_checkpointTargetTool':'vrcforge_add_component'})
+    assert result=={'ok':True,'scope':'full_project'}
+    assert calls==[(root,(),{})]
+
+
+def test_custom_component_remove_keeps_existing_path_and_uses_full_project_checkpoint(case,monkeypatch):
+    server,root,target,request=case
+    tool='vrcforge_remove_component'
+    custom_type='Example.PluginBehaviour'
+    request['componentType']=custom_type
+    target['scope']='component'
+    target['component']={'globalObjectId':'component','type':custom_type}
+    calls=[]
+    monkeypatch.setattr(server,'prepare_unity_checkpoint_sync',lambda project,*args,**kwargs:
+        calls.append((project,args,kwargs)) or {'ok':True,'scope':'full_project'})
+    handler=server.AGENT_GATEWAY._write_handlers[tool]
+    result=handler.checkpoint_prepare_handler(root,{**request,'_checkpointTargetTool':tool})
+    assert result=={'ok':True,'scope':'full_project'}
+    assert calls==[(root,(),{})]
 
 
 @pytest.mark.parametrize('kind',['scene','object','editor','ambiguous'])

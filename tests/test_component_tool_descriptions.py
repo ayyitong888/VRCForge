@@ -38,9 +38,11 @@ def test_lazy_component_tool_discovery_explains_safe_add_paths():
     ma_write = definitions["vrcforge_add_modular_avatar_component"]["description"]
 
     assert "UnityEngine.CanvasGroup" in add
-    assert "other built-in or custom component types" in add
+    assert "custom MonoBehaviour" in add
+    assert "full-project checkpoint" in add
+    assert "callbacks may affect assets" in add
     assert "vrcforge_preview_add_modular_avatar_component" in add
-    assert "UnityEngine.CanvasGroup" in remove
+    assert "full-project checkpoint" in remove
     assert "When NOT to use:" in remove and "Negative example:" in remove
     for description in (ma_preview, ma_write):
         assert "fully-qualified nadena.dev.modular_avatar.core type" in description

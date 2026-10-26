@@ -21531,9 +21531,9 @@ def prepare_authoritative_unity_checkpoint_sync(
         obj = ensure_dict(target.get("object"))
         component = ensure_dict(target.get("component"))
         scene_path = ensure_dict(target.get("scene")).get("assetPath")
-        # Generic component writes are scene-only mutations on one exact
-        # bound object; the component type itself is not restricted, but the
-        # CanvasGroup-only shortcut keeps its stricter component checks.
+        # Preserve the exact bound-object checkpoint for the known native
+        # CanvasGroup path. Other component add/remove callbacks can affect
+        # project assets, so their checkpoint must cover the project.
         canvas_group_only = request.get("componentType") == "UnityEngine.CanvasGroup"
         proven = (
             target.get("scope") in {"object", "component"}
@@ -21546,7 +21546,8 @@ def prepare_authoritative_unity_checkpoint_sync(
             and all(part not in {"", ".", ".."} for part in scene_path.split("/"))
             and (checkpoint_target != "vrcforge_remove_component" or (
                 target.get("scope") == "component" and component.get("globalObjectId")
-                and component.get("type")))
+                and component.get("type")
+                and request.get("componentType") == component.get("type")))
         )
         if not proven:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
@@ -21569,6 +21570,11 @@ def prepare_authoritative_unity_checkpoint_sync(
         live = list_execution_targets_sync(query)
         if live.get("ok") is not True or live.get("targets") != [target]:
             return {"ok": False, "error": "The approved component scene identity changed before checkpointing."}
+        if checkpoint_target in {"vrcforge_add_component", "vrcforge_remove_component"} and not canvas_group_only:
+            # Non-native component callbacks are outside the scene file
+            # boundary. Use the established full-project checkpoint so any
+            # project asset side effects remain recoverable.
+            return prepare_unity_checkpoint_sync(project_root)
         return {"ok": True, "projectPath": str(project_root),
                 "mode": "read_only_authoritative_revalidation", "canonicalRevalidated": True,
                 "archiveAssetPaths": [scene_path], "archiveScopeReason": "revalidated_native_component_scene_only"}
@@ -28229,7 +28235,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_add_component",
-        "When to use: add UnityEngine.CanvasGroup to an exact scene GameObject through the approval-bound generic component lane, which has a proven scene-only checkpoint. When NOT to use: do not use this generic lane for other built-in or custom component types because their callbacks are not proven scene-only; use the domain-specific Modular Avatar or VRCFury tool when applicable. Negative example: do not send nadena.dev.modular_avatar.core types here; use vrcforge_preview_add_modular_avatar_component then vrcforge_add_modular_avatar_component.",
+        "When to use: after reading the exact component type and binding one scene GameObject, add a legal built-in or custom MonoBehaviour component through approval. The known UnityEngine.CanvasGroup path uses a scene checkpoint; other types use a full-project checkpoint because their add callbacks may affect assets. Inspect the returned component and project after dispatch. When NOT to use: do not add an unknown component type without checking its exact assembly-qualified identity or bypass the checkpoint/approval path. Negative example: do not treat a custom plugin MonoBehaviour addition as scene-only; use vrcforge_preview_add_modular_avatar_component then vrcforge_add_modular_avatar_component for Modular Avatar types.",
         "medium",
         add_component_sync,
         verification_profile="persisted_scene_write_console",
@@ -28238,7 +28244,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_remove_component",
-        "When to use: remove one exact UnityEngine.CanvasGroup component from a freshly bound scene GameObject through the approval-bound generic component lane. When NOT to use: do not use this lane for other component types; use the owning domain-specific workflow when available. Negative example: do not use generic remove_component for a Modular Avatar component or any component without exact type and instance identity.",
+        "When to use: remove one exact bound Unity Component from its scene GameObject through approval; non-CanvasGroup types use a full-project checkpoint because removal callbacks may affect assets. When NOT to use: do not remove by an ambiguous type or stale component identity. Negative example: do not remove a different component than the exact type and GlobalObjectId approved for this request.",
         "medium",
         remove_component_sync,
         verification_profile="persisted_scene_write_console",
