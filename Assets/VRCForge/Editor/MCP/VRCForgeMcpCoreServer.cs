@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -214,6 +214,44 @@ namespace VRCForge.Editor
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Execute a Unity-API-dependent function on the editor main thread and
+        /// block the calling (TCP service) thread for the bounded result.
+        /// Unity scene APIs throw off the main thread, so external-write
+        /// identity validation routes its live assertions through this bridge.
+        /// </summary>
+        private static T RunOnMainThread<T>(Func<T> func)
+        {
+            // Re-entrancy guard: the drain itself runs on the main thread, so
+            // validations invoked from inside a drained invocation must execute
+            // inline instead of posting to the queue they are blocking.
+            if (SynchronizationContext.Current == editorSynchronizationContext
+                && editorSynchronizationContext != null)
+            {
+                return func();
+            }
+            var completion = new System.Threading.Tasks.TaskCompletionSource<T>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!TryPostToEditor(() =>
+            {
+                try
+                {
+                    completion.SetResult(func());
+                }
+                catch (System.Exception ex)
+                {
+                    completion.SetException(ex);
+                }
+            }))
+            {
+                throw new UnityException("The editor main thread is unavailable for Unity API validation.");
+            }
+            if (!completion.Task.Wait(TimeSpan.FromSeconds(15)))
+            {
+                throw new UnityException("The editor main thread did not complete Unity API validation in time.");
+            }
+            return completion.Task.Result;
         }
 
         private static void RequestInvocationDrain()
@@ -1566,7 +1604,7 @@ namespace VRCForge.Editor
                 {
                     pending.Response = ToolError(
                         "invocation_revalidation_failed",
-                        "VRCForge tool authorization changed before execution.",
+                        "VRCForge tool authorization changed before execution. reason=" + LastPeerReverifyFailure,
                         pending.Modern,
                         true);
                     return;
@@ -1636,20 +1674,46 @@ namespace VRCForge.Editor
                 return IsStrictAvatarUploadJobPoll(pending.ToolName, pending.Arguments)
                     && ValidateManagedAppInstanceContext(pending.ExecutionContext);
             }
-            var validManagedWrite = pending.Lane == InvocationLane.ApprovedWrite
-                ? ValidateApprovedExecutionContext(
+            if (pending.Lane == InvocationLane.ApprovedWrite)
+            {
+                var validApproved = ValidateApprovedExecutionContext(
                     pending.ExecutionContext,
                     pending.ToolName,
-                    pending.Arguments)
-                : pending.Lane == InvocationLane.ExternalMcpWrite
-                    && ValidateExternalMcpExecutionContext(
-                        pending.ExecutionContext,
-                        pending.ToolName,
-                        pending.Arguments);
-            return validManagedWrite
-                && ConsumeApprovedExecutionId(
-                    (string)pending.ExecutionContext["executionId"],
-                    pending.ExecutionContext["expiresAtUnixMs"].Value<long>());
+                    pending.Arguments);
+                if (!validApproved)
+                {
+                    LastPeerReverifyFailure = "approved-context-invalid";
+                }
+                return validApproved
+                    && ConsumeApprovedExecutionId(
+                        (string)pending.ExecutionContext["executionId"],
+                        pending.ExecutionContext["expiresAtUnixMs"].Value<long>());
+            }
+            if (pending.Lane == InvocationLane.ExternalMcpWrite)
+            {
+                string drainFailureCode;
+                var validExternal = ValidateExternalMcpExecutionContext(
+                    pending.ExecutionContext,
+                    pending.ToolName,
+                    pending.Arguments,
+                    out drainFailureCode);
+                if (!validExternal)
+                {
+                    LastPeerReverifyFailure = "external-context-invalid:" + drainFailureCode;
+                }
+                if (!validExternal)
+                {
+                    return false;
+                }
+            }
+            var consumed = ConsumeApprovedExecutionId(
+                (string)pending.ExecutionContext["executionId"],
+                pending.ExecutionContext["expiresAtUnixMs"].Value<long>());
+            if (!consumed)
+            {
+                LastPeerReverifyFailure = "execution-id-consume-failed";
+            }
+            return consumed;
         }
 
         private static bool IsStrictSetupOutfitJobPoll(string toolName, JObject arguments)
@@ -1732,20 +1796,53 @@ namespace VRCForge.Editor
             }
         }
 
+        internal static string LastPeerReverifyFailure = "never-run";
+
         private static bool ReverifyManagedPeer(PendingInvocation pending)
         {
-            VRCForgeMcpPeerProcessEvidence evidence;
-            if (pending == null || pending.ExecutionContext == null || pending.PeerEvidence == null
-                || !VRCForgeMcpPeerProcessVerifier.TryScreenManagedBackendPeer(pending.Client, out evidence)
-                || !pending.PeerEvidence.Matches(evidence))
+            if (pending == null || pending.ExecutionContext == null || pending.PeerEvidence == null)
             {
+                LastPeerReverifyFailure = "pending-null";
                 return false;
             }
+            // Primary: re-screen the live connection while the socket is open.
+            VRCForgeMcpPeerProcessEvidence evidence;
+            if (VRCForgeMcpPeerProcessVerifier.TryScreenManagedBackendPeer(pending.Client, out evidence)
+                && pending.PeerEvidence.Matches(evidence))
+            {
+                LastPeerReverifyFailure = "live-ok";
+                return ClientProcessIdMatches(pending, evidence.ProcessId);
+            }
+            LastPeerReverifyFailure = evidence != null
+                ? "live-screen-mismatch:" + (evidence.LastMismatch ?? "?")
+                : "live-screen-failed";
+            // The editor main thread drains the queue; while it is busy the
+            // caller's TCP socket can time out and close, which makes the
+            // connection-table screen impossible. Fall back to re-reading the
+            // snapshotted process identity: same backend executable, same
+            // parent shell, still running with the same start times. This is
+            // equally fail-closed - a recycled or replaced process cannot
+            // reproduce both start-time ticks.
+            long processStartTicks;
+            var processPath = VRCForgeMcpPeerProcessVerifier.ReadExpectedProcessPath(
+                pending.PeerEvidence.ProcessId, "vrcforge_backend", out processStartTicks);
+            if (string.IsNullOrEmpty(processPath)
+                || processStartTicks != pending.PeerEvidence.ProcessStartTimeUtcTicks
+                || !string.Equals(processPath, pending.PeerEvidence.ProcessPath, StringComparison.OrdinalIgnoreCase))
+            {
+                LastPeerReverifyFailure = "snapshot-process-gone-or-replaced"; return false;
+            }
+            return ClientProcessIdMatches(pending, pending.PeerEvidence.ProcessId);
+        }
+
+        private static bool ClientProcessIdMatches(PendingInvocation pending, int processId)
+        {
             try
             {
-                return pending.ExecutionContext["clientProcessId"] != null
+                return pending.ExecutionContext != null
+                    && pending.ExecutionContext["clientProcessId"] != null
                     && pending.ExecutionContext["clientProcessId"].Type == JTokenType.Integer
-                    && pending.ExecutionContext["clientProcessId"].Value<int>() == evidence.ProcessId;
+                    && pending.ExecutionContext["clientProcessId"].Value<int>() == processId;
             }
             catch (Exception)
             {
@@ -2078,9 +2175,14 @@ namespace VRCForge.Editor
             var expectedAbsolute = Path.GetFullPath(Path.Combine(projectRoot, assetPath.Replace('/', Path.DirectorySeparatorChar)));
             if (!string.Equals(Path.GetFullPath(absolutePath), expectedAbsolute, StringComparison.OrdinalIgnoreCase)
                 || !File.Exists(expectedAbsolute)) return false;
-            var activeScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
-            if (!activeScene.IsValid() || !activeScene.isLoaded
-                || !string.Equals(activeScene.path.Replace('\\', '/'), assetPath, StringComparison.Ordinal)) return false;
+            // The whole Scene-struct assertion (IsValid/isLoaded/path) is
+            // main-thread-only Unity API; evaluate it as one bridged block.
+            if (!RunOnMainThread(() =>
+            {
+                var activeScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+                return activeScene.IsValid() && activeScene.isLoaded
+                    && string.Equals(activeScene.path.Replace('\\', '/'), assetPath, StringComparison.Ordinal);
+            })) return false;
             var guid = ReadUnityMetaGuid(expectedAbsolute + ".meta");
             // Content revisions belong to write/checkpoint state, not scene identity.
             return string.Equals(RequiredBoundedString(scene, "guid", 64), guid, StringComparison.Ordinal);
@@ -2102,8 +2204,14 @@ namespace VRCForge.Editor
         {
             GlobalObjectId parsed;
             var value = identity == null ? null : RequiredBoundedString(identity, "globalObjectId", 512);
-            return !string.IsNullOrEmpty(value) && GlobalObjectId.TryParse(value, out parsed)
-                ? GlobalObjectId.GlobalObjectIdentifierToObjectSlow(parsed) as GameObject : null;
+            if (string.IsNullOrEmpty(value) || !GlobalObjectId.TryParse(value, out parsed))
+            {
+                return null;
+            }
+            // GlobalObjectIdentifierToObjectSlow is a main-thread Unity API;
+            // external write identity validation calls this from the TCP
+            // service thread and must bridge before touching scene objects.
+            return RunOnMainThread(() => GlobalObjectId.GlobalObjectIdentifierToObjectSlow(parsed) as GameObject);
         }
 
         private static string CurrentProcessStartTime()

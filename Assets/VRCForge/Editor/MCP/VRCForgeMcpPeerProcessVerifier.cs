@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -42,15 +42,18 @@ namespace VRCForge.Editor
             ParentProcessStartTimeUtcTicks = parentProcessStartTimeUtcTicks;
         }
 
+        internal string LastMismatch { get; private set; }
+
         internal bool Matches(VRCForgeMcpPeerProcessEvidence other)
         {
-            return other != null
-                && ProcessId == other.ProcessId
-                && ProcessStartTimeUtcTicks == other.ProcessStartTimeUtcTicks
-                && ParentProcessId == other.ParentProcessId
-                && ParentProcessStartTimeUtcTicks == other.ParentProcessStartTimeUtcTicks
-                && string.Equals(ProcessPath, other.ProcessPath, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(ParentProcessPath, other.ParentProcessPath, StringComparison.OrdinalIgnoreCase);
+            if (other == null) { LastMismatch = "evidence-null"; return false; }
+            if (ProcessId != other.ProcessId) { LastMismatch = "pid"; return false; }
+            if (ProcessStartTimeUtcTicks != other.ProcessStartTimeUtcTicks) { LastMismatch = "start-ticks"; return false; }
+            if (ParentProcessId != other.ParentProcessId) { LastMismatch = "parent-pid"; return false; }
+            if (ParentProcessStartTimeUtcTicks != other.ParentProcessStartTimeUtcTicks) { LastMismatch = "parent-start-ticks"; return false; }
+            if (!string.Equals(ProcessPath, other.ProcessPath, StringComparison.OrdinalIgnoreCase)) { LastMismatch = "path"; return false; }
+            if (!string.Equals(ParentProcessPath, other.ParentProcessPath, StringComparison.OrdinalIgnoreCase)) { LastMismatch = "parent-path"; return false; }
+            return true;
         }
     }
 
@@ -249,7 +252,7 @@ namespace VRCForge.Editor
             return (uint)(((port & 0xff) << 8) | ((port >> 8) & 0xff));
         }
 
-        private static string ReadExpectedProcessPath(int processId, string expectedName, out long startTimeUtcTicks)
+        internal static string ReadExpectedProcessPath(int processId, string expectedName, out long startTimeUtcTicks)
         {
             startTimeUtcTicks = 0;
             try
