@@ -4531,6 +4531,7 @@ export default function App() {
               goalEndpoint={endpoint}
               resourceImageEndpoint={endpoint}
               resourceChatId={activeChatId || undefined}
+              runtimeSessionId={sessionId || undefined}
               resourceProjectPath={activeChat?.projectPath || activeProjectPath || undefined}
               projects={projectItems.map((project) => ({
                 key: projectKey(project),

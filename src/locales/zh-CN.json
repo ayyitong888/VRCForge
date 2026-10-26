@@ -750,6 +750,8 @@
     "roslynFullAutoDesc": "所有请求自动通过并留痕；风险最高，不再需要启动额外确认。"
   },
   "chat": {
+    "positionNavigation": "对话位置",
+    "jumpToTurn": "跳到第 {{index}} 轮：{{preview}}",
     "transportInterrupted": "连接中断，执行状态待核对",
     "markdown": {
       "copy": "复制代码",

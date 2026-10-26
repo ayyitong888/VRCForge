@@ -750,6 +750,8 @@
     "roslynFullAutoDesc": "すべてのリクエストを監査記録付きで自動承認します。最もリスクが高く、起動時の追加確認はありません。"
   },
   "chat": {
+    "positionNavigation": "会話内の位置",
+    "jumpToTurn": "{{index}} 番目へ移動：{{preview}}",
     "transportInterrupted": "接続が中断されました。実行状態は未確認です",
     "markdown": {
       "copy": "コードをコピー",

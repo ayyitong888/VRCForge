@@ -60,6 +60,7 @@ export function ConversationCard({
   onSaveOperationAsSkill,
   reopenQuestionId,
   onReopenQuestion,
+  runtimeActive,
 }: {
   item: Exclude<ConversationItem, { type: "handoff_card" }>;
   interleavedUserMessages?: Extract<ConversationItem, { type: "user" }>[];
@@ -91,6 +92,8 @@ export function ConversationCard({
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
   reopenQuestionId?: string;
   onReopenQuestion?: (questionId: string) => void;
+  /** Exact session/CID activity from the current runtime ledger, when available. */
+  runtimeActive?: boolean;
 }) {
   const { t } = useTranslation();
   const storedAttachments = item.type === "user" || item.type === "question_answer" ? item.attachments : undefined;
@@ -286,7 +289,7 @@ export function ConversationCard({
       .find(event => event.kind === "assistant" && event.payload.summary)?.payload.summary;
     const showLiveText = Boolean(item.text && item.text.trim() !== lastAssistantText?.trim());
     const timelineRows = buildDurableTimelineRows(item.timeline, undefined, "", [], {
-      live: true,
+      live: runtimeActive ?? true,
       renderElapsed: false,
       processTitleElapsed: streamingElapsed,
       providerLine: "",
@@ -422,6 +425,7 @@ export function ConversationCard({
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
     renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, onImportAttachment),
+    live: runtimeActive ?? false,
     t,
   });
 

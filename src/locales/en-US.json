@@ -750,6 +750,8 @@
     "roslynFullAutoDesc": "Auto approve all requests with an audit trail. Highest risk; no extra startup confirmation."
   },
   "chat": {
+    "positionNavigation": "Conversation position",
+    "jumpToTurn": "Jump to turn {{index}}: {{preview}}",
     "transportInterrupted": "Connection interrupted · execution status unconfirmed",
     "markdown": {
       "copy": "Copy code",

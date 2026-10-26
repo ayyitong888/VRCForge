@@ -11,7 +11,7 @@ const { chromium } = createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRI
 const baseline = process.env.VRCFORGE_TIMELINE_BASELINE_REF;
 const css = (await postcss([tailwindcss("./tailwind.config.ts")]).process((await readFile("src/theme.css", "utf8")) + "\n@tailwind base; @tailwind components; @tailwind utilities;", { from: undefined })).css;
 const result = await build({ stdin: { resolveDir: process.cwd(), loader: "tsx", contents: `
-import React from 'react'; import {createRoot} from 'react-dom/client';
+import React, {useState} from 'react'; import {createRoot} from 'react-dom/client';
 import {ConversationCard} from './src/components/chat/conversation-card'; import {initializeI18n} from './src/i18n';
 const e=(id,sequence,kind,payload)=>({id,sequence,kind,payload,timestamp:new Date(2026,0,1,0,0,sequence).toISOString()});
 const timeline=[e('progress',0,'assistant',{summary:'Inspecting outfit bindings.',phase:'commentary'}),
@@ -26,8 +26,14 @@ const item={id:'history',type:'agent',response:{clientTurnId:'history-turn',plan
 const durationItem=(id,seconds)=>({id,type:'agent',response:{clientTurnId:id+'-turn',plan:{nextStep:'done',reply:'duration fixture'},timeline:durationTimeline(seconds)}});
 const pending={id:'pending',type:'streaming',clientTurnId:'pending-turn',text:'',timeline:[e('p',0,'tool_call',{actionId:'p',tool:'vrcforge_write_file',status:'prepared'})]};
 const recovered={id:'recovered',type:'streaming',clientTurnId:'recovered-turn',text:'',timeline:[e('r1',0,'tool_call',{actionId:'r1',tool:'unity_bind_execution_target',status:'started'}),e('r1r',1,'tool_result',{actionId:'r1',tool:'unity_bind_execution_target',status:'ok'}),e('r2',2,'tool_call',{actionId:'r2',tool:'unity_get_gameobject',status:'started'}),e('r2r',190,'tool_result',{actionId:'r2',tool:'unity_get_gameobject',status:'ok'})]};
+const recoveredAgent={id:'recovered-agent',type:'agent',response:{sessionId:'session-recovered',clientTurnId:'recovered-agent-turn',status:'running',plan:{nextStep:'continue',reply:'Partial response'},timeline:[e('recovered-agent-call',0,'tool_call',{actionId:'recovered-agent-action',tool:'vrcforge_read_text_file',status:'started'})]}};
 const interrupted={id:'interrupted',type:'agent',response:{clientTurnId:'interrupted-turn',status:'interrupted',continuationSource:'foreground_interrupted',plan:{nextStep:'interrupted',reply:'Accepted partial model text.'},timeline:[e('earlier',0,'assistant',{summary:'Earlier public update.',phase:'commentary'})]}};
-void initializeI18n().then(()=>createRoot(document.getElementById('root')).render(<><section id="history"><ConversationCard item={item}/></section><section id="pending"><ConversationCard item={pending}/></section><section id="interrupted"><ConversationCard item={interrupted}/></section><section id="recovered"><ConversationCard item={recovered}/></section><section id="duration-59m59s"><ConversationCard item={durationItem('duration-59m59s',3599)}/></section><section id="duration-1h"><ConversationCard item={durationItem('duration-1h',3600)}/></section><section id="duration-1h10m45s"><ConversationCard item={durationItem('duration-1h10m45s',4245)}/></section></>));
+const transitionTimeline=[e('transition-call',0,'tool_call',{actionId:'transition-action',tool:'vrcforge_read_text_file',status:'started'}),e('transition-result',1,'tool_result',{actionId:'transition-action',tool:'vrcforge_read_text_file',status:'ok'})];
+function RunningToTerminal(){const [terminal,setTerminal]=useState(false); const current=terminal
+  ? {id:'transition',type:'agent',response:{clientTurnId:'transition-turn',status:'completed',plan:{nextStep:'done',reply:'The live inspection finished.'},timeline:[...transitionTimeline,e('transition-final',2,'assistant',{summary:'The live inspection finished.',phase:'final_answer',status:'done'})]}}
+  : {id:'transition',type:'streaming',clientTurnId:'transition-turn',text:'',timeline:transitionTimeline};
+  return <><button id="transition-to-terminal" type="button" onClick={()=>setTerminal(true)}>Finish turn</button><ConversationCard item={current}/></>;}
+void initializeI18n().then(()=>createRoot(document.getElementById('root')).render(<><section id="transition"><RunningToTerminal/></section><section id="active-agent"><ConversationCard item={recoveredAgent} runtimeActive={true}/></section><section id="history"><ConversationCard item={item}/></section><section id="pending"><ConversationCard item={pending}/></section><section id="interrupted"><ConversationCard item={interrupted}/></section><section id="recovered"><ConversationCard item={recovered}/></section><section id="duration-59m59s"><ConversationCard item={durationItem('duration-59m59s',3599)}/></section><section id="duration-1h"><ConversationCard item={durationItem('duration-1h',3600)}/></section><section id="duration-1h10m45s"><ConversationCard item={durationItem('duration-1h10m45s',4245)}/></section></>));
 ` }, bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", plugins: baseline ? [{name:'frozen-timeline-baseline',setup(plugin){plugin.onLoad({filter:/conversation-timeline\.tsx$/},()=>({loader:'tsx',contents:execFileSync('git',['show',baseline+':src/components/chat/conversation-timeline.tsx'],{encoding:'utf8'})}));}}] : [] });
 const server = createServer((_, response) => { response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(`<style>${css}</style><div id="root" style="width:720px"></div><script>${result.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script>`); });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -61,10 +67,31 @@ try {
   assert.equal(await group.locator('button.group\\/run').count(),2,'opening completed work exposes individual tool calls without another group click');
   await group.locator('button.group\\/run').last().click();
   assert.ok((await group.locator('[data-agent-invocation-output-card]').innerText()).includes('Historical read failure'),'exact error detail stays inspectable');
+  await processFold.locator('button').first().click();
+  assert.equal(await processFold.locator('button').first().getAttribute('aria-expanded'),'false','terminal turn work summary remains user-collapsible');
   const pending=page.locator('#pending');
   assert.match(await pending.locator('[data-agent-turn-process-title]').innerText(), /Handled in —/, 'missing duration stays explicitly unknown instead of changing the process heading');
+  const pendingProcess=pending.locator('[data-agent-turn-process-group]');
+  assert.equal(await pendingProcess.locator('button').first().getAttribute('aria-expanded'),'true','running turn work summary starts expanded');
+  assert.equal(await pendingProcess.locator('button').first().isDisabled(),true,'running turn summary exposes its non-collapsible state accessibly');
   const pendingGroup=pending.locator('[data-agent-tool-call-group]'); await pendingGroup.locator('button').first().click();
   await pendingGroup.locator('button.group\\/run').click();
   assert.doesNotMatch(await pendingGroup.locator('[data-agent-invocation-output-card]').innerText(),/Done|已完成/,'prepared request is not a completed write');
+  const transition=page.locator('#transition');
+  const liveSummary=transition.locator('[data-agent-turn-process-group] button').first();
+  assert.equal(await liveSummary.getAttribute('aria-expanded'),'true','live clientTurn starts expanded');
+  assert.equal(await liveSummary.isDisabled(),true,'live clientTurn exposes its non-collapsible state accessibly');
+  await transition.locator('#transition-to-terminal').click();
+  const terminalSummary=transition.locator('[data-agent-turn-process-group] button').first();
+  await terminalSummary.waitFor();
+  assert.equal(await terminalSummary.getAttribute('aria-expanded'),'false','the same clientTurn becomes collapsible only after its streaming item reaches a terminal agent response');
+  await terminalSummary.click();
+  assert.equal(await terminalSummary.getAttribute('aria-expanded'),'true','terminal clientTurn can be opened for review');
+  await terminalSummary.click();
+  assert.equal(await terminalSummary.getAttribute('aria-expanded'),'false','terminal clientTurn can be folded after review');
+  const activeAgent=page.locator('#active-agent');
+  const recoveredSummary=activeAgent.locator('[data-agent-turn-process-group] button').first();
+  assert.equal(await recoveredSummary.getAttribute('aria-expanded'),'true','a recovered agent item with active CID state stays expanded');
+  assert.equal(await recoveredSummary.isDisabled(),true,'active recovered summary exposes its non-collapsible state accessibly');
   assert.deepEqual(errors,[]); console.log('work summary, historical failure, original detail and prepared stage browser passed');
 } finally { await browser?.close(); await new Promise(resolve=>server.close(resolve)); }

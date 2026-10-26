@@ -63,6 +63,7 @@ export function buildAgentTimelineRows({
   interleavedUsersExpanded = false,
   onInterleavedUsersExpandedChange,
   renderInterleavedUserMessage,
+  live = false,
   t,
 }: {
   response: AgentRuntimeResponse;
@@ -83,6 +84,7 @@ export function buildAgentTimelineRows({
   interleavedUsersExpanded?: boolean;
   onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
   renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
+  live?: boolean;
   t: typeof i18n.t;
 }): ReactNode[] {
   const cancelled = isCancelledRuntimeResponse(response);
@@ -136,6 +138,7 @@ export function buildAgentTimelineRows({
     response.plan.plannerFailure?.code,
     response.steps,
     {
+      live,
       providerLine,
       renderElapsed: true,
       dropCancellationMarkers: cancelled,
@@ -499,6 +502,7 @@ export function buildDurableTimelineRows(
           showStatus={processInvocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
           openByDefault={Boolean(options.live)}
+          forceOpen={Boolean(options.live)}
           controlledOpen={interleavedMessages.length ? options.interleavedUsersExpanded : undefined}
           onOpenChange={options.onInterleavedUsersExpandedChange}
           processHeader
@@ -1309,6 +1313,7 @@ function WorkSegmentRow({
   statusTone,
   showStatus = false,
   openByDefault = false,
+  forceOpen = false,
   controlledOpen,
   onOpenChange,
   processHeader = false,
@@ -1322,19 +1327,23 @@ function WorkSegmentRow({
   statusTone: "danger" | "warn" | "muted";
   showStatus?: boolean;
   openByDefault?: boolean;
+  forceOpen?: boolean;
   controlledOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   processHeader?: boolean;
   children: ReactNode;
 }) {
   const [localOpen, setLocalOpen] = useState(openByDefault);
-  const open = controlledOpen ?? localOpen;
+  const open = forceOpen || (controlledOpen ?? localOpen);
   return (
     <div className="text-muted-foreground">
       <button
         type="button"
         aria-expanded={open}
+        aria-disabled={forceOpen || undefined}
+        disabled={forceOpen}
         onClick={() => {
+          if (forceOpen) return;
           const next = !open;
           if (controlledOpen === undefined) setLocalOpen(next);
           onOpenChange?.(next);

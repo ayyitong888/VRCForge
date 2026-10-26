@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowDown, ArrowUp, Loader2, MoreHorizontal, Pause, Play, X } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent, type Ref } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { updateAgentGoal } from "../../lib/api";
 import type { AgentApproval, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
@@ -29,6 +29,8 @@ import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { conversationRoundDateSeparators } from "../../lib/message-time";
 import { projectConversationTasks } from "../../lib/chat-task-projection";
 import { capturePreviewsForQuestion } from "../../lib/chat-timeline-presentation";
+import { ChatPositionRail, type ChatPositionMarker } from "./chat-position-rail";
+import { isActiveRuntimeRunStatus } from "../../lib/runtime-run-status";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -134,6 +136,7 @@ export function ChatWorkspace({
   goalEndpoint,
   resourceImageEndpoint,
   resourceChatId,
+  runtimeSessionId,
   resourceProjectPath,
   projects,
   onBindProject,
@@ -232,6 +235,7 @@ export function ChatWorkspace({
   goalEndpoint: string;
   resourceImageEndpoint?: string;
   resourceChatId?: string;
+  runtimeSessionId?: string;
   resourceProjectPath?: string;
   projects: Array<{ key: string; name: string }>;
   onBindProject: (path: string) => void;
@@ -328,6 +332,35 @@ export function ChatWorkspace({
     const question = projectedAgentQuestions.find((candidate) => candidate.questionId === item.questionId)?.question;
     return question ? { ...item, question } : item;
   });
+  const conversationRenderScope = sessionHandoffSourceChatId || "chat";
+  const conversationItemKeyOccurrences = new Map<string, number>();
+  const navigationMarkers = useMemo<ChatPositionMarker[]>(() => {
+    const occurrences = new Map<string, number>();
+    const seenTurns = new Set<string>();
+    const markers: ChatPositionMarker[] = [];
+    const addUser = (user: Extract<ConversationItem, { type: "user" | "question_answer" }>, key: string) => {
+      if (user.text.trim() === "<task-notification-trigger/>") return;
+      const turn = user.type === "user" ? user.clientTurnId || user.id : user.id;
+      if (seenTurns.has(turn)) return;
+      seenTurns.add(turn);
+      const preview = user.text.replace(/\s+/g, " ").trim();
+      markers.push({ key, preview: preview.length > 96 ? `${preview.slice(0, 95)}…` : preview });
+    };
+    for (const item of conversationItems) {
+      const renderKey = conversationItemRenderKey(item, conversationRenderScope, occurrences);
+      if (item.type === "user" || item.type === "question_answer") {
+        addUser(item, renderKey);
+        continue;
+      }
+      const turnId = item.type === "agent" ? item.response.clientTurnId : item.type === "streaming" ? item.clientTurnId : "";
+      const initialUser = turnId ? steeringProjection.initialUsersByTurnId.get(turnId) : undefined;
+      if (initialUser) {
+        addUser(initialUser, conversationItemRenderKey(initialUser, conversationRenderScope, occurrences));
+      }
+    }
+    return markers;
+  }, [conversationItems, conversationRenderScope, steeringProjection.initialUsersByTurnId]);
+  const historyScrollRef = useRef<HTMLDivElement>(null);
   const questionCapturePreviews = (question: AgentQuestion) => capturePreviewsForQuestion(question, conversationItems);
   const questionResourceImageContext = (question: AgentQuestion) => {
     const capturePreviews = questionCapturePreviews(question);
@@ -350,8 +383,6 @@ export function ChatWorkspace({
     const timer = window.setInterval(() => setActivityNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [activeStreamingItems.length]);
-  const conversationItemKeyOccurrences = new Map<string, number>();
-  const conversationRenderScope = sessionHandoffSourceChatId || "chat";
   const [goalActionBusy, setGoalActionBusy] = useState(false);
   const [goalActionError, setGoalActionError] = useState("");
   const [goalLocalTick, setGoalLocalTick] = useState(0);
@@ -564,8 +595,14 @@ export function ChatWorkspace({
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div className="relative min-h-0 flex-1">
+        <ChatPositionRail
+          markers={navigationMarkers}
+          scrollContainerRef={historyScrollRef}
+          scopeKey={conversationRenderScope}
+        />
         <div
-          className="app-scrollbar h-full overflow-auto px-4 py-6 md:px-6 md:py-8"
+          ref={historyScrollRef}
+          className="app-scrollbar h-full overflow-auto pl-7 pr-4 py-6 md:pl-8 md:pr-6 md:py-8"
           data-chat-history-scroll
           onMouseUp={onConversationMouseUp}
           onScroll={(event) => onConversationScroll(event.currentTarget)}
@@ -584,9 +621,10 @@ export function ChatWorkspace({
             const taskId = taskProjection.taskIdByItem.get(item);
             const previous = conversationItems[itemIndex - 1];
             const taskContinuation = previous && taskProjection.taskIdByItem.get(previous) === taskId;
+            const renderKey = conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences);
             if (item.type === "handoff_card") {
               return (
-                <div key={item.id}>
+                <div key={renderKey} data-chat-nav-anchor={renderKey}>
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <SessionHandoffCard
                   handoff={{
@@ -613,22 +651,25 @@ export function ChatWorkspace({
             }
             const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
             const turnId = item.type === "agent" ? item.response.clientTurnId : item.type === "streaming" ? item.clientTurnId : "";
+            const turnSessionId = runtimeSessionId || (item.type === "agent" ? item.response.sessionId || item.response.session_id : "");
+            const runtimeRun = turnId && turnSessionId ? runtimeRuns.find((run) => run.clientTurnId === turnId && run.sessionId === turnSessionId) : undefined;
             const initialUser = turnId ? steeringProjection.initialUsersByTurnId.get(turnId) : undefined;
             const capturedOperation = item.type === "agent"
               ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
               : null;
             return (
-              <div key={conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={item.id}
+              <div key={renderKey} data-chat-nav-anchor={renderKey} data-conversation-item-id={item.id}
                 data-chat-task={taskId} data-chat-task-continuation={taskContinuation || undefined}
                 style={taskContinuation ? { marginTop: "0.75rem" } : undefined}>
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <ConversationCard
                 item={item}
+                runtimeActive={runtimeRun ? isActiveRuntimeRunStatus(runtimeRun.status) : undefined}
                 reopenQuestionId={item.type === "question_answer" ? pendingQuestionPrompts.find((question) => question.questionId === item.questionId)?.questionId : undefined}
                 onReopenQuestion={onReplyInChat}
                 interleavedUserMessages={turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined}
                 initialUserContent={initialUser ? (
-                  <div data-conversation-item-id={initialUser.id} data-turn-initial-user>
+                  <div data-chat-nav-anchor={conversationItemRenderKey(initialUser, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={initialUser.id} data-turn-initial-user>
                     <ConversationCard
                       item={initialUser}
                       attachmentPayloads={attachmentPayloads}
