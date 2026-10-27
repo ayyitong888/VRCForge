@@ -51,6 +51,41 @@ def test_sub_agent_registry_runs_records_and_retries(tmp_path):
     assert retried["task"]["displayName"] == "Kikyo"
 
 
+def test_llm_task_fields_and_child_identity_are_durable_and_retry_gets_new_identity(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def handler(payload, _cancel):
+        entered.set()
+        release.wait(2)
+        return {"ok": True, "summaryText": "done"}
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("llm_readonly", "Read only", "LLM", tool_profile="read-only")],
+        handlers={"llm_readonly": handler},
+    )
+    created = registry.create_task(role="llm_readonly", task="Review", display_name="Manuka",
+                                   params={"model": "fixture-model", "systemPrompt": "Only inspect",
+                                           "maxSteps": 3, "selectedMaterials": [{"name": "note", "text": "fact"}]})
+    task_id = created["task"]["id"]
+    assert entered.wait(1)
+    task = created["task"]
+    assert task["model"] == "fixture-model"
+    assert task["systemPrompt"] == "Only inspect"
+    assert task["maxSteps"] == 3
+    assert task["childSessionId"].startswith("sub-session-")
+    snapshot = registry._task_snapshot(registry._tasks[task_id])
+    restored = registry._task_from_snapshot(snapshot)
+    assert restored is not None and restored.child_session_id == task["childSessionId"]
+    release.set()
+    deadline = time.time() + 2
+    while registry.get_task(task_id)["task"]["status"] == "running" and time.time() < deadline:
+        time.sleep(.01)
+    retried = registry.retry_task(task_id)
+    assert retried["task"]["childSessionId"] != task["childSessionId"]
+
+
 def test_task_linked_sub_agent_notifies_once_after_terminal_state_is_durable(tmp_path):
     terminal_events: list[dict[str, object]] = []
     registry = SubAgentTaskRegistry(

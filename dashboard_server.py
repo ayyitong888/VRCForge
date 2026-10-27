@@ -7811,7 +7811,9 @@ async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]
             parent_chat_id=request.parent_chat_id,
             parent_session_id=request.parent_session_id,
             project_path=request.project_path,
-            params=request.params,
+            params={**request.params, **request.model_dump(
+                include={"model", "system_prompt", "max_steps", "selected_materials"},
+                by_alias=True, exclude_unset=True)},
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -26646,6 +26648,9 @@ def delegate_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str
     arguments = dict(params or {})
     task_seed, runtime_session_id = AGENT_GATEWAY.consume_runtime_task_link(arguments)
     worker_params = ensure_dict(arguments.pop("params", None))
+    for key in ("model", "systemPrompt", "maxSteps", "selectedMaterials"):
+        if key in arguments:
+            worker_params[key] = arguments[key]
     if isinstance(task_seed, dict) and task_seed:
         worker_params["_taskSeed"] = dict(task_seed)
     created = SUB_AGENT_COLLABORATION.create_task(

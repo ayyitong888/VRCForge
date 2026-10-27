@@ -4804,6 +4804,15 @@ class AgentGateway:
             ),
         }
 
+    def run_sub_agent_llm(self, *, task: str, child_session_id: str, model: str = "",
+                          system_prompt: str = "", max_steps: int = 4,
+                          project_path: str = "", selected_materials: list[dict] | None = None,
+                          cancel_event: threading.Event) -> dict[str, Any]:
+        from agent_subagent_runtime import run_child_runtime
+        return run_child_runtime(self, task=task, child_session_id=child_session_id, model=model,
+                                 system_prompt=system_prompt, max_steps=max_steps, project_path=project_path,
+                                 selected_materials=selected_materials or [], cancel_event=cancel_event)
+
     def runtime_message(
         self,
         params: dict[str, Any] | None = None,
@@ -6735,6 +6744,10 @@ class AgentGateway:
                 **({"native_turn": native_turn} if native_binding else {}),
             )
             planned_at = time.perf_counter()
+            # Child cancellation can arrive with the provider result, before
+            # the forwarding watcher has been scheduled. Settle it before dispatch.
+            from agent_subagent_runtime import forward_child_cancellation
+            forward_child_cancellation(self)
             # Planner model is populated only from the provider response;
             # preserve it before cancellation or a subsequent tool can fail.
             if str(plan.get("model") or "").strip():

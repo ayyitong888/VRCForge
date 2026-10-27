@@ -1172,6 +1172,10 @@ class SubAgentCreateRequest(BaseModel):
     parent_chat_id: str = Field(default="", alias="parentChatId")
     parent_session_id: str = Field(default="", alias="parentSessionId")
     project_path: str = Field(default="", alias="projectPath")
+    model: str = ""
+    system_prompt: str = Field(default="", alias="systemPrompt")
+    max_steps: int = Field(default=4, alias="maxSteps", ge=1, le=12)
+    selected_materials: list[dict[str, Any]] = Field(default_factory=list, alias="selectedMaterials")
     params: dict[str, Any] = Field(default_factory=dict)
 
     model_config = {"populate_by_name": True}

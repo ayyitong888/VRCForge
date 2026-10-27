@@ -23,6 +23,10 @@ class RuntimeSkillGateway(Protocol):
         agent_name: str,
     ) -> dict[str, Any]: ...
 
+    def run_sub_agent_llm(self, *, task: str, child_session_id: str, model: str,
+                          system_prompt: str, max_steps: int, project_path: str,
+                          selected_materials: list[dict[str, Any]], cancel_event: Any) -> dict[str, Any]: ...
+
 
 def _checkpoint(cancel_event: Any) -> None:
     if cancel_event.is_set():
@@ -339,6 +343,45 @@ def run_skill_delegate(
     }
 
 
+def run_readonly_llm_agent(gateway: RuntimeSkillGateway, payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
+    """Run one independent child session through AgentGateway's native runtime loop."""
+    _checkpoint(cancel_event)
+    task = str(payload.get("task") or "").strip()
+    child_session_id = str(payload.get("childSessionId") or "").strip()
+    if not task or not child_session_id:
+        raise RuntimeError("llm_readonly requires task and childSessionId.")
+    raw_materials = payload.get("selectedMaterials") or payload.get("selected_materials") or []
+    if not isinstance(raw_materials, list) or any(not isinstance(item, dict) for item in raw_materials):
+        raise RuntimeError("selectedMaterials must be a list of objects.")
+    # Deliberately never forward parent native history, task seed, or arbitrary params.
+    materials = [dict(item) for item in raw_materials]
+    response = gateway.run_sub_agent_llm(
+        task=task,
+        child_session_id=child_session_id,
+        model=str(payload.get("model") or "").strip(),
+        system_prompt=str(payload.get("systemPrompt") or payload.get("system_prompt") or "").strip(),
+        max_steps=max(1, min(int(payload.get("maxSteps", payload.get("max_steps", 4))), 12)),
+        project_path=str(payload.get("projectPath") or "").strip(),
+        selected_materials=materials,
+        cancel_event=cancel_event,
+    )
+    _checkpoint(cancel_event)
+    if not isinstance(response, dict) or not isinstance(response.get("finalReport"), str):
+        raise RuntimeError("Native child runtime did not return a final report.")
+    return {
+        "ok": bool(response.get("ok", True)),
+        "schema": "vrcforge.sub_agent.llm_readonly.v1",
+        "role": "llm_readonly",
+        "readOnly": True,
+        "childSessionId": child_session_id,
+        "summaryText": response["finalReport"][:1000],
+        "finalReport": response["finalReport"],
+        "plannerEvidence": {"role": "llm_readonly", "childSessionId": child_session_id,
+                            "stepCount": int(response.get("stepCount") or 0)},
+        "rawResult": response.get("rawResult", response),
+    }
+
+
 def build_sub_agent_roles() -> list[SubAgentRole]:
     """组合根用的完整角色清单（六个既有角色 + skill_delegate）。"""
     return [
@@ -384,6 +427,12 @@ def build_sub_agent_roles() -> list[SubAgentRole]:
             description="Run one allowlisted read-only or plan-only runtime skill by name and report its output. Required in params: toolName or tool_name; pass skill inputs in skillParams when needed.",
             tool_profile="runtime-allowlist",
         ),
+        SubAgentRole(
+            id="llm_readonly",
+            title="Read-only LLM sub-agent",
+            description="Reason over the task using an independent child session and read-only tools.",
+            tool_profile="read-only",
+        ),
     ]
 
 
@@ -404,6 +453,11 @@ def build_sub_agent_input_schema() -> dict[str, Any]:
                 ),
             },
             "task": {"type": "string", "description": "Bounded task for the selected role."},
+            "model": {"type": "string", "description": "Optional provider model override; defaults to the configured provider model."},
+            "systemPrompt": {"type": "string", "description": "Optional role instructions for this child session."},
+            "maxSteps": {"type": "integer", "minimum": 1, "maximum": 12,
+                         "description": "Maximum provider model requests; queued tool calls in one response do not add model turns."},
+            "selectedMaterials": {"type": "array", "items": {"type": "object"}},
             "prompt": {"type": "string", "description": "Alias for task."},
             "displayName": {"type": "string"},
             "display_name": {"type": "string"},
@@ -445,4 +499,5 @@ def build_sub_agent_role_handlers(
         "package_install_diagnosis": lambda payload, cancel_event: run_package_install_diagnosis(gateway, payload, cancel_event),
         "outfit_import_plan_review": lambda payload, cancel_event: run_outfit_import_plan_review(gateway, payload, cancel_event),
         "skill_delegate": lambda payload, cancel_event: run_skill_delegate(gateway, payload, cancel_event),
+        "llm_readonly": lambda payload, cancel_event: run_readonly_llm_agent(gateway, payload, cancel_event),
     }

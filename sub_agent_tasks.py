@@ -48,6 +48,10 @@ class SubAgentTask:
     parent_session_id: str = ""
     project_path: str = ""
     tool_profile: str = "read-only"
+    model: str = ""
+    system_prompt: str = ""
+    max_steps: int = 4
+    child_session_id: str = ""
     status: str = "queued"
     created_at: str = field(default_factory=lambda: utc_now())
     started_at: str = ""
@@ -352,6 +356,10 @@ class SubAgentTaskRegistry:
                 parent_session_id=str(parent_session_id or "").strip(),
                 project_path=str(project_path or "").strip(),
                 tool_profile=role_spec.tool_profile,
+                model=str((params or {}).get("model") or "").strip(),
+                system_prompt=str((params or {}).get("system_prompt") or (params or {}).get("systemPrompt") or "").strip(),
+                max_steps=max(1, min(int((params or {}).get("max_steps", (params or {}).get("maxSteps", 4))), 12)),
+                child_session_id=(f"sub-session-{task_id}" if role_id == "llm_readonly" else ""),
                 params=copy.deepcopy(params or {}),
                 retry_of=str(retry_of or "").strip(),
             )
@@ -754,6 +762,14 @@ class SubAgentTaskRegistry:
             payload.setdefault("parentTurnId", str(seed.get("turnId") or "")[:180])
             payload.setdefault("parentClientTurnId", str(seed.get("clientTurnId") or "")[:240])
         payload.setdefault("displayName", task.display_name)
+        payload.setdefault("model", task.model)
+        payload.setdefault("systemPrompt", task.system_prompt)
+        payload.setdefault("maxSteps", task.max_steps)
+        if task.child_session_id:
+            # The registry owns child identity and the persisted execution
+            # choices; arbitrary task params cannot redirect it into a parent.
+            payload.update(childSessionId=task.child_session_id, model=task.model,
+                           systemPrompt=task.system_prompt, maxSteps=task.max_steps)
         payload.setdefault("retryOf", task.retry_of)
         return payload
 
@@ -791,6 +807,10 @@ class SubAgentTaskRegistry:
             "parentClientTurnId": parent_client_turn_id,
             "projectPath": task.project_path,
             "toolProfile": task.tool_profile,
+            "model": task.model,
+            "systemPrompt": task.system_prompt,
+            "maxSteps": task.max_steps,
+            "childSessionId": task.child_session_id,
             "status": task.status,
             "createdAt": task.created_at,
             "startedAt": task.started_at,
@@ -827,6 +847,10 @@ class SubAgentTaskRegistry:
             parent_session_id=str(snapshot.get("parentSessionId") or ""),
             project_path=str(snapshot.get("projectPath") or ""),
             tool_profile=str(snapshot.get("toolProfile") or "read-only"),
+            model=str(snapshot.get("model") or ""),
+            system_prompt=str(snapshot.get("systemPrompt") or ""),
+            max_steps=int(snapshot.get("maxSteps") or 4),
+            child_session_id=str(snapshot.get("childSessionId") or ""),
             status=str(snapshot.get("status") or "queued"),
             created_at=str(snapshot.get("createdAt") or utc_now()),
             started_at=str(snapshot.get("startedAt") or ""),

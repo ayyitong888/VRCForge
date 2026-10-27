@@ -13,6 +13,7 @@ from sub_agent_delegate import (
     run_package_install_diagnosis,
     run_project_index_review,
     run_selected_context_review,
+    run_readonly_llm_agent,
     run_skill_delegate,
     run_validation_triage,
 )
@@ -255,7 +256,7 @@ def test_selected_context_review_never_touches_gateway():
     assert set(handlers) == {role.id for role in build_sub_agent_roles()}
 
 
-def test_build_sub_agent_roles_covers_seven_roles_including_skill_delegate():
+def test_build_sub_agent_roles_covers_existing_roles_and_readonly_llm_agent():
     roles = build_sub_agent_roles()
     role_ids = [role.id for role in roles]
     assert role_ids == [
@@ -266,9 +267,40 @@ def test_build_sub_agent_roles_covers_seven_roles_including_skill_delegate():
         "package_install_diagnosis",
         "outfit_import_plan_review",
         "skill_delegate",
+        "llm_readonly",
     ]
     delegate = next(role for role in roles if role.id == "skill_delegate")
     assert delegate.tool_profile == "runtime-allowlist"
+    llm = next(role for role in roles if role.id == "llm_readonly")
+    assert llm.tool_profile == "read-only"
+    assert llm.read_only is True
+
+
+def test_readonly_llm_agent_forwards_only_selected_context_and_child_identity():
+    class RuntimeGateway(FakeGateway):
+        def __init__(self):
+            super().__init__()
+            self.request = None
+
+        def run_sub_agent_llm(self, **kwargs):
+            self.request = kwargs
+            return {"ok": True, "finalReport": "Two checks support the conclusion.", "stepCount": 2,
+                    "rawResult": {"messages": [{"role": "assistant"}]}}
+
+    gateway = RuntimeGateway()
+    result = run_readonly_llm_agent(gateway, {
+        "task": "Review these facts", "childSessionId": "child-1", "model": "fixture",
+        "systemPrompt": "Be concise", "maxSteps": 3, "projectPath": "ProjectA",
+        "selectedMaterials": [{"name": "notes", "text": "fact"}],
+        "_taskSeed": {"_nativeConversation": {"messages": [{"content": "parent secret"}]}},
+        "parentSessionId": "parent-1",
+    }, _idle_event())
+    assert gateway.request["child_session_id"] == "child-1"
+    assert gateway.request["selected_materials"] == [{"name": "notes", "text": "fact"}]
+    assert "parent secret" not in repr(gateway.request)
+    assert "parent_session_id" not in gateway.request
+    assert result["finalReport"] == "Two checks support the conclusion."
+    assert result["rawResult"]["messages"][0]["role"] == "assistant"
 
 
 def test_cancel_event_raises_before_dispatch():

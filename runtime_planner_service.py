@@ -1776,14 +1776,22 @@ class RuntimePlannerService:
         self._tool_image_reader = tool_image_reader
         self._native_binding = ContextVar("runtime_native_binding", default="")
         self._verified_context_limit = ContextVar("verified_context_limit", default=None)
+        self._role_instructions = ContextVar("runtime_role_instructions", default="")
+
+    @contextmanager
+    def bind_role_instructions(self, instructions: str):
+        token = self._role_instructions.set(str(instructions or ""))
+        try:
+            yield
+        finally:
+            self._role_instructions.reset(token)
 
     def _read_global_instructions(self) -> str:
-        if self._global_instructions is None:
-            return ""
         try:
-            return str(self._global_instructions() or "").strip()
+            base = str(self._global_instructions() or "").strip() if self._global_instructions else ""
         except (OSError, RuntimeError, UnicodeError, ValueError):
-            return ""
+            base = ""
+        return "\n\n".join(part for part in (base, self._role_instructions.get()) if part)
 
     @contextmanager
     def bind_turn(self, request: Mapping[str, object]):
