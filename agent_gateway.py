@@ -3984,7 +3984,7 @@ class AgentGateway:
             if is_execution_target_reference(public_reference):
                 result = self._replace_execution_target_with_reference(
                     result,
-                    execution_target_digest(execution_target),
+                    result["executionTargetDigest"],
                     public_reference,
                 )
             result["executionTarget"] = (

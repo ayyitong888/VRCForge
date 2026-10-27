@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import agent_gateway
 import pytest
 
 from execution_target import (
@@ -37,6 +38,45 @@ def _assert_no_project_path(value, project_root):
             for child in item:
                 check(child)
     check(value)
+
+
+def test_external_write_result_reuses_digest_for_reference_projection(tmp_path, monkeypatch):
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    name = "vrcforge_set_property"
+    target = _target(tmp_path)
+    reference = {"schema": EXECUTION_TARGET_REF_SCHEMA, "ref": "vrcforge-target-test"}
+    gateway._write_handlers[name] = object()
+    monkeypatch.setattr(gateway, "ensure_config", lambda: SimpleNamespace(enabled=True, allow_write_requests=True))
+    monkeypatch.setattr(gateway, "_guard_external_mcp_project_scope", lambda *_args: None)
+    monkeypatch.setattr(gateway, "_external_mcp_write_handler_block", lambda *_args: True)
+    monkeypatch.setattr(gateway, "_validate_external_mcp_execution_target", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(gateway, "shared_agent_tool_descriptor", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(type(gateway.approval_transactions), "prepare_external_mcp_write",
+                        lambda _self, _name, args: {"arguments": copy.deepcopy(args)})
+    digest_calls = []
+    real_digest = execution_target_digest
+
+    def tracked_digest(value):
+        digest_calls.append(value)
+        return real_digest(value)
+
+    def execute(*_args, **_kwargs):
+        digest_calls.clear()  # Only count result projection, after preparation validation.
+        return {"operationId": "fixture-operation"}
+
+    monkeypatch.setattr(agent_gateway, "execution_target_digest", tracked_digest)
+    monkeypatch.setattr(type(gateway.approval_transactions), "execute_prepared_external_mcp_write", execute)
+    monkeypatch.setattr(gateway, "_external_mcp_write_result",
+                        lambda *_args: {"outcome": {"executionTarget": copy.deepcopy(target)}})
+    result = gateway.call_external_mcp_tool(name, {"executionTarget": reference})
+
+    assert sum(value is target for value in digest_calls) == 1
+    assert result["executionTargetDigest"] == real_digest(target)
+    assert result["executionTarget"] == reference
+    assert result["outcome"]["executionTarget"] == reference
+    assert result["outcome"]["executionTargetDigest"] == real_digest(target)
+    assert result["operationId"] == "fixture-operation"
+    _assert_no_project_path(result, tmp_path)
 
 
 def _target(tmp_path: Path, *, scope: str = "component") -> dict:
