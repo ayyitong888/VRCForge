@@ -79,8 +79,9 @@ def test_descriptor_exposes_stage1_contract_and_future_unavailable_boundaries():
     assert descriptor["outputSchema"]["properties"]["operationId"]["type"] == "string"
     assert "operationId" in descriptor["outputSchema"]["required"]
     assert "operationStatus" in descriptor["outputSchema"]["required"]
-    assert "resources" in descriptor["outputSchema"]["required"]
-    assert "promptSkillProvenance" in descriptor["outputSchema"]["required"]
+    assert "resources" not in descriptor["outputSchema"]["required"]
+    assert "promptSkillProvenance" not in descriptor["outputSchema"]["required"]
+    assert "operationResource" in descriptor["outputSchema"]["required"]
     assert "executionTarget" in descriptor["inputSchema"]["properties"]
 
 

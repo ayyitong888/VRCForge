@@ -258,6 +258,26 @@ def result_resource_links(value: Mapping[str, Any]) -> list[dict[str, Any]]:
     }]
 
 
+def _empty_result_slot(value: Any) -> bool:
+    return value is None or (isinstance(value, Mapping) and value.get("status") == "unavailable")
+
+
+def operation_result_required_fields(required: list[str], properties: Mapping[str, Any]) -> list[str]:
+    """Align the shared scalar/open-object operation schema with empty-slot omission."""
+    retained = []
+    for name in required:
+        field = properties[name]
+        types = field.get("type", [])
+        types = [types] if isinstance(types, str) else types
+        empty_values = ([None] if "null" in types else [])
+        if types == ["object"] and not (set(field) - {"type", "description"}):
+            empty_values.append({"status": "unavailable"})
+        # Compact projection requires a readable operationResource in the first place.
+        if name == "operationResource" or not any(_empty_result_slot(value) for value in empty_values):
+            retained.append(name)
+    return retained
+
+
 def project_result(value: Mapping[str, Any], *, mode: str, resource_readable: bool) -> dict[str, Any]:
     result = dict(value)
     uri = result.get("operationResource")
@@ -270,8 +290,7 @@ def project_result(value: Mapping[str, Any], *, mode: str, resource_readable: bo
     result = {
         key: item
         for key, item in result.items()
-        if item is not None
-        and not (isinstance(item, Mapping) and item.get("status") == "unavailable")
+        if not _empty_result_slot(item)
     }
     omitted = []
     result = _without_transport_copies(result, "", omitted)

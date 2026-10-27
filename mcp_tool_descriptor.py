@@ -10,6 +10,7 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 from execution_target import future_provenance_metadata, standard_identity_metadata
+from external_mcp_result_projection import operation_result_required_fields
 
 
 CANONICAL_TOOL_NAMES = {
@@ -150,7 +151,7 @@ def write_runtime_identity_required(name: str) -> bool:
 
 
 def _result_schema(write: bool) -> dict[str, Any]:
-    return {
+    schema = {
         "type": "object",
         "additionalProperties": True,
         "required": [
@@ -194,6 +195,8 @@ def _result_schema(write: bool) -> dict[str, Any]:
         },
         "x-vrcforge-write": bool(write),
     }
+    schema["required"] = operation_result_required_fields(schema["required"], schema["properties"])
+    return schema
 
 
 def tool_identity_metadata(name: str, *, write: bool, input_schema: Mapping[str, Any] | None = None) -> dict[str, Any]:
