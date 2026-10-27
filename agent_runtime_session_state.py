@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 from context_compaction import normalize_compaction_recovery
 from agent_native_history_store import NativeHistoryStore
+from agent_renderer_correction_history import retained_renderer_corrections
 from agent_user_path_context import confirmed_human_indices, human_indices, human_user_projection, missing_human_history
 from agent_scan_result_policy import (
     SCAN_RESULT_CONTINUATION_POLICY, SCAN_RESULT_CONTINUATION_POLICY_V2,
@@ -633,6 +634,7 @@ class AgentRuntimeSessionState:
         if not retained or not source:
             raise ValueError("native compaction source is unavailable")
         retained.extend(restored_scan_result_policy(snapshot["messages"], retained))
+        retained.extend(retained_renderer_corrections(snapshot["messages"]))
         return source, retained
 
     def replace_native_compacted_history(
