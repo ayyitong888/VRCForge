@@ -6102,6 +6102,8 @@ class AgentGateway:
                 )
             )
         timeline: list[dict[str, Any]] = []
+        timeline_clock_start = time.perf_counter()
+        previous_timeline_timing: dict[str, Any] | None = None
         params["_runtimeFailureProgress"] = {"steps": steps, "timeline": timeline, "contextUsage": context_usage, "_nativeTurn": native_turn, "_nativeBinding": bool(native_binding)}
 
         def append_timeline_event(
@@ -6116,9 +6118,10 @@ class AgentGateway:
             action_id: str = "",
             message_id: str = "",
             capture_result: object = None,
+            timing: dict[str, Any] | None = None,
         ) -> None:
             """Persist the visible runtime order without prompts, CoT, or raw arguments."""
-
+            nonlocal previous_timeline_timing
             sequence = len(timeline)
             payload: dict[str, Any] = {}
             for key, value, limit in (
@@ -6157,6 +6160,13 @@ class AgentGateway:
             # The callback is a live projection only. Commit the same bounded
             # visible event first so a tray/process kill cannot lose observed
             # dialogue or tool activity.
+            persist_started = time.perf_counter()
+            ledger_timing = {
+                "clock": "monotonic_turn_ms",
+                "eventReadyMs": round((persist_started - timeline_clock_start) * 1000, 3),
+                **(timing or {}),
+                **({"previousEvent": previous_timeline_timing} if previous_timeline_timing else {}),
+            }
             self._runtime_run_ledger.append_timeline_event(
                 session_id=session_id,
                 turn_id=turn_id,
@@ -6166,7 +6176,9 @@ class AgentGateway:
                 provider_label=str(params.get("providerLabel") or params.get("provider_label") or ""),
                 model=str(params.get("model") or ""),
                 project_root=project_root,
+                timing=ledger_timing,
             )
+            persisted_at = time.perf_counter()
             try:
                 self._runtime_timeline_changed(
                     {
@@ -6179,6 +6191,13 @@ class AgentGateway:
             except Exception:
                 # Presentation must never fail or delay the Runtime.
                 pass
+            previous_timeline_timing = {
+                # Attach completed persistence/publication durations to the next
+                # existing event, never add an I/O solely to time this I/O.
+                "eventId": event["id"],
+                "persistMs": round((persisted_at - persist_started) * 1000, 3),
+                "publishMs": round((time.perf_counter() - persisted_at) * 1000, 3),
+            }
         if vision_payload is not None:
             # 带标签的视觉分析 run step：记录真实执行的 provider/model 与该次
             # 调用自己的 token 用量（不进聊天 contextUsage）。
@@ -6518,7 +6537,10 @@ class AgentGateway:
         # Optional model-turn limits support automation. Tool-call count is
         # telemetry only; normal turns end at the model's final response.
         for step_index in count():
+            iteration_started = time.perf_counter()
+            settle_started = time.perf_counter()
             native_turn.settle()
+            settled_at = time.perf_counter()
             if handoff_terminal is not None:
                 last_plan = handoff_terminal
                 break
@@ -6676,6 +6698,7 @@ class AgentGateway:
                              "planner": "runtime", **budget_decision}
                 self._cancel_turn_questions_at_pause(session_id, turn_id, client_turn_id)
                 break
+            planner_started = time.perf_counter()
             plan = self.runtime_planner.plan_agent_turn(
                 message,
                 params,
@@ -6702,6 +6725,7 @@ class AgentGateway:
                 ),
                 **({"native_turn": native_turn} if native_binding else {}),
             )
+            planned_at = time.perf_counter()
             # Planner model is populated only from the provider response;
             # preserve it before cancellation or a subsequent tool can fail.
             if str(plan.get("model") or "").strip():
@@ -7216,6 +7240,7 @@ class AgentGateway:
             # Preparation and the eventual tool_result share one occurrence.
             # A supervised request is not evidence that a file is being edited.
             timeline_kind = "tool_call"
+            dispatch_ready = time.perf_counter()
             append_timeline_event(
                 timeline_kind,
                 label=("Run command" if action_kind == "shell" else planned_tool or action_kind),
@@ -7223,7 +7248,18 @@ class AgentGateway:
                 status="prepared" if action_kind in {"write", "shell"} else "started",
                 tool=planned_tool,
                 action_id=planned_action_id,
+                timing={
+                    "queuedNativeCall": queued_native_action,
+                    "iterationStartMs": round((iteration_started - timeline_clock_start) * 1000, 3),
+                    "settleMs": round((settled_at - settle_started) * 1000, 3),
+                    "readinessMs": round((planner_started - settled_at) * 1000, 3),
+                    "plannerMs": round((planned_at - planner_started) * 1000, 3),
+                    "prepareMs": round((dispatch_ready - planned_at) * 1000, 3),
+                },
             )
+            # Includes approval/preflight, handler execution and result projection;
+            # this is not a measurement of Unity handler execution alone.
+            tool_phase_started = time.perf_counter()
 
             completion_requirement = ensure_dict(plan.get("completionRequirement"))
             native_read_observation_for_plan = is_native_read_observation(
@@ -7847,6 +7883,7 @@ class AgentGateway:
                 tool=step_tool,
                 action_id=planned_action_id,
                 capture_result=steps[-1].get("result"),
+                timing={"toolPhaseMs": round((time.perf_counter() - tool_phase_started) * 1000, 3)},
             )
 
             from checkpoint_unity_evidence import restore_failure_terminal_plan

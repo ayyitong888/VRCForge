@@ -196,6 +196,7 @@ class AgentRuntimeRunLedger:
         provider_label: str = "",
         model: str = "",
         project_root: str = "",
+        timing: dict[str, Any] | None = None,
     ) -> None:
         """Persist one safe visible event before notifying the live projector."""
 
@@ -210,6 +211,7 @@ class AgentRuntimeRunLedger:
             "model": str(model or "")[:160],
             "projectRoot": str(project_root or "")[:1000],
             "timelineEvent": copy.deepcopy(event),
+            **({"timing": copy.deepcopy(timing)} if timing is not None else {}),
         })
 
     def recover_interrupted_runs(self) -> int:
