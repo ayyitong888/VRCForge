@@ -3236,7 +3236,7 @@ class AgentApprovalTransactionService:
                         or self._entry_project_key(recovery) != key):
                     continue
                 try:
-                    validate_runtime_execution_target(recovery.get("executionTarget"), project_root=project_root, required_scope="project")
+                    validate_runtime_execution_target(recovery.get("executionTarget"), project_root=project_root, required_scope="project", refresh_scene_snapshot=False)
                     proof = verify_interrupted_package_import(
                         recovery, dict(status), audit_path=self._ports.audit_log_path(),
                         runtime_path=self._ports.audit_log_path().with_name("runtime-runs.jsonl"),
@@ -3348,7 +3348,7 @@ class AgentApprovalTransactionService:
                 # The Core-owned transition is not a replacement for current
                 # process/scene authority. An unbound read must pass that gate too.
                 try:
-                    validate_runtime_execution_target(completed_target, project_root=project_root, required_scope="avatar")
+                    validate_runtime_execution_target(completed_target, project_root=project_root, required_scope="avatar", refresh_scene_snapshot=False)
                 except (ExecutionTargetError, OSError, ValueError, TypeError):
                     continue
             elif not isinstance(execution_target, Mapping) or (
@@ -4994,6 +4994,7 @@ class AgentApprovalTransactionService:
                 execution_target,
                 project_root=str(project_root),
                 required_scope=identity_scope(target_tool, write=True, arguments=arguments),
+                refresh_scene_snapshot=False,
             )
         except ExecutionTargetError as exc:
             raise AgentGatewayError(

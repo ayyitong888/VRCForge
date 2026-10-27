@@ -20,6 +20,7 @@ def test_accepted_async_write_executes_once_and_rejects_replay(tmp_path):
         "private static bool ValidateApprovedExecutionContext(",
         "private static bool ValidateExternalMcpExecutionContext(\n            JObject context,\n            string toolName,\n            JObject arguments,\n            out string failureCode)",
         "private static bool ValidateManagedWriteExecutionContext(",
+        "private static bool ValidateExecutionTargetContext(",
         "private static bool ConsumeApprovedExecutionId(",
         "private static void PurgeExpiredExecutionIds(",
         "private static string RequiredBoundedString(",
@@ -27,7 +28,12 @@ def test_accepted_async_write_executes_once_and_rejects_replay(tmp_path):
     ]
     methods = "\n".join(method(source, signature) for signature in signatures)
     program = r'''
-using System; using System.Collections.Generic; using Newtonsoft.Json.Linq;
+using System; using System.IO; using System.Collections.Generic; using Newtonsoft.Json.Linq;
+class Scene { public string path="Assets/Fixture.unity"; }
+class Transform { public bool IsChildOf(Transform other)=>true; }
+class GameObject { public Scene scene=new Scene(); public Transform transform=new Transform(); }
+class Component { public GameObject gameObject; }
+struct GlobalObjectId { public static bool TryParse(string value,out GlobalObjectId id) { id=new GlobalObjectId();return false; } public static object GlobalObjectIdentifierToObjectSlow(GlobalObjectId id)=>null; }
 enum VRCForgeCommandAccess { ReadOnly, Write }
 class VRCForgeToolDescriptor { public VRCForgeCommandAccess Permission = VRCForgeCommandAccess.Write; }
 static class VRCForgeMcpToolContract { public static bool IsExpectedDescriptor(VRCForgeToolDescriptor d) => d != null; }
@@ -39,11 +45,15 @@ class Probe {
  static readonly Queue<KeyValuePair<string,long>> ConsumedExecutionOrder = new Queue<KeyValuePair<string,long>>();
  static readonly HashSet<string> ApprovedAppCoreTools = new HashSet<string>{"test_write"};
  const int ApprovedExecutionMaxLifetimeMilliseconds = 120000, ApprovedExecutionClockSkewMilliseconds = 5000, MaxConsumedExecutionIds = 4096;
- static string LastPeerReverifyFailure, descriptorInstanceId = "instance";
- static string GetProjectRoot() => "project";
- static string ComputeProjectId(string root) => "project-id";
+ const string ExecutionTargetVerifiedKey="_vrcforgeExecutionTargetTransportVerified";
+ static string LastPeerReverifyFailure, descriptorInstanceId = "instance", descriptorProjectId = "project-id";
+ static int projectHashCalls;
+ static string GetProjectRoot() => Path.GetFullPath(".");
+ static string ComputeProjectId(string root) { projectHashCalls++; return "project-id"; }
  static string ComputeCanonicalJsonHash(JToken args) => new string('a',64);
- static bool ValidateExecutionTargetContext(JObject c,bool live,out string failure) { failure=""; return true; }
+ static string CurrentProcessStartTime()=>"start";
+ static bool ValidateExecutionTargetScene(JObject scene,string root)=>false;
+ static GameObject ResolveExecutionTargetGameObject(JObject identity)=>null;
  static bool ReverifyManagedPeer(PendingInvocation p) => true;
  static bool IsStrictNoWritePayloadRead(string n,JObject a) => false;
  static bool HasAllowedPreviewRequest(string n,JObject a) => true;
@@ -59,7 +69,14 @@ class Probe {
  static PendingInvocation Create(InvocationLane lane,bool asyncWrite,string id) {
    var now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
    var c=new JObject { ["executionId"]=id,["targetTool"]="test_write",["unityToolName"]="test_write",["argumentsSha256"]=new string('a',64),["projectId"]="project-id",["instanceId"]="instance",["issuedAtUnixMs"]=now-1000,["expiresAtUnixMs"]=now+60000 };
-   if(lane==InvocationLane.ExternalMcpWrite) c["operationId"]="operation";
+   if(lane==InvocationLane.ExternalMcpWrite) {
+     c["operationId"]="operation";
+     c["executionTargetDigest"]=new string('a',64);
+     c["executionTarget"]=new JObject { ["schema"]="vrcforge.execution_target.v1",["scope"]="project",
+       ["project"]=new JObject { ["root"]=GetProjectRoot(),["projectId"]="project-id" },
+       ["editor"]=new JObject { ["unityPid"]=System.Diagnostics.Process.GetCurrentProcess().Id,["coreInstanceId"]="instance",["processStartTime"]="start" },
+       ["namespace"]="vrcforge://projects/project-id" };
+   }
    else { c["approvalId"]="approval"; c["checkpointId"]="checkpoint"; }
    return new PendingInvocation { Lane=lane,AsyncWrite=asyncWrite,ExecutionContext=c,Arguments=new JObject(),ToolName="test_write" };
  }
@@ -80,7 +97,21 @@ class Probe {
      var sync=Create(lane,false,lane+"-sync");
      Check(IsInvocationStillAuthorized(sync,descriptor),lane+" sync still executes");
      Check(!IsInvocationStillAuthorized(sync,descriptor),lane+" sync replay still rejected");
+     var wrongProject=Create(lane,true,lane+"-wrong-project");
+     wrongProject.ExecutionContext["projectId"]="other-project";
+     Check(!IsInvocationStillAuthorized(wrongProject,descriptor),lane+" wrong project still rejected");
    }
+   foreach(var badField in new[]{"digest","project","instance","namespace","scene"}) {
+     var invalid=Create(InvocationLane.ExternalMcpWrite,true,"invalid-"+badField);
+     var t=(JObject)invalid.ExecutionContext["executionTarget"];
+     if(badField=="digest") invalid.ExecutionContext["executionTargetDigest"]="bad";
+     if(badField=="project") t["project"]["projectId"]="other";
+     if(badField=="instance") t["editor"]["coreInstanceId"]="other";
+     if(badField=="namespace") t["namespace"]="other";
+     if(badField=="scene") t["scope"]="scene";
+     Check(!IsInvocationStillAuthorized(invalid,descriptor),"single target rejects invalid "+badField);
+   }
+   Check(projectHashCalls==0,"static project identity reuses the running descriptor");
    return failures==0?0:1;
  }
 }
@@ -105,4 +136,4 @@ class Probe {
     (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions": {"tfm": "net8.0", "framework": {"name": "Microsoft.NETCore.App", "version": "8.0.0"}}}), encoding="utf-8")
     result = subprocess.run([str(dotnet), str(dll)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("PASS ") == 16
+    assert result.stdout.count("PASS ") == 24

@@ -3830,10 +3830,11 @@ class AgentGateway:
                 agent_name=agent_name,
             )
             if verified_target is not None:
+                verified_digest = execution_target_digest(verified_target)
                 if is_execution_target_reference(public_reference):
                     result = self._replace_execution_target_with_reference(
                         result,
-                        execution_target_digest(verified_target),
+                        verified_digest,
                         public_reference,
                     )
                 result["executionTarget"] = (
@@ -3841,7 +3842,7 @@ class AgentGateway:
                     if is_execution_target_reference(public_reference)
                     else verified_target
                 )
-                result["executionTargetDigest"] = execution_target_digest(verified_target)
+                result["executionTargetDigest"] = verified_digest
             result["canonicalToolName"] = canonical_tool_name(name)
             result["legacyAliasUsed"] = requested_name != name
             if prompt_skill_provenance is not None:
@@ -3891,13 +3892,14 @@ class AgentGateway:
                 agent_name=agent_name,
             )
             if execution_target is not None and is_execution_target_reference(public_reference):
+                target_digest = execution_target_digest(execution_target)
                 result = self._replace_execution_target_with_reference(
                     result,
-                    execution_target_digest(execution_target),
+                    target_digest,
                     public_reference,
                 )
                 result["executionTarget"] = dict(public_reference)
-                result["executionTargetDigest"] = execution_target_digest(execution_target)
+                result["executionTargetDigest"] = target_digest
             result["canonicalToolName"] = canonical_tool_name(name)
             result["legacyAliasUsed"] = requested_name != name
             if prompt_skill_provenance is not None:
@@ -3955,13 +3957,14 @@ class AgentGateway:
                     request_arguments_digest=request_arguments_digest,
                 )
                 if execution_target is not None and is_execution_target_reference(public_reference):
+                    target_digest = execution_target_digest(execution_target)
                     proposal = self._replace_execution_target_with_reference(
                         proposal,
-                        execution_target_digest(execution_target),
+                        target_digest,
                         public_reference,
                     )
                     proposal["executionTarget"] = dict(public_reference)
-                    proposal["executionTargetDigest"] = execution_target_digest(execution_target)
+                    proposal["executionTargetDigest"] = target_digest
                 if prompt_skill_provenance is not None:
                     proposal["promptSkillProvenance"] = prompt_skill_provenance
                 return proposal

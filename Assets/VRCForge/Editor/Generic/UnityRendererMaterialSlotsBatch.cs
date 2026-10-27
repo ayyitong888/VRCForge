@@ -98,11 +98,16 @@ namespace VRCForge.Editor
             var rows = new JArray();
             foreach (JObject request in requests)
             {
-                RendererMaterialSlotTool.Target target;
-                var scene = RendererMaterialSlotTool.ResolveTarget(Text(request, "rendererPath"), Text(request, "rendererComponentId"), out target);
-                if (plan.Scene == null) plan.Scene = scene;
-                else Verify(SceneEvidence(plan.Scene), SceneEvidence(scene));
-                if (!plan.Targets.Any(t => t.Identity.componentId == target.Identity.componentId)) { plan.Targets.Add(target); before.Add(RendererEvidence(target)); }
+                var rendererPath = Text(request, "rendererPath");
+                var rendererId = Text(request, "rendererComponentId");
+                var target = plan.Targets.FirstOrDefault(t => t.Identity.componentId == rendererId && t.Identity.rendererPath == rendererPath);
+                if (target == null)
+                {
+                    var scene = RendererMaterialSlotTool.ResolveTarget(rendererPath, rendererId, out target, plan.Scene);
+                    if (plan.Scene == null) plan.Scene = scene;
+                    else Verify(SceneEvidence(plan.Scene), SceneEvidence(scene));
+                    if (!plan.Targets.Any(t => t.Identity.componentId == target.Identity.componentId)) { plan.Targets.Add(target); before.Add(RendererEvidence(target)); }
+                }
                 var path = RendererMaterialSlotTool.NormalizeMaterialPath(Text(request, "newMaterialAssetPath"));
                 RendererMaterialSlotTool.MaterialEvidence next;
                 if (!plan.Materials.TryGetValue(path, out next)) { next = RendererMaterialSlotTool.ReadMaterial(path, "new batch material"); plan.Materials.Add(path, next); }
@@ -158,7 +163,7 @@ namespace VRCForge.Editor
                 var sceneWithoutDigest = (JObject)sceneAfter.DeepClone(); sceneWithoutDigest["sceneFileDigest"] = plan.Scene.FileDigest;
                 Verify(plan.Evidence["scene"], sceneWithoutDigest);
                 if (saved.FileDigest == plan.Scene.FileDigest) throw new InvalidOperationException("Renderer batch scene bytes did not change.");
-                var actual = ReadRenderers(plan);
+                var actual = ReadRenderers(plan, saved);
                 Verify(plan.Evidence["afterRenderers"], actual);
                 foreach (JObject row in plan.Evidence["assignments"])
                 {
@@ -187,7 +192,7 @@ namespace VRCForge.Editor
                         if (!EditorSceneManager.SaveScene(plan.Scene.Scene)) throw new InvalidOperationException("Batch restoration save failed.");
                         var restoredScene = SceneObjectCopyCore.ResolveSavedScene(plan.Scene.Path, "restored renderer batch scene");
                         Verify(plan.Evidence["scene"], SceneEvidence(restoredScene));
-                        Verify(plan.Evidence["beforeRenderers"], ReadRenderers(plan));
+                        Verify(plan.Evidence["beforeRenderers"], ReadRenderers(plan, restoredScene));
                         restored = true;
                     }
                     catch { }
@@ -199,13 +204,13 @@ namespace VRCForge.Editor
             }
         }
 
-        private static JArray ReadRenderers(Plan plan)
+        private static JArray ReadRenderers(Plan plan, SavedSceneSnapshot observedScene)
         {
             var actual = new JArray();
             foreach (var before in plan.Targets)
             {
                 RendererMaterialSlotTool.Target target;
-                RendererMaterialSlotTool.ResolveTarget(before.Identity.rendererPath, before.Identity.componentId, out target);
+                RendererMaterialSlotTool.ResolveTarget(before.Identity.rendererPath, before.Identity.componentId, out target, observedScene);
                 actual.Add(RendererEvidence(target));
             }
             return actual;

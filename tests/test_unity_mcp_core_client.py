@@ -520,6 +520,35 @@ def test_core_190_catalogue_replays_the_actual_previous_contract(core_files):
         server.close()
 
 
+@pytest.mark.parametrize("lane", ["external_mcp_write", "approved_write"])
+def test_modern_call_sends_external_target_only_in_approved_context(core_files, lane):
+    from operation_context import bind_operation_context
+    from execution_target import execution_target_digest
+
+    project, descriptor_path, descriptor = core_files
+    server = FakeCore(_modern_handler)
+    _write_descriptor(descriptor_path, descriptor, server.port)
+    target = {"schema": "vrcforge.execution_target.v1", "scope": "project",
+              "project": {"root": str(project), "projectId": descriptor["projectId"]}}
+    digest = execution_target_digest(target)
+    context = {"lane": lane, "executionTarget": target, "executionTargetDigest": digest}
+    try:
+        with bind_operation_context("fixture-operation", target):
+            UnityMcpCoreClient(project).call_tool("vrc_write", {}, execution_context=context)
+    finally:
+        server.close()
+    metadata = server.seen[1]["message"]["params"]["_meta"]
+    assert metadata["io.vrcforge/approvedExecution"]["executionTarget"] == target
+    assert metadata["io.vrcforge/approvedExecution"]["executionTargetDigest"] == digest
+    assert metadata["io.vrcforge/operationId"] == "fixture-operation"
+    if lane == "external_mcp_write":
+        assert "io.vrcforge/executionTarget" not in metadata
+        assert "io.vrcforge/executionTargetDigest" not in metadata
+    else:
+        assert metadata["io.vrcforge/executionTarget"] == target
+        assert metadata["io.vrcforge/executionTargetDigest"] == digest
+
+
 def test_modern_call_keeps_execution_context_out_of_arguments(core_files):
     project, descriptor_path, descriptor = core_files
     server = FakeCore(_modern_handler)

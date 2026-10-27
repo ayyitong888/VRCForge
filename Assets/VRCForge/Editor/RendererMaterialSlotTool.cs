@@ -97,7 +97,7 @@ namespace VRCForge.Editor
                         throw new InvalidOperationException("The exact renderer scene could not be saved.");
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                     ResolveTarget(path, componentId, out target);
-                    var persistedScene = SceneObjectCopyCore.ResolveSavedScene(scene.Path, "persisted renderer scene");
+                    var persistedScene = target.Scene;
                     if (string.Equals(persistedScene.FileDigest, current.FileDigest, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidOperationException("The saved scene digest did not change after the material-slot replacement.");
                     VerifySlots(target.Renderer, beforeSlots, slot, materialEvidence);
@@ -168,17 +168,24 @@ namespace VRCForge.Editor
         private static string LowerHex(JObject p, string key, int length, bool required) { var v = p?[key]?.ToString()?.Trim() ?? ""; if (required && (v.Length != length || v.Any(c => !Uri.IsHexDigit(c)))) throw new InvalidOperationException(key + " must be a lowercase hexadecimal identity."); return v.ToLowerInvariant(); }
         internal static void RequireProject(JObject p) { var expected = Required(p, "expectedProjectPath"); var actual = Path.GetFullPath(Directory.GetParent(Application.dataPath).FullName).TrimEnd('\\', '/'); if (!string.Equals(actual, Path.GetFullPath(expected).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The Unity project no longer matches the verified preview."); }
         internal static string NormalizeMaterialPath(string raw) { var p = raw.Replace('\\', '/'); if (!p.StartsWith("Assets/", StringComparison.Ordinal) || !p.EndsWith(".mat", StringComparison.Ordinal) || p.Contains("..") || p.StartsWith("Packages/", StringComparison.Ordinal)) throw new InvalidOperationException("newMaterialAssetPath must be one main persistent Assets/*.mat asset."); return p; }
-        internal static SavedSceneSnapshot ResolveTarget(string rendererPath, string componentId, out Target output)
+        internal static SavedSceneSnapshot ResolveTarget(string rendererPath, string componentId, out Target output, SavedSceneSnapshot observedScene = null)
         {
-            var scene = SceneObjectCopyCore.ResolveSavedScene(FindScenePath(rendererPath), "renderer scene");
+            var scenePath = FindScenePath(rendererPath);
+            var scene = observedScene != null && observedScene.Path == scenePath
+                ? observedScene
+                : SceneObjectCopyCore.ResolveSavedScene(scenePath, "renderer scene");
             var gameObject = SceneObjectCopyCore.ResolveUniqueGameObject(scene.Scene, rendererPath, "renderer path");
             var renderers = gameObject.GetComponents<Renderer>().Where(r => r != null).ToList();
-            var matches = string.IsNullOrEmpty(componentId)
-                ? renderers
-                : renderers.Where(r => { try { return RendererComponentIdentity.Create(r).componentId == componentId; } catch { return false; } }).ToList();
+            if (string.IsNullOrEmpty(componentId) && renderers.Count != 1)
+                throw new InvalidOperationException("The renderer path or stable component identity is missing, ambiguous, or drifted.");
+            var matches = renderers.Select(r =>
+            {
+                try { return RendererComponentIdentity.Create(r); }
+                catch { if (string.IsNullOrEmpty(componentId)) throw; return null; }
+            }).Where(identity => identity != null && (string.IsNullOrEmpty(componentId) || identity.componentId == componentId)).ToList();
             if (matches.Count != 1) throw new InvalidOperationException("The renderer path or stable component identity is missing, ambiguous, or drifted.");
-            var renderer = matches[0];
-            output = new Target { Scene = scene, Renderer = renderer, Identity = RendererComponentIdentity.Create(renderer) };
+            var identity = matches[0];
+            output = new Target { Scene = scene, Renderer = identity.renderer, Identity = identity };
             return scene;
         }
         private static string FindScenePath(string rendererPath)

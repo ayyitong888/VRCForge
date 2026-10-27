@@ -502,3 +502,36 @@ def test_runtime_target_rejects_descriptor_from_another_project(tmp_path: Path):
     with pytest.raises(ExecutionTargetError) as exc_info:
         validate_runtime_execution_target(target, project_root=str(tmp_path), required_scope="avatar")
     assert exc_info.value.code == "project_root_drifted"
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+def test_runtime_identity_validation_reads_scene_only_for_requested_snapshot(tmp_path, monkeypatch, refresh):
+    target = _live_runtime_target(tmp_path)
+    scene = Path(target["scene"]["absolutePath"])
+    scene.write_bytes(b"changed scene contents")
+    original_read = Path.read_bytes
+    reads = []
+    def read_bytes(path):
+        if path == scene:
+            reads.append(path)
+        return original_read(path)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    verified = validate_runtime_execution_target(
+        target, project_root=str(tmp_path), required_scope="avatar", refresh_scene_snapshot=refresh)
+    assert len(reads) == int(refresh)
+    assert execution_target_digest(verified) == execution_target_digest(target)
+    assert verified["scene"]["digest"] == (hashlib.sha256(b"changed scene contents").hexdigest() if refresh else target["scene"]["digest"])
+
+
+@pytest.mark.parametrize("drift", ["scene_missing", "guid_changed", "process_changed"])
+def test_runtime_identity_only_retains_disk_and_lifetime_validation(tmp_path, drift):
+    target = _live_runtime_target(tmp_path)
+    scene = Path(target["scene"]["absolutePath"])
+    if drift == "scene_missing":
+        scene.unlink()
+    elif drift == "guid_changed":
+        Path(str(scene) + ".meta").write_text("guid: replacement-guid", encoding="utf-8")
+    else:
+        target["editor"]["processStartTime"] = "1.000000"
+    with pytest.raises(ExecutionTargetError):
+        validate_runtime_execution_target(target, project_root=str(tmp_path), required_scope="avatar", refresh_scene_snapshot=False)

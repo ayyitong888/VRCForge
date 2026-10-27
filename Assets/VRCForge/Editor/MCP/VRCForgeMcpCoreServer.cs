@@ -31,9 +31,6 @@ namespace VRCForge.Editor
         private const string MinimumProtocolVersion = "2026-07-28";
         private const string MaximumProtocolVersion = "2026-07-28";
         private const string ApprovedExecutionMetaKey = "io.vrcforge/approvedExecution";
-        private const string ExecutionTargetMetaKey = "io.vrcforge/executionTarget";
-        private const string ExecutionTargetDigestMetaKey = "io.vrcforge/executionTargetDigest";
-        private const string ExecutionTargetVerifiedKey = "_vrcforgeExecutionTargetTransportVerified";
         private const int MaxFrameBytes = 1024 * 1024;
         private const int MaxResponseFrameBytes = 8 * 1024 * 1024;
         private const int MaxClients = 4;
@@ -1098,11 +1095,6 @@ namespace VRCForge.Editor
             }
 
             var laneName = (string)executionContext["lane"];
-            if (string.Equals(laneName, "external_mcp_write", StringComparison.Ordinal)
-                && !BindTransportExecutionTarget(executionContext, metadata))
-            {
-                return ToolError("execution_target_invalid", "The exact ExecutionTarget transport binding is invalid.", modern, true);
-            }
             InvocationLane lane;
             if (string.Equals(laneName, "app_preview", StringComparison.Ordinal))
             {
@@ -1976,7 +1968,7 @@ namespace VRCForge.Editor
                 var projectId = RequiredBoundedString(context, "projectId", 64);
                 var instanceId = RequiredBoundedString(context, "instanceId", 128);
                 return IsLowerHex(projectId, 64)
-                    && string.Equals(projectId, ComputeProjectId(GetProjectRoot()), StringComparison.Ordinal)
+                    && string.Equals(projectId, descriptorProjectId, StringComparison.Ordinal)
                     && string.Equals(instanceId, descriptorInstanceId, StringComparison.Ordinal);
             }
             catch (Exception)
@@ -2169,7 +2161,7 @@ namespace VRCForge.Editor
                     failureCode = "arguments_mismatch";
                     return false;
                 }
-                if (!string.Equals(projectId, ComputeProjectId(GetProjectRoot()), StringComparison.Ordinal))
+                if (!string.Equals(projectId, descriptorProjectId, StringComparison.Ordinal))
                 {
                     failureCode = "project_mismatch";
                     return false;
@@ -2214,31 +2206,6 @@ namespace VRCForge.Editor
             }
         }
 
-        private static bool BindTransportExecutionTarget(JObject context, JObject metadata)
-        {
-            if (context == null || metadata == null)
-            {
-                return false;
-            }
-            context[ExecutionTargetVerifiedKey] = false;
-            var contextTarget = context["executionTarget"] as JObject;
-            var transportTarget = metadata[ExecutionTargetMetaKey] as JObject;
-            var contextDigest = RequiredBoundedString(context, "executionTargetDigest", 64);
-            var transportDigest = metadata[ExecutionTargetDigestMetaKey] != null
-                && metadata[ExecutionTargetDigestMetaKey].Type == JTokenType.String
-                ? (string)metadata[ExecutionTargetDigestMetaKey]
-                : null;
-            if (contextTarget == null || transportTarget == null
-                || !IsLowerHex(contextDigest, 64)
-                || !string.Equals(contextDigest, transportDigest, StringComparison.Ordinal)
-                || !JToken.DeepEquals(contextTarget, transportTarget))
-            {
-                return false;
-            }
-            context[ExecutionTargetVerifiedKey] = true;
-            return true;
-        }
-
         private static bool ValidateExecutionTargetContext(
             JObject context,
             bool validateUnityObjectIdentities,
@@ -2247,9 +2214,7 @@ namespace VRCForge.Editor
             failureCode = "execution_target_invalid";
             try
             {
-                if (context[ExecutionTargetVerifiedKey] == null
-                    || context[ExecutionTargetVerifiedKey].Type != JTokenType.Boolean
-                    || !context[ExecutionTargetVerifiedKey].Value<bool>())
+                if (!IsLowerHex(RequiredBoundedString(context, "executionTargetDigest", 64), 64))
                 {
                     return false;
                 }
@@ -2270,7 +2235,7 @@ namespace VRCForge.Editor
                 var unityPid = editor["unityPid"] != null && editor["unityPid"].Type == JTokenType.Integer
                     ? editor["unityPid"].Value<int>() : 0;
                 if (!string.Equals(projectRoot, currentRoot, StringComparison.OrdinalIgnoreCase)
-                    || !string.Equals(projectId, ComputeProjectId(GetProjectRoot()), StringComparison.Ordinal)
+                    || !string.Equals(projectId, descriptorProjectId, StringComparison.Ordinal)
                     || unityPid != System.Diagnostics.Process.GetCurrentProcess().Id
                     || !string.Equals(RequiredBoundedString(editor, "coreInstanceId", 128), descriptorInstanceId, StringComparison.Ordinal)
                     || !string.Equals(RequiredBoundedString(editor, "processStartTime", 64), CurrentProcessStartTime(), StringComparison.Ordinal))

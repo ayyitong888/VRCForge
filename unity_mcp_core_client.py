@@ -610,7 +610,10 @@ class UnityMcpCoreClient:
         if operation_context is not None:
             metadata["io.vrcforge/operationId"] = operation_context.get("operationId")
             execution_target = operation_context.get("executionTarget")
-            if isinstance(execution_target, dict):
+            if isinstance(execution_target, dict) and not (
+                execution_context is not None
+                and execution_context.get("lane") == "external_mcp_write"
+            ):
                 from execution_target import execution_target_digest
                 metadata["io.vrcforge/executionTargetDigest"] = execution_target_digest(execution_target)
                 metadata["io.vrcforge/executionTarget"] = execution_target

@@ -278,8 +278,13 @@ def validate_runtime_execution_target(
     *,
     project_root: str,
     required_scope: str,
+    refresh_scene_snapshot: bool = True,
 ) -> dict[str, Any]:
-    """Bind a supplied envelope to the current on-disk Core descriptor."""
+    """Validate live identity, optionally refreshing the scene content snapshot.
+
+    Identity-only callers retain the supplied revision/digest without reading
+    scene bytes. Public snapshot consumers retain fresh content by default.
+    """
 
     root = normalize_project_root(project_root)
     descriptor_path = Path(root) / "Library" / "VRCForge" / "mcp-core.json"
@@ -338,7 +343,7 @@ def validate_runtime_execution_target(
         scene_path = _scene_absolute_path(scene, root)
         try:
             stat = Path(scene_path).stat()
-            digest = hashlib.sha256(Path(scene_path).read_bytes()).hexdigest()
+            digest = hashlib.sha256(Path(scene_path).read_bytes()).hexdigest() if refresh_scene_snapshot else None
             meta_lines = Path(scene_path + ".meta").read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError) as exc:
             raise ExecutionTargetError(
@@ -368,7 +373,7 @@ def validate_runtime_execution_target(
     )
     # Revision and digest remain visible as current state for previews and
     # callers, but do not alter stable identity references.
-    if target_scope != "project":
+    if target_scope != "project" and refresh_scene_snapshot:
         verified["scene"]["revision"] = core["sceneRevision"]
         verified["scene"]["digest"] = core["sceneDigest"]
     return verified

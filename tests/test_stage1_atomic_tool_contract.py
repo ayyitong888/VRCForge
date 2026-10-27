@@ -200,7 +200,8 @@ def test_stage1_core_sources_keep_preview_nonmutating_and_identity_fail_closed()
         assert f'"{tool_name}",' in core_server.split(
             "private static readonly HashSet<string> PreviewTools", 1
         )[1].split("};", 1)[0]
-    assert "BindTransportExecutionTarget" in core_server
+    assert "BindTransportExecutionTarget" not in core_server
+    assert 'var target = context["executionTarget"] as JObject;' in core_server
     assert "ValidateExecutionTargetContext" in core_server
     assert "GlobalObjectIdentifierToObjectSlow" in core_server
     assert "ReadUnityMetaGuid" in core_server

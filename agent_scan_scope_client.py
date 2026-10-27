@@ -155,7 +155,7 @@ class AgentScanScopeClient:
         target = targets[0]
         try:
             verified = validate_runtime_execution_target(
-                target, project_root=str(self._project_root), required_scope="avatar",
+                target, project_root=str(self._project_root), required_scope="avatar", refresh_scene_snapshot=False,
             )
         except Exception:
             return None
