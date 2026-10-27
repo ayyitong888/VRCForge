@@ -1653,6 +1653,9 @@ RUNTIME_QUEUE_PORT = runtime_queue_ports.CallbackRuntimeQueueAdapter(
                 queue_id=queue_id,
             )
         ),
+        release_runtime_followup=lambda queue_id, session_id="", claim_token="": (
+            AGENT_GATEWAY.release_runtime_followup(queue_id, session_id, claim_token)
+        ),
         ack_runtime_followup=lambda queue_id, session_id="", claim_token="": (
             AGENT_GATEWAY.ack_runtime_followup(
                 queue_id,
@@ -2975,6 +2978,8 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
         "projectRoot": str(runtime_request.project_root or runtime_request.project_path or "").strip(),
     }
     followup_claim_token = ""
+    runtime_returned = False
+    admission_rejected = False
     if runtime_request.followup_queue_id:
         followup_lane_id = runtime_request.followup_lane_id or runtime_request.session_id
         if not followup_lane_id or not runtime_request.client_turn_id:
@@ -3015,21 +3020,32 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
                 runtime_params,
                 agent_name=runtime_request.agent_name,
             )
+        runtime_returned = True
         payload = attach_agent_harness_journey_receipt(payload)
     except BackgroundGoalDeliveryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        admission_rejected = getattr(exc, "runtime_admitted", None) is False
+        detail = {"code": "followup_admission_rejected", "message": str(exc)} if admission_rejected and followup_claim_token else str(exc)
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+    except Exception as exc:
+        admission_rejected = getattr(exc, "runtime_admitted", None) is False
+        if admission_rejected and followup_claim_token:
+            raise HTTPException(status_code=500, detail={"code": "followup_admission_rejected", "message": str(exc)}) from exc
+        raise
     finally:
         followup_lane_id = runtime_request.followup_lane_id or runtime_request.session_id
         if runtime_request.followup_queue_id and followup_lane_id and followup_claim_token:
             try:
-                RUNTIME_QUEUE_PORT.ack_runtime_followup(
-                    runtime_request.followup_queue_id,
-                    followup_lane_id,
-                    followup_claim_token,
-                )
-            except OSError:
+                if runtime_returned:
+                    RUNTIME_QUEUE_PORT.ack_runtime_followup(runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
+                elif admission_rejected:
+                    RUNTIME_QUEUE_PORT.release_runtime_followup(runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
+                else:
+                    recovery = AGENT_GATEWAY.get_runtime_session(runtime_request.session_id or "", client_turn_id=runtime_request.client_turn_id or "")
+                    if recovery.get("status") in {"completed", "failed"}:
+                        RUNTIME_QUEUE_PORT.ack_runtime_followup(runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
+            except (OSError, AgentGatewayError):
                 pass
     try:
         terminal_event = await asyncio.to_thread(

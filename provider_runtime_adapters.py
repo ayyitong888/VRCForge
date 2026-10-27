@@ -251,6 +251,9 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
             raise ProviderResponseError(str(exc), response) from exc
 
     def _parse_response(self, response: Any, *, planner_mode: bool) -> ProviderRuntimeResponse:
+        status = str(_value(response, "status") or "")
+        if status and status != "completed":
+            raise RuntimeError(f"{self._provider_label} response did not complete ({status}).")
         output = _as_list(_value(response, "output"))
         tool_calls = [item for item in output if str(_value(item, "type") or "") == "function_call"]
         if tool_calls:

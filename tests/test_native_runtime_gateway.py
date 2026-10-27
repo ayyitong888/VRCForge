@@ -514,7 +514,7 @@ def test_native_gateway_host_binds_completion_without_model_copying_ids(tmp_path
 
 @pytest.mark.parametrize("budget", [2, 5])
 def test_native_plain_final_stops_without_reasking_completion_and_keeps_reply(tmp_path, budget):
-    reply = "I read the fixture; further work remains unverified."
+    reply = "The fixture contains fixture-body."
     gateway, model, invoked = setup_gateway(tmp_path, [
         call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}),
         {"role": "assistant", "content": reply},
@@ -525,13 +525,46 @@ def test_native_plain_final_stops_without_reasking_completion_and_keeps_reply(tm
     assert len(invoked) == 1
     assert plan["reply"] == reply
     assert plan["summary"] == reply
-    assert plan["nextStep"] == "completion_unverified"
-    assert plan["task"]["status"] == "completion_unverified"
-    assert plan["completionClaim"] == {"satisfied": False}
-    assert "taskCompletion" not in plan
+    assert plan["nextStep"] == "done"
+    assert plan["task"]["status"] == "completed"
+    assert plan["completionClaim"] == {"satisfied": True}
+    assert plan["taskCompletion"]["evidenceActionIds"] == [plan["task"]["actions"][0]["actionId"]]
     assert not plan.get("stepLimitReached")
     assert not plan.get("plannerFailed")
     assert all("reply_completion_claim" not in json.dumps(r["messages"]) for r in model.requests)
+
+
+def test_native_plain_final_without_tools_completes(tmp_path):
+    gateway, model, invoked = setup_gateway(tmp_path, [{"role": "assistant", "content": "Hello."}])
+    result = run(gateway, tmp_path, message="Hello")
+    assert result["plan"]["nextStep"] == "done"
+    assert result["plan"]["reply"] == "Hello."
+    assert result["plan"]["completionClaim"] == {"satisfied": True}
+    assert len(model.requests) == 1 and not invoked
+
+
+@pytest.mark.parametrize("blocked", ["failed", "pending", "unverified", "missing_requirement"])
+def test_natural_final_cannot_override_unfinished_action(blocked):
+    from agent_task_loop import AgentTaskLoop
+    loop = AgentTaskLoop("Complete required work")
+    required = loop.require_action(
+        kind="skill", tool="required_operation", arguments={},
+        verification_profile="persisted_scene_write" if blocked == "unverified" else "",
+    )
+    if blocked != "missing_requirement":
+        outcome = {"status": "failed" if blocked == "failed" else
+                   "needs_user_action" if blocked == "pending" else "ok",
+                   "summary": "Operation returned"}
+        loop.record_action(kind="skill", tool="required_operation", arguments={},
+                           action_id=required["actionId"], raw_result={"ok": blocked != "failed"},
+                           outcome=outcome)
+    payload, rejection = RuntimePlannerService._native_action_payload(
+        {"role": "assistant", "content": "Finished."}, [])
+    assert rejection is None
+    gated = loop.gate_terminal({"planner": "llm", "nextStep": "done", "reply": payload["reply"],
+                                "completionClaim": payload["completion_claim"]})
+    assert gated["nextStep"] != "done"
+    assert "taskCompletion" not in gated
 
 
 def test_native_plain_final_after_failed_read_keeps_failure_canonical(tmp_path):

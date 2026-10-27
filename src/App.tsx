@@ -4556,7 +4556,7 @@ export default function App() {
               onQueue={() => void submitMessage(undefined, "queue")}
               onSteerNow={() => void submitMessage(undefined, "steer")}
               onStop={stopInteractiveActivity}
-              onResumeQueue={() => void resumeQueuedTurns()}
+              onResumeQueue={() => void resumeQueuedTurns(true)}
               onCancelQueue={() => void cancelQueuedTurns()}
               onEditQueuedTurn={async (turnId) => {
                 const turn = await editQueuedTurn(turnId);

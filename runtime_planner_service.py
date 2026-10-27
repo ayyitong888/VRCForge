@@ -2001,9 +2001,15 @@ class RuntimePlannerService:
             return request, guard
         snapshot = native_turn.snapshot()
         metadata = {**guard, "attempts": 0}
-        if native_turn.compaction_attempted or self._compactor is None:
+        # Only the history and its projection boundaries affect compaction;
+        # tool exposure/recovery metadata must not restart a failed attempt.
+        compaction_snapshot = {key: snapshot.get(key) for key in (
+            "messages", "activeTurnStart", "humanUserMessageIndices",
+        )}
+        same_attempted_snapshot = native_turn.compaction_attempted_snapshot == compaction_snapshot
+        if same_attempted_snapshot or self._compactor is None:
             metadata["failureClass"] = (
-                "suppressed_after_attempt" if native_turn.compaction_attempted else
+                "suppressed_after_attempt" if same_attempted_snapshot else
                 "compactor_unavailable"
             )
             if native_turn.compaction is None:
@@ -2013,7 +2019,8 @@ class RuntimePlannerService:
             metadata["failureClass"] = "pending_tool_calls"
             native_turn.compaction = runtime_compaction_audit_view(metadata)
             return request, guard
-        native_turn.compaction_attempted = True
+        # Suppress a failed retry only while its history snapshot is unchanged.
+        native_turn.compaction_attempted_snapshot = compaction_snapshot
         # Earlier state snapshots now belong to history. Only this request's
         # final state has not yet been persisted; never re-append old snapshots.
         runtime_messages = [deepcopy(request["messages"][-1])]
@@ -2084,7 +2091,7 @@ class RuntimePlannerService:
             # The facade checks cancellation and exact snapshot identity inside
             # the owner's existing lock. No mutation precedes this commit.
             native_turn.replace_compacted_history(snapshot, summary, recovery=recovery)
-            native_turn.compaction_attempted = False
+            native_turn.compaction_attempted_snapshot = None
             runtime_messages = [deepcopy(candidate["messages"][-1])]
             metadata.update({"applied": True, "blocked": False, "afterTokens": after["beforeTokens"],
                              "entryCount": result.get("entryCount"), "retainedEntryCount": result.get("retainedEntryCount"),
@@ -4872,7 +4879,9 @@ class RuntimePlannerService:
             if final is None:
                 final = next((item["text"] for item in reversed(messages) if item.get("phase") is None), "")
             return {"action": "reply", "reply": final if messages else receipt.get("content") or "",
-                    "completion_claim": {"satisfied": False}}, None
+                    # A natural final ends the model turn; the task loop still
+                    # checks actual failures, pending actions and required evidence.
+                    "completion_claim": {"satisfied": True}}, None
         call = calls[0]
         function = ensure_dict(call.get("function"))
         name = str(function.get("name") or "")

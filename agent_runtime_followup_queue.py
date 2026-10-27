@@ -178,13 +178,33 @@ class AgentRuntimeFollowupQueue:
                     return True
             return False
 
+    def release(self, *, queue_id: str, session_id: str, claim_token: str) -> bool:
+        """Retain rejected input paused for explicit retry, releasing its lease."""
+        with self._ports.lock:
+            for item in self._entries:
+                if (item.get("queueId") == queue_id and item.get("sessionId") == session_id
+                        and item.get("status") == "claimed"
+                        and secrets.compare_digest(str(item.get("claimToken", "")), claim_token)):
+                    previous = copy.deepcopy(item)
+                    item["status"] = "paused"
+                    for field in ("claimToken", "claimOwner", "leaseUntil"):
+                        item.pop(field, None)
+                    try:
+                        self._persist()
+                    except OSError:
+                        item.clear()
+                        item.update(previous)
+                        raise
+                    return True
+            return False
+
     def ack(self, *, queue_id: str, session_id: str, claim_token: str) -> bool:
         return self._transition(queue_id, session_id, claim_token, "acked")
 
     def cancel(self, *, queue_id: str, session_id: str, claim_token: str = "") -> bool:
         with self._ports.lock:
             for x in self._entries:
-                if x.get("queueId") == queue_id and x.get("sessionId") == session_id and (x.get("status") == "pending" or (x.get("status") == "claimed" and claim_token and secrets.compare_digest(str(x.get("claimToken", "")), claim_token))):
+                if x.get("queueId") == queue_id and x.get("sessionId") == session_id and (x.get("status") in {"pending", "paused"} or (x.get("status") == "claimed" and claim_token and secrets.compare_digest(str(x.get("claimToken", "")), claim_token))):
                     previous = copy.deepcopy(x)
                     self._make_terminal_tombstone(x, "cancelled")
                     try:

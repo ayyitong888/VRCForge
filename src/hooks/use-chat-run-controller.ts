@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ApiError } from "../lib/api/http";
 import { useTranslation } from "react-i18next";
 import {
   applyAgentRuntimeDeltaToStreamingItem,
@@ -314,7 +315,7 @@ export function useChatRunController({
         const pending = entry.status === "pending";
         const status: QueuedTurn["queueStatus"] = pending
           ? (unresolvedAttachment ? "paused" : "queued")
-          : "delivery_unverified";
+          : entry.status === "paused" ? "paused" : "delivery_unverified";
         const turn: QueuedTurn = {
           planMode: savedItem?.planMode === true || entry.planMode === true,
           id: entry.clientTurnId,
@@ -431,7 +432,7 @@ export function useChatRunController({
     void persistChatsNow?.().catch(() => undefined);
   }
 
-  async function resumeQueuedTurns(): Promise<void> {
+  async function resumeQueuedTurns(manual = false): Promise<void> {
     if (queueResumeInFlightRef.current) {
       queueResumeRequestedRef.current = true;
       return;
@@ -440,7 +441,7 @@ export function useChatRunController({
     queueResumeInFlightRef.current = true;
     try {
       const head = queueRef.current[0];
-      if (!head || await hasPendingQuestionForTurn(head)) return;
+      if (!head || (head.queueStatus === "paused" && !manual) || await hasPendingQuestionForTurn(head)) return;
       if (head.queueStatus === "waiting_for_resources" || head.queueStatus === "delivery_unverified" || !head.queueId) {
         const result = await recordAgentRunQueued(endpoint, {
           sessionId: head.sessionId,
@@ -1624,6 +1625,26 @@ export function useChatRunController({
       // Preserve its accepted dialogue as an interrupted transport placeholder;
       // the exact runtime receipt owns the eventual execution status.
       const interrupted = abortController.signal.aborted || text.toLowerCase().includes("cancel");
+      const queueFailure = cause instanceof ApiError && cause.detail && typeof cause.detail === "object"
+        ? cause.detail as { code?: string; message?: string } : null;
+      if (!background && turn.queueId && queueFailure?.code === "followup_admission_rejected") {
+        if (!queueRef.current.some((item) => item.id === turn.id)) queueRef.current.unshift({ ...turn, queueStatus: "paused" });
+        markQueuedTurnStatus(turn.id, "paused");
+        updateChat(chatId, (current) => ({
+          ...touchChat(current),
+          items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id
+            ? { ...item, queuedFrom: true, composerQueued: true, queueStatus: "paused", queueEnvelope: {
+                planMode: turn.planMode === true, provider: turn.provider, providerLabel: turn.providerLabel,
+                model: turn.model, projectPath: turn.projectPath, projectType: turn.projectType,
+                sessionId: turn.sessionId, laneId: turn.queueLaneId || turn.chatId,
+                queueId: turn.queueId, sequence: turn.queueSequence,
+              } }
+            : item),
+        }));
+        await persistChatsNow?.().catch(() => undefined);
+        setError(queueFailure.message || text);
+        return false;
+      }
       if (!background && turn.queueId && (!runtimeRequestStarted || text.includes("followup_queue_not_ready"))) {
         turn.queueStatus = "waiting_for_resources";
         markQueuedTurnStatus(turn.id, "waiting_for_resources");

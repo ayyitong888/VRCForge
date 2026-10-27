@@ -9,7 +9,7 @@ class NativePlannerFixture:
         self._messages = deepcopy(messages)
         self._sink = sink
         self.compaction = None
-        self.compaction_attempted = False
+        self.compaction_attempted_snapshot = None
         self._tool_order = []
         self._queued_calls = []
         self.admitted_tool_names = set()

@@ -125,7 +125,7 @@ class NativeRuntimeTurn:
         self._argument_failure_counted = False
         self._scan_result_policy_persisted = False
         self.admitted_tool_names: set[str] | None = None
-        self.compaction_attempted = False
+        self.compaction_attempted_snapshot: dict[str, Any] | None = None
         self.compaction: dict[str, Any] | None = None
         # The gateway owns reader scope and lifecycle; the turn owns no store.
         self.retain_recovery = retain_recovery

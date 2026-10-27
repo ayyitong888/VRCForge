@@ -291,7 +291,7 @@ def test_pending_current_call_defers_compaction_before_compactor_and_preserves_h
     assert result["nextStep"] == "context_compaction_required"
     assert compactor.calls == [] and model.requests == []
     assert state.native_conversation("s", binding="b") == before
-    assert turn.compaction_attempted is False
+    assert turn.compaction_attempted_snapshot is None
     assert turn.compaction["failureClass"] == "pending_tool_calls"
 
 
@@ -323,8 +323,14 @@ def test_failed_native_compaction_never_replaces_transcript_or_sends_oversized_r
     assert after["messages"][:len(before["messages"])] == before["messages"]
     assert after["activeTurnStart"] == before["activeTurnStart"]
     assert turn.compaction["applied"] is False
-    plan(planner, turn)
-    assert len(compactor.calls) == 1
+    if failure == "race":
+        compactor.hook = None
+        assert plan(planner, turn)["nextStep"] == "done"
+        assert len(compactor.calls) == 2
+        assert turn.compaction["applied"] is True
+    else:
+        plan(planner, turn)
+        assert len(compactor.calls) == 1
 
 
 def test_native_current_turn_overflow_keeps_exact_history_without_compactor_call():

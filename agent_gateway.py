@@ -4797,6 +4797,7 @@ class AgentGateway:
         agent_name: str = "desktop-agent",
     ) -> dict[str, Any]:
         params = dict(params or {})
+        params.pop("_runtimeAdmitted", None)
         self._signal_background_activity("runtime_message")
         try:
             with self.runtime_planner.bind_turn(params) as metadata:
@@ -4805,7 +4806,12 @@ class AgentGateway:
                 with self._desktop.runtime_turn_context(params):
                     return self._runtime_message_impl(params, agent_name=agent_name)
         except DesktopActionBrokerError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+            error = AgentGatewayError(str(exc), status_code=exc.status_code)
+            error.runtime_admitted = params.get("_runtimeAdmitted") is True
+            raise error from exc
+        except Exception as exc:
+            exc.runtime_admitted = params.get("_runtimeAdmitted") is True
+            raise
 
     def resume_runtime_task_after_approval(
         self,
@@ -5467,6 +5473,7 @@ class AgentGateway:
                 "A runtime turn with this sessionId and clientTurnId is already active.",
                 status_code=409,
             )
+        params["_runtimeAdmitted"] = True
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
         self._mcp_resource_context.set(f"runtime:{session_id}")
         chat_id = str(params.get("chat_id") or params.get("chatId") or "").strip()
@@ -6826,6 +6833,12 @@ class AgentGateway:
                 unresolved_planner_argument_failure = None
                 planner_argument_failures = 0
 
+            if native_binding and not plan.get("nativeCallIds") and plan.get("nextStep") == "done":
+                # Natural finals need no completion tool. Bind their completion
+                # to the same action ledger that governs explicit final claims.
+                plan["completionClaim"] = {
+                    "satisfied": task_loop.gate_terminal(plan).get("nextStep") == "done",
+                }
             planner_reply = str(plan.get("reply") or "").strip()
             public_messages = plan.get("publicMessages") or []
             command = str(plan.get("shellCommand") or "").strip()
@@ -8636,6 +8649,9 @@ class AgentGateway:
 
     def claim_runtime_followups(self, *, session_id: str = "", owner_id: str = "", limit: int = 8, queue_id: str = "") -> list[dict[str, Any]]:
         return self._runtime_followup_queue.claim(session_id=session_id, owner_id=owner_id, limit=limit, queue_id=queue_id)
+
+    def release_runtime_followup(self, queue_id: str, session_id: str = "", claim_token: str = "") -> bool:
+        return self._runtime_followup_queue.release(queue_id=queue_id, session_id=session_id, claim_token=claim_token)
 
     def ack_runtime_followup(self, queue_id: str, session_id: str = "", claim_token: str = "") -> bool:
         return self._runtime_followup_queue.ack(queue_id=queue_id, session_id=session_id, claim_token=claim_token)

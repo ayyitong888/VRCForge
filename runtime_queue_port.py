@@ -32,6 +32,8 @@ class RuntimeQueuePort(Protocol):
         queue_id: str = "",
     ) -> list[Mapping[str, Any]]: ...
 
+    def release_runtime_followup(self, queue_id: str, session_id: str = "", claim_token: str = "") -> bool: ...
+
     def ack_runtime_followup(
         self,
         queue_id: str,
@@ -56,6 +58,7 @@ class RuntimeQueueCallbacks:
     list_runtime_followups: Callable[..., list[Mapping[str, Any]]]
     enqueue_runtime_followup: Callable[[Mapping[str, Any]], Mapping[str, Any]]
     claim_runtime_followups: Callable[..., list[Mapping[str, Any]]]
+    release_runtime_followup: Callable[[str, str, str], bool]
     ack_runtime_followup: Callable[[str, str, str], bool]
     cancel_runtime_followup: Callable[[str, str, str], bool]
 
@@ -122,6 +125,9 @@ class CallbackRuntimeQueueAdapter:
                 queue_id=queue_id,
             )
         )
+
+    def release_runtime_followup(self, queue_id: str, session_id: str = "", claim_token: str = "") -> bool:
+        return self._callbacks.release_runtime_followup(queue_id, session_id, claim_token)
 
     def ack_runtime_followup(
         self,
