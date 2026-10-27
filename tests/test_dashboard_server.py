@@ -3850,7 +3850,10 @@ class DashboardServerTests(unittest.TestCase):
             reopened = AgentGateway(root / "config.json", root / "audit")
             resumed = isolated_agent_question_service(reopened).answer(question["questionId"], {})
             self.assertTrue(resumed["idempotent"])
+            self.assertIn("goalDelivery", resumed, resumed)
             self.assertEqual(resumed["goalDelivery"]["delivery"]["status"], "interrupted")
+            retried = isolated_agent_question_service(reopened).answer(question["questionId"], {})
+            self.assertEqual(retried["goalDelivery"], resumed["goalDelivery"])
             durable_text = (root / "audit").read_text(encoding="utf-8") if (root / "audit").is_file() else ""
             durable_text += "\n".join(
                 path.read_text(encoding="utf-8", errors="replace")
@@ -6187,7 +6190,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("All blendshapes", payload["filterNote"])
 
     def test_blendshape_scan_rejects_invalid_or_conflicting_scope(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "either 'face' or 'all'"):
+        with self.assertRaisesRegex(RuntimeError, "one of 'face', 'face_static', 'face_unknown', or 'all'"):
             dashboard_server.resolve_blendshape_filter_scope(
                 dashboard_server.AvatarBlendshapeListRequest(scope="body")
             )
@@ -6761,7 +6764,7 @@ class DashboardServerTests(unittest.TestCase):
             )
 
         self.assertEqual(payload["plan"]["nextStep"], "cancelled")
-        self.assertEqual(payload["plan"]["reply"], "Request cancelled.")
+        self.assertEqual(payload["plan"]["reply"], "Request cancelled.", payload["plan"])
 
     def test_agent_runtime_stop_cooperatively_cancels_blocked_provider_owner(self) -> None:
         client_turn_id = "client-cancel-blocked-provider"
@@ -6792,6 +6795,7 @@ class DashboardServerTests(unittest.TestCase):
                 errors.append(exc)
 
         with (
+            patch.object(dashboard_server.PROVIDER_MODEL_CATALOG, "resolve_context_limit", return_value=128_000),
             patch.object(
                 dashboard_server.PROVIDER_CONFIGURATION,
                 "current_api_config",
@@ -6801,12 +6805,19 @@ class DashboardServerTests(unittest.TestCase):
         ):
             caller = threading.Thread(target=run_turn, daemon=True)
             caller.start()
-            self.assertTrue(started.wait(1.0))
-            dashboard_server.AGENT_GATEWAY.request_runtime_cancel(
-                {"clientTurnId": client_turn_id, "reason": "user_stop"}
-            )
-            caller.join(1.0)
+            try:
+                self.assertTrue(started.wait(1.0))
+            finally:
+                dashboard_server.AGENT_GATEWAY.request_runtime_cancel(
+                    {"clientTurnId": client_turn_id, "reason": "user_stop"}
+                )
+                caller.join(1.0)
+                cancelled_within_deadline = not caller.is_alive()
+                if not cancelled_within_deadline:
+                    # Keep provider mocks owned until failure-path cleanup ends.
+                    caller.join(15.0)
 
+        self.assertTrue(cancelled_within_deadline)
         self.assertFalse(caller.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(result["plan"]["nextStep"], "cancelled")
@@ -6896,6 +6907,7 @@ class DashboardServerTests(unittest.TestCase):
 
         started_at = time.monotonic()
         with (
+            patch.object(dashboard_server.PROVIDER_MODEL_CATALOG, "resolve_context_limit", return_value=128_000),
             patch.object(
                 dashboard_server.PROVIDER_CONFIGURATION,
                 "current_api_config",
@@ -6916,7 +6928,7 @@ class DashboardServerTests(unittest.TestCase):
         elapsed = time.monotonic() - started_at
 
         self.assertLess(
-            elapsed,
+            timing["transport_closed"] - timing["provider_started"],
             0.75,
             "the bounded idle timeout and cancel join must terminate the silent Provider call within one Windows scheduling margin; "
             f"total={elapsed:.3f}s, preparation={timing.get('provider_started', started_at) - started_at:.3f}s, "
@@ -11482,7 +11494,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(
             {tool["name"] for tool in default_external_tools},
             {
-                "vrcforge_external_tool_blocks", "vrcforge_health", "vrcforge_know_yourself",
+                "vrcforge_external_tool_blocks", "vrcforge_health", "vrcforge_know_yourself", "vrcforge_call_user",
                 "vrcforge_unity_status", "vrcforge_unity_tools", "vrcforge_get_compile_errors",
                 "vrcforge_list_execution_targets", "vrcforge_bind_execution_target",
                 "vrcforge_refresh_execution_target", "vrcforge_list_avatars",
@@ -11789,7 +11801,7 @@ class DashboardServerTests(unittest.TestCase):
             original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler
             try:
                 dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _root, *, checkpoint_files: {"ok": True, "scenes": []}
                 dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
                 dashboard_server.AGENT_GATEWAY.approval_transactions.register_write_handler(
                     "vrcforge_test_checkpoint_write",
@@ -11820,7 +11832,7 @@ class DashboardServerTests(unittest.TestCase):
                     "checkpointId": checkpoint_id,
                     "confirmRestore": True,
                 })
-                self.assertTrue(restored["ok"])
+                self.assertTrue(restored["ok"], restored)
                 self.assertFalse((project / "Assets" / "generated.txt").exists())
             finally:
                 dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
@@ -11920,15 +11932,20 @@ class DashboardServerTests(unittest.TestCase):
                 "activeScenePath": "Assets/Lighting.unity",
             }
 
-            def prepare_restore(_path: Path) -> dict[str, object]:
+            def prepare_restore(_path: Path, *, checkpoint_files) -> dict[str, object]:
                 events.append(("prepare", existing.read_text(encoding="utf-8")))
                 return dict(restore_context)
 
+            reload_request_ids = []
+
             def reload_restore(_path: Path, prepared: dict[str, object]) -> dict[str, object]:
+                self.assertTrue(prepared["requestId"].startswith("restore_"))
+                reload_request_ids.append(prepared["requestId"])
                 self.assertEqual(
                     prepared,
                     {
                         **restore_context,
+                        "requestId": prepared["requestId"],
                         "restoredFiles": ["Assets/existing.txt"],
                         "deletedFiles": [],
                     },
@@ -11963,9 +11980,9 @@ class DashboardServerTests(unittest.TestCase):
                 {"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True}
             )
 
-            self.assertTrue(restored["ok"])
+            self.assertTrue(restored["ok"], restored)
             self.assertEqual(events, [("prepare", "after"), ("reload", "before")])
-            self.assertEqual(restored["unityRestorePrepare"], restore_context)
+            self.assertEqual(restored["unityRestorePrepare"], {**restore_context, "requestId": reload_request_ids[0]})
 
     def test_archive_restore_reloads_checkpoint_scene_topology_after_new_scene_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11982,7 +11999,7 @@ class DashboardServerTests(unittest.TestCase):
 
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             reloaded: list[dict[str, object]] = []
-            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _path: {
+            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _path, *, checkpoint_files: {
                 "ok": True,
                 "phase": "prepare_restore",
                 "scenes": ["Assets/AvatarAssembly.unity"],
@@ -12022,7 +12039,7 @@ class DashboardServerTests(unittest.TestCase):
                 {"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True}
             )
 
-            self.assertTrue(restored["ok"])
+            self.assertTrue(restored["ok"], restored)
             self.assertFalse(created_scene.exists())
             self.assertEqual(len(reloaded), 1)
             self.assertEqual(reloaded[0]["scenes"], [])
@@ -12045,7 +12062,7 @@ class DashboardServerTests(unittest.TestCase):
 
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
-            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _path: {
+            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _path, *, checkpoint_files: {
                 "ok": False,
                 "error": "Unity scene close failed.",
             }
@@ -12870,6 +12887,10 @@ class DashboardServerTests(unittest.TestCase):
             "vrcforge_edit_file", "vrcforge_write_file", "vrcforge_delete_path",
             "vrcforge_move_path", "vrcforge_apply_patch",
         }
+        independently_managed_tools = {
+            "vrcforge_create_safe_backup": "create_new_backup_artifact",
+            "vrcforge_handle_unity_editor_dialog": "native_dialog_continues_approved_operation",
+        }
         observed_no_rollback_tools = {
             name
             for name, target in targets.items()
@@ -12877,7 +12898,7 @@ class DashboardServerTests(unittest.TestCase):
         }
         self.assertEqual(
             observed_no_rollback_tools,
-            explicit_rollback_tools | managed_artifact_tools | irreversible_ephemeral_tools | general_host_file_tools,
+            explicit_rollback_tools | managed_artifact_tools | irreversible_ephemeral_tools | general_host_file_tools | set(independently_managed_tools),
         )
         for name, target in targets.items():
             policy = target.get("rollbackPolicy")
@@ -12889,6 +12910,7 @@ class DashboardServerTests(unittest.TestCase):
                 or name in managed_artifact_tools
                 or name in irreversible_ephemeral_tools
                 or name in general_host_file_tools
+                or name in independently_managed_tools
             ):
                 self.assertFalse(policy["required"], name)
                 if name in explicit_rollback_tools:
@@ -12896,6 +12918,10 @@ class DashboardServerTests(unittest.TestCase):
             else:
                 self.assertTrue(policy["required"], name)
                 self.assertTrue(policy["restoreTool"], name)
+
+        for name, kind in independently_managed_tools.items():
+            self.assertEqual(targets[name]["rollbackPolicy"]["kind"], kind)
+            self.assertFalse(targets[name]["rollbackPolicy"]["preWriteCheckpointRequired"])
 
         for name in general_host_file_tools:
             policy = targets[name]["rollbackPolicy"]
@@ -13338,7 +13364,7 @@ class DashboardServerTests(unittest.TestCase):
 
             try:
                 dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _root, *, checkpoint_files: {"ok": True, "scenes": []}
                 dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
                 dashboard_server.AGENT_GATEWAY.approval_transactions.register_write_handler(
                     "vrcforge_test_checkpoint_write",
@@ -13370,7 +13396,7 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(restore_request["approval"]["targetTool"], "vrcforge_restore_checkpoint")
                 stored_restore = dashboard_server.AGENT_GATEWAY._approvals[restore_approval_id]  # noqa: SLF001 - verify executable approval payload.
                 self.assertEqual(stored_restore["arguments"]["projectRoot"], str(project.resolve()))
-                self.assertTrue(applied["execution"]["ok"])
+                self.assertTrue(applied["execution"]["ok"], applied)
                 self.assertFalse((project / "Assets" / "generated.txt").exists())
             finally:
                 dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
@@ -13393,7 +13419,7 @@ class DashboardServerTests(unittest.TestCase):
             original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler
             try:
                 dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _root, *, checkpoint_files: {"ok": True, "scenes": []}
                 dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
                 with TestClient(dashboard_server.app) as client:
                     created = client.post(
@@ -17351,7 +17377,8 @@ namespace VRCForge.Editor
         )
 
         self.assertEqual(defaults.protocol_profile, "auto")
-        self.assertEqual(defaults.exposure_layer, "planning")
+        self.assertIsNone(defaults.exposure_layer)
+        # Omission delegates to the configured exposure layer; explicit pins remain authoritative.
         self.assertEqual(standard.protocol_profile, "mcp-1x")
         self.assertEqual(standard.exposure_layer, "planning")
 
@@ -17762,7 +17789,7 @@ namespace VRCForge.Editor
         self.assertEqual(response.json()["status"], "pending")
         payload = mock_create_apply_request.call_args.args[0]
         self.assertEqual(payload["target_tool"], "vrcforge_capture_screenshot")
-        self.assertEqual(payload["arguments"]["avatar_path"], "Scene/HeroAvatar")
+        self.assertEqual(payload["arguments"]["avatarPath"], "Scene/HeroAvatar")
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")

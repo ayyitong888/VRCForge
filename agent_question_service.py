@@ -457,7 +457,9 @@ class AgentQuestionService:
                     if answered is None:
                         raise OSError("Question storage did not preserve the answer.")
                     payload = {"ok": True, "question": self._redact(answered)}
-        if goal_delivery_id and not payload.get("idempotent"):
+        # A persisted answer can precede an interrupted Goal projection. Its
+        # resolver is idempotent, so retries must finish that durable handoff.
+        if goal_delivery_id:
             payload["goalDelivery"] = self._goal_resolution.resolve(
                 resolved_id,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
