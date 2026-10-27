@@ -47,13 +47,22 @@ def publish_scene_capture_preview(registry, image_path, project_path, binding, c
             if width < 1 or height < 1 or width * height > MAX_SOURCE_PIXELS or getattr(original, "n_frames", 1) != 1:
                 raise ValueError("Approved scene capture exceeds the pixel limit or is animated.")
             original.load()
-            thumbnail = original.convert("RGBA")
-        with thumbnail:
-            thumbnail.thumbnail((MAX_PREVIEW_EDGE, MAX_PREVIEW_EDGE), Image.Resampling.LANCZOS)
-            output = io.BytesIO()
-            thumbnail.save(output, format="PNG")
-            png = output.getvalue()
-            preview_width, preview_height = thumbnail.size
+            rgba = original.convert("RGBA")
+        with rgba:
+            with rgba.copy() as thumbnail:
+                thumbnail.thumbnail((MAX_PREVIEW_EDGE, MAX_PREVIEW_EDGE), Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                thumbnail.save(output, format="PNG")
+                png = output.getvalue()
+                preview_width, preview_height = thumbnail.size
+            while len(png) > MAX_PREVIEW_BYTES and (preview_width, preview_height) != (1, 1):
+                preview_width = max(1, int(preview_width * 0.75))
+                preview_height = max(1, int(preview_height * 0.75))
+                # Resize each candidate from the source to avoid accumulating blur.
+                with rgba.resize((preview_width, preview_height), Image.Resampling.LANCZOS) as thumbnail:
+                    output = io.BytesIO()
+                    thumbnail.save(output, format="PNG")
+                    png = output.getvalue()
     except (OSError, Image.DecompressionBombError) as exc:
         raise ValueError("Approved scene capture is not a supported PNG image.") from exc
     if not 0 < len(png) <= MAX_PREVIEW_BYTES:

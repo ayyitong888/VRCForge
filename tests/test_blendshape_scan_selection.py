@@ -124,6 +124,24 @@ def test_unknown_renderer_is_rejected_not_broadened(scan):
     with pytest.raises(Exception,match='Unknown rendererPaths'):
         scan[0](scope='all',rendererPaths=['Body'])
 
+
+def test_unknown_renderer_reports_real_candidates_and_can_be_corrected(scan):
+    invoke, export = scan
+    renderers = export['avatars'][0]['renderers']
+    renderers[0]['rendererPath'] = f'{PATH}/Outfit/Outer'
+    export['avatars'].append({'avatarPath': 'OtherAvatar', 'renderers': [
+        {'rendererPath': 'OtherAvatar/Outfit/Pants'},
+    ]})
+    with pytest.raises(Exception) as failure:
+        invoke(scope='all', rendererPaths=[f'{PATH}/Outfit/Pants'])
+    message = str(failure.value)
+    assert 'Did you mean' in message
+    assert f'{PATH}/Outfit/Outer' in message
+    assert 'OtherAvatar' not in message
+    corrected = invoke(scope='all', rendererPaths=[f'{PATH}/Outfit/Outer'])
+    assert corrected['rendererPaths'] == [f'{PATH}/Outfit/Outer']
+    assert len(renderers) == 4
+
 @pytest.mark.parametrize('params',[{'scope':'body'},{'rendererPaths':[]},{'rendererPaths':['x','x']},
     {'rendererPaths':['']},{'rendererPaths':[' ']},{'rendererPaths':[42]},
     {'rendererPaths':[str(i) for i in range(33)]},{'filterScope':'all'}])

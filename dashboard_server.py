@@ -53,6 +53,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
+from difflib import get_close_matches
 from threading import Event, Lock, RLock, Thread
 from types import SimpleNamespace
 from typing import Any, Callable, Literal, Mapping
@@ -11647,7 +11648,13 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
             known_paths = {renderer.get("rendererPath") for renderer in renderers}
             missing = [path for path in request.renderer_paths if path not in known_paths]
             if missing:
-                raise RuntimeError(f"Unknown rendererPaths in selected avatar: {missing}")
+                candidates = sorted(path for path in known_paths if isinstance(path, str) and path)
+                suggestions = {path: get_close_matches(path, candidates, n=3) for path in missing}
+                raise RuntimeError(
+                    f"Unknown rendererPaths in selected avatar: {missing}. "
+                    f"Did you mean one of these actual renderer paths? {suggestions}. "
+                    "Use scope='all' without rendererPaths to read the selected avatar's renderer inventory."
+                )
             selected_paths = set(request.renderer_paths)
             scoped_export = {**export_payload, "avatars": [{**avatar_payload, "renderers": [
                 renderer for renderer in renderers if renderer.get("rendererPath") in selected_paths

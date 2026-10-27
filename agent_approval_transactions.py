@@ -704,6 +704,7 @@ class ApprovalTransactionPorts:
     invalidate_scan_results: Callable[[str, str], Any] = _noop_scan_invalidation
     complete_scan_mutation: Callable[[str, str, Any, Any], None] = _noop_scan_completion
     freeze_native_history: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None
+    native_result_observation: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
 class AgentApprovalTransactionService:
@@ -2227,6 +2228,23 @@ class AgentApprovalTransactionService:
                     "completionStatus": completion_status,
                     **permission_context,
                 }
+                native_context = ensure_dict(approval.get("taskContext"))
+                native_snapshot = ensure_dict(native_context.get("_nativeConversation"))
+                if native_context.get("_nativeCallId") and self._ports.native_result_observation is not None:
+                    # Keep the recoverable model result in the existing applied
+                    # record, before returning to the interruptible runtime loop.
+                    observation = self._ports.native_result_observation({
+                        "kind": "write", "status": "executed", "tool": target_tool,
+                        "actionId": native_context.get("actionId") or "",
+                        "result": result, "outcome": completion_outcome,
+                    })
+                    applied_audit["nativeResult"] = {
+                        "sessionId": native_context.get("sessionId"),
+                        "binding": native_snapshot.get("binding") or ensure_dict(native_context.get("_nativeConversationRef")).get("binding"),
+                        "turnId": native_context.get("turnId"),
+                        "callId": native_context["_nativeCallId"],
+                        "content": {"observations": [observation]},
+                    }
                 memory_evidence = self._ports.validated_memory_evidence_for_applied_write(
                     approval,
                     arguments,
@@ -5209,6 +5227,29 @@ class AgentApprovalTransactionService:
 
     def _load_approval_from_audit(self, approval_id: str) -> dict[str, Any] | None:
         return None
+
+    def recover_native_results(self, session_id: str, snapshot: dict[str, Any], pending: set[str]) -> dict[str, str]:
+        """Read result evidence only; never recreate executable approvals."""
+        path = self._ports.audit_log_path()
+        if not pending or not path.exists():
+            return {}
+        recovered: dict[str, str] = {}
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                result = event.get("nativeResult")
+                if event.get("event") != "approval_applied" or not isinstance(result, dict):
+                    continue
+                call_id = result.get("callId")
+                if (call_id in pending and result.get("sessionId") == session_id
+                        and result.get("binding") == snapshot["binding"]
+                        and result.get("turnId") == snapshot["turnId"]
+                        and isinstance(result.get("content"), dict)):
+                    recovered[call_id] = json.dumps(result["content"], ensure_ascii=False)
+        return recovered
 
     def _reconcile_unrecoverable_linked_approval(self, approval_id: str) -> bool:
         linked = self._goal.delivery_for_approval(approval_id)

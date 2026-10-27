@@ -539,6 +539,8 @@ class NativeRuntimeTurn:
             if snapshot is not None:
                 seed["_nativeConversation"] = snapshot
                 seed["_nativeAdmittedToolNames"] = sorted(self.admitted_tool_names or ())
+                if self._native_decision and len(self._native_decision["ids"]) == 1:
+                    seed["_nativeCallId"] = self._native_decision["ids"][0]
         return seed
 
     def messages(self) -> list[dict[str, Any]]:

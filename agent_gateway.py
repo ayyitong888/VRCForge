@@ -758,6 +758,9 @@ class AgentGateway:
         self._runtime_session_state = AgentRuntimeSessionState(
             AgentRuntimeSessionStatePorts(shared_state_lock=self._lock,
                 native_history_store=NativeHistoryStore(self.audit_dir / "native-history"),
+                recover_native_results=lambda session_id, snapshot, pending: self.approval_transactions.recover_native_results(
+                    session_id, snapshot, pending
+                ),
                 discard_result_snapshots=lambda session_id: (
                     self._scan_results.delete(session_id),
                     self._execution_target_bindings.discard_session(f"runtime:{session_id}"),
@@ -1008,6 +1011,7 @@ class AgentGateway:
                 freeze_native_history=lambda approval_id, session_id, snapshot: self._runtime_session_state.freeze_native_conversation(
                     approval_id, session_id, snapshot
                 ),
+                native_result_observation=lambda step: RuntimePlannerService.native_result_observation(None, step),
             ),
             ApprovalGoalPorts(
                 deny_approval=self._goal.deny_agent_goal_approval,
@@ -9429,6 +9433,8 @@ class AgentGateway:
             self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.audit_log_path.open("a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+                if "nativeResult" in safe_entry:
+                    flush_and_fsync(log_file)
 
     def _append_jsonl(self, path: Path, schema: str, entry: dict[str, Any]) -> dict[str, Any]:
         safe_entry = redact_sensitive(

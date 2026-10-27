@@ -27,6 +27,7 @@ class AgentRuntimeSessionStatePorts:
     shared_state_lock: AbstractContextManager[Any]
     native_history_store: NativeHistoryStore | None = None
     discard_result_snapshots: Callable[[str], None] | None = None
+    recover_native_results: Callable[[str, dict[str, Any], set[str]], dict[str, str]] | None = None
 
 
 class AgentRuntimeSessionState:
@@ -470,16 +471,18 @@ class AgentRuntimeSessionState:
             if existing is not None:
                 pending = self._native_pending(existing)
                 if pending:
-                    # A completed turn settles its calls, so pending calls at
-                    # a new user turn are crash-window orphans. Settle them as
-                    # interrupted instead of wedging the session behind a
-                    # raise that no caller can recover from.
+                    recovered = (
+                        self._ports.recover_native_results(session_id, existing, pending)
+                        if self._ports.recover_native_results is not None else {}
+                    )
+                    # Restore durable applied results before marking remaining
+                    # orphan proposals interrupted. Neither path executes tools.
                     orphan = copy.deepcopy(existing)
                     for call_id in sorted(pending):
                         orphan["messages"].append({
                             "role": "tool",
                             "tool_call_id": call_id,
-                            "content": json.dumps(
+                            "content": recovered.get(call_id) or json.dumps(
                                 {"status": "not_executed", "reason": "runtime_interrupted", "observations": []},
                                 ensure_ascii=False,
                             ),

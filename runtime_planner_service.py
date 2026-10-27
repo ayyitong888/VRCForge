@@ -1814,7 +1814,7 @@ class RuntimePlannerService:
                 **({"admissionError": sanitize_planner_observation_text(result.get("summary"), 600)}
                    if result.get("code") == "planner_invalid_response" else {}),
                 "outcome": {"status": sanitize_planner_observation_text(ensure_dict(step.get("outcome")).get("status"), 80)},
-                "observation": self._llm_loop_step_observation(dict(step), native_contract=True)}
+                "observation": RuntimePlannerService._llm_loop_step_observation(self, dict(step), native_contract=True)}
         if step.get("tool") == "vrcforge_load_internal_tool_block" and isinstance(result.get("legalBlocks"), list):
             observation["legalBlocks"] = [x for x in result["legalBlocks"] if isinstance(x, str)]
         if step.get("tool") == "vrcforge_load_internal_tool_block" and result.get("schema") == "vrcforge.internal_tool_search.v1":

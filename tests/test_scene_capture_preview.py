@@ -150,3 +150,54 @@ def test_reader_rejects_tampered_png_hash(tmp_path):
 
     with pytest.raises(ValueError, match="hash"):
         read_scene_capture_preview(envelope)
+
+
+def test_noisy_transparent_capture_shrinks_to_actual_png_byte_budget(tmp_path):
+    import random
+
+    project = tmp_path / "UnityProject"
+    project.mkdir()
+    image_path = tmp_path / "capture.png"
+    # Deterministic incompressible RGB, retaining non-opaque alpha.
+    image = Image.frombytes("RGBA", (1024, 1024), random.Random(719).randbytes(1024 * 1024 * 4))
+    image.save(image_path, format="PNG")
+    raw = image_path.read_bytes()
+    assert len(raw) > preview_module.MAX_PREVIEW_BYTES
+    registry = McpResourceRegistry(tmp_path / "registry")
+
+    published = publish_scene_capture_preview(
+        registry, image_path, str(project),
+        {"sessionId": "session-fixture", "approvalId": "approval-fixture"},
+        "resource-context-fixture",
+    )
+    png = base64.b64decode(registry.read(published["resourceUri"])["contents"][0]["blob"])
+    assert 0 < len(png) <= preview_module.MAX_PREVIEW_BYTES
+    assert published["width"] < 1024
+    assert published["width"] == published["height"]
+    with Image.open(io.BytesIO(png)) as resized:
+        assert resized.mode == "RGBA"
+        assert resized.getextrema()[3][0] < 255
+        expected = image.resize(resized.size, Image.Resampling.LANCZOS)
+        assert resized.tobytes() == expected.tobytes()
+    assert published["sourceSha256"] == hashlib.sha256(raw).hexdigest()
+    assert image_path.read_bytes() == raw
+
+
+def test_capture_already_within_budget_keeps_existing_png_encoding(tmp_path):
+    project = tmp_path / "UnityProject"
+    project.mkdir()
+    image_path = tmp_path / "capture.png"
+    raw = _source(image_path, size=(1280, 720), color=(30, 120, 220, 150))
+    with Image.open(io.BytesIO(raw)) as original:
+        image = original.convert("RGBA")
+    image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+    expected = io.BytesIO()
+    image.save(expected, format="PNG")
+    registry = McpResourceRegistry(tmp_path / "registry")
+    published = publish_scene_capture_preview(
+        registry, image_path, str(project),
+        {"sessionId": "session-fixture", "approvalId": "approval-fixture"},
+        "resource-context-fixture",
+    )
+    png = base64.b64decode(registry.read(published["resourceUri"])["contents"][0]["blob"])
+    assert png == expected.getvalue()
