@@ -298,6 +298,31 @@ def test_provider_turn_binding_uses_frozen_explicit_native_route_only():
             assert metadata.native_binding == ""
 
 
+def test_runtime_catalog_reads_one_config_snapshot_per_turn_and_refreshes_next_turn(monkeypatch):
+    gateway = dashboard_server.AGENT_GATEWAY
+    original_ensure_config = gateway.ensure_config
+    configs = [replace(original_ensure_config(), allow_write_requests=True)]
+    config_reads = 0
+
+    def current_config():
+        nonlocal config_reads
+        config_reads += 1
+        return configs[0]
+
+    monkeypatch.setattr(gateway, "ensure_config", current_config)
+    catalog = dashboard_server._RuntimePlannerCatalog()
+
+    first = catalog.read(EXPOSURE_LAYER_EXECUTION)
+    first_read_count = config_reads
+    assert first_read_count == 1
+    assert any(tool.write for tool in first.visible_tools)
+
+    configs[0] = replace(configs[0], allow_write_requests=False)
+    second = catalog.read(EXPOSURE_LAYER_EXECUTION)
+    assert config_reads == first_read_count + 1
+    assert not any(tool.write for tool in second.visible_tools)
+
+
 @pytest.mark.parametrize("second_outcome", ["reply", "failed", "cancelled"])
 def test_each_model_call_starts_a_fresh_stream_boundary_even_for_format_retry(second_outcome):
     binding = dashboard_server._RuntimePlannerProviderTurnBinding()

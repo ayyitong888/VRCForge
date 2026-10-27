@@ -360,6 +360,23 @@ def test_shared_unity_facades_reuse_external_blocks_and_schemas_inside() -> None
         assert internal.definition_digest
 
 
+def test_external_block_projection_accepts_catalog_config_snapshot(monkeypatch) -> None:
+    gateway = dashboard_server.AGENT_GATEWAY
+    config = gateway.ensure_config()
+    tool_name = next(iter(gateway._tools))
+
+    monkeypatch.setattr(
+        gateway,
+        "ensure_config",
+        lambda: (_ for _ in ()).throw(AssertionError("catalog snapshot should avoid another config read")),
+    )
+    gateway.external_mcp_tool_block_for_name(
+        tool_name,
+        write=False,
+        config=config,
+    )
+
+
 def test_five_atomic_facades_are_registered_for_both_internal_and_external_execution() -> None:
     expected = {
         "vrcforge_atomic_reference_rename",

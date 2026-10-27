@@ -2871,11 +2871,20 @@ class AgentGateway:
         stamped["_meta"] = metadata
         return stamped
 
-    def external_mcp_tool_block_for_name(self, name: str, *, write: bool) -> str:
+    def external_mcp_tool_block_for_name(
+        self,
+        name: str,
+        *,
+        write: bool,
+        config: AgentGatewayConfig | None = None,
+    ) -> str:
         """Return the canonical external Unity block reused by the internal Unity tree."""
 
         normalized = canonical_mcp_tool_name(name)
-        config = self.ensure_config()
+        # Catalog projections pass their already-resolved config snapshot so
+        # every tool in one planner turn sees the same exposure policy without
+        # rereading the config file for each Unity tool.
+        config = config if config is not None else self.ensure_config()
         if write:
             handler = self._write_handlers.get(normalized)
             return self._external_mcp_write_handler_block(handler, config) if handler else ""

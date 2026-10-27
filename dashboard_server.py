@@ -16456,13 +16456,19 @@ class _RuntimePlannerCompactor:
         return result
 
 
-def _runtime_planner_tool(tool: Any, projection: Any) -> PlannerTool:
+def _runtime_planner_tool(
+    tool: Any,
+    projection: Any,
+    *,
+    gateway_config: Any | None = None,
+) -> PlannerTool:
     shared_unity_block = AGENT_GATEWAY.external_mcp_tool_block_for_name(
-        str(tool.name), write=False
+        str(tool.name), write=False, config=gateway_config
     ) if str(projection.tool_set.value) == "unity" else ""
     shared_descriptor = AGENT_GATEWAY.shared_agent_tool_descriptor(
         str(tool.name),
         write=False,
+        config=gateway_config,
         exposure_layer=RUNTIME_PLANNER_EXECUTION_LAYER,
         block=shared_unity_block,
     )
@@ -16484,13 +16490,19 @@ def _runtime_planner_tool(tool: Any, projection: Any) -> PlannerTool:
     )
 
 
-def _runtime_planner_write_tool(handler: Any, projection: Any) -> PlannerTool:
+def _runtime_planner_write_tool(
+    handler: Any,
+    projection: Any,
+    *,
+    gateway_config: Any | None = None,
+) -> PlannerTool:
     shared_unity_block = AGENT_GATEWAY.external_mcp_tool_block_for_name(
-        str(handler.name), write=True
+        str(handler.name), write=True, config=gateway_config
     ) if str(projection.tool_set.value) == "unity" else ""
     shared_descriptor = AGENT_GATEWAY.shared_agent_tool_descriptor(
         str(handler.name),
         write=True,
+        config=gateway_config,
         exposure_layer=RUNTIME_PLANNER_EXECUTION_LAYER,
         block=shared_unity_block,
     )
@@ -16897,7 +16909,7 @@ class _RuntimePlannerCatalog:
             or (not project_context_active and channel_project_selection_available())
         )
         visible_direct_tools = tuple(
-            _runtime_planner_tool(tool, projection)
+            _runtime_planner_tool(tool, projection, gateway_config=gateway_config)
             for projection in projections
             for tool in [AGENT_GATEWAY._tools.get(projection.internal_name)]
             if tool is not None
@@ -16905,7 +16917,7 @@ class _RuntimePlannerCatalog:
             and _runtime_planner_provider_capability_visible(tool)
         )
         visible_write_tools = tuple(
-            _runtime_planner_write_tool(handler, projection)
+            _runtime_planner_write_tool(handler, projection, gateway_config=gateway_config)
             for projection in projections
             for handler in [AGENT_GATEWAY._write_handlers.get(projection.internal_name)]
             if handler is not None and projection.internal_name not in AGENT_GATEWAY._tools
@@ -16913,14 +16925,14 @@ class _RuntimePlannerCatalog:
             and AGENT_GATEWAY._write_handler_visible(handler, gateway_config, layer)
         )
         routable_write_tools = tuple(
-            _runtime_planner_write_tool(handler, projection)
+            _runtime_planner_write_tool(handler, projection, gateway_config=gateway_config)
             for projection in projections
             for handler in [AGENT_GATEWAY._write_handlers.get(projection.internal_name)]
             if handler is not None and projection.internal_name not in AGENT_GATEWAY._tools
         )
         visible_tools = (*visible_direct_tools, *visible_write_tools)
         routable_tools = tuple(
-            _runtime_planner_tool(tool, projection)
+            _runtime_planner_tool(tool, projection, gateway_config=gateway_config)
             for projection in projections
             for tool in [AGENT_GATEWAY._tools.get(projection.internal_name)]
             if tool is not None
