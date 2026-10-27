@@ -327,7 +327,8 @@ def test_core_and_backend_handshake_identity_matches_the_product_version() -> No
     metadata = SERVER[SERVER.index("private static VRCForgeMcpMetadataError ValidateModernMetadata") : SERVER.index("private static JObject InvokeTool")]
     assert 'string.IsNullOrWhiteSpace((string)clientInfo["version"])' in metadata
     assert 'metadata["io.vrcforge/projectBinding"] as JObject' in metadata
-    assert 'projectBinding["projectId"], ComputeProjectId(GetProjectRoot())' in metadata
+    assert 'projectBinding["projectId"], descriptorProjectId, StringComparison.Ordinal)' in metadata
+    assert 'descriptorProjectId = ComputeProjectId(root);' in SERVER
     assert 'projectBinding["instanceId"], descriptorInstanceId' in metadata
 
 
@@ -710,7 +711,8 @@ def test_gesture_manager_adapter_is_reflection_only_and_enumerates_runtime_param
     assert 'candidate.Name, "CreateAndPing"' in GESTURE_MANAGER_RUNTIME
     assert 'candidate.Name, "SetModule"' in GESTURE_MANAGER_RUNTIME
     assert "EditorApplication.EnterPlaymode();" in GESTURE_MANAGER_RUNTIME
-    assert "GestureManagerPlayModeCoordinator.Prepare(managerPath, avatarPath);" in GESTURE_MANAGER_RUNTIME
+    assert "var transitionId = GestureManagerPlayModeCoordinator.Prepare(managerPath, avatarPath, avatars[0].gameObject);" in GESTURE_MANAGER_RUNTIME
+    assert "playModeTransitionId = transitionId" in GESTURE_MANAGER_RUNTIME
     assert '"gesture_manager_active_instance_ambiguous"' in GESTURE_MANAGER_RUNTIME
     assert '"gesture_manager_avatar_ambiguous"' in GESTURE_MANAGER_RUNTIME
     assert 'toolId: "vrc_gesture_manager_set_parameter"' in GESTURE_MANAGER_RUNTIME

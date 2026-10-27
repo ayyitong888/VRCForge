@@ -24,6 +24,7 @@ from mcp_tool_descriptor import standardize_tool_descriptor
 from external_mcp_result_projection import project_tool
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
+from unity_mcp_tool_contract import PRODUCT_VERSION
 from internal_tool_blocks import (
     CANONICAL_TOOL_BLOCKS,
     CANONICAL_TOOL_BLOCK_ALIASES,
@@ -679,7 +680,7 @@ class VRCForgeBridge:
             "io.modelcontextprotocol/clientCapabilities": {},
             "io.modelcontextprotocol/clientInfo": {
                 "name": "vrcforge-agent-stdio-bridge",
-                "version": "1.9.1",
+                "version": PRODUCT_VERSION,
             },
         }
         if method in {"tools/call", "tools/list", "prompts/get"}:
@@ -1731,7 +1732,7 @@ def run_stdio_server(
         lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.9.1",
+        server_version=PRODUCT_VERSION,
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         tool_call_catalogue_for_call=lambda name, params: list_tools({
@@ -1754,7 +1755,7 @@ def run_stdio_server(
         list_tools,
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.9.1",
+        server_version=PRODUCT_VERSION,
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda params: list_tools({"exposureLayer": requested_layer["value"], "_lookupToolNames": [str(params.get("name") or "")]}) if isinstance(params, Mapping) and params.get("name") else list_tools({"exposureLayer": requested_layer["value"]}),
         resource_list=list_resources,
