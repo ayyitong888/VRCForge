@@ -20320,6 +20320,12 @@ def read_agent_compile_errors(params: dict[str, Any]) -> dict[str, Any]:
     return ensure_dict_payload(extract_tool_result_payload(result), "compile diagnostics")
 
 
+def read_agent_ndmf_errors(params: dict[str, Any]) -> dict[str, Any]:
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    result = invoke_unity_mcp(settings, "vrc_get_ndmf_errors", {})
+    return ensure_dict_payload(extract_tool_result_payload(result), "NDMF diagnostics")
+
+
 def get_unitypackage_import_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     job_id = str(params.get("jobId") or params.get("job_id") or "").strip().lower()
@@ -27476,6 +27482,12 @@ def register_agent_gateway_tools() -> None:
         read_agent_compile_errors,
     )
     AGENT_GATEWAY.register_tool(
+        "vrcforge_get_ndmf_errors",
+        "When to use: read existing NDMF build errors with their original message, severity, avatar, plugin and pass after an avatar build or preprocess failure. When NOT to use: do not start a build, enter Play, clear errors, or use this to inspect native modal dialogs. Negative example: do not call this tool to fix or rerun a failed build.",
+        "read/debug",
+        read_agent_ndmf_errors,
+    )
+    AGENT_GATEWAY.register_tool(
         "vrcforge_core_upgrade_status",
         "When to use: after installing or upgrading VRCForge Unity Core, read one pre-handshake snapshot containing the running compiled Core identity and current Unity Console compilation result. When NOT to use: do not wait internally, retry automatically, modify the project, or treat an old reported Core version as success. Negative example: do not call it for ordinary avatar edits after Core is already ready.",
         "read/debug",
@@ -27816,7 +27828,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_handle_unity_editor_dialog",
-        "When to use: press one exact observed native Unity dialog button to continue its active approved operation, using that operation's sourceApprovalId and existing checkpoint. Inspect the dialog first. In full-permission mode, handle ordinary confirmations yourself within the approved task. When NOT to use: do not use an old approval, enlarge asset write scope, guess a button, or claim dialog closure proves asset success. Negative example: never confirm an unrelated overwrite using another operation's checkpoint; use the dedicated Reload tool for a standalone Reload prompt.",
+        "When to use: dismiss an exact observed native Unity dialog with action=dismiss (close/cancel only, no source approval or button needed), or press one exact observed native Unity dialog button with action=press to continue its active approved operation, using that operation's sourceApprovalId and existing checkpoint. Inspect the dialog first. In full-permission mode, handle ordinary confirmations yourself within the approved task. When NOT to use: do not use an old approval, enlarge asset write scope, guess a button, or claim dialog closure proves asset success. Negative example: never confirm an unrelated overwrite using another operation's checkpoint; use the dedicated Reload tool for a standalone Reload prompt.",
         "high",
         lambda params: handle_unity_editor_dialog(params, source_approval_lookup=AGENT_GATEWAY.approval_transactions.get_native_dialog_source_approval),
         request_preparer=lambda params, preview: prepare_unity_editor_dialog_action(params, preview, source_approval_lookup=AGENT_GATEWAY.approval_transactions.get_native_dialog_source_approval),

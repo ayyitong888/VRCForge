@@ -522,8 +522,8 @@ def test_editor_autoconnect_retries_after_domain_reload_with_a_pre_registered_ma
     start = SERVER[SERVER.index("private static void StartExclusive()") : SERVER.index("public static void Stop()")]
     stop = SERVER[SERVER.index("private static void StopLocked(") : SERVER.index("private static void JoinThreads(")]
     assert "[InitializeOnLoadMethod]" in pump
-    assert "EditorApplication.update -= DrainInvocations;" in pump
-    assert "EditorApplication.update += DrainInvocations;" in pump
+    assert "EditorApplication.update -= OnEditorUpdate;" in pump
+    assert "EditorApplication.update += OnEditorUpdate;" in pump
     assert "EditorApplication.playModeStateChanged -= HandlePlayModeStateChanged;" in pump
     assert "EditorApplication.playModeStateChanged += HandlePlayModeStateChanged;" in pump
     assert "ScheduleInvocationPumpRegistration();" in pump

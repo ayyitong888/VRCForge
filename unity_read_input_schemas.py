@@ -54,6 +54,11 @@ _BLENDSHAPE_PREVIEW_ITEM: dict[str, Any] = {
 
 
 UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_get_ndmf_errors": {
+        "type": "object", "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {"projectPath": _PROJECT_PATH_PROPERTY},
+    },
     "vrcforge_preview_unpack_prefab": {
         "type": "object", "additionalProperties": False,
         "required": ["projectPath", "gameObjectPath"],

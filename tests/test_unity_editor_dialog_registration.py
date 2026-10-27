@@ -13,7 +13,7 @@ def test_native_dialog_tools_are_exposed_without_a_core_binding():
     assert tools[read_name].input_schema["required"] == ["projectPath"]
     schema = canonical_unity_write_tool_input_schema(write_name)
     assert "executionTarget" not in schema.get("required", [])
-    assert "sourceApprovalId" in schema["required"]
+    assert "sourceApprovalId" in schema["allOf"][0]["else"]["required"]
     assert tools[write_name].input_schema["required"] == schema["required"]
     for name, field in schema["properties"].items():
         assert tools[write_name].input_schema["properties"][name] == field

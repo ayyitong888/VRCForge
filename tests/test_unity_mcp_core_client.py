@@ -488,6 +488,38 @@ def test_previous_core_contract_uses_protocol_compatibility_without_a_second_ver
         server.close()
 
 
+def test_core_190_catalogue_replays_the_actual_previous_contract(core_files):
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "core_contract_190.json").read_text(encoding="utf-8")
+    )
+    names = fixture["toolNames"]
+    version = fixture["toolContractVersion"]
+
+    def handler(connection, seen):
+        discover = _read_line(connection)
+        seen.append(discover)
+        _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {
+            "jsonrpc": "2.0", "id": 1,
+            "result": _discovery_result(discover, tool_contract_version=version),
+        }})
+        request = _read_line(connection)
+        seen.append(request)
+        _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {
+            "jsonrpc": "2.0", "id": request["message"]["id"],
+            "result": {"resultType": "complete", "tools": [_tool_entry(name) for name in names]},
+        }})
+
+    project, descriptor_path, descriptor = core_files
+    descriptor.update(toolCount=len(names), toolContractVersion=version)
+    server = FakeCore(handler)
+    _write_descriptor(descriptor_path, descriptor, server.port)
+    try:
+        tools = UnityMcpCoreClient(project).list_tools(exposure_layer="execution")
+        assert [tool["name"] for tool in tools] == names
+    finally:
+        server.close()
+
+
 def test_modern_call_keeps_execution_context_out_of_arguments(core_files):
     project, descriptor_path, descriptor = core_files
     server = FakeCore(_modern_handler)

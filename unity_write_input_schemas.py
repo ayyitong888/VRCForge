@@ -776,8 +776,11 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "vrcforge_handle_unity_editor_dialog": {
         "type": "object", "additionalProperties": False,
-        "required": ["projectPath", "dialogId", "buttonHandle", "buttonText", "sourceApprovalId"],
+        "required": ["projectPath", "dialogId"],
+        "allOf": [{"if": {"properties": {"action": {"const": "dismiss"}}, "required": ["action"]},
+                   "else": {"required": ["buttonHandle", "buttonText", "sourceApprovalId"]}}],
         "properties": {
+            "action": {"type": "string", "enum": ["press", "dismiss"], "default": "press", "description": "dismiss requests native close/cancel without clicking a button; press continues an approved source operation."},
             "projectPath": {"type": "string"},
             "dialogId": {"type": "string", "description": "Exact current ID returned by inspect_unity_editor_dialogs."},
             "buttonHandle": {"type": "integer", "minimum": 1},

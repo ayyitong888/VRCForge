@@ -310,6 +310,27 @@ def post_native_dialog_button_click(
         )
 
 
+def post_native_dialog_close(process_id: int, window_handle: int) -> None:
+    """Post WM_CLOSE once to the exact native dialog; owns no OS handles."""
+    if os.name != "nt":
+        raise UnityReloadDialogError("Native dialog dismissal requires Windows.")
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.restype = ctypes.c_int
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostMessageW.restype = wintypes.BOOL
+    actual_pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(window_handle, ctypes.byref(actual_pid))
+    class_name = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(window_handle, class_name, len(class_name))
+    if actual_pid.value != process_id or class_name.value != "#32770":
+        raise UnityReloadDialogError("The observed native dialog identity changed.")
+    if not user32.PostMessageW(window_handle, 0x0010, 0, 0):  # WM_CLOSE: default dialog cancellation.
+        raise UnityReloadDialogError(f"Native dialog close failed: Windows error {ctypes.get_last_error()}.")
+
+
 def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
     if process_id <= 0:
         return []
@@ -325,6 +346,11 @@ def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
     user32.GetWindowTextLengthW.restype = ctypes.c_int
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowTextW.restype = ctypes.c_int
+    user32.SendMessageTimeoutW.argtypes = [
+        wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+        wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t),
+    ]
+    user32.SendMessageTimeoutW.restype = wintypes.LPARAM
     user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetClassNameW.restype = ctypes.c_int
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
@@ -349,7 +375,22 @@ def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
         user32.GetClassNameW(hwnd, buffer, len(buffer))
         return buffer.value
 
+    def read_control_text(hwnd: int) -> str:
+        # GetWindowText only returns captions across processes, not Edit text.
+        # WM_GETTEXT is marshalled by Windows; this owns only the local buffer.
+        # A hung Unity control must not hang the diagnostic request.
+        buffer = ctypes.create_unicode_buffer(4097)
+        copied = ctypes.c_size_t()
+        ctypes.set_last_error(0)
+        if not user32.SendMessageTimeoutW(
+            hwnd, 0x000D, len(buffer), ctypes.addressof(buffer),
+            0x0001 | 0x0002, 200, ctypes.byref(copied),
+        ):
+            raise OSError(f"Unity control text could not be read: Windows error {ctypes.get_last_error()}.")
+        return buffer.value
+
     windows: list[dict[str, Any]] = []
+    text_errors: list[OSError] = []
 
     @enum_callback
     def collect_window(hwnd: int, _lparam: int) -> bool:
@@ -361,14 +402,19 @@ def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
 
         @enum_callback
         def collect_control(child: int, _child_lparam: int) -> bool:
-            text = read_text(child)
+            try:
+                text = read_control_text(child)
+            except OSError as exc:
+                # ctypes callbacks cannot propagate exceptions to their caller.
+                text_errors.append(exc)
+                return False
             class_name = read_class(child)
             if len(controls) < 256 and (text or class_name.casefold() == "button"):
                 controls.append(
                     {
                         "windowHandle": int(child),
                         "text": text[:512],
-                        "textTruncated": int(user32.GetWindowTextLengthW(child)) > 512,
+                        "textTruncated": len(text) > 512,
                         "className": class_name[:128],
                         "visible": bool(user32.IsWindowVisible(child)),
                         "enabled": bool(user32.IsWindowEnabled(child)),
@@ -379,6 +425,8 @@ def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
             return True
 
         user32.EnumChildWindows(hwnd, collect_control, 0)
+        if text_errors:
+            return False
         if len(windows) < 64:
             windows.append(
                 {
@@ -399,4 +447,6 @@ def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
         error_code = ctypes.get_last_error()
         if error_code:
             raise ctypes.WinError(error_code)
+    if text_errors:
+        raise text_errors[0]
     return windows

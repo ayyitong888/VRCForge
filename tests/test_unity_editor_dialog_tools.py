@@ -170,3 +170,88 @@ def test_process_change_is_rejected_even_if_same_handles_reused(context):
     with pytest.raises(tools.UnityEditorDialogError):
         tools.handle_unity_editor_dialog(prepared, source_approval_lookup=lookup)
     click.assert_not_called()
+
+
+def test_dismiss_closes_exact_native_dialog_without_source_or_button(context, monkeypatch):
+    project, windows, click, _source, lookup = context
+    params = {k: v for k, v in _params(project).items() if k in {"projectPath", "dialogId"}}
+    params["action"] = "dismiss"
+    close = Mock(side_effect=lambda *_args: windows.clear())
+    monkeypatch.setattr(tools.native, "post_native_dialog_close", close, raising=False)
+    prepared, preview = tools.prepare_unity_editor_dialog_action(params, None, source_approval_lookup=lookup)
+    result = tools.handle_unity_editor_dialog(prepared, source_approval_lookup=lookup)
+    close.assert_called_once_with(4242, 101)
+    click.assert_not_called()
+    lookup.assert_not_called()
+    assert result["ok"] and result["dialogClosed"]
+    assert result["closeRequested"] and result["buttonClicked"] is False
+    assert preview["checkpointAvailable"] is False
+
+
+def test_dismiss_does_not_close_owned_custom_editor_window(context):
+    project, windows, click, _source, lookup = context
+    windows[0]["className"] = "UnityContainerWndClass"
+    params = _params(project) | {"action": "dismiss"}
+    with pytest.raises(tools.UnityEditorDialogError, match="native dialog"):
+        tools.prepare_unity_editor_dialog_action(params, None, source_approval_lookup=lookup)
+    click.assert_not_called()
+
+
+def test_external_mcp_dismiss_uses_native_lane_without_core(context, monkeypatch, tmp_path):
+    import jsonschema
+    from agent_gateway import AgentGateway, canonical_unity_write_tool_input_schema
+    project, windows, click, _source, lookup = context
+    for folder in ("Assets", "Packages", "ProjectSettings"):
+        (project / folder).mkdir(exist_ok=True)
+    args = {k: v for k, v in _params(project).items() if k in {"projectPath", "dialogId"}}
+    args["action"] = "dismiss"
+    jsonschema.validate(args, canonical_unity_write_tool_input_schema("vrcforge_handle_unity_editor_dialog"))
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    config.execution_mode = "roslyn_full_auto"
+    config.roslyn_risk_acknowledged = True
+    gateway.save_config(config)
+    monkeypatch.setattr(gateway, "resolve_execution_target_reference", lambda *a, **kw: pytest.fail("Modal dismissal must not call Core"))
+    close = Mock(side_effect=lambda *_args: windows.clear())
+    monkeypatch.setattr(tools.native, "post_native_dialog_close", close)
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_handle_unity_editor_dialog", "Dismiss exact native dialog.", "high",
+        tools.handle_unity_editor_dialog, request_preparer=tools.prepare_unity_editor_dialog_action,
+        pre_write_checkpoint_required=False)
+    gateway.register_external_mcp_unity_tool("vrcforge_handle_unity_editor_dialog", "project")
+    result = gateway.call_external_mcp_tool("vrcforge_handle_unity_editor_dialog", args)
+    assert result["status"] == "executed", result
+    close.assert_called_once_with(4242, 101)
+    click.assert_not_called()
+
+
+@pytest.mark.parametrize("readback", ["recovers", "deadline", "pid_changed"])
+def test_dismiss_readback_replays_transient_native_probe_failure(context, monkeypatch, readback):
+    project, windows, click, _source, lookup = context
+    params = {k: v for k, v in _params(project).items() if k in {"projectPath", "dialogId"}}
+    params["action"] = "dismiss"
+    prepared, _ = tools.prepare_unity_editor_dialog_action(params, None)
+    snapshot = tools.inspect_unity_editor_dialogs(params)
+    failed = {**snapshot, "available": False, "dialogs": [],
+              "probeError": {"code": "unity_editor_dialog_probe_failed", "message": "native window disappeared"}}
+    closed = {**snapshot, "dialogs": []}
+    if readback == "pid_changed":
+        failed["unityProcessId"] = 999
+    probe = Mock(side_effect=[snapshot, failed, closed] if readback != "deadline" else [snapshot, failed, failed])
+    monkeypatch.setattr(tools, "inspect_unity_editor_dialogs", probe)
+    close = Mock()
+    monkeypatch.setattr(tools.native, "post_native_dialog_close", close)
+    monkeypatch.setattr(tools.time, "sleep", lambda _: None)
+    monkeypatch.setattr(tools.time, "monotonic", Mock(side_effect=[0, 0.5, 2.0]))
+    result = tools.handle_unity_editor_dialog(prepared)
+    close.assert_called_once_with(4242, 101)
+    click.assert_not_called()
+    assert result["retryable"] is False
+    if readback == "recovers":
+        assert result["ok"] and result["dialogClosed"]
+        assert probe.call_count == 3
+    else:
+        assert result["ok"] is False and result["commitState"] == "unknown"
+        assert probe.call_count == (2 if readback == "pid_changed" else 3)

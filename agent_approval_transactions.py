@@ -3515,7 +3515,7 @@ class AgentApprovalTransactionService:
                 "preWriteCheckpointRequired": False, "checkpointScope": ["original-approved-operation"],
                 "restoreTool": "vrcforge_restore_checkpoint", "postRestoreValidationRequired": True,
                 "coverageAudit": "vrcforge.unity_editor_dialog_action.v1",
-                "note": "The exact button continues an active approved operation under its existing lock and checkpoint. Dialog closure does not verify asset success or enlarge the original write scope.",
+                "note": "Dismiss requests native close/cancel without a checkpoint or confirmation click. Press continues an active approved operation under its existing lock and checkpoint. Dialog closure does not verify asset success or enlarge the original write scope.",
             }
         if handler.name == "vrcforge_confirm_unity_reload_dialog":
             return {

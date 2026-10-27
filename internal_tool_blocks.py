@@ -289,6 +289,7 @@ _ATTACHMENT_TOOLS = frozenset(
 )
 _DIAGNOSTIC_TOOLS = frozenset(
     {
+        "vrcforge_get_ndmf_errors",
         "vrcforge_agent_observe",
         "vrcforge_apply_approved",
         "vrcforge_export_skill_package",

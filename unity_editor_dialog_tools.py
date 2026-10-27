@@ -1,4 +1,4 @@
-"""Project-bound native Unity dialog inspection and approved-operation continuation.
+"""Project-bound native Unity dialog inspection, dismissal and write continuation.
 
 Uses the existing Win32 enumerator and button primitive. It never identifies an
 operation's write footprint from button captions: the hosting gateway must supply
@@ -114,6 +114,13 @@ def _selected(snapshot: dict[str, Any], params: dict[str, Any]) -> tuple[dict[st
     dialog = next((d for d in snapshot["dialogs"] if d["dialogId"] == dialog_id), None)
     if dialog is None:
         raise UnityEditorDialogError("The inspected dialog content or identity changed; inspect again.")
+    action = params.get("action", "press")
+    if action == "dismiss":
+        if dialog["className"].casefold() != "#32770" or dialog.get("enabled") is not True:
+            raise UnityEditorDialogError("Only an enabled exact native dialog can be dismissed.")
+        return dialog, {}
+    if action != "press":
+        raise UnityEditorDialogError("The dialog action must be press or dismiss.")
     handle = _positive(params.get("buttonHandle"), "observed buttonHandle")
     text = params.get("buttonText")
     if not isinstance(text, str) or not text:
@@ -146,59 +153,71 @@ def prepare_unity_editor_dialog_action(
     params: dict[str, Any], _preview: dict[str, Any] | None,
     *, source_approval_lookup: SourceApprovalLookup | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Freeze observed text/button identities under the original approved write."""
+    """Freeze the observed dialog; confirmation presses retain their source write."""
     snapshot = inspect_unity_editor_dialogs(params)
     dialog, button = _selected(snapshot, params)
-    source = _source(params, snapshot["projectPath"], source_approval_lookup)
+    dismiss = params.get("action") == "dismiss"
+    source = {} if dismiss else _source(params, snapshot["projectPath"], source_approval_lookup)
     prepared = {
         "projectPath": snapshot["projectPath"], "dialogId": dialog["dialogId"],
-        "buttonHandle": button["buttonHandle"], "buttonText": button["text"],
-        "sourceApprovalId": source["sourceApprovalId"], "expectedSource": source,
+        "action": "dismiss" if dismiss else "press",
+        **({} if dismiss else {"buttonHandle": button["buttonHandle"], "buttonText": button["text"],
+                              "sourceApprovalId": source["sourceApprovalId"], "expectedSource": source}),
         "expectedUnityProcessId": snapshot["unityProcessId"],
         "expectedWindowHandle": dialog["windowHandle"],
     }
     return prepared, {
         "schema": "vrcforge.unity_editor_dialog_action.v1", **prepared,
         "dialogText": dialog["text"], "dialogTitle": dialog["title"],
-        "checkpointAvailable": True, "checkpointScope": "original-approved-operation-only",
+        "checkpointAvailable": not dismiss, "checkpointScope": "none" if dismiss else "original-approved-operation-only",
         "dialogClickRollbackAvailable": False,
-        "note": "The button click itself has no inverse. Asset recovery uses only the original operation's checkpoint; closure does not prove asset success.",
+        "note": "Dismiss sends only a native close/cancel request and never presses a confirmation button." if dismiss else "The button click itself has no inverse. Asset recovery uses only the original operation's checkpoint; closure does not prove asset success.",
     }
 
 
 def handle_unity_editor_dialog(
     params: dict[str, Any], *, source_approval_lookup: SourceApprovalLookup | None = None,
 ) -> dict[str, Any]:
-    """Reinspect, revalidate the source approval, click once, and observe closure."""
+    """Reinspect, dispatch close or approved button once, and observe closure."""
     snapshot = inspect_unity_editor_dialogs(params)
     dialog, button = _selected(snapshot, params)
     if snapshot["unityProcessId"] != params.get("expectedUnityProcessId"):
         raise UnityEditorDialogError("The selected Unity process changed after approval.")
     if dialog["windowHandle"] != params.get("expectedWindowHandle"):
         raise UnityEditorDialogError("The selected dialog window changed after approval.")
-    source = _source(params, snapshot["projectPath"], source_approval_lookup)
-    if source != params.get("expectedSource"):
-        raise UnityEditorDialogError("The source approval or checkpoint changed after preparation.")
-    native.post_native_dialog_button_click(snapshot["unityProcessId"], dialog["windowHandle"],
-                                          button["buttonHandle"], button["text"])
+    dismiss = params.get("action") == "dismiss"
+    source = {} if dismiss else _source(params, snapshot["projectPath"], source_approval_lookup)
+    if dismiss:
+        native.post_native_dialog_close(snapshot["unityProcessId"], dialog["windowHandle"])
+    else:
+        if source != params.get("expectedSource"):
+            raise UnityEditorDialogError("The source approval or checkpoint changed after preparation.")
+        native.post_native_dialog_button_click(snapshot["unityProcessId"], dialog["windowHandle"],
+                                              button["buttonHandle"], button["text"])
     result: dict[str, Any] = {
         "schema": "vrcforge.unity_editor_dialog_action.v1", "projectPath": snapshot["projectPath"],
         "unityProcessId": snapshot["unityProcessId"], "windowHandle": dialog["windowHandle"],
-        "buttonHandle": button["buttonHandle"], "buttonText": button["text"], **source,
-        "buttonClicked": True, "dialogClosed": None, "retryable": False,
+        "action": "dismiss" if dismiss else "press",
+        **({"closeRequested": True} if dismiss else {"buttonHandle": button["buttonHandle"], "buttonText": button["text"]}), **source,
+        "buttonClicked": not dismiss, "dialogClosed": None, "retryable": False,
         "assetOperationVerified": False, "dialogClickRollbackAvailable": False,
     }
     deadline = time.monotonic() + 2.0
     while True:
         after = inspect_unity_editor_dialogs(params)
-        if after.get("available") is not True or after.get("probeError") or after.get("unityProcessId") != snapshot["unityProcessId"]:
-            message = "The button was dispatched, but the same Unity process could not be inspected afterwards."
+        if after.get("unityProcessId") is not None and after["unityProcessId"] != snapshot["unityProcessId"]:
+            message = "The dialog action was dispatched, but the Unity process changed afterwards."
             break
-        current = next((d for d in after["dialogs"] if d["windowHandle"] == dialog["windowHandle"]), None)
-        if current is None or current["dialogId"] != dialog["dialogId"]:
-            return {**result, "ok": True, "dialogClosed": current is None, "dialogChanged": current is not None}
+        if after.get("available") is True and not after.get("probeError") and after.get("unityProcessId") == snapshot["unityProcessId"]:
+            current = next((d for d in after["dialogs"] if d["windowHandle"] == dialog["windowHandle"]), None)
+            if current is None or current["dialogId"] != dialog["dialogId"]:
+                return {**result, "ok": True, "dialogClosed": current is None, "dialogChanged": current is not None}
+            message = "The dialog action was dispatched, but the dialog did not close or change within two seconds."
+        else:
+            # A closing HWND may disappear during enumeration. Keep observing
+            # within the original deadline; never redispatch the native action.
+            message = "The dialog action was dispatched, but the same Unity process could not be inspected afterwards."
         if time.monotonic() >= deadline:
-            message = "The button was dispatched, but the dialog did not close or change within two seconds."
             break
         time.sleep(0.05)
     return {**result, "ok": False, "mutationStarted": True, "commitState": "unknown", "error": message}

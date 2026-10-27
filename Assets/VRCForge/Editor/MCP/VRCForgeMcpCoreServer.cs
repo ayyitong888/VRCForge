@@ -143,7 +143,7 @@ namespace VRCForge.Editor
             public bool AsyncWrite;
             public string ExecutionId;
             public string JobId;
-            public int QueueFrame;
+            public long QueueEditorTick;
             public readonly ManualResetEventSlim Completion = new ManualResetEventSlim(false);
             public JObject Response;
             public int State;
@@ -159,6 +159,7 @@ namespace VRCForge.Editor
         private static VRCForgeToolDescriptor[] tools = new VRCForgeToolDescriptor[0];
         private static VRCForgeExcludedToolDescriptor[] excludedExternalTools = new VRCForgeExcludedToolDescriptor[0];
         private static SynchronizationContext editorSynchronizationContext;
+        private static long editorUpdateTick;
 
         internal static string CurrentInstanceId
         {
@@ -191,10 +192,15 @@ namespace VRCForge.Editor
             // any listener instance. Register it before Bootstrap can start a
             // listener from an update callback, so a successful Start never
             // depends on mutating the update delegate during its dispatch.
-            EditorApplication.update -= DrainInvocations;
-            EditorApplication.update += DrainInvocations;
-            EditorApplication.update -= DrainMcpWriteExecutions;
-            EditorApplication.update += DrainMcpWriteExecutions;
+            EditorApplication.update -= OnEditorUpdate;
+            EditorApplication.update += OnEditorUpdate;
+        }
+
+        private static void OnEditorUpdate()
+        {
+            editorUpdateTick++;
+            DrainInvocations();
+            DrainMcpWriteExecutions();
         }
 
         internal static void ScheduleInvocationPumpRegistration()
@@ -1667,14 +1673,7 @@ namespace VRCForge.Editor
                 }
                 if (pending.AsyncWrite)
                 {
-                    var operation = UnityAsyncJobRegistry.CreateMcpWrite(
-                        pending.ToolName,
-                        pending.ExecutionId,
-                        GetProjectRoot());
-                    pending.JobId = (string)operation["jobId"];
-                    pending.Response = AsyncWriteSubmissionResponse(operation);
-                    pending.QueueFrame = Time.frameCount;
-                    PendingMcpWriteExecutions.Enqueue(pending);
+                    QueueMcpWriteExecution(pending);
                     return;
                 }
                 var result = descriptor.Handler.Invoke(null, new object[] { pending.Arguments });
@@ -1696,9 +1695,21 @@ namespace VRCForge.Editor
             }
         }
 
+        private static void QueueMcpWriteExecution(PendingInvocation pending)
+        {
+            var operation = UnityAsyncJobRegistry.CreateMcpWrite(
+                pending.ToolName,
+                pending.ExecutionId,
+                GetProjectRoot());
+            pending.JobId = (string)operation["jobId"];
+            pending.Response = AsyncWriteSubmissionResponse(operation);
+            pending.QueueEditorTick = editorUpdateTick;
+            PendingMcpWriteExecutions.Enqueue(pending);
+        }
+
         private static void DrainMcpWriteExecutions()
         {
-            if (!PendingMcpWriteExecutions.TryPeek(out var next) || next.QueueFrame >= Time.frameCount) return;
+            if (!PendingMcpWriteExecutions.TryPeek(out var next) || next.QueueEditorTick >= editorUpdateTick) return;
             if (!PendingMcpWriteExecutions.TryDequeue(out var pending)) return;
             JObject result;
             var handlerStarted = false;
@@ -1743,12 +1754,13 @@ namespace VRCForge.Editor
         {
             if (pending == null || descriptor == null || !VRCForgeMcpToolContract.IsExpectedDescriptor(descriptor)
                 || descriptor.Permission == VRCForgeCommandAccess.ReadOnly) return false;
+            bool valid;
             if (pending.Lane == InvocationLane.ApprovedWrite)
-                return ValidateApprovedExecutionContext(pending.ExecutionContext, pending.ToolName, pending.Arguments);
-            if (pending.Lane == InvocationLane.ExternalMcpWrite)
+                valid = ValidateApprovedExecutionContext(pending.ExecutionContext, pending.ToolName, pending.Arguments);
+            else if (pending.Lane == InvocationLane.ExternalMcpWrite)
             {
                 string ignoredFailureCode;
-                return ValidateManagedWriteExecutionContext(
+                valid = ValidateManagedWriteExecutionContext(
                     pending.ExecutionContext,
                     pending.ToolName,
                     pending.Arguments,
@@ -1756,7 +1768,11 @@ namespace VRCForge.Editor
                     validateUnityObjectIdentities: true,
                     failureCode: out ignoredFailureCode);
             }
-            return false;
+            else return false;
+            // Consume once at handler dispatch, after the final queued-state validation.
+            return valid && ConsumeApprovedExecutionId(
+                (string)pending.ExecutionContext["executionId"],
+                pending.ExecutionContext["expiresAtUnixMs"].Value<long>());
         }
 
         private static JObject ReadMcpWriteOperation(JObject parameters)
@@ -1858,9 +1874,9 @@ namespace VRCForge.Editor
                     LastPeerReverifyFailure = "approved-context-invalid";
                 }
                 return validApproved
-                    && ConsumeApprovedExecutionId(
+                    && (pending.AsyncWrite || ConsumeApprovedExecutionId(
                         (string)pending.ExecutionContext["executionId"],
-                        pending.ExecutionContext["expiresAtUnixMs"].Value<long>());
+                        pending.ExecutionContext["expiresAtUnixMs"].Value<long>()));
             }
             if (pending.Lane == InvocationLane.ExternalMcpWrite)
             {
@@ -1879,7 +1895,7 @@ namespace VRCForge.Editor
                     return false;
                 }
             }
-            var consumed = ConsumeApprovedExecutionId(
+            var consumed = pending.AsyncWrite || ConsumeApprovedExecutionId(
                 (string)pending.ExecutionContext["executionId"],
                 pending.ExecutionContext["expiresAtUnixMs"].Value<long>());
             if (!consumed)

@@ -39,12 +39,10 @@ SCAN_SCOPE_TOOL_NAMES = frozenset({"vrc_capture_scan_scope", "vrc_validate_scan_
 EXPECTED_TOOL_COUNT = 101
 
 # Contract revisions describe the discovered tool surface; protocol-range
-# negotiation decides whether the App and Core can communicate. Revision 88
-# adds the read-only Unity ExecutionTarget identity discovery tool; revision 89
-# adds renderer-slot assignment; revision 90 adds generated-asset relocation.
-# These tools did not exist in the revision-87 surface.
+# negotiation decides whether the App and Core can communicate. Revision 191
+# adds NDMF error inspection to the revision-190 surface.
 PREVIOUS_CORE_UPGRADE_MISSING_TOOLS = frozenset(
-    {"vrc_get_ndmf_errors", "vrc_get_execution_targets", "vrc_set_renderer_material_slot", "vrc_relocate_generated_assets", "vrc_start_runtime_observation", "vrc_get_runtime_observation", "vrc_flatten_material_variant"}
+    {"vrc_get_ndmf_errors"}
 )
 PREVIOUS_CORE_TOOL_NAMES = EXPECTED_TOOL_NAMES - PREVIOUS_CORE_UPGRADE_MISSING_TOOLS
 PREVIOUS_CORE_TOOL_COUNT = len(PREVIOUS_CORE_TOOL_NAMES)

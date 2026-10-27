@@ -1,16 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json.Linq;
 
 namespace VRCForge.Editor
 {
     // Read-only diagnostic: report the NDMF build errors that Modular Avatar,
     // VRCFury and every other NDMF plugin surface through ErrorReportWindow.
-    // NDMF exposes no read API, so the internal report list is read through
-    // reflection; ObjectReference and SimpleError.ToString() return cached
-    // strings, which keeps the read safe from the TCP service thread even
-    // while a modal dialog blocks the editor update loop.
+    // NDMF exposes no report-list read API, so the list is read through
+    // reflection. Core dispatches this read on the Unity main thread, where
+    // IError.ToMessage() may safely initialize its localization assets.
     [VRCForgeCommand(
         toolId: "vrc_get_ndmf_errors",
         Summary = "Read-only: report NDMF build errors (Modular Avatar, VRCFury, and every other NDMF plugin) with plugin, pass, severity and formatted message. Native dialog windows are read by the App-side inspect_unity_editor_dialogs tool instead.",
@@ -41,6 +41,8 @@ namespace VRCForge.Editor
                     return errors;
                 }
                 var reportType = ndmfAssembly.GetType("nadena.dev.ndmf.ErrorReport");
+                var errorInterface = ndmfAssembly.GetType("nadena.dev.ndmf.IError");
+                var toMessage = errorInterface.GetMethod("ToMessage");
                 var reportsField = reportType.GetField("Reports", BindingFlags.Static | BindingFlags.NonPublic);
                 var reports = reportsField?.GetValue(null) as System.Collections.IEnumerable;
                 if (reports == null)
@@ -63,7 +65,7 @@ namespace VRCForge.Editor
                         if (theError == null) continue;
                         var entry = new JObject();
                         var errorType = theError.GetType();
-                        try { entry["message"] = theError.ToString(); }
+                        try { entry["message"] = (string)toMessage.Invoke(theError, null); }
                         catch (Exception ex) { entry["message"] = "<error formatting failed: " + ex.GetType().Name + ">"; }
                         var severity = errorType.GetProperty("Severity")?.GetValue(theError);
                         if (severity != null) entry["severity"] = severity.ToString();

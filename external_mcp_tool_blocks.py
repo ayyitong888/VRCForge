@@ -230,6 +230,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
     ),
     "diagnostics": frozenset(
         {
+            "vrcforge_get_ndmf_errors",
             "vrcforge_build_test_readiness",
             "vrcforge_capture_status",
             "vrcforge_get_build_test_status",

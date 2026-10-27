@@ -2,6 +2,10 @@
   "schema": "vrcforge.unitypackage-guid-manifest.v1",
   "entries": [
     {
+      "path": "Assets/VRCForge/Editor/EditorDialogTools.cs",
+      "guid": "a4e48ad5a8c4475a93fef302270ac08b"
+    },
+    {
       "path": "Assets/VRCForge/Editor/TransformPreservationSnapshot.cs",
       "guid": "ffd6c337e38c4deda5ff49fe5c2100c3"
     },

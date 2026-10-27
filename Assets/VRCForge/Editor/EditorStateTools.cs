@@ -823,6 +823,7 @@ namespace VRCForge.Editor
         {
             var result = new JObject
             {
+                ["schema"] = "vrcforge.write-operation.v1",
                 ["jobId"] = record["job_id"]?.DeepClone() ?? JValue.CreateNull(),
                 ["executionId"] = record["operation"]?["execution_id"]?.DeepClone() ?? JValue.CreateNull(),
                 ["status"] = record["status"]?.DeepClone() ?? new JValue("unknown"),
