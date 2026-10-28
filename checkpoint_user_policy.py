@@ -12,6 +12,39 @@ from typing import Any
 _CHECKPOINT_SKIP_AUTHORITY_SCHEMA = "vrcforge.user_checkpoint_skip_authority.v1"
 
 
+def bind_external_checkpoint_skip(
+    choice: object, *, session_id: str, project_root: str, tool: str,
+    arguments_digest: str, plan_digest: str,
+) -> dict[str, Any]:
+    """Bind the external host Agent's quoted user instruction to this write.
+
+    MCP does not provide the host transcript. The host Agent is responsible
+    for quoting an explicit user opt-out; this is not App-message attestation.
+    The gateway supplies the authenticated session and prepared write scope.
+    """
+    if (
+        not isinstance(choice, Mapping)
+        or set(choice) != {"mode", "quote"}
+        or choice.get("mode") != "skip"
+        or not isinstance(choice.get("quote"), str)
+        or not choice["quote"].strip()
+    ):
+        raise ValueError("checkpointChoice requires mode=skip and the user's exact explicit opt-out quote.")
+    if not session_id or not project_root:
+        raise ValueError("Checkpoint choice requires the current authenticated MCP session and exact project root.")
+    return {
+        "schema": "vrcforge.user_checkpoint_policy.v1",
+        "status": "skipped_by_user",
+        "source": "external_user_instruction",
+        "sourceQuote": choice["quote"],
+        "sessionId": session_id,
+        "projectRoot": str(Path(project_root).expanduser().resolve()),
+        "targetTool": tool,
+        "approvedArgumentsSha256": arguments_digest,
+        "approvedPlanDigest": plan_digest,
+    }
+
+
 def _digest(value: Mapping[str, Any]) -> str:
     encoded = json.dumps(dict(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

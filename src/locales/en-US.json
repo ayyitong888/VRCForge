@@ -1047,6 +1047,7 @@
       "genericSummary": "Applies one requested change to {{project}}.",
       "genericNotificationSummary": "Apply one supervised change to the current Unity project.",
       "rollbackAvailable": "A checkpoint is created first. Restoring it requires separate approval.",
+      "rollbackSkippedByUser": "No checkpoint for this operation (user statement): {{sourceQuote}}",
       "restoreEffect": "Restores the previously saved state. It cannot repeat this rollback automatically.",
       "rollbackDepends": "Review the details before allowing. Undo support depends on this operation."
     }

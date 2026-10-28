@@ -24,7 +24,21 @@ def test_projection_never_mutates_shared_nested_schemas() -> None:
     before = deepcopy(source)
     write = projection.canonical_unity_write_tool_input_schema("vrcforge_manage_fx_animator")
     preview = projection.canonical_unity_read_tool_input_schema("vrcforge_preview_manage_fx_animator")
-    assert write == preview
+    assert {**write, "properties": {k: v for k, v in write["properties"].items() if k != "checkpointChoice"}} == preview
+    assert write["properties"]["checkpointChoice"] == {
+        "type": "object",
+        "description": (
+            "Only set mode=skip when the user explicitly instructed you not to use checkpoints. "
+            "Copy the exact user instruction into quote. Omit this field otherwise."
+        ),
+        "required": ["mode", "quote"],
+        "properties": {
+            "mode": {"type": "string", "const": "skip"},
+            "quote": {"type": "string", "minLength": 1},
+        },
+        "additionalProperties": False,
+    }
+    assert "checkpointChoice" not in write["required"]
     assert "executionTarget" in write["required"]
     write["properties"]["action"]["enum"].clear()
     write["required"].clear()

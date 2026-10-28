@@ -1041,6 +1041,7 @@
       "genericSummary": "將對「{{project}}」套用一項要求的變更。",
       "genericNotificationSummary": "對目前 Unity 專案套用一項受監督的變更。",
       "rollbackAvailable": "執行前會建立檢查點；還原仍需另行確認。",
+      "rollbackSkippedByUser": "本次無還原點（使用者聲明引用）：{{sourceQuote}}",
       "restoreEffect": "將還原先前儲存的狀態；不會自動重複復原。",
       "rollbackDepends": "允許前請查看詳細資料；能否復原取決於這次操作。"
     }

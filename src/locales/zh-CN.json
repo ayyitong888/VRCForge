@@ -1047,6 +1047,7 @@
       "genericSummary": "将对“{{project}}”应用一项请求的更改。",
       "genericNotificationSummary": "对当前 Unity 项目应用一项受监督的更改。",
       "rollbackAvailable": "执行前会创建检查点；恢复仍需另行确认。",
+      "rollbackSkippedByUser": "本次无还原点（用户声明引用）：{{sourceQuote}}",
       "restoreEffect": "将恢复此前保存的状态；不会自动重复回滚。",
       "rollbackDepends": "允许前请查看详情；是否能撤销取决于本次操作。"
     }

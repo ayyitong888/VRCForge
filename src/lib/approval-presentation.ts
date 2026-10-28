@@ -87,6 +87,20 @@ export function presentApproval(approval: AgentApproval, t: TFunction): Approval
     notificationSummary = t("approval.presentation.genericNotificationSummary");
   }
 
+  const checkpointPolicy = approval.taskContext?.checkpointUserPolicy;
+  if (
+    checkpointPolicy?.schema === "vrcforge.user_checkpoint_policy.v1" &&
+    checkpointPolicy.status === "skipped_by_user" &&
+    (checkpointPolicy.source === "user_message" ||
+      checkpointPolicy.source === "external_user_instruction") &&
+    typeof checkpointPolicy.sourceQuote === "string" &&
+    checkpointPolicy.sourceQuote.trim()
+  ) {
+    rollback = t("approval.presentation.rollbackSkippedByUser", {
+      sourceQuote: checkpointPolicy.sourceQuote,
+    });
+  }
+
   return {
     title,
     summary,

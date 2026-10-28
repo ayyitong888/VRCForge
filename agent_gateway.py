@@ -3120,7 +3120,7 @@ class AgentGateway:
                 "confirmationPolicy": "risk_based",
                 "baseRiskLevel": risk_level,
                 "checkpointPolicy": (
-                    "required_before_mutation"
+                    "required_unless_user_explicitly_skips"
                     if handler.pre_write_checkpoint_required
                     else "handler_managed_atomic_receipt"
                 ),
@@ -3928,7 +3928,11 @@ class AgentGateway:
         if execution_target is not None and is_execution_target_reference(public_reference):
             preparation_arguments["executionTarget"] = execution_target
         try:
-            prepared = self.approval_transactions.prepare_external_mcp_write(name, preparation_arguments)
+            prepared = self.approval_transactions.prepare_external_mcp_write(
+                name, preparation_arguments,
+                **({"external_session_id": self.execution_target_session_context()}
+                   if "checkpointChoice" in preparation_arguments else {}),
+            )
         except AgentGatewayError as exc:
             return self._external_mcp_no_write_error(name, "write_preparation", exc)
         except Exception as exc:  # noqa: BLE001 - preserve the redacted causal chain for the calling Agent.
@@ -3996,6 +4000,8 @@ class AgentGateway:
             applied = self.approval_transactions.execute_prepared_external_mcp_write(
                 prepared,
                 agent_name=agent_name,
+                **({"external_session_id": self.execution_target_session_context()}
+                   if prepared.get("checkpointUserPolicy") is not None else {}),
             )
         except AgentGatewayError as exc:
             return self._external_mcp_no_write_error(name, "transaction_start", exc)
@@ -4049,6 +4055,11 @@ class AgentGateway:
             or ""
         )
         tool_definition_digest = str(prepared.get("toolDefinitionDigest") or "")
+        checkpoint_policy = ensure_dict(prepared.get("checkpointUserPolicy"))
+        checkpoint_warning = (
+            "No restore point for this write. User instruction: " + str(checkpoint_policy["sourceQuote"])
+            if checkpoint_policy else ""
+        )
         record = {
             "operationId": operation_id,
             "targetTool": str(prepared.get("targetTool") or ""),
@@ -4102,6 +4113,12 @@ class AgentGateway:
             "riskLevel": str(prepared.get("riskLevel") or ""),
             "reason": str(prepared.get("confirmationReason") or ""),
             "preview": redact_sensitive(prepared.get("preview")),
+            **({
+                "checkpointWarning": checkpoint_warning,
+                "rollbackAvailable": False,
+                "sourceQuote": checkpoint_policy["sourceQuote"],
+                "taskContext": {"checkpointUserPolicy": checkpoint_policy},
+            } if checkpoint_policy else {}),
             "confirmation": confirmation,
             "resubmit": {
                 "placement": "arguments.confirmation",
@@ -4112,7 +4129,8 @@ class AgentGateway:
             "committed": False,
             "commitState": "not_started",
             "message": (
-                "No write has started. The external Agent must show this risk to the user and "
+                (checkpoint_warning + " " if checkpoint_warning else "")
+                + "No write has started. The external Agent must show this risk to the user and "
                 "repeat the same tool call with all original arguments unchanged, add the returned "
                 "confirmation object at arguments.confirmation, and set "
                 "arguments.confirmation.decision to approve or reject."
@@ -4152,6 +4170,11 @@ class AgentGateway:
             expected_tool_definition_digest = str(
                 record.get("toolDefinitionDigest") or ""
             )
+            checkpoint_policy = ensure_dict(ensure_dict(record.get("prepared")).get("checkpointUserPolicy"))
+            if checkpoint_policy and checkpoint_policy.get("sessionId") != self.execution_target_session_context():
+                return self._invalid_external_mcp_confirmation(
+                    target_tool, "Checkpoint choice belongs to another MCP session.",
+                )
             actual_target = str(target_tool or "")
             actual_digest = str(request_arguments_digest or "")
             supplied_execution_target_digest = str(
@@ -4251,6 +4274,8 @@ class AgentGateway:
             applied = self.approval_transactions.execute_prepared_external_mcp_write(
                 stored_prepared,
                 agent_name=agent_name,
+                **({"external_session_id": self.execution_target_session_context()}
+                   if stored_prepared.get("checkpointUserPolicy") is not None else {}),
             )
         except AgentGatewayError as exc:
             result = self._external_mcp_no_write_error(
@@ -4452,6 +4477,9 @@ class AgentGateway:
             "errorDetails",
             "consoleVerification",
             "completionVerification",
+            "checkpointSkipped",
+            "sourceQuote",
+            "rollbackAvailable",
         ):
             if key in applied:
                 value = applied[key]
@@ -7443,6 +7471,7 @@ class AgentGateway:
                 checkpoint_user_policy = None
                 checkpoint_resolved_execution_target = None
                 action_arguments = dict(execution_arguments)
+                argument_checkpoint_choice = action_arguments.pop("checkpointChoice", None)
                 if step_tool in {
                     "vrcforge_edit_file",
                     "vrcforge_write_file",
@@ -7458,7 +7487,7 @@ class AgentGateway:
                     checkpoint_user_policy = bind_runtime_checkpoint_policy(
                         step_tool,
                         action_arguments,
-                        plan.get("checkpointChoice"),
+                        plan.get("checkpointChoice") or argument_checkpoint_choice,
                         correction_for_action_id=str(plan.get("correctionForActionId") or ""),
                     )
                     if checkpoint_correction_block_reason:

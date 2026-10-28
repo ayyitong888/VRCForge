@@ -446,7 +446,7 @@ CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON = (
     "Checkpoint restore always requires manual user approval because it can remove "
     "or replace project files."
 )
-from checkpoint_user_policy import bind_approved_write, checkpoint_skip_matches
+from checkpoint_user_policy import bind_approved_write, bind_external_checkpoint_skip, checkpoint_skip_matches
 CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON = (
     "Checkpoint restore automatic launch is blocked after three proven zero-effect failures; "
     "a new invocation requires explicit manual user approval."
@@ -1981,6 +1981,7 @@ class AgentApprovalTransactionService:
                 approval["taskContext"] = task_context
                 self._ports.append_audit({
                     "event": "approval_checkpoint_skipped_by_user",
+                    "checkpointSkipped": True,
                     "status": "skipped_by_user",
                     "source": "user_message",
                     "sourceQuote": str(ensure_dict(task_context.get("checkpointUserPolicy")).get("sourceQuote") or ""),
@@ -3902,6 +3903,8 @@ class AgentApprovalTransactionService:
         self,
         target_tool: str,
         params: Mapping[str, Any] | None,
+        *,
+        external_session_id: str = "",
     ) -> dict[str, Any]:
         """Prepare one real MCP write under the user's selected permission policy."""
 
@@ -3927,7 +3930,20 @@ class AgentApprovalTransactionService:
                 status_code=403,
             )
 
-        arguments = ensure_dict(params or {})
+        arguments = dict(params or {})
+        has_checkpoint_choice = "checkpointChoice" in arguments
+        forbidden_skip_fields = {
+            "skipCheckpoint", "skipCheckpoints", "skip_checkpoint", "checkpointSkipped",
+            "checkpointUserPolicy", "_checkpointUserPolicy", "checkpointSkipAuthority",
+        }
+        if forbidden_skip_fields.intersection(arguments):
+            raise AgentGatewayError(
+                "Use checkpointChoice with the user's explicit opt-out quote; private checkpoint flags are not accepted.",
+                status_code=400,
+            )
+        checkpoint_choice = arguments.pop("checkpointChoice", None)
+        if has_checkpoint_choice and checkpoint_choice is None:
+            raise AgentGatewayError("checkpointChoice must contain mode=skip and the user's quote.", status_code=400)
         arguments.pop("_vrcforge_incident_restore_auto", None)
         arguments.pop("_restorePrepareForRecovery", None)
         caller_requested_preview = arguments.get("preview") is True
@@ -4058,7 +4074,7 @@ class AgentApprovalTransactionService:
         arguments_digest = stable_hash(
             json.dumps(arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         )
-        return {
+        prepared = {
             "targetTool": normalized_target,
             "arguments": arguments,
             "argumentsDigest": arguments_digest,
@@ -4076,6 +4092,19 @@ class AgentApprovalTransactionService:
             "authoritativePreviewOnly": authoritative_preview_only,
             "userConstraints": user_constraints,
         }
+        if checkpoint_choice is not None:
+            try:
+                checkpoint_policy = bind_external_checkpoint_skip(
+                    checkpoint_choice, session_id=external_session_id,
+                    project_root=str(extract_project_root(arguments) or ""),
+                    tool=normalized_target, arguments_digest=arguments_digest,
+                    plan_digest=prepared["planDigest"],
+                )
+            except ValueError as exc:
+                raise AgentGatewayError(str(exc), status_code=400) from exc
+            if _requires_pre_write_checkpoint(write_handler, arguments) and not authoritative_preview_only:
+                prepared["checkpointUserPolicy"] = checkpoint_policy
+        return prepared
 
     def _build_external_mcp_execution_plan(
         self,
@@ -4250,6 +4279,7 @@ class AgentApprovalTransactionService:
         prepared: Mapping[str, Any],
         *,
         agent_name: str = "mcp-agent",
+        external_session_id: str = "",
     ) -> dict[str, Any]:
         """Execute one prepared MCP operation without the internal Agent loop."""
 
@@ -4330,6 +4360,20 @@ class AgentApprovalTransactionService:
                     "The prepared external MCP write ExecutionTarget no longer matches its approval binding.",
                     status_code=409,
                 )
+        checkpoint_policy = prepared.get("checkpointUserPolicy")
+        if checkpoint_policy is not None:
+            try:
+                expected_policy = bind_external_checkpoint_skip(
+                    {"mode": "skip", "quote": ensure_dict(checkpoint_policy).get("sourceQuote")},
+                    session_id=external_session_id,
+                    project_root=str(extract_project_root(arguments) or ""),
+                    tool=target_tool, arguments_digest=actual_digest, plan_digest=actual_plan_digest,
+                )
+            except ValueError as exc:
+                raise AgentGatewayError(str(exc), status_code=409) from exc
+            if checkpoint_policy != expected_policy:
+                raise AgentGatewayError("Checkpoint choice does not match this MCP session and prepared write.", status_code=409)
+        checkpoint_skip_receipt: dict[str, Any] = {}
         operation_id = str(prepared.get("_externalOperationId") or "").strip() or (
             f"mcpwrite_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_"
             f"{secrets.token_hex(4)}"
@@ -4467,6 +4511,7 @@ class AgentApprovalTransactionService:
             if (
                 (write_handler.requires_approved_execution_context or bool(write_handler.external_mcp_capability))
                 and _requires_pre_write_checkpoint(write_handler, arguments)
+                and checkpoint_policy is None
                 and arguments.get("preview") is not True
                 and (extract_project_root(arguments) is not None)
                 and extract_project_root(arguments).is_dir()
@@ -4505,6 +4550,18 @@ class AgentApprovalTransactionService:
                         arguments,
                         checkpoint,
                     )
+            if checkpoint_policy is not None and arguments.get("preview") is not True:
+                checkpoint_skip_receipt = {
+                    "checkpointSkipped": True,
+                    "sourceQuote": checkpoint_policy["sourceQuote"],
+                    "rollbackAvailable": False,
+                }
+                self._ports.append_audit({
+                    "event": "external_mcp_checkpoint_skipped_by_user",
+                    "operationId": operation_id,
+                    **checkpoint_policy,
+                    **checkpoint_skip_receipt,
+                })
             if (
                 write_handler.requires_approved_execution_context
                 and expected_execution_target_digest
@@ -4716,6 +4773,7 @@ class AgentApprovalTransactionService:
                 "ok": True,
                 "operationId": operation_id,
                 "tool": target_tool,
+                **checkpoint_skip_receipt,
                 "status": (
                     "pending"
                     if operation_pending
@@ -4770,6 +4828,7 @@ class AgentApprovalTransactionService:
             self._ports.append_audit(
                 {
                     "event": "external_mcp_write_completed",
+                    **checkpoint_skip_receipt,
                     "operationId": operation_id,
                     "targetTool": target_tool,
                     "agent": str(agent_name or "mcp-agent")[:120],
@@ -4946,6 +5005,7 @@ class AgentApprovalTransactionService:
             payload = {
                 "ok": False,
                 "operationId": operation_id,
+                **checkpoint_skip_receipt,
                 "status": "failed",
                 "result": redact_sensitive(source_failure_result),
                 "error": str(source_failure_result.get("error") or exception_text),
@@ -4976,6 +5036,7 @@ class AgentApprovalTransactionService:
             self._ports.append_audit(
                 {
                     "event": "external_mcp_write_failed",
+                    **checkpoint_skip_receipt,
                     "operationId": operation_id,
                     "targetTool": target_tool,
                     "agent": str(agent_name or "mcp-agent")[:120],

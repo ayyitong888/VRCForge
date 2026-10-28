@@ -317,6 +317,12 @@ export type AgentApproval = {
     clientTurnId?: string;
     actionId?: string;
     approvalRevisionUsed?: boolean;
+    checkpointUserPolicy?: {
+      schema?: string;
+      status?: string;
+      source?: string;
+      sourceQuote?: string;
+    } & Record<string, unknown>;
   } & Record<string, unknown>;
   taskCompletion?: Record<string, unknown>;
   preview?: {

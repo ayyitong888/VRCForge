@@ -163,6 +163,22 @@ def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
             "additionalProperties": True,
         }
 
+    properties = dict(schema.get("properties") or {})
+    properties["checkpointChoice"] = {
+        "type": "object",
+        "description": (
+            "Only set mode=skip when the user explicitly instructed you not to use checkpoints. "
+            "Copy the exact user instruction into quote. Omit this field otherwise."
+        ),
+        "required": ["mode", "quote"],
+        "properties": {
+            "mode": {"type": "string", "const": "skip"},
+            "quote": {"type": "string", "minLength": 1},
+        },
+        "additionalProperties": False,
+    }
+    schema["properties"] = properties
+
     # This is part of the canonical write schema, not an external-MCP-only
     # decoration. Internal and external Agents must reason over the exact same
     # namespace lock contract even though their visible Tool projections differ.

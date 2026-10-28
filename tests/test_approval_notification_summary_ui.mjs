@@ -34,6 +34,64 @@ assert.equal(single.title, "approval.presentation.captureSingleTitle");
 assert.equal(single.summary, "approval.presentation.captureSingleSummary");
 assert.equal(single.notificationSummary, "approval.presentation.captureSingleNotificationSummary");
 
+const checkpointQuote = "本轮上述修改不用检查点，继续并保存";
+const skippedCheckpoint = presentApproval(
+  {
+    id: "approval-checkpoint-skipped",
+    status: "pending",
+    targetTool: "vrcforge_write_file",
+    taskContext: {
+      checkpointUserPolicy: {
+        schema: "vrcforge.user_checkpoint_policy.v1",
+        status: "skipped_by_user",
+        source: "user_message",
+        sourceQuote: checkpointQuote,
+      },
+    },
+  },
+  translate,
+);
+assert.equal(
+  skippedCheckpoint.rollback,
+  `approval.presentation.rollbackSkippedByUser:${checkpointQuote}`,
+  "the approval rollback row must show the explicit no-checkpoint warning and source quote",
+);
+const externalSkippedCheckpoint = presentApproval(
+  {
+    id: "approval-external-checkpoint-skipped",
+    status: "pending",
+    targetTool: "external_mcp_write",
+    taskContext: {
+      checkpointUserPolicy: {
+        schema: "vrcforge.user_checkpoint_policy.v1",
+        status: "skipped_by_user",
+        source: "external_user_instruction",
+        sourceQuote: "Skip this MCP checkpoint for this approved action",
+      },
+    },
+  },
+  translate,
+);
+assert.equal(
+  externalSkippedCheckpoint.rollback,
+  "approval.presentation.rollbackSkippedByUser:Skip this MCP checkpoint for this approved action",
+);
+const ordinaryApproval = presentApproval(
+  { id: "approval-normal", status: "pending", targetTool: "vrcforge_write_file" },
+  translate,
+);
+assert.equal(ordinaryApproval.rollback, "approval.presentation.rollbackDepends");
+const invalidCheckpointPolicy = presentApproval(
+  {
+    id: "approval-invalid-checkpoint-policy",
+    status: "pending",
+    targetTool: "vrcforge_write_file",
+    taskContext: { checkpointUserPolicy: { schema: "other", sourceQuote: checkpointQuote } },
+  },
+  translate,
+);
+assert.equal(invalidCheckpointPolicy.rollback, "approval.presentation.rollbackDepends");
+
 const secretMarker = "SENSITIVE_INPUT_SENTINEL";
 const general = presentApproval(
   {
@@ -119,6 +177,11 @@ for (const locale of ["en-US", "zh-CN", "zh-TW", "ja-JP"]) {
   assert.ok(messages.approval.presentation.captureSingleSummary);
   assert.ok(messages.approval.presentation.generalTitle);
   assert.ok(messages.approval.presentation.generalNotificationSummary);
+  assert.ok(messages.approval.presentation.rollbackSkippedByUser.includes("{{sourceQuote}}"));
 }
+assert.equal(
+  JSON.parse(await read("src/locales/zh-CN.json")).approval.presentation.rollbackSkippedByUser,
+  "本次无还原点（用户声明引用）：{{sourceQuote}}",
+);
 
 console.log("approval notification summary UI contract: ok");

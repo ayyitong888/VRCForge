@@ -259,6 +259,7 @@ def test_approved_write_skip_omits_checkpoint_but_keeps_writer_and_persisted_rea
     audit = [row for row in audit if row.get("event") == "approval_checkpoint_skipped_by_user"]
     assert len(audit) == 1
     assert audit[0]["rollbackAvailable"] is False
+    assert audit[0]["checkpointSkipped"] is True
     assert audit[0]["sourceQuote"] == "skip checkpoint"
 
 
@@ -419,3 +420,42 @@ def test_skip_binding_rejects_different_project_identity(tmp_path):
         requested_arguments=args, approved_arguments=args,
         approved_project_root=str(other.resolve()),
     ) is None
+
+
+def test_internal_write_argument_choice_uses_current_owner_message(monkeypatch):
+    from test_agent_loop_p0 import AgentLoopP0Tests
+
+    fixture = AgentLoopP0Tests("test_unverifiable_checkpoint_skip_correction_never_reenters_write_transaction")
+    fixture.setUp()
+    try:
+        gateway = fixture.gateway
+        project = fixture._unity_project()
+        quote = "This write does not need a checkpoint."
+        captured = []
+        plan = {
+            "planner": "llm", "summary": "Apply the requested change.", "writeNeeded": True,
+            "writeTool": "vrcforge_set_gameobject_active", "continueLoop": False, "nextStep": "call_tool",
+            "writeParams": {
+                "projectPath": str(project), "gameObjectPath": "SampleAvatar_Default", "active": True,
+                "executionTarget": fixture._fixture_execution_target(project),
+                "checkpointChoice": {"mode": "skip", "quote": quote},
+            },
+        }
+        monkeypatch.setattr(gateway.runtime_planner, "plan_agent_turn", lambda *_a, **_k: plan)
+        def capture(_self, tool, args, agent, **kwargs):
+            captured.append((args, kwargs["task_context"]))
+            return {"ok": True, "status": "needs_approval", "outcome": {"status": "needs_approval"}}
+        monkeypatch.setattr(AgentApprovalTransactionService, "_execute_write_request", capture)
+        gateway.runtime_message({
+            "message": quote, "projectPath": str(project), "projectRoot": str(project),
+            "session_id": "owner-session", "client_turn_id": "owner-turn",
+            "_humanUserMessageSource": {"source": "app_user_message", "message": quote,
+                "sessionId": "owner-session", "clientTurnId": "owner-turn", "projectRoot": str(project)},
+        })
+        assert captured
+        args, context = captured[0]
+        assert "checkpointChoice" not in args
+        assert context["checkpointUserPolicy"]["sourceQuote"] == quote
+        assert context["checkpointUserPolicy"]["source"] == "user_message"
+    finally:
+        fixture.tearDown()

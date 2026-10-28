@@ -1041,6 +1041,7 @@
       "genericSummary": "「{{project}}」に要求された変更を 1 件適用します。",
       "genericNotificationSummary": "現在の Unity プロジェクトに監督付きの変更を 1 件適用します。",
       "rollbackAvailable": "先にチェックポイントを作成します。復元には別の承認が必要です。",
+      "rollbackSkippedByUser": "今回の復元ポイントなし（ユーザー申告）：{{sourceQuote}}",
       "restoreEffect": "保存済みの状態へ戻します。この復元を自動では繰り返しません。",
       "rollbackDepends": "許可する前に詳細を確認してください。元に戻せるかは操作によって異なります。"
     }
