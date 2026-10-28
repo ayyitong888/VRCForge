@@ -29,6 +29,7 @@ function Fixture(){
  const scroll=useConversationScroll({chatKey:chat,endRef});
  window.switchChat=()=>{setChat('chat-b');setItems([user(100),answer(100),user(101),answer(101)]);};
  window.grow=()=>setItems(s=>s.map((item,i)=>i===s.length-1?{...item,response:{...item.response,plan:{...item.response.plan,reply:item.response.plan.reply+'\\n\\nExtra streamed content.'.repeat(80)}}}:item));
+ window.longAnswer=(i)=>setItems(s=>s.map(item=>item.id==='answer-'+i?{...item,response:{...item.response,plan:{...item.response.plan,reply:('Answer '+i+'. Long preview text for independent scrolling. ').repeat(120)}}}:item));
  window.single=()=>setItems([user(1),answer(1)]);
  window.streaming=()=>setItems([user(1),answer(1),user(2),{id:'stream-2',type:'streaming',clientTurnId:'turn-2',text:'Working',phase:'receiving_response'}]);
  window.settle=()=>setItems([user(1),answer(1),user(2),answer(2)]);
@@ -67,7 +68,38 @@ try {
   await rail.waitFor(); assert.equal(await marks.count(), 80, "each human turn has exactly one reachable marker");
   const lastMarkBox = await marks.last().boundingBox(); const initialRailBox = await rail.boundingBox();
   assert.ok(lastMarkBox.y + lastMarkBox.height <= initialRailBox.y + initialRailBox.height, "80 ticks fit in the rail without a second long scroll");
+  await marks.first().hover();
+  const preview = page.locator("[data-chat-position-preview]");
+  await preview.waitFor({ state: "visible" });
+  assert.match(await preview.textContent(), /Prompt 0: inspect this part of the conversation\./, "hover shows the corresponding user-message preview");
+  assert.match(await preview.textContent(), /Answer 0\./, "hover also shows the associated public assistant response");
+  const firstPreviewBox = await preview.boundingBox();
+  assert.ok(firstPreviewBox.y >= 0 && firstPreviewBox.y + firstPreviewBox.height <= 850, "preview card stays within the viewport beside the top tick");
   const key = await marks.nth(30).getAttribute("data-chat-position-marker");
+  const scrollBeforeHover = await scroller.evaluate(e => e.scrollTop);
+  const currentBeforeHover = await rail.locator('[aria-current="location"]').getAttribute("data-chat-position-marker");
+  await marks.nth(30).hover();
+  await page.waitForFunction(() => document.querySelector('[data-chat-position-preview]')?.textContent?.includes("Prompt 30:"));
+  const previewBox = await preview.boundingBox();
+  await page.mouse.move(previewBox.x + previewBox.width / 2, previewBox.y + previewBox.height / 2);
+  await page.waitForTimeout(220);
+  assert.equal(await preview.isVisible(), true, "pointer can move from a tick onto its preview without the card flickering away");
+  assert.equal(await scroller.evaluate(e => e.scrollTop), scrollBeforeHover, "hovering a marker does not navigate the conversation");
+  assert.equal(await rail.locator('[aria-current="location"]').getAttribute("data-chat-position-marker"), currentBeforeHover, "hovering does not change the current reading position");
+  await page.evaluate(() => window.longAnswer(30));
+  await page.waitForFunction(() => {
+    const card = document.querySelector('[data-chat-position-preview]');
+    return card && card.scrollHeight > card.clientHeight;
+  });
+  const scrollBeforePreviewWheel = await scroller.evaluate(e => e.scrollTop);
+  const longPreviewBox = await preview.boundingBox();
+  await page.mouse.move(longPreviewBox.x + longPreviewBox.width / 2, longPreviewBox.y + longPreviewBox.height / 2);
+  await page.mouse.wheel(0, 220);
+  await page.waitForFunction(() => document.querySelector('[data-chat-position-preview]')?.scrollTop > 0);
+  assert.equal(await scroller.evaluate(e => e.scrollTop), scrollBeforePreviewWheel, "preview scrolling stays inside the card instead of scrolling the conversation");
+  assert.equal(await preview.isVisible(), true, "wheel scrolling keeps the hovered preview open");
+  await page.mouse.move(600, 20);
+  await preview.waitFor({ state: "hidden" });
   await marks.nth(30).click();
   await page.waitForFunction(() => document.getElementById("pinned").textContent === "false");
   await page.waitForFunction(key => document.querySelector('[data-chat-position-marker][aria-current="location"]')?.getAttribute('data-chat-position-marker') === key, key);
@@ -76,7 +108,11 @@ try {
   assert.ok(Math.abs(await scroller.evaluate(e => e.scrollTop) - top) < 3, "rail navigation must stop automatic follow of streamed replies");
   await scroller.evaluate(e => { e.scrollTop = 0; });
   await page.waitForFunction(() => document.querySelector('[data-chat-position-marker][aria-current="location"]') === document.querySelector('[data-chat-position-marker]'));
-  await marks.nth(10).focus(); await marks.nth(10).press("Enter");
+  await marks.nth(10).focus();
+  await preview.waitFor({ state: "visible" });
+  assert.match(await preview.textContent(), /Prompt 10:/, "keyboard focus reveals the matching message preview");
+  assert.equal(await marks.nth(10).getAttribute("aria-describedby"), await preview.getAttribute("id"), "focused tick is associated with its preview for assistive technology");
+  await marks.nth(10).press("Enter");
   await page.waitForFunction(() => document.querySelector('[data-chat-history-scroll]').scrollTop > 100);
   const out = process.env.VRCFORGE_RAIL_SCREENSHOT_DIR;
   if (out) { mkdirSync(out, { recursive: true }); await page.screenshot({ path: resolve(out, "rail-wide.png") }); }
@@ -94,7 +130,7 @@ try {
   assert.deepEqual(await marks.evaluateAll(nodes => nodes.map(n => n.getAttribute('data-chat-position-marker'))), before, "settling a stream preserves turn identity");
   await page.evaluate(() => window.userOnly());
   await page.waitForFunction(() => document.querySelectorAll('[data-chat-position-marker]').length === 2);
-  const labels = await marks.evaluateAll(nodes => nodes.map(n => n.getAttribute('title')));
+  const labels = await marks.evaluateAll(nodes => nodes.map(n => n.getAttribute('aria-label')));
   assert.ok(labels[0].includes('Prompt 1') && labels[1].includes('My selected answer'), 'previews contain only human input, including submitted answers');
   assert.ok(labels.every(label => !label.includes('Assistant question') && !label.includes('Answer 2') && !label.includes('notification-trigger')), 'assistant, tool and internal notification content never becomes a navigation preview');
   await page.evaluate(() => window.long());
@@ -105,6 +141,16 @@ try {
     if(!marker)return false;const r=marker.getBoundingClientRect(),p=marker.parentElement.getBoundingClientRect();
     return r.top>=p.top && r.bottom<=p.bottom;
   });
+  const railList = rail.locator('[data-chat-position-marker-list]');
+  await railList.evaluate(e => { e.scrollTop = 0; });
+  const scrollBeforeRailWheel = await scroller.evaluate(e => e.scrollTop);
+  const currentBeforeRailWheel = await rail.locator('[aria-current="location"]').getAttribute("data-chat-position-marker");
+  const railListBox = await railList.boundingBox();
+  await page.mouse.move(railListBox.x + railListBox.width / 2, railListBox.y + railListBox.height / 2);
+  await page.mouse.wheel(0, 240);
+  await page.waitForFunction(() => document.querySelector('[data-chat-position-marker-list]')?.scrollTop > 0);
+  assert.equal(await scroller.evaluate(e => e.scrollTop), scrollBeforeRailWheel, "wheel scrolling a long rail does not scroll the conversation");
+  assert.equal(await rail.locator('[aria-current="location"]').getAttribute("data-chat-position-marker"), currentBeforeRailWheel, "wheel scrolling the rail preserves the current conversation position");
   await page.evaluate(() => window.single()); await rail.waitFor({ state: "detached" });
   for (const status of ["running", "waiting_for_model", "waiting_for_tool"]) {
     await page.evaluate(status => window.restoreRun(status), status);

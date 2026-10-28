@@ -24,7 +24,7 @@ import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
 import { projectConversationSteeringMessages } from "../../lib/chat-steering-projection";
-import { conversationItemRenderKey } from "../../lib/conversation-utils";
+import { conversationItemRenderKey, visibleAgentDialogueText } from "../../lib/conversation-utils";
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { conversationRoundDateSeparators } from "../../lib/message-time";
 import { projectConversationTasks } from "../../lib/chat-task-projection";
@@ -338,13 +338,23 @@ export function ChatWorkspace({
     const occurrences = new Map<string, number>();
     const seenTurns = new Set<string>();
     const markers: ChatPositionMarker[] = [];
+    const responsesByTurn = new Map<string, Extract<ConversationItem, { type: "agent" }>["response"]>();
+    for (const item of conversationItems) {
+      if (item.type === "agent" && item.response.clientTurnId) responsesByTurn.set(item.response.clientTurnId, item.response);
+    }
     const addUser = (user: Extract<ConversationItem, { type: "user" | "question_answer" }>, key: string) => {
       if (user.text.trim() === "<task-notification-trigger/>") return;
       const turn = user.type === "user" ? user.clientTurnId || user.id : user.id;
       if (seenTurns.has(turn)) return;
       seenTurns.add(turn);
       const preview = user.text.replace(/\s+/g, " ").trim();
-      markers.push({ key, preview: preview.length > 96 ? `${preview.slice(0, 95)}…` : preview });
+      const response = user.type === "user" ? responsesByTurn.get(turn) : undefined;
+      markers.push({ key, preview: preview.length > 96 ? `${preview.slice(0, 95)}…` : preview,
+        getAssistantPreview: response ? () => {
+          const text = visibleAgentDialogueText(response).replace(/\s+/g, " ").trim();
+          return text.length > 600 ? `${text.slice(0, 599)}…` : text;
+        } : undefined,
+      });
     };
     for (const item of conversationItems) {
       const renderKey = conversationItemRenderKey(item, conversationRenderScope, occurrences);
