@@ -13,6 +13,7 @@ import pytest
 
 import dashboard_server
 import vrcforge_runtime_paths as runtime_paths
+from outfit_import_planner import build_outfit_import_plan
 from prepared_archive_imports import (
     cleanup_owned_zip_materialization,
     execute_zip_member_materialization,
@@ -103,8 +104,36 @@ def _project(tmp_path: Path) -> Path:
     return root
 
 
+def _unitypackage_bytes(asset_path: str, payload: bytes) -> bytes:
+    package = io.BytesIO()
+    with tarfile.open(fileobj=package, mode="w:gz") as archive:
+        for suffix, contents in (("pathname", asset_path.encode("utf-8")), ("asset", payload)):
+            member = tarfile.TarInfo(f"0001/{suffix}")
+            member.size = len(contents)
+            archive.addfile(member, io.BytesIO(contents))
+    return package.getvalue()
+
+
+def _unitypackage_missing_asset_payload_bytes(asset_path: str) -> bytes:
+    package = io.BytesIO()
+    with tarfile.open(fileobj=package, mode="w:gz") as archive:
+        for name in (".", "./f3000000000000000000000000000003"):
+            directory = tarfile.TarInfo(name)
+            directory.type = tarfile.DIRTYPE
+            directory.size = 0
+            archive.addfile(directory)
+        for suffix, contents in (
+            ("pathname", asset_path.encode("utf-8")),
+            ("asset.meta", b"fileFormatVersion: 2\r\nguid: f3000000000000000000000000000003\r\nTextureImporter:\r\n"),
+        ):
+            member = tarfile.TarInfo(f"f3000000000000000000000000000003/{suffix}")
+            member.size = len(contents)
+            archive.addfile(member, io.BytesIO(contents))
+    return package.getvalue()
+
+
 def _plan(project: Path, package: Path) -> dict:
-    return {"plan": {"readyToApply": True, "kind": "unitypackage_import", "projectPath": str(project), "source": {"actualPackagePath": str(package)}, "expectedAssetPaths": ["Assets/Outfits/Dress.prefab"]}}
+    return {"plan": {"readyToApply": True, "kind": "unitypackage_import", "projectPath": str(project), "source": {"actualPackagePath": str(package)}, "expectedAssetPaths": ["Assets/Outfits/Dress.prefab"], "expectedAssetPathsComplete": True}}
 
 
 def _medium_risk_facts() -> dict:
@@ -171,6 +200,37 @@ def test_preparer_reports_blocking_dependency_reason(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="Poiyomi is required by the selected prefab"):
         _prepare(tmp_path, plan, {})
+
+
+def test_preparer_reports_missing_unitypackage_payload_and_correction(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    package = tmp_path / "missing-png-payload.unitypackage"
+    package.write_bytes(
+        _unitypackage_missing_asset_payload_bytes(
+            "Assets/VRCForgeHorizontalImport_20261029/Probe.png"
+        )
+    )
+    plan = build_outfit_import_plan(
+        package,
+        project_path=project,
+        dependency_mode="selected_only",
+    )
+    assert plan["plan"]["readyToApply"] is False
+    assert plan["plan"]["expectedAssetPathsComplete"] is False
+
+    with pytest.raises(RuntimeError) as caught:
+        _prepare(
+            tmp_path,
+            plan,
+            {"packagePath": str(package), "projectPath": str(project)},
+        )
+
+    message = str(caught.value)
+    assert "without an asset payload or folder marker" in message
+    assert "exact file inventory is incomplete" in message
+    assert "Re-export or replace the UnityPackage" in message
+    assert "every file GUID has its /asset payload" in message
+    assert "rerun vrcforge_plan_outfit_import" in message
 
 
 def _approved(
@@ -287,6 +347,45 @@ def test_execute_uses_target_index_and_real_content_callback_after_import(
     )
     assert public["commitState"] == "complete"
     assert public["outcome"]["commitState"] == "complete"
+
+
+def test_unitypackage_content_readback_normalizes_dot_prefixed_members(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    package = tmp_path / "native-export.unitypackage"
+    target = project / "Assets" / "Outfits" / "Probe.png"
+    target.parent.mkdir(parents=True)
+    content = b"persisted native UnityPackage payload"
+    target.write_bytes(content)
+    guid = "c" * 32
+
+    with tarfile.open(package, "w:gz") as archive:
+        root = tarfile.TarInfo(".")
+        root.type = tarfile.DIRTYPE
+        archive.addfile(root)
+        directory = tarfile.TarInfo(f"./{guid}")
+        directory.type = tarfile.DIRTYPE
+        archive.addfile(directory)
+        entries = (
+            (f"./{guid}/pathname", b"Assets/Outfits/Probe.png"),
+            (f"./{guid}/asset.meta", f"fileFormatVersion: 2\r\nguid: {guid}\r\n".encode()),
+            # Some producers omit the leading ./ on an individual member.
+            (f"{guid}/asset", content),
+        )
+        for name, data in entries:
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+
+    result = verify_unitypackage_asset_content(
+        package,
+        project,
+        ["Assets/Outfits/Probe.png"],
+        lambda path, label: capture_regular_file(path, label=label),
+    )
+
+    assert result["verified"] is True
+    assert result["checked"] == 1
+    assert result["assets"][0]["assetPath"] == "Assets/Outfits/Probe.png"
 
 
 def test_job_receipt_rejects_explicit_conflicting_commit_facts() -> None:
@@ -640,8 +739,20 @@ def test_prepared_import_second_core_uncertainty_requires_recovery(tmp_path: Pat
     plan = _plan(project, target)
     plan["plan"]["kind"] = "unitypackage_import_sequence"
     plan["plan"]["source"]["importQueue"] = [
-        {"actualPackagePath": str(support), "role": "support", "order": 1},
-        {"actualPackagePath": str(target), "role": "target", "order": 2},
+        {
+            "actualPackagePath": str(support),
+            "role": "support",
+            "order": 1,
+            "expectedAssetPaths": ["Assets/Outfits/Support.mat"],
+            "expectedAssetPathsComplete": True,
+        },
+        {
+            "actualPackagePath": str(target),
+            "role": "target",
+            "order": 2,
+            "expectedAssetPaths": ["Assets/Outfits/Dress.prefab"],
+            "expectedAssetPathsComplete": True,
+        },
     ]
     prepared, _ = _prepare(
         tmp_path,
@@ -873,7 +984,9 @@ def test_unitypackage_core_restores_active_job_across_domain_reload() -> None:
     )[0]
     assert "!job.startedForThisJob" not in restored_readback
     assert "!job.mutationStarted" in restored_readback
-    assert "job.expectedAssetPaths.Count == 0" in source
+    assert "job.expectedAssetPaths.Count == 0" not in source
+    assert "expected asset path inventory is empty" in source
+    assert "expectedAssetPaths must include at least one exact Assets path" in source
     assert "EditorApplication.isCompiling" in source
     assert "EditorApplication.isUpdating" in source
     assert '"restored_expected_asset_readback"' in source
@@ -953,12 +1066,67 @@ def test_prepared_import_rejects_unsafe_expected_asset_before_core(tmp_path: Pat
         )
 
 
+@pytest.mark.parametrize(
+    ("paths", "complete", "message"),
+    [
+        ([], True, "at least one exact imported asset path"),
+        ([], False, "complete exact imported asset paths"),
+    ],
+)
+def test_preparer_rejects_import_without_verifiable_asset_inventory(
+    tmp_path: Path,
+    paths: list[str],
+    complete: bool,
+    message: str,
+) -> None:
+    project, package = _project(tmp_path), tmp_path / "Unknown.unitypackage"
+    package.write_bytes(b"package")
+    plan = _plan(project, package)
+    plan["plan"]["expectedAssetPaths"] = paths
+    plan["plan"]["expectedAssetPathsComplete"] = complete
+    with pytest.raises(RuntimeError, match=message):
+        _prepare(
+            tmp_path,
+            plan,
+            {"packagePath": str(package), "projectPath": str(project)},
+        )
+
+
+def test_preparer_rejects_empty_inventory_for_one_queued_package(tmp_path: Path) -> None:
+    project, package = _project(tmp_path), tmp_path / "Unknown.unitypackage"
+    package.write_bytes(b"package")
+    plan = _plan(project, package)
+    plan["plan"]["kind"] = "unitypackage_import_sequence"
+    plan["plan"]["source"]["importQueue"] = [
+        {
+            "actualPackagePath": str(package),
+            "role": "target",
+            "order": 1,
+            "expectedAssetPaths": [],
+            "expectedAssetPathsComplete": True,
+        }
+    ]
+
+    with pytest.raises(RuntimeError, match="every queued package"):
+        _prepare(
+            tmp_path,
+            plan,
+            {"packagePath": str(package), "projectPath": str(project)},
+        )
+
+
 def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = _project(tmp_path)
     bundle = tmp_path / "bundle.zip"
+    nested_package = _unitypackage_bytes("Assets/Outfits/Dress.prefab", b"prefab bytes")
     with zipfile.ZipFile(bundle, "w") as archive:
-        archive.writestr("x.unitypackage", b"nested-package")
-    zip_plan = {"plan": {"readyToApply": True, "kind": "unitypackage_import", "projectPath": str(project), "source": {"path": str(bundle), "importQueue": [{"sourceType": "zip", "path": "x.unitypackage", "role": "target", "order": 1}]}}}
+        archive.writestr("x.unitypackage", nested_package)
+    zip_plan = build_outfit_import_plan(
+        bundle,
+        project_path=project,
+        selected_unitypackage="x.unitypackage",
+        dependency_mode="selected_only",
+    )
     prepared, _ = _prepare(
         tmp_path,
         zip_plan,
@@ -966,7 +1134,8 @@ def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path
     )
     nested_call = build_prepared_execution_plan(prepared)[0]
     assert nested_call[0] == "vrc_import_unitypackage"
-    assert nested_call[1]["expectedSha256"] == hashlib.sha256(b"nested-package").hexdigest()
+    assert nested_call[1]["expectedAssetPaths"] == ["Assets/Outfits/Dress.prefab"]
+    assert nested_call[1]["expectedSha256"] == hashlib.sha256(nested_package).hexdigest()
     temporary_package = Path(nested_call[1]["unityPackagePath"])
     assert not temporary_package.exists()
 
@@ -976,7 +1145,7 @@ def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path
 
     def invoke(_settings, tool, arguments, **_kwargs):
         if tool == "vrc_import_unitypackage" and "expectedSha256" in arguments:
-            assert Path(arguments["unityPackagePath"]).read_bytes() == b"nested-package"
+            assert Path(arguments["unityPackagePath"]).read_bytes() == nested_package
             start_arguments.update(arguments)
             return _pending_import(arguments)
         if tool == "vrc_import_unitypackage":
@@ -1002,6 +1171,34 @@ def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path
     assert result["importedPrefabCandidates"] == ["Assets/VRCForge/ImportedOutfits/Dress.prefab"]
     assert result["nextTool"] == "vrcforge_add_outfit"
     assert (project / "Assets" / "VRCForge" / "ImportedOutfits" / "Dress.prefab").read_bytes() == b"prefab"
+
+
+def test_nested_zip_prepares_exact_inventory_for_every_queued_package(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    bundle = tmp_path / "bundle.zip"
+    support = _unitypackage_bytes("Assets/Outfits/Materials/Dress.mat", b"material")
+    target = _unitypackage_bytes("Assets/Outfits/Dress.prefab", b"prefab")
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("Product/Dress_Materials.unitypackage", support)
+        archive.writestr("Product/Dress.unitypackage", target)
+
+    plan = build_outfit_import_plan(bundle, project_path=project)
+    assert plan["plan"]["readyToApply"] is True
+    prepared, _ = _prepare(
+        tmp_path,
+        plan,
+        {"packagePath": str(bundle), "projectPath": str(project)},
+    )
+    imports = [
+        arguments
+        for tool, arguments in build_prepared_execution_plan(prepared)
+        if tool == "vrc_import_unitypackage"
+    ]
+
+    assert [item["expectedAssetPaths"] for item in imports] == [
+        ["Assets/Outfits/Materials/Dress.mat"],
+        ["Assets/Outfits/Dress.prefab"],
+    ]
 
 
 def test_loose_post_copy_identity_failure_returns_partial_recovery(

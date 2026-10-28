@@ -81,7 +81,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Approval-bound byte length of the UnityPackage.", IsRequired = true)]
             public long expectedSize { get; set; } = -1;
 
-            [VRCForgeInput("Exact Unity asset paths expected after this import and refresh.", IsRequired = false)]
+            [VRCForgeInput("Required, non-empty exact Assets paths expected after this import and refresh; Unity verifies each path before reporting completion.", IsRequired = true)]
             public List<string> expectedAssetPaths { get; set; } = new List<string>();
 
             [VRCForgeInput("When true, Unity may show the package import UI. VRCForge uses false.", IsRequired = false)]
@@ -226,7 +226,7 @@ namespace VRCForge.Editor
                 ["unityPackagePath"] = job.unityPackagePath,
                 ["expectedSha256"] = job.expectedSha256,
                 ["expectedSize"] = job.expectedSize,
-                ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths),
+                ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths ?? new List<string>()),
                 ["mutationStarted"] = job.mutationStarted,
                 ["startedForThisJob"] = job.startedForThisJob,
                 ["restoredAfterDomainReload"] = job.restoredAfterDomainReload,
@@ -392,7 +392,7 @@ namespace VRCForge.Editor
                     ["unityPackagePath"] = job.unityPackagePath,
                     ["expectedSha256"] = job.expectedSha256,
                     ["expectedSize"] = job.expectedSize,
-                    ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths),
+                    ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths ?? new List<string>()),
                     ["expectedAssets"] = JArray.FromObject(expectedAssets),
                     ["mutationStarted"] = true,
                     ["committed"] = true,
@@ -547,8 +547,6 @@ namespace VRCForge.Editor
         {
             if (!job.mutationStarted
                 || job.result != null
-                || job.expectedAssetPaths == null
-                || job.expectedAssetPaths.Count == 0
                 || EditorApplication.isCompiling
                 || EditorApplication.isUpdating)
             {
@@ -578,7 +576,7 @@ namespace VRCForge.Editor
                     ["unityPackagePath"] = job.unityPackagePath,
                     ["expectedSha256"] = job.expectedSha256,
                     ["expectedSize"] = job.expectedSize,
-                    ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths),
+                    ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths ?? new List<string>()),
                     ["expectedAssets"] = JArray.FromObject(expectedAssets),
                     ["mutationStarted"] = true,
                     ["committed"] = true,
@@ -651,7 +649,7 @@ namespace VRCForge.Editor
                 ["unityPackagePath"] = job.unityPackagePath,
                 ["expectedSha256"] = job.expectedSha256,
                 ["expectedSize"] = job.expectedSize,
-                ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths),
+                ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths ?? new List<string>()),
                 ["expectedEventPackageName"] = job.expectedEventPackageName,
                 ["mutationStarted"] = job.mutationStarted,
                 ["startedForThisJob"] = job.startedForThisJob,
@@ -724,14 +722,33 @@ namespace VRCForge.Editor
                 }
                 paths.Add(assetPath);
             }
+            if (paths.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "expectedAssetPaths must include at least one exact Assets path so UnityPackage import can be verified.");
+            }
             return paths;
         }
 
         private static List<object> ReadExpectedAssets(IEnumerable<string> expectedPaths)
         {
-            var receipts = new List<object>();
-            foreach (var assetPath in expectedPaths ?? Array.Empty<string>())
+            var paths = (expectedPaths ?? Array.Empty<string>()).ToList();
+            if (paths.Count == 0)
             {
+                throw new InvalidOperationException(
+                    "expected asset path inventory is empty; UnityPackage import completion cannot be verified.");
+            }
+            var receipts = new List<object>();
+            foreach (var assetPath in paths)
+            {
+                var absoluteAssetPath = Path.Combine(
+                    CheckpointPrepareTool.ProjectRoot(),
+                    assetPath.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(absoluteAssetPath))
+                {
+                    throw new InvalidOperationException(
+                        $"Expected imported asset readback failed for '{assetPath}': fileExists=false, assetType=not_checked, guidLength=0.");
+                }
                 var assetType = AssetDatabase.GetMainAssetTypeAtPath(assetPath);
                 var guid = (AssetDatabase.AssetPathToGUID(assetPath) ?? string.Empty).Trim().ToLowerInvariant();
                 if (assetType == null || guid.Length != 32 || !IsLowerHex(guid))

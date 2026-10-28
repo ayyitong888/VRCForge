@@ -16,6 +16,7 @@ from prepared_unity_execution import (
     prepared_call,
     prepared_evidence,
 )
+from outfit_package_inspector import unitypackage_member_parts
 
 
 PreparedImportCall = tuple[str, dict[str, Any]]
@@ -56,8 +57,18 @@ def verify_unitypackage_asset_content(
         return {"verified": True, "checked": 0, "assets": []}
     package_assets: dict[str, tuple[str, str | None]] = {}
     with tarfile.open(Path(package_path), mode="r:*") as archive:
+        members_by_path: dict[str, tarfile.TarInfo] = {}
         for member in archive.getmembers():
-            if not member.isfile() or not member.name.replace("\\", "/").endswith("/pathname"):
+            if not member.isfile():
+                continue
+            parts = unitypackage_member_parts(member.name)
+            if parts is not None and parts[1] in {"pathname", "asset", "asset.meta"}:
+                members_by_path["/".join(parts)] = member
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            parts = unitypackage_member_parts(member.name)
+            if parts is None or parts[1] != "pathname":
                 continue
             pathname_file = archive.extractfile(member)
             if pathname_file is None:
@@ -65,19 +76,16 @@ def verify_unitypackage_asset_content(
             asset_path = pathname_file.read(32768).decode("utf-8", errors="replace").strip().replace("\\", "/")
             if asset_path not in expected:
                 continue
-            asset_member_name = member.name.rsplit("/", 1)[0] + "/asset"
-            try:
-                asset_meta = archive.extractfile(archive.getmember(member.name.rsplit("/", 1)[0] + "/asset.meta"))
-                meta_text = asset_meta.read(32768).decode("utf-8", errors="replace") if asset_meta is not None else ""
-            except KeyError:
-                meta_text = ""
-            try:
-                asset_member = archive.getmember(asset_member_name)
-            except KeyError as exc:
+            prefix = parts[0]
+            asset_meta = members_by_path.get(f"{prefix}/asset.meta")
+            asset_meta_file = archive.extractfile(asset_meta) if asset_meta is not None else None
+            meta_text = asset_meta_file.read(32768).decode("utf-8", errors="replace") if asset_meta_file is not None else ""
+            asset_member = members_by_path.get(f"{prefix}/asset")
+            if asset_member is None:
                 if "folderAsset: yes" in meta_text:
                     package_assets[asset_path] = ("folder", None)
                     continue
-                raise RuntimeError(f"UnityPackage asset payload is missing for file {asset_path}.") from exc
+                raise RuntimeError(f"UnityPackage asset payload is missing for file {asset_path}.")
             asset_file = archive.extractfile(asset_member)
             if asset_file is None:
                 raise RuntimeError(f"UnityPackage asset payload is missing for {asset_path}.")
@@ -283,6 +291,8 @@ class PreparedOutfitImportPreparer:
                     "path": source.get("actualPackagePath") or source.get("path"),
                     "role": "target",
                     "order": 1,
+                    "expectedAssetPaths": plan_payload.get("expectedAssetPaths"),
+                    "expectedAssetPathsComplete": plan_payload.get("expectedAssetPathsComplete") is True,
                 }
             ]
         queue: list[dict[str, Any]] = []
@@ -373,6 +383,8 @@ class PreparedOutfitImportPreparer:
                     "order": int(raw.get("order") or index),
                     "role": str(raw.get("role") or "target"),
                     "identity": identity,
+                    "expectedAssetPaths": raw.get("expectedAssetPaths"),
+                    "expectedAssetPathsComplete": raw.get("expectedAssetPathsComplete") is True,
                     "materializationIndex": materialization_index,
                     "folderRootIdentity": folder_root_identity,
                 }
@@ -412,9 +424,40 @@ class PreparedOutfitImportPreparer:
                 and str(entry.get("status") or "") == "missing"
                 and str(entry.get("message") or "").strip()
             ]
-            detail = "; ".join(blocking_messages)
-            suffix = f" Reason: {detail}" if detail else ""
-            raise RuntimeError(f"Outfit import plan is not ready to apply.{suffix}")
+            plan_warnings = [
+                str(item).strip()
+                for item in plan_payload.get("warnings") or []
+                if isinstance(item, str) and item.strip()
+            ]
+            details = list(dict.fromkeys([*blocking_messages, *plan_warnings]))
+            source = plan_payload.get("source") if isinstance(plan_payload.get("source"), dict) else {}
+            queued_packages = source.get("importQueue") if isinstance(source.get("importQueue"), list) else []
+            inventory_incomplete = (
+                plan_payload.get("expectedAssetPathsComplete") is False
+                or any(
+                    isinstance(item, dict) and item.get("expectedAssetPathsComplete") is False
+                    for item in queued_packages
+                )
+            )
+            corrections = []
+            if inventory_incomplete:
+                corrections.append(
+                    "Re-export or replace the UnityPackage so every file GUID has its /asset payload "
+                    "(folder entries must be marked folderAsset: yes), then rerun vrcforge_plan_outfit_import."
+                )
+            if blocking_messages:
+                corrections.append(
+                    "Resolve the listed blocking dependencies, then rerun vrcforge_plan_outfit_import."
+                )
+            if not corrections:
+                corrections.append(
+                    "Resolve the plan details above, then rerun vrcforge_plan_outfit_import."
+                )
+            detail = "; ".join(details) or "The plan did not provide ready-to-apply evidence."
+            raise RuntimeError(
+                f"Outfit import plan is not ready to apply. Details: {detail} "
+                f"Next: {' '.join(corrections)}"
+            )
         kind = str(plan_payload.get("kind") or "")
         project_root = self._ports.resolve_project_root(arguments, plan_payload)
         project_identity = self._ports.capture_project_identity(project_root)
@@ -460,8 +503,16 @@ class PreparedOutfitImportPreparer:
             raise RuntimeError(
                 f"Unsupported prepared outfit import branch: {kind or 'unknown'}"
             )
-        queue, materializations = self._unitypackage_queue(plan_payload)
+        if plan_payload.get("expectedAssetPathsComplete") is not True:
+            raise RuntimeError(
+                "Prepared UnityPackage import requires complete exact imported asset paths before approval; inspect the selected package for its asset paths."
+            )
         expected_asset_paths = self._expected_asset_paths(plan_payload)
+        if not expected_asset_paths:
+            raise RuntimeError(
+                "Prepared UnityPackage import requires at least one exact imported asset path so file creation can be verified."
+            )
+        queue, materializations = self._unitypackage_queue(plan_payload)
         target_indexes = [
             index for index, item in enumerate(queue) if item["role"] == "target"
         ]
@@ -469,6 +520,18 @@ class PreparedOutfitImportPreparer:
             raise RuntimeError(
                 "Prepared outfit import queue must contain exactly one target package."
             )
+        for item in queue:
+            if item.get("expectedAssetPathsComplete") is not True:
+                raise RuntimeError(
+                    "Prepared UnityPackage import requires a complete exact asset inventory for every queued package before approval."
+                )
+            item["expectedAssetPaths"] = self._expected_asset_paths(
+                {"expectedAssetPaths": item.get("expectedAssetPaths")}
+            )
+            if not item["expectedAssetPaths"]:
+                raise RuntimeError(
+                    "Prepared UnityPackage import requires at least one exact Assets path for every queued package so each import can be verified."
+                )
         calls = [
             (
                 "vrc_import_unitypackage",
@@ -477,9 +540,7 @@ class PreparedOutfitImportPreparer:
                     "unityPackagePath": item["identity"]["path"],
                     "expectedSha256": item["identity"]["sha256"],
                     "expectedSize": item["identity"]["size"],
-                    "expectedAssetPaths": (
-                        expected_asset_paths if index == target_indexes[0] else []
-                    ),
+                    "expectedAssetPaths": item["expectedAssetPaths"],
                     "interactive": False,
                 },
             )
@@ -964,11 +1025,7 @@ class PreparedOutfitImportApprovedWriteService:
                 except ValueError as exc:
                     raise RuntimeError(str(exc)) from exc
                 tool_name, tool_arguments = prepared_call(arguments, index)
-                expected_asset_paths = (
-                    evidence.get("expectedAssetPaths")
-                    if index == evidence.get("targetIndex")
-                    else []
-                )
+                expected_asset_paths = item.get("expectedAssetPaths")
                 if not isinstance(expected_asset_paths, list):
                     raise RuntimeError(
                         "Prepared outfit expected asset evidence is invalid."
@@ -1140,7 +1197,7 @@ class PreparedOutfitImportApprovedWriteService:
                 content_readback = self._ports.verify_imported_asset_content(
                     str(target_identity.get("path") or ""),
                     str(project_identity.get("projectPath") or ""),
-                    [str(path) for path in evidence.get("expectedAssetPaths") or []],
+                    [str(path) for path in target_item.get("expectedAssetPaths") or []],
                 )
             nested_receipts_complete = bool(imports) and all(
                 isinstance(item.get("unityImport"), dict)

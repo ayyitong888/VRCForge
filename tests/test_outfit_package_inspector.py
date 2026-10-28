@@ -15,6 +15,12 @@ def write_tar_member(archive: tarfile.TarFile, name: str, data: bytes) -> None:
     archive.addfile(info, fileobj=__import__("io").BytesIO(data))
 
 
+def write_tar_directory(archive: tarfile.TarFile, name: str) -> None:
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.DIRTYPE
+    archive.addfile(info)
+
+
 def make_unitypackage(path: Path) -> None:
     with tarfile.open(path, mode="w:gz") as archive:
         write_tar_member(archive, "0001/pathname", b"Assets/Outfits/Dress.prefab")
@@ -43,6 +49,43 @@ def test_unitypackage_inspection_reads_pathnames_not_asset_payload(tmp_path: Pat
     assert "SECRET_TEXTURE_PAYLOAD_SHOULD_NOT_APPEAR" not in rendered
 
 
+def test_native_unity_export_dot_prefix_parses_file_and_folder_entries(tmp_path: Path) -> None:
+    package = tmp_path / "native-export.unitypackage"
+    with tarfile.open(package, mode="w:gz") as archive:
+        write_tar_directory(archive, ".")
+        write_tar_directory(archive, "./" + "f" * 32)
+        write_tar_directory(archive, "./" + "a" * 32)
+        write_tar_member(archive, "./" + "f" * 32 + "/pathname", b"Assets/Outfits/Textures")
+        write_tar_member(
+            archive,
+            "./" + "f" * 32 + "/asset.meta",
+            b"fileFormatVersion: 2\r\nguid: " + b"f" * 32 + b"\rfolderAsset: yes\r\n",
+        )
+        write_tar_member(archive, "./" + "a" * 32 + "/pathname", b"Assets/Outfits/Textures/Probe.png")
+        write_tar_member(
+            archive,
+            "./" + "a" * 32 + "/asset.meta",
+            b"fileFormatVersion: 2\r\nguid: " + b"a" * 32 + b"\r",
+        )
+        write_tar_member(archive, "./" + "a" * 32 + "/asset", b"PNG payload")
+        write_tar_member(archive, "./bad/../pathname", b"Assets/Outfits/Escaped.png")
+
+    result = inspect_outfit_package(package)
+    receipt = result["unityPackages"][0]
+
+    assert receipt["pathnamesEvidence"] == [
+        {
+            "packagePath": package.name,
+            "path": "Assets/Outfits/Textures/Probe.png",
+            "category": "texture",
+        }
+    ]
+    assert receipt["folderPathnameCount"] == 1
+    assert receipt["missingAssetPayloadCount"] == 0
+    assert receipt["pathnamesEvidenceComplete"] is True
+    assert "Assets/Outfits/Escaped.png" not in json.dumps(receipt)
+
+
 def test_unitypackage_pathname_evidence_is_complete_beyond_agent_summary_limit(tmp_path: Path) -> None:
     package = tmp_path / "large.unitypackage"
     with tarfile.open(package, mode="w:gz") as archive:
@@ -52,6 +95,7 @@ def test_unitypackage_pathname_evidence_is_complete_beyond_agent_summary_limit(t
                 f"{index:04d}/pathname",
                 f"Assets/Outfits/Item{index:04d}.prefab".encode(),
             )
+            write_tar_member(archive, f"{index:04d}/asset", b"")
 
     result = inspect_outfit_package(package)
     receipt = result["unityPackages"][0]
@@ -139,6 +183,7 @@ def test_nested_unitypackage_inspection_stops_at_decompressed_byte_limit(tmp_pat
     unitypackage = io.BytesIO()
     with tarfile.open(fileobj=unitypackage, mode="w:gz") as archive:
         write_tar_member(archive, "0001/pathname", b"Assets/Outfits/BeforeLimit.prefab")
+        write_tar_member(archive, "0001/asset", b"")
         write_tar_member(archive, "0002/asset", b"X" * 30000)
         write_tar_member(archive, "0003/pathname", b"Assets/Outfits/AfterLimit.prefab")
 
@@ -162,6 +207,7 @@ def test_nested_unitypackage_pathname_traversal_is_rejected(tmp_path: Path) -> N
         write_tar_member(archive, "0001/pathname", b"../../outside.prefab")
         write_tar_member(archive, "0002/pathname", b"/Assets/absolute.prefab")
         write_tar_member(archive, "0003/pathname", b"Assets/Outfits/Valid.prefab")
+        write_tar_member(archive, "0003/asset", b"prefab payload")
 
     package = tmp_path / "unsafe-inner.zip"
     with zipfile.ZipFile(package, mode="w") as outer:
@@ -218,6 +264,23 @@ def test_loose_prefab_texture_folder_reports_candidates_without_file_contents(tm
     assert "SECRET_PNG_BYTES_SHOULD_NOT_APPEAR" not in rendered
     assert "SECRET_MAT_TEXT_SHOULD_NOT_APPEAR" not in rendered
     assert "SECRET_FBX_BYTES_SHOULD_NOT_APPEAR" not in rendered
+
+
+def test_folder_unitypackage_inventory_is_inspected_before_import_planning(tmp_path: Path) -> None:
+    folder = tmp_path / "PackageFolder"
+    folder.mkdir()
+    package = folder / "Dress.unitypackage"
+    make_unitypackage(package)
+
+    result = inspect_outfit_package(folder)
+
+    assert result["summary"]["nestedUnityPackageCount"] == 1
+    assert result["summary"]["nestedPathnameCount"] == 2
+    assert result["unityPackages"][0]["pathnamesEvidenceComplete"] is True
+    assert [item["path"] for item in result["unityPackages"][0]["pathnamesEvidence"]] == [
+        "Assets/Outfits/Dress.prefab",
+        "Assets/Outfits/Textures/body.png",
+    ]
 
 
 def test_loose_outfit_inspection_exposes_editor_asmdef_as_copyable_dependency(tmp_path: Path) -> None:

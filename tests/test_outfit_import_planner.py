@@ -29,6 +29,18 @@ def make_unitypackage(path: Path) -> None:
         write_tar_member(archive, "0002/asset", b"SECRET_TEXTURE_PAYLOAD")
 
 
+def unitypackage_bytes(*path_payloads: tuple[str, bytes]) -> bytes:
+    import io
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for index, (asset_path, payload) in enumerate(path_payloads, start=1):
+            prefix = f"{index:04d}"
+            write_tar_member(archive, f"{prefix}/pathname", asset_path.encode("utf-8"))
+            write_tar_member(archive, f"{prefix}/asset", payload)
+    return buffer.getvalue()
+
+
 def make_liltoon_hint_unitypackage(path: Path) -> None:
     with tarfile.open(path, mode="w:gz") as archive:
         write_tar_member(archive, "0001/pathname", b"Assets/Outfits/lilToon_Dress.prefab")
@@ -51,8 +63,14 @@ def make_dual_shader_variant_unitypackage(path: Path) -> None:
 
 def make_zip_with_unitypackages(path: Path) -> None:
     with zipfile.ZipFile(path, mode="w") as archive:
-        archive.writestr("Product/MaterialPack.unitypackage", b"SECRET_MATERIAL_PACKAGE")
-        archive.writestr("Product/Dress_Milltina.unitypackage", b"SECRET_DRESS_PACKAGE")
+        archive.writestr(
+            "Product/MaterialPack.unitypackage",
+            unitypackage_bytes(("Assets/Outfits/Materials/Dress.mat", b"SECRET_MATERIAL_PACKAGE")),
+        )
+        archive.writestr(
+            "Product/Dress_Milltina.unitypackage",
+            unitypackage_bytes(("Assets/Outfits/Dress.prefab", b"SECRET_DRESS_PACKAGE")),
+        )
 
 
 def make_project(root: Path, dependencies: dict[str, str] | None = None) -> None:
@@ -77,12 +95,13 @@ def test_nested_package_plan_never_treats_outer_loose_assets_as_package_destinat
         selected_unitypackage="Product/Dress_Milltina.unitypackage",
     )
     plan = result["plan"]
-    assert plan["readyToApply"] is True
+    assert plan["readyToApply"] is False
     assert plan["expectedAssetPaths"] == []
     assert plan["selectedPrefab"] == ""
     assert plan["expectedAssetPathsComplete"] is False
     assert plan["riskFacts"]["pathnameEvidenceComplete"] is False
     assert PreparedOutfitImportPreparer._expected_asset_paths(plan) == []
+    assert any("every queued UnityPackage needs" in warning for warning in plan["warnings"])
 
 
 def test_nested_package_plan_reports_size_above_one_gib_without_fixed_limit(tmp_path: Path) -> None:
@@ -118,8 +137,8 @@ def test_nested_package_plan_reports_size_above_one_gib_without_fixed_limit(tmp_
     assert plan["source"]["selectedUnityPackageSizeBytes"] == declared_size
     assert plan["source"]["nestedUnityPackageImportSizeBytes"] == declared_size
     assert "maxNestedUnityPackageBytes" not in plan["source"]
-    assert plan["readyToApply"] is True
-    assert plan["writeTarget"] == "vrcforge_import_outfit_package"
+    assert plan["readyToApply"] is False
+    assert plan["writeTarget"] == ""
 
 
 def test_nested_package_plan_reports_cumulative_import_queue_size(tmp_path: Path) -> None:
@@ -143,8 +162,8 @@ def test_nested_package_plan_reports_cumulative_import_queue_size(tmp_path: Path
     ]
     assert plan["source"]["nestedUnityPackageImportSizeBytes"] == 6
     assert "maxNestedUnityPackageBytes" not in plan["source"]
-    assert plan["readyToApply"] is True
-    assert plan["writeTarget"] == "vrcforge_import_outfit_package"
+    assert plan["readyToApply"] is False
+    assert plan["writeTarget"] == ""
 
 
 def test_direct_unitypackage_plan_is_supervised_and_payload_safe(tmp_path: Path) -> None:
@@ -173,17 +192,95 @@ def test_direct_unitypackage_plan_is_supervised_and_payload_safe(tmp_path: Path)
     assert "SECRET_TEXTURE_PAYLOAD" not in rendered
 
 
+def test_plan_uses_full_inventory_when_display_path_sample_is_truncated(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    package = tmp_path / "ManyAssets.unitypackage"
+    with tarfile.open(package, mode="w:gz") as archive:
+        for index in range(1251):
+            write_tar_member(
+                archive,
+                f"{index:04d}/pathname",
+                f"Assets/Outfits/Item{index:04d}.prefab".encode(),
+            )
+            write_tar_member(archive, f"{index:04d}/asset", b"")
+
+    result = build_outfit_import_plan(
+        package, project_path=project, dependency_mode="selected_only"
+    )
+    plan = result["plan"]
+
+    assert result["inspection"]["unityPackages"][0]["pathnamesReturnedTruncated"] is True
+    assert plan["readyToApply"] is True
+    assert plan["expectedAssetPathsComplete"] is True
+    assert len(plan["expectedAssetPaths"]) == 1251
+    assert len(plan["source"]["importQueue"][0]["expectedAssetPaths"]) == 1251
+    assert plan["expectedAssetPaths"][0] == "Assets/Outfits/Item0000.prefab"
+    assert plan["expectedAssetPaths"][-1] == "Assets/Outfits/Item1250.prefab"
+
+
+def test_unitypackage_inventory_excludes_folders_without_asset_members(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    package = tmp_path / "FolderAndTexture.unitypackage"
+    with tarfile.open(package, mode="w:gz") as archive:
+        write_tar_member(archive, "folder-guid/pathname", b"Assets/Foo")
+        write_tar_member(archive, "folder-guid/asset.meta", b"fileFormatVersion: 2\nfolderAsset: yes\n")
+        write_tar_member(archive, "texture-guid/pathname", b"Assets/Foo/Test.png")
+        write_tar_member(archive, "texture-guid/asset", b"png payload")
+        write_tar_member(archive, "texture-guid/asset.meta", b"fileFormatVersion: 2\n")
+
+    result = build_outfit_import_plan(
+        package, project_path=project, dependency_mode="selected_only"
+    )
+    plan = result["plan"]
+
+    receipt = result["inspection"]["unityPackages"][0]
+    assert receipt["folderPathnameCount"] == 1
+    assert receipt["missingAssetPayloadCount"] == 0
+    assert plan["readyToApply"] is True
+    assert plan["expectedAssetPathsComplete"] is True
+    assert plan["expectedAssetPaths"] == ["Assets/Foo/Test.png"]
+    assert plan["source"]["importQueue"][0]["expectedAssetPaths"] == [
+        "Assets/Foo/Test.png"
+    ]
+
+
+def test_unitypackage_missing_asset_payload_without_folder_marker_blocks_plan(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    package = tmp_path / "Broken.unitypackage"
+    with tarfile.open(package, mode="w:gz") as archive:
+        write_tar_member(archive, "file-guid/pathname", b"Assets/Foo/Test.png")
+        write_tar_member(archive, "file-guid/asset.meta", b"fileFormatVersion: 2\n")
+
+    plan = build_outfit_import_plan(
+        package, project_path=project, dependency_mode="selected_only"
+    )["plan"]
+
+    assert plan["readyToApply"] is False
+    assert plan["writeTarget"] == ""
+    assert plan["expectedAssetPathsComplete"] is False
+    assert any("without an asset payload or folder marker" in item for item in plan["warnings"])
+
+
 def test_script_payload_is_reported_but_does_not_imply_execution(tmp_path: Path) -> None:
     project = tmp_path / "Project"
     make_project(project)
     package = tmp_path / "Scripted.unitypackage"
     with tarfile.open(package, mode="w:gz") as archive:
         write_tar_member(archive, "0001/pathname", b"Assets/Outfits/Dress.prefab")
+        write_tar_member(archive, "0001/asset", b"prefab")
         write_tar_member(archive, "0002/pathname", b"Assets/Outfits/Editor/Setup.cs")
+        write_tar_member(archive, "0002/asset", b"script")
         write_tar_member(archive, "0003/pathname", b"Assets/Outfits/Editor/Setup.asmdef")
+        write_tar_member(archive, "0003/asset", b"asmdef")
         write_tar_member(archive, "0004/pathname", b"Assets/Outfits/Editor/Setup.asmref")
+        write_tar_member(archive, "0004/asset", b"asmref")
         write_tar_member(archive, "0005/pathname", b"Assets/Outfits/Editor/Setup.dll")
+        write_tar_member(archive, "0005/asset", b"dll")
         write_tar_member(archive, "0006/pathname", b"Assets/Outfits/Editor/csc.rsp")
+        write_tar_member(archive, "0006/asset", b"rsp")
 
     facts = build_outfit_import_plan(package, project_path=project)["plan"]["riskFacts"]
 
@@ -242,6 +339,7 @@ def test_unitypackage_plan_keeps_complete_expected_asset_receipt(tmp_path: Path)
                 f"{index:04d}/pathname",
                 f"Assets/Outfits/Item{index:04d}.prefab".encode(),
             )
+            write_tar_member(archive, f"{index:04d}/asset", b"")
 
     result = build_outfit_import_plan(package, project_path=project, base_avatar_name="Manuka")
     plan = result["plan"]
@@ -397,6 +495,15 @@ def test_zip_container_builds_ordered_import_queue_without_manual_extract(tmp_pa
     assert [item["role"] for item in queue] == ["support", "target"]
     assert queue[0]["path"] == "Product/MaterialPack.unitypackage"
     assert queue[1]["path"] == "Product/Dress_Milltina.unitypackage"
+    assert plan["expectedAssetPathsComplete"] is True
+    assert plan["expectedAssetPaths"] == [
+        "Assets/Outfits/Dress.prefab",
+        "Assets/Outfits/Materials/Dress.mat",
+    ]
+    assert queue[0]["expectedAssetPaths"] == ["Assets/Outfits/Materials/Dress.mat"]
+    assert queue[0]["expectedAssetPathsComplete"] is True
+    assert queue[1]["expectedAssetPaths"] == ["Assets/Outfits/Dress.prefab"]
+    assert queue[1]["expectedAssetPathsComplete"] is True
     assert "SECRET_MATERIAL_PACKAGE" not in rendered
     assert "SECRET_DRESS_PACKAGE" not in rendered
 
@@ -407,9 +514,9 @@ def test_zip_container_queues_sibling_material_zip_first(tmp_path: Path) -> None
     package = tmp_path / "Dress_Milltina.zip"
     material_zip = tmp_path / "Dress_MaterialPack.zip"
     with zipfile.ZipFile(package, mode="w") as archive:
-        archive.writestr("Dress_Milltina.unitypackage", b"SECRET_DRESS_PACKAGE")
+        archive.writestr("Dress_Milltina.unitypackage", unitypackage_bytes(("Assets/Dress.prefab", b"SECRET_DRESS_PACKAGE")))
     with zipfile.ZipFile(material_zip, mode="w") as archive:
-        archive.writestr("Dress_MaterialPack.unitypackage", b"SECRET_MATERIAL_PACKAGE")
+        archive.writestr("Dress_MaterialPack.unitypackage", unitypackage_bytes(("Assets/Materials/Dress.mat", b"SECRET_MATERIAL_PACKAGE")))
 
     result = build_outfit_import_plan(package, project_path=project, base_avatar_name="Milltina")
     queue = result["plan"]["source"]["importQueue"]
@@ -418,7 +525,11 @@ def test_zip_container_queues_sibling_material_zip_first(tmp_path: Path) -> None
     assert [item["role"] for item in queue] == ["support", "target"]
     assert queue[0]["containerPath"].endswith("Dress_MaterialPack.zip")
     assert queue[0]["path"] == "Dress_MaterialPack.unitypackage"
+    assert queue[0]["expectedAssetPaths"] == ["Assets/Materials/Dress.mat"]
+    assert queue[0]["expectedAssetPathsComplete"] is True
     assert queue[1]["path"] == "Dress_Milltina.unitypackage"
+    assert queue[1]["expectedAssetPaths"] == ["Assets/Dress.prefab"]
+    assert queue[1]["expectedAssetPathsComplete"] is True
 
 
 def test_shader_unitypackage_inside_support_zip_is_support_role(tmp_path: Path) -> None:
@@ -427,10 +538,10 @@ def test_shader_unitypackage_inside_support_zip_is_support_role(tmp_path: Path) 
     package = tmp_path / "Dress_Milltina.zip"
     material_zip = tmp_path / "Dress_MaterialPack.zip"
     with zipfile.ZipFile(package, mode="w") as archive:
-        archive.writestr("Dress_Milltina.unitypackage", b"SECRET_DRESS_PACKAGE")
+        archive.writestr("Dress_Milltina.unitypackage", unitypackage_bytes(("Assets/Dress.prefab", b"SECRET_DRESS_PACKAGE")))
     with zipfile.ZipFile(material_zip, mode="w") as archive:
-        archive.writestr("lilToon_1.7.3.unitypackage", b"SECRET_SHADER_PACKAGE")
-        archive.writestr("Dress_Textures.unitypackage", b"SECRET_MATERIAL_PACKAGE")
+        archive.writestr("lilToon_1.7.3.unitypackage", unitypackage_bytes(("Assets/lilToon/Shader.shader", b"SECRET_SHADER_PACKAGE")))
+        archive.writestr("Dress_Textures.unitypackage", unitypackage_bytes(("Assets/Materials/Body.mat", b"SECRET_MATERIAL_PACKAGE")))
 
     result = build_outfit_import_plan(package, project_path=project, base_avatar_name="Milltina")
     queue = result["plan"]["source"]["importQueue"]
@@ -446,10 +557,10 @@ def test_installed_shader_dependency_support_package_is_skipped_from_zip_queue(t
     package = tmp_path / "Milltina_Slingshot_Swimsuit.zip"
     material_zip = tmp_path / "Slingshot_Material_and_textures.zip"
     with zipfile.ZipFile(package, mode="w") as archive:
-        archive.writestr("Milltina Slingshot Swimsuit.unitypackage", b"SECRET_DRESS_PACKAGE")
+        archive.writestr("Milltina Slingshot Swimsuit.unitypackage", unitypackage_bytes(("Assets/Dress.prefab", b"SECRET_DRESS_PACKAGE")))
     with zipfile.ZipFile(material_zip, mode="w") as archive:
-        archive.writestr("lilToon_1.7.3.unitypackage", b"SECRET_SHADER_PACKAGE")
-        archive.writestr("Slingshot textures.unitypackage", b"SECRET_MATERIAL_PACKAGE")
+        archive.writestr("lilToon_1.7.3.unitypackage", unitypackage_bytes(("Assets/lilToon/Shader.shader", b"SECRET_SHADER_PACKAGE")))
+        archive.writestr("Slingshot textures.unitypackage", unitypackage_bytes(("Assets/Textures/Body.png", b"SECRET_MATERIAL_PACKAGE")))
 
     result = build_outfit_import_plan(package, project_path=project, base_avatar_name="Milltina")
     package_order = result["dependencyPreflight"]["packageOrder"]
@@ -459,6 +570,10 @@ def test_installed_shader_dependency_support_package_is_skipped_from_zip_queue(t
     assert result["plan"]["kind"] == "unitypackage_import_sequence"
     assert result["plan"]["readyToApply"] is True
     assert [item["path"] for item in queue] == ["Slingshot textures.unitypackage", "Milltina Slingshot Swimsuit.unitypackage"]
+    assert [item["expectedAssetPaths"] for item in queue] == [
+        ["Assets/Textures/Body.png"],
+        ["Assets/Dress.prefab"],
+    ]
     assert skipped[0]["path"] == "lilToon_1.7.3.unitypackage"
     assert skipped[0]["skipReason"] == "already_installed_dependency"
     assert skipped[0]["dependencyId"] == "liltoon"
@@ -478,6 +593,10 @@ def test_sibling_material_package_is_queued_before_direct_outfit(tmp_path: Path)
     assert result["plan"]["kind"] == "unitypackage_import_sequence"
     assert result["plan"]["readyToApply"] is True
     assert [Path(item.get("actualPackagePath", "")).name for item in queue] == ["Dress_Materials.unitypackage", "Dress_Milltina.unitypackage"]
+    assert [item["expectedAssetPaths"] for item in queue] == [
+        ["Assets/Outfits/Dress.prefab", "Assets/Outfits/Textures/body.png"],
+        ["Assets/Outfits/Dress.prefab", "Assets/Outfits/Textures/body.png"],
+    ]
 
 
 def test_selected_only_direct_package_excludes_filename_heuristic_sibling(tmp_path: Path) -> None:
@@ -535,6 +654,11 @@ def test_selected_only_folder_accepts_one_unique_package(tmp_path: Path) -> None
 
     assert result["plan"]["writeTarget"] == "vrcforge_import_outfit_package"
     assert [item["path"] for item in result["plan"]["source"]["importQueue"]] == ["Dress_Milltina.unitypackage"]
+    assert result["plan"]["expectedAssetPathsComplete"] is True
+    assert result["plan"]["expectedAssetPaths"] == [
+        "Assets/Outfits/Dress.prefab",
+        "Assets/Outfits/Textures/body.png",
+    ]
 
 
 def test_selected_only_zip_explicit_package_excludes_companion_scan(tmp_path: Path) -> None:

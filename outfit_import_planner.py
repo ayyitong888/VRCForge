@@ -373,13 +373,29 @@ def build_unitypackage_plan(
         for item in import_queue
     )
     nested_size_ready = not nested_queue_present or nested_size_verified
-    expected_assets_complete = inspection_complete and all(
-        package.get("pathnamesEvidenceComplete") is True
-        for package in inspection.get("unityPackages") or []
-    )
+    import_queue = [dict(item) for item in import_queue if isinstance(item, dict)]
+    expected_assets_complete = inspection_complete and bool(import_queue)
+    expected_assets: list[str] = []
+    for item in import_queue:
+        package = _inspection_for_import_queue_item(item, inspection, source_path)
+        paths = expected_asset_paths_from_package(package) if package else []
+        complete = bool(
+            package
+            and package.get("pathnamesEvidenceComplete") is True
+            and int(package.get("unsafePathnameCount") or 0) == 0
+            and paths
+        )
+        item["expectedAssetPaths"] = paths
+        item["expectedAssetPathsComplete"] = complete
+        item["unsafePathnameCount"] = int(package.get("unsafePathnameCount") or 0) if package else 0
+        expected_assets_complete = expected_assets_complete and complete
+        expected_assets.extend(paths)
+    expected_assets = sorted(dict.fromkeys(expected_assets), key=str.casefold)
     ready = (
         not needs_extract
         and inspection_complete
+        and expected_assets_complete
+        and bool(expected_assets)
         and nested_size_ready
         and bool(dependency_preflight.get("readyForImport"))
     )
@@ -392,7 +408,14 @@ def build_unitypackage_plan(
         plan_warnings.append(
             "Nested UnityPackage sizes could not be verified from the ZIP central directory; inspect the source before applying."
         )
-    expected_assets = expected_asset_paths_from_inspection(inspection)
+    if not expected_assets_complete:
+        plan_warnings.append(
+            "Import blocked: every queued UnityPackage needs a complete, safe, non-empty exact Assets path inventory; inspect the selected and support packages, including nested packages, before approval."
+        )
+    elif not expected_assets:
+        plan_warnings.append(
+            "The selected UnityPackage has no verifiable Assets paths; import is blocked because created files could not be confirmed."
+        )
     if selected_prefab_path and selected_prefab_path not in expected_assets:
         plan_warnings.append("The container prefab is not a proven destination of the UnityPackage; find the imported prefab after refresh.")
         selected_prefab_path = ""
@@ -1432,16 +1455,79 @@ def resolve_selected_unitypackage_path(source_path: Path, source_type: str, sele
     return None
 
 
+def _inspection_for_import_queue_item(
+    item: dict[str, Any], inspection: dict[str, Any], source_path: Path
+) -> dict[str, Any] | None:
+    entry_path = str(item.get("path") or "").replace("\\", "/").strip("/")
+    source_type = str(item.get("sourceType") or "").strip().casefold()
+    container_value = str(item.get("containerPath") or "").strip()
+    container_path = Path(container_value).expanduser() if container_value else source_path
+
+    def matching_package(candidate: dict[str, Any]) -> dict[str, Any] | None:
+        packages = candidate.get("unityPackages")
+        if not isinstance(packages, list):
+            return None
+        for package in packages:
+            if not isinstance(package, dict):
+                continue
+            package_path = str(package.get("path") or "").replace("\\", "/").strip("/")
+            if package_path.casefold() == entry_path.casefold():
+                return package
+        return None
+
+    try:
+        same_container = container_path.resolve() == source_path.resolve()
+    except OSError:
+        same_container = False
+    if same_container:
+        package = matching_package(inspection)
+        if package is not None:
+            return package
+
+    actual_path = str(item.get("actualPackagePath") or "").strip()
+    if actual_path:
+        candidate_path = Path(actual_path).expanduser()
+        if candidate_path.is_file():
+            candidate = inspect_outfit_package(candidate_path)
+            package = matching_package(candidate)
+            if package is not None:
+                return package
+            packages = candidate.get("unityPackages")
+            if isinstance(packages, list) and len(packages) == 1 and isinstance(packages[0], dict):
+                return packages[0]
+
+    if source_type == "folder":
+        candidate_path = source_path / entry_path
+        if candidate_path.is_file():
+            candidate = inspect_outfit_package(candidate_path)
+            packages = candidate.get("unityPackages")
+            if isinstance(packages, list) and len(packages) == 1 and isinstance(packages[0], dict):
+                return packages[0]
+    elif source_type == "zip" and container_path.is_file():
+        candidate = inspect_outfit_package(container_path)
+        package = matching_package(candidate)
+        if package is not None:
+            return package
+    return None
+
+
+def expected_asset_paths_from_package(package: dict[str, Any] | None) -> list[str]:
+    if not isinstance(package, dict):
+        return []
+    paths: list[str] = []
+    for item in package_pathname_evidence(package):
+        if isinstance(item, dict):
+            path = str(item.get("path") or "").replace("\\", "/").strip("/")
+            if path.startswith("Assets/"):
+                paths.append(path)
+    return sorted(dict.fromkeys(paths), key=str.casefold)
+
+
 def expected_asset_paths_from_inspection(inspection: dict[str, Any]) -> list[str]:
     paths: list[str] = []
     for package in inspection.get("unityPackages") or []:
-        if not isinstance(package, dict):
-            continue
-        for item in package_pathname_evidence(package):
-            if isinstance(item, dict):
-                path = str(item.get("path") or "").replace("\\", "/").strip("/")
-                if path.startswith("Assets/"):
-                    paths.append(path)
+        if isinstance(package, dict):
+            paths.extend(expected_asset_paths_from_package(package))
     # A container's loose FBX/prefab entries are not destinations of the
     # selected UnityPackage. Unknown package pathnames stay unknown until
     # approval-bound inspection; they cannot fall back to another asset kind.
