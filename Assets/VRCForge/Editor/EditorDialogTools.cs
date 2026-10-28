@@ -6,14 +6,13 @@ using Newtonsoft.Json.Linq;
 
 namespace VRCForge.Editor
 {
-    // Read-only diagnostic: report the NDMF build errors that Modular Avatar,
-    // VRCFury and every other NDMF plugin surface through ErrorReportWindow.
+    // Read-only diagnostic: report the errors in NDMF's last retained build report.
     // NDMF exposes no report-list read API, so the list is read through
     // reflection. Core dispatches this read on the Unity main thread, where
     // IError.ToMessage() may safely initialize its localization assets.
     [VRCForgeCommand(
         toolId: "vrc_get_ndmf_errors",
-        Summary = "Read-only: report NDMF build errors (Modular Avatar, VRCFury, and every other NDMF plugin) with plugin, pass, severity and formatted message. Native dialog windows are read by the App-side inspect_unity_editor_dialogs tool instead.",
+        Summary = "Read-only: report errors from NDMF's last retained report, matching the report shown by Show NDMF Console, with plugin, pass, severity and formatted message. Native dialog windows are read by the App-side inspect_unity_editor_dialogs tool instead.",
         Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class NdmfErrorReader
@@ -25,7 +24,7 @@ namespace VRCForge.Editor
             var errors = CollectNdmfErrors(out var note);
             var payload = new JObject { ["ndmfErrors"] = errors, ["ndmfErrorCount"] = errors.Count };
             if (!string.IsNullOrEmpty(note)) payload["note"] = note;
-            return VRCForgeToolResult.Completed("NDMF errors enumerated.", payload);
+            return VRCForgeToolResult.Completed("NDMF's last retained report was read.", payload);
         }
 
         private static JArray CollectNdmfErrors(out string note)
@@ -50,33 +49,36 @@ namespace VRCForge.Editor
                     note = "NDMF report list not found (NDMF version change); NDMF errors unavailable.";
                     return errors;
                 }
-                foreach (var report in reports)
+                object latestReport = null;
+                foreach (var report in reports) latestReport = report;
+                if (latestReport != null)
                 {
-                    if (report == null) continue;
-                    var reportTypeInstance = report.GetType();
-                    var avatarName = reportTypeInstance.GetProperty("AvatarName")?.GetValue(report) as string;
-                    var errorList = reportTypeInstance.GetProperty("Errors")?.GetValue(report) as System.Collections.IEnumerable;
-                    if (errorList == null) continue;
-                    foreach (var context in errorList)
+                    var reportTypeInstance = latestReport.GetType();
+                    var avatarName = reportTypeInstance.GetProperty("AvatarName")?.GetValue(latestReport) as string;
+                    var errorList = reportTypeInstance.GetProperty("Errors")?.GetValue(latestReport) as System.Collections.IEnumerable;
+                    if (errorList != null)
                     {
-                        if (context == null) continue;
-                        var contextType = context.GetType();
-                        var theError = contextType.GetField("TheError")?.GetValue(context);
-                        if (theError == null) continue;
-                        var entry = new JObject();
-                        var errorType = theError.GetType();
-                        try { entry["message"] = (string)toMessage.Invoke(theError, null); }
-                        catch (Exception ex) { entry["message"] = "<error formatting failed: " + ex.GetType().Name + ">"; }
-                        var severity = errorType.GetProperty("Severity")?.GetValue(theError);
-                        if (severity != null) entry["severity"] = severity.ToString();
-                        var titleKey = errorType.GetProperty("TitleKey")?.GetValue(theError) as string;
-                        if (!string.IsNullOrEmpty(titleKey)) entry["titleKey"] = titleKey;
-                        var plugin = contextType.GetField("Plugin")?.GetValue(context);
-                        if (plugin != null) entry["plugin"] = plugin.GetType().Name;
-                        var passName = contextType.GetField("PassName")?.GetValue(context) as string;
-                        if (!string.IsNullOrEmpty(passName)) entry["pass"] = passName;
-                        if (!string.IsNullOrEmpty(avatarName)) entry["avatar"] = avatarName;
-                        errors.Add(entry);
+                        foreach (var context in errorList)
+                        {
+                            if (context == null) continue;
+                            var contextType = context.GetType();
+                            var theError = contextType.GetField("TheError")?.GetValue(context);
+                            if (theError == null) continue;
+                            var entry = new JObject();
+                            var errorType = theError.GetType();
+                            try { entry["message"] = (string)toMessage.Invoke(theError, null); }
+                            catch (Exception ex) { entry["message"] = "<error formatting failed: " + ex.GetType().Name + ">"; }
+                            var severity = errorType.GetProperty("Severity")?.GetValue(theError);
+                            if (severity != null) entry["severity"] = severity.ToString();
+                            var titleKey = errorType.GetProperty("TitleKey")?.GetValue(theError) as string;
+                            if (!string.IsNullOrEmpty(titleKey)) entry["titleKey"] = titleKey;
+                            var plugin = contextType.GetField("Plugin")?.GetValue(context);
+                            if (plugin != null) entry["plugin"] = plugin.GetType().Name;
+                            var passName = contextType.GetField("PassName")?.GetValue(context) as string;
+                            if (!string.IsNullOrEmpty(passName)) entry["pass"] = passName;
+                            if (!string.IsNullOrEmpty(avatarName)) entry["avatar"] = avatarName;
+                            errors.Add(entry);
+                        }
                     }
                 }
             }

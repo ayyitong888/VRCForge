@@ -27561,7 +27561,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_get_ndmf_errors",
-        "When to use: read existing NDMF build errors with their original message, severity, avatar, plugin and pass after an avatar build or preprocess failure. When NOT to use: do not start a build, enter Play, clear errors, or use this to inspect native modal dialogs. Negative example: do not call this tool to fix or rerun a failed build.",
+        "When to use: read errors from NDMF's last report currently retained in memory, matching the report shown by Show NDMF Console, with its original message, severity, avatar, plugin and pass. When NOT to use: do not start a build, enter Play, clear errors, or use this to inspect native modal dialogs. Negative example: do not call this tool to fix or rerun a failed build.",
         "read/debug",
         read_agent_ndmf_errors,
     )
