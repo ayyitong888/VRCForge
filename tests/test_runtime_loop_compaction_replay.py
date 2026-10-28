@@ -133,4 +133,3 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
         planner.maybe_compact_runtime_history = original_maybe_compact
         fixture.tearDown()
 AgentLoopP0Tests.__test__ = False
-

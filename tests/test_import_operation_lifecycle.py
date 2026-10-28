@@ -222,4 +222,3 @@ def test_host_journals_full_seal_before_dispatch_and_fails_closed_on_storage_err
     before = path.read_bytes() if path.exists() else None
     _journal_import_progress(untrusted=True)
     assert (path.read_bytes() if path.exists() else None) == before
-
