@@ -51,8 +51,9 @@ def prepare_component_property_batch(params):
     """Validate the complete batch before invoking Core, without repeated scene hashing."""
     scalar_keys = {"gameObjectPath", "game_object_path", "componentType", "component_type", "componentIndex", "component_index",
                    "propertyPath", "property_path", "maxItems", "max_items"}
-    if scalar_keys.intersection(params):
-        raise ValueError("queries and scalar property arguments are mutually exclusive.")
+    mixed_fields = sorted(scalar_keys.intersection(params))
+    if mixed_fields:
+        raise ValueError(f"queries cannot be combined with scalar fields {mixed_fields}. Remove these fields or use one scalar property read without queries.")
     queries = params.get("queries")
     if not isinstance(queries, list) or not 1 <= len(queries) <= 128:
         raise ValueError("queries must contain 1–128 components.")
@@ -63,28 +64,33 @@ def prepare_component_property_batch(params):
     if anchor.get("scope") != "component":
         raise ValueError("The batch anchor must be an exact component executionTarget.")
     projected, seen, property_count = [], set(), 0
-    for query in queries:
-        if not isinstance(query, Mapping) or set(query) - {"gameObjectPath", "componentType", "componentIndex", "propertyNames", "executionTarget"}:
-            raise ValueError("Invalid component property query fields.")
+    for index, query in enumerate(queries):
+        location = f"queries[{index}]"
+        if not isinstance(query, Mapping):
+            raise ValueError(f"{location} must be an object containing one bound component and its propertyNames.")
+        allowed_fields = COMPONENT_PROPERTY_QUERIES_SCHEMA["items"]["properties"]
+        unknown_fields = sorted(set(query) - allowed_fields.keys())
+        if unknown_fields:
+            raise ValueError(f"{location} contains unsupported fields {unknown_fields}. Use only {list(allowed_fields)}; propertyNames is an array of simple field names.")
         names = query.get("propertyNames")
         if (not isinstance(names, list) or not 1 <= len(names) <= 16
                 or any(not isinstance(name, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in names)
                 or len(set(names)) != len(names)):
-            raise ValueError("propertyNames must contain 1–16 distinct simple property names.")
+            raise ValueError(f"{location}.propertyNames must contain 1–16 distinct simple property names. Use one scalar get_property read for a nested path or collection.")
         property_count += len(names)
         if property_count > 512:
-            raise ValueError("A batch may read at most 512 properties.")
+            raise ValueError(f"{location}.propertyNames raises the batch total to {property_count}; split the request into batches of at most 512 properties.")
         component_index = query.get("componentIndex", 0)
         if type(component_index) is not int or component_index < 0:
-            raise ValueError("componentIndex must be a nonnegative integer.")
+            raise ValueError(f"{location}.componentIndex must be a nonnegative integer from inspection, not a string or a guessed component index.")
         target = validate_execution_target(query.get("executionTarget"), project_root=project_root, required_scope="component")
         if target.get("scope") != "component" or any(target.get(group) != anchor.get(group) for group in ("project", "editor", "scene", "avatar")):
-            raise ValueError("Every query must share the verified anchor project/editor/scene/avatar identity.")
+            raise ValueError(f"{location}.executionTarget must share the verified anchor project/editor/scene/avatar identity. Rebind this component in the anchor's current scene or read it in a separate batch; do not edit identity fields.")
         if query.get("gameObjectPath") != target["object"]["exactHierarchyPath"] or query.get("componentType") != target["component"]["type"]:
-            raise ValueError("Query path/type differs from its bound component identity.")
+            raise ValueError(f"{location}.gameObjectPath/componentType differs from its bound component identity. Expected gameObjectPath={target['object']['exactHierarchyPath']!r}, componentType={target['component']['type']!r}. Bind the intended component and copy its returned path/type; do not edit identity fields.")
         component_id = target["component"]["globalObjectId"]
         if component_id in seen:
-            raise ValueError("Duplicate component query; combine its propertyNames.")
+            raise ValueError(f"Duplicate component query at {location}; combine its propertyNames into the earlier query for this same component.")
         seen.add(component_id)
         projected.append({
             "gameObjectPath": query["gameObjectPath"], "componentType": query["componentType"],

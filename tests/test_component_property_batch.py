@@ -142,3 +142,25 @@ def test_handler_forwards_one_core_call_only_after_all_identity_checks(monkeypat
     with pytest.raises(ValueError):
         dashboard.read_component_property_sync(bad)
     assert len(calls) == 1
+
+
+def test_rejected_query_identifies_exact_row_and_correction_then_accepts_it(monkeypatch):
+    args = request()
+    args["queries"][1]["propertyName"] = "enabled"
+    with pytest.raises(ValueError) as error:
+        prepared(monkeypatch, args)
+    assert "queries[1]" in str(error.value)
+    assert "propertyName" in str(error.value) and "propertyNames" in str(error.value)
+    del args["queries"][1]["propertyName"]
+    assert len(prepared(monkeypatch, args)[0]["queries"]) == 2
+
+
+def test_identity_mismatch_reports_bound_field_and_does_not_suggest_editing_identity(monkeypatch):
+    args = request()
+    args["queries"][1]["gameObjectPath"] = "Avatar/Guessed"
+    with pytest.raises(ValueError) as error:
+        prepared(monkeypatch, args)
+    assert "queries[1].gameObjectPath/componentType" in str(error.value)
+    assert "Avatar/Part1" in str(error.value) and "do not edit identity fields" in str(error.value)
+    args["queries"][1]["gameObjectPath"] = args["queries"][1]["executionTarget"]["object"]["exactHierarchyPath"]
+    assert len(prepared(monkeypatch, args)[0]["queries"]) == 2
