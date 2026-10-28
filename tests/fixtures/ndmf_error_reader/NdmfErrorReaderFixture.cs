@@ -39,8 +39,9 @@ namespace VRCForge.LocalReview
                 var response = (VRCForgeToolResult)NdmfErrorReader.HandleCommand(new JObject());
                 var payload = (JObject)response.Payload;
                 result["staleErrorFollowedByLatestEmpty"] = payload;
-                Require((int)payload["ndmfErrorCount"] == 0,
-                    "The reader returned an error from an older report instead of the last empty report");
+                Require(response.IsSuccessful && (bool)payload["readable"] && (bool)payload["reportAvailable"]
+                    && (int)payload["ndmfErrorCount"] == 0,
+                    "The reader must successfully read the last empty report rather than an older error");
                 Require(((JArray)payload["ndmfErrors"]).Count == 0,
                     "The last empty report should produce an empty error list");
 
@@ -68,8 +69,10 @@ namespace VRCForge.LocalReview
                 response = (VRCForgeToolResult)NdmfErrorReader.HandleCommand(new JObject());
                 payload = (JObject)response.Payload;
                 result["noReports"] = payload;
-                Require((int)payload["ndmfErrorCount"] == 0 && ((JArray)payload["ndmfErrors"]).Count == 0,
-                    "No reports should produce an empty error list");
+                Require(response.IsSuccessful && (bool)payload["readable"] && !(bool)payload["reportAvailable"]
+                    && payload["ndmfErrorCount"].Type == JTokenType.Null
+                    && ((JArray)payload["ndmfErrors"]).Count == 0,
+                    "No retained report must not be represented as a clean report");
                 result["pass"] = true;
             }
             catch (Exception exception)

@@ -50,3 +50,23 @@ def test_registered_ndmf_reader_preserves_empty_last_report_payload():
             )):
         actual = dashboard_server.AGENT_GATEWAY._tools[TOOL].handler({"projectPath": "D:/Fixture"})
     assert actual == payload
+
+
+def test_registered_ndmf_reader_preserves_failed_read_instead_of_zero_errors():
+    payload = {
+        "readable": False, "reportAvailable": True, "readStatus": "unavailable",
+        "ndmfErrorCount": None, "ndmfErrors": [], "failurePhase": "report_read",
+        "diagnostics": {"exceptionType": "System.InvalidOperationException", "message": "report getter exploded"},
+        "nextAction": "Inspect the retained NDMF report and the reported API exception.",
+    }
+    structured = {"success": False, "code": "ndmf_report_read_failed",
+                  "error": "NDMF report read failed: report getter exploded", "data": payload}
+    with patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()), \
+            patch("dashboard_server.invoke_unity_mcp", return_value=dashboard_server.McpResult(
+                exit_code=1, stdout="", stderr="", payload={"isError": True, "structuredContent": structured},
+            )):
+        actual = dashboard_server.AGENT_GATEWAY._tools[TOOL].handler({"projectPath": "D:/Fixture"})
+    assert actual["ok"] is False
+    assert actual["code"] == "ndmf_report_read_failed"
+    for key, value in payload.items():
+        assert actual[key] == value
