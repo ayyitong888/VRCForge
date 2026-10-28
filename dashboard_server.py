@@ -23327,7 +23327,7 @@ def build_safe_backup_restore_request(params: dict[str, Any], confirm: bool) -> 
     request: dict[str, Any] = {
         "backupPath": str(params.get("backup_path") or params.get("backupPath") or "").strip(),
         "backupId": str(params.get("backup_id") or params.get("backupId") or "").strip(),
-        "assetPaths": [str(item) for item in asset_paths if str(item).strip()],
+        "assetPaths": list(asset_paths),
         "confirmRestore": confirm,
         "allowProjectMismatch": bool(params.get("allow_project_mismatch") or params.get("allowProjectMismatch") or False),
         "allowOverwriteChanged": bool(params.get("allow_overwrite_changed") or params.get("allowOverwriteChanged") or False),

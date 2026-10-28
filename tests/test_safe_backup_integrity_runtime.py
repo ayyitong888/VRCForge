@@ -23,7 +23,7 @@ class VRCForgeInputAttribute:System.Attribute {public VRCForgeInputAttribute(str
 }
 namespace VRCForge.Editor {
 class VRCForgeOutputPathGuard {public static string ResolveManagedProjectPath(string path,string fallback,string scope,string label)=>System.IO.Path.GetFullPath(System.IO.Path.Combine(System.IO.Directory.GetParent(UnityEngine.Application.dataPath).FullName,string.IsNullOrWhiteSpace(path)?fallback:path));}
-class VRCForgeToolResult {public bool Success;public string Message;public object Payload;public static object Completed(string m,object p)=>new VRCForgeToolResult{Success=true,Message=m,Payload=p};public static object Failed(string m,object p=null)=>new VRCForgeToolResult{Success=false,Message=m,Payload=p};}
+class VRCForgeToolResult {public bool Success;public string Message;public object Payload;public static object Completed(string m,object p)=>new VRCForgeToolResult{Success=true,Message=m,Payload=p};public static object Failed(string m,object p=null)=>new VRCForgeToolResult{Success=false,Message=m,Payload=p};public static object FailedWithCode(string c,string m,object p=null)=>Failed(m,p);}
 class Probe {
 static string Hash(byte[] bytes){using(var h=System.Security.Cryptography.SHA256.Create())return System.BitConverter.ToString(h.ComputeHash(bytes)).Replace("-","").ToLowerInvariant();}
 static void Main(string[] args){

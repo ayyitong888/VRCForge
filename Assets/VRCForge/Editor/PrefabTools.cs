@@ -60,6 +60,10 @@ namespace VRCForge.Editor
                     $"{action} safe backup '{payload.backup_id}': {payload.summary.restoredCount} restored, {payload.summary.skippedCount} skipped.",
                     payload);
             }
+            catch (RestoreSelectionException ex)
+            {
+                return VRCForgeToolResult.FailedWithCode(ex.Code, ex.Message, ex.Details);
+            }
             catch (RestoreTransactionException ex)
             {
                 if (ex.Payload.rollback_verified)
@@ -108,13 +112,33 @@ namespace VRCForge.Editor
                 }
             }
 
-            var requestedSubset = new HashSet<string>(
-                (parameters.assetPaths ?? new List<string>())
-                    .Where(path => !string.IsNullOrWhiteSpace(path))
-                    .Select(NormalizeRequestedAssetPath)
-                    .Where(path => !string.IsNullOrWhiteSpace(path)),
-                StringComparer.OrdinalIgnoreCase);
+            var requestedPaths = parameters.assetPaths ?? new List<string>();
+            var invalidIndices = Enumerable.Range(0, requestedPaths.Count)
+                .Where(index => string.IsNullOrWhiteSpace(requestedPaths[index])).ToArray();
+            if (invalidIndices.Length > 0)
+                throw new RestoreSelectionException("backup_asset_selection_invalid", "assetPaths contains a blank or null path; it cannot mean restore all.",
+                    new { ok = false, invalidAssetPathIndices = invalidIndices, backupPath, manifestPath,
+                        mutationStarted = false, committed = false, commitState = "not_started",
+                        nextAction = "Replace every blank/null assetPaths entry with an exact path from vrcforge_preview_restore_backup. Omit assetPaths only when restoring the entire backup is intended, then preview before restoring. No requested file was restored." });
+            var requestedSubset = new HashSet<string>(requestedPaths.Select(NormalizeRequestedAssetPath), StringComparer.OrdinalIgnoreCase);
             var files = manifest["files"] as JArray ?? new JArray();
+            if (requestedSubset.Count > 0)
+            {
+                var available = files.OfType<JObject>().Select(file =>
+                {
+                    return TryNormalizeManifestRelativePath((string)file["project_relative_path"], out var path, out _)
+                        && (path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) || path.Equals("Assets", StringComparison.OrdinalIgnoreCase))
+                        ? path : null;
+                }).Where(path => path != null).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                var missing = requestedSubset.Where(requested => !available.Any(path => ShouldRestore(path,
+                    new HashSet<string>(new[] { requested }, StringComparer.OrdinalIgnoreCase)))).ToArray();
+                if (missing.Length > 0)
+                    throw new RestoreSelectionException("backup_asset_selection_missing", "Requested asset path(s) are not present in this backup: " + string.Join(", ", missing),
+                        new { ok = false, missingAssetPaths = missing, availableAssetPaths = available.Take(50).ToArray(),
+                            availableAssetPathCount = available.Length, backupPath, manifestPath,
+                            mutationStarted = false, committed = false, commitState = "not_started",
+                            nextAction = "Use vrcforge_preview_restore_backup with this backupPath and without assetPaths to inspect its entries. Choose exact paths from this backup or select the correct backup, then preview the corrected subset before restoring. No requested file was restored." });
+            }
             foreach (var file in files.OfType<JObject>())
             {
                 var rawRelativePath = (string)file["project_relative_path"] ?? "";
@@ -158,12 +182,10 @@ namespace VRCForge.Editor
 
                 if (!File.Exists(backupFilePath))
                 {
-                    skipped.Add(new RestoreSkippedItem
-                    {
-                        project_relative_path = relativePath,
-                        reason = "Backup file is missing from the snapshot."
-                    });
-                    continue;
+                    throw new RestoreSelectionException("backup_snapshot_source_missing", "Backup snapshot source is missing for '" + relativePath + "': " + backupFilePath,
+                        new { ok = false, missingSnapshotAssetPaths = new[] { relativePath }, missingSnapshotFiles = new[] { backupFilePath },
+                            backupPath, manifestPath, mutationStarted = false, committed = false, commitState = "not_started",
+                            nextAction = "The backup manifest names this asset but its snapshot file is absent. Select an intact backup or restore the original snapshot file from a trusted copy, then preview again. Do not substitute the current project file for missing snapshot data. No requested file was restored." });
                 }
 
                 var backupSha = VerifyBackupIntegrity(backupFilePath, originalSha);
@@ -581,6 +603,13 @@ namespace VRCForge.Editor
             public int restoredCount;
             public int skippedCount;
             public int warningCount;
+        }
+
+        private sealed class RestoreSelectionException : Exception
+        {
+            internal readonly string Code;
+            internal readonly object Details;
+            internal RestoreSelectionException(string code, string message, object details) : base(message) { Code = code; Details = details; }
         }
 
         private sealed class RestoreTransactionException : Exception
