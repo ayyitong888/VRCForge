@@ -10,11 +10,12 @@ from runtime_planner_service import RuntimePlannerService
 from unity_editor_extension_tools import editor_menu_request
 
 
+@pytest.mark.parametrize("external_lane", [False, True])
 @pytest.mark.parametrize("arguments,reason", [
     ({"menuPath": "GameObject/Modular Avatar/Setup Outfit"}, "menuItemPath must be one exact discovered menu path."),
     ({"menuItemPath": "GameObject/Modular Avatar/Setup Outfit"}, "selectionGlobalObjectIds must be an explicit array"),
 ])
-def test_original_zcode_menu_argument_failure_leads_receipt(tmp_path, arguments, reason):
+def test_original_zcode_menu_argument_failure_leads_receipt(tmp_path, arguments, reason, external_lane):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     gateway.ensure_config().allow_write_requests = True
     gateway.approval_transactions.register_write_handler(
@@ -25,8 +26,11 @@ def test_original_zcode_menu_argument_failure_leads_receipt(tmp_path, arguments,
     )
     arguments = {"projectPath": str(tmp_path), **arguments}
     with pytest.raises(AgentGatewayError) as caught:
-        gateway.approval_transactions.create_apply_request({
-            "target_tool": "vrcforge_execute_unity_editor_menu", "arguments": arguments})
+        if external_lane:
+            gateway.approval_transactions.prepare_external_mcp_write("vrcforge_execute_unity_editor_menu", arguments)
+        else:
+            gateway.approval_transactions.create_apply_request({
+                "target_tool": "vrcforge_execute_unity_editor_menu", "arguments": arguments})
     assert reason in str(caught.value)[:100]
     assert isinstance(caught.value.__cause__, ValueError)
     external = build_external_tool_error(exception=caught.value, operation_kind="write",
@@ -57,3 +61,22 @@ def test_valid_menu_arguments_still_freeze_exact_plan(tmp_path):
         "arguments": {"projectPath": str(tmp_path), **request}})
     assert result["approval"]["approvedUnityExecutionPlan"] == freeze_approved_unity_execution_plan(
         [("vrc_execute_unity_editor_menu", request)])
+
+
+@pytest.mark.parametrize("external_lane", [False, True])
+@pytest.mark.parametrize("phase", ["request_preparer", "manual_approval_resolver", "risk_level_resolver"])
+def test_write_preparation_failure_identifies_the_original_reason(tmp_path, external_lane, phase):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    def reject(*_args):
+        raise ValueError("requested field must identify an existing target; inspect its exact identity before retrying")
+    gateway.approval_transactions.register_write_handler(
+        "fixture_write", "Fixture write", "medium", lambda _: pytest.fail("no write should start"),
+        **{phase: reject})
+    with pytest.raises(AgentGatewayError) as caught:
+        if external_lane:
+            gateway.approval_transactions.prepare_external_mcp_write("fixture_write", {"projectPath": str(tmp_path)})
+        else:
+            gateway.approval_transactions.create_apply_request({"target_tool": "fixture_write", "arguments": {"projectPath": str(tmp_path)}})
+    assert str(caught.value).startswith("ValueError: requested field must identify an existing target;")
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert gateway._approvals == {}

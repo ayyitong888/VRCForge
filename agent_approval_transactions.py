@@ -1361,7 +1361,8 @@ class AgentApprovalTransactionService:
                 raise
             except Exception as exc:  # noqa: BLE001 - a failed authoritative preview must block the request.
                 raise AgentGatewayError(
-                    f"Could not prepare the supervised write request for {target_tool}.",
+                    f"{type(exc).__name__}: {exc} "
+                    f"(Could not prepare the supervised write request for {target_tool}.)",
                     status_code=500,
                     cause_code="write_request_preparation_failed",
                     failure_layer="write_request_preparation",
@@ -1385,7 +1386,8 @@ class AgentApprovalTransactionService:
                 ).strip()
             except Exception as exc:  # noqa: BLE001 - policy failures must block the request.
                 raise AgentGatewayError(
-                    f"Could not determine the manual approval policy for {target_tool}.",
+                    f"{type(exc).__name__}: {exc} "
+                    f"(Could not determine the manual approval policy for {target_tool}.)",
                     status_code=500,
                 ) from exc
         base_risk_level = normalize_risk_level(write_handler.risk_level)
@@ -1398,7 +1400,8 @@ class AgentApprovalTransactionService:
                 ).strip().lower()
             except Exception as exc:  # noqa: BLE001 - a failed classifier must block the write request.
                 raise AgentGatewayError(
-                    f"Could not determine write risk for {target_tool}: {exc}",
+                    f"{type(exc).__name__}: {exc} "
+                    f"(Could not determine write risk for {target_tool}.)",
                     status_code=500,
                 ) from exc
             if resolved_risk_level not in {"low", "medium", "high", "critical"}:
@@ -3978,10 +3981,9 @@ class AgentApprovalTransactionService:
             except AgentGatewayError:
                 raise
             except Exception as exc:  # noqa: BLE001 - authoritative preparation fails closed.
-                detail = str(exc).strip()
-                suffix = f" Reason: {detail}" if detail else ""
                 raise AgentGatewayError(
-                    f"Could not prepare the external MCP write for {normalized_target}.{suffix}",
+                    f"{type(exc).__name__}: {exc} "
+                    f"(Could not prepare the external MCP write for {normalized_target}.)",
                     status_code=500,
                 ) from exc
             if not isinstance(prepared_arguments, dict):
@@ -4006,7 +4008,8 @@ class AgentApprovalTransactionService:
                 ).strip()
             except Exception as exc:  # noqa: BLE001 - safety policy failures fail closed.
                 raise AgentGatewayError(
-                    f"Could not determine the external confirmation policy for {normalized_target}.",
+                    f"{type(exc).__name__}: {exc} "
+                    f"(Could not determine the external confirmation policy for {normalized_target}.)",
                     status_code=500,
                 ) from exc
 
@@ -4019,7 +4022,8 @@ class AgentApprovalTransactionService:
                 ).strip().lower()
             except Exception as exc:  # noqa: BLE001 - safety classification failures fail closed.
                 raise AgentGatewayError(
-                    f"Could not determine write risk for {normalized_target}: {exc}",
+                    f"{type(exc).__name__}: {exc} "
+                    f"(Could not determine write risk for {normalized_target}.)",
                     status_code=500,
                 ) from exc
             if resolved_risk_level not in {"low", "medium", "high", "critical"}:
@@ -4088,7 +4092,8 @@ class AgentApprovalTransactionService:
                 raise
             except Exception as exc:  # noqa: BLE001 - malformed plans fail before any write.
                 raise AgentGatewayError(
-                    f"Could not freeze the exact Core execution plan for {normalized_target}.",
+                    f"{type(exc).__name__}: {exc} "
+                    f"(Could not freeze the exact Core execution plan for {normalized_target}.)",
                     status_code=409,
                 ) from exc
 
