@@ -312,7 +312,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Compile error check failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Compile error check failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

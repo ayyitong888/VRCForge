@@ -42,7 +42,7 @@ static class PrefabUtility {public static GameObject GetNearestPrefabInstanceRoo
 static class Undo {public static int ParentCalls,OrderCalls; public static void SetTransformParent(Transform t,Transform p,bool keep,string label){ParentCalls++;t.SetParent(p,keep);}public static void SetSiblingIndex(Transform t,int i,string label){OrderCalls++;t.SetSiblingIndex(i);} public static void FlushUndoRecordObjects(){} }
 static class EditorUtility {public static void SetDirty(object x){} }
 static class EditorSceneManager {public static bool FailNextSave;public static int Saves;public static void MarkSceneDirty(Scene s){}public static bool SaveScene(Scene s){Saves++;if(FailNextSave){FailNextSave=false;return false;}return true;} }
-static class VRCForgeToolResult {
+static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message);
  public static object Completed(string m,object p)=>new {ok=true,summary=m,data=p};
  public static object Failed(string m)=>new {ok=false,summary=m};
  public static object FailedWithCode(string code,string m,object p)=>new {ok=false,code,summary=m,data=p};

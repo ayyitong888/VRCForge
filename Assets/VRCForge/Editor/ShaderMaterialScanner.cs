@@ -84,7 +84,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Material scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Material scan failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

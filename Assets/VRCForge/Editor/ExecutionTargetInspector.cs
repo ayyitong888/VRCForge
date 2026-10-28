@@ -114,7 +114,7 @@ namespace VRCForge.Editor
                 if (component == null) return VRCForgeToolResult.FailedWithCode("execution_target_component_unavailable", "An exact component GlobalObjectId on the object is required.", BuildDiscovery(project, editor, scope, null));
                 return VRCForgeToolResult.Completed("Execution target discovered.", BuildTarget(scope, project, editor, scene, avatar, DescribeGameObject(targetObject), DescribeComponent(component)));
             }
-            catch (Exception exception) { return VRCForgeToolResult.FailedWithCode("execution_target_discovery_failed", "Execution target discovery failed: " + exception.Message); }
+            catch (Exception exception) { return VRCForgeToolResult.FailedWithException("execution_target_discovery_failed", "Execution target discovery failed: " + exception.Message, exception); }
         }
 
         private static JObject BuildDiscovery(JObject project, JObject editor, string scope, IList<JObject> candidates)

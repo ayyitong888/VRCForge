@@ -136,7 +136,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Animation binding scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Animation binding scan failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

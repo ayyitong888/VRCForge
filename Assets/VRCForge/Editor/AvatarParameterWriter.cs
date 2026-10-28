@@ -126,7 +126,7 @@ namespace VRCForge.Editor
             catch (Exception ex)
             {
                 var restored = !mutationStarted || (recovery != null && recovery.Restore());
-                return VRCForgeToolResult.Failed($"Parameter optimization apply failed: {ex.Message}\nFailure compensation: {(restored ? "restored" : "incomplete; preserve current state for recovery")}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Parameter optimization apply failed: {ex.Message}\nFailure compensation: {(restored ? "restored" : "incomplete; preserve current state for recovery")}\n{ex.StackTrace}", ex);
             }
         }
 
@@ -324,7 +324,7 @@ namespace VRCForge.Editor
             catch (Exception ex)
             {
                 var restored = !mutationStarted || (recovery != null && recovery.Restore());
-                return VRCForgeToolResult.Failed($"Parameter rollback failed: {ex.Message}\nFailure compensation: {(restored ? "restored" : "incomplete; preserve current state for recovery")}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Parameter rollback failed: {ex.Message}\nFailure compensation: {(restored ? "restored" : "incomplete; preserve current state for recovery")}\n{ex.StackTrace}", ex);
             }
         }
 

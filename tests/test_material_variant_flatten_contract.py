@@ -50,7 +50,7 @@ namespace VRCForge.Core.MCP {
  public enum VRCForgeCommandAccess { RequiresApproval }
  public class VRCForgeCommandAttribute:Attribute { public VRCForgeCommandAttribute(string toolId){} public string Summary{get;set;} public VRCForgeCommandAccess Access{get;set;} }
  public class VRCForgeInputAttribute:Attribute {public VRCForgeInputAttribute(string s){}public bool IsRequired{get;set;}}
- public class VRCForgeToolResult {
+ public class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>Failed(message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message,payload);
   public bool Ok;public string Message;public object Payload;
   public static object Completed(string m,object p=null)=>new VRCForgeToolResult{Ok=true,Message=m,Payload=p};
   public static object Failed(string m,object p=null)=>new VRCForgeToolResult{Message=m,Payload=p};

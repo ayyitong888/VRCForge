@@ -2579,6 +2579,15 @@ namespace VRCForge.Editor
             bool noWriteProven = false,
             Exception exception = null)
         {
+            if (exception != null && exception.InnerException != null)
+            {
+                var root = exception.GetBaseException();
+                var rootMessage = root.Message ?? string.Empty;
+                var context = message ?? string.Empty;
+                message = root.GetType().Name + ": "
+                    + rootMessage.Substring(0, Math.Min(800, rootMessage.Length))
+                    + " Context: " + context.Substring(0, Math.Min(1600, context.Length));
+            }
             var structured = new JObject
             {
                 ["success"] = false,
@@ -2632,6 +2641,10 @@ namespace VRCForge.Editor
                     ["failurePhase"] = "tool_handler_exception",
                 };
                 structured["rootCause"] = structured["failureCause"].DeepClone();
+                var rootException = exception.GetBaseException();
+                structured["rootCause"]["type"] = rootException.GetType().FullName ?? rootException.GetType().Name;
+                structured["rootCause"]["message"] = (rootException.Message ?? message).Substring(
+                    0, Math.Min(800, (rootException.Message ?? message).Length));
                 structured["failedStep"] = "unity_tool_handler";
             }
             var result = new JObject

@@ -1489,9 +1489,9 @@ namespace VRCForge.Editor
             }
             catch (Exception exception)
             {
-                return VRCForgeToolResult.FailedWithCode(
-                    "vrchat_avatar_upload_readiness_failed",
+                return VRCForgeToolResult.FailedWithException("vrchat_avatar_upload_readiness_failed",
                     exception.Message ?? "VRChat avatar upload readiness failed.",
+                    exception,
                     new JObject
                     {
                         ["ok"] = false,

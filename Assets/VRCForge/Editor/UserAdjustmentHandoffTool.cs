@@ -57,9 +57,9 @@ namespace VRCForge.Editor
             {
                 if (mutationStarted)
                 {
-                    return VRCForgeToolResult.FailedWithCode(
-                        "user_adjustment_handoff_failed_after_mutation",
+                    return VRCForgeToolResult.FailedWithException("user_adjustment_handoff_failed_after_mutation",
                         exception.Message,
+                        exception,
                         new
                         {
                             schema = ResultSchema,
@@ -71,10 +71,13 @@ namespace VRCForge.Editor
                             failurePhase = "apply_mutation"
                         });
                 }
-                return VRCForgeToolResult.RejectedBeforeMutation(
-                    "user_adjustment_handoff_rejected", exception.Message,
-                    "unity_core_tool", "identity_or_preview_validation", false,
-                    new { schema = ResultSchema, operation = "user_adjustment_" + action });
+                return VRCForgeToolResult.RejectedBeforeMutation("user_adjustment_handoff_rejected",
+                    exception.Message,
+                    "unity_core_tool",
+                    "identity_or_preview_validation",
+                    false,
+                    new { schema = ResultSchema, operation = "user_adjustment_" + action },
+                    exception: exception);
             }
         }
 

@@ -98,7 +98,9 @@ namespace VRCForge.Editor
                     catch { restored = false; }
                     finally { if (restorePath != null && File.Exists(restorePath)) { try { File.Delete(restorePath); } catch { restored = false; } } }
                 }
-                return VRCForgeToolResult.Failed("Material scalar edit rejected or failed: " + ex.Message, new JObject {
+                return VRCForgeToolResult.FailedWithException("Material scalar edit rejected or failed: " + ex.Message,
+                    ex,
+                    new JObject {
                     ["schema"] = "vrcforge.material_property_edit.v1", ["ok"] = false, ["mutationStarted"] = started,
                     ["committed"] = started && !restored ? JValue.CreateNull() : new JValue(false),
                     ["commitState"] = !started ? "not_started" : restored ? "rolled_back" : "unknown",

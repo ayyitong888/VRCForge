@@ -136,9 +136,9 @@ namespace VRCForge.Editor
                 catch (Exception exception) when (mutationStarted)
                 {
                     var after = UnityConsoleSnapshotReader.Capture(ConsoleEntryLimit);
-                    return VRCForgeToolResult.FailedWithCode(
-                        "vrchat_constraint_conversion_failed_after_mutation",
+                    return VRCForgeToolResult.FailedWithException("vrchat_constraint_conversion_failed_after_mutation",
                         exception.Message ?? "VRChat constraint conversion failed after mutation started.",
+                        exception,
                         new JObject
                         {
                             ["ok"] = false,
@@ -164,9 +164,9 @@ namespace VRCForge.Editor
             catch (Exception exception)
             {
                 var after = UnityConsoleSnapshotReader.Capture(ConsoleEntryLimit);
-                return VRCForgeToolResult.FailedWithCode(
-                    "vrchat_constraint_conversion_preflight_failed",
+                return VRCForgeToolResult.FailedWithException("vrchat_constraint_conversion_preflight_failed",
                     exception.Message ?? "VRChat constraint conversion preflight failed.",
+                    exception,
                     new JObject
                     {
                         ["ok"] = false,

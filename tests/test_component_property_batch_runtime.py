@@ -36,7 +36,7 @@ namespace UnityEditor {
  public static class AssetDatabase {public static string AssetPathToGUID(string p)=>"scene";}
 }
 namespace VRCForge.Core.MCP {
- public static class VRCForgeToolResult {
+ public static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>FailedWithCode(message,message,payload);
   public static object Completed(string s,object o)=>JObject.FromObject(o);
   public static object FailedWithCode(string c,string m,object payload=null){var r=payload==null?new JObject():JObject.FromObject(payload);r["errorCode"]=c;r["message"]=m;return r;}
  }
@@ -183,7 +183,7 @@ namespace VRCForge.Editor {static class ComponentCrudCore {
  internal static Type GetMemberType(MemberInfo m)=>null;
  internal static object DescribeValue(object obj)=>null;
 }}
-namespace VRCForge.Core.MCP {static class VRCForgeToolResult {
+namespace VRCForge.Core.MCP {static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>FailedWithCode(message,message,payload);
  internal static object Completed(string s,object o)=>null;
  internal static object FailedWithCode(string c,string m,object payload=null)=>null;
 }}

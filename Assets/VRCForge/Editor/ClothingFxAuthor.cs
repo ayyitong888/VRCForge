@@ -157,8 +157,8 @@ namespace VRCForge.Editor
                     failed.Status = "failed";
                     failed.Error = ex.Message;
                 }
-                return VRCForgeToolResult.Failed(
-                    $"Clothing FX authoring failed: {ex.Message}\n{ex.StackTrace}",
+                return VRCForgeToolResult.FailedWithException($"Clothing FX authoring failed: {ex.Message}\n{ex.StackTrace}",
+                    ex,
                     new { transaction = BuildTransaction(receipts, assetDir) });
             }
         }

@@ -536,8 +536,8 @@ namespace VRCForge.Editor
                     failed.Status = "failed";
                     failed.Error = ex.Message;
                 }
-                return VRCForgeToolResult.Failed(
-                    $"Ensure expression parameter failed: {ex.Message}\n{ex.StackTrace}",
+                return VRCForgeToolResult.FailedWithException($"Ensure expression parameter failed: {ex.Message}\n{ex.StackTrace}",
+                    ex,
                     new
                     {
                         schema = "vrcforge.expression_write.v1", verified = false, mutationStarted,
@@ -767,8 +767,8 @@ namespace VRCForge.Editor
                     try { failedGraph = CaptureMenuGraph(trackedRoot); failureReadbackComplete = true; }
                     catch { /* Preserve the original failure when a damaged menu cannot be inspected. */ }
                 }
-                return VRCForgeToolResult.Failed(
-                    $"Ensure expression menu control failed: {ex.Message}\n{ex.StackTrace}",
+                return VRCForgeToolResult.FailedWithException($"Ensure expression menu control failed: {ex.Message}\n{ex.StackTrace}",
+                    ex,
                     new
                     {
                         schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, committed = false, restored,
@@ -1321,8 +1321,8 @@ namespace VRCForge.Editor
                     failed.Status = "failed";
                     failed.Error = ex.Message;
                 }
-                return VRCForgeToolResult.Failed(
-                    $"Ensure animator state failed: {ex.Message}\n{ex.StackTrace}",
+                return VRCForgeToolResult.FailedWithException($"Ensure animator state failed: {ex.Message}\n{ex.StackTrace}",
+                    ex,
                     new { mutationStarted, committed = false, restored,
                         commitState = !mutationStarted ? "not_started" : restored ? "rolled_back" : "unknown",
                         checkpointRecoveryRequired = mutationStarted && !restored,

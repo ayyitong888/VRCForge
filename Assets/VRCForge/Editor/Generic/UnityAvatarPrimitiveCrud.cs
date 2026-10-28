@@ -278,7 +278,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Read avatar descriptor failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Read avatar descriptor failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 
@@ -526,7 +526,7 @@ namespace VRCForge.Editor
                         cleanup,
                         mutationApplied);
                 }
-                return VRCForgeToolResult.Failed($"Write avatar descriptor failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Write avatar descriptor failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 
@@ -1303,7 +1303,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Manage expression parameters failed: {ex.Message}\n{ex.StackTrace}", new { schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted });
+                return VRCForgeToolResult.FailedWithException($"Manage expression parameters failed: {ex.Message}\n{ex.StackTrace}", ex, new { schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted });
             }
         }
 
@@ -1552,7 +1552,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Manage expression menu failed: {ex.Message}\n{ex.StackTrace}", new { schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted });
+                return VRCForgeToolResult.FailedWithException($"Manage expression menu failed: {ex.Message}\n{ex.StackTrace}", ex, new { schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted });
             }
         }
 
@@ -2384,13 +2384,13 @@ namespace VRCForge.Editor
             {
                 if (!mutationStarted)
                 {
-                    return VRCForgeToolResult.RejectedBeforeMutation(
-                        "fx_animator_delete_parameter_rejected",
+                    return VRCForgeToolResult.RejectedBeforeMutation("fx_animator_delete_parameter_rejected",
                         ex.Message,
                         "unity_core_tool",
                         failurePhase,
                         false,
-                        new { action = "delete_parameter", controllerPath, parameterName, exceptionType = ex.GetType().FullName });
+                        new { action = "delete_parameter", controllerPath, parameterName, exceptionType = ex.GetType().FullName },
+                        exception: ex);
                 }
 
                 var restored = RestoreAnimatorControllerPreState(
@@ -2400,9 +2400,9 @@ namespace VRCForge.Editor
                     beforeEvidence,
                     parameterName,
                     undoGroup);
-                return VRCForgeToolResult.FailedWithCode(
-                    "fx_animator_delete_parameter_failed_after_mutation",
+                return VRCForgeToolResult.FailedWithException("fx_animator_delete_parameter_failed_after_mutation",
                     ex.Message,
+                    ex,
                     new
                     {
                         failureLayer = "unity_core_tool",

@@ -110,9 +110,9 @@ namespace VRCForge.Editor.Generic
             }
             catch (Exception exception)
             {
-                return VRCForgeToolResult.FailedWithCode(
-                    "unity_editor_menu_invocation_exception",
+                return VRCForgeToolResult.FailedWithException("unity_editor_menu_invocation_exception",
                     "The Unity Editor menu invocation raised an exception; partial side effects may remain and were not undone or cleaned up.",
+                    exception,
                     new
                     {
                         menuItemPath,

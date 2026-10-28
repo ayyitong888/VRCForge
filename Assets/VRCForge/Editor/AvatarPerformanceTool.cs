@@ -53,7 +53,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Avatar performance scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Avatar performance scan failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 
@@ -318,7 +318,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Thry avatar performance scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Thry avatar performance scan failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

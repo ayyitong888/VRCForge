@@ -33,7 +33,7 @@ namespace VRCForge.Editor
         {
             Parameters p;
             try { p = (@params ?? new JObject()).ToObject<Parameters>() ?? new Parameters(); }
-            catch (Exception ex) { return VRCForgeToolResult.Failed("Invalid material flatten input: " + ex.Message); }
+            catch (Exception ex) { return VRCForgeToolResult.FailedWithException("Invalid material flatten input: " + ex.Message, ex); }
             var path = (p.assetPath ?? "").Replace("\\", "/").Trim();
             var preview = p.preview ?? true;
             Material target = null;
@@ -109,7 +109,8 @@ namespace VRCForge.Editor
             catch (Exception ex)
             {
                 if (!mutationStarted)
-                    return VRCForgeToolResult.Failed("Material Variant flatten rejected: " + ex.Message,
+                    return VRCForgeToolResult.FailedWithException("Material Variant flatten rejected: " + ex.Message,
+                        ex,
                         new { mutationStarted = false, committed = false, commitState = "not_started", checkpointRecoveryRequired = false });
                 var restored = false;
                 try
@@ -136,7 +137,9 @@ namespace VRCForge.Editor
                     if (System.IO.File.Exists(tempPath)) System.IO.File.Delete(tempPath);
                 }
                 catch { restored = false; }
-                return VRCForgeToolResult.Failed("Material Variant flatten failed: " + ex.Message, new
+                return VRCForgeToolResult.FailedWithException("Material Variant flatten failed: " + ex.Message,
+                    ex,
+                    new
                 {
                     mutationStarted = true, mutationApplied = true, committed = restored ? (bool?)false : null,
                     commitState = restored ? "rolled_back" : "unknown", checkpointRecoveryRequired = !restored,

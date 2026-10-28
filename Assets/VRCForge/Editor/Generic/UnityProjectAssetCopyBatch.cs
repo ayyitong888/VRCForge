@@ -190,7 +190,9 @@ namespace VRCForge.Editor
                 failureDetails["destinationAssetPath"] = destinationPath;
                 failureDetails["failurePhase"] = failurePhase;
                 var restored = CleanupOwned(attempted, owned);
-                return VRCForgeToolResult.FailedWithCode("project_asset_copy_batch_failed", exception.Message,
+                return VRCForgeToolResult.FailedWithException("project_asset_copy_batch_failed",
+                    exception.Message,
+                    exception,
                     new { schema = DuplicateProjectAssetTool.ResultSchema, batch = true, verified = false, ok = false, mutationStarted = attempted.Count > 0,
                         committed = false, saved = false, restored, cleanupRequired = !restored, checkpointRecoveryRequired = !restored,
                         commitState = attempted.Count == 0 ? "not_started" : restored ? "rolled_back" : "unknown", commitStateKnown = restored,

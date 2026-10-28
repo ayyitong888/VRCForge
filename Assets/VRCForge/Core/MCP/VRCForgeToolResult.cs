@@ -64,10 +64,42 @@ namespace VRCForge.Core.MCP
 
         /// <summary>Keep caught handler failures diagnosable without changing mutation facts.</summary>
         public static VRCForgeToolResult FailedWithException(
+            string messageOrCode, Exception exception, object payload = null)
+        {
+            return FailedWithException(messageOrCode, messageOrCode, exception, payload);
+        }
+
+        public static VRCForgeToolResult FailedWithException(
             string errorCode, string message, Exception exception, object payload = null)
         {
+            if (exception != null && exception.InnerException != null)
+            {
+                var root = exception.GetBaseException();
+                var rootMessage = root.Message ?? string.Empty;
+                var context = message ?? string.Empty;
+                message = root.GetType().Name + ": "
+                    + rootMessage.Substring(0, Math.Min(800, rootMessage.Length))
+                    + " Context: " + context.Substring(0, Math.Min(1600, context.Length));
+            }
             var failure = payload == null ? new JObject() : JObject.FromObject(payload);
-            failure["diagnostics"] = ExceptionDiagnostics(exception);
+            var diagnostics = failure["diagnostics"] as JObject ?? new JObject();
+            var existingSchema = diagnostics["schema"]?.DeepClone();
+            diagnostics.Merge(ExceptionDiagnostics(exception), new JsonMergeSettings
+            {
+                MergeArrayHandling = MergeArrayHandling.Union,
+            });
+            if (existingSchema != null) diagnostics["schema"] = existingSchema;
+            failure["diagnostics"] = diagnostics;
+            if (failure["rootCause"] == null && exception != null)
+            {
+                var root = exception.GetBaseException();
+                var rootMessage = root.Message ?? string.Empty;
+                failure["rootCause"] = new JObject
+                {
+                    ["type"] = root.GetType().FullName ?? root.GetType().Name,
+                    ["message"] = rootMessage.Substring(0, Math.Min(800, rootMessage.Length)),
+                };
+            }
             return FailedWithCode(errorCode, message, failure);
         }
 
@@ -134,7 +166,7 @@ namespace VRCForge.Core.MCP
                 payload["details"] = JToken.FromObject(details);
             }
             if (exception != null)
-                payload["diagnostics"] = ExceptionDiagnostics(exception);
+                return FailedWithException(errorCode, message, exception, payload);
             return FailedWithCode(errorCode, message, payload);
         }
 

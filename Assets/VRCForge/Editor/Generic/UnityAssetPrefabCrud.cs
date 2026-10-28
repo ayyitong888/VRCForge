@@ -179,7 +179,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Find assets failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Find assets failed: {ex.Message}", ex);
             }
         }
     }
@@ -351,7 +351,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Get asset info failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Get asset info failed: {ex.Message}", ex);
             }
         }
 
@@ -977,7 +977,7 @@ namespace VRCForge.Editor
                 {
                     return CommittedFailure($"Instantiate prefab failed after mutation: {ex.Message}", mutatedPath, mutatedGlobalObjectId, beforeScene, undoGroup, mutationSceneHandle, string.IsNullOrEmpty(mutatedPath) ? "" : mutatedPath);
                 }
-                return VRCForgeToolResult.Failed($"Instantiate prefab failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Instantiate prefab failed: {ex.Message}", ex);
             }
         }
 
@@ -1265,7 +1265,7 @@ namespace VRCForge.Editor
                 {
                     return CommittedFailure($"Unpack prefab failed after mutation: {ex.Message}", mutatedPath, mutatedGlobalObjectId);
                 }
-                return VRCForgeToolResult.Failed($"Unpack prefab failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Unpack prefab failed: {ex.Message}", ex);
             }
         }
 

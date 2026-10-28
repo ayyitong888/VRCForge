@@ -652,7 +652,9 @@ namespace VRCForge.Editor
                         failed.Status = "failed";
                         failed.Error = ex.Message;
                     }
-                    return VRCForgeToolResult.Failed($"Add wardrobe outfit failed after mutation: {ex.Message}", new
+                    return VRCForgeToolResult.FailedWithException($"Add wardrobe outfit failed after mutation: {ex.Message}",
+                        ex,
+                        new
                     {
                         ok = false,
                         committed = true,
@@ -665,7 +667,7 @@ namespace VRCForge.Editor
                         transaction = BuildTransaction(receipts, transactionHandle)
                     });
                 }
-                return VRCForgeToolResult.Failed($"Add wardrobe outfit failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Add wardrobe outfit failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

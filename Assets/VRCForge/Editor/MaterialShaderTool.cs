@@ -398,13 +398,13 @@ namespace VRCForge.Editor
             {
                 if (!mutationStarted)
                 {
-                    return VRCForgeToolResult.RejectedBeforeMutation(
-                        "material_shader_rejected",
+                    return VRCForgeToolResult.RejectedBeforeMutation("material_shader_rejected",
                         ex.Message,
                         "unity_core_tool",
                         failurePhase,
                         false,
-                        new { exceptionType = ex.GetType().FullName });
+                        new { exceptionType = ex.GetType().FullName },
+                        exception: ex);
                 }
                 var restored = RestoreMaterialPreState(
                     mutatedMaterial,
@@ -412,9 +412,9 @@ namespace VRCForge.Editor
                     evidenceForRestore,
                     beforeBytes,
                     undoGroup);
-                return VRCForgeToolResult.FailedWithCode(
-                    "material_shader_failed_after_mutation",
+                return VRCForgeToolResult.FailedWithException("material_shader_failed_after_mutation",
                     ex.Message,
+                    ex,
                     new
                     {
                         failureLayer = "unity_core_tool",
@@ -1362,12 +1362,12 @@ namespace VRCForge.Editor
             {
                 if (!mutationStarted)
                 {
-                    return VRCForgeToolResult.RejectedBeforeMutation(
-                        "material_texture_rejected",
+                    return VRCForgeToolResult.RejectedBeforeMutation("material_texture_rejected",
                         exception.Message,
                         "unity_core_tool",
                         failurePhase,
-                        false);
+                        false,
+                        exception: exception);
                 }
                 var restored = RestoreTexturePreState(
                     material,
@@ -1376,9 +1376,9 @@ namespace VRCForge.Editor
                     beforeTexture,
                     beforeBytes,
                     undoGroup);
-                return VRCForgeToolResult.FailedWithCode(
-                    "material_texture_failed_after_mutation",
+                return VRCForgeToolResult.FailedWithException("material_texture_failed_after_mutation",
                     exception.Message,
+                    exception,
                     new
                     {
                         failureLayer = "unity_core_tool",

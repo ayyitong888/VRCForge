@@ -235,7 +235,7 @@ namespace VRCForge.Editor
                     }
                     catch (Exception ex)
                     {
-                        return VRCForgeToolResult.Failed($"Could not convert field '{pair.Key}' to {assignment.memberType.Name}: {ex.Message}");
+                        return VRCForgeToolResult.FailedWithException($"Could not convert field '{pair.Key}' to {assignment.memberType.Name}: {ex.Message}", ex);
                     }
                     fieldPlan.Add(assignment);
                 }
@@ -329,7 +329,7 @@ namespace VRCForge.Editor
                             UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(targetScene);
                         }
                     }
-                    return VRCForgeToolResult.Failed($"Could not configure {componentType.Name}; the added component was rolled back: {ex.Message}");
+                    return VRCForgeToolResult.FailedWithException($"Could not configure {componentType.Name}; the added component was rolled back: {ex.Message}", ex);
                 }
 
                 Undo.CollapseUndoOperations(undoGroup);
@@ -378,7 +378,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Add Modular Avatar component failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Add Modular Avatar component failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 
@@ -493,7 +493,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Inspect Modular Avatar component failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Inspect Modular Avatar component failed: {ex.Message}", ex);
             }
         }
 

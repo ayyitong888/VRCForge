@@ -44,10 +44,10 @@ namespace UnityEditor {
 namespace VRCForge.Core.MCP {
  [AttributeUsage(AttributeTargets.Class)]public class VRCForgeCommandAttribute:Attribute {public string Summary{get;set;}public VRCForgeCommandAttribute(string toolId){}}
  [AttributeUsage(AttributeTargets.Property)]public class VRCForgeInputAttribute:Attribute {public bool IsRequired{get;set;}public VRCForgeInputAttribute(string text){}}
- public static class VRCForgeToolResult {
+ public static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>FailedWithCode(message,message,payload);
   public static object Completed(string message,object data)=>new {success=true,message,data};
   public static object FailedWithCode(string code,string message,object data)=>new {success=false,code,message,data};
-  public static object RejectedBeforeMutation(string code,string message,string layer,string phase,bool retry)=>new {success=false,code,message};
+  public static object RejectedBeforeMutation(string code,string message,string layer,string phase,bool retry,System.Exception exception=null)=>new {success=false,code,message};
  }
 }
 namespace VRCForge.Editor { public static class SceneObjectCopyCore {public static bool MatchesCurrentProject(string path)=>Path.GetFullPath(path)==Directory.GetCurrentDirectory();} }

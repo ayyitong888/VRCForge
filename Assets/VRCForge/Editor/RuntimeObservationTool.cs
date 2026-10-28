@@ -192,7 +192,7 @@ namespace VRCForge.Editor
             catch (Exception exception)
             {
                 if (job != null) { job.Finish(exception.Message); return VRCForgeToolResult.Completed("Runtime observation stopped.", job.Result()); }
-                return VRCForgeToolResult.RejectedBeforeMutation("runtime_observation_rejected", exception.Message, "runtime_observation", "preflight");
+                return VRCForgeToolResult.RejectedBeforeMutation("runtime_observation_rejected", exception.Message, "runtime_observation", "preflight", exception: exception);
             }
         }
         private static Vector3 Vector(JToken token)

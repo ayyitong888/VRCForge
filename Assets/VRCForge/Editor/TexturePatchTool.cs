@@ -318,10 +318,10 @@ namespace VRCForge.Editor
                 {
                     var restored = CleanupTarget(targetTexturePath, targetFilePath, createdTargetHash, createdMetaHash, out var cleanupError);
 
-                    return VRCForgeToolResult.FailedWithCode(
-                        "vrc_texture_patch_failed_after_mutation",
+                    return VRCForgeToolResult.FailedWithException("vrc_texture_patch_failed_after_mutation",
                         "Texture patch failed after mutation: " + exception.Message +
                         (restored ? " Target absence was verified." : " Cleanup could not be verified; checkpoint recovery is required."),
+                        exception,
                         new
                         {
                             schema = ResultSchema,
@@ -341,12 +341,12 @@ namespace VRCForge.Editor
                         });
                 }
 
-                return VRCForgeToolResult.RejectedBeforeMutation(
-                    "vrc_texture_patch_rejected",
+                return VRCForgeToolResult.RejectedBeforeMutation("vrc_texture_patch_rejected",
                     exception.Message,
                     "unity_core_tool",
                     "texture_patch_validation",
-                    false);
+                    false,
+                    exception: exception);
             }
         }
 

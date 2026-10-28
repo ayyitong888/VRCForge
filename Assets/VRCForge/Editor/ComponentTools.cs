@@ -71,7 +71,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"FX animator scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"FX animator scan failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

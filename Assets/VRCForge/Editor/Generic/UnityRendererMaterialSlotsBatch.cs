@@ -197,7 +197,9 @@ namespace VRCForge.Editor
                     }
                     catch { }
                 }
-                return VRCForgeToolResult.FailedWithCode("renderer_material_slots_batch_failed", exception.Message,
+                return VRCForgeToolResult.FailedWithException("renderer_material_slots_batch_failed",
+                    exception.Message,
+                    exception,
                     new { schema = Schema, batch = true, verified = false, mutationStarted = started, applied = false, committed = false,
                         sceneSaved = false, persistedReadback = false, restored, commitState = started ? (restored ? "rolled_back" : "unknown") : "not_started",
                         commitStateKnown = !started || restored, checkpointRecoveryRequired = started && !restored });

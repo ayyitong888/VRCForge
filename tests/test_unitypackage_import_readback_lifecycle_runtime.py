@@ -37,7 +37,7 @@ namespace UnityEditor.PackageManager {}
 namespace VRCForge.Core.MCP {
  public class VRCForgeCommandAttribute:System.Attribute {public string Summary{get;set;} public VRCForgeCommandAttribute(string toolId){}}
  public class VRCForgeInputAttribute:System.Attribute {public bool IsRequired{get;set;} public VRCForgeInputAttribute(string description){}}
- public static class VRCForgeToolResult {
+ public static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>Failed(message); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message);
   public static object Waiting(string m,double d,object o)=>o;
   public static object Completed(string m,object o)=>o;
   public static object Failed(string m)=>m;

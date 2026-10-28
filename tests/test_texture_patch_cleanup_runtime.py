@@ -51,9 +51,9 @@ static class File {
         if (meta) Meta=false; else Png=false;
     }
 }
-static class VRCForgeToolResult {
+static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>FailedWithCode(message,message,payload);
     public static object FailedWithCode(string code,string message,object payload) { return new {code,message,data=payload}; }
-    public static object RejectedBeforeMutation(string code,string message,string layer,string phase,bool retry) { return new {code,message}; }
+    public static object RejectedBeforeMutation(string code,string message,string layer,string phase,bool retry,System.Exception exception=null) { return new {code,message}; }
 }
 class Probe {
     const string ResultSchema="vrcforge.texture_patch.v1";

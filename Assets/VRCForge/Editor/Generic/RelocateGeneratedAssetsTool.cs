@@ -107,7 +107,7 @@ namespace VRCForge.Editor
                 if (!mutationStarted)
                 {
                     var failedPreview = BuildPayload(ResolveProjectPathSafe(), bindings, p == null || p.preview == null || p.preview.Value, false, false, "not_started", "not_started", "not_started", "not_applicable", false, false, false);
-                    return VRCForgeToolResult.FailedWithCode("generated_asset_relocation_failed", "Generated asset relocation failed: " + ex.Message, failedPreview);
+                    return VRCForgeToolResult.FailedWithException("generated_asset_relocation_failed", "Generated asset relocation failed: " + ex.Message, ex, failedPreview);
                 }
                 var recoveryRequired = false;
                 var rollbackAttempted = bindings.Any(item => item.Attempted) || createdFolders.Count > 0;
@@ -171,7 +171,7 @@ namespace VRCForge.Editor
                     rollbackAttempted && !recoveryRequired ? "rolled_back" : rollbackAttempted ? "unknown" : "not_started",
                     rollbackAttempted && !recoveryRequired ? "persisted" : "unknown", "failed",
                     recoveryRequired ? "failed" : rollbackAttempted ? "complete" : "not_applicable", recoveryRequired, false, false);
-                return VRCForgeToolResult.FailedWithCode("generated_asset_relocation_failed", "Generated asset relocation failed: " + ex.Message, payload);
+                return VRCForgeToolResult.FailedWithException("generated_asset_relocation_failed", "Generated asset relocation failed: " + ex.Message, ex, payload);
             }
         }
 

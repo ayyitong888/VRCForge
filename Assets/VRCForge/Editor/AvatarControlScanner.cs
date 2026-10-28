@@ -78,7 +78,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Avatar control scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Avatar control scan failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 
@@ -553,7 +553,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Scene object toggle failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Scene object toggle failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

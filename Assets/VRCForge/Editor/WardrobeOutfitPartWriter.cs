@@ -403,7 +403,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Add outfit part failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Add outfit part failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

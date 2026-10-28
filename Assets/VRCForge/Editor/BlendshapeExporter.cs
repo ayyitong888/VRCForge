@@ -79,7 +79,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Blendshape export failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Blendshape export failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

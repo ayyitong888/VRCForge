@@ -178,7 +178,9 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Checkpoint preparation failed: {ex.Message}", new
+                return VRCForgeToolResult.FailedWithException($"Checkpoint preparation failed: {ex.Message}",
+                    ex,
+                    new
                 {
                     blocking = true, mutationStarted = false, committed = false,
                     commitState = "not_started", saved = false, snapshotIncludesUnsavedState = false
@@ -945,8 +947,8 @@ namespace VRCForge.Editor
                                 receipt.RolledBack = false;
                             }
                         }
-                        return VRCForgeToolResult.Failed(
-                            "Checkpoint restore could not safely close all project scenes.",
+                        return VRCForgeToolResult.FailedWithException("Checkpoint restore could not safely close all project scenes.",
+                            closeError,
                             new
                             {
                                 phase,
@@ -1089,8 +1091,8 @@ namespace VRCForge.Editor
                             receipt.RolledBack = false;
                         }
                     }
-                    return VRCForgeToolResult.Failed(
-                        "Checkpoint files were restored, but Unity could not close stale scene state before reload.",
+                    return VRCForgeToolResult.FailedWithException("Checkpoint files were restored, but Unity could not close stale scene state before reload.",
+                        closeError,
                         new
                         {
                             phase,
@@ -1145,8 +1147,8 @@ namespace VRCForge.Editor
                         failed.Error = reopenError.Message;
                         failed.RolledBack = false;
                     }
-                    return VRCForgeToolResult.Failed(
-                        "Checkpoint files were restored, but Unity could not reopen every scene.",
+                    return VRCForgeToolResult.FailedWithException("Checkpoint files were restored, but Unity could not reopen every scene.",
+                        reopenError,
                         new
                         {
                             phase,
@@ -1227,7 +1229,9 @@ namespace VRCForge.Editor
                 if (mutationStarted)
                 {
                     ReadSceneAfter(receipts);
-                    return VRCForgeToolResult.Failed($"Checkpoint reload failed: {ex.Message}", new
+                    return VRCForgeToolResult.FailedWithException($"Checkpoint reload failed: {ex.Message}",
+                        ex,
+                        new
                     {
                         phase = recoveryPhase,
                         transaction = BuildFailedSceneTransaction(
@@ -1237,7 +1241,7 @@ namespace VRCForge.Editor
                             ex.Message)
                     });
                 }
-                return VRCForgeToolResult.Failed($"Checkpoint reload failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Checkpoint reload failed: {ex.Message}", ex);
             }
         }
 

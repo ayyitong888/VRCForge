@@ -69,12 +69,14 @@ public static class ManageFxAnimatorTool {
     public static void ApplyForBatch(string action, AnimatorController controller, JObject edit) { Applied++; }
 }
 public sealed class Result { public bool ok; public bool mutationStarted; }
-public static class VRCForgeToolResult {
+public static class VRCForgeToolResult { public static Result FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static Result FailedWithException(string message,System.Exception exception,object payload=null)=>FailedWithCode(message,message,payload);
     public static Result Completed(string message, object payload) => new Result { ok = true, mutationStarted = true };
-    public static Result RejectedBeforeMutation(string code, string message, string layer, string phase) => new Result { ok = false, mutationStarted = false };
+    public static Result RejectedBeforeMutation(string code, string message, string layer, string phase,System.Exception exception=null) => new Result { ok = false, mutationStarted = false };
     public static Result FailedWithCode(string code, string message, object payload) => new Result { ok = false, mutationStarted = true };
 }
 public static class WriteAnimationCurveTool {
+    public static object ResolveBindingRoot(JObject arguments) => throw new Exception("This no-motion fixture must not resolve scene bindings.");
+    public static void ValidateClipBindings(object root, AnimationClip clip) => throw new Exception("This no-motion fixture must not validate scene bindings.");
     public sealed class AssetEditRecovery {
         public static int Captures, Begins, Completes;
         public void Capture(string path) { Captures++; }

@@ -16,7 +16,7 @@ class Scene {public string path;}
 enum OpenSceneMode{Additive} [Flags]enum ImportAssetOptions {ForceUpdate=1,ForceSynchronousImport=2}
 class Receipt {public string Asset,Status;public object After;}
 class CheckpointPrepareTool {public static string Root;public static string ProjectRoot()=>Root;}
-class VRCForgeToolResult {public static object Failed(string s,object p)=>false;}
+class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>Failed(message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message,payload); public static object Failed(string s,object p)=>false;}
 static class AssetDatabase {public static List<string> Events=new List<string>(); public static void ImportAsset(string p,ImportAssetOptions options){if(options!=(ImportAssetOptions.ForceUpdate|ImportAssetOptions.ForceSynchronousImport))throw new Exception("options");Events.Add("import:"+p);}}
 static class EditorSceneManager {public static Scene OpenScene(string p,OpenSceneMode mode){AssetDatabase.Events.Add("open:"+p);return new Scene{path=p};}}
 class Probe {static object DescribeScene(string path)=>null;
@@ -45,5 +45,5 @@ Console.WriteLine("PASS scene-order-and-paths");return 0;}}
     assert result.returncode==0,result.stdout+result.stderr
     # Successful close loop and its failure return precede the import/open block.
     close=source.index("var closedBeforeReload")
-    assert close < start and "return VRCForgeToolResult.Failed(" in source[close:start]
+    assert close < start and "return VRCForgeToolResult.FailedWithException(" in source[close:start]
     assert "SaveAssets" not in block and "Refresh(" not in block

@@ -102,7 +102,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Primitive-basis fixture inspection failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Primitive-basis fixture inspection failed: {ex.Message}", ex);
             }
         }
 
@@ -146,7 +146,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Primitive-basis fixture reload failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Primitive-basis fixture reload failed: {ex.Message}", ex);
             }
         }
 

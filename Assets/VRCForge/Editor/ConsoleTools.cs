@@ -65,7 +65,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Safe backup creation failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Safe backup creation failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

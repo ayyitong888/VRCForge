@@ -35,7 +35,7 @@ def test_parameter_writer_runtime_failure_and_readback_paths(tmp_path: Path) -> 
 namespace VRCForge.Core.MCP {
  public sealed class VRCForgeCommandAttribute:System.Attribute {public VRCForgeCommandAttribute(string toolId){} public string Summary{get;set;} }
  public sealed class VRCForgeInputAttribute:System.Attribute {public VRCForgeInputAttribute(string x){ } public bool IsRequired{get;set;} }
- public static class VRCForgeToolResult {
+ public static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>Failed(message); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message);
   public static object Failed(string m)=>new JObject{{"ok",false},{"status","failed"},{"message",m}};
   public static object Completed(string m,object p)=>new JObject{{"ok",true},{"status","completed"},{"message",m},{"payload",JObject.FromObject(p)}};
  }

@@ -1792,7 +1792,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.FailedWithCode("skinned_mesh_deformation_inspection_failed", $"Inspect skinned mesh deformation failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException("skinned_mesh_deformation_inspection_failed", $"Inspect skinned mesh deformation failed: {ex.Message}", ex);
             }
             finally
             {
@@ -2042,7 +2042,7 @@ namespace VRCForge.Editor
                         });
                     return ComponentCrudCore.FailedMutationResult("skinned_bone_remap_failed_after_mutation", "remap_skinned_mesh_bone", failureStage, ex, beforeScene, cleanup, mutationApplied);
                 }
-                return VRCForgeToolResult.RejectedBeforeMutation("skinned_bone_remap_rejected_before_mutation", $"Skinned mesh bone remap failed: {ex.Message}", "unity_editor_tool", failureStage);
+                return VRCForgeToolResult.RejectedBeforeMutation("skinned_bone_remap_rejected_before_mutation", $"Skinned mesh bone remap failed: {ex.Message}", "unity_editor_tool", failureStage, exception: ex);
             }
         }
     }
@@ -2281,9 +2281,9 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.FailedWithCode(
-                    "skinned_mesh_bone_usage_inspection_failed",
-                    $"Inspect skinned mesh bone usage failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException("skinned_mesh_bone_usage_inspection_failed",
+                    $"Inspect skinned mesh bone usage failed: {ex.Message}",
+                    ex);
             }
         }
     }
@@ -2409,7 +2409,7 @@ namespace VRCForge.Editor
                         cleanup,
                         mutationApplied);
                 }
-                return VRCForgeToolResult.Failed($"Add component failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Add component failed: {ex.Message}", ex);
             }
         }
     }
@@ -2538,7 +2538,7 @@ namespace VRCForge.Editor
                         cleanup,
                         mutationApplied);
                 }
-                return VRCForgeToolResult.Failed($"Remove component failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Remove component failed: {ex.Message}", ex);
             }
         }
     }

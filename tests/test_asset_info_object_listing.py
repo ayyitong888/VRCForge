@@ -157,7 +157,7 @@ namespace UnityEditor.Compilation {
 namespace UnityEditor.AssetImporters {public sealed class ImportLog:UnityEngine.Object {}}
 namespace VRCForge.Core.MCP {
  [AttributeUsage(AttributeTargets.Property)] public class VRCForgeInput:Attribute {public bool IsRequired{get;set;}public VRCForgeInput(string text){}}
- public static class VRCForgeToolResult {public static object Completed(string message,object data)=>JObject.FromObject(data);public static object Failed(string message)=>new JObject{["ok"]=false,["error"]=message};}
+ public static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>Failed(message); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message); public static object Completed(string message,object data)=>JObject.FromObject(data);public static object Failed(string message)=>new JObject{["ok"]=false,["error"]=message};}
 }
 namespace VRCForge.Editor {
  public static class AssetPrefabCore {public static string ResolveAssetPath(string path,string guid)=>"Assets/a.mat";}

@@ -62,10 +62,10 @@ namespace Newtonsoft.Json.Linq {
     }
 }
 class Scene { public int handle = 7; }
-class VRCForgeToolResult {
+class VRCForgeToolResult { public static VRCForgeToolResult FailedWithException(string code,string message,System.Exception exception,object payload=null)=>Failed(message); public static VRCForgeToolResult FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message);
     public object Payload;
     public static VRCForgeToolResult Failed(string message) { return new VRCForgeToolResult(); }
-    public static VRCForgeToolResult RejectedBeforeMutation(string code, string message, string layer, string phase, bool retryable = false, object details = null) {
+    public static VRCForgeToolResult RejectedBeforeMutation(string code, string message, string layer, string phase, bool retryable = false, object details = null,System.Exception exception=null) {
         return new VRCForgeToolResult { Payload = new JObject {
             ["mutationStarted"] = false, ["committed"] = false, ["commitState"] = "not_started",
             ["commitStateKnown"] = true, ["retryable"] = retryable, ["checkpointRecoveryRequired"] = false,
@@ -109,4 +109,4 @@ class Probe {
     assert "return VRCForgeToolResult.Failed(" not in preflight
     assert "return PreflightFailure(" in preflight
     assert 'return VRCForgeToolResult.Failed($"Unity refused to instantiate the prefab' in after_instantiate
-    assert 'return VRCForgeToolResult.Failed($"Instantiate prefab failed:' in after_instantiate
+    assert 'return VRCForgeToolResult.FailedWithException($"Instantiate prefab failed:' in after_instantiate

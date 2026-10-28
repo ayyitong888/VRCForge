@@ -126,7 +126,8 @@ namespace VRCForge.Editor
                     }
                     catch { }
                 }
-                return VRCForgeToolResult.Failed(exception.Message,
+                return VRCForgeToolResult.FailedWithException(exception.Message,
+                    exception,
                     new { schema = ResultSchema, mutationStarted, applied = false, committed = false, sceneSaved = false, persistedReadback = false, restored = mutationStarted ? (bool?)false : null });
             }
         }

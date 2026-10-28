@@ -85,7 +85,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Setup Outfit failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"Setup Outfit failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 
@@ -228,6 +228,9 @@ namespace VRCForge.Editor
                     ["error"] = ex.Message,
                     ["stackTrace"] = ex.StackTrace ?? "",
                 };
+                var failure = VRCForgeToolResult.FailedWithException(ex.Message, ex, payload);
+                payload = (JObject)failure.Payload;
+                payload["error"] = failure.Message;
                 CompleteJob(jobId, "error", payload);
             }
         }

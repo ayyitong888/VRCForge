@@ -46,9 +46,9 @@ namespace VRCForge.Editor
             }
             catch (Exception exception)
             {
-                return VRCForgeToolResult.FailedWithCode(
-                    "scene_object_selection_rejected",
+                return VRCForgeToolResult.FailedWithException("scene_object_selection_rejected",
                     exception.Message,
+                    exception,
                     NoMutation(new { gameObjectPath = requestedPath }));
             }
 

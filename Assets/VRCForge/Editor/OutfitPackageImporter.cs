@@ -1182,7 +1182,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"AssetDatabase refresh failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"AssetDatabase refresh failed: {ex.Message}", ex);
             }
         }
 

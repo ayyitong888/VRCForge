@@ -55,7 +55,7 @@ namespace UnityEditor {
  }
 }
 namespace VRCForge.Core.MCP {
- public class VRCForgeToolResult {public bool IsSuccessful;public object Payload;public string Message;
+ public class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>FailedWithCode(message,message,payload); public bool IsSuccessful;public object Payload;public string Message;
  public static object Completed(string s,object p)=>new VRCForgeToolResult{IsSuccessful=true,Payload=p,Message=s};
  public static object FailedWithCode(string c,string s,object p)=>new VRCForgeToolResult{IsSuccessful=false,Payload=p,Message=s};}
 }

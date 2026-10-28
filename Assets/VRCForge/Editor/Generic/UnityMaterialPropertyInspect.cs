@@ -64,7 +64,7 @@ namespace VRCForge.Editor.Generic
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed("Material property inspection failed: " + ex.Message);
+                return VRCForgeToolResult.FailedWithException("Material property inspection failed: " + ex.Message, ex);
             }
         }
 

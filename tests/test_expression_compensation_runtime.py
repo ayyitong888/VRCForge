@@ -20,7 +20,7 @@ def test_expression_failures_attempt_recovery_and_preserve_original_error(tmp_pa
 using System;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;
 class Receipt {public string Status="not_attempted",Error="";public bool RolledBack;}
 class Recovery {public static int Calls;public bool Result;public bool Restore(){Calls++;return Result;}}
-static class VRCForgeToolResult {public static object Failed(string message,object details)=>new JObject{{"message",message},{"details",JObject.FromObject(details)}};}
+static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>Failed(message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message,payload); public static object Failed(string message,object details)=>new JObject{{"message",message},{"details",JObject.FromObject(details)}};}
 class Parameter {
  static object BuildTransaction(List<Receipt> r,string h)=>new {handle=h};
  public static object Run(bool mutationStarted,bool restore){var recovery=new Recovery{Result=restore};var receipts=new List<Receipt>{new Receipt()};var transactionHandle="Assets/P.asset";

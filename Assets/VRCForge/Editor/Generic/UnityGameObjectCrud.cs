@@ -117,7 +117,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Get GameObject failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException($"Get GameObject failed: {ex.Message}", ex);
             }
         }
     }
@@ -277,8 +277,8 @@ namespace VRCForge.Editor
                 {
                     restored = false;
                 }
-                return VRCForgeToolResult.Failed(
-                    $"Create GameObject failed: {ex.Message}",
+                return VRCForgeToolResult.FailedWithException($"Create GameObject failed: {ex.Message}",
+                    ex,
                     new
                     {
                         mutationStarted,
@@ -432,7 +432,9 @@ namespace VRCForge.Editor
                 {
                     restored = false;
                 }
-                return VRCForgeToolResult.Failed($"Rename GameObject failed: {ex.Message}", new
+                return VRCForgeToolResult.FailedWithException($"Rename GameObject failed: {ex.Message}",
+                    ex,
+                    new
                 {
                     mutationStarted,
                     restored,
@@ -717,9 +719,9 @@ namespace VRCForge.Editor
                 var readbackFailure = ex.Message.IndexOf(
                     "persisted readback was not exact",
                     StringComparison.OrdinalIgnoreCase) >= 0;
-                return VRCForgeToolResult.FailedWithCode(
-                    readbackFailure ? "reparent_persisted_readback_mismatch" : "reparent_gameobject_failed",
+                return VRCForgeToolResult.FailedWithException(readbackFailure ? "reparent_persisted_readback_mismatch" : "reparent_gameobject_failed",
                     $"Reparent GameObject failed: {ex.Message}",
+                    ex,
                     new
                     {
                         mutationStarted,
@@ -886,7 +888,9 @@ namespace VRCForge.Editor
                 {
                     restored = false;
                 }
-                return VRCForgeToolResult.Failed($"Delete GameObject failed: {ex.Message}", new
+                return VRCForgeToolResult.FailedWithException($"Delete GameObject failed: {ex.Message}",
+                    ex,
+                    new
                 {
                     mutationStarted,
                     restored,
@@ -1036,8 +1040,8 @@ namespace VRCForge.Editor
                 {
                     restored = false;
                 }
-                return VRCForgeToolResult.Failed(
-                    $"Set GameObject active failed: {ex.Message}",
+                return VRCForgeToolResult.FailedWithException($"Set GameObject active failed: {ex.Message}",
+                    ex,
                     new
                     {
                         mutationStarted,

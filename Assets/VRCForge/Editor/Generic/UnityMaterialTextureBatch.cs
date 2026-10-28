@@ -312,7 +312,7 @@ namespace VRCForge.Editor
                     }
                     catch { restored = false; }
                 }
-                return VRCForgeToolResult.FailedWithCode("material_texture_batch_failed", exception.Message, new { schema = Schema, batch = true, verified = false, mutationStarted = started, committed = false, commitState = started ? (restored ? "rolled_back" : "unknown") : "not_started", commitStateKnown = !started || restored, restored, checkpointRecoveryRequired = started && !restored });
+                return VRCForgeToolResult.FailedWithException("material_texture_batch_failed", exception.Message, exception, new { schema = Schema, batch = true, verified = false, mutationStarted = started, committed = false, commitState = started ? (restored ? "rolled_back" : "unknown") : "not_started", commitStateKnown = !started || restored, restored, checkpointRecoveryRequired = started && !restored });
             }
         }
     }

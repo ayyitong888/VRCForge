@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 SOURCE=(ROOT/'Assets/VRCForge/Editor/Generic/UnityMaterialTextureBatch.cs').read_text(encoding='utf-8')
 STUBS=r'''
-namespace VRCForge.Core.MCP {public class VRCForgeToolResult {public bool Ok;public object Payload;public string Message;public static object Completed(string m,object p)=>new VRCForgeToolResult{Ok=true,Payload=p,Message=m};public static object FailedWithCode(string c,string m,object p)=>new VRCForgeToolResult{Payload=p,Message=m};}}
+namespace VRCForge.Core.MCP {public class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>FailedWithCode(message,message,payload); public bool Ok;public object Payload;public string Message;public static object Completed(string m,object p)=>new VRCForgeToolResult{Ok=true,Payload=p,Message=m};public static object FailedWithCode(string c,string m,object p)=>new VRCForgeToolResult{Payload=p,Message=m};}}
 namespace UnityEngine {
  public class Object{public string Path;public bool Dirty;}
  public class Shader:Object{}

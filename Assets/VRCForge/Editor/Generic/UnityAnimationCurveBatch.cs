@@ -189,9 +189,12 @@ namespace VRCForge.Editor
             }
             catch (Exception exception)
             {
-                if (!started) return VRCForgeToolResult.RejectedBeforeMutation("animation_clips_batch_failed", exception.Message, "unity_core_tool", phase);
+                if (!started) return VRCForgeToolResult.RejectedBeforeMutation("animation_clips_batch_failed", exception.Message, "unity_core_tool", phase, exception: exception);
                 var restored = RestorePreparedClips(prepared);
-                return VRCForgeToolResult.FailedWithCode("animation_clips_batch_failed", exception.Message, new {
+                return VRCForgeToolResult.FailedWithException("animation_clips_batch_failed",
+                    exception.Message,
+                    exception,
+                    new {
                     schema = "vrcforge.authoring_failure.v1", ok = false, failureLayer = "unity_core_tool", failurePhase = phase,
                     mutationStarted = true, committed = false, commitState = restored ? "rolled_back" : "unknown", commitStateKnown = restored,
                     restored, cleanupRequired = !restored, checkpointRecoveryRequired = !restored, temporaryCleanupRequired = !restored, retryable = false });

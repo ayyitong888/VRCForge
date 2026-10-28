@@ -368,7 +368,9 @@ namespace VRCForge.Editor
                         ["mutationStarted"] = edit.Mutated, ["restored"] = rowRestored, ["hadSavedOwnership"] = edit.Owned != null });
                 }
                 var started = edits.Any(e => e.Mutated);
-                return VRCForgeToolResult.FailedWithCode("material_shader_batch_failed", exception.Message,
+                return VRCForgeToolResult.FailedWithException("material_shader_batch_failed",
+                    exception.Message,
+                    exception,
                     new { schema = Schema, batch = true, verified = false, mutationStarted = started, committed = false, restored, failureDetails, recoveryResults,
                         checkpointRecoveryRequired = !restored, commitState = !started ? "not_started" : restored ? "rolled_back" : "unknown", commitStateKnown = restored });
             }

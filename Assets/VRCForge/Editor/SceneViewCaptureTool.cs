@@ -433,7 +433,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"SceneView capture failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.FailedWithException($"SceneView capture failed: {ex.Message}\n{ex.StackTrace}", ex);
             }
         }
 

@@ -181,7 +181,9 @@ namespace VRCForge.Editor
                     foreach (var scene in sceneDirty)
                         restored &= scene.Key.IsValid() && scene.Key.isLoaded && scene.Key.isDirty == scene.Value;
                 }
-                return VRCForgeToolResult.Failed($"Blendshape apply failed: {ex.Message}\n{ex.StackTrace}", new
+                return VRCForgeToolResult.FailedWithException($"Blendshape apply failed: {ex.Message}\n{ex.StackTrace}",
+                    ex,
+                    new
                 {
                     mutationStarted,
                     committed = !mutationStarted || restored ? (bool?)false : null,

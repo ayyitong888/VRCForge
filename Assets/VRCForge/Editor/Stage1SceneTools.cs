@@ -266,9 +266,9 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.FailedWithCode(
-                    mutationStarted ? "scene_save_failed_after_mutation" : "scene_save_rejected",
+                return VRCForgeToolResult.FailedWithException(mutationStarted ? "scene_save_failed_after_mutation" : "scene_save_rejected",
                     ex.Message,
+                    ex,
                     mutationStarted
                         ? Stage1SceneToolCore.UnknownAfterMutation(Stage1SceneToolCore.SaveSchema, "scene_save_" + action, project, ex.Message)
                         : Stage1SceneToolCore.NoMutation(Stage1SceneToolCore.SaveSchema, action, project, string.Empty, ex.Message));
@@ -446,9 +446,9 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.FailedWithCode(
-                    mutationStarted ? "scene_transition_failed_after_mutation" : "scene_transition_rejected",
+                return VRCForgeToolResult.FailedWithException(mutationStarted ? "scene_transition_failed_after_mutation" : "scene_transition_rejected",
                     ex.Message,
+                    ex,
                     mutationStarted
                         ? Stage1SceneToolCore.UnknownAfterMutation(Stage1SceneToolCore.TransitionSchema, "scene_transition_" + action, project, ex.Message)
                         : Stage1SceneToolCore.NoMutation(Stage1SceneToolCore.TransitionSchema, action, project, string.Empty, ex.Message));

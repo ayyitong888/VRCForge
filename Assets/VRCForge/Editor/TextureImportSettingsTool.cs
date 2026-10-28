@@ -436,14 +436,13 @@ namespace VRCForge.Editor
             }
             catch (Exception exception)
             {
-                return VRCForgeToolResult.RejectedBeforeMutation(
-                    "texture_import_settings_rejected",
+                return VRCForgeToolResult.RejectedBeforeMutation("texture_import_settings_rejected",
                     exception.Message,
                     "unity_core_tool",
                     "pre_mutation_validation",
                     false,
-                    new { exceptionType = exception.GetType().Name }
-                );
+                    new { exceptionType = exception.GetType().Name },
+                    exception: exception);
             }
         }
 

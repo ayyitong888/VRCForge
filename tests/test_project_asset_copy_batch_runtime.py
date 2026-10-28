@@ -48,7 +48,7 @@ namespace UnityEditor {
   internal static Type GetMainAssetTypeAtPath(string p)=>p=="dest2"&&Drift=="type"?typeof(int):typeof(string);
  }
 }
-namespace VRCForge.Core.MCP {static class VRCForgeToolResult {
+namespace VRCForge.Core.MCP {static class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>FailedWithCode(message,message,payload);
  internal static object Completed(string s,object p)=>JObject.FromObject(p);
  internal static object FailedWithCode(string c,string s,object p)=>JObject.FromObject(p);
 }}

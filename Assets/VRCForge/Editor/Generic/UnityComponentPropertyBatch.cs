@@ -132,7 +132,7 @@ namespace VRCForge.Editor
             }
             catch (Exception error)
             {
-                return VRCForgeToolResult.FailedWithCode("component_property_batch_invalid", error.Message);
+                return VRCForgeToolResult.FailedWithException("component_property_batch_invalid", error.Message, error);
             }
         }
 
