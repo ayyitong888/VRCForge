@@ -36,6 +36,7 @@ export type ExternalAgentConnectorStatus = {
     restUrl?: string;
     pendingApprovalCount?: number;
     checkpointArchiveMaxSizeMb?: number;
+    checkpointArchiveMaxCount?: number;
     checkpointArchiveUsage?: {
       ok?: boolean;
       schema?: string;
@@ -48,6 +49,9 @@ export type ExternalAgentConnectorStatus = {
       protectedCount?: number;
       autoCleanupProtectedCount?: number;
       maxSizeMb?: number;
+      maxCount?: number;
+      countLimitEnabled?: boolean;
+      overCountLimit?: boolean;
       limitEnabled?: boolean;
       overLimit?: boolean;
       overLimitBytes?: number;
@@ -68,6 +72,9 @@ export type ExternalAgentConnectorStatus = {
       schema?: string;
       directory?: string;
       maxSizeMb?: number;
+      maxCount?: number;
+      countLimitEnabled?: boolean;
+      overCountLimit?: boolean;
       limitEnabled?: boolean;
       initialBytes?: number;
       remainingBytes?: number;
@@ -238,6 +245,7 @@ export async function updateExternalAgentGateway(
     allowWriteRequests?: boolean;
     revokeToken?: boolean;
     checkpointArchiveMaxSizeMb?: number;
+    checkpointArchiveMaxCount?: number;
     deleteCheckpointArchiveIds?: string[];
     checkpointArchiveDirectory?: string;
   },

@@ -28,7 +28,9 @@ type CheckpointStoragePanelProps = {
   loading: boolean;
   isDesktop: boolean;
   limitInput: string;
+  countInput: string;
   onLimitInputChange: (value: string) => void;
+  onCountInputChange: (value: string) => void;
   onSaveLimit: () => void;
   onOpenFolder: (targetPath: string) => void;
   onPickDirectory: (currentPath: string) => Promise<string>;
@@ -41,7 +43,9 @@ export function CheckpointStoragePanel({
   loading,
   isDesktop,
   limitInput,
+  countInput,
   onLimitInputChange,
+  onCountInputChange,
   onSaveLimit,
   onOpenFolder,
   onPickDirectory,
@@ -52,6 +56,7 @@ export function CheckpointStoragePanel({
   const usage = status?.gateway?.checkpointArchiveUsage;
   const prune = status?.gateway?.checkpointArchivePrune;
   const maxSizeMb = status?.gateway?.checkpointArchiveMaxSizeMb ?? usage?.maxSizeMb ?? 0;
+  const maxCount = status?.gateway?.checkpointArchiveMaxCount ?? usage?.maxCount ?? 4;
   const usageText = `${formatStorageSize(usage?.sizeBytes)} / ${maxSizeMb > 0 ? `${formatCount(maxSizeMb)} MB` : t("settings.unlimited")}`;
   const directory = usage?.directory || "";
 
@@ -143,14 +148,14 @@ export function CheckpointStoragePanel({
       <div className="flex min-w-0 items-center gap-2">
         <Archive className="h-4 w-4 shrink-0 text-primary" />
         <h2 className="min-w-0 flex-1 truncate text-base font-semibold">{t("settings.storage")}</h2>
-        <Badge tone={maxSizeMb > 0 ? "ok" : "muted"} className="shrink-0">
-          {maxSizeMb > 0 ? t("settings.limitOn") : t("settings.unlimited")}
+        <Badge tone={maxSizeMb > 0 || maxCount > 0 ? "ok" : "muted"} className="shrink-0">
+          {maxSizeMb > 0 || maxCount > 0 ? t("settings.limitOn") : t("settings.unlimited")}
         </Badge>
       </div>
 
       <div className="mt-4 grid gap-3">
         <DataLine label={t("settings.checkpointArchiveUsage")} value={usageText} />
-        <DataLine label={t("settings.checkpointArchiveCount")} value={formatCount(usage?.archiveCount)} />
+        <DataLine label={t("settings.checkpointArchiveCount")} value={`${formatCount(usage?.archiveCount)}${maxCount > 0 ? ` / ${formatCount(maxCount)}` : ""}`} />
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <div className="min-w-0 flex-1">
             <DataLine label={t("settings.checkpointArchiveDirectory")} value={directory || "-"} />
@@ -181,12 +186,26 @@ export function CheckpointStoragePanel({
             className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
           />
         </label>
+        <label className="min-w-48 flex-1 text-sm">
+          <span className="mb-1 block font-medium">{t("settings.checkpointArchiveCountLimit")}</span>
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={countInput}
+            onChange={(event) => onCountInputChange(event.target.value)}
+            disabled={disabled}
+            className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+          />
+        </label>
         <Button type="button" disabled={disabled} onClick={onSaveLimit}>
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {t("common.save")}
         </Button>
       </div>
       <div className="mt-2 text-xs text-muted-foreground">{t("settings.checkpointArchiveLimitHint")}</div>
+      <div className="mt-1 text-xs text-muted-foreground">{t("settings.checkpointArchiveCountLimitHint")}</div>
+      {usage?.overCountLimit ? <p className="mt-2 text-xs text-muted-foreground">{t("settings.checkpointArchiveCountProtected")}</p> : null}
       {prune ? (
         <div className="mt-3 text-xs text-muted-foreground">
           {t("settings.checkpointArchivePruned", {

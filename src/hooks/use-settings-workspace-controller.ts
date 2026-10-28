@@ -24,6 +24,7 @@ type GatewaySettingsRequest = {
   allowWriteRequests?: boolean;
   revokeToken?: boolean;
   checkpointArchiveMaxSizeMb?: number;
+  checkpointArchiveMaxCount?: number;
   deleteCheckpointArchiveIds?: string[];
   checkpointArchiveDirectory?: string;
 };
@@ -73,6 +74,7 @@ export function useSettingsWorkspaceController({
   const [loadingConnectors, setLoadingConnectors] = useState(false);
   const [connectorMessage, setConnectorMessage] = useState("");
   const [checkpointArchiveLimitInput, setCheckpointArchiveLimitInput] = useState("10240");
+  const [checkpointArchiveCountInput, setCheckpointArchiveCountInput] = useState("4");
   const diagnosticsRequestSequenceRef = useRef(0);
   const diagnosticsPendingRef = useRef(0);
   const diagnosticsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -97,6 +99,11 @@ export function useSettingsWorkspaceController({
     const configuredLimit = connectorStatus?.gateway?.checkpointArchiveMaxSizeMb;
     setCheckpointArchiveLimitInput(typeof configuredLimit === "number" ? String(configuredLimit) : "10240");
   }, [connectorStatus?.gateway?.checkpointArchiveMaxSizeMb]);
+
+  useEffect(() => {
+    const configuredCount = connectorStatus?.gateway?.checkpointArchiveMaxCount;
+    setCheckpointArchiveCountInput(typeof configuredCount === "number" ? String(configuredCount) : "4");
+  }, [connectorStatus?.gateway?.checkpointArchiveMaxCount]);
 
   async function openSettings() {
     setActiveView("settings");
@@ -317,7 +324,7 @@ export function useSettingsWorkspaceController({
         message = del?.ok
           ? t("settings.checkpointArchiveDeleted", { count: del.deletedCount ?? 0 })
           : t("settings.checkpointArchiveDeleteFailed", { reason: del?.error || "" });
-      } else if (request.checkpointArchiveMaxSizeMb !== undefined) {
+      } else if (request.checkpointArchiveMaxSizeMb !== undefined || request.checkpointArchiveMaxCount !== undefined) {
         message = t("settings.checkpointArchiveUpdated");
       }
       setConnectorMessage(message);
@@ -336,7 +343,12 @@ export function useSettingsWorkspaceController({
       setError(t("settings.checkpointArchiveLimitInvalid"));
       return;
     }
-    await updateGatewaySettings({ checkpointArchiveMaxSizeMb: Math.round(parsed) });
+    const count = Number(checkpointArchiveCountInput.trim() || "0");
+    if (!Number.isSafeInteger(count) || count < 0) {
+      setError(t("settings.checkpointArchiveCountLimitInvalid"));
+      return;
+    }
+    await updateGatewaySettings({ checkpointArchiveMaxSizeMb: Math.round(parsed), checkpointArchiveMaxCount: count });
   }
 
   async function openCheckpointArchiveFolder(targetPath: string) {
@@ -469,6 +481,7 @@ export function useSettingsWorkspaceController({
     loadingConnectors,
     connectorMessage,
     checkpointArchiveLimitInput,
+    checkpointArchiveCountInput,
     openSettings,
     loadDiagnostics,
     setLogLevel,
@@ -485,6 +498,7 @@ export function useSettingsWorkspaceController({
     runConnectorAction,
     saveNotes,
     setCheckpointArchiveLimitInput,
+    setCheckpointArchiveCountInput,
     updateAgentNotes,
     copyConnectorText,
   };

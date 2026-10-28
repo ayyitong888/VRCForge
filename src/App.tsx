@@ -558,6 +558,7 @@ export default function App() {
     loadingConnectors,
     connectorMessage,
     checkpointArchiveLimitInput,
+    checkpointArchiveCountInput,
     openSettings,
     loadDiagnostics,
     setLogLevel,
@@ -573,6 +574,7 @@ export default function App() {
     runConnectorAction,
     saveNotes,
     setCheckpointArchiveLimitInput,
+    setCheckpointArchiveCountInput,
     updateAgentNotes,
     copyConnectorText,
   } = useSettingsWorkspaceController({
@@ -4543,6 +4545,7 @@ export default function App() {
               memoryReviewRefreshSignal={memoryReviewRefreshSignal}
               isDesktop={isTauriRuntime()}
               checkpointArchiveLimitInput={checkpointArchiveLimitInput}
+              checkpointArchiveCountInput={checkpointArchiveCountInput}
               agentNotes={agentNotes}
               agentNotesLoaded={agentNotesLoaded}
               agentNotesPath={agentNotesPath}
@@ -4589,6 +4592,7 @@ export default function App() {
               onOpenLogsFolder={() => void openLogsFolder()}
               onCreateSupportBundle={() => void createSupportBundle()}
               onCheckpointArchiveLimitInputChange={setCheckpointArchiveLimitInput}
+              onCheckpointArchiveCountInputChange={setCheckpointArchiveCountInput}
               onSaveCheckpointArchiveLimit={() => void saveCheckpointArchiveLimit()}
               onOpenCheckpointArchiveFolder={(targetPath) => void openCheckpointArchiveFolder(targetPath)}
               onPickCheckpointArchiveDirectory={pickCheckpointArchiveDirectory}

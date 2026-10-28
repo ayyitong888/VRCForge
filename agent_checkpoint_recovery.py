@@ -52,6 +52,7 @@ from agent_gateway import (
     fsync_file_path,
     normalize_checkpoint_archive_dir,
     normalize_checkpoint_archive_max_size_mb,
+    normalize_checkpoint_archive_max_count,
     redact_sensitive,
     utc_now_iso,
 )
@@ -468,6 +469,7 @@ class AgentCheckpointRecoveryService:
         total_bytes = sum(item["sizeBytes"] for item in archives)
         max_size_mb = normalize_checkpoint_archive_max_size_mb(config.checkpoint_archive_max_size_mb)
         excess_bytes = max(0, total_bytes - max_size_mb * CHECKPOINT_ARCHIVE_BYTES_PER_MB) if max_size_mb else 0
+        max_count = normalize_checkpoint_archive_max_count(config.checkpoint_archive_max_count)
         return {
             "ok": True,
             "directory": str(self._ports.checkpoint_store_dir()),
@@ -475,6 +477,9 @@ class AgentCheckpointRecoveryService:
             "sizeMb": round(total_bytes / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
             "archiveCount": len(archives),
             "maxSizeMb": max_size_mb,
+            "maxCount": max_count,
+            "countLimitEnabled": max_count > 0,
+            "overCountLimit": max_count > 0 and len(archives) > max_count,
             "limitEnabled": max_size_mb > 0,
             "overLimit": excess_bytes > 0,
             "overLimitBytes": excess_bytes,
@@ -484,7 +489,10 @@ class AgentCheckpointRecoveryService:
         config = config or self._ports.ensure_config()
         archives = self._checkpoint_archive_files()
         active_recovery_ids = self._protected_checkpoint_archive_ids(include_recent=False)
-        protected_ids = self._protected_checkpoint_archive_ids(include_recent=True, archives=archives)
+        protected_ids = self._protected_checkpoint_archive_ids(
+            include_recent=True, archives=archives,
+            include_grace=normalize_checkpoint_archive_max_count(config.checkpoint_archive_max_count) <= 0,
+        )
         labels = self._checkpoint_archive_labels()
         items = [
             {
@@ -805,11 +813,13 @@ class AgentCheckpointRecoveryService:
         normalized_max = normalize_checkpoint_archive_max_size_mb(
             config.checkpoint_archive_max_size_mb if max_size_mb is None else max_size_mb
         )
+        max_count = normalize_checkpoint_archive_max_count(config.checkpoint_archive_max_count)
         archives = self._checkpoint_archive_files()
         total_bytes = sum(item["sizeBytes"] for item in archives)
         protected_ids = set(protected_checkpoint_ids or set())
-        protected_ids.update(self._protected_checkpoint_archive_ids(include_recent=True, archives=archives))
-        if normalized_max <= 0:
+        protected_ids.update(self._protected_checkpoint_archive_ids(include_recent=True, archives=archives, include_grace=False))
+        size_protected_ids = protected_ids | self._protected_checkpoint_archive_ids(include_recent=True, archives=archives)
+        if normalized_max <= 0 and max_count <= 0:
             return {
                 **self.checkpoint_archive_usage(config),
                 "maxSizeMb": normalized_max,
@@ -822,10 +832,15 @@ class AgentCheckpointRecoveryService:
         target_bytes = normalized_max * CHECKPOINT_ARCHIVE_BYTES_PER_MB
         deleted: list[dict[str, Any]] = []
         remaining_bytes = total_bytes
+        remaining_count = len(archives)
         for archive in sorted(archives, key=lambda item: item["modifiedAt"]):
-            if remaining_bytes <= target_bytes:
+            size_satisfied = normalized_max <= 0 or remaining_bytes <= target_bytes
+            count_satisfied = max_count <= 0 or remaining_count <= max_count
+            if size_satisfied and count_satisfied:
                 break
-            if archive["checkpointId"] in protected_ids:
+            # Count retention applies immediately to ordinary backups; the
+            # existing recent-operation grace remains authoritative for byte-only cleanup.
+            if archive["checkpointId"] in protected_ids or (count_satisfied and archive["checkpointId"] in size_protected_ids):
                 continue
             path = archive["path"]
             try:
@@ -842,6 +857,7 @@ class AgentCheckpointRecoveryService:
             deleted.append({"path": str(path), "checkpointId": archive["checkpointId"], "sizeBytes": archive["sizeBytes"]})
             cleanup_checkpoint_evidence(self, archive['checkpointId'])
             remaining_bytes -= archive["sizeBytes"]
+            remaining_count -= 1
             self._remove_empty_checkpoint_archive_parents(path.parent)
 
         summary = {
@@ -849,6 +865,9 @@ class AgentCheckpointRecoveryService:
             "schema": "vrcforge.checkpoint_archive_prune.v1",
             "directory": str(self._ports.checkpoint_store_dir()),
             "maxSizeMb": normalized_max,
+            "maxCount": max_count,
+            "countLimitEnabled": max_count > 0,
+            "overCountLimit": max_count > 0 and remaining_count > max_count,
             "limitEnabled": True,
             "initialBytes": total_bytes,
             "remainingBytes": max(0, remaining_bytes),
@@ -4062,6 +4081,7 @@ class AgentCheckpointRecoveryService:
         *,
         include_recent: bool = False,
         archives: list[dict[str, Any]] | None = None,
+        include_grace: bool = True,
     ) -> set[str]:
         protected: set[str] = set()
         for recovery in self._active_apply_recoveries():
@@ -4080,17 +4100,19 @@ class AgentCheckpointRecoveryService:
             candidates = archives if archives is not None else self._checkpoint_archive_files()
             # A third successful edit must not evict the first step's rollback
             # point while the user is still composing the operation. Automatic
-            # quota cleanup gets a 15-minute grace period; explicit user deletion
-            # and active-recovery protection retain their existing semantics.
+            # byte-quota cleanup gets a 15-minute grace period. Count retention
+            # skips that grace while keeping referenced and newest restore points;
+            # explicit user deletion and active-recovery protection are unchanged.
             cutoff = time.time() - 15 * 60
-            protected.update(
-                str(archive["checkpointId"])
-                for archive in candidates
-                if archive["modifiedAt"] >= cutoff
-            )
-            for archive in sorted(candidates, key=lambda item: item["modifiedAt"], reverse=True)[
-                :CHECKPOINT_ARCHIVE_PROTECTED_RECENT_COUNT
-            ]:
+            if include_grace:
+                protected.update(
+                    str(archive["checkpointId"])
+                    for archive in candidates
+                    if archive["modifiedAt"] >= cutoff
+                )
+            max_count = normalize_checkpoint_archive_max_count(self._ports.ensure_config().checkpoint_archive_max_count)
+            recent_count = min(CHECKPOINT_ARCHIVE_PROTECTED_RECENT_COUNT, max_count) if max_count else CHECKPOINT_ARCHIVE_PROTECTED_RECENT_COUNT
+            for archive in sorted(candidates, key=lambda item: item["modifiedAt"], reverse=True)[:recent_count]:
                 protected.add(str(archive["checkpointId"]))
         return protected
 

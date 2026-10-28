@@ -28,8 +28,8 @@ const bundle = await build({
       return <>
         <button onClick={() => setRevision(v => v + 1)}>Refresh fixture</button>
         <CheckpointQuotaNotice endpoint={location.origin} connected={true} refreshTrigger={revision} onManage={() => window.managed++} />
-        <CheckpointStoragePanel status={status} loading={false} isDesktop={false} limitInput="1"
-          onLimitInputChange={() => {}} onSaveLimit={() => {}} onOpenFolder={() => {}} onPickDirectory={async () => ""}
+        <CheckpointStoragePanel status={status} loading={false} isDesktop={false} limitInput="1" countInput="4"
+          onCountInputChange={() => {}} onLimitInputChange={() => {}} onSaveLimit={() => {}} onOpenFolder={() => {}} onPickDirectory={async () => ""}
           onRelocate={() => {}} onDeleteSelected={ids => { window.deleted.push(ids); setArchives(v => v.filter(a => !ids.includes(a.checkpointId))); }} />
       </>;
     }

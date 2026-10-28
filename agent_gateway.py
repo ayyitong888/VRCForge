@@ -239,6 +239,7 @@ CHECKPOINT_ARCHIVE_BYTES_PER_MB = 1024 * 1024
 CHECKPOINT_ARCHIVE_MAX_SIZE_MB_LIMIT = 1024 * 1024
 CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB = 10 * 1024
 CHECKPOINT_ARCHIVE_PROTECTED_RECENT_COUNT = 2
+CHECKPOINT_ARCHIVE_DEFAULT_MAX_COUNT = 4
 CHECKPOINT_RECORD_SCHEMA = "vrcforge.checkpoint.v1"
 AUTO_APPROVAL_MANUAL_WRITE_TOKENS = (
     "delete",
@@ -391,6 +392,7 @@ class AgentGatewayConfig:
     computer_use_ever_enabled: bool = False
     background_goal_notifications_enabled: bool = True
     checkpoint_archive_max_size_mb: int = CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB
+    checkpoint_archive_max_count: int = CHECKPOINT_ARCHIVE_DEFAULT_MAX_COUNT
     checkpoint_archive_dir: str = ""
     project_category_allow_rules: list[dict[str, str]] = field(default_factory=list)
     agent_budget_policy: dict[str, Any] = field(default_factory=dict)
@@ -2259,6 +2261,7 @@ class AgentGateway:
                 "computer_use_ever_enabled": False,
                 "background_goal_notifications_enabled": True,
                 "checkpoint_archive_max_size_mb": CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
+                "checkpoint_archive_max_count": CHECKPOINT_ARCHIVE_DEFAULT_MAX_COUNT,
                 "checkpoint_archive_dir": "",
                 "project_category_allow_rules": [],
                 "agent_budget_policy": {},
@@ -2297,6 +2300,9 @@ class AgentGateway:
                 ),
                 checkpoint_archive_max_size_mb=normalize_checkpoint_archive_max_size_mb(
                     raw.get("checkpoint_archive_max_size_mb")
+                ),
+                checkpoint_archive_max_count=normalize_checkpoint_archive_max_count(
+                    raw.get("checkpoint_archive_max_count")
                 ),
                 checkpoint_archive_dir=normalize_checkpoint_archive_dir(
                     raw.get("checkpoint_archive_dir")
@@ -2345,6 +2351,9 @@ class AgentGateway:
                 ),
                 "checkpoint_archive_max_size_mb": normalize_checkpoint_archive_max_size_mb(
                     config.checkpoint_archive_max_size_mb
+                ),
+                "checkpoint_archive_max_count": normalize_checkpoint_archive_max_count(
+                    config.checkpoint_archive_max_count
                 ),
                 "checkpoint_archive_dir": normalize_checkpoint_archive_dir(
                     config.checkpoint_archive_dir
@@ -11106,6 +11115,13 @@ def normalize_checkpoint_archive_max_size_mb(value: Any) -> int:
     if amount <= 0:
         return 0
     return min(amount, CHECKPOINT_ARCHIVE_MAX_SIZE_MB_LIMIT)
+
+
+def normalize_checkpoint_archive_max_count(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return CHECKPOINT_ARCHIVE_DEFAULT_MAX_COUNT
 
 
 def normalize_checkpoint_archive_dir(value: Any) -> str:

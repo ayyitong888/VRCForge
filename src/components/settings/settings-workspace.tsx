@@ -88,6 +88,7 @@ type SettingsWorkspaceProps = {
   memoryReviewRefreshSignal?: number;
   isDesktop: boolean;
   checkpointArchiveLimitInput: string;
+  checkpointArchiveCountInput: string;
   agentNotes: string;
   agentNotesLoaded: boolean;
   agentNotesPath: string;
@@ -126,6 +127,7 @@ type SettingsWorkspaceProps = {
   onOpenLogsFolder: () => void;
   onCreateSupportBundle: () => void;
   onCheckpointArchiveLimitInputChange: (value: string) => void;
+  onCheckpointArchiveCountInputChange: (value: string) => void;
   onSaveCheckpointArchiveLimit: () => void;
   onOpenCheckpointArchiveFolder: (targetPath: string) => void;
   onPickCheckpointArchiveDirectory: (currentPath: string) => Promise<string>;
@@ -191,6 +193,7 @@ export function SettingsWorkspace({
   memoryReviewRefreshSignal = 0,
   isDesktop,
   checkpointArchiveLimitInput,
+  checkpointArchiveCountInput,
   agentNotes,
   agentNotesLoaded,
   agentNotesPath,
@@ -229,6 +232,7 @@ export function SettingsWorkspace({
   onOpenLogsFolder,
   onCreateSupportBundle,
   onCheckpointArchiveLimitInputChange,
+  onCheckpointArchiveCountInputChange,
   onSaveCheckpointArchiveLimit,
   onOpenCheckpointArchiveFolder,
   onPickCheckpointArchiveDirectory,
@@ -574,7 +578,9 @@ export function SettingsWorkspace({
             loading={loadingConnectors}
             isDesktop={isDesktop}
             limitInput={checkpointArchiveLimitInput}
+            countInput={checkpointArchiveCountInput}
             onLimitInputChange={onCheckpointArchiveLimitInputChange}
+            onCountInputChange={onCheckpointArchiveCountInputChange}
             onSaveLimit={onSaveCheckpointArchiveLimit}
             onOpenFolder={onOpenCheckpointArchiveFolder}
             onPickDirectory={onPickCheckpointArchiveDirectory}

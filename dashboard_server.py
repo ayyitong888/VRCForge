@@ -149,6 +149,7 @@ from agent_gateway import (
     ensure_dict,
     normalize_bool,
     normalize_checkpoint_archive_max_size_mb,
+    normalize_checkpoint_archive_max_count,
     normalize_exposure_layer,
     normalize_skill_id,
     parse_skill_markdown,
@@ -7299,6 +7300,7 @@ def external_agent_status_sync(project_path: str | None = None, generic_config_p
             "restUrl": health.get("restUrl"),
             "pendingApprovalCount": health.get("pendingApprovalCount"),
             "checkpointArchiveMaxSizeMb": int(config.checkpoint_archive_max_size_mb),
+            "checkpointArchiveMaxCount": int(config.checkpoint_archive_max_count),
             "checkpointArchiveUsage": AGENT_GATEWAY.checkpoint_recovery.checkpoint_archive_usage(config),
         },
         "advertisedTools": [
@@ -7325,9 +7327,12 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
     if params.get("allowWriteRequests") is not None or params.get("allow_write_requests") is not None:
         config.allow_write_requests = bool(params.get("allowWriteRequests", params.get("allow_write_requests")))
     checkpoint_limit = params.get("checkpointArchiveMaxSizeMb", params.get("checkpoint_archive_max_size_mb"))
+    checkpoint_count = params.get("checkpointArchiveMaxCount", params.get("checkpoint_archive_max_count"))
     prune_summary: dict[str, Any] | None = None
     if checkpoint_limit is not None:
         config.checkpoint_archive_max_size_mb = normalize_checkpoint_archive_max_size_mb(checkpoint_limit)
+    if checkpoint_count is not None:
+        config.checkpoint_archive_max_count = normalize_checkpoint_archive_max_count(checkpoint_count)
     if params.get("revokeToken") is True or params.get("revoke_token") is True:
         config.token = secrets.token_urlsafe(32)
         config.approval_token = secrets.token_urlsafe(32)
@@ -7335,7 +7340,7 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
         config.token_created_at = config.token_created_at or rotated_at
         config.token_rotated_at = rotated_at
     AGENT_GATEWAY.save_config(config)
-    if checkpoint_limit is not None:
+    if checkpoint_limit is not None or checkpoint_count is not None:
         prune_summary = AGENT_GATEWAY.checkpoint_recovery.prune_checkpoint_archives(config.checkpoint_archive_max_size_mb)
 
     delete_ids = params.get("deleteCheckpointArchiveIds")
