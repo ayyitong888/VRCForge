@@ -229,7 +229,10 @@ def _authorized_path(value: str | Path, allowed_roots: Iterable[str | Path]) -> 
         except ValueError:
             continue
         if not candidate_lexical.exists():
-            raise FileNotFoundError(str(candidate_lexical))
+            raise FileNotFoundError(
+                f"Path does not exist: {candidate_lexical}. "
+                "Use find_files or list_directory to locate an existing path before retrying."
+            )
         current = root_lexical
         if _is_link_or_junction(current):
             raise PermissionError(f"authorized root is a link or reparse point: {root_lexical}")
@@ -244,7 +247,10 @@ def _authorized_path(value: str | Path, allowed_roots: Iterable[str | Path]) -> 
         except (OSError, RuntimeError, ValueError):
             raise PermissionError(f"path escapes its authorized root: {candidate_lexical}")
         return resolved_candidate
-    raise PermissionError(f"path is outside every authorized root: {candidate_lexical}")
+    raise PermissionError(
+        f"path is outside every authorized root: {candidate_lexical}. "
+        "Use a path within an authorized root, or ask the user to authorize this location."
+    )
 
 
 def host_scope_roots() -> list[str]:
@@ -475,7 +481,10 @@ def read_text_file(
         max_output_chars = _limit(max_output_chars, "max_output_chars", MAX_OUTPUT_CHARS)
     file_path = _authorized_path(path, allowed_roots)
     if not file_path.is_file():
-        raise IsADirectoryError(str(file_path))
+        raise IsADirectoryError(
+            f"Expected a text file, but path is a directory: {file_path}. "
+            "Use list_directory to choose a file before retrying."
+        )
     if _sensitive_file(file_path):
         raise PermissionError(f"sensitive credential file is not readable by the General Agent: {file_path.name}")
     if enable_source_paging:

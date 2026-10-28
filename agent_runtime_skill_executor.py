@@ -206,7 +206,7 @@ class AgentRuntimeSkillExecutor:
                     "error": str(exc),
                 }
             )
-            return {
+            payload = {
                 "ok": False,
                 "status": "failed",
                 "tool": tool.name,
@@ -622,12 +622,22 @@ class AgentRuntimeSkillExecutor:
                 ),
             }
         except Exception as exc:  # noqa: BLE001 - keep the agent loop alive.
-            return {
+            payload = {
                 "ok": False,
                 "status": "failed",
                 "tool": entrypoint,
                 "category": tool.category,
                 "error": str(exc),
+                "cause": {
+                    "layer": "runtime_skill_executor",
+                    "phase": "tool_invocation",
+                    "category": type(exc).__name__,
+                    "code": str(getattr(exc, "cause_code", "") or "runtime_tool_error"),
+                    "message": str(exc)[:600],
+                    "mutationStarted": None if tool.write else False,
+                    "committed": None if tool.write else False,
+                    "commitState": "unknown" if tool.write else "not_started",
+                },
                 **(
                     {
                         "errorCode": "permission_denied",
@@ -638,3 +648,9 @@ class AgentRuntimeSkillExecutor:
                     else {}
                 ),
             }
+            payload["outcome"] = normalize_agent_tool_result(
+                payload,
+                fallback_summary=str(exc),
+                write=tool.write,
+            )
+            return payload
