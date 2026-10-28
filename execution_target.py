@@ -565,6 +565,7 @@ class ExecutionTargetBindingRegistry:
         project_root: str,
         session_context: str,
         required_scope: str | None = None,
+        refresh_scene_snapshot: bool = True,
     ) -> dict[str, Any]:
         """Restore a bound identity; an explicit operation scope stays strict."""
         normalized_root = normalize_project_root(project_root)
@@ -576,6 +577,7 @@ class ExecutionTargetBindingRegistry:
             target,
             project_root=normalized_root,
             required_scope=_identity_scope_for_target(target) if required_scope is None else required_scope,
+            refresh_scene_snapshot=refresh_scene_snapshot,
         )
         if execution_target_digest(verified) != prior.get("digest"):
             raise ExecutionTargetError(

@@ -3693,10 +3693,11 @@ class AgentGateway:
         *,
         project_root: str | None = None,
         required_scope: str | None = None,
+        refresh_scene_snapshot: bool = True,
     ) -> dict[str, Any]:
         try:
             session_context = self.execution_target_session_context()
-            if project_root is None and required_scope is None:
+            if project_root is None and required_scope is None and refresh_scene_snapshot:
                 return self._execution_target_bindings.resolve_in_current_session(
                     reference,
                     session_context=session_context,
@@ -3711,6 +3712,7 @@ class AgentGateway:
                 project_root=project_root,
                 session_context=session_context,
                 required_scope=required_scope,
+                refresh_scene_snapshot=refresh_scene_snapshot,
             )
         except ExecutionTargetError as exc:
             raise AgentGatewayError(

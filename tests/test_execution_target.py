@@ -535,3 +535,33 @@ def test_runtime_identity_only_retains_disk_and_lifetime_validation(tmp_path, dr
         target["editor"]["processStartTime"] = "1.000000"
     with pytest.raises(ExecutionTargetError):
         validate_runtime_execution_target(target, project_root=str(tmp_path), required_scope="avatar", refresh_scene_snapshot=False)
+
+
+def test_component_binding_identity_only_resolve_skips_scene_bytes_for_owner_snapshot(tmp_path, monkeypatch):
+    target = _live_runtime_target(tmp_path)
+    target['scope'] = 'component'
+    target['object'] = {'globalObjectId': 'object-id', 'exactHierarchyPath': 'Avatar/Data'}
+    target['component'] = {'globalObjectId': 'component-id', 'type': 'Plain'}
+    target['namespace'] = canonical_namespace(target)
+    gateway = AgentGateway(tmp_path / 'config' / 'gateway.json', tmp_path / 'audit')
+    monkeypatch.setattr(gateway, 'execution_target_session_context', lambda: 'runtime:checkpoint')
+    binding = gateway.bind_execution_target(target, project_root=str(tmp_path))
+    scene = Path(target['scene']['absolutePath'])
+    scene.write_bytes(b'changed scene content for the Core owner proof')
+
+    original_read = Path.read_bytes
+    reads = []
+
+    def tracked_read(path):
+        if path == scene:
+            reads.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(Path, 'read_bytes', tracked_read)
+    resolved = gateway.resolve_execution_target_reference(
+        binding['executionTarget'], project_root=str(tmp_path),
+        required_scope='component', refresh_scene_snapshot=False,
+    )
+    assert reads == []
+    assert resolved['scene']['digest'] == target['scene']['digest']
+    assert execution_target_digest(resolved) == binding['executionTargetDigest']

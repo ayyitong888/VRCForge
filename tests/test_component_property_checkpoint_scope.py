@@ -29,7 +29,6 @@ def case(tmp_path, monkeypatch):
              'componentType': 'UnityEngine.Transform', 'componentIndex': 0, 'propertyPath': 'localScale',
              'archiveAssetPaths': ['Assets/Main.unity']}
     calls = []
-    monkeypatch.setattr(server, 'list_execution_targets_sync', lambda query: {'ok': True, 'targets': [deepcopy(target)]})
     monkeypatch.setattr(server, 'read_component_property_sync', lambda request: {'ok': True, 'checkpointScope': deepcopy(scope)})
     monkeypatch.setattr(server, 'set_component_property_sync', lambda _: pytest.fail('checkpoint must never call a managed writer, even in preview mode'))
     def prepare(project, checkpoint_asset_paths=None, *, checkpoint_files=None):
@@ -145,7 +144,10 @@ def test_internal_property_reference_is_resolved_without_changing_approved_argum
     args['executionTarget'] = reference
     def resolve(value, **kwargs):
         assert value == reference
-        assert kwargs == {'project_root': str(root), 'required_scope': 'component'}
+        assert kwargs == {
+            'project_root': str(root), 'required_scope': 'component',
+            'refresh_scene_snapshot': False,
+        }
         return deepcopy(target)
     monkeypatch.setattr(server.AGENT_GATEWAY, 'resolve_execution_target_reference', resolve)
     result = server.prepare_authoritative_unity_checkpoint_sync(root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
@@ -156,7 +158,7 @@ def test_internal_property_reference_is_resolved_without_changing_approved_argum
 
 @pytest.mark.parametrize('field,value', [
     ('schema', 'forged'), ('ownerKind', 'prefab'), ('scenePath', 'Assets/Other.unity'),
-    ('sceneGuid', 'other'), ('sceneDigest', 'b' * 64), ('objectGlobalObjectId', 'other'),
+    ('sceneGuid', 'other'), ('objectGlobalObjectId', 'other'),
     ('componentGlobalObjectId', 'other'), ('componentType', 'UnityEngine.Camera'),
     ('componentIndex', 1), ('propertyPath', 'position'),
     ('archiveAssetPaths', ['Assets/Other.mat']),
@@ -169,6 +171,38 @@ def test_owner_preview_mismatch_never_reaches_prepare(case, field, value):
     assert calls == []
 
 
+def test_property_checkpoint_uses_one_current_owner_proof_without_scene_rediscovery(case, monkeypatch):
+    root, target, args, scope, calls = case
+    scope['sceneDigest'] = 'b' * 64  # Current Core snapshot may differ from the bound digest.
+    owner_reads = []
+
+    def inspect_owner(request):
+        owner_reads.append(request)
+        return {'ok': True, 'checkpointScope': deepcopy(scope)}
+
+    monkeypatch.setattr(server, 'read_component_property_sync', inspect_owner)
+    monkeypatch.setattr(server, 'list_execution_targets_sync',
+                        lambda *_: pytest.fail('component checkpoint must not rediscover and hash the scene'))
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is True, result
+    assert len(owner_reads) == 1
+    assert owner_reads[0]['includeCheckpointScope'] is True
+    assert calls == [(root, ['Assets/Main.unity'])]
+
+
+def test_property_checkpoint_does_not_require_unused_scene_digests(case, monkeypatch):
+    root, target, args, scope, calls = case
+    target['scene'].pop('digest')
+    scope.pop('sceneDigest')
+    monkeypatch.setattr(server, 'read_component_property_sync',
+                        lambda _: {'ok': True, 'checkpointScope': deepcopy(scope)})
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is True, result
+    assert calls == [(root, ['Assets/Main.unity'])]
+
+
 def test_caller_cannot_supply_footprint_for_legacy_or_unknown_setter(case, monkeypatch):
     root, _, args, scope, calls = case
     monkeypatch.setattr(server, 'read_component_property_sync', lambda _: {'ok': True})
@@ -177,10 +211,23 @@ def test_caller_cannot_supply_footprint_for_legacy_or_unknown_setter(case, monke
     assert calls == []
 
 
+def test_component_checkpoint_rejects_a_different_project_root(case):
+    root, _, args, _, calls = case
+    args['executionTarget']['project']['root'] = str(root / 'OtherProject')
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is False, result
+    assert calls == []
+
+
 def test_identity_drift_blocks_before_owner_preview(case, monkeypatch):
-    root, target, args, _, calls = case
-    fresh = deepcopy(target); fresh['editor']['coreInstanceId'] = 'new'
-    monkeypatch.setattr(server, 'list_execution_targets_sync', lambda _: {'ok': True, 'targets': [fresh]})
+    root, _, args, _, calls = case
+    reference = {'schema': 'vrcforge.execution_target_ref.v1', 'ref': 'session-bound-reference'}
+    args['executionTarget'] = reference
+    def resolve(_reference, **kwargs):
+        assert kwargs['refresh_scene_snapshot'] is False
+        raise server.AgentGatewayError('Unity editor identity changed.')
+    monkeypatch.setattr(server.AGENT_GATEWAY, 'resolve_execution_target_reference', resolve)
     monkeypatch.setattr(server, 'read_component_property_sync', lambda _: pytest.fail('stale target must not reach preview'))
     assert server.prepare_authoritative_unity_checkpoint_sync(root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})['ok'] is False
     assert calls == []

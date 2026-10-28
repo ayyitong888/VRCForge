@@ -1,4 +1,4 @@
-"""Bind property checkpoint files to fresh read-only Core owner discovery."""
+"""Bind property checkpoint files to a fresh read-only Core owner proof."""
 from pathlib import Path
 from typing import Any, Callable
 
@@ -8,7 +8,6 @@ def prepare_component_property_checkpoint(
     arguments: dict[str, Any],
     *,
     build_plan: Callable,
-    discover: Callable,
     inspect_owner: Callable,
     prepare: Callable,
 ) -> dict[str, Any]:
@@ -39,16 +38,8 @@ def prepare_component_property_checkpoint(
             or not isinstance(scene_path, str) or not scene_path.startswith('Assets/')
             or not scene_path.lower().endswith('.unity') or '\\' in scene_path
             or any(part in {'', '.', '..'} for part in scene_path.split('/'))
-            or not scene.get('guid') or not scene.get('digest')):
+            or not scene.get('guid')):
         return rejected('The approved property write does not identify a saved scene component.')
-    query = {'projectPath': str(project_root), 'scope': 'component',
-             'objectGlobalObjectId': obj['globalObjectId'],
-             'componentGlobalObjectId': component['globalObjectId']}
-    if (target.get('avatar') or {}).get('globalObjectId'):
-        query['avatarGlobalObjectId'] = target['avatar']['globalObjectId']
-    live = discover(query)
-    if live.get('ok') is not True or live.get('targets') != [target]:
-        return rejected('The approved property target changed before checkpointing.')
 
     # Only actual read-only Core owner discovery is authoritative. Caller-supplied footprint
     # fields are deliberately ignored, including when the Core is older.
@@ -60,7 +51,7 @@ def prepare_component_property_checkpoint(
         return rejected('The loaded Core did not prove the property persistence owner; load the current Core.')
     expected = {
         'schema': 'vrcforge.component_property_checkpoint.v1', 'ownerKind': 'scene',
-        'scenePath': scene_path, 'sceneGuid': scene['guid'], 'sceneDigest': scene['digest'],
+        'scenePath': scene_path, 'sceneGuid': scene['guid'],
         'objectGlobalObjectId': obj['globalObjectId'],
         'componentGlobalObjectId': component['globalObjectId'],
         'componentType': component['type'], 'componentIndex': request['componentIndex'],

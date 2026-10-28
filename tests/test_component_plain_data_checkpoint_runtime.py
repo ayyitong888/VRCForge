@@ -93,12 +93,12 @@ class Probe {
 
 
 def test_real_python_checkpoint_accepts_exact_component_scope_and_blocks_forgery(tmp_path):
-    target = {"scope":"component","project":{"root":str(tmp_path)},"scene":{"assetPath":"Assets/Main.unity","guid":"scene","digest":"digest"},"object":{"globalObjectId":"object","exactHierarchyPath":"Avatar/Data"},"component":{"globalObjectId":"component","type":"Plain"}}
+    target = {"scope":"component","project":{"root":str(tmp_path)},"scene":{"assetPath":"Assets/Main.unity","guid":"scene","digest":"a"*64},"object":{"globalObjectId":"object","exactHierarchyPath":"Avatar/Data"},"component":{"globalObjectId":"component","type":"Plain"}}
     request = {"gameObjectPath":"Avatar/Data","componentType":"Plain","componentIndex":0,"propertyPath":"number","value":42}
-    scope = {"schema":"vrcforge.component_property_checkpoint.v1","ownerKind":"scene","scenePath":"Assets/Main.unity","sceneGuid":"scene","sceneDigest":"digest","objectGlobalObjectId":"object","componentGlobalObjectId":"component","componentType":"Plain","componentIndex":0,"propertyPath":"number","archiveAssetPaths":["Assets/Main.unity"]}
+    scope = {"schema":"vrcforge.component_property_checkpoint.v1","ownerKind":"scene","scenePath":"Assets/Main.unity","sceneGuid":"scene","sceneDigest":"b"*64,"objectGlobalObjectId":"object","componentGlobalObjectId":"component","componentType":"Plain","componentIndex":0,"propertyPath":"number","archiveAssetPaths":["Assets/Main.unity"]}
     archived=[]
     def call():
-        return prepare_component_property_checkpoint(tmp_path,{"executionTarget":target},build_plan=lambda *a:[("vrc_set_property",request)],discover=lambda q:{"ok":True,"targets":[target]},inspect_owner=lambda a:{"ok":True,"checkpointScope":scope},prepare=lambda root,checkpoint_files: archived.append(checkpoint_files) or {"ok":True})
+        return prepare_component_property_checkpoint(tmp_path,{"executionTarget":target},build_plan=lambda *a:[("vrc_set_property",request)],inspect_owner=lambda a:{"ok":True,"checkpointScope":scope},prepare=lambda root,checkpoint_files: archived.append(checkpoint_files) or {"ok":True})
     assert call()["ok"] is True
     assert archived == [["Assets/Main.unity"]]
     scope["componentGlobalObjectId"]="forged"

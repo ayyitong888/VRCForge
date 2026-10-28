@@ -21418,9 +21418,18 @@ def prepare_authoritative_unity_checkpoint_sync(
     if isinstance(execution_target, dict) and execution_target.get("schema") == "vrcforge.execution_target_ref.v1":
         from mcp_tool_descriptor import identity_scope
         try:
+            resolve_options = {
+                "project_root": str(project_root),
+                "required_scope": identity_scope(checkpoint_target, write=True),
+            }
+            if checkpoint_target in {"vrcforge_set_property", "vrcforge_remap_skinned_mesh_bone"}:
+                # The following Core owner read supplies the current scene
+                # digest and exact component/property owner. Resolve the
+                # session-bound target's project/editor/scene identity without
+                # hashing the same scene first.
+                resolve_options["refresh_scene_snapshot"] = False
             arguments["executionTarget"] = AGENT_GATEWAY.resolve_execution_target_reference(
-                execution_target, project_root=str(project_root),
-                required_scope=identity_scope(checkpoint_target, write=True),
+                execution_target, **resolve_options,
             )
         except AgentGatewayError as exc:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
@@ -21436,7 +21445,7 @@ def prepare_authoritative_unity_checkpoint_sync(
 
         return prepare_component_property_checkpoint(
             project_root, arguments, build_plan=build_scene_execution_plan,
-            discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
+            inspect_owner=read_component_property_sync,
             prepare=prepare_unity_checkpoint_sync,
         )
     if checkpoint_target == "vrcforge_remap_skinned_mesh_bone":
@@ -21452,7 +21461,7 @@ def prepare_authoritative_unity_checkpoint_sync(
         return prepare_component_property_checkpoint(
             project_root, owner_arguments,
             build_plan=lambda _tool, _values: [("vrc_set_property", owner_request)],
-            discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
+            inspect_owner=read_component_property_sync,
             prepare=prepare_unity_checkpoint_sync,
         )
     if checkpoint_target == "vrcforge_manage_expression_parameters":
