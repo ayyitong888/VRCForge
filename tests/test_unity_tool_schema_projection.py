@@ -28,12 +28,12 @@ def test_projection_never_mutates_shared_nested_schemas() -> None:
     assert write["properties"]["checkpointChoice"] == {
         "type": "object",
         "description": (
-            "Only set mode=skip when the user explicitly instructed you not to use checkpoints. "
-            "Copy the exact user instruction into quote. Omit this field otherwise."
+            "Session checkpoint switch: mode=skip disables checkpoints until the user explicitly re-enables them with mode=require. "
+            "Change only on explicit user instruction and copy it into quote. Omit to retain the current session setting; new sessions default to checkpoints enabled."
         ),
         "required": ["mode", "quote"],
         "properties": {
-            "mode": {"type": "string", "const": "skip"},
+            "mode": {"type": "string", "enum": ["skip", "require"]},
             "quote": {"type": "string", "minLength": 1},
         },
         "additionalProperties": False,

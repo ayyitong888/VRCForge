@@ -118,8 +118,10 @@ from agent_task_loop import (
 )
 from checkpoint_user_policy import (
     bind_approved_write,
+    bind_session_checkpoint_skip,
     bind_checkpoint_skip_for_correction,
     bind_continued_checkpoint_skip,
+    bind_user_checkpoint_choice,
     bind_user_checkpoint_skip,
     checkpoint_skip_authority_for_context,
     checkpoint_skip_authority_from_policy,
@@ -1014,6 +1016,7 @@ class AgentGateway:
                     approval_id, session_id, snapshot
                 ),
                 native_result_observation=lambda step: RuntimePlannerService.native_result_observation(None, step),
+                session_checkpoint_choice=self._runtime_session_state.checkpoint_choice,
             ),
             ApprovalGoalPorts(
                 deny_approval=self._goal.deny_agent_goal_approval,
@@ -3925,6 +3928,34 @@ class AgentGateway:
             return result
 
         preparation_arguments = dict(arguments)
+        checkpoint_session = self._mcp_resource_context.get()
+        checkpoint_choice = arguments.get("checkpointChoice")
+        if "checkpointChoice" in arguments:
+            if (
+                not isinstance(checkpoint_choice, Mapping)
+                or set(checkpoint_choice) != {"mode", "quote"}
+                or checkpoint_choice.get("mode") not in {"skip", "require"}
+                or not isinstance(checkpoint_choice.get("quote"), str)
+                or not checkpoint_choice["quote"].strip()
+            ):
+                return self._external_mcp_no_write_error(name, "write_preparation",
+                    AgentGatewayError("checkpointChoice requires mode=skip or require and the user's explicit instruction quote.", status_code=400))
+            checkpoint_session = self.execution_target_session_context()
+        elif checkpoint_session:
+            checkpoint_choice = self._runtime_session_state.checkpoint_choice(checkpoint_session)
+        if "checkpointChoice" in arguments:
+            self._runtime_session_state.set_checkpoint_choice(checkpoint_session, {
+                **checkpoint_choice, "source": "external_user_instruction",
+            })
+            self.append_audit({"event": "checkpoint_session_choice_changed", "sessionId": checkpoint_session,
+                "mode": checkpoint_choice["mode"], "sourceQuote": checkpoint_choice["quote"],
+                "source": "external_user_instruction"})
+        if checkpoint_choice and checkpoint_choice["mode"] == "skip":
+            preparation_arguments["checkpointChoice"] = {
+                "mode": "skip", "quote": checkpoint_choice["quote"],
+            }
+        else:
+            preparation_arguments.pop("checkpointChoice", None)
         if execution_target is not None and is_execution_target_reference(public_reference):
             preparation_arguments["executionTarget"] = execution_target
         try:
@@ -4175,6 +4206,12 @@ class AgentGateway:
                 return self._invalid_external_mcp_confirmation(
                     target_tool, "Checkpoint choice belongs to another MCP session.",
                 )
+            if checkpoint_policy:
+                current_choice = self._runtime_session_state.checkpoint_choice(self.execution_target_session_context())
+                if not current_choice or current_choice.get("mode") != "skip":
+                    return self._invalid_external_mcp_confirmation(
+                        target_tool, "Checkpoints were re-enabled. Prepare this write again with the current session setting.",
+                    )
             actual_target = str(target_tool or "")
             actual_digest = str(request_arguments_digest or "")
             supplied_execution_target_digest = str(
@@ -5848,6 +5885,9 @@ class AgentGateway:
                     "projectRoot": task_loop.project_root,
                 },
             )
+        saved_checkpoint_choice = self._runtime_session_state.checkpoint_choice(session_id)
+        if saved_checkpoint_choice and saved_checkpoint_choice.get("mode") == "require":
+            checkpoint_skip_authority = None
 
         def runtime_approval_seed(**kwargs: Any) -> dict[str, Any]:
             nonlocal checkpoint_skip_authority
@@ -5904,6 +5944,20 @@ class AgentGateway:
             checkpoint_user_policy = None
             checkpoint_correction_block_reason = ""
             checkpoint_correction_retryable = False
+            saved_choice = self._runtime_session_state.checkpoint_choice(task_loop.session_id)
+            if saved_choice and saved_choice.get("mode") == "require":
+                return None
+            session_policy = bind_session_checkpoint_skip(
+                saved_choice,
+                session_id=task_loop.session_id,
+                turn_id=task_loop.turn_id,
+                client_turn_id=task_loop.client_turn_id,
+                project_root=project_root,
+                tool=policy_tool,
+                arguments=policy_arguments,
+            )
+            if session_policy is not None:
+                return session_policy
             correction_id = str(correction_for_action_id or "").strip()
             if correction_id:
                 failed_action = next(
@@ -6750,6 +6804,11 @@ class AgentGateway:
             # and capabilities without host-owned budget counters.
             planner_observe = dict(observe) if isinstance(observe, dict) else {}
             planner_observe["planMode"] = task_loop.plan_mode
+            saved_checkpoint_setting = self._runtime_session_state.checkpoint_choice(session_id)
+            planner_observe["checkpointChoice"] = {
+                "mode": saved_checkpoint_setting.get("mode", "require")
+                if saved_checkpoint_setting else "require"
+            }
             # Host-owned current scope, including activation/exit and approval resume.
             planner_observe["skillPolicy"] = task_loop.planner_projection()["skillPolicy"]
             # Budget enforcement and the terminal user notice belong to the host,
@@ -6834,6 +6893,40 @@ class AgentGateway:
             last_plan = plan
             if first_plan is None:
                 first_plan = plan
+
+            # A quoted user instruction changes the checkpoint default for
+            # this live session, including when the planner returns a reply
+            # without proposing a write.
+            setting_choice = plan.get("checkpointChoice")
+            if not isinstance(setting_choice, Mapping):
+                setting_choice = ensure_dict(plan.get("writeParams")).get("checkpointChoice")
+            if isinstance(setting_choice, Mapping):
+                owner_source = params.get("_humanUserMessageSource")
+                if isinstance(owner_source, Mapping):
+                    validated_choice = bind_user_checkpoint_choice(
+                        owner_source,
+                        setting_choice,
+                        session_id=task_loop.session_id,
+                        turn_id=task_loop.turn_id,
+                        client_turn_id=task_loop.client_turn_id,
+                        project_root=project_root,
+                    )
+                    if (
+                        validated_choice is not None
+                        and str(owner_source.get("message") or "") == str(params.get("message") or "")
+                    ):
+                        self._runtime_session_state.set_checkpoint_choice(
+                            task_loop.session_id, validated_choice,
+                        )
+                        self.append_audit({
+                            "event": "checkpoint_session_choice_changed",
+                            "sessionId": task_loop.session_id,
+                            "mode": validated_choice["mode"],
+                            "sourceQuote": validated_choice["quote"],
+                            "source": "user_message",
+                        })
+                        if validated_choice["mode"] == "require":
+                            checkpoint_skip_authority = None
 
             # Explicit Plan is a user-owned read-only boundary, independent of
             # global permission settings and model-proposed phase transitions.

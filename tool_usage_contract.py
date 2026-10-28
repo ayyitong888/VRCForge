@@ -23,7 +23,7 @@ def tool_usage_description(name: str, summary: str, *, write: bool) -> str:
         description += (
             "\nCheckpoint choice: include checkpointChoice={mode:'skip', quote:<exact user instruction>} "
             "only when the user explicitly said not to use checkpoints; never decide this yourself. "
-            "Omit checkpointChoice otherwise to keep this tool's normal checkpoint behavior. For a "
+            "Use mode:'require' only when the user explicitly asks to re-enable checkpoints. The choice persists across writes in this session. Omit checkpointChoice to keep the current session setting; new sessions default to enabled. For a "
             "checkpointed write, skipping loses the retained restore point; atomic write behavior is unchanged."
         )
     return description

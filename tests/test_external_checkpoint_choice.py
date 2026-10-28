@@ -177,3 +177,35 @@ def test_skipping_retained_checkpoint_preserves_handler_atomic_failure(tmp_path,
     assert result["checkpointSkipped"] is True
     assert result["sourceQuote"] == QUOTE
     assert any(row.get("event") == "external_mcp_write_failed" and row.get("checkpointSkipped") for row in events(gateway))
+
+
+def test_session_switch_persists_until_explicit_require_and_new_session_defaults_on(tmp_path):
+    gateway, project, target, calls = fixture_gateway(tmp_path)
+    first = call(gateway, arguments(project, checkpointChoice={"mode": "skip", "quote": "Turn off checkpoints"}))
+    assert first["checkpointSkipped"] is True
+    second = call(gateway, arguments(project, value="second"))
+    assert second["checkpointSkipped"] is True
+    assert second["sourceQuote"] == "Turn off checkpoints"
+    fresh = call(gateway, arguments(project, value="fresh"), "external:fresh")
+    assert fresh["ok"] is True and fresh.get("checkpoint"), fresh
+    assert "checkpointSkipped" not in fresh
+    enabled = call(gateway, arguments(project, checkpointChoice={"mode": "require", "quote": "Turn checkpoints back on"}))
+    assert enabled["ok"] is True and enabled.get("checkpoint"), enabled
+    assert "checkpointSkipped" not in enabled
+    later = call(gateway, arguments(project, value="later"))
+    assert later["ok"] is True and later.get("checkpoint"), later
+    assert "checkpointSkipped" not in later
+    assert target.read_text(encoding="utf-8") == "later"
+    assert len(calls) == 5
+
+
+def test_reenable_invalidates_pending_skip_confirmation(tmp_path):
+    gateway, project, _, calls = fixture_gateway(tmp_path, mode="approval")
+    off_args = arguments(project, checkpointChoice={"mode": "skip", "quote": "Disable checkpoints"})
+    off = call(gateway, off_args)
+    on = call(gateway, arguments(project, checkpointChoice={"mode": "require", "quote": "Enable checkpoints"}))
+    assert on["status"] == "user_confirmation_required"
+    result = call(gateway, {**off_args, "confirmation": {**off["confirmation"], "decision": "approve"}})
+    assert result["ok"] is False
+    assert "re-enabled" in str(result)
+    assert calls == []

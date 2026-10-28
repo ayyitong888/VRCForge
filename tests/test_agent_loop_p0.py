@@ -4873,7 +4873,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             failed_action_id,
         )
 
-    def test_unverifiable_checkpoint_skip_correction_never_reenters_write_transaction(self) -> None:
+    def test_session_checkpoint_switch_covers_corrected_write_transaction(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
         quote = "Do not create a checkpoint."
@@ -4925,12 +4925,15 @@ class AgentLoopP0Tests(unittest.TestCase):
                 "_humanUserMessageSource": source,
             })
 
-        self.assertEqual(len(transaction_calls), 1, result.get("task", {}).get("actions"))
+        # The session switch covers the corrected request too. Its transaction
+        # still runs and reports the actual failure; checkpoint policy does not
+        # substitute for normal write validation or claim success.
+        self.assertEqual(len(transaction_calls), 2, result.get("task", {}).get("actions"))
         self.assertEqual(checkpoint_calls, [])
         corrected_action = result["task"]["actions"][-1]
-        self.assertEqual(corrected_action["status"], "needs_user_action")
-        self.assertIn("cannot be proven to be the same", corrected_action["outcome"]["summary"])
-        self.assertIn("not executed and no checkpoint was created", corrected_action["outcome"]["summary"])
+        self.assertEqual(corrected_action["status"], "failed")
+        self.assertIn("fixture write failure", corrected_action["outcome"]["summary"])
+        self.assertEqual(gateway.runtime_sessions.checkpoint_choice("checkpoint-correction-session")["mode"], "skip")
 
     def test_outside_project_read_stops_before_cross_tool_or_cwd_retry(self) -> None:
         project = self._unity_project()

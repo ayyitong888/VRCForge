@@ -425,7 +425,7 @@ def test_skip_binding_rejects_different_project_identity(tmp_path):
 def test_internal_write_argument_choice_uses_current_owner_message(monkeypatch):
     from test_agent_loop_p0 import AgentLoopP0Tests
 
-    fixture = AgentLoopP0Tests("test_unverifiable_checkpoint_skip_correction_never_reenters_write_transaction")
+    fixture = AgentLoopP0Tests("test_session_checkpoint_switch_covers_corrected_write_transaction")
     fixture.setUp()
     try:
         gateway = fixture.gateway
@@ -459,3 +459,31 @@ def test_internal_write_argument_choice_uses_current_owner_message(monkeypatch):
         assert context["checkpointUserPolicy"]["source"] == "user_message"
     finally:
         fixture.tearDown()
+
+
+def test_reenabled_session_requires_checkpoint_for_older_pending_skip(tmp_path, monkeypatch):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.allow_write_requests = True
+    gateway.save_config(config)
+    project = tmp_path / "Project"
+    project.mkdir()
+    tool = "vrcforge_fixture_pending_skip"
+    args = {"projectRoot": str(project), "value": "write"}
+    context = _bound_context(project, tool, args)
+    writes, checkpoints = [], []
+    gateway.approval_transactions.register_write_handler(
+        tool, "Write fixture", "medium", lambda args: writes.append(args) or {"ok": True})
+    requested = gateway.approval_transactions.create_apply_request(
+        {"target_tool": tool, "arguments": args}, task_context=context)
+    gateway.runtime_sessions.set_checkpoint_choice(context["sessionId"], {
+        "mode": "require", "quote": "Enable checkpoints again", "source": "user_message"})
+    def unavailable(*_args):
+        checkpoints.append(True)
+        return {"ok": False, "error": "fixture checkpoint unavailable"}
+    monkeypatch.setattr(AgentApprovalTransactionService, "_create_pre_write_checkpoint", unavailable)
+    approval_id = requested["approval"]["id"]
+    gateway.approval_transactions.approve(approval_id)
+    gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+    assert checkpoints == [True]
+    assert writes == []

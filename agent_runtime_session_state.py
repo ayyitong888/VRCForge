@@ -142,6 +142,22 @@ class AgentRuntimeSessionState:
         with self._ports.shared_state_lock:
             self._user_adjustments[(session_id, os.path.normcase(os.path.abspath(project_root)))] = copy.deepcopy(value)
 
+    def checkpoint_choice(self, session_id: str) -> dict[str, Any] | None:
+        """Return this live session's explicit checkpoint setting, if any."""
+        with self._ports.shared_state_lock:
+            session = self._sessions.get(str(session_id or "").strip())
+            choice = session.get("checkpointChoice") if session else None
+            return copy.deepcopy(choice) if isinstance(choice, dict) else None
+
+    def set_checkpoint_choice(self, session_id: str, choice: dict[str, Any]) -> None:
+        """Store a user-validated checkpoint setting with the owning session."""
+        key = str(session_id or "").strip()
+        if not key or not isinstance(choice, dict) or choice.get("mode") not in {"skip", "require"}:
+            raise ValueError("Checkpoint choice requires a session and mode skip or require")
+        with self._ports.shared_state_lock:
+            session = self._sessions.setdefault(key, {"id": key, "turns": []})
+            session["checkpointChoice"] = copy.deepcopy(choice)
+
     def session_count(self) -> int:
         with self._ports.shared_state_lock:
             return len(self._sessions)
@@ -706,7 +722,7 @@ class AgentRuntimeSessionState:
         except (TypeError, ValueError):
             return False
         required = {"exposureLayer", "projectContextActive", "allowedRuntimeActions", "availableToolNames"}
-        optional = {"planMode", "modeConstraint", "projectPath", "loadedToolBlocks", "shellExecutor", "compactionRecoveryInformation"}
+        optional = {"planMode", "modeConstraint", "projectPath", "loadedToolBlocks", "shellExecutor", "compactionRecoveryInformation", "checkpointChoice"}
         if not isinstance(state, dict) or not required <= state.keys() or state.keys() - required - optional:
             return False
         if not isinstance(state["exposureLayer"], str) or state["exposureLayer"] not in {"planning", "execution"} or not isinstance(state["projectContextActive"], bool):
@@ -716,6 +732,11 @@ class AgentRuntimeSessionState:
                 return False
         return (all(isinstance(state[key], str) for key in ("modeConstraint", "projectPath") if key in state)
                 and ("planMode" not in state or isinstance(state["planMode"], bool))
+                and ("checkpointChoice" not in state or (
+                    isinstance(state["checkpointChoice"], dict)
+                    and state["checkpointChoice"].get("mode") in {"skip", "require"}
+                    and set(state["checkpointChoice"]) == {"mode"}
+                ))
                 and ("shellExecutor" not in state or isinstance(state["shellExecutor"], dict)))
 
     def append_native_runtime_state(

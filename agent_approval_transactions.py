@@ -705,6 +705,7 @@ class ApprovalTransactionPorts:
     complete_scan_mutation: Callable[[str, str, Any, Any], None] = _noop_scan_completion
     freeze_native_history: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None
     native_result_observation: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    session_checkpoint_choice: Callable[[str], dict[str, Any] | None] | None = None
 
 
 class AgentApprovalTransactionService:
@@ -1976,6 +1977,12 @@ class AgentApprovalTransactionService:
                 arguments=ensure_dict(approval.get("arguments")),
                 plan_digest=str(ensure_dict(approval.get("approvedUnityExecutionPlan")).get("planDigest") or ""),
             )
+            if checkpoint_user_skip and self._ports.session_checkpoint_choice is not None:
+                current_choice = self._ports.session_checkpoint_choice(str(task_context.get("sessionId") or ""))
+                if current_choice and current_choice.get("mode") == "require":
+                    checkpoint_user_skip = False
+                    task_context.pop("checkpointUserPolicy", None)
+                    approval["taskContext"] = task_context
             if checkpoint_user_skip:
                 task_context["checkpointSkipApplied"] = True
                 approval["taskContext"] = task_context

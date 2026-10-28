@@ -468,6 +468,28 @@ def test_native_write_receipt_carries_structured_checkpoint_choice_through_dispa
     assert "checkpoint_choice" in dispatcher["function"]["parameters"]["properties"]
 
 
+def test_native_reply_can_switch_session_checkpoints_back_on():
+    quote = "Turn checkpoints back on for this session."
+    tool = PlannerTool("write_file", "Write one file.", "write", write=True,
+                       input_schema={"type": "object", "properties": {"path": {"type": "string"}},
+                                     "required": ["path"], "additionalProperties": False})
+    catalog = FakeCatalog(execution=PlannerCatalogSnapshot(visible_tools=(tool,), routable_tools=(tool,)))
+    model = NativeModel(native_call("vrcforge_runtime_action", json.dumps({
+        "action": "reply", "reply": "Checkpoints are on.",
+        "checkpoint_choice": {"mode": "require", "quote": quote},
+    })))
+    native = NativePlannerFixture([{"role": "user", "content": quote}])
+    plan = service(catalog=catalog, model=model).plan_agent_turn(
+        quote, {}, {}, exposure_layer=EXPOSURE_LAYER_EXECUTION, native_turn=native,
+    )
+    assert plan["nextStep"] == "done"
+    assert plan["checkpointChoice"] == {"mode": "require", "quote": quote}
+    control = next(item for item in model.requests[0]["tools"]
+                   if item["function"]["name"] == "vrcforge_runtime_action")
+    choice_schema = control["function"]["parameters"]["properties"]["checkpoint_choice"]
+    assert choice_schema["properties"]["mode"]["enum"] == ["skip", "require"]
+
+
 def test_native_action_payload_rejects_ambiguous_exact_catalog_names() -> None:
     first = PlannerTool("same_name", "first", "read")
     second = PlannerTool("same_name", "second", "read")

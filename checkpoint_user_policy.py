@@ -12,6 +12,62 @@ from typing import Any
 _CHECKPOINT_SKIP_AUTHORITY_SCHEMA = "vrcforge.user_checkpoint_skip_authority.v1"
 
 
+def bind_user_checkpoint_choice(
+    authority: object, choice: object, *, session_id: str, turn_id: str,
+    client_turn_id: str, project_root: str,
+) -> dict[str, Any] | None:
+    """Validate and normalize an explicit checkpoint on/off instruction."""
+    if not isinstance(authority, Mapping) or authority.get("source") != "app_user_message":
+        return None
+    if not isinstance(choice, Mapping) or choice.get("mode") not in {"skip", "require"}:
+        return None
+    quote, message = choice.get("quote"), authority.get("message")
+    if not isinstance(quote, str) or not quote.strip() or not isinstance(message, str) or quote not in message:
+        return None
+    expected = {
+        "sessionId": session_id,
+        "clientTurnId": client_turn_id,
+        "projectRoot": project_root,
+    }
+    if any(str(authority.get(key) or "") != str(value or "") for key, value in expected.items()):
+        return None
+    return {
+        "mode": choice["mode"],
+        "quote": quote,
+        "source": "user_message",
+        "turnId": turn_id,
+        **expected,
+    }
+
+
+def bind_session_checkpoint_skip(
+    setting: object, *, session_id: str, turn_id: str, client_turn_id: str,
+    project_root: str, tool: str, arguments: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Bind the session's previously user-authorized skip switch to one write."""
+    if not isinstance(setting, Mapping) or setting.get("mode") != "skip":
+        return None
+    quote = setting.get("quote")
+    if (
+        setting.get("source") != "user_message"
+        or not isinstance(quote, str) or not quote.strip()
+        or str(setting.get("sessionId") or "") != str(session_id or "")
+    ):
+        return None
+    return {
+        "schema": "vrcforge.user_checkpoint_policy.v1",
+        "status": "skipped_by_user",
+        "source": "user_message",
+        "sourceQuote": quote,
+        "sessionId": session_id,
+        "turnId": turn_id,
+        "clientTurnId": client_turn_id,
+        "projectRoot": project_root,
+        "tool": tool,
+        "argumentsSha256": _digest(arguments),
+    }
+
+
 def bind_external_checkpoint_skip(
     choice: object, *, session_id: str, project_root: str, tool: str,
     arguments_digest: str, plan_digest: str,
