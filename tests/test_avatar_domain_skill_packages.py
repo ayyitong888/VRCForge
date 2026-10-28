@@ -9,6 +9,7 @@ import pytest
 import dashboard_server
 from agent_gateway import RUNTIME_SKILL_SUPPORT_MAX_FILES, parse_skill_markdown
 from skill_packages import SkillPackageService
+from test_skill_package_projection_service import _projection
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,22 @@ def _json(path: Path) -> dict[str, object]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(payload, dict)
     return payload
+
+
+@pytest.mark.parametrize("root", ALL_OFFICIAL_SOURCE_ROOTS, ids=lambda path: path.name)
+def test_official_avatar_package_runtime_projection_preserves_declared_content(
+    tmp_path: Path, root: Path,
+) -> None:
+    manifest = _json(root / "manifest.json")
+    parsed = parse_skill_markdown(root / "SKILL.md")
+    target = tmp_path / "skills" / str(manifest["skill_name"])
+    service = _projection(tmp_path / "skills")
+
+    service.project_installed(root, manifest)
+
+    assert (target / "SKILL.md").read_bytes() == (root / "SKILL.md").read_bytes()
+    for relative in parsed["supportFiles"]:
+        assert (target / relative).read_bytes() == (root / relative).read_bytes()
 
 
 @pytest.mark.parametrize("slug,package_id,title,read_only", CASES, ids=[case[0] for case in CASES])
@@ -127,7 +144,7 @@ def test_wardrobe_skill_preserves_capabilities_without_project_presets() -> None
     manifest = _json(root / "manifest.json")
     workflow = _json(root / manifest["entrypoints"]["workflow"])
     skill = parse_skill_markdown(root / "SKILL.md")
-    assert manifest["version"] == "1.1.32"
+    assert manifest["version"] == "1.1.33"
     assert {
         "vrcforge_setup_outfit", "vrcforge_add_wardrobe_outfit",
         "vrcforge_ensure_expression_parameter", "vrcforge_ensure_animator_state",

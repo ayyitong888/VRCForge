@@ -2,7 +2,7 @@
   "id": "com.vrcforge.skills.avatar_wardrobe",
   "name": "VRChat 衣柜制作",
   "skill_name": "vrcforge-avatar-wardrobe",
-  "version": "1.1.32",
+  "version": "1.1.33",
   "author": "VRCForge",
   "author_display_name": "ayyitong888",
   "description": "Inspect or author avatar clothing behavior from project evidence and user-approved requirements, without prescribing parameter values, activation patterns, topology or menu layout.",
@@ -19,7 +19,8 @@
   "entrypoints": {
     "skill": "SKILL.md",
     "workflow": "workflows/wardrobe-authoring.json",
-    "guide": "references/workflow.md"
+    "guide": "references/workflow.md",
+    "physbone_guide": "references/physbone-preset-integration.md"
   },
   "targets": {
     "runtime": "VRCForge",

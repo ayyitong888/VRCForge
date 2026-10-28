@@ -2,7 +2,7 @@
   "id": "com.vrcforge.skills.avatar_audit",
   "name": "VRChat Avatar 检查与验收",
   "skill_name": "vrcforge-avatar-audit",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "VRCForge",
   "description": "Perform a strictly read-only VRChat avatar inventory and final acceptance audit across Descriptor assets, hierarchy, weighted bones, controls, parameters, FX, animation bindings, wardrobe, compile diagnostics and validation readiness.",
   "min_vrcforge_version": "1.7.9",

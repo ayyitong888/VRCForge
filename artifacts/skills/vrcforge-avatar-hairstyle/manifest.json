@@ -2,7 +2,7 @@
   "id": "com.vrcforge.skills.avatar_hairstyle",
   "name": "VRChat 发型切换",
   "skill_name": "vrcforge-avatar-hairstyle",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "author": "VRCForge",
   "description": "Create or maintain one VRChat hairstyle switch using the user's confirmed selector convention for new designs and preserving existing Avatar parameters, menu paths and animation timing.",
   "min_vrcforge_version": "1.7.9",
