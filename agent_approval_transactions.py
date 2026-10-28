@@ -1475,7 +1475,8 @@ class AgentApprovalTransactionService:
                 raise
             except Exception as exc:  # noqa: BLE001 - malformed plans must fail before approval exists.
                 raise AgentGatewayError(
-                    f"Could not freeze the exact Core execution plan for {target_tool}.",
+                    f"{type(exc).__name__}: {exc} "
+                    f"(Could not freeze the exact Core execution plan for {target_tool}.)",
                     status_code=409,
                 ) from exc
         normalized_task_context = approval_task_context(
