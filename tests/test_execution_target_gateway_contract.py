@@ -162,11 +162,12 @@ def test_refresh_accepts_public_reference_and_returns_no_target_paths(monkeypatc
     }
     list_calls = []
     refresh_calls = []
-    monkeypatch.setattr(
-        dashboard_server.AGENT_GATEWAY,
-        "resolve_execution_target_reference",
-        lambda supplied: target if supplied == reference else pytest.fail("unexpected reference"),
-    )
+    resolve_calls = []
+    def resolve(supplied, **kwargs):
+        assert supplied == reference
+        resolve_calls.append(kwargs)
+        return target
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "resolve_execution_target_reference", resolve)
 
     def list_targets(request):
         list_calls.append(request)
@@ -194,6 +195,9 @@ def test_refresh_accepts_public_reference_and_returns_no_target_paths(monkeypatc
         "avatarGlobalObjectId": "avatar-id",
     }]
     assert refresh_calls == [(reference, target, "D:/Unity/Avatar")]
+    assert resolve_calls == [{
+        "project_root": "D:/Unity/Avatar", "refresh_scene_snapshot": False,
+    }]
     assert result["executionTarget"] == reference
     assert "D:/Unity/Avatar" not in str(result)
     assert "absolutePath" not in str(result)
@@ -210,7 +214,8 @@ def test_refresh_accepts_public_reference_and_returns_no_target_paths(monkeypatc
 def test_refresh_rejects_ambiguous_or_incomplete_discovery(monkeypatch, metadata) -> None:
     reference = {"schema": "vrcforge.execution_target_ref.v1", "ref": "vrcforge-target-test-reference"}
     target = {"scope": "project", "project": {"projectId": "project-id"}}
-    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "resolve_execution_target_reference", lambda _ref: target)
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "resolve_execution_target_reference",
+                        lambda _ref, **_kwargs: target)
     monkeypatch.setattr(dashboard_server, "list_execution_targets_sync", lambda _request: {
         "targets": [target], "projectPath": "D:/Unity/Avatar", **metadata,
     })

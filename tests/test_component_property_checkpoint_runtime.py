@@ -186,7 +186,8 @@ static class ComponentCrudCore {
  public static Type ResolveComponentType(string p)=>typeof(Component);
  public static Component ResolveComponent(GameObject g,Type t,int i)=>g.component;
  public static MemberInfo ResolveMember(Type t,string p)=>t.GetField(p);
- public static object ResolveSavedSceneFor(GameObject g)=>new object();
+ public static bool lastIncludeSceneDigest;
+ public static object ResolveSavedSceneFor(GameObject g,bool includeSceneDigest=true){lastIncludeSceneDigest=includeSceneDigest;return new object();}
  PATH_HELPERS
  public static object BuildPropertyCheckpointScope(Component c,MemberInfo m,int i,string p,object scene,bool serializedProperty=false){scopes++;if(rejectScope)throw new InvalidOperationException("unsupported owner");return new{schema="vrcforge.component_property_checkpoint.v1",scenePath="Assets/Actual.unity",propertyPath=serializedProperty?m.Name:p,serializedPropertyPath=serializedProperty?p:null};}
  public static object GetReadOnlyMemberValue(Component c,MemberInfo m){reads++;return c.value;}
@@ -200,9 +201,10 @@ class Probe {
  static JObject Call(JObject args){var r=(VRCForgeToolResult)GetPropertyTool.HandleCommand(args);var wire=r.ToStructuredContent();var data=wire["data"] as JObject??new JObject();if(!r.IsSuccessful){data["error"]=wire["error"];data["code"]=wire["code"];}return data;}
  static JObject Args()=>new JObject{["gameObjectPath"]="Caller/Component",["componentType"]="Component",["propertyPath"]="value"};
  static void Check(bool valid,string message){if(!valid)throw new Exception(message);}
- static void Main(){var p=Args();p["includeCheckpointScope"]=true;var scoped=Call(p);
+ static void Main(){var p=Args();p["includeCheckpointScope"]=true;p["includeSceneDigest"]=false;var scoped=Call(p);
   Check((string)scoped["checkpointScope"]?["scenePath"]=="Assets/Actual.unity","missing authoritative read scope");
   Check((string)scoped["gameObjectPath"]=="Actual/Component"&&ComponentCrudCore.reads==0&&ComponentCrudCore.scopes==1,"scope must bypass getter and use actual owner");
+  Check(!ComponentCrudCore.lastIncludeSceneDigest,"owner-only request still computes scene digest");
   var serialized=Args();serialized.Remove("propertyPath");serialized["serializedPropertyPath"]="settings.count";serialized["includeCheckpointScope"]=true;var serializedScope=Call(serialized);
   Check((string)serializedScope["checkpointScope"]?["propertyPath"]=="settings"&&(string)serializedScope["checkpointScope"]?["serializedPropertyPath"]=="settings.count","serialized checkpoint root and leaf");
   Check(ComponentCrudCore.reads==0&&SerializedObject.constructed==0,"serialized checkpoint must not instantiate a SerializedObject or read a property");

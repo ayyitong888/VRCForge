@@ -329,6 +329,9 @@ def test_core_and_backend_handshake_identity_matches_the_product_version() -> No
     assert 'metadata["io.vrcforge/projectBinding"] as JObject' in metadata
     assert 'projectBinding["projectId"], descriptorProjectId, StringComparison.Ordinal)' in metadata
     assert 'descriptorProjectId = ComputeProjectId(root);' in SERVER
+    descriptor = SERVER[SERVER.index("private static void WriteDescriptor("):SERVER.index("private static void WriteJsonAtomically(")]
+    assert descriptor.count("ComputeProjectId(root)") == 1
+    assert '["projectId"] = descriptorProjectId' in descriptor
     assert 'projectBinding["instanceId"], descriptorInstanceId' in metadata
 
 

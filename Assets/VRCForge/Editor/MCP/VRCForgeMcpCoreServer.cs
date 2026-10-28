@@ -2214,10 +2214,6 @@ namespace VRCForge.Editor
             failureCode = "execution_target_invalid";
             try
             {
-                if (!IsLowerHex(RequiredBoundedString(context, "executionTargetDigest", 64), 64))
-                {
-                    return false;
-                }
                 var target = context["executionTarget"] as JObject;
                 var project = target == null ? null : target["project"] as JObject;
                 var editor = target == null ? null : target["editor"] as JObject;
@@ -2901,7 +2897,7 @@ namespace VRCForge.Editor
                 ["processId"] = System.Diagnostics.Process.GetCurrentProcess().Id,
                 ["processStartTime"] = CurrentProcessStartTime(),
                 ["projectPath"] = root,
-                ["projectId"] = ComputeProjectId(root),
+                ["projectId"] = descriptorProjectId,
                 ["projectIdSource"] = "normalized_project_path_sha256",
                 ["startedAt"] = DateTime.UtcNow.ToString("o"),
                 ["toolCount"] = tools.Length,

@@ -959,7 +959,7 @@ namespace VRCForge.Editor
             return (value ?? string.Empty).Replace("\\", "/").Trim().Trim('/');
         }
 
-        internal static SavedSceneSnapshot ResolveSavedSceneFor(GameObject gameObject)
+        internal static SavedSceneSnapshot ResolveSavedSceneFor(GameObject gameObject, bool includeSceneDigest = true)
         {
             if (gameObject == null
                 || !gameObject.scene.IsValid()
@@ -968,7 +968,9 @@ namespace VRCForge.Editor
             {
                 throw new InvalidOperationException("Component writes require one loaded saved scene object.");
             }
-            return SceneObjectCopyCore.ResolveSavedScene(gameObject.scene.path, "component target scene");
+            return includeSceneDigest
+                ? SceneObjectCopyCore.ResolveSavedScene(gameObject.scene.path, "component target scene")
+                : SceneObjectCopyCore.ResolveSavedSceneOwner(gameObject.scene.path, "component target scene");
         }
 
         private static bool IsEngineComponentAssembly(Assembly assembly)
@@ -1520,6 +1522,9 @@ namespace VRCForge.Editor
 
             [VRCForgeInput("If true, return only the authoritative saved-scene checkpoint scope for this scalar component property without invoking its getter. Not supported with queries.", IsRequired = false)]
             public bool? includeCheckpointScope { get; set; } = false;
+
+            [VRCForgeInput("Include the scene content digest in checkpoint scope (default true). Set false when only persistence ownership is needed.", IsRequired = false)]
+            public bool? includeSceneDigest { get; set; } = true;
         }
 
         public static object HandleCommand(JObject @params)
@@ -1547,7 +1552,7 @@ namespace VRCForge.Editor
                 {
                     var checkpointScope = ComponentCrudCore.BuildPropertyCheckpointScope(
                         component, member, p.componentIndex ?? 0, propertyPath,
-                        ComponentCrudCore.ResolveSavedSceneFor(component.gameObject), serializedPath);
+                        ComponentCrudCore.ResolveSavedSceneFor(component.gameObject, p.includeSceneDigest != false), serializedPath);
                     return VRCForgeToolResult.Completed("Read the resolved component property's checkpoint scope without invoking its getter.", new
                     {
                         gameObjectPath = ComponentCrudCore.GetHierarchyPath(component.gameObject.transform),

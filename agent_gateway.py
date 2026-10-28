@@ -2611,16 +2611,18 @@ class AgentGateway:
                     )
                 except ExecutionTargetError as exc:
                     raise McpResourceError("Identity Resource ExecutionTarget reference is stale") from exc
+                target_digest = execution_target_digest(target)
                 expected_resource_identity = {
                     "executionTarget": dict(public_reference),
-                    "executionTargetDigest": execution_target_digest(target),
+                    "executionTargetDigest": target_digest,
                 }
             else:
                 target = validate_execution_target(public_reference)
                 expected_resource_identity = self._mcp_resource_identity(target)
+                target_digest = execution_target_digest(target)
             if resource["identity"] != expected_resource_identity:
                 raise McpResourceError("Identity Resource anchors do not match its ExecutionTarget")
-            if data.get("executionTargetDigest") != execution_target_digest(target):
+            if data.get("executionTargetDigest") != target_digest:
                 raise McpResourceError("Identity Resource ExecutionTarget digest is invalid")
         return resource
 
@@ -3907,6 +3909,9 @@ class AgentGateway:
                 ),
             )
 
+        execution_target_identity_digest = (
+            execution_target_digest(execution_target) if execution_target is not None else ""
+        )
         confirmation = arguments.pop("confirmation", None)
         request_arguments_digest = stable_hash(
             json.dumps(arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -3924,7 +3929,7 @@ class AgentGateway:
                 agent_name=agent_name,
             )
             if execution_target is not None and is_execution_target_reference(public_reference):
-                target_digest = execution_target_digest(execution_target)
+                target_digest = execution_target_identity_digest
                 result = self._replace_execution_target_with_reference(
                     result,
                     target_digest,
@@ -3996,7 +4001,7 @@ class AgentGateway:
         prepared_target = ensure_dict(prepared.get("arguments")).get("executionTarget")
         if execution_target is not None and (
             not isinstance(prepared_target, Mapping)
-            or execution_target_digest(prepared_target) != execution_target_digest(execution_target)
+            or execution_target_digest(prepared_target) != execution_target_identity_digest
         ):
             return self._external_mcp_no_write_error(
                 name,
@@ -4021,7 +4026,7 @@ class AgentGateway:
                     request_arguments_digest=request_arguments_digest,
                 )
                 if execution_target is not None and is_execution_target_reference(public_reference):
-                    target_digest = execution_target_digest(execution_target)
+                    target_digest = execution_target_identity_digest
                     proposal = self._replace_execution_target_with_reference(
                         proposal,
                         target_digest,
@@ -4049,7 +4054,7 @@ class AgentGateway:
             return self._external_mcp_no_write_error(name, "transaction_start", exc)
         result = self._external_mcp_write_result(name, applied)
         if execution_target is not None:
-            result["executionTargetDigest"] = execution_target_digest(execution_target)
+            result["executionTargetDigest"] = execution_target_identity_digest
             if is_execution_target_reference(public_reference):
                 result = self._replace_execution_target_with_reference(
                     result,
@@ -4148,7 +4153,7 @@ class AgentGateway:
             "status": "user_confirmation_required",
             "tool": record["targetTool"],
             **(
-                {"executionTargetDigest": execution_target_digest(prepared["arguments"]["executionTarget"])}
+                {"executionTargetDigest": bound_execution_target_digest}
                 if isinstance(ensure_dict(prepared.get("arguments")).get("executionTarget"), Mapping)
                 else {}
             ),
@@ -9848,9 +9853,13 @@ class AgentGateway:
             enriched.setdefault("user_constraints", snapshot.content)
             enriched.setdefault("userConstraints", snapshot.content)
         instruction = enriched.get("instruction")
-        constraints_block = self._user_constraints_instruction_block(snapshot, include_content=include_content)
         if not append_instruction:
             return enriched
+        constraints_block = self._user_constraints_instruction_block(
+            snapshot,
+            include_content=include_content,
+            content_hash=str(enriched["_vrcforge_user_constraints"].get("contentHash") or ""),
+        )
         if isinstance(instruction, str) and instruction.strip():
             if constraints_block.strip() not in instruction:
                 enriched["instruction"] = instruction.rstrip() + constraints_block
@@ -9887,13 +9896,13 @@ class AgentGateway:
         snapshot: UserConstraintsSnapshot,
         *,
         include_content: bool,
+        content_hash: str,
     ) -> str:
         if include_content:
             return (
                 "\n\nUser constraints from %LOCALAPPDATA%\\VRCForge\\agentic-app\\AGENTS.md:\n"
                 f"{snapshot.content}"
             )
-        content_hash = hashlib.sha256(snapshot.content.encode("utf-8")).hexdigest() if snapshot.content else ""
         return (
             "\n\nUser constraints are active in %LOCALAPPDATA%\\VRCForge\\agentic-app\\AGENTS.md "
             f"(sha256={content_hash}, characters={len(snapshot.content)}). "

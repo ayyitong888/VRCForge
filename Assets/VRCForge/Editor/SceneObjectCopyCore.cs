@@ -298,7 +298,12 @@ namespace VRCForge.Editor
 
         internal static SavedSceneSnapshot ResolveSavedScene(string rawPath, string label)
         {
-            return ResolveSavedScene(rawPath, label, false);
+            return ResolveSavedScene(rawPath, label, false, true);
+        }
+
+        internal static SavedSceneSnapshot ResolveSavedSceneOwner(string rawPath, string label)
+        {
+            return ResolveSavedScene(rawPath, label, false, false);
         }
 
         internal static SavedSceneSnapshot ResolveSavedSceneForPrefabUnpack(GameObject gameObject)
@@ -310,10 +315,10 @@ namespace VRCForge.Editor
             {
                 throw new SceneObjectCopyException("Prefab unpack requires one loaded saved scene object.");
             }
-            return ResolveSavedScene(gameObject.scene.path, "prefab unpack target scene", true);
+            return ResolveSavedScene(gameObject.scene.path, "prefab unpack target scene", true, true);
         }
 
-        private static SavedSceneSnapshot ResolveSavedScene(string rawPath, string label, bool allowDirtyScene)
+        private static SavedSceneSnapshot ResolveSavedScene(string rawPath, string label, bool allowDirtyScene, bool includeContentDigests)
         {
             var path = NormalizeSceneAssetPath(rawPath, label);
             var matches = new List<Scene>();
@@ -336,7 +341,7 @@ namespace VRCForge.Editor
             {
                 throw new SceneObjectCopyException("The selected scene has unsaved changes.");
             }
-            var evidence = ReadStableAssetEvidence(path, label);
+            var evidence = ReadStableAssetEvidence(path, label, includeContentDigests: includeContentDigests);
             return new SavedSceneSnapshot
             {
                 Scene = sceneMatch,
@@ -395,7 +400,8 @@ namespace VRCForge.Editor
         internal static StableAssetEvidence ReadStableAssetEvidence(
             string assetPath,
             string label,
-            Action<string, string> whileHandlesHeldProbe = null)
+            Action<string, string> whileHandlesHeldProbe = null,
+            bool includeContentDigests = true)
         {
             var absolutePath = ToAbsoluteAssetPath(assetPath);
             var metaPath = absolutePath + ".meta";
@@ -424,17 +430,19 @@ namespace VRCForge.Editor
                     whileHandlesHeldProbe?.Invoke(absolutePath, metaPath);
 
                     fileStream.Position = 0;
-                    string fileDigest;
-                    using (var sha256 = SHA256.Create())
+                    string fileDigest = string.Empty;
+                    if (includeContentDigests)
                     {
-                        fileDigest = Hex(sha256.ComputeHash(fileStream));
+                        using (var sha256 = SHA256.Create())
+                            fileDigest = Hex(sha256.ComputeHash(fileStream));
                     }
                     metaStream.Position = 0;
                     var metaBytes = ReadBoundedStream(metaStream, 1024 * 1024, label + " metadata");
-                    string metaDigest;
-                    using (var sha256 = SHA256.Create())
+                    string metaDigest = string.Empty;
+                    if (includeContentDigests)
                     {
-                        metaDigest = Hex(sha256.ComputeHash(metaBytes));
+                        using (var sha256 = SHA256.Create())
+                            metaDigest = Hex(sha256.ComputeHash(metaBytes));
                     }
                     var metaText = Encoding.UTF8.GetString(metaBytes);
                     var metaGuid = ParseMetaGuid(metaText, label);

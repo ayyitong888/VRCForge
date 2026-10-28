@@ -188,6 +188,7 @@ def test_property_checkpoint_uses_one_current_owner_proof_without_scene_rediscov
     assert result['ok'] is True, result
     assert len(owner_reads) == 1
     assert owner_reads[0]['includeCheckpointScope'] is True
+    assert owner_reads[0]['includeSceneDigest'] is False
     assert calls == [(root, ['Assets/Main.unity'])]
 
 

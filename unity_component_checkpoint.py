@@ -43,7 +43,7 @@ def prepare_component_property_checkpoint(
 
     # Only actual read-only Core owner discovery is authoritative. Caller-supplied footprint
     # fields are deliberately ignored, including when the Core is older.
-    result = inspect_owner({**arguments, 'includeCheckpointScope': True})
+    result = inspect_owner({**arguments, 'includeCheckpointScope': True, 'includeSceneDigest': False})
     if result.get('ok') is False or result.get('success') is False:
         return {**result, 'ok': False, 'blocking': True, 'mutationStarted': False, 'saved': False}
     scope = result.get('checkpointScope')

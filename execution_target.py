@@ -436,6 +436,7 @@ class ExecutionTargetBindingRegistry:
             target,
             project_root=normalized_root,
             required_scope=str(target.get("scope") or "project"),
+            refresh_scene_snapshot=False,
         )
         digest = execution_target_digest(verified)
         with self._lock:
@@ -635,6 +636,7 @@ class ExecutionTargetBindingRegistry:
             observed_target,
             project_root=normalized_root,
             required_scope=str(observed_target.get("scope") or "project"),
+            refresh_scene_snapshot=False,
         )
         prior_target = prior.get("target") if isinstance(prior.get("target"), Mapping) else {}
         if str(prior_target.get("scope") or "project") != str(verified.get("scope") or "project"):

@@ -70,7 +70,8 @@ def test_external_write_result_reuses_digest_for_reference_projection(tmp_path, 
                         lambda *_args: {"outcome": {"executionTarget": copy.deepcopy(target)}})
     result = gateway.call_external_mcp_tool(name, {"executionTarget": reference})
 
-    assert sum(value is target for value in digest_calls) == 1
+    assert len(digest_calls) == 1
+    assert all(value is not target for value in digest_calls)
     assert result["executionTargetDigest"] == real_digest(target)
     assert result["executionTarget"] == reference
     assert result["outcome"]["executionTarget"] == reference
@@ -276,6 +277,8 @@ def test_binding_refresh_allows_display_change_but_rejects_avatar_replacement(tm
             required_scope="avatar",
         )
     assert exc_info.value.code == "execution_target_session_mismatch"
+
+
     with pytest.raises(ExecutionTargetError) as exc_info:
         registry.resolve(
             reference,
@@ -309,6 +312,37 @@ def test_binding_refresh_allows_display_change_but_rejects_avatar_replacement(tm
             session_context="runtime:session-a",
         )
     assert exc_info.value.code == "execution_target_identity_drifted"
+
+
+def test_bind_and_core_refresh_reuse_the_scene_digest_without_python_full_reads(tmp_path, monkeypatch):
+    target = _live_runtime_target(tmp_path)
+    registry = ExecutionTargetBindingRegistry()
+    scene = Path(target["scene"]["absolutePath"])
+    original_read = Path.read_bytes
+    scene_reads = []
+
+    def tracked_read(path):
+        if path == scene:
+            scene_reads.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", tracked_read)
+    bound = registry.bind(target, project_root=str(tmp_path), session_context="runtime:session")
+    assert scene_reads == []
+
+    scene.write_bytes(b"new Core snapshot")
+    observed = copy.deepcopy(target)
+    observed["scene"]["digest"] = hashlib.sha256(original_read(scene)).hexdigest()
+    scene_reads.clear()
+    refreshed = registry.refresh(
+        bound["executionTarget"], observed, project_root=str(tmp_path),
+        session_context="runtime:session",
+    )
+    assert scene_reads == []
+    assert refreshed["changed"] is False
+    assert registry.bound_target_snapshot(
+        bound["executionTarget"], project_root=str(tmp_path), session_context="runtime:session",
+    )["scene"]["digest"] == observed["scene"]["digest"]
 
 
 def test_public_reference_survives_scene_state_change_and_ambiguous_capture(tmp_path: Path):

@@ -24770,6 +24770,8 @@ def read_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
     request["propertyPath" if direct else "serializedPropertyPath"] = direct or serialized
     if params.get("includeCheckpointScope") is True:
         request["includeCheckpointScope"] = True
+        if params.get("includeSceneDigest") is False:
+            request["includeSceneDigest"] = False
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(
@@ -24865,7 +24867,9 @@ def refresh_execution_target_sync(params: dict[str, Any]) -> dict[str, Any]:
     project_root = str(raw.get("projectPath") or "").strip()
     if not project_root:
         raise RuntimeError("projectPath is required for ExecutionTarget refresh.")
-    previous_target = AGENT_GATEWAY.resolve_execution_target_reference(previous)
+    previous_target = AGENT_GATEWAY.resolve_execution_target_reference(
+        previous, project_root=project_root, refresh_scene_snapshot=False,
+    )
     request: dict[str, Any] = {
         "projectPath": project_root,
         "scope": str(previous_target.get("scope") or "").strip(),

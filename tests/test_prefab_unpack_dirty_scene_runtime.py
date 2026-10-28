@@ -41,7 +41,7 @@ def test_dirty_scene_resolver_is_strict_except_for_completely_unpack(tmp_path):
     source = _source("Assets/VRCForge/Editor/SceneObjectCopyCore.cs")
     strict = _method(source, r"internal static SavedSceneSnapshot ResolveSavedScene\(string rawPath, string label\)")
     unpack = _method(source, r"internal static SavedSceneSnapshot ResolveSavedSceneForPrefabUnpack\(GameObject gameObject\)")
-    shared = _method(source, r"private static SavedSceneSnapshot ResolveSavedScene\(string rawPath, string label, bool allowDirtyScene\)")
+    shared = _method(source, r"private static SavedSceneSnapshot ResolveSavedScene\(string rawPath, string label, bool allowDirtyScene, bool includeContentDigests\)")
     harness = r'''
 using System;
 using System.Collections.Generic;
@@ -66,7 +66,7 @@ namespace UnityEngine.SceneManagement {
 static class SceneObjectCopyCore {
  static string NormalizeSceneAssetPath(string p,string l)=>Probe.NormalizeSceneAssetPath(p,l);
  static string NormalizeSlashes(string p)=>Probe.NormalizeSlashes(p);
- static StableAssetEvidence ReadStableAssetEvidence(string p,string l)=>Probe.ReadStableAssetEvidence(p,l);
+ static StableAssetEvidence ReadStableAssetEvidence(string p,string l,bool includeContentDigests=true)=>Probe.ReadStableAssetEvidence(p,l);
  // production methods
  STRICT
  UNPACK
