@@ -726,7 +726,9 @@ def _validate_tool_result(result: dict[str, Any]) -> None:
 
 
 def is_readonly_job_poll(name: str, arguments: Any, execution_context: Any) -> bool:
-    """Classify only the existing backend peer lanes and their exact status shape."""
+    """Recognize exact status queries, including the Core's read-only job tool."""
+    if name == "vrc_poll_job":
+        return _is_strict_job_poll(arguments, "job_id")
     if not isinstance(execution_context, dict):
         return False
     tool = {
@@ -738,9 +740,13 @@ def is_readonly_job_poll(name: str, arguments: Any, execution_context: Any) -> b
 
 
 def _is_strict_setup_outfit_job_poll(arguments: Any) -> bool:
-    if not isinstance(arguments, dict) or set(arguments) != {"jobId"}:
+    return _is_strict_job_poll(arguments, "jobId")
+
+
+def _is_strict_job_poll(arguments: Any, key: str) -> bool:
+    if not isinstance(arguments, dict) or set(arguments) != {key}:
         return False
-    job_id = arguments.get("jobId")
+    job_id = arguments.get(key)
     if not isinstance(job_id, str) or len(job_id) != 32:
         return False
     return all(character in "0123456789abcdefABCDEF" for character in job_id)

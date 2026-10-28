@@ -26388,9 +26388,6 @@ def build_refresh_asset_database_execution_plan(
 
 
 UNITY_ASYNC_JOB_POLL_SECONDS = 0.25
-ASYNC_JOB_POLL_RETRYABLE_CORE_CODES = frozenset(
-    {"unity_core_starting", "unity_core_unavailable"}
-)
 
 
 def poll_unity_async_job_sync(
@@ -26419,6 +26416,7 @@ def poll_unity_async_job_sync(
 
     deadline = time.monotonic() + max(0.0, float(timeout_seconds))
     last = current
+    observation_error: dict[str, Any] | None = None
     while time.monotonic() <= deadline:
         try:
             polled = ensure_dict_payload(
@@ -26434,12 +26432,18 @@ def poll_unity_async_job_sync(
             )
         except UnityMcpError as exc:
             cause_code = str(getattr(exc, "cause_code", "") or "").strip()
-            if cause_code not in ASYNC_JOB_POLL_RETRYABLE_CORE_CODES:
-                raise
+            observation_error = {
+                "code": cause_code or "async_job_poll_failed",
+                "message": str(exc),
+                "retryable": bool(getattr(exc, "retryable", False)),
+            }
+            if not observation_error["retryable"]:
+                break
             if time.monotonic() >= deadline:
                 break
             time.sleep(UNITY_ASYNC_JOB_POLL_SECONDS)
             continue
+        observation_error = None
         last = {**current, **polled}
         status = str(last.get("status") or "").strip().lower()
         if status not in {"queued", "running"}:
@@ -26447,15 +26451,37 @@ def poll_unity_async_job_sync(
             return last
         time.sleep(UNITY_ASYNC_JOB_POLL_SECONDS)
 
+    observation_error = observation_error or {
+        "code": "async_job_poll_timeout",
+        "message": "The bounded status wait expired before a terminal reply was observed.",
+        "retryable": True,
+    }
     return {
         **last,
         "ok": False,
-        "status": "failed",
+        "status": "pending",
+        "pending": True,
+        "lastKnownStatus": str(last.get("status") or ""),
+        "operationStatus": "pending",
+        "completionKnown": False,
+        "readbackState": "unknown",
+        "mutationStarted": True if last.get("mutationStarted") is True else None,
+        "committed": True if last.get("committed") is True else None,
+        "commitState": str(last.get("commitState") or "full") if last.get("committed") is True else "unknown",
+        "commitStateKnown": last.get("committed") is True,
+        "safeToRetry": False,
+        "retryable": False,
         "error": {
-            "code": "async_job_poll_timeout",
-            "message": f"{label} did not reach a terminal state before the bounded wait expired.",
-            "retryable": True,
+            **observation_error,
+            "message": f"The {label} job {job_id} was already submitted; its final result is not known. "
+                + observation_error["message"],
         },
+        "nextAction": (
+            f"Do not resubmit the write. Retain job_id={job_id}. "
+            "Read vrcforge_core_upgrade_status and vrcforge_get_compile_errors for the same project "
+            "to inspect the loaded Core and current compilation. Those diagnostic reads alone do not "
+            "prove this job completed; reconcile the existing job's result before any new write."
+        ),
     }
 
 

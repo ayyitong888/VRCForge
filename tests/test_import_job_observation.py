@@ -6,12 +6,13 @@ from test_prepared_outfit_import_writes import _approved
 from types import SimpleNamespace
 
 
-@pytest.mark.parametrize("lane,tool", [
-    ("app_unitypackage_import_poll", "vrc_import_unitypackage"),
-    ("app_setup_outfit_poll", "vrc_setup_outfit"),
-    ("app_build_test_poll", "vrc_build_test_avatar"),
+@pytest.mark.parametrize("lane,tool,key", [
+    ("app_unitypackage_import_poll", "vrc_import_unitypackage", "jobId"),
+    ("app_setup_outfit_poll", "vrc_setup_outfit", "jobId"),
+    ("app_build_test_poll", "vrc_build_test_avatar", "jobId"),
+    (None, "vrc_poll_job", "job_id"),
 ])
-def test_exact_readonly_job_poll_does_not_depend_on_native_window_probe(tmp_path, monkeypatch, lane, tool):
+def test_exact_readonly_job_poll_does_not_depend_on_native_window_probe(tmp_path, monkeypatch, lane, tool, key):
     _descriptor(tmp_path)
     calls = []
     class Core:
@@ -21,9 +22,25 @@ def test_exact_readonly_job_poll_does_not_depend_on_native_window_probe(tmp_path
             return {"isError": False, "structuredContent": {"success": True, "data": {"jobId": "a"*32, "status": "completed"}}}
     monkeypatch.setattr(agent, "UnityMcpCoreClient", Core)
     monkeypatch.setattr(agent, "probe_unity_reload_dialog", lambda _: pytest.fail("A cached read-only job poll must not depend on UI Automation"))
-    result = agent.invoke_unity_mcp(_settings(tmp_path), tool, {"jobId": "a"*32}, execution_context={"lane": lane})
+    context = {"lane": lane} if lane else None
+    result = agent.invoke_unity_mcp(_settings(tmp_path), tool, {key: "a"*32}, execution_context=context)
     assert result.exit_code == 0
-    assert calls == [(tool, {"jobId": "a"*32}, {"execution_context": {"lane": lane}})]
+    assert calls == [(tool, {key: "a"*32}, {"execution_context": context} if context else {})]
+
+
+@pytest.mark.parametrize("arguments", [
+    {"job_id": "a" * 32, "unityPackagePath": "unexpected"},
+    {"job_id": "a" * 32, "action": "start"},
+    {"jobId": "a" * 32},
+    {"job_id": "not-a-job"},
+    {"job_id": None},
+])
+def test_unified_poll_invalid_or_extra_arguments_do_not_skip_probe(tmp_path, monkeypatch, arguments):
+    _descriptor(tmp_path)
+    monkeypatch.setattr(agent, "UnityMcpCoreClient", lambda *_a, **_kw: pytest.fail("Invalid poll must not dispatch"))
+    monkeypatch.setattr(agent, "probe_unity_reload_dialog", lambda _: {"probeError": {"code": "unity_editor_window_probe_failed"}})
+    with pytest.raises(agent.UnityMcpError, match="inspect"):
+        agent.invoke_unity_mcp(_settings(tmp_path), "vrc_poll_job", arguments)
 
 
 def test_poll_lane_cannot_hide_mutating_arguments_from_probe(tmp_path, monkeypatch):
