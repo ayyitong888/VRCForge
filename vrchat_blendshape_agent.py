@@ -37,7 +37,7 @@ from approved_unity_execution import (
     current_approved_unity_execution,
 )
 from external_tool_result_contract import build_external_tool_error
-from unity_mcp_core_client import APP_UNITYPACKAGE_IMPORT_POLL_LANE, UnityMcpCoreClient, UnityMcpCoreError
+from unity_mcp_core_client import APP_UNITYPACKAGE_IMPORT_POLL_LANE, UnityMcpCoreClient, UnityMcpCoreError, is_readonly_job_poll
 from unity_mcp_tool_contract import READ_ONLY_TOOL_NAMES, is_direct_read_call
 from unity_editor_window_probe import probe_unity_reload_dialog
 
@@ -3833,7 +3833,8 @@ def invoke_unity_mcp(
             failure_phase="gateway_policy",
         )
     active_plan = current_approved_unity_execution()
-    direct_read = is_direct_read_call(tool_name, params)
+    job_poll = is_readonly_job_poll(tool_name, params, execution_context)
+    direct_read = job_poll or is_direct_read_call(tool_name, params)
     transport_context = execution_context
     core_project = str(
         params.get("projectPath")
@@ -3865,7 +3866,9 @@ def invoke_unity_mcp(
             failure_phase="project_selection",
         )
 
-    editor_blocker = probe_unity_reload_dialog(core_project)
+    # A status-only peer call reads an already submitted job, including while
+    # Unity is busy or modal. Native UI probing is not its availability source.
+    editor_blocker = {} if job_poll else probe_unity_reload_dialog(core_project)
     if isinstance(editor_blocker.get("probeError"), dict):
         probe_error = editor_blocker["probeError"]
         raise _unity_mcp_pre_route_error(

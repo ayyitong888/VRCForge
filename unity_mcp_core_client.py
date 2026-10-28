@@ -725,6 +725,18 @@ def _validate_tool_result(result: dict[str, Any]) -> None:
         raise UnityMcpCoreError("Unity MCP Core returned an invalid tool result.")
 
 
+def is_readonly_job_poll(name: str, arguments: Any, execution_context: Any) -> bool:
+    """Classify only the existing backend peer lanes and their exact status shape."""
+    if not isinstance(execution_context, dict):
+        return False
+    tool = {
+        APP_SETUP_OUTFIT_POLL_LANE: "vrc_setup_outfit",
+        APP_UNITYPACKAGE_IMPORT_POLL_LANE: "vrc_import_unitypackage",
+        APP_BUILD_TEST_POLL_LANE: "vrc_build_test_avatar",
+    }.get(execution_context.get("lane"))
+    return tool is not None and name == tool and _is_strict_setup_outfit_job_poll(arguments)
+
+
 def _is_strict_setup_outfit_job_poll(arguments: Any) -> bool:
     if not isinstance(arguments, dict) or set(arguments) != {"jobId"}:
         return False

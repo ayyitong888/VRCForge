@@ -704,11 +704,11 @@ class PreparedOutfitImportApprovedWriteService:
                 return {
                     "ok": False,
                     "failureLayer": "unity_core_job_polling",
-                    "pending": False,
+                    "pending": True,
                     "status": "transport_error",
                     "jobId": job_id,
-                    "mutationStarted": True,
-                    "committed": True,
+                    "mutationStarted": payload.get("mutationStarted"),
+                    "committed": payload.get("committed"),
                     "commitState": "unknown",
                     "checkpointRecoveryRequired": True,
                     "requestMayHaveCommitted": True,
@@ -719,7 +719,8 @@ class PreparedOutfitImportApprovedWriteService:
                     ),
                     "retryable": bool(getattr(exc, "retryable", False)),
                     "unityJobState": self._unity_job_state(payload),
-                    "error": str(exc),
+                    "nextAction": f"Read vrcforge_get_unitypackage_import_status for jobId={job_id} in the same project; do not resubmit the import or infer rollback from a failed status read.",
+                    "error": f"Import job {job_id} was already submitted. Status polling failed; the import outcome remains unknown. Poll diagnostic: {exc}",
                 }
             if str(payload.get("jobId") or "").strip().lower() != job_id:
                 raise RuntimeError(
@@ -730,17 +731,18 @@ class PreparedOutfitImportApprovedWriteService:
             return {
                 "ok": False,
                 "failureLayer": "unity_core_job_polling",
-                "pending": False,
+                "pending": True,
                 "status": "timeout",
                 "jobId": job_id,
-                "mutationStarted": True,
-                "committed": True,
+                "mutationStarted": payload.get("mutationStarted"),
+                "committed": payload.get("committed"),
                 "commitState": "unknown",
                 "checkpointRecoveryRequired": True,
                 "unityJobState": unity_job_state,
-                "error": (
-                    "UnityPackage import did not reach a terminal state before timeout."
-                ),
+                "safeToRetry": False,
+                "requestMayHaveCommitted": True,
+                "nextAction": f"Read vrcforge_get_unitypackage_import_status for jobId={job_id} in the same project; resume observation without resubmitting the import.",
+                "error": f"Import job {job_id} was already submitted; its terminal result was not observed before the polling timeout.",
             }
         return payload
 
@@ -1018,6 +1020,7 @@ class PreparedOutfitImportApprovedWriteService:
                         "jobId": payload.get("jobId"),
                         "status": payload.get("status"),
                         "errorCode": payload.get("errorCode"),
+                        "nextAction": payload.get("nextAction"),
                         "requestMayHaveCommitted": payload.get(
                             "requestMayHaveCommitted"
                         ),
@@ -1043,8 +1046,8 @@ class PreparedOutfitImportApprovedWriteService:
                         "failureLayer": str(
                             payload.get("failureLayer") or "unity_core_job_polling"
                         ),
-                        "mutationStarted": True,
-                        "committed": True,
+                        "mutationStarted": payload.get("mutationStarted"),
+                        "committed": payload.get("committed"),
                         "commitState": "unknown",
                         "checkpointRecoveryRequired": True,
                         "kind": kind,
@@ -1054,6 +1057,7 @@ class PreparedOutfitImportApprovedWriteService:
                         "jobId": payload.get("jobId"),
                         "status": payload.get("status"),
                         "errorCode": payload.get("errorCode"),
+                        "nextAction": payload.get("nextAction"),
                         "requestMayHaveCommitted": payload.get(
                             "requestMayHaveCommitted"
                         ),
