@@ -1316,6 +1316,11 @@
     "noTasks": "暂无后台任务。",
     "inspect": "检查",
     "cancel": "取消",
+    "resume": "继续追问",
+    "resumeQuestionLabel": "输入新的追问",
+    "resumeQuestionPlaceholder": "接下来希望它继续调查什么？",
+    "resumeQuestionHint": "必须输入新问题，才会在同一子代理会话中继续。",
+    "retryNewTask": "重跑为新任务",
     "roles": {
       "projectIndexReview": "项目",
       "outfitPackageInspection": "包",

@@ -1,12 +1,13 @@
 import { formatPayload } from "../../lib/conversation-utils";
-import { Ban, BellOff, Check, CornerDownRight, Loader2, RefreshCw, X } from "lucide-react";
-import { useMemo } from "react";
+import { Ban, BellOff, Check, CornerDownRight, Loader2, MessageSquareReply, RefreshCw, X } from "lucide-react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
-import type { SubAgentTask } from "../../lib/api";
+import type { SubAgentRole, SubAgentTask } from "../../lib/api";
 import {
   canAdoptSubAgentResult,
   canCancelSubAgentTask,
   canDismissSubAgentResult,
+  canResumeSubAgentTask,
   canRetrySubAgentTask,
   isAwaitingMergeReview,
   isMergedAdopted,
@@ -39,10 +40,12 @@ function formatRevision(value: number | undefined): string {
 
 export function SubAgentWorkspaceSurface({
   tasks,
+  roles = [],
   selected,
   onSelect,
   onCancel,
   onRetry,
+  onResume,
   onMerge,
   onIgnoreNotification,
   onAdoptNextAction,
@@ -50,10 +53,12 @@ export function SubAgentWorkspaceSurface({
   onClose,
 }: {
   tasks: SubAgentTask[];
+  roles?: SubAgentRole[];
   selected: SubAgentTask | null;
   onSelect: (taskId: string) => void;
   onCancel: (taskId: string) => void;
   onRetry: (taskId: string) => void;
+  onResume: (taskId: string, question: string) => Promise<boolean>;
   onMerge: (task: SubAgentTask, decision: "adopted" | "dismissed") => void;
   onIgnoreNotification: (task: SubAgentTask) => void;
   onAdoptNextAction: (task: SubAgentTask) => void;
@@ -61,6 +66,8 @@ export function SubAgentWorkspaceSurface({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const [resumeQuestion, setResumeQuestion] = useState("");
+  const [resumeSubmitting, setResumeSubmitting] = useState(false);
   const openTasks = useMemo(() => tasks.filter((task) => isOpenTask(task)), [tasks]);
   const completedTasks = useMemo(
     () => tasks.filter((task) => task.status === "completed" && !isAwaitingMergeReview(task)),
@@ -70,12 +77,27 @@ export function SubAgentWorkspaceSurface({
   const activeTaskNextAction = activeTask ? subAgentProposedNextAction(activeTask) : "";
   const canCancel = activeTask ? canCancelSubAgentTask(activeTask) : false;
   const canRetry = activeTask ? canRetrySubAgentTask(activeTask) : false;
+  const canResume = activeTask ? canResumeSubAgentTask(activeTask) : false;
   const canAdopt = activeTask ? canAdoptSubAgentResult(activeTask) : false;
   const canDismiss = activeTask ? canDismissSubAgentResult(activeTask) : false;
   const canIgnoreNotification = activeTask ? isAwaitingMergeReview(activeTask) : false;
   const actionBusy = activeTask ? busyTaskIds.has(activeTask.id) : false;
   const hasTasks = tasks.length > 0;
   const selectedTaskStatus = activeTask ? displaySubAgentStatus(activeTask.status) : "";
+
+  useEffect(() => setResumeQuestion(""), [activeTask?.id]);
+
+  async function submitResume(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const question = resumeQuestion.trim();
+    if (!activeTask || !canResume || !question || actionBusy || resumeSubmitting) return;
+    setResumeSubmitting(true);
+    try {
+      if (await onResume(activeTask.id, question)) setResumeQuestion("");
+    } finally {
+      setResumeSubmitting(false);
+    }
+  }
 
   if (!hasTasks) {
     return null;
@@ -120,7 +142,7 @@ export function SubAgentWorkspaceSurface({
                       </span>
                     </div>
                     <div className="truncate text-[11px] text-muted-foreground">
-                      {subAgentRoleLabel(task.role)} rev {formatRevision(task.revision)}
+                      {subAgentRoleLabel(task.role, roles)} rev {formatRevision(task.revision)}
                     </div>
                   </button>
                 ))}
@@ -157,7 +179,7 @@ export function SubAgentWorkspaceSurface({
                         </span>
                       </div>
                       <div className="truncate text-[11px] text-muted-foreground">
-                        {subAgentRoleLabel(task.role)} rev {formatRevision(task.revision)}
+                      {subAgentRoleLabel(task.role, roles)} rev {formatRevision(task.revision)}
                       </div>
                     </button>
                   ))}
@@ -176,7 +198,7 @@ export function SubAgentWorkspaceSurface({
               <Badge tone={activeTask ? taskStyleByStatus(activeTask) : "muted"}>{selectedTaskStatus}</Badge>
             </div>
             <div className="mt-1 text-[11px] text-muted-foreground">
-              {activeTask ? subAgentRoleLabel(activeTask.role) : "-"}
+              {activeTask ? subAgentRoleLabel(activeTask.role, roles) : "-"}
             </div>
           </div>
           <div className="app-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto p-2 text-xs">
@@ -227,6 +249,36 @@ export function SubAgentWorkspaceSurface({
             ) : null}
           </div>
           <div className="sticky bottom-0 border-t border-border/80 bg-card p-2">
+            {canResume && activeTask ? (
+              <form className="mb-2 rounded-md border border-border/80 bg-background p-2" onSubmit={(event) => void submitResume(event)}>
+                <label htmlFor="subagent-resume-question" className="mb-1 block text-xs font-medium">
+                  {t("subagent.resumeQuestionLabel")}
+                </label>
+                <textarea
+                  id="subagent-resume-question"
+                  className="min-h-20 w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={resumeQuestion}
+                  onChange={(event) => setResumeQuestion(event.target.value)}
+                  placeholder={t("subagent.resumeQuestionPlaceholder")}
+                  required
+                  disabled={actionBusy || resumeSubmitting}
+                  data-vrcforge-subagent-resume-question
+                />
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-muted-foreground">{t("subagent.resumeQuestionHint")}</span>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    className="h-7 px-2 text-xs"
+                    disabled={actionBusy || resumeSubmitting || !resumeQuestion.trim()}
+                    data-vrcforge-subagent-resume
+                  >
+                    {resumeSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageSquareReply className="h-3.5 w-3.5" />}
+                    {t("subagent.resume")}
+                  </Button>
+                </div>
+              </form>
+            ) : null}
             <div className="flex flex-wrap justify-end gap-2">
               {canCancel && activeTask ? (
                 <Button type="button" variant="ghost" className="h-7 px-2 text-xs" disabled={actionBusy} onClick={() => onCancel(activeTask.id)}>
@@ -237,7 +289,7 @@ export function SubAgentWorkspaceSurface({
               {canRetry && activeTask ? (
                 <Button type="button" variant="ghost" className="h-7 px-2 text-xs" disabled={actionBusy} onClick={() => onRetry(activeTask.id)}>
                   <RefreshCw className="h-3.5 w-3.5" />
-                  {t("doctor.retry")}
+                  {t("subagent.retryNewTask")}
                 </Button>
               ) : null}
               {canAdopt && activeTask ? (

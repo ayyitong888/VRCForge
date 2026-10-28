@@ -1316,6 +1316,11 @@
     "noTasks": "No background tasks.",
     "inspect": "Inspect",
     "cancel": "Cancel",
+    "resume": "Ask a follow-up",
+    "resumeQuestionLabel": "New question for this child",
+    "resumeQuestionPlaceholder": "What should it investigate next?",
+    "resumeQuestionHint": "Enter a new question to continue this child conversation.",
+    "retryNewTask": "Retry as new task",
     "roles": {
       "projectIndexReview": "Project",
       "outfitPackageInspection": "Package",

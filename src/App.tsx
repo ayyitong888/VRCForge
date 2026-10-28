@@ -204,6 +204,7 @@ import {
   requestAgentDesktopAction,
   requestAgentRunCancel,
   requestChatAttachmentImport,
+  resumeSubAgent,
   refreshProjects,
   setAppSessionToken,
   retrySubAgent,
@@ -3862,6 +3863,32 @@ export default function App() {
     }
   }
 
+  async function resumeSubAgentTask(taskId: string, question: string): Promise<boolean> {
+    if (!beginSubAgentAction(taskId)) {
+      return false;
+    }
+    const selectionIntentAtStart = subAgentSelectionIntentRef.current;
+    try {
+      const payload = await resumeSubAgent(endpoint, taskId, { task: question });
+      setSubAgentList((current) => updateSubAgentList(current, payload.task));
+      if (
+        selectionIntentAtStart !== taskId
+        || subAgentSelectionIntentRef.current !== selectionIntentAtStart
+      ) {
+        return true;
+      }
+      setSelectedSubAgent(payload.task);
+      subAgentSelectionIntentRef.current = payload.task.id;
+      await refreshSelectedSubAgentTask(payload.task.id, "if-current");
+      return true;
+    } catch (cause) {
+      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      endSubAgentAction(taskId);
+    }
+  }
+
   async function refreshSelectedSubAgentTask(taskId: string, mode: "select" | "if-current" = "select") {
     const requestId = mode === "select" ? ++subAgentInspectRequestRef.current : subAgentInspectRequestRef.current;
     if (mode === "select") {
@@ -4164,10 +4191,12 @@ export default function App() {
       <Suspense fallback={null}>
         <AsyncSubAgentWorkspaceSurface
           tasks={activeSubAgentTasks}
+          roles={subAgentList?.roles || []}
           selected={activeSubAgentTasks.some((task) => task.id === selectedSubAgent?.id) ? selectedSubAgent : null}
           onSelect={(taskId) => void inspectSubAgentTask(taskId)}
           onCancel={(taskId) => void cancelSubAgentTask(taskId)}
           onRetry={(taskId) => void retrySubAgentTask(taskId)}
+          onResume={resumeSubAgentTask}
           onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
           onIgnoreNotification={ignoreSubAgentReviewNotification}
           onAdoptNextAction={adoptSubAgentNextAction}

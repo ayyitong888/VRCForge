@@ -1,6 +1,21 @@
 import i18n from "../i18n";
+import type { SubAgentRole } from "./api/sub-agents";
 
-export function subAgentRoleLabel(role: string): string {
+const BUILT_IN_ROLES = new Set([
+  "project_index_review",
+  "outfit_package_inspection",
+  "validation_triage",
+  "selected_context_review",
+  "package_install_diagnosis",
+  "outfit_import_plan_review",
+  "skill_delegate",
+]);
+
+export function subAgentRoleLabel(role: string, configuredRoles: SubAgentRole[] = []): string {
+  if (!BUILT_IN_ROLES.has(role)) {
+    const configuredTitle = configuredRoles.find((item) => item.id === role)?.title?.trim();
+    if (configuredTitle) return configuredTitle;
+  }
   switch (role) {
     case "project_index_review":
       return i18n.t("subagent.roles.projectIndexReview");

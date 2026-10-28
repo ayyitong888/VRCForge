@@ -357,6 +357,7 @@ fn main() {
             request_restore_interrupted_apply_recovery,
             resolve_interrupted_apply_recovery,
             retry_sub_agent,
+            resume_sub_agent,
             replace_agent_progress,
             revoke_skill_package_signer,
             save_agent_notes,

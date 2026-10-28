@@ -1310,6 +1310,11 @@
     "noTasks": "バックグラウンドタスクはありません。",
     "inspect": "確認",
     "cancel": "キャンセル",
+    "resume": "続けて質問",
+    "resumeQuestionLabel": "子エージェントへの新しい質問",
+    "resumeQuestionPlaceholder": "次に何を調べますか？",
+    "resumeQuestionHint": "同じ子エージェントの会話を続けるには、新しい質問を入力してください。",
+    "retryNewTask": "新しいタスクとして再実行",
     "roles": {
       "projectIndexReview": "プロジェクト",
       "outfitPackageInspection": "パッケージ",

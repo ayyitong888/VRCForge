@@ -37,6 +37,9 @@ export type SubAgentTask = {
   mergedChatId?: string;
   mergeDecision?: "adopted" | "dismissed" | string;
   parentContinuationStatus?: "pending" | "dispatching" | "delivered" | "interrupted" | string;
+  resumeOf?: string;
+  childSessionId?: string;
+  canResume?: boolean;
   resultAvailable?: boolean;
   resultUnavailable?: boolean;
   result?: Record<string, unknown> | null;
@@ -120,6 +123,24 @@ export async function retrySubAgent(endpoint: string, taskId: string): Promise<{
     });
   }
   return requestJson(`${endpoint}/api/app/sub-agents/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
+}
+
+export async function resumeSubAgent(
+  endpoint: string,
+  taskId: string,
+  request: { task: string; displayName?: string },
+): Promise<{ ok: boolean; task: SubAgentTask }> {
+  const body = { task: request.task, ...(request.displayName ? { displayName: request.displayName } : {}) };
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("resume_sub_agent", {
+      request: { id: taskId, body, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/sub-agents/${encodeURIComponent(taskId)}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 export async function mergeSubAgent(

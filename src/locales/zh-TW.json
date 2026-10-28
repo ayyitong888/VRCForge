@@ -1310,6 +1310,11 @@
     "noTasks": "暫無背景任務。",
     "inspect": "檢查",
     "cancel": "取消",
+    "resume": "繼續追問",
+    "resumeQuestionLabel": "輸入新的追問",
+    "resumeQuestionPlaceholder": "接下來希望它繼續調查什麼？",
+    "resumeQuestionHint": "必須輸入新問題，才會在同一個子代理工作階段中繼續。",
+    "retryNewTask": "重跑為新任務",
     "roles": {
       "projectIndexReview": "專案",
       "outfitPackageInspection": "套件",

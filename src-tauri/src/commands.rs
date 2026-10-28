@@ -2491,6 +2491,25 @@ pub async fn retry_sub_agent(
 }
 
 #[tauri::command]
+pub async fn resume_sub_agent(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/sub-agents/{}/resume",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn merge_sub_agent(
     request: DesktopIdJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
