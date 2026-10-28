@@ -231,10 +231,17 @@ def test_latest_texture_revision_replaces_same_base_resource_and_keeps_scene(ima
     assert original_texture["resourceUri"] not in reads
 
 
-def test_tampered_latest_texture_hash_is_unavailable_without_fallback_but_scene_remains(image_sources):
+@pytest.mark.parametrize("hash_mode", ["missing", "incorrect"])
+def test_preview_descriptor_hashes_are_not_required_for_current_resource(image_sources, hash_mode):
     project, _texture_path, _registry, texture, scenes = image_sources
     tampered_latest = dict(texture)
-    tampered_latest["sha256"] = "0" * 64
+    scene = dict(scenes[0])
+    for preview in (tampered_latest, scene):
+        for key in ("sha256", "sourceSha256"):
+            if hash_mode == "missing":
+                preview.pop(key, None)
+            else:
+                preview[key] = "0" * 64
     reads = []
 
     def record_read(preview, project_path):
@@ -244,7 +251,7 @@ def test_tampered_latest_texture_hash_is_unavailable_without_fallback_but_scene_
     content = collect_tool_images(
         [
             _texture_step(texture, "texture-valid-old"),
-            _scene_step(scenes[0], "scene-valid"),
+            _scene_step(scene, "scene-valid"),
             _texture_step(tampered_latest, "texture-tampered-new"),
         ],
         record_read,
@@ -253,13 +260,14 @@ def test_tampered_latest_texture_hash_is_unavailable_without_fallback_but_scene_
 
     captions = _source_captions(content)
     images = _image_parts(content)
-    assert len(images) == 1
+    assert len(images) == 2
     assert len(captions) == 2
-    unavailable = next(caption for caption in captions if "image unavailable" in caption.lower())
-    assert "texture-tampered-new" in unavailable
+    assert all("image unavailable" not in caption.lower() for caption in captions)
+    assert "texture-tampered-new" in " ".join(captions)
     assert "texture-valid-old" not in " ".join(captions)
     assert scenes[0]["resourceUri"] in " ".join(captions)
     assert scenes[0]["resourceUri"] in reads
+    assert texture["resourceUri"] in reads
 
 
 def test_real_native_planner_and_responses_input_receive_two_images_without_history_payload(image_sources):

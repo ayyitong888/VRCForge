@@ -29455,7 +29455,7 @@ def _read_native_tool_image_resource(preview: Mapping[str, object], project_path
     expected_schema = "vrcforge.scene_capture_preview.v1" if is_capture else "vrcforge.texture_asset_preview.v1"
     if preview.get("schema") != expected_schema or preview.get("mimeType") != "image/png" \
             or any(not preview.get(key) or data.get(key) != preview.get(key)
-                   for key in (*identity_keys, "sha256", "sourceSha256")):
+                   for key in identity_keys):
         raise ValueError("Tool image does not match its captured preview receipt.")
     if is_capture:
         from scene_capture_preview import read_scene_capture_preview

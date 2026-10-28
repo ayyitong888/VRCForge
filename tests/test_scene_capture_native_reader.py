@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 
 import pytest
 from PIL import Image
@@ -61,15 +62,18 @@ def test_published_scene_preview_flows_through_dashboard_reader_into_native_mode
     assert len(content) == 2
     assert content[0]["type"] == "text"
     assert preview["resourceUri"] in content[0]["text"]
-    assert preview["sha256"] in content[0]["text"]
+    assert "capture-action-fixture" in content[0]["text"]
     data_url = content[1]["image_url"]["url"]
     assert data_url.startswith("data:image/png;base64,")
     decoded = base64.b64decode(data_url.partition(",")[2], validate=True)
     assert decoded.startswith(b"\x89PNG\r\n\x1a\n")
+    with Image.open(io.BytesIO(decoded)) as image:
+        assert image.size == (preview["width"], preview["height"])
+        assert image.getpixel((0, 0)) == (240, 80, 20, 255)
 
 
-@pytest.mark.parametrize("invalid", ["other-context", "other-project", "wrong-hash", "wrong-capture-id"])
-def test_scene_preview_reader_rejects_context_project_hash_and_capture_mismatch(
+@pytest.mark.parametrize("invalid", ["other-context", "other-project", "wrong-capture-id"])
+def test_scene_preview_reader_rejects_context_project_and_capture_mismatch(
     published_scene_capture, tmp_path, invalid
 ):
     project, _registry, _context_id, original = published_scene_capture
@@ -82,8 +86,6 @@ def test_scene_preview_reader_rejects_context_project_hash_and_capture_mismatch(
         other_project = tmp_path / "OtherUnityProject"
         other_project.mkdir()
         project_path = str(other_project)
-    elif invalid == "wrong-hash":
-        preview["sha256"] = "0" * 64
     elif invalid == "wrong-capture-id":
         preview["captureId"] = "00000000-0000-0000-0000-000000000000"
 

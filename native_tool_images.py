@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import io
 import json
-import re
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any
@@ -25,7 +23,6 @@ _MAX_IMAGE_BYTES = 1024 * 1024
 _MAX_IMAGE_COUNT = 4
 _MAX_IMAGE_EDGE = 1024
 _MAX_BASE64_CHARS = ((_MAX_IMAGE_BYTES + 2) // 3) * 4
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SUPPORTED_FORMATS = {
     "image/png": "PNG",
     "image/jpeg": "JPEG",
@@ -79,7 +76,7 @@ def collect_tool_images(
             if uri:
                 identity = ("resource", uri.partition("?")[0])
             elif kind == "image" and isinstance(encoded, str) and len(encoded) <= _MAX_BASE64_CHARS:
-                identity = ("content", hashlib.sha256(encoded.encode("utf-8")).hexdigest())
+                identity = ("content", encoded)
             else:
                 identity = ("unavailable", str(id(candidate)))
             if identity in seen:
@@ -89,8 +86,8 @@ def collect_tool_images(
             seen.add(identity)
             if kind == "image":
                 try:
-                    data, mime, digest = _decode_image_content(candidate)
-                    content = _provider_content(step, data, mime, digest, uri)
+                    data, mime, _dimensions = _decode_image_content(candidate)
+                    content = _provider_content(step, data, mime, uri)
                 except ValueError as exc:
                     content = _unavailable_content(step, f"MCP ImageContent rejected: {exc}")
             else:
@@ -179,39 +176,25 @@ def _collect_preview(
         mime = str(preview.get("mimeType") or "").strip().lower()
         if mime != "image/png" or item.get("uri") != preview.get("resourceUri") or item.get("mimeType") != mime:
             raise ValueError("Resource uri and mimeType must match the bound preview; this preview requires image/png")
-        meta = item.get("_meta")
-        if not isinstance(meta, Mapping):
-            raise ValueError("Resource _meta must include sha256 and sourceSha256 from the same preview")
-        preview_sha = _required_sha256(preview.get("sha256"))
-        if meta.get("sha256") != preview_sha:
-            raise ValueError("Resource hash metadata does not match the tool result")
-        source_sha = _required_sha256(preview.get("sourceSha256"))
-        if meta.get("sourceSha256") != source_sha:
-            raise ValueError("Resource source hash metadata does not match the tool result")
         width = _positive_dimension(preview.get("width"))
         height = _positive_dimension(preview.get("height"))
         if max(width, height) > _MAX_IMAGE_EDGE:
             raise ValueError(f"Preview width/height exceed {_MAX_IMAGE_EDGE} pixels; request a smaller capture")
-        data, mime, digest = _decode_image_content({
+        data, mime, _dimensions = _decode_image_content({
             "data": item.get("blob"),
             "mimeType": item.get("mimeType"),
             "width": width,
             "height": height,
-            "sha256": preview_sha,
         })
-        if mime != "image/png" or _image_dimensions(data, mime) != (width, height):
-            raise ValueError("Preview dimensions do not match the tool result")
-        if digest != preview_sha:
-            raise ValueError("Preview bytes do not match the tool result")
     except ValueError as exc:
-        return _unavailable_content(step, f"Tool preview rejected: {exc}. Re-read the current preview and its Resource together; do not alter hashes to bypass verification.", uri)
+        return _unavailable_content(step, f"Tool preview rejected: {exc}. Re-read the current preview and its Resource together.", uri)
     except Exception as exc:
         return _unavailable_content(step, f"Tool preview metadata could not be processed ({type(exc).__name__}). Re-read the current preview and Resource; this image is unavailable for verification.", uri)
 
-    return _provider_content(step, data, mime, digest, uri)
+    return _provider_content(step, data, mime, uri)
 
 
-def _decode_image_content(item: Mapping[str, Any]) -> tuple[bytes, str, str]:
+def _decode_image_content(item: Mapping[str, Any]) -> tuple[bytes, str, tuple[int, int]]:
     mime_value = item.get("mimeType", item.get("mime_type"))
     mime = str(mime_value or "").strip().lower()
     if mime not in _SUPPORTED_FORMATS:
@@ -225,20 +208,12 @@ def _decode_image_content(item: Mapping[str, Any]) -> tuple[bytes, str, str]:
         raise ValueError("data is invalid base64; encode the image bytes as base64 without a data URL prefix") from exc
     if not data or len(data) > _MAX_IMAGE_BYTES:
         raise ValueError(f"decoded image must contain 1–{_MAX_IMAGE_BYTES} bytes; return a smaller image")
-    digest = hashlib.sha256(data).hexdigest()
-    declared_hash = item.get("sha256")
-    metadata = item.get("_meta")
-    if declared_hash is None and isinstance(metadata, Mapping):
-        declared_hash = metadata.get("sha256")
-    if declared_hash is not None and _required_sha256(declared_hash) != digest:
-        raise ValueError("sha256 does not match image bytes; re-read the image and hash from the same capture, without guessing or replacing the hash")
-
     dimensions = _image_dimensions(data, mime)
     declared_width, declared_height = item.get("width"), item.get("height")
     if declared_width is not None or declared_height is not None:
         if (_positive_dimension(declared_width), _positive_dimension(declared_height)) != dimensions:
             raise ValueError("width/height do not match decoded image bytes; obtain dimensions and bytes from the same capture")
-    return data, mime, digest
+    return data, mime, dimensions
 
 
 def _image_dimensions(data: bytes, mime: str) -> tuple[int, int]:
@@ -262,13 +237,6 @@ def _positive_dimension(value: Any) -> int:
     return value
 
 
-def _required_sha256(value: Any) -> str:
-    digest = str(value or "").strip().lower()
-    if not _SHA256_RE.fullmatch(digest):
-        raise ValueError("sha256 must contain 64 hexadecimal characters from the exact image bytes")
-    return digest
-
-
 def _source_uri(value: Any) -> str:
     uri = str(value or "").strip()
     return uri[:1024] if uri.startswith("vrcforge://") else ""
@@ -278,12 +246,11 @@ def _provider_content(
     step: Mapping[str, Any],
     data: bytes,
     mime: str,
-    digest: str,
     uri: str,
 ) -> list[dict[str, Any]]:
     tool = str(step.get("tool") or "unknown_tool")[:160]
     action = str(step.get("actionId") or "")[:160]
-    provenance = {"tool": tool, "sha256": digest}
+    provenance = {"tool": tool}
     if action:
         provenance["actionId"] = action
     if uri:

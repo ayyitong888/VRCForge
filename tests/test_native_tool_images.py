@@ -52,8 +52,7 @@ def test_retains_distinct_recent_mcp_images_as_typed_provider_content():
     assert content[2]["type"] == "text"
     assert "capture_latest" in content[2]["text"]
     assert "latest" in content[2]["text"]
-    digest = hashlib.sha256(latest).hexdigest()
-    assert digest in content[2]["text"]
+    assert "sha256" not in content[2]["text"]
     assert content[3] == {
         "type": "image_url",
         "image_url": {"url": "data:image/png;base64," + base64.b64encode(latest).decode("ascii")},
@@ -64,7 +63,7 @@ def test_retains_distinct_recent_mcp_images_as_typed_provider_content():
 def test_reads_only_exact_texture_preview_descriptor_through_injected_reader():
     png = _png()
     source_sha = "a" * 64
-    image_sha = hashlib.sha256(png).hexdigest()
+    image_sha = "0" * 64
     preview = {
         "schema": "vrcforge.texture_asset_preview.v1",
         "assetPath": "Assets/Outfits/dress.png",
@@ -84,7 +83,7 @@ def test_reads_only_exact_texture_preview_descriptor_through_injected_reader():
             "uri": preview["resourceUri"],
             "mimeType": "image/png",
             "blob": base64.b64encode(png).decode("ascii"),
-            "_meta": {"sha256": image_sha, "sourceSha256": source_sha},
+            "_meta": {"sha256": "1" * 64, "sourceSha256": "2" * 64},
         }]}
 
     content = collect_tool_images(
@@ -97,7 +96,7 @@ def test_reads_only_exact_texture_preview_descriptor_through_injected_reader():
     assert calls[0] == (preview, "D:/Project")
     assert content[0]["type"] == "text"
     assert preview["resourceUri"] in content[0]["text"]
-    assert preview["sha256"] in content[0]["text"]
+    assert "sha256" not in content[0]["text"]
     assert content[1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(png).decode("ascii")
 
 
@@ -165,7 +164,7 @@ def test_single_screenshot_preview_uses_only_exact_tool_and_verified_resource():
     assert len(calls) == 1
     assert calls[0] == (preview, "D:/Project")
     assert preview["resourceUri"] in content[0]["text"]
-    assert preview["sha256"] in content[0]["text"]
+    assert "sha256" not in content[0]["text"]
     assert content[1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(png).decode("ascii")
 
 
@@ -201,7 +200,7 @@ def test_multi_screenshot_keeps_distinct_angles_together():
     assert content[3]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(latest_png).decode("ascii")
 
 
-def test_capture_preview_rejects_wrong_schema_and_resource_hash():
+def test_capture_preview_rejects_wrong_schema_but_ignores_hash_metadata():
     png = _png()
     preview = _capture_preview("vrcforge://scene-capture/hash?revision=1", png)
     bad_schema = {**preview, "schema": "vrcforge.texture_asset_preview.v1"}
@@ -229,17 +228,32 @@ def test_capture_preview_rejects_wrong_schema_and_resource_hash():
         read_resource,
         "D:/Project",
     )
-    assert len(wrong_hash) == 1 and "image unavailable" in wrong_hash[0]["text"].lower()
+    assert wrong_hash[1]["type"] == "image_url"
+    assert wrong_hash[1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+    preview_without_hash = dict(preview)
+    preview_without_hash.pop("sha256")
+    preview_without_hash.pop("sourceSha256")
+    without_hash = collect_tool_images(
+        [_successful_step("vrcforge_capture_screenshot", {"preview": preview_without_hash})],
+        lambda value, _project_path: {"contents": [{
+            "uri": value["resourceUri"],
+            "mimeType": "image/png",
+            "blob": base64.b64encode(png).decode("ascii"),
+        }]},
+        "D:/Project",
+    )
+    assert without_hash[1]["type"] == "image_url"
 
 
-def test_rejects_mime_hash_dimensions_and_oversized_mcp_images():
+def test_rejects_bad_bytes_mime_dimensions_and_oversized_mcp_images():
     png = _png()
     encoded = base64.b64encode(png).decode("ascii")
-    bad_sha = {"type": "image", "data": encoded, "mimeType": "image/png", "_meta": {"sha256": "0" * 64}}
     bad_dimensions = {"type": "image", "data": encoded, "mimeType": "image/png", "width": 2048, "height": 6}
     bad_mime = {"type": "image", "data": encoded, "mimeType": "image/jpeg"}
+    bad_bytes = {"type": "image", "data": base64.b64encode(b"not an image").decode("ascii"), "mimeType": "image/png"}
 
-    for item in (bad_sha, bad_dimensions, bad_mime):
+    for item in (bad_dimensions, bad_mime, bad_bytes):
         content = collect_tool_images(
             [_successful_step("capture", {"content": [item]})], None, "D:/Project"
         )
@@ -307,9 +321,16 @@ def test_rejected_image_reports_specific_field_and_correction_without_raw_payloa
     assert collect_tool_images([_successful_step("capture", {"content": [item]})], None, "D:/Project")[1]["type"] == "image_url"
 
 
-def test_bad_image_hash_keeps_exact_reason_and_does_not_use_older_visual_evidence():
-    item = _image_content(_png())
-    item["sha256"] = "0" * 64
-    content = collect_tool_images([_successful_step("capture", {"content": [item]})], None, "D:/Project")
-    assert len(content) == 1 and "sha256 does not match image bytes" in content[0]["text"]
-    assert "without guessing or replacing the hash" in content[0]["text"]
+def test_missing_or_wrong_image_hash_still_reaches_provider_as_image():
+    png = _png()
+    for item in (_image_content(png), {
+        **_image_content(png),
+        "sha256": "0" * 64,
+        "_meta": {"sha256": "1" * 64},
+    }):
+        content = collect_tool_images([_successful_step("capture", {"content": [item]})], None, "D:/Project")
+        request = bind_tool_images({"messages": [{"role": "user", "content": "inspect"}]}, content)
+        provider_content = request["messages"][-1]["content"]
+        assert provider_content[-1]["type"] == "image_url"
+        assert provider_content[-1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+        assert "sha256" not in provider_content[0]["text"]
