@@ -477,6 +477,19 @@ def _always_manual_approval_reason(target_tool: str, full_permission: bool, hand
         return AVATAR_UPLOAD_MANUAL_APPROVAL_REASON
     return ""
 
+def _checkpoint_failure_result(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep the preparer's actual rejection visible at either execution boundary."""
+    source = checkpoint.get("unityPrepare")
+    result = dict(source if isinstance(source, Mapping) else checkpoint)
+    result.update(ok=False, status="failed")
+    result.setdefault("code", "unity_checkpoint_prepare_failed")
+    result.setdefault("mutationStarted", False)
+    result.setdefault("committed", False)
+    result.setdefault("commitState", "not_started")
+    result.setdefault("checkpointRecoveryRequired", False)
+    return result
+
+
 def _write_failure_facts(
     failure_result: Any,
     *,
@@ -2331,21 +2344,7 @@ class AgentApprovalTransactionService:
             if failure_result is None:
                 checkpoint_failure = ensure_dict(checkpoint)
                 if checkpoint_failure.get("ok") is False:
-                    failure_result = {
-                        "ok": False,
-                        "status": "failed",
-                        "error": {
-                            "type": "checkpoint",
-                            "code": str(
-                                checkpoint_failure.get("code")
-                                or "unity_checkpoint_prepare_failed"
-                            ),
-                            "summary": str(
-                                checkpoint_failure.get("error")
-                                or "The pre-write checkpoint failed."
-                            ),
-                        },
-                    }
+                    failure_result = _checkpoint_failure_result(checkpoint_failure)
                 else:
                     failure_result = {
                         "ok": False,
@@ -2891,7 +2890,7 @@ class AgentApprovalTransactionService:
                     prepare_result = ensure_dict(
                         dedicated_checkpoint_prepare(project_root, {**dict(arguments), "_checkpointTargetTool": target_tool})
                     )
-                except Exception as exc:  # noqa: BLE001 - dedicated preflight details stay internal.
+                except Exception as exc:  # noqa: BLE001 - preserve the bounded cause for agent correction.
                     try:
                         import sys
                         import traceback
@@ -2906,10 +2905,20 @@ class AgentApprovalTransactionService:
                         )
                     except Exception:  # noqa: BLE001 - diagnostics must not alter the failed preflight.
                         pass
-                    prepare_result = {
+                    prepare_result = ensure_dict(redact_sensitive({
                         "ok": False,
-                        "error": "The dedicated checkpoint preflight failed.",
-                    }
+                        **build_external_tool_error(
+                            error=f"Checkpoint preflight raised {type(exc).__name__}: {exc}",
+                            error_code=str(getattr(exc, "cause_code", "") or "checkpoint_preflight_exception"),
+                            failure_layer="checkpoint_preflight",
+                            failure_phase="prepare",
+                            operation_kind="write", tool=target_tool,
+                            tool_routing_started=False, mutation_started=False,
+                            committed=False, commit_state="not_started", exception=exc,
+                        ),
+                        "diagnostics": {"exceptionType": type(exc).__name__, "message": str(exc)[:800]},
+                        "nextAction": "Inspect the reported checkpoint preflight exception and correct its cause before retrying; the write handler has not run.",
+                    }))
                 mutation["outcome"] = prepare_result
             record["unityPrepare"] = prepare_result
             if not prepare_result.get("ok"):
@@ -4858,7 +4867,10 @@ class AgentApprovalTransactionService:
             exception_text = str(exc)
             legacy_exception_details = external_exception_details(exc)
             exception_raw_result = external_exception_raw_result(legacy_exception_details)
-            if isinstance(source_tool_result, Mapping):
+            if not handler_started and isinstance(checkpoint, Mapping) and checkpoint.get("ok") is False:
+                source_failure_result = _checkpoint_failure_result(checkpoint)
+                failure_result = dict(source_failure_result)
+            elif isinstance(source_tool_result, Mapping):
                 # Preserve the Unity Core result as the external Agent's
                 # authoritative failure object.  The Gateway may derive an
                 # adjacent writeFailure/Console envelope, but must never

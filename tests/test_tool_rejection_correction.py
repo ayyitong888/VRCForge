@@ -56,3 +56,48 @@ def test_empty_wrapper_action_does_not_erase_domain_correction(empty):
         "vrcforge_test_corrective_write", {"ok": False, "status": "failed",
             "nextAction": empty, "result": raw})
     assert result["outcome"]["nextAction"] == raw["nextAction"]
+
+
+@pytest.mark.parametrize("lane", ["internal", "external"])
+@pytest.mark.parametrize("raises", [False, True])
+def test_checkpoint_preflight_cause_reaches_both_agents(tmp_path, lane, raises):
+    gateway = _gateway(tmp_path)
+    service = gateway.approval_transactions
+    project = _project(tmp_path)
+    name = "vrcforge_test_checkpoint_rejection"
+    writes = []
+    raw = {"ok": False, "blocking": True, "code": "checkpoint_owner_mismatch",
+        "error": "Expected targetParentPath; parentPath is not part of this tool.",
+        "nextAction": "Read the target parent and use targetParentPath.",
+        "diagnostics": {"failurePhase": "resolve_parent", "observed": "parentPath absent",
+                        "expected": "targetParentPath"}, "mutationStarted": False, "saved": False}
+    def prepare(_root, arguments):
+        assert arguments["_checkpointTargetTool"] == name
+        if raises:
+            raise ValueError("The parent scope resolver failed at targetParentPath.")
+        return deepcopy(raw)
+    service.register_write_handler(name, "Test checkpoint rejection", "medium",
+        lambda args: writes.append(args) or {"ok": True},
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=lambda args: [("vrc_fixture", {})],
+        checkpoint_prepare_handler=prepare)
+    if lane == "internal":
+        request = service.create_apply_request({"target_tool": name, "arguments": {"projectRoot": str(project)}})
+        approval_id = request["approval"]["id"]
+        service.approve(approval_id)
+        result = service.apply_approved({"approval_id": approval_id})
+    else:
+        prepared = service.prepare_external_mcp_write(name, {"projectRoot": str(project)})
+        result = gateway._external_mcp_write_result(name, service.execute_prepared_external_mcp_write(prepared))
+    assert result["ok"] is False
+    assert writes == []
+    outcome = result["outcome"]
+    if raises:
+        assert "ValueError" in str(outcome)
+        assert "parent scope resolver failed at targetParentPath" in str(outcome)
+    else:
+        assert outcome["error"]["code"] == raw["code"]
+        assert raw["nextAction"] in str(outcome["nextAction"])
+        assert outcome["diagnostics"] == raw["diagnostics"]
+    assert outcome["mutationStarted"] is False
+    assert outcome["commitState"] == "not_started"
