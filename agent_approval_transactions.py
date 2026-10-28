@@ -282,11 +282,36 @@ def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
 
     if not isinstance(value, Mapping):
         return value
-    pending: list[tuple[Mapping[str, Any], int]] = [(value, 0)]
+    pending: list[tuple[Mapping[str, Any], int, tuple[Mapping[str, Any], ...]]] = [(value, 0, ())]
     seen: set[int] = set()
 
+    def _failed_view(view: Mapping[str, Any]) -> bool:
+        status = str(view.get("status") or "").strip().casefold().replace("-", "_")
+        return (
+            view.get("ok") is False
+            or view.get("success") is False
+            or view.get("isError") is True
+            or status in {"error", "failed", "failure", "timed_out", "timeout", "unavailable"}
+            or (type(view.get("exitCode")) is int and view["exitCode"] != 0)
+        )
+
+    def _reject_domain_receipt(current: Mapping[str, Any], reason: str) -> dict[str, Any]:
+        receipt = dict(current)
+        receipt["ok"] = False
+        receipt["verified"] = False
+        receipt["status"] = "failed"
+        if not str(receipt.get("error") or "").strip():
+            receipt["error"] = reason
+        changed = receipt.get("changed")
+        if type(changed) is bool:
+            receipt["mutationStarted"] = changed
+            receipt["mutationApplied"] = changed
+            receipt["committed"] = False
+            receipt["commitState"] = "unknown" if changed else "not_started"
+        return receipt
+
     while pending:
-        current, depth = pending.pop(0)
+        current, depth, ancestors = pending.pop(0)
         marker = id(current)
         if marker in seen:
             continue
@@ -425,12 +450,60 @@ def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
                         },
                     }
             return receipt
+        has_domain_write_facts = (
+            isinstance(current.get("schema"), str)
+            and current["schema"].startswith("vrcforge.")
+            and any(key in current for key in ("verified", "changed", "saved"))
+        )
+        if has_domain_write_facts:
+            if any(_failed_view(ancestor) for ancestor in ancestors):
+                return _reject_domain_receipt(
+                    current,
+                    "A transport or Core wrapper reported failure around the domain write receipt.",
+                )
+            if _failed_view(current):
+                # Preserve explicit failure details and mutation facts without
+                # allowing a contradictory nested verified=true to win.
+                return _reject_domain_receipt(
+                    current,
+                    str(current.get("error") or current.get("message") or "Core reported a failed domain write."),
+                )
+            if (
+                type(current.get("ok")) is not bool
+                or type(current.get("verified")) is not bool
+                or type(current.get("changed")) is not bool
+                or type(current.get("saved")) is not bool
+                or type(current.get("preview")) is not bool
+            ):
+                return _reject_domain_receipt(
+                    current,
+                    "The Core domain write receipt is incomplete; expected boolean ok, verified, changed, saved, and preview fields.",
+                )
+            if current.get("ok") is not True:
+                return _reject_domain_receipt(current, "Core did not report the domain write as successful.")
+            if current.get("verified") is not True:
+                return _reject_domain_receipt(current, "Core did not verify the domain write result.")
+            if current.get("preview") is not False:
+                return _reject_domain_receipt(current, "Core returned a preview instead of applying the approved write.")
+            changed = current["changed"]
+            if changed and current["saved"] is not True:
+                return _reject_domain_receipt(
+                    current,
+                    "Core reported changed data without saving it; the write is not committed.",
+                )
+            receipt = dict(current)
+            receipt["mutationStarted"] = changed
+            receipt["mutationApplied"] = changed
+            receipt["committed"] = True
+            receipt["commitState"] = "committed" if changed else "no_change"
+            receipt["commitStateKnown"] = True
+            return receipt
         if depth >= 5:
             continue
         for key in ("structuredContent", "result", "payload", "data", "toolResult"):
             nested = current.get(key)
             if isinstance(nested, Mapping):
-                pending.append((nested, depth + 1))
+                pending.append((nested, depth + 1, (*ancestors, current)))
     return value
 
 
