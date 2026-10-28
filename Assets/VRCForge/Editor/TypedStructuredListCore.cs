@@ -37,14 +37,12 @@ namespace VRCForge.Editor
         internal string ComponentAssemblyName = string.Empty;
         internal string ComponentAssemblyVersion = string.Empty;
         internal string ComponentAssemblyPublicKeyToken = string.Empty;
-        internal string ComponentAssemblySha256 = string.Empty;
         internal string ListMemberName = string.Empty;
         internal string ListTypeName = string.Empty;
         internal string ElementTypeName = string.Empty;
         internal string AssemblyName = string.Empty;
         internal string AssemblyVersion = string.Empty;
         internal string AssemblyPublicKeyToken = string.Empty;
-        internal string AssemblySha256 = string.Empty;
         internal int MaximumItems;
         internal bool RequireUniqueObjectReferences;
         internal List<StructuredFieldSchema> Fields = new List<StructuredFieldSchema>();
@@ -278,14 +276,12 @@ namespace VRCForge.Editor
                 || string.IsNullOrWhiteSpace(schema.ComponentAssemblyName)
                 || string.IsNullOrWhiteSpace(schema.ComponentAssemblyVersion)
                 || schema.ComponentAssemblyPublicKeyToken == null
-                || string.IsNullOrWhiteSpace(schema.ComponentAssemblySha256)
                 || string.IsNullOrWhiteSpace(schema.ListMemberName)
                 || string.IsNullOrWhiteSpace(schema.ListTypeName)
                 || string.IsNullOrWhiteSpace(schema.ElementTypeName)
                 || string.IsNullOrWhiteSpace(schema.AssemblyName)
                 || string.IsNullOrWhiteSpace(schema.AssemblyVersion)
                 || schema.AssemblyPublicKeyToken == null
-                || string.IsNullOrWhiteSpace(schema.AssemblySha256)
                 || schema.MaximumItems < 0
                 || schema.Fields == null
                 || schema.Fields.Count == 0
@@ -1464,21 +1460,19 @@ namespace VRCForge.Editor
             {
                 throw new InvalidOperationException("Component type is not registered for this structured-list schema.");
             }
-            ValidateAssembly(
+            ValidateStructuredListAssembly(
                 component.GetType().Assembly,
                 schema.ComponentAssemblyName,
                 schema.ComponentAssemblyVersion,
-                schema.ComponentAssemblyPublicKeyToken,
-                schema.ComponentAssemblySha256
+                schema.ComponentAssemblyPublicKeyToken
             );
             var listType = ResolveExactType(schema.ListTypeName);
             var elementType = ResolveExactType(schema.ElementTypeName);
-            ValidateAssembly(
+            ValidateStructuredListAssembly(
                 listType.Assembly,
                 schema.AssemblyName,
                 schema.AssemblyVersion,
-                schema.AssemblyPublicKeyToken,
-                schema.AssemblySha256
+                schema.AssemblyPublicKeyToken
             );
             if (!ReferenceEquals(listType.Assembly, elementType.Assembly))
             {
@@ -1495,6 +1489,23 @@ namespace VRCForge.Editor
                 ListType = listType,
                 ElementType = elementType
             };
+        }
+
+        private static void ValidateStructuredListAssembly(
+            Assembly assembly,
+            string expectedName,
+            string expectedVersion,
+            string expectedPublicKeyToken)
+        {
+            var name = assembly.GetName();
+            var tokenBytes = name.GetPublicKeyToken() ?? Array.Empty<byte>();
+            var token = string.Concat(tokenBytes.Select(value => value.ToString("x2", CultureInfo.InvariantCulture)));
+            if (name.Name != expectedName
+                || (name.Version?.ToString() ?? string.Empty) != expectedVersion
+                || token != expectedPublicKeyToken)
+            {
+                throw new InvalidOperationException("Structured-list compatibility assembly identity is unsupported.");
+            }
         }
 
         private static void ValidateAssembly(

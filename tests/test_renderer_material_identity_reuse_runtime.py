@@ -66,6 +66,7 @@ static class RendererComponentIdentity {
  public static RendererComponentIdentityEvidence Create(Renderer r) { Calls++; return new RendererComponentIdentityEvidence { renderer=r,rendererPath=r.Path,componentId=r.Id }; }
 }
 static class EditorUtility { public static bool IsDirty(object value) => false; }
+static class AssetDatabase { public static string GetAssetPath(Material value) => value.Path; }
 static class SceneObjectCopyCore {
  public static int Reads; public static string Digest="before";
  public static readonly Dictionary<string,Renderer> Renderers = new Dictionary<string,Renderer>();
@@ -73,11 +74,12 @@ static class SceneObjectCopyCore {
  public static GameObject ResolveUniqueGameObject(object scene,string path,string label) { return new GameObject { Value=Renderers[path] }; }
 }
 static class RendererMaterialSlotTool {
+ internal static int MaterialReads;
  internal sealed class Target { internal SavedSceneSnapshot Scene; internal Renderer Renderer; internal RendererComponentIdentityEvidence Identity; }
  internal sealed class MaterialEvidence { internal Material Material; internal string Path, Guid="material-guid", Digest="material-digest"; }
  static string FindScenePath(string path) => path.StartsWith("Other/") ? "Assets/Other.unity" : "Assets/Main.unity";
  internal static string NormalizeMaterialPath(string path) => path;
- internal static MaterialEvidence ReadMaterial(string path,string label) => new MaterialEvidence {Path=path,Material=new Material {Path=path}};
+ internal static MaterialEvidence ReadMaterial(string path,string label) { MaterialReads++; return new MaterialEvidence {Path=path,Material=new Material {Path=path}}; }
  internal static MaterialEvidence ReadMaterialAsset(Material value,string label) => ReadMaterial(value.Path,label);
  internal static string MaterialIdentity(Material value) => value == null ? "null" : value.Path+"|material-guid";
  internal static object MaterialPayload(MaterialEvidence value) => value == null ? null : new {assetPath=value.Path,assetGuid=value.Guid,fileDigest=value.Digest};
@@ -92,16 +94,19 @@ BATCH_METHODS
  {'rendererPath':'Avatar/A','rendererComponentId':'aaa','slotIndex':1,'newMaterialAssetPath':'Assets/New.mat'},
  {'rendererPath':'Avatar/B','rendererComponentId':'bbb','slotIndex':0,'newMaterialAssetPath':'Assets/New.mat'}]");
  public static int Main() {
-  SceneObjectCopyCore.Renderers["Avatar/A"]=new Renderer {Path="Avatar/A",Id="aaa",sharedMaterials=new Material[2]};
-  SceneObjectCopyCore.Renderers["Avatar/B"]=new Renderer {Path="Avatar/B",Id="bbb",sharedMaterials=new Material[1]};
+  var oldMaterial=new Material {Path="Assets/Old.mat"};
+  SceneObjectCopyCore.Renderers["Avatar/A"]=new Renderer {Path="Avatar/A",Id="aaa",sharedMaterials=new[] {oldMaterial,oldMaterial}};
+  SceneObjectCopyCore.Renderers["Avatar/B"]=new Renderer {Path="Avatar/B",Id="bbb",sharedMaterials=new[] {oldMaterial}};
   SceneObjectCopyCore.Renderers["Other/C"]=new Renderer {Path="Other/C",Id="ccc",sharedMaterials=new Material[1]};
   var first=Build(Rows());
   Console.WriteLine("COUNTS first scene="+SceneObjectCopyCore.Reads+" renderer="+RendererComponentIdentity.Calls);
   Check(SceneObjectCopyCore.Reads==1,"one scene observation for three assignments");
   Check(RendererComponentIdentity.Calls==2,"one identity per unique renderer");
+  Check(RendererMaterialSlotTool.MaterialReads==2,"one new and one shared old material read");
   Check(first.Targets.Count==2 && ((JArray)first.Evidence["assignments"]).Count==3,"plan preserves assignments");
   var second=Build(Rows());
   Check(SceneObjectCopyCore.Reads==2 && RendererComponentIdentity.Calls==4,"fresh observation at next Build boundary");
+  Check(RendererMaterialSlotTool.MaterialReads==4,"unique material evidence reused in each Build");
   Verify(first.Evidence,second.Evidence);
   SceneObjectCopyCore.Digest="after";
   var saved=SceneObjectCopyCore.ResolveSavedScene("Assets/Main.unity","saved");

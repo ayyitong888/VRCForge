@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from test_curve_fx_authoring_runtime_contract import method
 
 from component_feature_write import (
     APPROVAL_PREVIEW_SCHEMA,
@@ -449,7 +450,7 @@ def test_csharp_domain_is_fixed_schema_public_api_only() -> None:
         'allowed.Add("expectedProjectPath")',
         "Undo.RegisterCreatedObjectUndo",
         "SceneObjectCopyCore.ReadStableAssetEvidence",
-        "SceneEvidenceMatches(snapshot.Scene, immediate)",
+        "snapshot.ToPayload(snapshot.Scene)",
         "EditorSceneManager.SaveScene",
         "CreateNew",
         "checkpointRestoreRequired",
@@ -470,6 +471,16 @@ def test_csharp_domain_is_fixed_schema_public_api_only() -> None:
     assert "package.version != ExpectedPackageVersion" not in source
     assert "packageEvidence.Digest != ExpectedPackageTreeDigest" not in source
     assert "ValidatePublicApiSurface" in source
+
+    apply = method(Path(paths[1]).read_text(encoding="utf-8"), "private static object Apply(")
+    before_mutation = apply[:apply.index("Undo.IncrementCurrentGroup();")]
+    for redundant in (
+        "ResolveSavedScene(",
+        "GetRootComponents(",
+        "SceneEvidenceMatches(",
+        "StableGlobalObjectId(",
+    ):
+        assert redundant not in before_mutation
 
 
 def test_disposable_fixture_declares_all_negative_and_restore_controls() -> None:

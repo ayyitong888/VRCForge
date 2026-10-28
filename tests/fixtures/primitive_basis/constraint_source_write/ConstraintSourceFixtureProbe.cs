@@ -26,6 +26,7 @@ public static class ConstraintSourceFixtureProbe
             CleanupBestEffort();
             VerifyStructuredMutationFailureSignals();
             var component = PrepareScene();
+            VerifyIncompatibleListTypeRejected(component);
             var baseline = SceneObjectCopyCore.ResolveSavedScene(ScenePath, "fixture baseline");
             var baselineDigest = baseline.FileDigest;
             var baselineMetaDigest = baseline.MetaDigest;
@@ -146,6 +147,67 @@ public static class ConstraintSourceFixtureProbe
         Require(EditorSceneManager.SaveScene(scene, ScenePath), "fixture scene save");
         Require(!scene.isDirty, "fixture scene dirty after save");
         return component;
+    }
+
+    private static void VerifyIncompatibleListTypeRejected(Component component)
+    {
+        var wrongListType = ResolveExactType("VRC.Dynamics.VRCConstraintSource");
+        var componentName = component.GetType().Assembly.GetName();
+        var listName = wrongListType.Assembly.GetName();
+        var schema = new StructuredListSchema
+        {
+            Id = "constraint-shape-mismatch-fixture.v1",
+            ComponentTypeNames = new HashSet<string>(
+                new[] { component.GetType().FullName },
+                StringComparer.Ordinal
+            ),
+            ComponentAssemblyName = componentName.Name,
+            ComponentAssemblyVersion = componentName.Version?.ToString() ?? string.Empty,
+            ComponentAssemblyPublicKeyToken = PublicKeyToken(componentName),
+            ListMemberName = "Sources",
+            ListTypeName = wrongListType.FullName,
+            ElementTypeName = wrongListType.FullName,
+            AssemblyName = listName.Name,
+            AssemblyVersion = listName.Version?.ToString() ?? string.Empty,
+            AssemblyPublicKeyToken = PublicKeyToken(listName),
+            MaximumItems = 1,
+            Fields = new List<StructuredFieldSchema>
+            {
+                new StructuredFieldSchema
+                {
+                    RequestKey = "sourcePath",
+                    MemberName = "SourceTransform",
+                    Kind = StructuredValueKind.ObjectReference,
+                    ObjectTypeName = typeof(Transform).FullName,
+                    AllowNull = false
+                }
+            },
+            ManagedElementFactory = type => Activator.CreateInstance(type)
+        };
+        TypedStructuredListCore.Register(schema);
+
+        var rejected = false;
+        try
+        {
+            TypedStructuredListCore.BuildPlan(
+                component,
+                schema.Id,
+                new JArray(),
+                (path, type) => null
+            );
+        }
+        catch (InvalidOperationException exception)
+        {
+            rejected = exception.Message == "Structured-list member type changed.";
+        }
+        Require(rejected, "incompatible structured-list member type accepted");
+    }
+
+    private static string PublicKeyToken(AssemblyName assemblyName)
+    {
+        var tokenBytes = assemblyName.GetPublicKeyToken() ?? Array.Empty<byte>();
+        return string.Concat(tokenBytes.Select(value =>
+            value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture)));
     }
 
     private static void VerifyRejectedRequestsStayReadOnly(

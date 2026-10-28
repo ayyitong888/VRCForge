@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from test_curve_fx_authoring_runtime_contract import method
 
 from constraint_source_write import (
     APPROVAL_PREVIEW_SCHEMA,
@@ -260,6 +261,54 @@ def test_csharp_core_exposes_only_registered_typed_schemas() -> None:
     assert "restored.SceneMetaLinkCount == snapshot.SceneMetaLinkCount" in tool
     assert "checkpointRestoreRequired" in tool
     assert "TryRestoreBeforeSources" in tool
+    capture = method(tool, "private static ConstraintSourceSnapshot CaptureSnapshot(")
+    assert capture.count("ResolveSavedScene(") == 1
+    initial_evidence = capture[capture.index("var scene ="):capture.index("var normalizedHostPath =")]
+    assert "ReadStableAssetEvidence(" not in initial_evidence
+    readback = capture[capture.index("var afterInspection ="):capture.index("return new ConstraintSourceSnapshot")]
+    assert "afterInspection.File.Digest != scene.FileDigest" in readback
+    assert "afterInspection.File.Identity != scene.FileIdentity" in readback
+    assert "afterInspection.Meta.Digest != scene.MetaDigest" in readback
+    assert "afterInspection.Meta.Identity != scene.MetaIdentity" in readback
+    assert "afterInspection.File.LinkCount != 1" in readback
+    assert "afterInspection.Meta.LinkCount != 1" in readback
+    handle = method(tool, "public static object HandleCommand(")
+    no_op = handle[handle.index("if (!snapshot.WouldChange)"):handle.index("return Apply(snapshot, sources);")]
+    assert "CaptureSnapshot(" not in no_op
+    apply = method(tool, "private static object Apply(")
+    before_mutation = apply[:apply.index("Undo.RecordObject(")]
+    assert "CaptureSnapshot(" not in before_mutation
+    assert "VerifySamePreState(" not in before_mutation
+
+
+def test_structured_list_uses_assembly_identity_and_rejects_changed_member_shape() -> None:
+    core = Path("Assets/VRCForge/Editor/TypedStructuredListCore.cs").read_text(
+        encoding="utf-8-sig"
+    )
+    schema = core[
+        core.index("internal sealed class StructuredListSchema"):
+        core.index("internal sealed class StructuredListElementValue")
+    ]
+    resolve = method(core, "private static StructuredListBinding ResolveBinding(")
+    identity = method(core, "private static void ValidateStructuredListAssembly(")
+
+    assert "AssemblySha256" not in schema
+    assert "ComponentAssemblySha256" not in schema
+    assert "ValidateStructuredListAssembly(" in resolve
+    assert "GetMemberType(member) != listType" in resolve
+    assert "ReferenceEquals(listType.Assembly, elementType.Assembly)" in resolve
+    assert "ResolveExactType(schema.ListTypeName)" in resolve
+    assert "ResolveExactType(schema.ElementTypeName)" in resolve
+    assert "assembly.GetName()" in identity
+    assert "expectedSha256" not in identity
+    assert "SHA256" not in identity
+    assert "FileStream" not in identity
+
+    fixture = Path(
+        "tests/fixtures/primitive_basis/constraint_source_write/ConstraintSourceFixtureProbe.cs"
+    ).read_text(encoding="utf-8-sig")
+    assert "VerifyIncompatibleListTypeRejected(component)" in fixture
+    assert '"Structured-list member type changed."' in fixture
 
 
 def test_managed_reference_reader_is_registered_object_only_and_nested_collection_aware() -> None:

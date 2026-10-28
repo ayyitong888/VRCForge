@@ -109,7 +109,7 @@ namespace VRCForge.Editor
                 if (preview)
                 {
                     return ComponentFeatureWriteCore.Success(
-                        snapshot.ToPayload(ComponentFeatureWriteCore.ResolveSavedScene(request.ScenePath)));
+                        snapshot.ToPayload(snapshot.Scene));
                 }
 
                 ValidateExpected(parameters, snapshot);
@@ -123,21 +123,6 @@ namespace VRCForge.Editor
 
         private static object Apply(ComponentFeaturePreviewSnapshot snapshot)
         {
-            var immediate = ComponentFeatureWriteCore.ResolveSavedScene(
-                snapshot.Request.ScenePath);
-            var immediateRoots = ComponentFeatureWriteCore.GetRootComponents(
-                snapshot.Host.Host,
-                snapshot.Compatibility.RootComponentType);
-            if (!ComponentFeatureWriteCore.SceneEvidenceMatches(snapshot.Scene, immediate)
-                || immediate.Dirty
-                || ComponentFeatureWriteCore.StableGlobalObjectId(
-                    snapshot.Host.Host,
-                    "feature host") != snapshot.Host.ObjectId
-                || immediateRoots.Count != snapshot.Host.ComponentIndex)
-            {
-                throw new ComponentFeatureWriteException(
-                    "Component feature state changed immediately before apply.");
-            }
             Undo.IncrementCurrentGroup();
             var undoGroup = Undo.GetCurrentGroup();
             Undo.SetCurrentGroupName("Create VRCForge component feature");

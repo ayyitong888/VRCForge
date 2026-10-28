@@ -140,15 +140,7 @@ namespace VRCForge.Editor
                 ValidateExpected(parameters, snapshot);
                 if (!snapshot.WouldChange)
                 {
-                    var unchanged = CaptureSnapshot(
-                        scenePath,
-                        gameObjectPath,
-                        constraintKind,
-                        componentIndex,
-                        sources
-                    );
-                    VerifySamePreState(snapshot, unchanged);
-                    return Success(snapshot, unchanged, false, false, false);
+                    return Success(snapshot, snapshot, false, false, false);
                 }
                 return Apply(snapshot, sources);
             }
@@ -172,15 +164,6 @@ namespace VRCForge.Editor
             var mutationStarted = false;
             try
             {
-                var immediate = CaptureSnapshot(
-                    snapshot.Scene.Path,
-                    snapshot.GameObjectPath,
-                    snapshot.ConstraintKind,
-                    snapshot.ComponentIndex,
-                    requestedSources
-                );
-                VerifySamePreState(snapshot, immediate);
-
                 Undo.RecordObject(snapshot.Component, "Set VRCForge constraint sources");
                 mutationStarted = true;
                 TypedStructuredListCore.Apply(snapshot.Component, snapshot.Plan);
@@ -300,21 +283,6 @@ namespace VRCForge.Editor
             JArray requestedSources)
         {
             var scene = SceneObjectCopyCore.ResolveSavedScene(scenePath, "constraint scene");
-            var stableAsset = SceneObjectCopyCore.ReadStableAssetEvidence(
-                scene.Path,
-                "constraint scene"
-            );
-            if (stableAsset.Guid != scene.Guid
-                || stableAsset.File.Digest != scene.FileDigest
-                || stableAsset.File.Identity != scene.FileIdentity
-                || stableAsset.Meta.Digest != scene.MetaDigest
-                || stableAsset.Meta.Identity != scene.MetaIdentity
-                || stableAsset.File.LinkCount != 1
-                || stableAsset.Meta.LinkCount != 1)
-            {
-                throw new ConstraintSourceToolException("Constraint scene identity changed during inspection.");
-            }
-
             var normalizedHostPath = NormalizeHierarchyPath(gameObjectPath, "gameObjectPath");
             var host = SceneObjectCopyCore.ResolveUniqueGameObject(
                 scene.Scene,
@@ -369,11 +337,11 @@ namespace VRCForge.Editor
                 scene.Path,
                 "constraint scene readback"
             );
-            if (afterInspection.Guid != stableAsset.Guid
-                || afterInspection.File.Digest != stableAsset.File.Digest
-                || afterInspection.File.Identity != stableAsset.File.Identity
-                || afterInspection.Meta.Digest != stableAsset.Meta.Digest
-                || afterInspection.Meta.Identity != stableAsset.Meta.Identity
+            if (afterInspection.Guid != scene.Guid
+                || afterInspection.File.Digest != scene.FileDigest
+                || afterInspection.File.Identity != scene.FileIdentity
+                || afterInspection.Meta.Digest != scene.MetaDigest
+                || afterInspection.Meta.Identity != scene.MetaIdentity
                 || afterInspection.File.LinkCount != 1
                 || afterInspection.Meta.LinkCount != 1
                 || scene.Scene.isDirty)
@@ -384,8 +352,8 @@ namespace VRCForge.Editor
             return new ConstraintSourceSnapshot
             {
                 Scene = scene,
-                SceneFileLinkCount = stableAsset.File.LinkCount,
-                SceneMetaLinkCount = stableAsset.Meta.LinkCount,
+                SceneFileLinkCount = afterInspection.File.LinkCount,
+                SceneMetaLinkCount = afterInspection.Meta.LinkCount,
                 GameObjectPath = normalizedHostPath,
                 ConstraintKind = constraintKind,
                 ComponentType = componentTypeName,
@@ -422,31 +390,6 @@ namespace VRCForge.Editor
                 || snapshot.Scene.Scene.isDirty)
             {
                 throw new ConstraintSourceToolException("Constraint source preview was not read-only.");
-            }
-        }
-
-        private static void VerifySamePreState(
-            ConstraintSourceSnapshot expected,
-            ConstraintSourceSnapshot actual)
-        {
-            if (actual.Scene.Path != expected.Scene.Path
-                || actual.Scene.Guid != expected.Scene.Guid
-                || actual.Scene.Handle != expected.Scene.Handle
-                || actual.Scene.FileDigest != expected.Scene.FileDigest
-                || actual.Scene.FileIdentity != expected.Scene.FileIdentity
-                || actual.Scene.MetaDigest != expected.Scene.MetaDigest
-                || actual.Scene.MetaIdentity != expected.Scene.MetaIdentity
-                || actual.GameObjectPath != expected.GameObjectPath
-                || actual.ConstraintKind != expected.ConstraintKind
-                || actual.ComponentType != expected.ComponentType
-                || actual.ComponentIndex != expected.ComponentIndex
-                || actual.ComponentId != expected.ComponentId
-                || actual.ComponentGlobalId != expected.ComponentGlobalId
-                || actual.BeforeSourcesDigest != expected.BeforeSourcesDigest
-                || actual.TargetSourcesDigest != expected.TargetSourcesDigest
-                || actual.WouldChange != expected.WouldChange)
-            {
-                throw new ConstraintSourceToolException("Constraint source state changed after the verified preview.");
             }
         }
 
@@ -616,14 +559,12 @@ namespace VRCForge.Editor
                 ComponentAssemblyName = "VRC.SDK3.Dynamics.Constraint",
                 ComponentAssemblyVersion = "1.0.0.0",
                 ComponentAssemblyPublicKeyToken = string.Empty,
-                ComponentAssemblySha256 = "560c36c5660abb4a91e9f330653e8d39a047b7648c1b2e862a037c7df71e2df0",
                 ListMemberName = "Sources",
                 ListTypeName = "VRC.Dynamics.VRCConstraintSourceKeyableList",
                 ElementTypeName = "VRC.Dynamics.VRCConstraintSource",
                 AssemblyName = "VRC.Dynamics",
                 AssemblyVersion = "1.0.0.0",
                 AssemblyPublicKeyToken = string.Empty,
-                AssemblySha256 = "c0343a61b88778726b5b510cc05c0d9b6e9b4df7ca17cf1e4de32b2551136b89",
                 MaximumItems = MaximumSources,
                 RequireUniqueObjectReferences = true,
                 Fields = new List<StructuredFieldSchema>

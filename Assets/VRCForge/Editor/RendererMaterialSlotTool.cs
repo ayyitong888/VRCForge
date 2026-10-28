@@ -82,8 +82,6 @@ namespace VRCForge.Editor
                 if (!IsPreview(parameters))
                 {
                     RequireApplyFields(parameters, target, scene, componentId, slot, before, beforeEvidence, materialEvidence);
-                    var current = SceneObjectCopyCore.ResolveSavedScene(scene.Path, "renderer scene");
-                    RequireEqual(current.FileDigest, parameters, "expectedSceneFileDigest");
                     Undo.IncrementCurrentGroup();
                     undoGroup = Undo.GetCurrentGroup();
                     Undo.SetCurrentGroupName("Set VRCForge renderer material slot");
@@ -98,7 +96,7 @@ namespace VRCForge.Editor
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                     ResolveTarget(path, componentId, out target);
                     var persistedScene = target.Scene;
-                    if (string.Equals(persistedScene.FileDigest, current.FileDigest, StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(persistedScene.FileDigest, scene.FileDigest, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidOperationException("The saved scene digest did not change after the material-slot replacement.");
                     VerifySlots(target.Renderer, beforeSlots, slot, materialEvidence);
                     var receipt = Payload(target, slot, beforeEvidence, materialEvidence, true, true, true, true, true);
@@ -211,6 +209,7 @@ namespace VRCForge.Editor
         private static void RequireEqual(string actual, JObject p, string key) { if (!string.Equals(actual, Required(p, key), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The verified scene or material state drifted."); }
         private static void RequireApplyFields(JObject p, Target t, SavedSceneSnapshot s, string id, int slot, Material beforeMaterial, MaterialEvidence before, MaterialEvidence next)
         {
+            RequireEqual(s.FileDigest, p, "expectedSceneFileDigest");
             var nullEvidence = p["expectedBeforeMaterialIsNull"];
             var expectsNull = nullEvidence?.Type == JTokenType.Boolean && nullEvidence.Value<bool>();
             var beforeMatches = before == null

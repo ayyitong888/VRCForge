@@ -115,7 +115,16 @@ namespace VRCForge.Editor
                 var slot = request["slotIndex"].Value<int>();
                 var slots = target.Renderer.sharedMaterials;
                 if (slot >= slots.Length) throw new InvalidOperationException("slotIndex is outside sharedMaterials.");
-                var old = slots[slot] == null ? null : RendererMaterialSlotTool.ReadMaterialAsset(slots[slot], "before batch material");
+                RendererMaterialSlotTool.MaterialEvidence old = null;
+                if (slots[slot] != null)
+                {
+                    var oldPath = RendererMaterialSlotTool.NormalizeMaterialPath(AssetDatabase.GetAssetPath(slots[slot]));
+                    if (!plan.Materials.TryGetValue(oldPath, out old))
+                    {
+                        old = RendererMaterialSlotTool.ReadMaterial(oldPath, "before batch material");
+                        plan.Materials.Add(oldPath, old);
+                    }
+                }
                 if (old != null && EditorUtility.IsDirty(old.Material)) throw new InvalidOperationException("Before batch material has unsaved changes.");
                 rows.Add(JObject.FromObject(new { rendererPath = target.Identity.rendererPath, rendererComponentId = target.Identity.componentId,
                     slotIndex = slot, newMaterialAssetPath = path, beforeMaterial = RendererMaterialSlotTool.MaterialPayload(old), newMaterial = RendererMaterialSlotTool.MaterialPayload(next) }));
@@ -141,8 +150,6 @@ namespace VRCForge.Editor
                         mutationStarted = false, applied = false, committed = false, sceneSaved = false, persistedReadback = false, plan = plan.Evidence });
                 if (!(request["expectedBatchPlan"] is JObject)) throw new InvalidOperationException("A sealed expectedBatchPlan from preview is required.");
                 Verify(request["expectedBatchPlan"], plan.Evidence);
-                // Re-read the full plan immediately before any mutation.
-                Verify(plan.Evidence, Build(rows).Evidence);
                 Undo.IncrementCurrentGroup(); undoGroup = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("Set VRCForge renderer material slots");
                 foreach (var target in plan.Targets) Undo.RegisterCompleteObjectUndo(target.Renderer, "Set VRCForge renderer material slots");
                 started = true;
@@ -165,13 +172,26 @@ namespace VRCForge.Editor
                 if (saved.FileDigest == plan.Scene.FileDigest) throw new InvalidOperationException("Renderer batch scene bytes did not change.");
                 var actual = ReadRenderers(plan, saved);
                 Verify(plan.Evidence["afterRenderers"], actual);
+                var persistedMaterials = new Dictionary<string, RendererMaterialSlotTool.MaterialEvidence>(StringComparer.Ordinal);
                 foreach (JObject row in plan.Evidence["assignments"])
                 {
-                    var next = RendererMaterialSlotTool.ReadMaterial(row["newMaterialAssetPath"].Value<string>(), "persisted new material");
+                    var nextPath = row["newMaterialAssetPath"].Value<string>();
+                    RendererMaterialSlotTool.MaterialEvidence next;
+                    if (!persistedMaterials.TryGetValue(nextPath, out next))
+                    {
+                        next = RendererMaterialSlotTool.ReadMaterial(nextPath, "persisted new material");
+                        persistedMaterials.Add(nextPath, next);
+                    }
                     Verify(row["newMaterial"], JToken.FromObject(RendererMaterialSlotTool.MaterialPayload(next)));
                     if (row["beforeMaterial"].Type != JTokenType.Null)
                     {
-                        var old = RendererMaterialSlotTool.ReadMaterial(row["beforeMaterial"]["assetPath"].Value<string>(), "unchanged before material");
+                        var oldPath = row["beforeMaterial"]["assetPath"].Value<string>();
+                        RendererMaterialSlotTool.MaterialEvidence old;
+                        if (!persistedMaterials.TryGetValue(oldPath, out old))
+                        {
+                            old = RendererMaterialSlotTool.ReadMaterial(oldPath, "unchanged before material");
+                            persistedMaterials.Add(oldPath, old);
+                        }
                         Verify(row["beforeMaterial"], JToken.FromObject(RendererMaterialSlotTool.MaterialPayload(old)));
                     }
                 }
