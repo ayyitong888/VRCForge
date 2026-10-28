@@ -173,9 +173,9 @@ def canonical_tool_owner(block: str, name: str) -> str:
     exact_owner = _EXACT_TOOL_OWNERS.get(lowered)
     if exact_owner:
         return exact_owner
-    # A legacy Skill leaf already has a precise canonical owner. Its package
-    # wording must not reroute it into generic asset/package management.
-    if raw_block.startswith("skills/") and canonical_block in CANONICAL_TOOL_LEAVES:
+    # Legacy integration and Skill leaves already declare a precise owner.
+    # Tool-name keywords must not reroute their tools into unrelated leaves.
+    if raw_block.startswith(("skills/", "integrations/")) and canonical_block in CANONICAL_TOOL_LEAVES:
         return canonical_block
     if "renderer_material_slot" in lowered or "renderer" in lowered:
         return "appearance/renderers"
