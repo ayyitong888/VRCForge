@@ -534,14 +534,14 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "vrcforge_preview_write_animation_curve": {
         "title": "Write Animation Curve Preview",
-        "inputs": ["AnimationClip target binding plus curve data, or source binding fields for one lossless retarget."],
+        "inputs": ["AnimationClip binding and curve data, with actual animatorRootPath and root-relative bindingPath for scene/avatar editing. Only explicit assetOnly=true authors reusable clip assets without scene validation."],
         "outputs": ["Planned AnimationClip binding change; no writes."],
         "sideEffects": "none",
         "tags": ["animation", "curve", "preview"],
     },
     "vrcforge_write_animation_curve": {
         "title": "Write Animation Curve",
-        "inputs": ["AnimationClip target binding plus curve data, or source binding fields for one lossless retarget."],
+        "inputs": ["AnimationClip binding and curve data, with actual animatorRootPath and root-relative bindingPath for scene/avatar editing. Only explicit assetOnly=true authors reusable clip assets without scene validation."],
         "outputs": ["Created, replaced, deleted, copied, or retargeted one AnimationClip curve binding."],
         "sideEffects": "creates or edits one AnimationClip binding; destination overwrite is denied unless explicitly enabled",
         "tags": ["animation", "curve", "write"],

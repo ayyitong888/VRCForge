@@ -30,7 +30,7 @@ GROUP = {
 
 
 def request(mode="clips"):
-    value = {"projectPath": "D:/Project"}
+    value = {"projectPath": "D:/Project", "animatorRootPath": "Avatar"}
     if mode == "single":
         return {**value, "clipPath": "Assets/A.anim", "curves": [copy.deepcopy(GROUP)]}
     if mode == "sets":

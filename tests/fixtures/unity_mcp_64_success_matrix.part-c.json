@@ -742,6 +742,7 @@
       "minimalArguments": {
         "action": "set_curve",
         "clipPath": "${RUN_OWNED_CLIP_PATH}",
+        "animatorRootPath": "${AVATAR_PATH}",
         "bindingPath": "${CURVE_OBJECT_PATH}",
         "componentType": "GameObject",
         "propertyName": "m_IsActive",
@@ -749,7 +750,7 @@
         "preview": false
       },
       "requiredFixtures": [
-        "run-owned Assets directory; target binding hierarchy"
+        "run-owned Assets directory; target binding hierarchy; CURVE_OBJECT_PATH is relative to AVATAR_PATH"
       ],
       "successFields": [
         "action",

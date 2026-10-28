@@ -114,6 +114,7 @@ def build_instantiate_prefab_request(params: dict[str, Any], *, preview: bool | 
 
 
 _AVATAR_KEYS = (
+    "animatorRootPath", "assetOnly",
     "expectedSpeed", "expectedStateDigest",
     "expectedPlanAssetPaths",
     "edits",

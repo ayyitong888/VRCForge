@@ -11591,7 +11591,7 @@ class DashboardServerTests(unittest.TestCase):
                 },
                 "vrc_write_avatar_descriptor",
             ),
-            (lambda params: dashboard_server.write_animation_curve_sync(params, preview=True), {"action": "retarget_curve", "clip_path": "Assets/Test.anim", "binding_path": "Body", "component_type": "SkinnedMeshRenderer", "property_name": "blendShape.jawOpen", "source_binding_path": "Body", "source_component_type": "SkinnedMeshRenderer", "source_property_name": "blendShape.JawOpen", "delete_source": True, "overwrite_existing": False}, "vrc_write_animation_curve"),
+            (lambda params: dashboard_server.write_animation_curve_sync(params, preview=True), {"action": "retarget_curve", "animatorRootPath": "Avatar", "clip_path": "Assets/Test.anim", "binding_path": "Body", "component_type": "SkinnedMeshRenderer", "property_name": "blendShape.jawOpen", "source_binding_path": "Body", "source_component_type": "SkinnedMeshRenderer", "source_property_name": "blendShape.JawOpen", "delete_source": True, "overwrite_existing": False}, "vrc_write_animation_curve"),
             (lambda params: dashboard_server.manage_expression_parameters_sync(params, preview=True), {"avatar_path": "Avatar", "action": "delete", "parameter_name": "Old"}, "vrc_manage_expression_parameters"),
             (lambda params: dashboard_server.manage_expression_menu_sync(params, preview=True), {"avatar_path": "Avatar", "action": "delete", "control_name": "Old"}, "vrc_manage_expression_menu"),
             (lambda params: dashboard_server.manage_fx_animator_sync(params, preview=True), {"avatar_path": "Avatar", "action": "delete_state", "layer_name": "FX", "state_name": "Old"}, "vrc_manage_fx_animator"),
@@ -11615,6 +11615,7 @@ class DashboardServerTests(unittest.TestCase):
                     "SapphyAttachment",
                 )
             if expected_tool == "vrc_write_animation_curve":
+                self.assertEqual(forwarded["animatorRootPath"], "Avatar")
                 self.assertEqual(forwarded["action"], "retarget_curve")
                 self.assertEqual(forwarded["sourceBindingPath"], "Body")
                 self.assertEqual(forwarded["sourceComponentType"], "SkinnedMeshRenderer")

@@ -23012,6 +23012,7 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
     params = params or {}
     request: dict[str, Any] = {}
     for key in (
+        "animatorRootPath", "assetOnly",
         "action",
         "edits",
         "avatarPath",

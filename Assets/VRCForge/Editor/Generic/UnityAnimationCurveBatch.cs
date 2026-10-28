@@ -24,9 +24,9 @@ namespace VRCForge.Editor
         internal static JArray ValidateClips(JObject arguments)
         {
             if (Encoding.UTF8.GetByteCount(arguments.ToString(Formatting.None)) > 512 * 1024
-                || arguments.Properties().Any(p => !new[] { "clips", "preview", "action" }.Contains(p.Name))
+                || arguments.Properties().Any(p => !new[] { "clips", "preview", "action", "animatorRootPath", "assetOnly" }.Contains(p.Name))
                 || (arguments["action"]?.ToString() ?? "set_curve") != "set_curve")
-                throw new InvalidOperationException("clips accepts only set_curve, preview and a bounded clips array.");
+                throw new InvalidOperationException("clips accepts only set_curve, preview, animatorRootPath or assetOnly, and a bounded clips array.");
             var clips = arguments["clips"] as JArray;
             if (clips == null || clips.Count < 1 || clips.Count > 32) throw new InvalidOperationException("clips requires 1..32 existing clips.");
             var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -117,6 +117,7 @@ namespace VRCForge.Editor
             try
             {
                 var rows = ValidateClips(arguments); long bytes = 0;
+                var bindingRoot = WriteAnimationCurveTool.ResolveBindingRoot(arguments);
                 var guids = new HashSet<string>(StringComparer.Ordinal);
                 foreach (JObject row in rows)
                 {
@@ -140,6 +141,7 @@ namespace VRCForge.Editor
                         var type = AvatarPrimitiveCrudCore.FindType(curveRow["componentType"]?.ToString() ?? "GameObject")
                             ?? throw new InvalidOperationException("Binding component type not found.");
                         var binding = new EditorCurveBinding { path = AvatarPrimitiveCrudCore.NormalizePath(curveRow["bindingPath"]?.ToString() ?? curveRow["objectPath"]?.ToString() ?? ""), type = type, propertyName = property };
+                        if (bindingRoot != null) WriteAnimationCurveTool.ValidateBindingTarget(bindingRoot, binding);
                         ValidateBinding(binding, curves.Select(c => c.binding), existing.Keys, curveRow["overwriteExisting"]?.Value<bool?>() ?? false);
                         curves.Add(new CurveEdit { binding = binding, curve = WriteAnimationCurveTool.BuildCurveForBatch(curveRow) });
                     }
@@ -150,6 +152,7 @@ namespace VRCForge.Editor
                 foreach (var edit in prepared) RequireEvidence(edit, edit.Before);
                 if (arguments["preview"]?.Value<bool>() == true)
                     return VRCForgeToolResult.Completed("Preview: existing multi-clip curve batch.", new { ok = true, preview = true, batch = true,
+                        bindingTargetValidated = bindingRoot != null,
                         clips = prepared.Select(e => new { clipPath = e.Path, assetGuid = e.Before.Guid, fileDigest = e.Before.File.Digest, curveCount = e.Edits.Length }).ToArray() });
                 foreach (var edit in prepared)
                 {
@@ -176,6 +179,7 @@ namespace VRCForge.Editor
                     VerifyPreparedClip(edit, finalClip); }
                 return VRCForgeToolResult.Completed("Multi-clip curves saved and verified.", new {
                     schema = "vrcforge.animation_curve_write.v1", ok = true, preview = false, batch = true, verified = true, persistedReadback = true,
+                    bindingTargetValidated = bindingRoot != null,
                     mutationStarted = true, mutationApplied = true, committed = true, commitState = "committed", commitStateKnown = true,
                     checkpointRecoveryRequired = false, temporaryCleanupRequired = false,
                     readback = new { persisted = true, clips = prepared.Select(e => new { clipPath = e.Path, assetGuid = e.Owned.Guid,
@@ -199,7 +203,7 @@ namespace VRCForge.Editor
         {
             if (Encoding.UTF8.GetByteCount(arguments.ToString(Formatting.None)) > 512 * 1024)
                 throw new InvalidOperationException("Curve batch exceeds 512 KiB.");
-            if (arguments.Properties().Any(property => !new[] { "clipPath", "preview", "action", "curves" }.Contains(property.Name)))
+            if (arguments.Properties().Any(property => !new[] { "clipPath", "preview", "action", "curves", "animatorRootPath", "assetOnly" }.Contains(property.Name)))
                 throw new InvalidOperationException("curves is mutually exclusive with single-curve fields.");
             if ((arguments["action"]?.ToString() ?? "set_curve") != "set_curve")
                 throw new InvalidOperationException("Curve batches only support set_curve.");
@@ -230,6 +234,7 @@ namespace VRCForge.Editor
             try
             {
                 var rows = ValidateEnvelope(arguments);
+                var bindingRoot = WriteAnimationCurveTool.ResolveBindingRoot(arguments);
                 var path = AvatarPrimitiveCrudCore.NormalizeAssetPath(arguments["clipPath"]?.ToString() ?? "");
                 if (string.IsNullOrWhiteSpace(path) || !path.StartsWith("Assets/", StringComparison.Ordinal))
                     throw new InvalidOperationException("clipPath must be an Assets AnimationClip path.");
@@ -261,6 +266,7 @@ namespace VRCForge.Editor
                     var binding = new EditorCurveBinding {
                         path = AvatarPrimitiveCrudCore.NormalizePath(row["bindingPath"]?.ToString() ?? row["objectPath"]?.ToString() ?? ""),
                         type = type, propertyName = property };
+                    if (bindingRoot != null) WriteAnimationCurveTool.ValidateBindingTarget(bindingRoot, binding);
                     ValidateBinding(binding, edits.Select(edit => edit.binding), expected.Keys,
                         row["overwriteExisting"]?.Value<bool?>() ?? false);
                     var curve = WriteAnimationCurveTool.BuildCurveForBatch(row);
@@ -270,7 +276,7 @@ namespace VRCForge.Editor
                 // No asset, folder or Undo mutation occurred before the last row passed.
                 if (preview)
                     return VRCForgeToolResult.Completed("Preview: would write one clip curve batch.", new {
-                        ok = true, preview = true, action = "set_curve", clipPath = path, batch = true,
+                        ok = true, preview = true, action = "set_curve", clipPath = path, batch = true, bindingTargetValidated = bindingRoot != null,
                         curveCount = edits.Count, plan = edits.Select(edit => Describe(edit.binding, edit.curve)).ToArray() });
                 recovery.Capture(path);
                 recovery.Begin();
@@ -306,6 +312,7 @@ namespace VRCForge.Editor
                 return VRCForgeToolResult.Completed("Animation curve batch saved and verified.", new {
                     schema = "vrcforge.animation_curve_write.v1", ok = true, preview = false, batch = true,
                     action = "set_curve", clipPath = path, curveCount = edits.Count, verified = true, persistedReadback = true,
+                    bindingTargetValidated = bindingRoot != null,
                     mutationStarted = true, mutationApplied = true, committed = true, commitState = "committed", commitStateKnown = true,
                     checkpointRecoveryRequired = false, temporaryCleanupRequired = false,
                     readback = new { persisted = true, clipPath = path, assetGuid = evidence.Guid, fileDigest = evidence.File.Digest,

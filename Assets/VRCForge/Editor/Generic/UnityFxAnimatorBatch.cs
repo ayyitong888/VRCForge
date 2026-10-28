@@ -18,7 +18,7 @@ namespace VRCForge.Editor
         {
             if (Encoding.UTF8.GetByteCount(arguments.ToString(Formatting.None)) > 512 * 1024)
                 throw new InvalidOperationException("FX batch exceeds 512 KiB.");
-            if (arguments.Properties().Any(property => !new[] { "controllerPath", "preview", "edits" }.Contains(property.Name)))
+            if (arguments.Properties().Any(property => !new[] { "controllerPath", "preview", "edits", "animatorRootPath", "assetOnly" }.Contains(property.Name)))
                 throw new InvalidOperationException("edits is mutually exclusive with single FX fields.");
             var edits = arguments["edits"] as JArray;
             if (edits == null || edits.Count < 1 || edits.Count > 128)
@@ -216,6 +216,8 @@ namespace VRCForge.Editor
             try
             {
                 var edits = ValidateEnvelope(arguments);
+                var hasMotion = edits.OfType<JObject>().Any(edit => edit["motionClipPath"] != null);
+                var bindingRoot = hasMotion ? WriteAnimationCurveTool.ResolveBindingRoot(arguments) : null;
                 var path = AvatarPrimitiveCrudCore.NormalizeAssetPath(Required(arguments, "controllerPath"));
                 if (!path.StartsWith("Assets/", StringComparison.Ordinal)) throw new InvalidOperationException("Controller must be an existing Assets controller.");
                 var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(path)
@@ -231,6 +233,8 @@ namespace VRCForge.Editor
                         var motion = Required(edit, "motionClipPath");
                         if (!motion.StartsWith("Assets/", StringComparison.Ordinal) || AssetDatabase.LoadAssetAtPath<AnimationClip>(motion) == null)
                             throw new InvalidOperationException("Batch references a missing motion clip.");
+                        if (bindingRoot != null)
+                            WriteAnimationCurveTool.ValidateClipBindings(bindingRoot, AssetDatabase.LoadAssetAtPath<AnimationClip>(motion));
                         motions.Add(motion);
                     }
                 var before = Snapshot(controller);

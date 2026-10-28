@@ -14,7 +14,7 @@ TARGET='vrcforge_write_animation_curve'
 ROOT=Path(__file__).resolve().parents[1]
 ARCHIVE_ROOT=Path(os.environ['VRCFORGE_REGRESSION_ARCHIVE_ROOT']) if os.environ.get('VRCFORGE_REGRESSION_ARCHIVE_ROOT') else ROOT/'.tmp'/'regression-archives'
 ROW={'bindingPath':'Body','componentType':'SkinnedMeshRenderer','propertyName':'blendShape.Fit','constantFloat':42,'overwriteExisting':True}
-BASE={'projectPath':'D:/Project','curveSets':[[ROW]],'clips':[{'clipPath':'Assets/A.anim','curveSet':0},{'clipPath':'Assets/B.anim','curveSet':0}]}
+BASE={'animatorRootPath':'Avatar','projectPath':'D:/Project','curveSets':[[ROW]],'clips':[{'clipPath':'Assets/A.anim','curveSet':0},{'clipPath':'Assets/B.anim','curveSet':0}]}
 
 def inline(params):
     result=copy.deepcopy(params);sets=result.pop('curveSets')

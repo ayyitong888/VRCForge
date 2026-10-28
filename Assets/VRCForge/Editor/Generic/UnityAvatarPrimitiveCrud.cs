@@ -836,6 +836,8 @@ namespace VRCForge.Editor
         {
             [VRCForgeInput("Curve action: set_curve, delete_curve, or retarget_curve.", IsRequired = false)] public string action { get; set; } = "set_curve";
             [VRCForgeInput("AnimationClip asset path; required unless clips is provided.", IsRequired = false)] public string clipPath { get; set; } = "";
+            [VRCForgeInput("Scene Animator root hierarchy path, required for scene/avatar edits. bindingPath is relative to this root; do not include the root name. Mutually exclusive with assetOnly=true.", IsRequired = false)] public string animatorRootPath { get; set; } = "";
+            [VRCForgeInput("Use true only for explicitly asset-only reusable clip authoring without a scene target. This does not verify any scene object or animation effect. Otherwise supply animatorRootPath.", IsRequired = false)] public bool? assetOnly { get; set; } = false;
             [VRCForgeInput("Return the curve change plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Optional relative binding path.", IsRequired = false)] public string bindingPath { get; set; } = "";
             [VRCForgeInput("Optional compatibility alias for bindingPath.", IsRequired = false)] public string objectPath { get; set; } = "";
@@ -879,6 +881,8 @@ namespace VRCForge.Editor
                 var type = AvatarPrimitiveCrudCore.FindType(componentTypeText)
                     ?? throw new InvalidOperationException($"Binding component type not found: {componentTypeText}");
                 var binding = new EditorCurveBinding { path = bindingPath, type = type, propertyName = propertyName };
+                var bindingRoot = ResolveBindingRoot(@params);
+                if (action != "delete_curve" && bindingRoot != null) ValidateBindingTarget(bindingRoot, binding);
                 var existingClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath);
                 if (existingClip == null && action == "set_curve")
                 {
@@ -964,7 +968,8 @@ namespace VRCForge.Editor
                 }
                 if (preview)
                 {
-                    return VRCForgeToolResult.Completed($"Preview: would {action} on AnimationClip '{clipPath}'.", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed($"Preview: would {action} on AnimationClip '{clipPath}'.", new { ok = true, preview = true, plan,
+                        bindingTargetValidated = action != "delete_curve" && bindingRoot != null });
                 }
 
                 recovery.Capture(clipPath);
@@ -1044,6 +1049,7 @@ namespace VRCForge.Editor
                         keyCount = actualCurve?.length ?? 0, curve = DescribeCurve(actualCurve) },
                     ok = true,
                     preview = false,
+                    bindingTargetValidated = action != "delete_curve" && bindingRoot != null,
                     action,
                     clipPath = AssetDatabase.GetAssetPath(readbackClip),
                     bindingPath,
@@ -1065,6 +1071,45 @@ namespace VRCForge.Editor
         internal static AnimationCurve BuildCurveForBatch(JObject arguments) => BuildCurve(arguments);
         internal static object DescribeCurveForBatch(AnimationCurve curve) => DescribeCurve(curve);
         internal static AnimationClip LoadOrCreateClipForBatch(string path) => LoadOrCreateClip(path, true);
+
+        internal static GameObject ResolveBindingRoot(JObject arguments)
+        {
+            var path = arguments["animatorRootPath"]?.ToString() ?? "";
+            var assetOnly = arguments["assetOnly"]?.Value<bool?>() ?? false;
+            if (assetOnly && !string.IsNullOrWhiteSpace(path))
+                throw new InvalidOperationException("assetOnly=true cannot be combined with animatorRootPath. Choose scene binding validation or explicit asset-only authoring.");
+            if (assetOnly) return null;
+            if (string.IsNullOrWhiteSpace(path))
+                throw new InvalidOperationException("animatorRootPath is required for scene/avatar animation edits. Read the actual Animator root hierarchy path, pass it as animatorRootPath, and use bindingPath relative to it (empty for the root itself). For intentionally reusable clip asset authoring without a scene target, explicitly pass assetOnly=true; this does not verify a scene effect.");
+            return ComponentCrudCore.ResolveGameObject(path);
+        }
+
+        internal static void ValidateBindingTarget(GameObject root, EditorCurveBinding binding)
+        {
+            if (root == null) throw new InvalidOperationException("Animation binding root does not exist.");
+            var target = string.IsNullOrEmpty(binding.path) ? root.transform : root.transform.Find(binding.path);
+            var context = $"bindingPath='{binding.path}', componentType='{binding.type?.FullName}', propertyName='{binding.propertyName}', animatorRoot='{ComponentCrudCore.GetHierarchyPath(root.transform)}'";
+            var guidance = $" Binding paths are relative to this Animator root; use an empty path for the root itself. Inspect its hierarchy and read the component's animatable properties before retrying; do not repeat the same binding unchanged.";
+            if (target == null)
+            {
+                var prefix = root.name + "/";
+                var hint = binding.path.StartsWith(prefix, StringComparison.Ordinal)
+                    && root.transform.Find(binding.path.Substring(prefix.Length)) != null
+                    ? $" The root name appears twice; the existing relative object path is '{binding.path.Substring(prefix.Length)}'." : "";
+                throw new InvalidOperationException($"Animation binding object does not exist: {context}.{hint}{guidance}");
+            }
+            if (AnimationUtility.GetAnimatedObject(root, binding) == null)
+                throw new InvalidOperationException($"Animation binding component does not exist on the object: {context}.{guidance}");
+            if (AnimationUtility.GetEditorCurveValueType(root, binding) == null)
+                throw new InvalidOperationException($"Animation binding property does not exist or cannot be animated: {context}.{guidance}");
+        }
+
+        internal static void ValidateClipBindings(GameObject root, AnimationClip clip)
+        {
+            if (clip == null) return;
+            foreach (var binding in AnimationUtility.GetCurveBindings(clip).Concat(AnimationUtility.GetObjectReferenceCurveBindings(clip)))
+                ValidateBindingTarget(root, binding);
+        }
 
         private static string NormalizeAction(string value)
         {
@@ -1905,6 +1950,8 @@ namespace VRCForge.Editor
         public class Parameters
         {
             [VRCForgeInput("Optional ordered batch on one existing controller and existing layers; mutually exclusive with single edit fields. At most 128 edits and 512 KiB.", IsRequired = false)] public object[] edits { get; set; }
+            [VRCForgeInput("For batch motion attachment: actual scene Animator root hierarchy path. Validate motion bindings relative to this root before any controller write.", IsRequired = false)] public string animatorRootPath { get; set; } = "";
+            [VRCForgeInput("For batch motion attachment only: true explicitly authors controller assets without a scene target. Does not validate a scene effect; mutually exclusive with animatorRootPath.", IsRequired = false)] public bool? assetOnly { get; set; } = false;
             [VRCForgeInput("FX animator action; required when edits is absent.", IsRequired = false)] public string action { get; set; } = "";
             [VRCForgeInput("Return the FX animator change plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Optional avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
@@ -1958,6 +2005,8 @@ namespace VRCForge.Editor
                     : action == "delete_parameter" ? ""
                     : GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{AvatarPrimitiveCrudCore.Sanitize(descriptor.name, "Avatar")}_FX.controller");
                 var motionClipPath = AvatarPrimitiveCrudCore.NormalizeAssetPath(@params["motionClipPath"]?.ToString() ?? "");
+                if ((action == "ensure_state" || action == "update_state") && !string.IsNullOrEmpty(motionClipPath))
+                    WriteAnimationCurveTool.ValidateClipBindings(descriptor.gameObject, AssetDatabase.LoadAssetAtPath<AnimationClip>(motionClipPath));
                 if ((action == "ensure_state" || action == "update_state") && !string.IsNullOrEmpty(motionClipPath)
                     && AssetDatabase.LoadAssetAtPath<AnimationClip>(motionClipPath) == null)
                 {

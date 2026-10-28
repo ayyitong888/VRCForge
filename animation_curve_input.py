@@ -63,6 +63,7 @@ def expand_animation_curve_sets(params: dict[str, Any]) -> dict[str, Any]:
     # The Core receives these fields, not project/approval metadata. Preserve its
     # expanded-size ceiling; a small template cannot authorize an oversized batch.
     envelope = {"clips": clips} if "clips" in params else dict(clips[0])
+    envelope.update({key: params[key] for key in ("animatorRootPath", "assetOnly") if key in params})
     envelope["preview"] = False
     if "action" in params:
         envelope["action"] = params["action"]

@@ -7,13 +7,26 @@ from unity_execution_plans_scene import build_scene_execution_plan
 
 
 def batch():
-    return {"projectPath": "D:/Project", "controllerPath": "Assets/FX.controller", "edits": [
+    return {"projectPath": "D:/Project", "animatorRootPath":"Avatar", "controllerPath": "Assets/FX.controller", "edits": [
         {"action": "ensure_state", "layerName": "Layer", "stateName": "New", "motionClipPath": "Assets/New.anim"},
         {"action": "ensure_transition", "layerName": "Layer", "sourceStateName": "Idle", "destinationStateName": "New"}]}
 
 
 def test_schema_supports_single_controller_edits():
     jsonschema.validate(batch(), MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA)
+
+
+def test_motion_attachment_requires_scene_root_or_explicit_asset_only():
+    arguments = batch()
+    arguments.pop("animatorRootPath")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(arguments, MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA)
+    arguments["assetOnly"] = True
+    jsonschema.validate(arguments, MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA)
+    assert build_scene_execution_plan("vrcforge_manage_fx_animator", arguments)[0][1]["assetOnly"] is True
+    arguments["animatorRootPath"] = "Avatar"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(arguments, MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA)
 
 
 def test_schema_supports_exact_layer_deletion_batch():

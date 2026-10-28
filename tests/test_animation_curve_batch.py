@@ -7,7 +7,7 @@ from unity_shared_input_schemas import ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA
 
 
 def batch():
-    return {"projectPath": "D:/Project", "clipPath": "Assets/Probe.anim", "curves": [
+    return {"projectPath": "D:/Project", "animatorRootPath": "Avatar", "clipPath": "Assets/Probe.anim", "curves": [
         {"bindingPath": "Body", "componentType": "SkinnedMeshRenderer", "propertyName": "blendShape.Smile", "keys": [{"time": 0, "value": 0}, {"time": 1, "value": 1}]},
         {"bindingPath": "Hat", "propertyName": "m_IsActive", "constantFloat": 1}]}
 

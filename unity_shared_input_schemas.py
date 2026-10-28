@@ -253,6 +253,8 @@ ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
         "projectPath": _PROJECT_PATH_PROPERTY,
         "action": {"type": "string", "enum": ["set_curve", "delete_curve", "retarget_curve"], "default": "set_curve"},
         "clipPath": {"type": "string", "pattern": "^Assets/"},
+        "animatorRootPath": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Required for scene/avatar edits: actual Animator root hierarchy path. bindingPath is relative to this root, excluding the root name. Do not use assetOnly for a scene effect."},
+        "assetOnly": {"type": "boolean", "default": False, "description": "True only for explicitly asset-only reusable clip authoring with no scene target. Does not verify object/component/property existence or a scene effect. Mutually exclusive with animatorRootPath."},
         "bindingPath": {"type": "string"},
         "objectPath": {"type": "string"},
         "componentType": {"type": "string", "default": "GameObject"},
@@ -356,7 +358,10 @@ ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["allOf"] = [{
     "if": {"required": ["curveSets"]},
     "then": {"required": ["clips"]},
     "else": {"properties": {"clips": {"items": {"not": {"required": ["curveSet"]}}}}},
-}]
+}, {"oneOf": [
+    {"required": ["animatorRootPath"], "properties": {"assetOnly": {"const": False}}},
+    {"required": ["assetOnly"], "properties": {"assetOnly": {"const": True}}, "not": {"required": ["animatorRootPath"]}},
+]}]
 ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["oneOf"].append({
     "required": ["clips"], "properties": {"action": {"const": "set_curve"}},
     "not": {"anyOf": [{"required": [field]} for field in (
@@ -414,6 +419,8 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["projectPath"],
     "properties": {
+        "animatorRootPath": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["properties"]["animatorRootPath"],
+        "assetOnly": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["properties"]["assetOnly"],
         "projectPath": {"type": "string", "description": "Exact Unity project root."},
         "avatarPath": {"type": "string", "description": "Avatar hierarchy path used to resolve its FX controller."},
         "controllerPath": {"type": "string", "pattern": "^Assets/", "description": "Exact AnimatorController asset path; overrides avatar FX resolution."},
@@ -516,7 +523,7 @@ for _fx_single_branch in MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["oneOf"]:
 MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["oneOf"].append({
     "required": ["controllerPath", "edits"],
     "not": {"anyOf": [{"required": [name]} for name in (
-        *[field for field in MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["properties"] if field not in {"projectPath", "controllerPath"}],
+        *[field for field in MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["properties"] if field not in {"projectPath", "controllerPath", "animatorRootPath", "assetOnly"}],
         "sourceStateName",
     )]},
 })
@@ -524,6 +531,10 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["properties"]["edits"] = {
     "type": "array", "minItems": 1, "maxItems": 128, "items": _FX_BATCH_ITEM_SCHEMA,
     "description": "Ordered atomic edits to one existing controller, at most 512 KiB. Supports state/transition edits and delete_layer by exact unique layerName. Delete synced dependent layers before their target. Layer deletion preserves subassets and clips. Mutually exclusive with top-level single-action fields. Motion clips must already exist.",
 }
+MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["allOf"] = [{
+    "if": {"required": ["edits"], "properties": {"edits": {"contains": {"required": ["motionClipPath"]}}}},
+    "then": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["allOf"][1],
+}]
 
 
 # One existing assignment contract shared by its preview and approved write.
