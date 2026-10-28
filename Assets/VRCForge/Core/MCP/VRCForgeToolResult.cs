@@ -62,13 +62,59 @@ namespace VRCForge.Core.MCP
                 0.0);
         }
 
+        /// <summary>Keep caught handler failures diagnosable without changing mutation facts.</summary>
+        public static VRCForgeToolResult FailedWithException(
+            string errorCode, string message, Exception exception, object payload = null)
+        {
+            var failure = payload == null ? new JObject() : JObject.FromObject(payload);
+            failure["diagnostics"] = ExceptionDiagnostics(exception);
+            return FailedWithCode(errorCode, message, failure);
+        }
+
+        public static JObject ExceptionDiagnostics(Exception exception)
+        {
+            var chain = new JArray();
+            var current = exception;
+            var depth = 0;
+            var stackTrace = string.Empty;
+            while (current != null && depth++ < 6)
+            {
+                var message = current.Message ?? string.Empty;
+                chain.Add(new JObject
+                {
+                    ["type"] = current.GetType().FullName ?? current.GetType().Name,
+                    ["message"] = message.Substring(0, Math.Min(800, message.Length)),
+                });
+                // The deepest available stack points to the original cause,
+                // rather than only the reflection wrapper that reported it.
+                if (!string.IsNullOrWhiteSpace(current.StackTrace))
+                    stackTrace = current.StackTrace;
+                current = current.InnerException;
+            }
+            var handler = new JObject
+            {
+                ["type"] = exception == null ? "Exception" : exception.GetType().FullName ?? exception.GetType().Name,
+                ["message"] = exception == null ? string.Empty
+                    : (exception.Message ?? string.Empty).Substring(0, Math.Min(800, (exception.Message ?? string.Empty).Length)),
+                ["innerChain"] = chain,
+            };
+            if (!string.IsNullOrEmpty(stackTrace))
+                handler["stackTrace"] = stackTrace.Substring(0, Math.Min(4000, stackTrace.Length));
+            return new JObject
+            {
+                ["schema"] = "vrcforge.unity_tool_handler_diagnostics.v1",
+                ["handlerException"] = handler,
+            };
+        }
+
         public static VRCForgeToolResult RejectedBeforeMutation(
             string errorCode,
             string message,
             string failureLayer,
             string failurePhase,
             bool retryable = false,
-            object details = null)
+            object details = null,
+            Exception exception = null)
         {
             var payload = new JObject
             {
@@ -87,6 +133,8 @@ namespace VRCForge.Core.MCP
             {
                 payload["details"] = JToken.FromObject(details);
             }
+            if (exception != null)
+                payload["diagnostics"] = ExceptionDiagnostics(exception);
             return FailedWithCode(errorCode, message, payload);
         }
 

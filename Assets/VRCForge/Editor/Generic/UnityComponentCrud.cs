@@ -1427,9 +1427,10 @@ namespace VRCForge.Editor
             var message = restored
                 ? $"{action} failed at {failureStage}: {failureDetail} The verified pre-state was restored."
                 : $"{action} failed at {failureStage}: {failureDetail} Atomic cleanup could not be verified; checkpoint recovery requires user approval.";
-            return VRCForgeToolResult.FailedWithCode(
+            return VRCForgeToolResult.FailedWithException(
                 errorCode,
                 message,
+                failure,
                 new
                 {
                     action,
@@ -1599,7 +1600,23 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Get property failed: {ex.Message}");
+                return VRCForgeToolResult.FailedWithException(
+                    "component_property_read_failed",
+                    $"Get property failed: {ComponentCrudCore.SafeExceptionMessage(ex)}",
+                    ex,
+                    new
+                    {
+                        failureLayer = "unity_editor_tool",
+                        failurePhase = p.includeCheckpointScope == true ? "checkpoint_scope" : "property_read",
+                        gameObjectPath = p.gameObjectPath,
+                        componentType = p.componentType,
+                        componentIndex = p.componentIndex ?? 0,
+                        propertyPath = p.propertyPath,
+                        serializedPropertyPath = p.serializedPropertyPath,
+                        nextAction = p.includeCheckpointScope == true
+                            ? "Use the reported checkpoint-owner or field reason to correct this request. Component callbacks require a project checkpoint, not an alternative avatar structure. If the loaded Core still rejects a valid serialized field, update the Core before retrying."
+                            : "Inspect the reported component/member, field type and requested path. Use serializedPropertyPath for serialized data; correct the specific cause in the exception before retrying.",
+                    });
             }
         }
     }
@@ -2844,8 +2861,9 @@ namespace VRCForge.Editor
                         reason = ex.Message,
                         recommendedAction = selectedSceneIsDirty
                             ? "Save or revert the selected scene, then retry the exact same tool call."
-                            : "Correct the reported validation or precondition failure before retrying."
-                    });
+                            : "Read the reported component field using vrcforge_get_property. Correct the exact path or value type in this request; for nested data and object references use serializedPropertyPath and the returned field type. Do not replace the avatar design to bypass a tool rejection."
+                    },
+                    exception: ex);
             }
         }
     }

@@ -195,14 +195,14 @@ namespace VRCForge.Editor
                         persistedReadback,
                         after));
             }
-            catch (Exception)
+            catch (Exception exception)
             {
                 if (!mutationStarted)
                 {
                     throw;
                 }
                 var restored = TryRestoreFailedApply(snapshot, created, undoGroup);
-                return ComponentFeatureWriteCore.BuildMutationFailure(restored);
+                return ComponentFeatureWriteCore.BuildMutationFailure(restored, exception);
             }
         }
 

@@ -256,16 +256,16 @@ namespace VRCForge.Editor
             {
                 return VRCForgeToolResult.Failed(controlled.Message);
             }
-            return VRCForgeToolResult.Failed("Component feature operation failed closed.");
+            return VRCForgeToolResult.FailedWithException("component_feature_write_failed",
+                "Component feature operation failed: " + exception.Message, exception);
         }
 
-        internal static object BuildMutationFailure(bool restored)
+        internal static object BuildMutationFailure(bool restored, Exception exception = null)
         {
-            return VRCForgeToolResult.Failed(
-                restored
-                    ? "Component feature apply failed after restoring the verified pre-state."
-                    : "Component feature apply failed; checkpoint restore is required.",
-                new
+            var message = restored
+                ? "Component feature apply failed after restoring the verified pre-state."
+                : "Component feature apply failed; checkpoint restore is required.";
+            var payload = new
                 {
                     schema = ResultSchema,
                     mutationStarted = true,
@@ -273,8 +273,13 @@ namespace VRCForge.Editor
                     cleanupVerified = restored,
                     cleanupRequired = !restored,
                     checkpointRestoreRequired = !restored,
-                    operationState = restored ? "restored" : "checkpoint_restore_required"
-                });
+                    operationState = restored ? "restored" : "checkpoint_restore_required",
+                    nextAction = restored
+                        ? "Read back the restored target and correct the reported cause before requesting another write."
+                        : "Use the checkpoint recovery flow with user approval before retrying this write."
+                };
+            return exception == null ? VRCForgeToolResult.Failed(message, payload)
+                : VRCForgeToolResult.FailedWithException(message, message + " " + exception.Message, exception, payload);
         }
 
         internal static ComponentFeatureCompatibility ValidateCompatibility()

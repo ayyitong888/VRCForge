@@ -820,9 +820,10 @@ namespace VRCForge.Editor
             string phase, AssetEditRecovery recovery)
         {
             if (!mutationStarted)
-                return VRCForgeToolResult.RejectedBeforeMutation(code, exception.Message, "unity_core_tool", phase);
+                return VRCForgeToolResult.RejectedBeforeMutation(code, exception.Message, "unity_core_tool", phase,
+                    exception: exception);
             var restored = recovery != null && recovery.Restore();
-            return VRCForgeToolResult.FailedWithCode(code, exception.Message, new
+            return VRCForgeToolResult.FailedWithException(code, exception.Message, exception, new
             {
                 schema = "vrcforge.authoring_failure.v1", ok = false, failureLayer = "unity_core_tool",
                 failurePhase = phase, mutationStarted = true, committed = false,

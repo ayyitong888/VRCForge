@@ -163,9 +163,11 @@ def test_registered_read_handler_returns_scope_without_getter_and_keeps_default_
         "internal static string ResolvePropertyPath(",
         "internal static FieldInfo ResolveSerializedRootField(",
         "internal static SerializedProperty ResolveSerializedProperty(",
+        "internal static string SafeExceptionMessage(",
+        "private static Exception UnwrapException(",
     ))
     program = r'''
-using System;using System.Reflection;using System.Collections.Generic;using Newtonsoft.Json.Linq;
+using System;using System.Reflection;using System.Collections.Generic;using Newtonsoft.Json.Linq;using VRCForge.Core.MCP;
 class VRCForgeInput:Attribute {public bool IsRequired{get;set;}public VRCForgeInput(string text){}}
 class Component {public GameObject gameObject;public int value=7;public Settings settings=new Settings();}
 [Serializable] class Settings {public int count=12;}
@@ -175,8 +177,8 @@ class SerializedProperty {public string propertyPath;public string type="int";pu
 class SerializedObject:IDisposable {
  public static int constructed;public SerializedObject(Component c){constructed++;}public void UpdateIfRequiredOrScript(){}public SerializedProperty FindProperty(string path)=>path=="settings.count"?new SerializedProperty{propertyPath=path}:null;public void Dispose(){}
 }
-static class VRCForgeToolResult {public static object Failed(string error)=>new JObject{["error"]=error};public static object Completed(string text,object payload)=>JObject.FromObject(payload);}
-static class UnityComponentPropertyBatch {public static int calls;public static object Handle(JObject p){calls++;return new JObject{["batch"]=true};}}
+RESULT_CONTRACT
+static class UnityComponentPropertyBatch {public static int calls;public static object Handle(JObject p){calls++;return VRCForgeToolResult.Completed("batch",new{batch=true});}}
 static class ComponentCrudCore {
  public static int reads,scopes;public static bool rejectScope;public static GameObject go=new GameObject();
  public static GameObject ResolveGameObject(string p){go.component=new Component{gameObject=go};return go;}
@@ -194,7 +196,7 @@ static class ComponentCrudCore {
 }
 class GetPropertyTool {PARAMETERS HANDLER}
 class Probe {
- static JObject Call(JObject args)=>(JObject)GetPropertyTool.HandleCommand(args);
+ static JObject Call(JObject args){var r=(VRCForgeToolResult)GetPropertyTool.HandleCommand(args);var wire=r.ToStructuredContent();var data=wire["data"] as JObject??new JObject();if(!r.IsSuccessful){data["error"]=wire["error"];data["code"]=wire["code"];}return data;}
  static JObject Args()=>new JObject{["gameObjectPath"]="Caller/Component",["componentType"]="Component",["propertyPath"]="value"};
  static void Check(bool valid,string message){if(!valid)throw new Exception(message);}
  static void Main(){var p=Args();p["includeCheckpointScope"]=true;var scoped=Call(p);
@@ -207,9 +209,11 @@ class Probe {
   Check((int)serializedValue["propertyValue"]==12&&SerializedObject.constructed==1&&ComponentCrudCore.reads==1,"serialized scalar read path");
   var normal=Call(Args());Check((int)normal["propertyValue"]==7&&ComponentCrudCore.reads==2&&ComponentCrudCore.scopes==2&&normal["checkpointScope"]==null,"default read changed");
   ComponentCrudCore.rejectScope=true;var rejected=Call(p);Check(rejected["error"]!=null&&ComponentCrudCore.reads==2,"failed scope must never reach getter");
+  Check((string)rejected["code"]=="component_property_read_failed"&&(string)rejected["diagnostics"]?["handlerException"]?["type"]=="System.InvalidOperationException","original exception type/code retained");
+  Check(rejected["nextAction"]!=null&&(string)rejected["componentType"]=="Component"&&(string)rejected["propertyPath"]=="value","correction keeps requested field");
   var batch=new JObject{["queries"]=new JArray(),["includeCheckpointScope"]=true};Check(Call(batch)["error"]!=null&&UnityComponentPropertyBatch.calls==0,"batch silently ignored scope");
   batch.Remove("includeCheckpointScope");Check((bool)Call(batch)["batch"]&&UnityComponentPropertyBatch.calls==1,"default batch changed");
   Console.WriteLine("read scope and defaults passed");}
 }
-'''.replace("PARAMETERS", parameters).replace("HANDLER", handler).replace("PATH_HELPERS", path_helpers)
+'''.replace("PARAMETERS", parameters).replace("HANDLER", handler).replace("PATH_HELPERS", path_helpers).replace("RESULT_CONTRACT", (ROOT / "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs").read_text(encoding="utf-8").replace("using System;", "").replace("using Newtonsoft.Json.Linq;", ""))
     assert "read scope and defaults passed" in run(tmp_path, program)

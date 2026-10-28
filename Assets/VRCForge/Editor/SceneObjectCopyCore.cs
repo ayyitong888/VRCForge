@@ -42,10 +42,11 @@ namespace VRCForge.Editor
             {
                 return VRCForgeToolResult.Failed(controlled.Message);
             }
-            return VRCForgeToolResult.Failed("Scene object copy operation failed closed.");
+            return VRCForgeToolResult.FailedWithException("scene_object_copy_failed",
+                "Scene object copy operation failed: " + exception.Message, exception);
         }
 
-        internal static object BuildMutationFailure(string operation, bool restored)
+        internal static object BuildMutationFailure(string operation, bool restored, Exception exception = null)
         {
             if (operation != DuplicateOperation && operation != PrefabOperation)
             {
@@ -54,9 +55,7 @@ namespace VRCForge.Editor
             var message = restored
                 ? "Scene object copy failed after restoring the verified pre-state."
                 : "Scene object copy failed; checkpoint restore is required.";
-            return VRCForgeToolResult.Failed(
-                message,
-                new
+            var payload = new
                 {
                     schema = ResultSchema,
                     operation,
@@ -65,8 +64,13 @@ namespace VRCForge.Editor
                     cleanupVerified = restored,
                     cleanupRequired = !restored,
                     checkpointRestoreRequired = !restored,
-                    operationState = restored ? "restored" : "checkpoint_restore_required"
-                });
+                    operationState = restored ? "restored" : "checkpoint_restore_required",
+                    nextAction = restored
+                        ? "Read back the restored target and correct the reported cause before requesting another write."
+                        : "Use the checkpoint recovery flow with user approval before retrying this write."
+                };
+            return exception == null ? VRCForgeToolResult.Failed(message, payload)
+                : VRCForgeToolResult.FailedWithException(message, message + " " + exception.Message, exception, payload);
         }
 
         internal static DuplicatePreviewSnapshot BuildDuplicatePreview(

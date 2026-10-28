@@ -894,10 +894,12 @@ namespace VRCForge.Editor
                 var reason = exception is ParameterBitPackingException
                     ? " " + exception.Message
                     : string.Empty;
-                return VRCForgeToolResult.Failed(
+                return VRCForgeToolResult.FailedWithException(
+                    "parameter_bit_packing_failed_after_mutation",
                     restored
                         ? "Parameter bit-packing failed after restoring the verified pre-state." + reason
                         : "Parameter bit-packing failed; checkpoint restore is required." + reason,
+                    exception,
                     new
                     {
                         schema = ResultSchema,
@@ -917,13 +919,10 @@ namespace VRCForge.Editor
             }
             catch (Exception exception)
             {
-                return VRCForgeToolResult.Failed(
-                    "Parameter bit-packing operation failed closed during "
-                    + operationStage
-                    + " ("
-                    + exception.GetType().Name
-                    + ")."
-                );
+                return VRCForgeToolResult.FailedWithException(
+                    "parameter_bit_packing_failed",
+                    "Parameter bit-packing operation failed during " + operationStage + ": " + exception.Message,
+                    exception, new { failureStage = operationStage });
             }
             finally
             {

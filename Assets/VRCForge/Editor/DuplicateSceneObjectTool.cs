@@ -255,7 +255,7 @@ namespace VRCForge.Editor
                 var restored = CleanupFailedApply(snapshot, duplicate, true);
                 return SceneObjectCopyCore.BuildMutationFailure(
                     SceneObjectCopyCore.DuplicateOperation,
-                    restored);
+                    restored, exception);
             }
         }
 

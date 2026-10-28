@@ -160,9 +160,10 @@ namespace VRCForge.Editor
             {
                 return VRCForgeToolResult.Failed(exception.Message);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
-                return VRCForgeToolResult.Failed("Constraint source operation failed closed.");
+                return VRCForgeToolResult.FailedWithException("constraint_source_failed",
+                    "Constraint source operation failed: " + exception.Message, exception);
             }
         }
 
@@ -216,21 +217,19 @@ namespace VRCForge.Editor
                 }
                 return Success(snapshot, readback, false, true, true);
             }
-            catch (Exception) when (mutationStarted)
+            catch (Exception exception) when (mutationStarted)
             {
                 var restored = TryRestoreBeforeSources(snapshot);
-                return BuildMutationFailure(restored);
+                return BuildMutationFailure(restored, exception);
             }
         }
 
-        private static object BuildMutationFailure(bool restored)
+        private static object BuildMutationFailure(bool restored, Exception exception = null)
         {
             var message = restored
                 ? "Constraint source operation failed after restoring the verified pre-state."
                 : "Constraint source operation failed; checkpoint restore is required.";
-            return VRCForgeToolResult.Failed(
-                message,
-                new
+            var payload = new
                 {
                     schema = ResultSchema,
                     mutationStarted = true,
@@ -238,9 +237,13 @@ namespace VRCForge.Editor
                     cleanupVerified = restored,
                     cleanupRequired = !restored,
                     checkpointRestoreRequired = !restored,
-                    operationState = restored ? "restored" : "checkpoint_restore_required"
-                }
-            );
+                    operationState = restored ? "restored" : "checkpoint_restore_required",
+                    nextAction = restored
+                        ? "Read back the restored target and correct the reported cause before requesting another write."
+                        : "Use the checkpoint recovery flow with user approval before retrying this write."
+                };
+            return exception == null ? VRCForgeToolResult.Failed(message, payload)
+                : VRCForgeToolResult.FailedWithException(message, message + " " + exception.Message, exception, payload);
         }
 
         private static bool TryRestoreBeforeSources(ConstraintSourceSnapshot snapshot)

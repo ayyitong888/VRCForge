@@ -133,14 +133,14 @@ namespace VRCForge.Editor
                         checkpointRestoreRequired = mutationStarted
                     });
             }
-            catch (Exception)
+            catch (Exception exception)
             {
                 return MutationFailure(
                     "scene_save_failed",
                     mutationStarted
                         ? "The new scene save failed after mutation; use the returned checkpoint before retrying."
                         : "The new scene save failed before changing the project.",
-                    mutationStarted);
+                    mutationStarted, exception);
             }
         }
 
@@ -212,11 +212,9 @@ namespace VRCForge.Editor
             }
         }
 
-        private static object MutationFailure(string code, string message, bool mutationStarted)
+        private static object MutationFailure(string code, string message, bool mutationStarted, Exception exception = null)
         {
-            return VRCForgeToolResult.Failed(
-                code,
-                new
+            var payload = new
                 {
                     schema = ResultSchema,
                     operation = Operation,
@@ -224,7 +222,9 @@ namespace VRCForge.Editor
                     mutationStarted,
                     commitState = mutationStarted ? "unknown" : "not_started",
                     checkpointRestoreRequired = mutationStarted
-                });
+                };
+            return exception == null ? VRCForgeToolResult.FailedWithCode(code, message, payload)
+                : VRCForgeToolResult.FailedWithException(code, message + " " + exception.Message, exception, payload);
         }
 
         private static string ComputeSceneHierarchyDigest(Scene scene)
@@ -489,14 +489,14 @@ namespace VRCForge.Editor
                         manualRecoveryRequired = mutationStarted
                     });
             }
-            catch (Exception)
+            catch (Exception exception)
             {
                 return MutationFailure(
                     "current_scene_save_failed",
                     mutationStarted
                         ? "The current scene save failed after persistence began; inspect the scene and Console before retrying."
                         : "The current scene save failed before changing the project.",
-                    mutationStarted);
+                    mutationStarted, exception);
             }
         }
 
@@ -574,11 +574,9 @@ namespace VRCForge.Editor
             return IsLowerHex(value, length) && value == expected;
         }
 
-        private static object MutationFailure(string code, string message, bool mutationStarted)
+        private static object MutationFailure(string code, string message, bool mutationStarted, Exception exception = null)
         {
-            return VRCForgeToolResult.Failed(
-                code,
-                new
+            var payload = new
                 {
                     schema = ResultSchema,
                     operation = Operation,
@@ -587,7 +585,9 @@ namespace VRCForge.Editor
                     commitState = mutationStarted ? "unknown" : "not_started",
                     checkpointRestoreRequired = false,
                     manualRecoveryRequired = mutationStarted
-                });
+                };
+            return exception == null ? VRCForgeToolResult.FailedWithCode(code, message, payload)
+                : VRCForgeToolResult.FailedWithException(code, message + " " + exception.Message, exception, payload);
         }
 
         private static string ComputeSceneHierarchyDigest(Scene scene)

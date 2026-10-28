@@ -266,7 +266,7 @@ namespace VRCForge.Editor
                         finalEvidenceCaptured);
                 return SceneObjectCopyCore.BuildMutationFailure(
                     SceneObjectCopyCore.PrefabOperation,
-                    restored);
+                    restored, exception);
             }
         }
 
