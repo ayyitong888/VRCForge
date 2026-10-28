@@ -54,3 +54,24 @@ def test_packaged_entry_preserves_config_environment_default(tmp_path, monkeypat
     profile = tmp_path / "gateway.json"
     monkeypatch.setenv("VRCFORGE_AGENT_GATEWAY_CONFIG", str(profile))
     assert dashboard_server.parse_args(["--agent-mcp-stdio"]).config == str(profile)
+
+
+def test_release_stdio_entry_imports_from_only_packaged_modules(tmp_path):
+    import re
+    import shutil
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[1]
+    build = (repo / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
+    modules = re.findall(r"Copy-Item -LiteralPath \.\\([a-z_0-9]+\.py) -Destination", build)
+    assert modules
+    payload = tmp_path / "payload"
+    (payload / "tools").mkdir(parents=True)
+    for name in modules:
+        shutil.copy2(repo / name, payload / name)
+    entry = payload / "tools" / "vrcforge_agent_mcp_stdio.py"
+    shutil.copy2(repo / "tools" / entry.name, entry)
+    result = subprocess.run([sys.executable, "-I", str(entry), "--help"],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert "--protocol-profile" in result.stdout

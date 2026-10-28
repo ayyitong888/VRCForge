@@ -913,6 +913,7 @@ try {
     Copy-Item -LiteralPath .\tools -Destination (Join-Path $payloadRoot "tools") -Recurse -Force
     Copy-Item -LiteralPath .\agent_mcp_2026.py -Destination (Join-Path $payloadRoot "agent_mcp_2026.py") -Force
     Copy-Item -LiteralPath .\agent_mcp_standard.py -Destination (Join-Path $payloadRoot "agent_mcp_standard.py") -Force
+    Copy-Item -LiteralPath .\unity_mcp_tool_contract.py -Destination (Join-Path $payloadRoot "unity_mcp_tool_contract.py") -Force
     Copy-Item -LiteralPath .\agent_tool_result_contract.py -Destination (Join-Path $payloadRoot "agent_tool_result_contract.py") -Force
     Copy-Item -LiteralPath .\external_tool_result_contract.py -Destination (Join-Path $payloadRoot "external_tool_result_contract.py") -Force
     Copy-Item -LiteralPath .\external_mcp_result_projection.py -Destination (Join-Path $payloadRoot "external_mcp_result_projection.py") -Force
