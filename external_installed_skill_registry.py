@@ -201,10 +201,13 @@ class ExternalInstalledSkillRegistryService:
             )
 
         permission = str(arguments.get("permissionMode") or "instruction_only").strip()
-        if permission not in {
-            "instruction_only", "read_only", "preview", "approval_required"
-        }:
-            raise AgentGatewayError("Unsupported Skill permission mode.", status_code=400)
+        permission_modes = ("instruction_only", "read_only", "preview", "approval_required")
+        if permission not in permission_modes:
+            raise AgentGatewayError(
+                "permissionMode is unsupported. Choose one of: " + ", ".join(permission_modes)
+                + ". Use read_only for inspection, preview for plans, and approval_required for supervised writes.",
+                status_code=400,
+            )
 
         payload = {
             "name": name,

@@ -464,3 +464,16 @@ def test_external_agent_creates_installs_disables_and_reenables_vsk(
             and item["packageId"] == "community.agent.created-workflow"
             for item in internal["skills"]
         )
+
+
+def test_unsupported_permission_names_the_field_and_legal_correction_before_registry_write():
+    from agent_gateway import AgentGatewayError
+    from external_installed_skill_registry import ExternalInstalledSkillRegistryService
+    service = ExternalInstalledSkillRegistryService(None)
+    with pytest.raises(AgentGatewayError) as error:
+        service.create_installed_skill({"name": "fixture-read", "description": "Fixture", "instructions": "Inspect only.", "permissionMode": "automatic"})
+    message = str(error.value)
+    assert "permissionMode" in message
+    for mode in ("instruction_only", "read_only", "preview", "approval_required"):
+        assert mode in message
+    assert "read_only for inspection" in message
