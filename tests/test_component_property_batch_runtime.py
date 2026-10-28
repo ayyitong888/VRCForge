@@ -38,7 +38,7 @@ namespace UnityEditor {
 namespace VRCForge.Core.MCP {
  public static class VRCForgeToolResult {
   public static object Completed(string s,object o)=>JObject.FromObject(o);
-  public static object FailedWithCode(string c,string m)=>new JObject{["errorCode"]=c,["message"]=m};
+  public static object FailedWithCode(string c,string m,object payload=null){var r=payload==null?new JObject():JObject.FromObject(payload);r["errorCode"]=c;r["message"]=m;return r;}
  }
 }
 namespace VRCForge.Editor {
@@ -185,7 +185,90 @@ namespace VRCForge.Editor {static class ComponentCrudCore {
 }}
 namespace VRCForge.Core.MCP {static class VRCForgeToolResult {
  internal static object Completed(string s,object o)=>null;
- internal static object FailedWithCode(string c,string m)=>null;
+ internal static object FailedWithCode(string c,string m,object payload=null)=>null;
 }}
 '''
     compile_probe(tmp_path, seams, [managed / "UnityEngine.CoreModule.dll", managed / "UnityEditor.CoreModule.dll"], executable=False)
+
+
+def test_batch_failures_keep_values_and_reach_internal_and_external_agents(tmp_path):
+    """Replay real producer receipts through both callers, including the next native request."""
+    from types import SimpleNamespace
+
+    from agent_gateway import create_agent_mcp_app
+    from dashboard_server import extract_tool_result_payload
+    from tests.test_internal_external_tool_result_parity import TOOL_NAME, _mcp_2026_tool_call
+    from tests.test_native_runtime_gateway import setup_gateway, call, run
+
+    # Use the production result class too: the old Completed() wrapper hid
+    # failed identities behind success=true even when every property failed.
+    start = SEAMS.index("namespace VRCForge.Core.MCP")
+    end = SEAMS.index("namespace VRCForge.Editor", start)
+    seams = SEAMS[:start] + SEAMS[end:]
+    result_source = (ROOT / "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs").read_text(encoding="utf-8")
+    result_source = "\n".join(line for line in result_source.splitlines() if not line.startswith("using "))
+    runner = RUNNER[:RUNNER.index(" static int Main(){Setup();")] + r'''
+ static void Emit(string name,params JObject[] queries){
+  var result=(VRCForge.Core.MCP.VRCForgeToolResult)VRCForge.Editor.UnityComponentPropertyBatch.Handle(new JObject{["queries"]=new JArray(queries)});
+  Console.WriteLine(name+" "+result.ToStructuredContent().ToString(Newtonsoft.Json.Formatting.None));
+ }
+ static int Main(){Setup();
+  var stale=Query(1,"threshold");stale["componentGlobalObjectId"]="deleted-component";
+  Emit("missing",stale);Emit("partial",Query(0,"threshold"),stale);
+  Emit("property",Query(0,"missing","broken"));Emit("good",Query(0,"threshold"));
+  return 0;
+ }
+}
+'''
+    base, newtonsoft, dll = compile_probe(tmp_path, seams + result_source + runner)
+    shutil.copy2(newtonsoft, tmp_path / newtonsoft.name)
+    (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions": {
+        "tfm": "net8.0", "framework": {"name": "Microsoft.NETCore.App", "version": "8.0.0"}
+    }}), encoding="utf-8")
+    replay = subprocess.run([str(base / "dotnet.exe"), str(dll)], capture_output=True, text=True, timeout=30)
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    receipts = {name: json.loads(value) for name, value in (line.split(" ", 1) for line in replay.stdout.splitlines())}
+    payloads = {name: extract_tool_result_payload(SimpleNamespace(payload={"structuredContent": value}))
+                for name, value in receipts.items()}
+    for name in ("missing", "partial", "property"):
+        assert receipts[name]["success"] is False
+        assert payloads[name]["ok"] is False
+        assert payloads[name]["code"] == "component_property_batch_incomplete"
+        assert "retry only" in payloads[name]["nextAction"]
+    assert payloads["partial"]["successCount"] == 1
+    assert payloads["partial"]["results"][0]["properties"][0]["ok"] is True
+    identity = payloads["missing"]["results"][0]["properties"][0]["error"]
+    assert identity["code"] == "component_identity_mismatch"
+    assert "Avatar/Part1" in identity["nextAction"] and "bind" in identity["nextAction"]
+    field_errors = payloads["property"]["results"][0]["properties"]
+    assert "'missing'" in field_errors[0]["error"]["nextAction"]
+    assert "getter failed" in field_errors[1]["error"]["message"]
+    assert receipts["good"]["success"] is True and payloads["good"]["ok"] is True
+
+    gateway, model, _ = setup_gateway(tmp_path / "runtime", [
+        call("read", "vrcforge_get_property", {"case": "missing"}),
+        {"role": "assistant", "content": "The exact component disappeared; rebind it before retrying."},
+    ])
+    gateway.register_tool("vrcforge_get_property", "When to use: read. When NOT to use: write.",
+                          "plan/preview", lambda args: payloads[args["case"]])
+    result = run(gateway, tmp_path, maxAgenticTurns=3)
+    receipt = next(message for message in model.requests[1]["messages"] if message.get("tool_call_id") == "read")
+    observation = json.loads(receipt["content"])["observations"][0]
+    assert observation["outcome"]["status"] == "failed"
+    assert "component_property_batch_incomplete" in receipt["content"]
+    assert "component_identity_mismatch" in receipt["content"] and "retry only" in receipt["content"]
+    assert result["plan"]["nextStep"] != "done"
+
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+    gateway.register_tool(TOOL_NAME, "Inspect the real batch receipt.", "read/debug", lambda args: payloads[args["case"]])
+    gateway.register_external_mcp_unity_tool(TOOL_NAME, "diagnostics")
+    app = create_agent_mcp_app(gateway)
+    for name in ("missing", "partial", "property", "good"):
+        external = _mcp_2026_tool_call(app, token=config.token, arguments={"case": name})
+        assert external["outcome"]["status"] == ("ok" if name == "good" else "failed")
+        assert external["result"]["results"] == payloads[name]["results"]
+        if name != "good":
+            assert external["outcome"]["error"]["code"] == "component_property_batch_incomplete"
+            assert "retry only" in external["outcome"]["nextAction"]

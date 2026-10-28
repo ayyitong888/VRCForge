@@ -93,7 +93,10 @@ namespace VRCForge.Editor
                             value["error"] = new JObject
                             {
                                 ["code"] = identityError == null ? "property_read_failed" : "component_identity_mismatch",
-                                ["message"] = error.GetBaseException().Message
+                                ["message"] = error.GetBaseException().Message,
+                                ["nextAction"] = identityError != null
+                                    ? $"Query {index} ('{query["gameObjectPath"]}', {query["componentType"]} index {query["componentIndex"]}) no longer matches its bound identity. Read vrcforge_get_gameobject and bind the current exact component before retrying this failed query; do not reuse stale IDs."
+                                    : $"Query {index}, property '{name}' on '{query["gameObjectPath"]}' could not be read: {error.GetBaseException().Message} Correct the property name or use a bounded scalar vrcforge_get_property read for nested fields or collections, then retry only the failed properties."
                             };
                             failureCount++;
                         }
@@ -111,17 +114,21 @@ namespace VRCForge.Editor
                         ["properties"] = values
                     });
                 }
-                return VRCForgeToolResult.Completed(
-                    $"Component property batch completed: {successCount} succeeded, {failureCount} failed.",
-                    new
+                var payload = new
                     {
-                        schema = "vrcforge.component_property_batch.v1", sampleId, sampledAtUtc,
+                        schema = "vrcforge.component_property_batch.v1", ok = failureCount == 0, sampleId, sampledAtUtc,
                         unityFrame = frame, completedUnityFrame = Time.frameCount,
                         sampleScope = "single_synchronous_editor_call",
                         successCount, failureCount, allSucceeded = failureCount == 0,
                         queryCount = queries.Count, propertyCount = successCount + failureCount,
-                        results = rows
-                    });
+                        results = rows,
+                        nextAction = failureCount == 0 ? null
+                            : "Keep the successful property values. Inspect results[].properties[].error for the exact failed query, property, cause and correction; rebind changed identities or correct unreadable fields, then retry only those failed queries/properties."
+                    };
+                var summary = $"Component property batch completed: {successCount} succeeded, {failureCount} failed.";
+                return failureCount == 0
+                    ? VRCForgeToolResult.Completed(summary, payload)
+                    : VRCForgeToolResult.FailedWithCode("component_property_batch_incomplete", summary, payload);
             }
             catch (Exception error)
             {
