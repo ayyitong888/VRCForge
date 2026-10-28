@@ -4528,6 +4528,8 @@ class AgentGateway:
                         outcome_value = outcome["data"].get(key)
                     if value in (None, "", "unknown") and outcome_value not in (None, "", "unknown"):
                         value = outcome_value
+                if key == "nextAction" and value in (None, "", [], {}):
+                    value = outcome.get("nextAction")
                 payload[key] = self._external_mcp_visible_value(value)
         # The transaction owner persists the full checkpoint and recovery
         # records, but the external receipt needs only bounded identifiers and
@@ -4579,6 +4581,8 @@ class AgentGateway:
                 "nextAction",
             ):
                 if key in payload:
+                    if key == "nextAction" and payload[key] in (None, "", [], {}):
+                        continue
                     outcome_projection[key] = payload[key]
             if payload.get("operationId"):
                 outcome_projection["operationId"] = payload["operationId"]

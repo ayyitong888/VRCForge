@@ -562,3 +562,15 @@ def test_real_human_request_is_not_replaced_by_model_negative_reply():
     assert gate["reply"] == "Which outfit should I use?"
     assert gate["nextStep"] == "needs_user_action"
     assert "modelFailureReplyPreserved" not in gate["completionGate"]
+
+
+def test_root_correction_actions_are_available_in_standard_error_projection() -> None:
+    raw = {
+        "ok": False, "code": "scene_precondition", "error": "The scene has unsaved changes.",
+        "nextActions": ["Save the selected scene.", "Retry the same operation."],
+        "diagnostics": {"phase": "scene_precondition"},
+    }
+    outcome = normalize_agent_tool_result(raw, fallback_summary="Write failed.", write=True)
+    assert outcome["nextAction"] == raw["nextActions"]
+    assert outcome["error"]["nextActions"] == raw["nextActions"]
+    assert outcome["diagnostics"] == raw["diagnostics"]

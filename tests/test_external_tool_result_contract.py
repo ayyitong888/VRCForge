@@ -344,3 +344,40 @@ def test_nested_details_keep_explicit_failure_cause_fields() -> None:
         "failurePhase": "descriptor_normalization",
     }
     assert facts["rootCause"] == facts["failureCause"]
+
+
+def test_component_rejection_recommended_action_reaches_both_contracts() -> None:
+    # Actual Core shape after the adapter flattens RejectedBeforeMutation.data.
+    raw = {
+        "ok": False, "success": False,
+        "code": "component_property_rejected_before_mutation",
+        "error": "The supplied object reference does not match this serialized field.",
+        "failureLayer": "unity_editor_tool", "failurePhase": "value_conversion",
+        "mutationStarted": False, "committed": False, "commitState": "not_started",
+        "details": {
+            "componentType": "FixtureMaterialSetter",
+            "serializedPropertyPath": "entries.Array.data[0].material",
+            "recommendedAction": "Read the serialized field type, then supply a matching asset object reference.",
+        },
+    }
+    expected = raw["details"]["recommendedAction"]
+    internal = normalize_agent_tool_result(raw, fallback_summary="Write failed.", write=True)
+    external = build_external_tool_error(raw_result=raw, operation_kind="write")
+    assert internal["nextAction"] == external["nextAction"] == expected
+    assert internal["error"]["nextActions"] == [expected]
+    assert internal["mutationStarted"] is False
+    assert external["rawResult"] == raw
+
+
+def test_explicit_structured_next_action_is_not_replaced_by_recommended_text() -> None:
+    action = {"tool": "vrcforge_get_property", "arguments": {"serializedPropertyPath": "entries.Array.size"}}
+    raw = {
+        "ok": False, "error": "Inspect the current collection before setting an element.",
+        "code": "serialized_index_out_of_range",
+        "nextAction": action,
+        "details": {"recommendedAction": "Read the collection size."},
+    }
+    internal = normalize_agent_tool_result(raw, fallback_summary="Write failed.", write=True)
+    external = build_external_tool_error(raw_result=raw, operation_kind="write")
+    assert internal["nextAction"] == external["nextAction"] == action
+    assert internal["error"]["nextActions"] == []

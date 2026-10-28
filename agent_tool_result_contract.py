@@ -135,11 +135,19 @@ def _structured_error(views: list[Mapping[str, Any]]) -> dict[str, Any]:
             ),
             None,
         )
+    # Use the same action aliases and source priority as the public result.
+    # Structured tool requests stay intact in nextAction; this human-readable
+    # error list contains only instructions that the tool actually supplied.
+    next_actions = canonical_result_facts([source, *views]).get("nextAction")
+    if isinstance(next_actions, str):
+        next_actions = [next_actions]
+    elif isinstance(next_actions, (list, tuple)):
+        next_actions = [item for item in next_actions if isinstance(item, str)]
     projected = {
         "type": error_type,
         "code": code,
         "likelyCauses": _bounded_text_list(source.get("likelyCauses")),
-        "nextActions": _bounded_text_list(source.get("nextActions")),
+        "nextActions": _bounded_text_list(next_actions),
         "retryable": retryable_value,
         "summary": str(source.get("summary") or source.get("message") or "").strip()[:600],
     }

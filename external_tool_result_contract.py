@@ -227,7 +227,7 @@ def canonical_result_facts(
         ("delta", ("delta",)),
         ("evidence", ("evidence",)),
         ("causeChain", ("causeChain", "causes")),
-        ("nextAction", ("nextAction", "nextActions")),
+        ("nextAction", ("nextAction", "nextActions", "recommendedAction")),
         ("recovery", ("recovery", "recoveryRequired", "checkpointRecoveryRequired")),
     ):
         if (

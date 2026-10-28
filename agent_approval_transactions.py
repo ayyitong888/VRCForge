@@ -5026,7 +5026,7 @@ class AgentApprovalTransactionService:
                 "readbackState": "failed" if handler_started else "not_started",
                 "cleanupState": "complete" if _confirmed_atomic_rollback_failure(failure_result, write_failure) else "unknown" if handler_started else "not_applicable",
                 "retryable": False,
-                "nextAction": None,
+                "nextAction": completion_outcome.get("nextAction"),
             }
             if isinstance(arguments.get("executionTarget"), Mapping):
                 payload["executionTargetDigest"] = execution_target_digest(arguments["executionTarget"])
