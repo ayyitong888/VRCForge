@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from agent_tool_result_contract import normalize_agent_tool_result
+from external_tool_result_contract import (
+    build_external_tool_error,
+    canonical_result_facts,
+    external_exception_details,
+    external_exception_raw_result,
+)
 
 
 def _result_approval_id(result: Any) -> str:
@@ -95,6 +101,42 @@ class AgentRuntimeSkillExecutor:
                 payload["status"] = "failed"
                 payload.setdefault("error", outcome["summary"])
         return payload
+
+    def _exception_evidence(self, tool: RuntimeSkillTool, error: Exception) -> dict[str, Any]:
+        raw = external_exception_raw_result(external_exception_details(error))
+        failure = build_external_tool_error(
+            exception=error, raw_result=raw, tool=tool.name,
+            failure_layer="runtime_skill_executor", failure_phase="tool_invocation",
+            operation_kind="write" if tool.write else "read",
+            **({"mutation_started": False, "committed": False, "commit_state": "not_started"} if not tool.write else {}),
+        )
+        if raw is not None:
+            original_source = raw
+            structured = raw.get("structuredContent")
+            if (raw.get("isError") is True and isinstance(structured, dict)
+                    and structured.get("success") is False and isinstance(structured.get("data"), dict)):
+                original_source = {**structured["data"], **{key: value for key, value in structured.items() if key != "data"}}
+            original = normalize_agent_tool_result(original_source, fallback_summary=str(error), write=tool.write)
+            if original["status"] == "failed":
+                failure.update(canonical_result_facts([original], success=False, status="failed"))
+                failure["error"] = original["summary"]
+                failure["errorCode"] = original["error"]["code"]
+                if original.get("diagnostics"):
+                    failure["diagnostics"] = original["diagnostics"]
+        cause = failure.get("failureCause")
+        if isinstance(cause, dict):
+            # The canonical source outranks the wrapper cause. Fill only its
+            # missing exception category; preserve any explicit domain type.
+            cause.setdefault("category", type(error).__name__)
+        # Keep the raw evidence once in the normal result channel, where the
+        # runtime's existing result reader owns paging and context limits.
+        failure.pop("rawResult", None)
+        return {
+            "error": failure["error"],
+            "errorCode": failure["errorCode"],
+            "errorDetails": self._ports.redact_runtime_result(failure),
+            **({"result": self._ports.redact_runtime_result(raw)} if raw is not None else {}),
+        }
 
     def _execute(
         self,
@@ -236,6 +278,7 @@ class AgentRuntimeSkillExecutor:
                 "committed": None if tool.write else False,
                 "commitState": "unknown" if tool.write else "not_started",
             }
+            payload.update(self._exception_evidence(tool, exc))
             payload["outcome"] = normalize_agent_tool_result(
                 payload,
                 fallback_summary=str(exc),
@@ -648,6 +691,7 @@ class AgentRuntimeSkillExecutor:
                     else {}
                 ),
             }
+            payload.update(self._exception_evidence(tool, exc))
             payload["outcome"] = normalize_agent_tool_result(
                 payload,
                 fallback_summary=str(exc),

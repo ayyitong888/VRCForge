@@ -24765,7 +24765,7 @@ def read_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(
             settings, "vrc_get_property", request,
-            preserve_tool_error=params.get("includeCheckpointScope") is True,
+            preserve_tool_error=True,
         )),
         "get property",
     )
