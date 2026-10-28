@@ -8,6 +8,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
+from .reasoning import direct_reasoning_effort
+
 from model_provider_adapters import validate_provider_api_key
 from provider_runtime_adapters import (
     OpenAIResponsesAdapter,
@@ -139,8 +141,9 @@ class ChatGPTResponsesAdapter:
             "stream": True,
             "include": ["reasoning.encrypted_content"],
         }
-        if request.reasoning_effort:
-            payload["reasoning"] = {"effort": request.reasoning_effort}
+        effort = direct_reasoning_effort(request.reasoning_effort)
+        if effort:
+            payload["reasoning"] = {"effort": effort}
         if request.mode == "planner":
             payload["tools"] = _namespace_tools([_TOOL_SCHEMA])
         elif request.structured_output:
@@ -177,8 +180,9 @@ class ChatGPTResponsesAdapter:
             "stream": True,
             "include": ["reasoning.encrypted_content"],
         }
-        if reasoning_effort:
-            payload["reasoning"] = {"effort": reasoning_effort}
+        effort = direct_reasoning_effort(reasoning_effort)
+        if effort:
+            payload["reasoning"] = {"effort": effort}
         grouped_tools = _namespace_tools(tools)
         if grouped_tools:
             payload["tools"] = grouped_tools

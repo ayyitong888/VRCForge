@@ -20,6 +20,7 @@ import httpx
 import jwt
 
 from .storage import ChatGPTAuthStorage, OAuthStorageError
+from .reasoning import DIRECT_REASONING_EFFORTS
 
 
 _AUTH_ORIGIN = "https://auth.openai.com"
@@ -267,6 +268,8 @@ class ChatGPTAuthService:
                         effort = entry.get("effort")
                         if not isinstance(effort, str) or not effort.strip() or len(effort) > 32:
                             continue
+                        if effort.strip().lower() not in DIRECT_REASONING_EFFORTS:
+                            continue
                         level = {"effort": effort.strip().lower()}
                         description = entry.get("description")
                         if isinstance(description, str) and len(description) <= 240:
@@ -274,7 +277,7 @@ class ChatGPTAuthService:
                         levels.append(level)
                     model["supportedReasoningLevels"] = levels
                     default_level = item.get("default_reasoning_level")
-                    if isinstance(default_level, str) and default_level.strip():
+                    if isinstance(default_level, str) and default_level.strip().lower() in {level["effort"] for level in levels}:
                         model["defaultReasoningLevel"] = default_level.strip().lower()
                 # Preserve advertised capacity; do not infer it from the name.
                 for target, keys in {

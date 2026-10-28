@@ -27,7 +27,7 @@ class FakeAuth:
         return [{
             "id": "available-model", "name": "Available Model",
             "supportedReasoningLevels": [
-                {"effort": "low"}, {"effort": "high"}, {"effort": "ultra"},
+                {"effort": "low"}, {"effort": "high"}, {"effort": "max"},
             ],
             "defaultReasoningLevel": "low",
         }]
@@ -182,14 +182,15 @@ def test_activate_uses_model_discovery_reasoning_metadata_and_rejects_unsupporte
     app, _, saved = setup_app()
     with TestClient(app, headers=HEADERS) as client:
         response = client.post("/api/chatgpt/activate", json={
-            "account_id": "account", "model": "available-model", "thinking_level": "ultra",
-        })
-        assert response.status_code == 200
-        assert saved[0].thinking_level == "ultra"
-        rejected = client.post("/api/chatgpt/activate", json={
             "account_id": "account", "model": "available-model", "thinking_level": "max",
         })
+        assert response.status_code == 200
+        assert saved[0].thinking_level == "max"
+        rejected = client.post("/api/chatgpt/activate", json={
+            "account_id": "account", "model": "available-model", "thinking_level": "ultra",
+        })
         assert rejected.status_code == 400
+        assert "direct Responses" in rejected.json()["detail"]
         assert len(saved) == 1
 
 
@@ -200,7 +201,7 @@ def test_models_preserve_reasoning_metadata_from_oauth_catalog():
         assert response.status_code == 200
         model = response.json()["models"][0]
         assert model["supportedReasoningLevels"] == [
-            {"effort": "low"}, {"effort": "high"}, {"effort": "ultra"},
+            {"effort": "low"}, {"effort": "high"}, {"effort": "max"},
         ]
         assert model["defaultReasoningLevel"] == "low"
 

@@ -111,7 +111,23 @@ def test_planner_oauth_responses_payload_carries_selected_reasoning_effort():
     assert payloads[0]["tools"]
 
 
-def test_native_oauth_responses_payload_keeps_reasoning_and_tools():
+@pytest.mark.parametrize("native", [False, True])
+def test_codex_orchestration_effort_is_not_sent_or_silently_downgraded(native):
+    token_calls = []
+    adapter, client, sdk_kwargs = make_adapter([], token_calls=token_calls)
+    with pytest.raises(ValueError, match="direct Responses") as raised:
+        if native:
+            adapter.send_native_request(model="gpt-6.1-sol", messages=[], tools=[], reasoning_effort="ultra")
+        else:
+            adapter.send_request(ProviderRuntimeRequest(
+                model="gpt-6.1-sol", prompt="plan", instructions="", reasoning_effort="ultra",
+            ))
+    assert "not changed" in str(raised.value)
+    assert token_calls == [] and sdk_kwargs == [] and client.closed == 0
+
+
+@pytest.mark.parametrize("effort", ["xhigh", "max"])
+def test_native_oauth_responses_payload_keeps_reasoning_and_tools(effort):
     payloads = []
     client = FakeClient([completed([{
         "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}],
@@ -123,9 +139,9 @@ def test_native_oauth_responses_payload_keeps_reasoning_and_tools():
     adapter.send_native_request(
         model="gpt-5.6-sol", messages=[{"role": "user", "content": "hi"}],
         tools=[{"type": "function", "function": {"name": "vrcforge_read", "parameters": {}}}],
-        reasoning_effort="xhigh",
+        reasoning_effort=effort,
     )
-    assert payloads[0]["reasoning"] == {"effort": "xhigh"}
+    assert payloads[0]["reasoning"] == {"effort": effort}
     assert payloads[0]["tools"]
 
 

@@ -464,7 +464,7 @@ def test_access_token_refresh_is_serialized_and_models_keep_visible_order(tmp_pa
         fake.model_payload = {
             "models": [
                 {"slug": "first", "display_name": "First", "visibility": "list", "context_window": 123456, "max_output_tokens": 4096,
-                 "supported_reasoning_levels": [{"effort": "low", "description": "Fast"}, {"effort": "ultra", "description": "Delegation"}],
+                 "supported_reasoning_levels": [{"effort": "low", "description": "Fast"}, {"effort": "max", "description": "Maximum"}, {"effort": "ultra", "description": "Delegation"}],
                  "default_reasoning_level": "low"},
                 {"slug": "hidden", "display_name": "Hidden", "visibility": "hide"},
                 {"slug": "second", "display_name": "Second", "visibility": "list", "context_window": True, "input_token_limit": -5},
@@ -473,11 +473,15 @@ def test_access_token_refresh_is_serialized_and_models_keep_visible_order(tmp_pa
         }
         assert service1.models(result["accountId"]) == [
             {"id": "first", "name": "First", "contextWindow": 123456, "maxOutputTokens": 4096,
-             "supportedReasoningLevels": [{"effort": "low", "description": "Fast"}, {"effort": "ultra", "description": "Delegation"}],
+             "supportedReasoningLevels": [{"effort": "low", "description": "Fast"}, {"effort": "max", "description": "Maximum"}],
              "defaultReasoningLevel": "low"},
             {"id": "second", "name": "Second"},
         ]
         assert fake.get_calls[-1][0] == "https://api.openai.com/v1/models"
+        fake.model_payload["models"][0]["default_reasoning_level"] = "ultra"
+        projected = service1.models(result["accountId"])[0]
+        assert "defaultReasoningLevel" not in projected
+        assert [entry["effort"] for entry in projected["supportedReasoningLevels"]] == ["low", "max"]
     finally:
         service1.close()
         service2.close()

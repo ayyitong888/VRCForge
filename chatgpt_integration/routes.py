@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from provider_configuration_service import ProviderApiConfig, ProviderConfigurationBusyError
 from .service import ChatGPTAuthError
+from .reasoning import direct_reasoning_effort
 
 
 class ChatGPTAccountRequest(BaseModel):
@@ -129,6 +130,10 @@ def build_chatgpt_oauth_router(
             if isinstance(entry, dict) and isinstance(entry.get("effort"), str)
         ] if isinstance(raw_levels, list) else []
         requested_level = body.thinking_level.strip().lower()
+        try:
+            direct_reasoning_effort(requested_level)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
         if supported_levels and requested_level not in supported_levels:
             raise HTTPException(400, "Choose a supported reasoning level for this ChatGPT model.")
         if requested_level and not supported_levels:
