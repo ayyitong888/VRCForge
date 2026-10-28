@@ -106,7 +106,7 @@ def publish_scene_capture_preview(registry, image_path, project_path, binding, c
     }
 
 
-def read_scene_capture_preview(envelope):
+def read_scene_capture_preview(envelope, *, include_verified_image=False):
     if not isinstance(envelope, Mapping):
         raise ValueError("Invalid stored scene capture preview envelope.")
     data = envelope.get("data")
@@ -123,7 +123,6 @@ def read_scene_capture_preview(envelope):
         or
         data.get("schema") != SCHEMA
         or data.get("mimeType") != "image/png"
-        or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("sourceSha256") or ""))
         or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("sha256") or ""))
         or not capture_id
         or identity.get("captureId") != capture_id
@@ -152,24 +151,30 @@ def read_scene_capture_preview(envelope):
                 or height != data.get("height")
                 or not 1 <= max(width, height) <= MAX_PREVIEW_EDGE
                 or width * height > MAX_SOURCE_PIXELS
+                or getattr(image, "n_frames", 1) != 1
             ):
-                raise ValueError("Stored scene capture preview dimensions mismatch.")
+                raise ValueError("Stored scene capture preview dimensions are invalid or the PNG is animated.")
             image.verify()
     except (OSError, Image.DecompressionBombError) as exc:
         raise ValueError("Stored scene capture preview is not a valid PNG.") from exc
+    content = {
+        "uri": str(envelope.get("uri") or ""),
+        "mimeType": "image/png",
+        "blob": encoded,
+        "_meta": {
+            "identity": dict(identity),
+            "sha256": data["sha256"],
+            "revision": envelope.get("revision"),
+            "contentHash": envelope.get("contentHash"),
+            "capturedAt": envelope.get("capturedAt"),
+            "historical": True,
+        },
+    }
+    if "sourceSha256" in data:
+        content["_meta"]["sourceSha256"] = data["sourceSha256"]
+    if include_verified_image:
+        from native_tool_images import _VerifiedNativeImage
+        content["_verifiedImage"] = _VerifiedNativeImage(png, "image/png", (width, height), content["uri"])
     return {
-        "contents": [{
-            "uri": str(envelope.get("uri") or ""),
-            "mimeType": "image/png",
-            "blob": encoded,
-            "_meta": {
-                "identity": dict(identity),
-                "sourceSha256": data["sourceSha256"],
-                "sha256": data["sha256"],
-                "revision": envelope.get("revision"),
-                "contentHash": envelope.get("contentHash"),
-                "capturedAt": envelope.get("capturedAt"),
-                "historical": True,
-            },
-        }]
+        "contents": [content]
     }

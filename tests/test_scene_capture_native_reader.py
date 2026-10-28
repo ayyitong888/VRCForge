@@ -9,7 +9,7 @@ from PIL import Image
 import dashboard_server as server
 from mcp_resource_registry import McpResourceRegistry
 from native_tool_images import collect_tool_images
-from scene_capture_preview import publish_scene_capture_preview
+from scene_capture_preview import publish_scene_capture_preview, read_scene_capture_preview
 
 
 @pytest.fixture
@@ -101,6 +101,27 @@ def test_scene_preview_reader_rejects_context_project_and_capture_mismatch(
 
     assert len(content) == 1
     assert "image unavailable" in content[0]["text"].lower()
+
+
+@pytest.mark.parametrize("source_hash", [None, "not-a-source-digest"])
+def test_scene_preview_does_not_require_unused_source_digest(published_scene_capture, source_hash):
+    _project, registry, _context_id, preview = published_scene_capture
+    envelope = registry.validate_reference(
+        preview["resourceUri"], expected_type="scene_capture_preview", context_id=_context_id,
+        expected_identity={"captureId": preview["captureId"]},
+    )
+    if source_hash is None:
+        envelope["data"].pop("sourceSha256", None)
+    else:
+        envelope["data"]["sourceSha256"] = source_hash
+
+    resource = read_scene_capture_preview(envelope)
+    assert resource["contents"][0]["uri"] == preview["resourceUri"]
+    assert resource["contents"][0]["mimeType"] == "image/png"
+    if source_hash is None:
+        assert "sourceSha256" not in resource["contents"][0]["_meta"]
+    else:
+        assert resource["contents"][0]["_meta"]["sourceSha256"] == source_hash
 
 
 def test_multi_capture_preview_transport_does_not_consume_capture_receipt(

@@ -103,7 +103,7 @@ def publish_texture_preview(registry, params, asset_info):
     return {key: value for key, value in data.items() if key != "pngBase64"} | {"resourceUri": record["uri"], "revision": record["revision"], "contentHash": record["contentHash"]}
 
 
-def read_texture_preview(envelope):
+def read_texture_preview(envelope, *, include_verified_image=False):
     data = envelope["data"]
     if data.get("schema") != "vrcforge.texture_asset_preview.v1" or data.get("mimeType") != "image/png":
         raise ValueError("Invalid stored texture preview.")
@@ -114,10 +114,20 @@ def read_texture_preview(envelope):
     if len(png) > MAX_PREVIEW_BYTES or hashlib.sha256(png).hexdigest() != data.get("sha256"):
         raise ValueError("Stored texture preview hash mismatch.")
     with Image.open(io.BytesIO(png), formats=["PNG"]) as image:
-        if image.size != (data.get("width"), data.get("height")) or not 1 <= max(image.size) <= 1024:
-            raise ValueError("Stored texture preview dimensions mismatch.")
+        if (image.size != (data.get("width"), data.get("height"))
+                or not 1 <= max(image.size) <= 1024
+                or getattr(image, "n_frames", 1) != 1):
+            raise ValueError("Stored texture preview dimensions are invalid or the PNG is animated.")
         image.verify()
-    return {"contents": [{"uri": envelope["uri"], "mimeType": "image/png", "blob": encoded,
-        "_meta": {"identity": envelope["identity"], "sourceSha256": data["sourceSha256"], "sha256": data["sha256"],
+    content = {"uri": envelope["uri"], "mimeType": "image/png", "blob": encoded,
+        "_meta": {"identity": envelope["identity"], "sha256": data["sha256"],
                   "revision": envelope["revision"], "contentHash": envelope["contentHash"],
-                  "capturedAt": envelope["capturedAt"], "historical": True, "interpretation": INTERPRETATION}}]}
+                  "capturedAt": envelope["capturedAt"], "historical": True, "interpretation": INTERPRETATION}}
+    if "sourceSha256" in data:
+        content["_meta"]["sourceSha256"] = data["sourceSha256"]
+    if include_verified_image:
+        from native_tool_images import _VerifiedNativeImage
+        content["_verifiedImage"] = _VerifiedNativeImage(
+            png, "image/png", (data["width"], data["height"]), envelope["uri"]
+        )
+    return {"contents": [content]}

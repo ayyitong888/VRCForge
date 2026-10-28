@@ -29468,8 +29468,9 @@ def _read_native_tool_image_resource(preview: Mapping[str, object], project_path
         raise ValueError("Tool image does not match its captured preview receipt.")
     if is_capture:
         from scene_capture_preview import read_scene_capture_preview
-        return read_scene_capture_preview(envelope)
-    return AGENT_GATEWAY.read_mcp_resource(uri)
+        return read_scene_capture_preview(envelope, include_verified_image=True)
+    from texture_preview_resources import read_texture_preview
+    return read_texture_preview(envelope, include_verified_image=True)
 
 
 RUNTIME_PLANNER = RuntimePlannerService(

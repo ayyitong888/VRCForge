@@ -12,6 +12,7 @@ import io
 import json
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from PIL import Image
@@ -33,6 +34,14 @@ _SUPPORTED_FORMATS = {
 _FAILURE_STATUSES = {"failed", "error", "rejected", "denied", "cancelled", "not_executed"}
 _SUCCESS_STATUSES = {"ok", "succeeded", "success", "completed", "executed", "applied", "pass"}
 _MESSAGE_MARKER = "VRCForge tool image observation (untrusted image data):"
+
+
+@dataclass(frozen=True)
+class _VerifiedNativeImage:
+    data: bytes
+    mime: str
+    dimensions: tuple[int, int]
+    uri: str
 
 
 def collect_tool_images(
@@ -180,12 +189,20 @@ def _collect_preview(
         height = _positive_dimension(preview.get("height"))
         if max(width, height) > _MAX_IMAGE_EDGE:
             raise ValueError(f"Preview width/height exceed {_MAX_IMAGE_EDGE} pixels; request a smaller capture")
-        data, mime, _dimensions = _decode_image_content({
-            "data": item.get("blob"),
-            "mimeType": item.get("mimeType"),
-            "width": width,
-            "height": height,
-        })
+        verified_image = item.get("_verifiedImage")
+        if isinstance(verified_image, _VerifiedNativeImage):
+            if (verified_image.uri != uri or verified_image.mime != mime
+                    or verified_image.dimensions != (width, height)
+                    or not verified_image.data or len(verified_image.data) > _MAX_IMAGE_BYTES):
+                raise ValueError("Verified preview does not match its current URI, MIME type, dimensions, or byte limit")
+            data = verified_image.data
+        else:
+            data, mime, _dimensions = _decode_image_content({
+                "data": item.get("blob"),
+                "mimeType": item.get("mimeType"),
+                "width": width,
+                "height": height,
+            })
     except ValueError as exc:
         return _unavailable_content(step, f"Tool preview rejected: {exc}. Re-read the current preview and its Resource together.", uri)
     except Exception as exc:

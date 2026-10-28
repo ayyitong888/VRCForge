@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import io
 import json
+import uuid
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -268,6 +271,123 @@ def test_preview_descriptor_hashes_are_not_required_for_current_resource(image_s
     assert scenes[0]["resourceUri"] in " ".join(captions)
     assert scenes[0]["resourceUri"] in reads
     assert texture["resourceUri"] in reads
+
+
+def test_native_texture_and_scene_resources_are_read_and_decoded_once(image_sources, monkeypatch):
+    project, _texture_path, registry, texture, scenes = image_sources
+    calls = {"validate": 0, "gateway_read": 0, "image_open": 0}
+    original_validate = registry.validate_reference
+    original_gateway_read = server.AGENT_GATEWAY.read_mcp_resource
+    original_image_open = Image.open
+
+    def validate(*args, **kwargs):
+        calls["validate"] += 1
+        return original_validate(*args, **kwargs)
+
+    def gateway_read(*args, **kwargs):
+        calls["gateway_read"] += 1
+        return original_gateway_read(*args, **kwargs)
+
+    def image_open(*args, **kwargs):
+        calls["image_open"] += 1
+        return original_image_open(*args, **kwargs)
+
+    monkeypatch.setattr(registry, "validate_reference", validate)
+    monkeypatch.setattr(server.AGENT_GATEWAY, "read_mcp_resource", gateway_read)
+    monkeypatch.setattr(Image, "open", image_open)
+    content = collect_tool_images(
+        [_texture_step(texture, "texture-once"), _scene_step(scenes[0], "scene-once")],
+        server._read_native_tool_image_resource,
+        str(project),
+    )
+
+    assert len(_image_parts(content)) == 2
+    assert calls == {"validate": 2, "gateway_read": 0, "image_open": 2}
+
+
+@pytest.mark.parametrize("kind", ["scene", "texture"])
+def test_animated_png_with_valid_resource_hash_is_unavailable(image_sources, kind):
+    project, _texture_path, registry, texture, scenes = image_sources
+    output = io.BytesIO()
+    frames = [Image.new("RGBA", (48, 32), color) for color in ((255, 0, 0, 255), (0, 0, 255, 255))]
+    frames[0].save(output, format="PNG", save_all=True, append_images=frames[1:], duration=100, loop=0)
+    png = output.getvalue()
+    context_id = server.AGENT_GATEWAY._mcp_resource_context.get()
+    if kind == "scene":
+        capture_id = str(uuid.uuid4())
+        record = registry.publish(
+            base_uri=f"vrcforge://scene-capture-preview/{capture_id}",
+            name="Animated preview test",
+            resource_type="scene_capture_preview",
+            data={
+                "schema": "vrcforge.scene_capture_preview.v1",
+                "captureId": capture_id,
+                "sourceSha256": "0" * 64,
+                "sha256": hashlib.sha256(png).hexdigest(),
+                "width": 48,
+                "height": 32,
+                "mimeType": "image/png",
+                "pngBase64": base64.b64encode(png).decode("ascii"),
+            },
+            identity={
+                "projectRoot": str(project),
+                "captureId": capture_id,
+                "sessionId": "session-fixture",
+                "approvalId": "approval-animated-preview",
+            },
+            source_mode="approved_scene_capture",
+            refresh_rule="Test fixture.",
+            context_id=context_id,
+        )
+        preview = {
+            "schema": "vrcforge.scene_capture_preview.v1",
+            "captureId": capture_id,
+            "resourceUri": record["uri"],
+            "mimeType": "image/png",
+            "width": 48,
+            "height": 32,
+        }
+        step = _scene_step(preview, "scene-animated")
+    else:
+        identity = registry.validate_reference(
+            texture["resourceUri"], expected_type="texture_asset_preview", context_id=context_id,
+            expected_identity={"assetPath": texture["assetPath"], "assetGuid": texture["assetGuid"]},
+        )["identity"]
+        record = registry.publish(
+            base_uri="vrcforge://texture-preview/animated-hash-test",
+            name="Animated texture preview test",
+            resource_type="texture_asset_preview",
+            data={
+                "schema": "vrcforge.texture_asset_preview.v1",
+                "assetPath": texture["assetPath"],
+                "assetGuid": texture["assetGuid"],
+                "sourceSha256": "0" * 64,
+                "sha256": hashlib.sha256(png).hexdigest(),
+                "width": 48,
+                "height": 32,
+                "mimeType": "image/png",
+                "pngBase64": base64.b64encode(png).decode("ascii"),
+            },
+            identity=identity,
+            source_mode="captured_asset_source_image",
+            refresh_rule="Test fixture.",
+            context_id=context_id,
+        )
+        preview = {
+            "schema": "vrcforge.texture_asset_preview.v1",
+            "assetPath": texture["assetPath"],
+            "assetGuid": texture["assetGuid"],
+            "resourceUri": record["uri"],
+            "mimeType": "image/png",
+            "width": 48,
+            "height": 32,
+        }
+        step = _texture_step(preview, "texture-animated")
+
+    content = collect_tool_images([step], server._read_native_tool_image_resource, str(project))
+
+    assert not _image_parts(content)
+    assert any("image unavailable" in caption.lower() for caption in _source_captions(content))
 
 
 def test_real_native_planner_and_responses_input_receive_two_images_without_history_payload(image_sources):
