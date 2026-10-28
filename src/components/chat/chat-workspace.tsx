@@ -24,7 +24,7 @@ import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
 import { projectConversationSteeringMessages } from "../../lib/chat-steering-projection";
-import { conversationItemRenderKey, visibleAgentDialogueText } from "../../lib/conversation-utils";
+import { agentReplyPreviewText, conversationItemRenderKey } from "../../lib/conversation-utils";
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { conversationRoundDateSeparators } from "../../lib/message-time";
 import { projectConversationTasks } from "../../lib/chat-task-projection";
@@ -351,7 +351,7 @@ export function ChatWorkspace({
       const response = user.type === "user" ? responsesByTurn.get(turn) : undefined;
       markers.push({ key, preview: preview.length > 96 ? `${preview.slice(0, 95)}…` : preview,
         getAssistantPreview: response ? () => {
-          const text = visibleAgentDialogueText(response).replace(/\s+/g, " ").trim();
+          const text = agentReplyPreviewText(response).replace(/\s+/g, " ").trim();
           return text.length > 600 ? `${text.slice(0, 599)}…` : text;
         } : undefined,
       });

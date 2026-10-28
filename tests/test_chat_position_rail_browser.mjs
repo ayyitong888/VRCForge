@@ -34,6 +34,9 @@ function Fixture(){
  window.streaming=()=>setItems([user(1),answer(1),user(2),{id:'stream-2',type:'streaming',clientTurnId:'turn-2',text:'Working',phase:'receiving_response'}]);
  window.settle=()=>setItems([user(1),answer(1),user(2),answer(2)]);
  window.userOnly=()=>setItems([user(1),answer(1),{id:'notification',type:'user',text:'<task-notification-trigger/>'},{id:'chosen-answer',type:'question_answer',questionId:'q-choice',question:'Assistant question should not be the preview',text:'My selected answer'},answer(2)]);
+ window.cancelledPreview=(reply=true)=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,status:'cancelled',clientTurnId:'turn-2',plan:{nextStep:'cancelled',summary:'Runtime turn was cancelled by the user.',reply:reply?'继续，只修你确认的这两处。保存后展示静态效果，状态标为待你验收。':''},timeline:[{id:'cancelled-tool',sequence:0,kind:'tool_call',payload:{tool:'unity_preview_add_modular_avatar_component',actionId:'ma-preview',status:'ok'}}]}}]);
+ window.commentaryPreview=()=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,status:'cancelled',clientTurnId:'turn-2',plan:{nextStep:'cancelled',summary:'Runtime turn was cancelled by the user.'},timeline:[{id:'spoken',sequence:0,kind:'assistant',payload:{phase:'commentary',status:'progress',summary:'正在检查衣服引用。'}},{id:'cancelled-tool',sequence:1,kind:'tool_result',payload:{tool:'unity_bind_execution_target',actionId:'bind',status:'ok',summary:'UNRELATED TOOL RESULT'}}]}}]);
+ window.unacceptedPreview=()=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,clientTurnId:'turn-2',plan:{reply:'UNACCEPTED FINAL',publicMessages:[{phase:'final_answer',text:'UNACCEPTED FINAL'}]},timeline:[{id:'unaccepted',sequence:0,kind:'assistant',payload:{phase:'final_answer',status:'completion_unverified',summary:'UNACCEPTED FINAL'}}]}}]);
  window.long=()=>setItems(Array.from({length:260},(_,i)=>[user(i),answer(i)]).flat());
  window.restoreRun=(status,sessionId='fixture-session')=>{setItems([user(5),{...answer(5),response:{...answer(5).response,sessionId:'fixture-session',timeline:[{id:'tool-start',sequence:0,kind:'tool_call',payload:{actionId:'read-5',tool:'vrcforge_read_text_file',status:'started'}}]}}]);setRuns([{sessionId,clientTurnId:'turn-5',status}]);};
  return <><output id='pinned' className='sr-only'>{String(scroll.pinned)}</output><ChatWorkspace
@@ -133,6 +136,20 @@ try {
   const labels = await marks.evaluateAll(nodes => nodes.map(n => n.getAttribute('aria-label')));
   assert.ok(labels[0].includes('Prompt 1') && labels[1].includes('My selected answer'), 'previews contain only human input, including submitted answers');
   assert.ok(labels.every(label => !label.includes('Assistant question') && !label.includes('Answer 2') && !label.includes('notification-trigger')), 'assistant, tool and internal notification content never becomes a navigation preview');
+  await page.evaluate(() => window.cancelledPreview());
+  await marks.last().hover();
+  await preview.waitFor({ state: 'visible' });
+  assert.match(await preview.textContent(), /继续，只修你确认的这两处/);
+  assert.doesNotMatch(await preview.textContent(), /Runtime turn|Completed or in flight|unity_preview_add_modular_avatar_component|\(ok\)/, 'cancelled preview contains model reply only, without runtime or tool evidence');
+  await page.evaluate(() => window.cancelledPreview(false));
+  await page.waitForFunction(() => !document.querySelector('[data-chat-position-preview]')?.textContent?.includes('继续，只修'));
+  assert.equal((await preview.textContent()).trim(), 'Prompt 2: inspect this part of the conversation.', 'tool-only turn has no synthetic assistant preview');
+  await page.evaluate(() => window.commentaryPreview());
+  await page.waitForFunction(() => document.querySelector('[data-chat-position-preview]')?.textContent?.includes('正在检查衣服引用。'));
+  assert.doesNotMatch(await preview.textContent(), /Runtime turn|Completed or in flight|unity_bind_execution_target|UNRELATED TOOL RESULT/, 'public model commentary survives without execution metadata');
+  await page.evaluate(() => window.unacceptedPreview());
+  await page.waitForFunction(() => !document.querySelector('[data-chat-position-preview]')?.textContent?.includes('正在检查衣服引用。'));
+  assert.equal((await preview.textContent()).trim(), 'Prompt 2: inspect this part of the conversation.', 'unaccepted final cannot return through legacy reply or publicMessages fields');
   await page.evaluate(() => window.long());
   await page.waitForFunction(() => document.querySelectorAll('[data-chat-position-marker]').length === 260);
   await scroller.evaluate(e => { e.scrollTop = e.scrollHeight; });

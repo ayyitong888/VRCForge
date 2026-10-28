@@ -222,6 +222,29 @@ export function collectCompactionRecovery(items: ConversationItem[]): Compaction
   )));
 }
 
+/** Public model text for hover previews, without model-context or execution summaries. */
+export function agentReplyPreviewText(response: AgentRuntimeResponse): string {
+  const assistantEntries = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries
+    .filter((entry) => entry.type === "assistant");
+  const spoken = assistantEntries.filter((entry) => (
+    entry.status !== "completion_unverified"
+    && !["cancelled", "canceled"].includes(entry.status.toLowerCase())
+    && !isCancellationMarkerAssistantText(entry.text)
+  ));
+  const final = [...spoken].reverse().find(isFinalAssistantPresentationEntry);
+  if (final) return final.text;
+  const hasUnacceptedFinal = assistantEntries.some((entry) => entry.status === "completion_unverified");
+  const publicMessages = (response.plan?.publicMessages || [])
+    .filter((message) => !isCancellationMarkerAssistantText(message.text)
+      && (!hasUnacceptedFinal || message.phase !== "final_answer"));
+  const finalMessage = [...publicMessages].reverse().find((message) => message.phase === "final_answer");
+  if (finalMessage) return finalMessage.text;
+  const reply = String(response.plan?.reply || "").trim();
+  if (reply && !isCancellationMarkerAssistantText(reply)
+    && !hasUnacceptedFinal) return reply;
+  return spoken.at(-1)?.text || publicMessages.at(-1)?.text || "";
+}
+
 export function visibleAgentDialogueText(response: AgentRuntimeResponse): string {
   const assistantEntries = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries.filter(
     (entry) => entry.type === "assistant",
