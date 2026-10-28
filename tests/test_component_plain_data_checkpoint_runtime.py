@@ -8,10 +8,12 @@ from test_component_property_checkpoint_runtime import run, source
 from unity_component_checkpoint import prepare_component_property_checkpoint
 
 
-def test_real_core_scope_accepts_plain_fields_and_rejects_behavior_before_getters(tmp_path):
+def test_real_core_scope_selects_project_for_behavior_without_invoking_getters(tmp_path):
     raw = source()
     signatures = ["private static bool IsEngineComponentAssembly("]
-    for signature in ("private static bool IsPlainSerializedFieldType(", "private static bool IsPlainSceneDataField("):
+    for signature in ("private static bool IsPlainSerializedFieldType(Type type, bool allowCollection = true)",
+                      "private static bool IsPlainSerializedFieldType(Type type, bool allowCollection, HashSet<Type> visiting)",
+                      "private static bool IsPlainSceneDataField("):
         if signature in raw:
             signatures.append(signature)
     signatures += ["internal static object BuildPropertyCheckpointScope(", "internal static object GetMemberValue(", "internal static void SetMemberValue("]
@@ -19,7 +21,7 @@ def test_real_core_scope_accepts_plain_fields_and_rejects_behavior_before_getter
     program = r'''
 using System;using System.Linq;using System.Collections.Generic;using System.Reflection;using Newtonsoft.Json.Linq;using UnityEngine;using UnityEditor;
 namespace UnityEngine {
- public class Object {} public struct Scene{public string path;public int handle;}
+ public class Object {} public class Material:Object {} public struct Scene{public string path;public int handle;}
  public class GameObject:Object {public Scene scene;public string id="object";}
  public class Component:Object {public GameObject gameObject;public string id="component";public int native;}
  public class MonoBehaviour:Component {}
@@ -51,6 +53,9 @@ class InheritedPlain:Plain {public bool flag;}
 class PropertyBehavior:MonoBehaviour {public static int calls;public int value {get{calls++;return 0;}set{calls++;}}public int field;}
 class CallbackBase:MonoBehaviour {private void OnValidate(){} public int number;}
 class CallbackChild:CallbackBase{}
+[Serializable]class AvatarObjectReference {public string referencePath;[SerializeField]internal GameObject targetObject;}
+[Serializable]class MaterialSwitchObject {public AvatarObjectReference Object;public Material Material;public int MaterialIndex;}
+class MaterialSetter:CallbackBase {[SerializeField]private List<MaterialSwitchObject> m_objects;public static int reads;public List<MaterialSwitchObject> Objects {get{reads++;return m_objects;}set{reads++;m_objects=value;}}}
 class Serialization:MonoBehaviour,ISerializationCallbackReceiver {public int number;public void OnBeforeSerialize(){}public void OnAfterDeserialize(){}}
 [ExecuteAlways]class Executing:MonoBehaviour{public int number;}
 class ExecutingChild:Executing{}
@@ -63,15 +68,20 @@ class Probe {
  static SavedSceneSnapshot scene=new SavedSceneSnapshot();
  static GameObject go=new GameObject{scene=new Scene{path="Assets/Main.unity",handle=17}};
  static MemberInfo Member(Type t,string name)=>t.GetField(name,BindingFlags.Instance|BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic) as MemberInfo??t.GetProperty(name);
- static void Accept(Component c,string name){c.gameObject=go;var scope=JObject.FromObject(BuildPropertyCheckpointScope(c,Member(c.GetType(),name),0,name,scene));Check((string)scope["scenePath"]==scene.Path&&(string)scope["componentGlobalObjectId"]=="component"&&scope["archiveAssetPaths"].ToString()==new JArray(scene.Path).ToString(),"scope");}
+ static void Accept(Component c,string name,string archiveScope="scene"){c.gameObject=go;var scope=JObject.FromObject(BuildPropertyCheckpointScope(c,Member(c.GetType(),name),0,name,scene));Check((string)scope["scenePath"]==scene.Path&&(string)scope["componentGlobalObjectId"]=="component"&&scope["archiveAssetPaths"].ToString()==new JArray(scene.Path).ToString(),"scope");Check((string)scope["archiveScope"]==archiveScope,"archive scope for "+c.GetType().Name);}
  static void Reject(Component c,string name){c.gameObject=go;try{BuildPropertyCheckpointScope(c,Member(c.GetType(),name),0,name,scene);}catch(InvalidOperationException){return;}throw new Exception("accepted "+c.GetType().Name+"."+name);}
  static void Main(){
   var plain=new Plain();foreach(var n in new[]{"number","vector","reference","numbers","refs","hidden"})Accept(plain,n);
   Accept(new InheritedPlain(),"number");Accept(new InheritedPlain(),"flag");Accept(new Component(),"native");
   foreach(var n in new[]{"transient","readOnly","shared"})Reject(plain,n);
-  foreach(var c in new Component[]{new Managed(),new DecimalData(),new Nested(),new Matrix(),new CustomData(),new CustomCollection()})Reject(c,"number");
-  Reject(new PropertyBehavior(),"value");Reject(new PropertyBehavior(),"field");Check(PropertyBehavior.calls==0,"getter/setter ran during scope");
-  Reject(new CallbackChild(),"number");Reject(new Serialization(),"number");Reject(new ExecutingChild(),"number");Reject(new Editing(),"number");Reject(new HelperBehavior(),"number");Reject(new StaticBehavior(),"number");
+  foreach(var c in new Component[]{new Managed(),new Nested(),new Matrix(),new CustomData(),new CustomCollection()})Accept(c,"number","project");
+  Accept(new DecimalData(),"number");Reject(new Managed(),"managed");Reject(new Nested(),"value");Reject(new Matrix(),"value");Reject(new CustomData(),"value");Reject(new CustomCollection(),"value");
+  Reject(new PropertyBehavior(),"value");Accept(new PropertyBehavior(),"field","project");Check(PropertyBehavior.calls==0,"getter/setter ran during scope");
+  Accept(new CallbackChild(),"number","project");Accept(new Serialization(),"number","project");Accept(new ExecutingChild(),"number","project");Accept(new Editing(),"number","project");Accept(new HelperBehavior(),"number","project");Accept(new StaticBehavior(),"number","project");
+  var ma=new MaterialSetter{gameObject=go};
+  var maScope=JObject.FromObject(BuildPropertyCheckpointScope(ma,Member(typeof(MaterialSetter),"m_objects"),0,"m_objects.Array.size",scene,true));
+  Check((string)maScope["archiveScope"]=="project"&&(string)maScope["propertyPath"]=="m_objects"&&(string)maScope["serializedPropertyPath"]=="m_objects.Array.size","original MA array-size request checkpoint");
+  Check(MaterialSetter.reads==0,"MA property accessor invoked during checkpoint");
   var field=Member(typeof(Plain),"number");SetMemberValue(plain,field,42);Check((int)GetMemberValue(plain,field)==42,"actual field setter");
   var refs=Member(typeof(Plain),"refs");SetMemberValue(plain,refs,new List<GameObject>{go});Check(ReferenceEquals(((List<GameObject>)GetMemberValue(plain,refs))[0],go),"reference list");
   GlobalObjectId.guid="other";Reject(plain,"number");GlobalObjectId.guid="guid";go.scene=new Scene{path="Assets/Other.unity",handle=17};Reject(plain,"number");

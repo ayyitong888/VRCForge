@@ -32,7 +32,7 @@ def case(tmp_path, monkeypatch):
     monkeypatch.setattr(server, 'list_execution_targets_sync', lambda query: {'ok': True, 'targets': [deepcopy(target)]})
     monkeypatch.setattr(server, 'read_component_property_sync', lambda request: {'ok': True, 'checkpointScope': deepcopy(scope)})
     monkeypatch.setattr(server, 'set_component_property_sync', lambda _: pytest.fail('checkpoint must never call a managed writer, even in preview mode'))
-    def prepare(project, checkpoint_asset_paths=None, *, checkpoint_files):
+    def prepare(project, checkpoint_asset_paths=None, *, checkpoint_files=None):
         calls.append((project, checkpoint_files))
         return {'ok': True, 'mode': 'read_only'}
     monkeypatch.setattr(server, 'prepare_unity_checkpoint_sync', prepare)
@@ -60,6 +60,54 @@ def test_serialized_leaf_checkpoint_matches_root_owner_and_exact_leaf(case):
         root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
     assert result['ok'] is True, result
     assert calls == [(root, ['Assets/Main.unity'])]
+
+
+@pytest.mark.parametrize('serialized', [False, True])
+def test_behavior_component_property_uses_full_project_checkpoint(case, serialized):
+    root, target, args, scope, calls = case
+    target['component']['type'] = args['componentType'] = scope['componentType'] = (
+        'nadena.dev.modular_avatar.core.ModularAvatarMaterialSetter')
+    scope['archiveScope'] = 'project'
+    if serialized:
+        args.pop('propertyPath')
+        args['serializedPropertyPath'] = 'm_objects.Array.size'
+        args['value'] = 1
+        scope['propertyPath'] = 'm_objects'
+        scope['serializedPropertyPath'] = args['serializedPropertyPath']
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is True, result
+    assert calls == [(root, None)]
+    assert 'archiveAssetPaths' not in result
+
+
+@pytest.mark.parametrize('archive_scope', [None, '', 'full_project', [], {}])
+def test_invalid_core_archive_scope_never_reaches_prepare(case, archive_scope):
+    root, _, args, scope, calls = case
+    scope['archiveScope'] = archive_scope
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is False, result
+    assert calls == []
+
+
+def test_explicit_scene_archive_scope_keeps_exact_scene_checkpoint(case):
+    root, _, args, scope, calls = case
+    scope['archiveScope'] = 'scene'
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is True, result
+    assert calls == [(root, ['Assets/Main.unity'])]
+
+
+def test_project_archive_scope_still_requires_exact_owner(case):
+    root, _, args, scope, calls = case
+    scope['archiveScope'] = 'project'
+    scope['componentGlobalObjectId'] = 'different'
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is False, result
+    assert calls == []
 
 
 def test_serialized_checkpoint_rejects_different_leaf_with_same_root(case):
@@ -161,3 +209,27 @@ def test_property_checkpoint_zip_contains_scene_and_meta_only(case, tmp_path):
     assert result['ok'] is True, result
     with zipfile.ZipFile(result['archivePath']) as archive:
         assert set(archive.namelist()) == {'Assets/Main.unity', 'Assets/Main.unity.meta'}
+
+
+def test_behavior_component_checkpoint_zip_covers_project_assets(case, tmp_path):
+    root, _, args, scope, calls = case
+    scope['archiveScope'] = 'project'
+    (root / 'Packages/manifest.json').write_text('{}')
+    (root / 'ProjectSettings/ProjectVersion.txt').write_text('fixture')
+    gateway = _gateway(tmp_path / 'app')
+    service = gateway.approval_transactions
+    handler = server.AGENT_GATEWAY._write_handlers['vrcforge_set_property']
+    service.register_write_handler('vrcforge_set_property', 'component', 'medium', lambda _: None,
+                                   checkpoint_prepare_handler=handler.checkpoint_prepare_handler)
+    service._ports = replace(service._ports, run_git=lambda *a, **kw: {
+        'ok': False, 'returncode': 1, 'stdout': '', 'error': 'not git'})
+    result = service._create_pre_write_checkpoint(
+        {'id': 'approval', 'targetTool': 'vrcforge_set_property'},
+        {**args, 'archiveFiles': ['Assets/Main.unity']})
+    assert result['ok'] is True, result
+    assert calls == [(root, None)]
+    with zipfile.ZipFile(result['archivePath']) as archive:
+        assert set(archive.namelist()) == {
+            'Assets/Main.unity', 'Assets/Main.unity.meta',
+            'Assets/Other.mat', 'Assets/Other.mat.meta',
+            'Packages/manifest.json', 'ProjectSettings/ProjectVersion.txt'}

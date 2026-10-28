@@ -73,6 +73,15 @@ def prepare_component_property_checkpoint(
         return rejected('The Core checkpoint scope included an unexpected serialized property path.')
     if any(scope.get(key) != value for key, value in expected.items()):
         return rejected('The Core property persistence owner differs from the approved target.')
+    archive_scope = scope.get('archiveScope', 'scene')
+    if archive_scope not in ('scene', 'project'):
+        return rejected('The Core property checkpoint archive scope is invalid.')
+    if archive_scope == 'project':
+        prepared = prepare(project_root)
+        if prepared.get('ok') is not True:
+            return prepared
+        return {**prepared,
+                'archiveScopeReason': 'revalidated_component_property_project_callbacks'}
     prepared = prepare(project_root, checkpoint_files=[scene_path])
     if prepared.get('ok') is not True:
         return prepared

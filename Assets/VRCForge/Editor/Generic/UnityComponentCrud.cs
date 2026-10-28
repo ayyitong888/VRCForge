@@ -1112,15 +1112,28 @@ namespace VRCForge.Editor
             Component component, MemberInfo member, int componentIndex,
             string propertyPath, SavedSceneSnapshot scene, bool serializedProperty = false)
         {
-            if (component == null || member == null || member.DeclaringType == null || scene == null
-                || (component is MonoBehaviour
-                    ? !IsPlainSceneDataField(component, member)
-                    : !IsEngineComponentAssembly(component.GetType().Assembly)
-                        || !IsEngineComponentAssembly(member.DeclaringType.Assembly)))
+            if (component == null || member == null || member.DeclaringType == null || scene == null)
+                throw new InvalidOperationException("component_property_checkpoint_owner_invalid: Resolve the exact component, member and saved scene before preparing its checkpoint.");
+            var native = !(component is MonoBehaviour)
+                && IsEngineComponentAssembly(component.GetType().Assembly)
+                && IsEngineComponentAssembly(member.DeclaringType.Assembly);
+            if (!native)
             {
-                throw new InvalidOperationException(
-                    "component_property_checkpoint_scope_unsupported: Generic writes require a native Unity component/member or a data-only MonoBehaviour serialized field; executable component behavior has no proven checkpoint scope.");
+                var field = member as FieldInfo;
+                var target = component.GetType().FullName + "." + member.Name;
+                if (!(component is MonoBehaviour) || field == null)
+                    throw new InvalidOperationException($"component_property_checkpoint_scope_unsupported: '{target}' is not a Unity serialized field. For a MonoBehaviour property, read its serialized backing field and use serializedPropertyPath, or use the component's dedicated writer when setter behavior is required.");
+                if (field.IsStatic || field.IsInitOnly || field.IsLiteral || field.IsNotSerialized)
+                    throw new InvalidOperationException($"component_property_checkpoint_scope_unsupported: '{target}' is static, read-only, constant or explicitly nonserialized; it cannot be persisted by this field writer. Select the component's writable serialized field instead.");
+                if (!field.IsPublic && !field.IsDefined(typeof(SerializeField), true))
+                    throw new InvalidOperationException($"component_property_checkpoint_scope_unsupported: Private field '{target}' has no SerializeField attribute. Read the component's serialized fields and select the actual persisted field.");
+                if (field.IsDefined(typeof(SerializeReference), true) || !IsPlainSerializedFieldType(field.FieldType))
+                    throw new InvalidOperationException($"component_property_checkpoint_scope_unsupported: '{target}' has unsupported serialized data type '{field.FieldType.FullName}'. Read the field schema and use a supported serialized leaf or the component's dedicated writer; do not change the avatar structure to bypass this tool limitation.");
             }
+            // Component behavior changes the archive boundary, not whether its
+            // serialized configuration is editable. Reuse the full-project
+            // checkpoint already used for third-party component add/remove.
+            var sceneOnly = native || IsPlainSceneDataField(component, member);
             var owner = component.gameObject;
             if (owner == null || owner.scene.path != scene.Path
                 || owner.scene.handle != scene.Handle || componentIndex < 0)
@@ -1140,6 +1153,7 @@ namespace VRCForge.Editor
             {
                 ["schema"] = "vrcforge.component_property_checkpoint.v1",
                 ["ownerKind"] = "scene",
+                ["archiveScope"] = sceneOnly ? "scene" : "project",
                 ["scenePath"] = scene.Path,
                 ["sceneGuid"] = scene.Guid,
                 ["sceneDigest"] = scene.FileDigest,
