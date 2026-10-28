@@ -21434,6 +21434,36 @@ def prepare_authoritative_unity_checkpoint_sync(
             discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
             prepare=prepare_unity_checkpoint_sync,
         )
+    if checkpoint_target == "vrcforge_remap_skinned_mesh_bone":
+        from unity_component_checkpoint import prepare_component_property_checkpoint
+
+        calls = build_scene_execution_plan(checkpoint_target, arguments)
+        request = calls[0][1] if len(calls) == 1 and calls[0][0] == "vrc_remap_skinned_mesh_bone" else {}
+        component = ensure_dict(ensure_dict(arguments.get("executionTarget")).get("component"))
+        owner_arguments = {**arguments, "componentType": component.get("type"), "propertyPath": "bones"}
+        owner_request = {**request, "componentType": component.get("type"), "propertyPath": "bones"}
+        # Remapping only persists this native Renderer property. Reuse the
+        # existing read-only property-owner proof, without invoking its setter.
+        return prepare_component_property_checkpoint(
+            project_root, owner_arguments,
+            build_plan=lambda _tool, _values: [("vrc_set_property", owner_request)],
+            discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
+            prepare=prepare_unity_checkpoint_sync,
+        )
+    if checkpoint_target == "vrcforge_manage_expression_parameters":
+        from unity_planned_checkpoint import prepare_planned_asset_checkpoint
+
+        preview = ensure_dict(manage_expression_parameters_sync(arguments, preview=True))
+        plan = ensure_dict(preview.get("plan"))
+        if preview.get("ok") is not True or preview.get("preview") is not True:
+            return {**preview, "ok": False, "blocking": True,
+                    "error": preview.get("error") or "The parameter-management preview did not prove its asset owner.",
+                    "mutationStarted": False, "saved": False}
+        # Core resolves descriptor.expressionParameters; caller path hints do
+        # not select the archive, and unrelated scene/assets stay out of it.
+        return prepare_planned_asset_checkpoint(
+            project_root, [plan.get("assetPath")], prepare=prepare_unity_checkpoint_sync,
+        )
     if checkpoint_target in {
         "vrcforge_ensure_expression_parameter",
         "vrcforge_ensure_expression_menu_control",
@@ -21614,15 +21644,7 @@ def prepare_authoritative_unity_checkpoint_sync(
         if not proven:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                     "error": "The approved component write did not establish an exact checkpoint scene scope."}
-        # Live revalidation against the exact bound object (the mature
-        # component-property pattern): the object must still resolve to the
-        # same identity right before the checkpoint is taken.
-        live_query = {"projectPath": str(project_root), "scope": target["scope"],
-                      "objectGlobalObjectId": obj["globalObjectId"]}
-        live = list_execution_targets_sync(live_query)
-        if live.get("ok") is not True or live.get("targets") != [target]:
-            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
-                    "error": "The approved component target changed before checkpointing."}
+        # Revalidate once using the complete object/component identity.
         query = {"projectPath": str(project_root), "scope": target["scope"],
                  "objectGlobalObjectId": obj["globalObjectId"]}
         if ensure_dict(target.get("avatar")).get("globalObjectId"):
@@ -21934,10 +21956,24 @@ def prepare_authoritative_unity_checkpoint_sync(
         from agent_approval_transactions import _checkpoint_archive_files_for_write
 
         checkpoint_files = _checkpoint_archive_files_for_write(checkpoint_target, arguments)
-        if not checkpoint_files:
+        if checkpoint_files:
+            return prepare_unity_checkpoint_sync(project_root, checkpoint_files=checkpoint_files)
+        handler = AGENT_GATEWAY._write_handlers.get(checkpoint_target)
+        builder = handler.approved_execution_plan_builder if handler is not None else None
+        try:
+            calls = builder(arguments) if builder is not None else []
+            if (not calls or not isinstance(calls, (list, tuple))
+                    or any(not isinstance(call, (list, tuple)) or len(call) != 2
+                           or call[0] not in REQUIRED_VRCFORGE_UNITY_TOOLS or not isinstance(call[1], dict)
+                           for call in calls)):
+                raise ValueError("The registered write has no valid approved Core execution plan for checkpoint preparation.")
+        except (AgentGatewayError, RuntimeError, TypeError, ValueError) as exc:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
-                    "error": "The approved write did not establish an exact checkpoint file scope."}
-        return prepare_unity_checkpoint_sync(project_root, checkpoint_files=checkpoint_files)
+                    "error": str(exc), "mutationStarted": False, "saved": False}
+        # A registered approved plan need not expose nested toolName or an
+        # exact asset list. Callback/multi-asset writes retain the established
+        # project checkpoint instead of being mistaken for an unsupported tool.
+        return prepare_unity_checkpoint_sync(project_root, checkpoint_files=None)
     approved_write_arguments = copy.deepcopy(arguments)
     approved_write_arguments.pop("_vrcforge_user_constraints", None)
     try:
@@ -27895,6 +27931,7 @@ def register_agent_gateway_tools() -> None:
         "When to use: select and ping one exact loaded-scene GameObject so the Unity Inspector shows that object. When NOT to use: do not use selection as proof that an object exists or to mutate scene data. Negative example: do not select an Avatar merely to claim its descriptor is valid.",
         "low",
         select_scene_object_sync,
+        pre_write_checkpoint_required=False,
     )
     register_write_handler(
         "vrcforge_set_play_mode",

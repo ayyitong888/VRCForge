@@ -95,3 +95,18 @@ def test_fresh_identity_drift_blocks_archive_offer(case,monkeypatch,kind):
     monkeypatch.setattr(server,'list_execution_targets_sync',lambda *_:{'ok':True,'targets':[fresh,fresh] if kind=='ambiguous' else [fresh]})
     result=server.prepare_authoritative_unity_checkpoint_sync(root,{**request,'_checkpointTargetTool':'vrcforge_add_component'})
     assert result['ok'] is False and 'archiveAssetPaths' not in result
+
+
+def test_remove_discovery_uses_complete_component_query_once(case,monkeypatch):
+    server,root,target,request=case
+    target['scope']='component';target['component']={'globalObjectId':'component','type':'UnityEngine.CanvasGroup'}
+    observed=[]
+    def exact_discover(query):
+        observed.append(query)
+        matches=query.get('componentGlobalObjectId')=='component' and query.get('objectGlobalObjectId')=='object'
+        return {'ok':True,'targets':[deepcopy(target)] if matches else []}
+    monkeypatch.setattr(server,'list_execution_targets_sync',exact_discover)
+    result=server.prepare_authoritative_unity_checkpoint_sync(root,{**request,'_checkpointTargetTool':'vrcforge_remove_component'})
+    assert result['ok'] is True,result
+    assert result['archiveAssetPaths']==['Assets/Main.unity']
+    assert len(observed)==1
