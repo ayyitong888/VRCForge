@@ -6,6 +6,21 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer components {
+  .chat-composer-shell {
+    @apply rounded-3xl bg-muted/70 shadow-composer;
+  }
+
+  .chat-composer-frame {
+    @apply rounded-3xl border border-border bg-card/80 transition-colors;
+  }
+
+  .chat-composer-frame textarea {
+    background-color: transparent;
+  }
+}
+
+
 body {
   -webkit-user-select: none;
   user-select: none;

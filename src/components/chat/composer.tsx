@@ -304,7 +304,7 @@ export function Composer({
       onDrop={handleDrop}
       onPaste={handlePaste}
       data-vrcforge-composer-dropzone
-      className={cn("relative rounded-3xl bg-muted/70 shadow-composer", questionPromptVisible && "rounded-2xl", dragActive && "ring-2 ring-primary/35")}
+      className={cn("relative chat-composer-shell", questionPromptVisible && "rounded-2xl", dragActive && "ring-2 ring-primary/35")}
     >
       {paletteOpen ? (
         <div className="absolute bottom-full left-0 right-0 z-30 mb-2 max-h-72 overflow-y-auto rounded-xl border border-border bg-card p-1 shadow-panel" data-composer-command-palette>
@@ -347,8 +347,8 @@ export function Composer({
         </div>
       ) : null}
       <div className={cn(
-        "rounded-3xl border transition-colors",
-        questionPromptVisible ? "grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto_auto] items-center gap-1 rounded-2xl border-0 bg-transparent p-1" : "bg-card/80",
+        "transition-colors",
+        questionPromptVisible ? "grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto_auto] items-center gap-1 rounded-2xl border-0 bg-transparent p-1" : "chat-composer-frame",
         !questionPromptVisible && (dragActive ? "border-primary/50 bg-primary/5" : "border-border"),
         !questionPromptVisible && (compact ? "p-3" : "p-4"),
       )}>

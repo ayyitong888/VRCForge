@@ -1355,7 +1355,13 @@
     "resultUnavailable": "持久化任务结果不可用，请先查看任务历史再继续。",
     "parentContinuation": "父任务回灌",
     "revision": "修订版本",
-    "lastUpdated": "最近更新"
+    "lastUpdated": "最近更新",
+    "active": "进行中",
+    "done": "已结束",
+    "conversation": "子代理对话",
+    "noConversation": "暂时还没有对话消息。",
+    "backToList": "返回子代理列表",
+    "showMore": "再显示 {{count}} 个"
   },
   "connector": {
     "configStatusHint": "可连接多个外部 Agent。这里显示各客户端是否已写入 VRCForge MCP 配置；客户端程序是否找到、连接自检是否通过会分别显示。配置完成后，请在对应客户端重新加载 MCP。",

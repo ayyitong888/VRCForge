@@ -1348,7 +1348,13 @@
     "resultUnavailable": "永続化されたタスク結果を利用できません。続行する前にタスク履歴を確認してください。",
     "parentContinuation": "親タスクへの返却",
     "revision": "リビジョン",
-    "lastUpdated": "最終更新"
+    "lastUpdated": "最終更新",
+    "active": "実行中",
+    "done": "完了",
+    "conversation": "サブエージェントの会話",
+    "noConversation": "会話メッセージはまだありません。",
+    "backToList": "サブエージェント一覧に戻る",
+    "showMore": "さらに {{count}} 件表示"
   },
   "connector": {
     "configStatusHint": "複数の外部 Agent を接続できます。各クライアントに VRCForge MCP が設定されているかを表示します。アプリの検出結果と接続テストは別々に表示されます。設定後は、そのクライアントで MCP を再読み込みしてください。",

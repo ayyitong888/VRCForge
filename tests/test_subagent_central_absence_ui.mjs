@@ -11,5 +11,5 @@ const [workspace, app] = await Promise.all([
 assert.doesNotMatch(workspace, /subAgentPanel/);
 const chatWorkspaceInvocation = app.slice(app.indexOf("<ChatWorkspace"), app.indexOf("\n            />", app.indexOf("<ChatWorkspace")));
 assert.doesNotMatch(chatWorkspaceInvocation, /subAgentPanel=/);
-assert.match(app, /projectWorkspace=\{projectChatWorkspace\}[\s\S]*subAgentPanel=\{projectChatWorkspace \? subAgentActivityPanel : undefined\}/);
+assert.match(app, /projectWorkspace=\{projectChatWorkspace\}[\s\S]*subAgentPanel=\{activeView === "chat" \? subAgentActivityPanel : undefined\}/);
 console.log("subagent central absence contract: ok");

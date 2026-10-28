@@ -64,6 +64,7 @@ import type { ProjectType } from "./lib/chat-types";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { VskOpenDialog } from "./components/skills/vsk-open-dialog";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
+import { groupSubAgentThreads } from "./lib/subagent-threads";
 import { type UserAttachmentSource } from "./components/runtime/project-workbench-sections";
 import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useAppUpdate } from "./hooks/use-app-update";
@@ -279,9 +280,9 @@ const AsyncAppSidebar = lazy(() =>
 const AsyncRightRuntimeSidebar = lazy(() =>
   import("./components/runtime/runtime-sidebar").then((module) => ({ default: module.RightRuntimeSidebar })),
 );
-const AsyncSubAgentWorkspaceSurface = lazy(() =>
-  import("./components/subagents/sub-agent-workspace-surface").then((module) => ({
-    default: module.SubAgentWorkspaceSurface,
+const AsyncSubAgentSidebar = lazy(() =>
+  import("./components/subagents/sub-agent-sidebar").then((module) => ({
+    default: module.SubAgentSidebar,
   })),
 );
 
@@ -393,6 +394,8 @@ export default function App() {
   const [subAgentError, setSubAgentError] = useState("");
   const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(() => initialSubAgentTask);
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
+  const [subAgentSidebarOpen, setSubAgentSidebarOpen] = useState(() => Boolean(initialSubAgentTask));
+  const [subAgentPaneWidth, setSubAgentPaneWidth] = useState(() => Math.min(1000, Math.max(520, window.innerWidth * 0.6)));
   const [subAgentActionBusyTaskIds, setSubAgentActionBusyTaskIds] = useState<Set<string>>(() => new Set());
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [pendingReplyQuestionId, setPendingReplyQuestionId] = useState("");
@@ -1861,13 +1864,14 @@ export default function App() {
     const parentChatId = activeChat?.id || "";
     return parentChatId ? subAgentTasks.filter((task) => task.parentChatId === parentChatId) : [];
   }, [activeChat?.id, subAgentTasks]);
+  const activeSubAgentThreads = useMemo(() => groupSubAgentThreads(activeSubAgentTasks), [activeSubAgentTasks]);
   const runningSubAgentTaskCount = useMemo(
-    () => activeSubAgentTasks.filter((task) => ["queued", "running", "cancelling"].includes(task.status)).length,
-    [activeSubAgentTasks],
+    () => activeSubAgentThreads.filter(({ task }) => ["queued", "running", "cancelling"].includes(task.status)).length,
+    [activeSubAgentThreads],
   );
   const completedSubAgentTaskCount = useMemo(
-    () => activeSubAgentTasks.filter((task) => task.status === "completed").length,
-    [activeSubAgentTasks],
+    () => activeSubAgentThreads.filter(({ task }) => !["queued", "running", "cancelling"].includes(task.status)).length,
+    [activeSubAgentThreads],
   );
   useEffect(() => {
     subAgentSelectionIntentRef.current = selectedSubAgent?.id || "";
@@ -1877,7 +1881,23 @@ export default function App() {
     projectDisplayLabel(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
   const effectiveLeftPaneWidth = layoutPaneWidths.left;
-  const effectiveRightPaneWidth = rightSidebarCollapsed ? 44 : layoutPaneWidths.right;
+  const subAgentSidebarActive = subAgentSidebarOpen || selectedSubAgentPanelOpen;
+  const centerPaneMinimum = subAgentSidebarActive ? 360 : MIN_CENTER_PANE_WIDTH;
+  const rightPaneMaximum = subAgentSidebarActive
+    ? Math.max(MIN_RIGHT_PANE_WIDTH, window.innerWidth - effectiveLeftPaneWidth - RESIZE_HANDLE_WIDTH * 2 - centerPaneMinimum)
+    : MAX_RIGHT_PANE_WIDTH;
+  const effectiveRightPaneWidth = rightSidebarCollapsed ? 44 : subAgentSidebarActive
+    ? clampNumber(subAgentPaneWidth, MIN_RIGHT_PANE_WIDTH, rightPaneMaximum) : layoutPaneWidths.right;
+  useEffect(() => {
+    if (subAgentSidebarActive) setRightSidebarCollapsed(false);
+  }, [subAgentSidebarOpen, selectedSubAgentPanelOpen, selectedSubAgent?.id]);
+  useEffect(() => {
+    if (!subAgentSidebarActive) return;
+    const fitPane = () => setSubAgentPaneWidth((width) => Math.min(width,
+      Math.max(MIN_RIGHT_PANE_WIDTH, window.innerWidth - effectiveLeftPaneWidth - RESIZE_HANDLE_WIDTH * 2 - 360)));
+    window.addEventListener("resize", fitPane);
+    return () => window.removeEventListener("resize", fitPane);
+  }, [subAgentSidebarActive, effectiveLeftPaneWidth]);
   const rightSidebarVisible = sidebarsVisible && activeView === "chat";
   const workspaceGridColumnsWithRightSidebar = `${effectiveLeftPaneWidth}px ${RESIZE_HANDLE_WIDTH}px minmax(0,1fr) ${RESIZE_HANDLE_WIDTH}px ${effectiveRightPaneWidth}px`;
   const workspaceGridColumnsWithoutRightSidebar = `${effectiveLeftPaneWidth}px ${RESIZE_HANDLE_WIDTH}px minmax(0,1fr)`;
@@ -1894,12 +1914,12 @@ export default function App() {
     document.body.style.userSelect = "none";
 
     const maxLeftWidth = () => {
-      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - MIN_CENTER_PANE_WIDTH - effectiveRightPaneWidth;
+      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - centerPaneMinimum - effectiveRightPaneWidth;
       return Math.max(MIN_LEFT_PANE_WIDTH, Math.min(MAX_LEFT_PANE_WIDTH, available));
     };
     const maxRightWidth = () => {
-      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - MIN_CENTER_PANE_WIDTH - layoutPaneWidths.left;
-      return Math.max(MIN_RIGHT_PANE_WIDTH, Math.min(MAX_RIGHT_PANE_WIDTH, available));
+      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - centerPaneMinimum - layoutPaneWidths.left;
+      return Math.max(MIN_RIGHT_PANE_WIDTH, Math.min(rightPaneMaximum, available));
     };
 
     const onPointerMove = (moveEvent: PointerEvent) => {
@@ -1919,10 +1939,11 @@ export default function App() {
         return;
       }
       setRightSidebarCollapsed(false);
-      setLayoutPaneWidths((current) => ({
-        ...current,
-        right: clampNumber(proposed, MIN_RIGHT_PANE_WIDTH, maxRightWidth()),
-      }));
+      if (subAgentSidebarActive) {
+        setSubAgentPaneWidth(clampNumber(proposed, MIN_RIGHT_PANE_WIDTH, maxRightWidth()));
+      } else {
+        setLayoutPaneWidths((current) => ({ ...current, right: clampNumber(proposed, MIN_RIGHT_PANE_WIDTH, maxRightWidth()) }));
+      }
     };
 
     const onPointerUp = () => {
@@ -3758,7 +3779,7 @@ export default function App() {
     const agentName = pickSubAgentName();
     const projectPath = activeChat?.projectPath || activeProjectPath;
     const hasPackage = outfitPackagePath.trim().length > 0;
-    const role = roleOverride || (hasPackage ? "outfit_import_plan_review" : "project_index_review");
+    const role = roleOverride || "llm_readonly";
     const defaultTask =
       role === "skill_delegate"
         ? `Run the delegated skill ${toolName || ""} and report its output.`.trim()
@@ -3766,6 +3787,8 @@ export default function App() {
           ? "Inspect the selected outfit package and return a supervised import plan summary."
           : role === "validation_triage"
             ? "Run read-only validation triage and summarize findings."
+            : hasPackage
+            ? `Inspect the outfit package ${outfitPackagePath.trim()} and return a supervised import plan summary.`
             : "Review the local Unity project index and summarize changed scanner families.";
     const task = taskOverride?.trim() || defaultTask;
     setActiveView("chat");
@@ -3905,6 +3928,9 @@ export default function App() {
   }
 
   async function inspectSubAgentTask(taskId: string) {
+    const task = subAgentTasksRef.current.find((item) => item.id === taskId);
+    if (task) setSelectedSubAgent(task);
+    setSubAgentError("");
     setSelectedSubAgentPanelOpen(true);
     try {
       await refreshSelectedSubAgentTask(taskId);
@@ -3914,12 +3940,9 @@ export default function App() {
   }
 
   async function openSubAgentWorkspace() {
-    const task = activeSubAgentTasks.find((item) => item.id === selectedSubAgent?.id) || activeSubAgentTasks[0];
-    if (!task) {
-      setSelectedSubAgentPanelOpen(true);
-      return;
-    }
-    await inspectSubAgentTask(task.id);
+    setSubAgentSidebarOpen(true);
+    setSelectedSubAgentPanelOpen(false);
+    setRightSidebarCollapsed(false);
   }
 
   async function mergeSubAgentTask(task: SubAgentTask, decision: "adopted" | "dismissed") {
@@ -4028,15 +4051,15 @@ export default function App() {
       await persistChatsNow();
       const parentChat = getChatById(parentChatId);
       const payload = await createSubAgent(targetEndpoint, {
-        role: "selected_context_review",
+        role: "llm_readonly",
         task: "Review the selected conversation excerpt in a scoped sub-agent thread.",
+        selectedMaterials: [{ content: { text: selectedText } }],
         displayName: agentName,
         parentChatId,
         parentSessionId: parentChat?.sessionId || "",
         projectPath: parentChat?.projectPath || projectPath,
         params: {
           projectPath,
-          selectedText,
           source: "selection-menu",
         },
       });
@@ -4183,14 +4206,21 @@ export default function App() {
       tasks={activeSubAgentTasks}
       loading={loadingSubAgents}
       error={subAgentError}
-      onOpen={() => void openSubAgentWorkspace()}
+      roles={subAgentList?.roles || []}
+      onOpen={(taskId) => void (taskId ? inspectSubAgentTask(taskId) : openSubAgentWorkspace())}
     />
   );
-  const subAgentWorkspaceSurface = selectedSubAgentPanelOpen ? (
-    <div className="min-h-0 flex-1 overflow-hidden px-3 pb-3">
-      <Suspense fallback={null}>
-        <AsyncSubAgentWorkspaceSurface
+  const subAgentWorkspaceSurface = subAgentSidebarActive ? (
+    <div className="h-full min-h-0 overflow-hidden bg-workspace">
+      <Suspense fallback={<div className="p-4 text-xs text-muted-foreground">{t("common.loading")}</div>}>
+        <AsyncSubAgentSidebar
           tasks={activeSubAgentTasks}
+          openThread={selectedSubAgentPanelOpen}
+          loading={loadingSubAgents}
+          error={subAgentError}
+          onBack={() => { setSubAgentSidebarOpen(true); setSelectedSubAgentPanelOpen(false); }}
+          endpoint={endpoint}
+          developerOptionsEnabled={developerOptionsEnabled}
           roles={subAgentList?.roles || []}
           selected={activeSubAgentTasks.some((task) => task.id === selectedSubAgent?.id) ? selectedSubAgent : null}
           onSelect={(taskId) => void inspectSubAgentTask(taskId)}
@@ -4201,7 +4231,7 @@ export default function App() {
           onIgnoreNotification={ignoreSubAgentReviewNotification}
           onAdoptNextAction={adoptSubAgentNextAction}
           busyTaskIds={subAgentActionBusyTaskIds}
-          onClose={() => setSelectedSubAgentPanelOpen(false)}
+          onClose={() => { setSubAgentSidebarOpen(false); setSelectedSubAgentPanelOpen(false); }}
         />
       </Suspense>
     </div>
@@ -4706,11 +4736,7 @@ export default function App() {
               onClose={activeView === "chat" ? () => setPendingApprovalPanelOpen(false) : undefined}
             />
           ) : null}
-          {selectedSubAgentPanelOpen ? (
-            <div className="absolute inset-x-0 bottom-0 top-14 z-20 flex min-h-0 flex-col bg-workspace">
-              {subAgentWorkspaceSurface}
-            </div>
-          ) : null}
+
         </section>
         {rightSidebarVisible ? (
           <>
@@ -4718,7 +4744,7 @@ export default function App() {
               side="right"
               value={effectiveRightPaneWidth}
               min={0}
-              max={MAX_RIGHT_PANE_WIDTH}
+              max={rightPaneMaximum}
               title={t("workspace.resizeRightPane")}
               onPointerDown={(event) => startLayoutResize("right", event)}
             />
@@ -4738,7 +4764,7 @@ export default function App() {
             ) : (
           <Suspense fallback={<SidebarPlaceholder side="right" />}>
             <SidebarMountTracker side="right" onMounted={markRightSidebarMounted}>
-              <AsyncRightRuntimeSidebar
+              {subAgentSidebarActive ? subAgentWorkspaceSurface : <AsyncRightRuntimeSidebar
               runtimeConnected={runtimeConnected}
               loadingUnityStatus={loadingUnityStatus}
               workspaceProjectLabel={workspaceProjectLabel}
@@ -4753,8 +4779,8 @@ export default function App() {
               authorizationStatus={authorizationStatus}
               agentProgress={agentProgress}
               projectWorkspace={projectChatWorkspace}
-              subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}
-              subAgentTaskCount={activeSubAgentTasks.length}
+              subAgentPanel={activeView === "chat" ? subAgentActivityPanel : undefined}
+              subAgentTaskCount={activeSubAgentThreads.length}
               subAgentRunningTaskCount={runningSubAgentTaskCount}
               subAgentCompletedTaskCount={completedSubAgentTaskCount}
               userAttachmentSources={userAttachmentSources}
@@ -4773,7 +4799,7 @@ export default function App() {
                 setPendingApprovalPanelOpen(true);
               }}
               localizeHealthMessage={localizeHealthMessage}
-              />
+              />}
             </SidebarMountTracker>
           </Suspense>
             )}

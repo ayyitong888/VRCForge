@@ -8,7 +8,7 @@ const root = resolve(import.meta.dirname, "..");
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
 const initialTasks = [
-  { id: "running-child", status: "running", canResume: true, childSessionId: "shared-child-context", role: "custom_reviewer", displayName: "Running child", task: "Still working." },
+  { id: "running-child", status: "running", canResume: true, childSessionId: "running-child-context", role: "custom_reviewer", displayName: "Running child", task: "Still working." },
   { id: "no-resume", status: "failed", canResume: false, role: "custom_reviewer", displayName: "Retry-only child", task: "Retry creates a new task." },
   { id: "eligible-child", status: "completed", canResume: true, childSessionId: "shared-child-context", role: "custom_reviewer", displayName: "Eligible follow-up", task: "Check the first report." },
 ];
@@ -36,9 +36,9 @@ const bundled = await build({
         setSelected(response.task);
         return true;
       }
-      return <SubAgentWorkspaceSurface tasks={tasks} roles={[{id:'custom_reviewer',title:'Custom reviewer title'}]} selected={selected}
+      return <><nav>{tasks.map(item=><button key={item.id} onClick={()=>setSelected(item)}>{item.displayName}</button>)}</nav><SubAgentWorkspaceSurface tasks={tasks} roles={[{id:'custom_reviewer',title:'Custom reviewer title'}]} selected={selected}
         onSelect={id=>setSelected(tasks.find(item=>item.id===id))} onCancel={noop} onRetry={noop} onResume={onResume}
-        onMerge={noop} onIgnoreNotification={noop} onAdoptNextAction={noop} busyTaskIds={busy} onClose={noop}/>;
+        onMerge={noop} onIgnoreNotification={noop} onAdoptNextAction={noop} busyTaskIds={busy} onClose={noop}/></>;
     }
     i18n.use(initReactI18next).init({lng:'en-US',resources:{'en-US':{translation:messages}},interpolation:{escapeValue:false}})
       .then(()=>createRoot(document.getElementById('root')).render(<Fixture/>));
@@ -81,13 +81,13 @@ try {
   assert.equal(await surface.getByRole("button", { name: "Ask a follow-up", exact: true }).count(), 0,
     "running task must not show follow-up controls even when backend metadata says resumable");
 
-  await surface.getByRole("button", { name: /Retry-only child/ }).click();
+  await page.getByRole("button", { name: /Retry-only child/ }).click();
   assert.equal(await surface.getByRole("button", { name: "Ask a follow-up", exact: true }).count(), 0,
     "task without canResume metadata must not show follow-up controls");
   assert.equal(await surface.getByRole("button", { name: "Retry as new task", exact: true }).count(), 1,
     "retry remains clearly a separate new-task action");
 
-  await surface.getByRole("button", { name: /Eligible follow-up/ }).click();
+  await page.getByRole("button", { name: /Eligible follow-up/ }).click();
   await surface.getByText("Custom reviewer title", { exact: true }).waitFor();
   const question = surface.getByLabel("New question for this child");
   const submit = surface.getByRole("button", { name: "Ask a follow-up", exact: true });

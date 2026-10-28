@@ -83,6 +83,7 @@ export async function createSubAgent(
     parentChatId: string;
     parentSessionId?: string;
     projectPath?: string;
+    selectedMaterials?: Array<Record<string, unknown>>;
     params?: Record<string, unknown>;
   },
 ): Promise<{ ok: boolean; task: SubAgentTask }> {

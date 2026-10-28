@@ -305,7 +305,8 @@
     background-color: transparent;
   }
 
-  html[data-vrcforge-wallpaper="active"] [data-vrcforge-composer-dropzone] {
+  html[data-vrcforge-wallpaper="active"] [data-vrcforge-composer-dropzone],
+  html[data-vrcforge-wallpaper="active"] .chat-composer-shell {
     background-color: hsl(var(--muted) / 0.58);
   }
 

@@ -18,7 +18,8 @@ assert.match(panel, /statusRunning/);
 assert.match(panel, /statusDone/);
 assert.doesNotMatch(panel, /onMerge|onRetry|onCancel/);
 
-assert.match(surface, /data-vrcforge-subagent-open-list/);
+const sidebar = await readFile(resolve(root, "src/components/subagents/sub-agent-sidebar.tsx"), "utf8");
+assert.match(sidebar, /data-vrcforge-subagent-sidebar-list/);
 assert.match(surface, /overflow-y-auto/);
 assert.match(surface, /sticky bottom-0/);
 assert.match(surface, /onCancel\(activeTask\.id\)/);
@@ -37,7 +38,7 @@ assert.match(mergePolicy, /!task\.mergeDecision/);
 assert.doesNotMatch(mergePolicy, /task\.status === "cancelling"/);
 
 assert.doesNotMatch(app, /selectedSubAgentPanelOpen \? subAgentWorkspaceSurface : activeView === "doctor"/);
-assert.match(app, /selectedSubAgentPanelOpen \? \([\s\S]*absolute inset-x-0 bottom-0 top-14/);
+assert.match(app, /subAgentSidebarActive \? subAgentWorkspaceSurface : <AsyncRightRuntimeSidebar/);
 assert.match(app, /fetchSubAgents\(endpoint, true\)/);
 assert.match(app, /subagent-event-\$\{task\.id\}-\$\{revision\}/);
 assert.match(app, /type: "timeline_event"/);
