@@ -225,6 +225,29 @@ def prepare_scene_workflow_checkpoint(
                 or request.get("expectedHostObjectId") != obj.get("globalObjectId")
                 or expected_project != project_root.resolve()):
             return reject("The frozen component feature call does not match its exact scene, project, and host identities.")
+    archive_scene_path = scene_path
+    if checkpoint_target == "vrcforge_duplicate_scene_object":
+        # Copy's canonical request names the destination explicitly. Its sealed
+        # preview and Core pre-mutation verification own both object identities;
+        # checkpoint only chooses the saved scene actually changed by the copy.
+        destination_scene = request.get("targetParentScenePath")
+        destination_parent = _hierarchy_path(request.get("targetParentPath"))
+        destination_name = _hierarchy_path(request.get("targetName"))
+        if (request.get("sourceScenePath") != scene_path
+                or request.get("expectedSourceSceneGuid") != scene.get("guid")
+                or not isinstance(destination_scene, str)
+                or not destination_scene.startswith("Assets/")
+                or not destination_scene.lower().endswith(".unity")
+                or "\\" in destination_scene
+                or any(part in {"", ".", ".."} for part in destination_scene.split("/"))
+                or not destination_parent or not destination_name or "/" in destination_name
+                or request.get("expectedDestinationPath") != destination_parent + "/" + destination_name
+                or not request.get("expectedTargetSceneGuid")
+                or not request.get("expectedTargetParentObjectId")
+                or not request.get("expectedPreviewDigest")
+                or request.get("preview") is not False or request.get("saveScene") is not True):
+            return reject("Duplicate must preserve the preview-bound source and exact target parent/scene destination.")
+        archive_scene_path = destination_scene
     selector_error = _selector_error(checkpoint_target, request, scope, avatar, obj, discover=discover, project_root=project_root)
     if selector_error:
         return reject(selector_error)
@@ -254,12 +277,12 @@ def prepare_scene_workflow_checkpoint(
     if live.get("ok") is not True or live.get("targets") != [target]:
         return reject("The approved scene workflow identity changed before checkpointing.")
 
-    prepared = prepare(project_root, checkpoint_files=[scene_path])
+    prepared = prepare(project_root, checkpoint_files=[archive_scene_path])
     if prepared.get("ok") is not True:
         return prepared
     return {
         **prepared,
-        "archiveAssetPaths": [scene_path],
+        "archiveAssetPaths": [archive_scene_path],
         "archiveScopeReason": "revalidated_scene_only_workflow_owner",
     }
 
@@ -302,10 +325,10 @@ def _selector_error(
     if checkpoint_target == "vrcforge_set_gameobject_active":
         if (scope not in {"object", "component"}
                 or not object_path or request.get("gameObjectPath") != object_path
-                or not avatar_path or not (object_path == avatar_path or object_path.startswith(avatar_path + "/"))
+                or (avatar_path and not (object_path == avatar_path or object_path.startswith(avatar_path + "/")))
                 or set(request) != {"gameObjectPath", "active", "preview"}
                 or type(request.get("active")) is not bool or request.get("preview") is not False):
-            return "Visibility must select one exact freshly bound Avatar object with an explicit Boolean state."
+            return "Visibility must select one exact freshly bound scene object with an explicit Boolean state."
         return ""
     if checkpoint_target == "vrcforge_setup_outfit":
         outfit_path = _hierarchy_path(request.get("outfitPath"))
@@ -331,28 +354,22 @@ def _selector_error(
         if scope in {"object", "component"} and selected and selected == object_path and _hierarchy_path(request.get("newName")):
             return ""
         return "Rename must select the exact freshly bound object with a non-empty new name."
+    if checkpoint_target == "vrcforge_duplicate_scene_object":
+        selected = _hierarchy_path(request.get("sourceObjectPath"))
+        bound_path = object_path if scope in {"object", "component"} else avatar_path if scope == "avatar" else ""
+        if selected and selected == bound_path:
+            return ""
+        return "Duplicate must select the exact freshly bound source object."
     if checkpoint_target == "vrcforge_reparent_gameobject":
-        # Reparenting INTO an Avatar moves an object that lives outside it;
-        # Core discovery for such a source object reports avatar=null, so the
-        # destination is proven against a live Avatar discovery instead of the
-        # (absent) target section. In-subtree destinations still validate
-        # against the bound Avatar identity.
-        new_parent = _hierarchy_path(request.get("newParentPath"))
-        if not new_parent:
-            return "Reparent requires an exact non-empty newParentPath."
-        if avatar_path and (new_parent == avatar_path or new_parent.startswith(avatar_path + "/")):
+        # The source is the object being changed. Core resolves the explicit
+        # parent path (or scene root) and rejects cross-scene/cyclic parents
+        # before mutation; neither operation requires a sole scene Avatar.
+        selected = _hierarchy_path(request.get("gameObjectPath"))
+        new_parent = request.get("newParentPath")
+        if (scope in {"object", "component"} and selected and selected == object_path
+                and (new_parent == "" or _hierarchy_path(new_parent))):
             return ""
-        if scope in {"object", "component"} and new_parent == object_path:
-            return ""
-        if not avatar:
-            avatars = discover({"projectPath": str(project_root), "scope": "avatar"}).get("targets") or []
-            exact_roots = [
-                str(((t.get("avatar") or t) if isinstance(t.get("avatar"), dict) else t).get("exactHierarchyPath") or "")
-                for t in avatars if isinstance(t, dict)
-            ]
-            if len(exact_roots) == 1 and new_parent == exact_roots[0]:
-                return ""
-        return "The reparent destination is outside the exact freshly bound Avatar or object."
+        return "Reparent must select the exact bound source and a valid parent path, or an empty path for the scene root."
     if checkpoint_target == "vrcforge_unpack_prefab":
         selected_path = _hierarchy_path(request.get("gameObjectPath"))
         if not selected_path or selected_path != (object_path or avatar_path):
