@@ -6,31 +6,65 @@
     <title>VRCForge</title>
     <style>
       html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #f5f6f8; }
-      @media (prefers-color-scheme: dark) { html, body, #root { background: #111827; } }
+      [data-vrcforge-startup-shell] { height: 100vh; color: #344054; background: #f5f6f8; font: 14px/1.4 system-ui, sans-serif; }
+      [data-vrcforge-startup-frame="header"] { height: 56px; display: flex; align-items: center; padding: 0 20px; border-bottom: 1px solid #e4e7ec; background: #fff; }
+      [data-vrcforge-startup-frame="body"] { height: calc(100% - 56px); display: grid; grid-template-columns: 240px minmax(0, 1fr) 260px; }
+      [data-vrcforge-startup-frame="navigation"], [data-vrcforge-startup-frame="details"] { padding: 28px 20px; background: #f9fafb; }
+      [data-vrcforge-startup-frame="navigation"] { border-right: 1px solid #e4e7ec; }
+      [data-vrcforge-startup-frame="details"] { border-left: 1px solid #e4e7ec; }
+      [data-vrcforge-startup-frame="workspace"] { display: flex; flex-direction: column; padding: 28px clamp(24px, 5vw, 72px); }
+      [data-vrcforge-startup-line] { height: 10px; margin: 0 0 18px; border-radius: 5px; background: #eaecf0; }
+      [data-vrcforge-startup-frame="navigation"] [data-vrcforge-startup-line], [data-vrcforge-startup-frame="details"] [data-vrcforge-startup-line], [data-vrcforge-startup-frame="workspace"] [data-vrcforge-startup-line] { animation: vrcforge-startup-breathe 1.8s ease-in-out infinite alternate; }
+      @keyframes vrcforge-startup-breathe { from { opacity: .62; } to { opacity: 1; } }
+      [data-vrcforge-startup-frame="header"] [data-vrcforge-startup-line] { width: 90px; height: 12px; margin: 0; background: #98a2b3; }
+      [data-vrcforge-startup-frame="workspace"] [data-vrcforge-startup-line]:first-child { width: 42%; height: 16px; margin-bottom: 36px; }
+      [data-vrcforge-startup-frame="workspace"] [data-vrcforge-startup-line]:nth-child(2) { width: 72%; margin-left: 12%; margin-top: auto; }
+      [data-vrcforge-startup-frame="workspace"] [data-vrcforge-startup-line]:nth-child(3) { width: 58%; margin-left: auto; margin-bottom: 12px; }
+      [data-vrcforge-startup-frame="navigation"] [data-vrcforge-startup-line]:nth-child(3n + 1) { width: 84%; }
+      [data-vrcforge-startup-frame="navigation"] [data-vrcforge-startup-line]:nth-child(3n + 2) { width: 65%; }
+      [data-vrcforge-startup-frame="details"] [data-vrcforge-startup-line]:nth-child(2n) { width: 76%; }
+      @media (max-width: 900px) { [data-vrcforge-startup-frame="body"] { grid-template-columns: 180px minmax(0, 1fr); } [data-vrcforge-startup-frame="details"] { display: none; } }
+      @media (prefers-reduced-motion: reduce) { [data-vrcforge-startup-frame] [data-vrcforge-startup-line] { animation: none; } }
+      @media (prefers-color-scheme: dark) {
+        html, body, #root, [data-vrcforge-startup-shell] { background: #111827; color: #e5e7eb; }
+        [data-vrcforge-startup-frame="header"] { background: #111827; border-color: #273244; }
+        [data-vrcforge-startup-frame="navigation"], [data-vrcforge-startup-frame="details"] { background: #151e2e; }
+        [data-vrcforge-startup-frame="navigation"] { border-color: #273244; }
+        [data-vrcforge-startup-frame="details"] { border-color: #273244; }
+        [data-vrcforge-startup-line] { background: #273244; }
+        [data-vrcforge-startup-frame="header"] [data-vrcforge-startup-line] { background: #667085; }
+      }
     </style>
   </head>
   <body>
-    <div id="root"><main data-vrcforge-startup-shell aria-hidden="true" style="height:100vh;pointer-events:none"></main></div>
+    <div id="root">
+      <main data-vrcforge-startup-shell aria-hidden="true">
+        <header data-vrcforge-startup-frame="header"><span>VRCForge</span></header>
+        <div data-vrcforge-startup-frame="body">
+          <aside data-vrcforge-startup-frame="navigation">
+            <div data-vrcforge-startup-line style="width:84%"></div><div data-vrcforge-startup-line style="width:65%"></div><div data-vrcforge-startup-line style="width:72%"></div><div data-vrcforge-startup-line style="width:58%"></div>
+          </aside>
+          <section data-vrcforge-startup-frame="workspace">
+            <div data-vrcforge-startup-line></div><div data-vrcforge-startup-line></div><div data-vrcforge-startup-line></div>
+          </section>
+          <aside data-vrcforge-startup-frame="details">
+            <div data-vrcforge-startup-line style="width:80%"></div><div data-vrcforge-startup-line style="width:62%"></div><div data-vrcforge-startup-line style="width:74%"></div><div data-vrcforge-startup-line style="width:56%"></div>
+          </aside>
+        </div>
+      </main>
+    </div>
     <script>
-      (function scheduleStartupShellPaint() {
+      (function measureStartupShellPaint() {
         var metrics = (window.__vrcforgeStartupMetrics ||= {});
         metrics.startupShellRequestedMs ??= Math.round(performance.now());
-        window.__vrcforgeStartupShellPaintedPromise ??= new Promise(function (resolve) {
-          window.requestAnimationFrame(function () {
-            window.setTimeout(function () {
-              metrics.startupShellPaintedMs ??= Math.round(performance.now());
-              document.documentElement.dataset.vrcforgeStartupShell = "ready";
-              resolve();
-            }, 0);
-          });
+        window.requestAnimationFrame(function () {
+          window.setTimeout(function () {
+            metrics.startupShellPaintedMs ??= Math.round(performance.now());
+            document.documentElement.dataset.vrcforgeStartupShell = "ready";
+          }, 0);
         });
       })();
     </script>
-    <script type="module">
-      void (async function loadAppAfterStartupShell() {
-        await window.__vrcforgeStartupShellPaintedPromise;
-        await import("/src/main.tsx");
-      })();
-    </script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

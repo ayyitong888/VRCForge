@@ -6,18 +6,7 @@ import "./styles.css";
 async function main() {
   const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
   metrics.mainModuleStartedMs ??= Math.round(performance.now());
-  metrics.startupShellRequestedMs ??= Math.round(performance.now());
-  const startupShellPainted = ((window as any).__vrcforgeStartupShellPaintedPromise ??= new Promise<void>((resolve) => {
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        metrics.startupShellPaintedMs ??= Math.round(performance.now());
-        document.documentElement.dataset.vrcforgeStartupShell = "ready";
-        resolve();
-      });
-    });
-  }));
-
-  const appModule = startupShellPainted.then(() => import("./App"));
+  const appModule = import("./App");
   const [, { default: App }] = await Promise.all([initializeI18n(), appModule]);
   metrics.appDependenciesReadyMs ??= Math.round(performance.now());
 

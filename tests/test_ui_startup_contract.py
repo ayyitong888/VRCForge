@@ -266,30 +266,31 @@ def test_main_window_restore_clears_native_minimized_state_before_showing() -> N
     assert "window.set_focus()" not in show
 
 
-def test_startup_paints_neutral_shell_without_showing_a_separate_startup_page() -> None:
+def test_startup_loads_the_app_while_showing_a_real_noninteractive_shell() -> None:
     index_source = _read("index.html")
     main_source = _read("src/main.tsx")
     app_source = _read("src/App.tsx")
     probe_source = _read("scripts/diagnose_packaged_latency.mjs")
 
-    assert 'const appModule = startupShellPainted.then(() => import("./App"))' in main_source
+    assert 'const appModule = import("./App")' in main_source
     assert "Promise.all([initializeI18n(), appModule])" in main_source
     assert "data-vrcforge-startup-shell" in index_source
     assert 'aria-hidden="true"' in index_source
-    assert "Local AI Workbench for VRChat Avatar Editing" not in index_source
-    assert "border-radius:1rem" not in index_source
-    assert "/vrcforge-startup-shell.js" not in index_source
-    assert index_source.index("__vrcforgeStartupShellPaintedPromise") < index_source.index("/src/main.tsx")
+    assert 'data-vrcforge-startup-frame="header"' in index_source
+    assert 'data-vrcforge-startup-frame="navigation"' in index_source
+    assert 'data-vrcforge-startup-frame="workspace"' in index_source
+    assert 'data-vrcforge-startup-frame="details"' in index_source
+    assert "<button" not in index_source
+    assert "<input" not in index_source
+    assert "prefers-reduced-motion: reduce" in index_source
+    assert "vrcforge-startup-breathe" in index_source
+    assert index_source.index("window.requestAnimationFrame") < index_source.index('src="/src/main.tsx"')
     assert "startupShellPaintedMs" in index_source
-    assert index_source.count("window.requestAnimationFrame") == 1
-    assert "window.setTimeout" in index_source
-    assert "await window.__vrcforgeStartupShellPaintedPromise" in index_source
-    assert 'await import("/src/main.tsx")' in index_source
-    assert '<script type="module" src="/src/main.tsx"></script>' not in index_source
+    assert 'src="/src/main.tsx"' in index_source
+    assert "startupShellPaintedPromise" not in main_source
+    assert "startupShellPaintedMs" not in main_source
     assert "flushSync" not in main_source
-    assert main_source.index("startupShellPainted.then") < main_source.index("await Promise.all")
     assert main_source.index("await Promise.all") < main_source.index("ReactDOM.createRoot")
-    assert "__vrcforgeStartupShellPaintedPromise" in main_source
     assert "const AsyncAppSidebar = lazy" in app_source
     assert "const AsyncRightRuntimeSidebar = lazy" in app_source
     assert "const AsyncSubAgentWorkspaceSurface = lazy" in app_source
