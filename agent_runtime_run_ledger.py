@@ -321,7 +321,11 @@ class AgentRuntimeRunLedger:
                     "identity": (stat.st_dev, stat.st_ino),
                     "mtime_ns": stat.st_mtime_ns,
                     "offset": consumed_offset,
-                    "events": copy.deepcopy(events),
+                    # These rows remain owned by the process-local reader cache.
+                    # list_runtime_continuations projects a detached public
+                    # value before returning, so copying the large event trees
+                    # here only duplicates the recovery scan's result.
+                    "events": events,
                     "start_times": dict(start_times),
                     "approval_ids": set(),
                     "direct_events": direct_events[-512:],
@@ -617,6 +621,7 @@ class AgentRuntimeRunLedger:
         event_approval_ids: Callable[[dict[str, Any]], set[str]], limit: int,
         event_matches: Callable[[dict[str, Any]], bool] | None = None,
         raw_line_matches: Callable[[bytes], bool] | None = None,
+        copy_events: bool = True,
     ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str], set[str]]:
         """Read one query window once, then consume only appended JSONL rows.
 
@@ -640,7 +645,9 @@ class AgentRuntimeRunLedger:
                          and stat.st_mtime_ns == cached["mtime_ns"])
         if unchanged:
             self._list_runs_cache.move_to_end(cache_key)
-            return (copy.deepcopy(cached["events"]), dict(cached["start_times"]),
+            cached_events = cached["events"]
+            events = copy.deepcopy(cached_events) if copy_events else list(cached_events)
+            return (events, dict(cached["start_times"]),
                     set(cached["approval_ids"]))
         if incremental:
             self._list_runs_cache.move_to_end(cache_key)
@@ -707,14 +714,17 @@ class AgentRuntimeRunLedger:
             events = [row for _, row in list(direct_events)[-limit:]]
         self._list_runs_cache[cache_key] = {
             "identity": identity, "mtime_ns": stat.st_mtime_ns, "offset": new_offset,
-            "events": copy.deepcopy(events), "start_times": dict(start_times),
+            # Parsed rows are private to the cache until returned. Keep one
+            # event graph instead of deep-copying the large timelines twice.
+            "events": events, "start_times": dict(start_times),
             "approval_ids": set(approval_ids), "direct_events": list(direct_events),
             "approval_events": approval_events, "ordinal": ordinal,
         }
         self._list_runs_cache.move_to_end(cache_key)
         while len(self._list_runs_cache) > 32:
             self._list_runs_cache.popitem(last=False)
-        return copy.deepcopy(events), dict(start_times), set(approval_ids)
+        return (copy.deepcopy(events) if copy_events else list(events),
+                dict(start_times), set(approval_ids))
 
     def list_runtime_continuations(self, *, limit: int = 64) -> list[dict[str, Any]]:
         """Return bounded durable chat projections for reconnect replay."""
@@ -736,6 +746,9 @@ class AgentRuntimeRunLedger:
                 raw_line_matches=lambda line: (
                     b'"continuationEvent"' in line or b'"runtime_turn_started"' in line
                 ),
+                # This consumer builds a detached public projection and never
+                # mutates the cached raw rows or their nested timeline data.
+                copy_events=False,
             )
         by_key: dict[str, dict[str, Any]] = {}
         order: list[str] = []

@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+import agent_runtime_run_ledger as ledger_module
 from agent_gateway import AgentGateway
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_task_loop import AgentTaskLoop
@@ -125,6 +126,81 @@ def test_live_ledger_is_not_interrupted_and_terminal_supersedes_recovery(tmp_pat
         },
     })
     assert ledger.list_runtime_continuations()[0]["continuationSource"] == "foreground_completed"
+
+
+def test_continuation_projection_avoids_copying_large_cached_events(tmp_path: Path, monkeypatch) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    original_text = "detail" * 20_000
+    native_snapshot = {"messages": [{"role": "assistant", "content": "private"}]}
+    ledger.append({
+        "event": "runtime_turn_completed", "status": "completed",
+        "sessionId": "s", "turnId": "t", "clientTurnId": "c",
+        "continuationEvent": {
+            "schema": "vrcforge.runtime_turn_event.v1",
+            "continuationSource": "foreground_completed", "sessionId": "s",
+            "turnId": "t", "clientTurnId": "c", "plan": {"reply": "done"},
+            "timeline": [{"id": "large-result", "sequence": 0, "kind": "tool_result",
+                          "payload": {"result": {"text": original_text,
+                                                  "_nativeConversation": native_snapshot}}}],
+        },
+    })
+    restarted, _ = make_ledger(tmp_path)
+    clone_calls: list[None] = []
+    original_deepcopy = ledger_module.copy.deepcopy
+    monkeypatch.setattr(
+        ledger_module,
+        "copy",
+        SimpleNamespace(deepcopy=lambda value: (clone_calls.append(None), original_deepcopy(value))[1]),
+    )
+
+    first = restarted.list_runtime_continuations()
+    assert len(first) == 1
+    assert first[0]["timeline"][0]["payload"]["result"]["text"] == original_text
+    assert "_nativeConversation" not in first[0]["timeline"][0]["payload"]["result"]
+    assert clone_calls == []
+
+    first[0]["timeline"][0]["payload"]["result"]["text"] = "caller mutation"
+    second = restarted.list_runtime_continuations()
+    assert second[0]["timeline"][0]["payload"]["result"]["text"] == original_text
+    assert clone_calls == []
+
+    persisted = ledger.read_events(limit=0)[-1]["continuationEvent"]["timeline"][0]["payload"]["result"]
+    assert persisted["text"] == original_text
+    assert persisted["_nativeConversation"] == native_snapshot
+
+
+def test_list_runs_cold_cache_owns_one_detached_copy(tmp_path: Path, monkeypatch) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    original_text = "detail" * 20_000
+    ledger.append({
+        "event": "runtime_turn_completed", "status": "completed",
+        "sessionId": "s", "turnId": "t", "clientTurnId": "c", "projectRoot": "P",
+        "continuationEvent": {
+            "schema": "vrcforge.runtime_turn_event.v1",
+            "continuationSource": "foreground_completed", "sessionId": "s",
+            "turnId": "t", "clientTurnId": "c", "projectRoot": "P",
+            "plan": {"reply": "done"},
+            "timeline": [{"id": "large-result", "sequence": 0, "kind": "tool_result",
+                          "payload": {"result": {"text": original_text}}}],
+        },
+    })
+    restarted, _ = make_ledger(tmp_path)
+    clone_calls: list[None] = []
+    original_deepcopy = ledger_module.copy.deepcopy
+    monkeypatch.setattr(
+        ledger_module,
+        "copy",
+        SimpleNamespace(deepcopy=lambda value: (clone_calls.append(None), original_deepcopy(value))[1]),
+    )
+
+    first = restarted.list_runs(limit=40, session_id="s", project_root="P")
+    assert len(clone_calls) == 1
+    assert first["runs"][0]["continuationEvent"]["timeline"][0]["payload"]["result"]["text"] == original_text
+    first["events"][0]["continuationEvent"]["timeline"][0]["payload"]["result"]["text"] = "caller mutation"
+
+    second = restarted.list_runs(limit=40, session_id="s", project_root="P")
+    assert len(clone_calls) == 2
+    assert second["events"][0]["continuationEvent"]["timeline"][0]["payload"]["result"]["text"] == original_text
 
 
 def test_list_runtime_continuations_is_read_only_until_explicit_recovery(tmp_path: Path) -> None:
