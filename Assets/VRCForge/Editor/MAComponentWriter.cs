@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -231,7 +232,11 @@ namespace VRCForge.Editor
                     var assignment = new AssignmentPlan { member = member, memberType = GetMemberType(member), token = pair.Value };
                     try
                     {
-                        assignment.convertedValue = ConvertScalar(pair.Value, assignment.memberType);
+                        assignment.convertedValue = ConvertScalar(
+                            pair.Value,
+                            assignment.memberType,
+                            avatarRoot,
+                            "fields." + pair.Key);
                     }
                     catch (Exception ex)
                     {
@@ -519,6 +524,7 @@ namespace VRCForge.Editor
         private static bool TryResolveReference(AssignmentPlan plan, Transform avatarRoot, out string error)
         {
             error = null;
+            var fieldName = string.IsNullOrEmpty(plan.fieldPath) ? plan.member.Name : plan.fieldPath;
             switch (plan.kind)
             {
                 case ReferenceKind.AvatarObjectReference:
@@ -526,7 +532,7 @@ namespace VRCForge.Editor
                     var go = ResolveSceneObject(plan.raw, avatarRoot);
                     if (go == null)
                     {
-                        error = $"Could not resolve object '{plan.raw}' for AvatarObjectReference field '{plan.member.Name}'.";
+                        error = $"Could not resolve object '{plan.raw}' for AvatarObjectReference field '{fieldName}'.";
                         return false;
                     }
                     plan.resolvedValue = go;
@@ -541,7 +547,7 @@ namespace VRCForge.Editor
                     var go = ResolveSceneObject(plan.raw, avatarRoot);
                     if (go == null)
                     {
-                        error = $"Could not resolve scene object '{plan.raw}' for field '{plan.member.Name}'.";
+                        error = $"Could not resolve scene object '{plan.raw}' for field '{fieldName}'.";
                         return false;
                     }
                     if (typeof(GameObject).IsAssignableFrom(plan.memberType))
@@ -553,7 +559,7 @@ namespace VRCForge.Editor
                         var resolvedComponent = go.GetComponent(plan.memberType);
                         if (resolvedComponent == null)
                         {
-                            error = $"Scene object '{plan.raw}' has no component of type '{plan.memberType.Name}' for field '{plan.member.Name}'.";
+                            error = $"Scene object '{plan.raw}' has no component of type '{plan.memberType.Name}' for field '{fieldName}'.";
                             return false;
                         }
                         plan.resolvedValue = resolvedComponent;
@@ -566,7 +572,7 @@ namespace VRCForge.Editor
                     var asset = AssetDatabase.LoadAssetAtPath(plan.raw, plan.memberType);
                     if (asset == null)
                     {
-                        error = $"Could not load asset '{plan.raw}' as {plan.memberType.Name} for field '{plan.member.Name}'.";
+                        error = $"Could not load asset '{plan.raw}' as {plan.memberType.Name} for field '{fieldName}'.";
                         return false;
                     }
                     plan.resolvedValue = asset;
@@ -574,7 +580,7 @@ namespace VRCForge.Editor
                     return true;
                 }
                 default:
-                    error = $"Field '{plan.member.Name}' is not a supported reference type.";
+                    error = $"Field '{fieldName}' is not a supported reference type.";
                     return false;
             }
         }
@@ -591,28 +597,8 @@ namespace VRCForge.Editor
                     {
                         refInstance = Activator.CreateInstance(plan.memberType);
                     }
-                    var setMethod = plan.memberType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                        .FirstOrDefault(m => m.Name == "Set"
-                            && m.GetParameters().Length == 1
-                            && m.GetParameters()[0].ParameterType == typeof(GameObject));
-                    if (setMethod != null)
-                    {
-                        setMethod.Invoke(refInstance, new object[] { go });
-                    }
-                    else
-                    {
-                        // Fallback: set the public referencePath field directly.
-                        var refPathField = plan.memberType.GetField("referencePath", BindingFlags.Public | BindingFlags.Instance);
-                        if (refPathField != null)
-                        {
-                            refPathField.SetValue(refInstance, plan.avatarRelativePath);
-                        }
-                        else
-                        {
-                            throw new InvalidOperationException(
-                                $"AvatarObjectReference field '{plan.member.Name}' has no usable Set method or referencePath field.");
-                        }
-                    }
+                    SetAvatarObjectReference(refInstance, plan.memberType, go, plan.avatarRelativePath,
+                        string.IsNullOrEmpty(plan.fieldPath) ? plan.member.Name : plan.fieldPath);
                     SetMemberValue(component, plan.member, refInstance);
                     return;
                 }
@@ -656,7 +642,7 @@ namespace VRCForge.Editor
             return avatarRoot.Find(NormalizePath(referencePath))?.gameObject;
         }
 
-        private static object ConvertScalar(JToken token, Type targetType)
+        private static object ConvertScalar(JToken token, Type targetType, Transform avatarRoot, string fieldPath)
         {
             if (token == null)
             {
@@ -672,8 +658,139 @@ namespace VRCForge.Editor
             if (targetType == typeof(int)) { return token.ToObject<int>(); }
             if (targetType == typeof(float)) { return token.ToObject<float>(); }
             if (targetType == typeof(double)) { return token.ToObject<double>(); }
-            // Last resort: let Json.NET try.
-            return token.ToObject(targetType);
+            // Keep Json.NET's ordinary recursive object/list conversion, resolving only
+            // typed Unity and MA references through the same preflight resolver as references=.
+            var serializer = new JsonSerializer();
+            serializer.Converters.Add(new NestedReferenceJsonConverter(avatarRoot, fieldPath));
+            using (var reader = token.CreateReader())
+            {
+                return serializer.Deserialize(reader, targetType);
+            }
+        }
+
+        private sealed class NestedReferenceJsonConverter : JsonConverter
+        {
+            private readonly Transform avatarRoot;
+            private readonly string baseFieldPath;
+
+            public NestedReferenceJsonConverter(Transform avatarRoot, string baseFieldPath)
+            {
+                this.avatarRoot = avatarRoot;
+                this.baseFieldPath = baseFieldPath;
+            }
+
+            public override bool CanConvert(Type objectType)
+            {
+                return objectType != null
+                    && (objectType.Name == "AvatarObjectReference"
+                        || typeof(UnityEngine.Object).IsAssignableFrom(objectType));
+            }
+
+            public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
+            {
+                if (reader.TokenType == JsonToken.Null) { return null; }
+
+                var fieldPath = ResolveJsonFieldPath(reader.Path);
+                if (objectType.Name == "AvatarObjectReference")
+                {
+                    if (reader.TokenType != JsonToken.StartObject)
+                    {
+                        throw new JsonSerializationException(
+                            $"Expected an object with referencePath for '{fieldPath}', received {reader.TokenType}.");
+                    }
+                    var json = JObject.Load(reader);
+                    var pathToken = json["referencePath"];
+                    var rawPath = pathToken?.Type == JTokenType.String ? pathToken.Value<string>() : null;
+                    if (string.IsNullOrWhiteSpace(rawPath))
+                    {
+                        throw new JsonSerializationException(
+                            $"AvatarObjectReference '{fieldPath}' requires a non-empty referencePath to an existing scene object.");
+                    }
+
+                    var plan = new AssignmentPlan
+                    {
+                        memberType = objectType,
+                        raw = rawPath,
+                        kind = ReferenceKind.AvatarObjectReference,
+                        fieldPath = fieldPath
+                    };
+                    if (!TryResolveReference(plan, avatarRoot, out var error))
+                    {
+                        throw new JsonSerializationException(error);
+                    }
+                    var reference = Activator.CreateInstance(objectType);
+                    SetAvatarObjectReference(reference, objectType, (GameObject)plan.resolvedValue,
+                        plan.avatarRelativePath, fieldPath);
+                    return reference;
+                }
+
+                if (reader.TokenType != JsonToken.String)
+                {
+                    throw new JsonSerializationException(
+                        $"Expected a path string for Unity reference '{fieldPath}' ({objectType.Name}), received {reader.TokenType}.");
+                }
+                var referencePlan = new AssignmentPlan
+                {
+                    memberType = objectType,
+                    raw = Convert.ToString(reader.Value),
+                    kind = ClassifyReference(objectType),
+                    fieldPath = fieldPath
+                };
+                if (!TryResolveReference(referencePlan, avatarRoot, out var referenceError))
+                {
+                    throw new JsonSerializationException(referenceError);
+                }
+                return referencePlan.resolvedValue;
+            }
+
+            public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+            {
+                throw new NotSupportedException("The nested reference converter is only used for field preflight.");
+            }
+
+            private string ResolveJsonFieldPath(string readerPath)
+            {
+                if (string.IsNullOrEmpty(readerPath)) { return baseFieldPath; }
+                var root = baseFieldPath.StartsWith("fields.", StringComparison.Ordinal)
+                    ? baseFieldPath.Substring("fields.".Length)
+                    : baseFieldPath;
+                if (readerPath.Equals(root, StringComparison.Ordinal)
+                    || readerPath.StartsWith(root + ".", StringComparison.Ordinal)
+                    || readerPath.StartsWith(root + "[", StringComparison.Ordinal))
+                {
+                    return "fields." + readerPath;
+                }
+                if (readerPath.StartsWith("fields.", StringComparison.Ordinal)) { return readerPath; }
+                return baseFieldPath + (readerPath.StartsWith("[", StringComparison.Ordinal) ? string.Empty : ".") + readerPath;
+            }
+        }
+
+        private static void SetAvatarObjectReference(
+            object reference,
+            Type referenceType,
+            GameObject target,
+            string relativePath,
+            string fieldName)
+        {
+            var setMethod = referenceType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "Set"
+                    && m.GetParameters().Length == 1
+                    && m.GetParameters()[0].ParameterType == typeof(GameObject));
+            if (setMethod != null)
+            {
+                setMethod.Invoke(reference, new object[] { target });
+                return;
+            }
+
+            // Fallback: set the public referencePath field directly.
+            var refPathField = referenceType.GetField("referencePath", BindingFlags.Public | BindingFlags.Instance);
+            if (refPathField != null)
+            {
+                refPathField.SetValue(reference, relativePath);
+                return;
+            }
+            throw new InvalidOperationException(
+                $"AvatarObjectReference field '{fieldName}' has no usable Set method or referencePath field.");
         }
 
         // --- reflection helpers ------------------------------------------------------
@@ -844,6 +961,7 @@ namespace VRCForge.Editor
             public MemberInfo member;
             public Type memberType;
             public string raw;       // for references
+            public string fieldPath; // for nested structured-field references
             public JToken token;     // for scalar fields
             public ReferenceKind kind;
             public object resolvedValue;
