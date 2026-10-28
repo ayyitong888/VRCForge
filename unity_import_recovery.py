@@ -61,7 +61,9 @@ def make_import_operation_journal(recovery: dict, approval: dict, arguments: dic
             "operationId": recovery["operationId"], "targetTool": approval["targetTool"],
             "projectRoot": recovery["projectRoot"], "taskContext": _action_context(approval.get("taskContext") or {}),
             "preparedSeal": copy.deepcopy(arguments[PREPARED_UNITY_EXECUTION_ARGUMENT_KEY]),
-            "approvedUnityExecutionPlan": frozen.as_json(), "materializations": []}
+            "approvedUnityExecutionPlan": frozen.as_json(), "materializations": [],
+            "executionLane": approval.get("executionLane", "approved_write"),
+            "authorizedAt": approval.get("authorizedAt", "")}
 
 
 def import_operation_journal_path(approval_id: str, audit_path: Path) -> Path:
@@ -184,27 +186,43 @@ def verify_interrupted_package_import(recovery: dict, status: dict, *, audit_pat
     job_id = status.get("jobId")
     _require(isinstance(job_id, str) and re.fullmatch(r"[0-9a-f]{32}", job_id) is not None, "Invalid import job identity.")
     _require(_same_path(status.get("projectPath"), recovery.get("projectRoot")), "Receipt belongs to another project.")
-    records = [entry for entry in _host_entries(audit_path, str(approval_id))
-               if isinstance(entry.get("approval"), dict) and entry["approval"].get("id") == approval_id]
-    _require(bool(records), "Host approval audit is missing.")
-    failed = [entry["approval"] for entry in records if entry.get("event") == "approval_failed"]
-    _require(len(failed) == 1 and records[-1].get("event") == "approval_failed", "Approval failure is ambiguous or no longer current.")
-    approval = failed[0]
-    _require(approval.get("status") == "failed" and approval.get("targetTool") == recovery["targetTool"]
-             and _same_path(approval.get("projectRoot"), recovery["projectRoot"]), "Approval scope differs from recovery.")
-    context = approval.get("taskContext") or {}
-    if journal is None:
-        _require(all(isinstance(context.get(key), str) and context[key] for key in ("sessionId", "turnId", "actionId"))
-                 and context.get("tool") == recovery["targetTool"], "Host action identity is incomplete.")
+    external = journal is not None and journal.get("executionLane") == "external_mcp_write"
+    if external:
+        records = [entry for entry in _host_entries(audit_path, str(approval_id))
+                   if entry.get("event") in {"external_mcp_write_failed", "external_mcp_write_completed"}
+                   and entry.get("operationId") == approval_id]
+        _require(len(records) == 1 and records[0].get("event") == "external_mcp_write_failed",
+                 "External import failure is missing, ambiguous or no longer current.")
+        failure = records[0]
+        _require(failure.get("targetTool") == recovery["targetTool"]
+                 and _same_path(failure.get("projectRoot"), recovery["projectRoot"]), "External import scope differs from recovery.")
+        context = journal.get("taskContext") or {}
+        approved_plan = journal.get("approvedUnityExecutionPlan")
+        authorized_at, failed_at = journal.get("authorizedAt"), journal.get("handlerFinishedAt")
     else:
-        _require(journal.get("taskContext") == _action_context(context), "Journal host action differs from approval.")
-    approved = [entry["approval"] for entry in records if entry.get("event") in {"approval_approved", "approval_applying"}]
-    _require({"approval_approved", "approval_applying"}.issubset({entry.get("event") for entry in records})
-             and all(item.get("approvedUnityExecutionPlan") == approval.get("approvedUnityExecutionPlan")
-             and all((item.get("taskContext") or {}).get(key) == context.get(key) for key in ("sessionId", "turnId", "actionId", "tool"))
-             for item in approved), "Approved plan or host action drifted.")
-    _require((approval.get("resultSummary") or {}).get("jobId") == job_id, "Failed approval did not witness this job.")
-    frozen = validate_frozen_approved_unity_execution_plan(approval.get("approvedUnityExecutionPlan"))
+        records = [entry for entry in _host_entries(audit_path, str(approval_id))
+                   if isinstance(entry.get("approval"), dict) and entry["approval"].get("id") == approval_id]
+        _require(bool(records), "Host approval audit is missing.")
+        failed = [entry["approval"] for entry in records if entry.get("event") == "approval_failed"]
+        _require(len(failed) == 1 and records[-1].get("event") == "approval_failed", "Approval failure is ambiguous or no longer current.")
+        approval = failed[0]
+        _require(approval.get("status") == "failed" and approval.get("targetTool") == recovery["targetTool"]
+                 and _same_path(approval.get("projectRoot"), recovery["projectRoot"]), "Approval scope differs from recovery.")
+        context = approval.get("taskContext") or {}
+        if journal is None:
+            _require(all(isinstance(context.get(key), str) and context[key] for key in ("sessionId", "turnId", "actionId"))
+                     and context.get("tool") == recovery["targetTool"], "Host action identity is incomplete.")
+        else:
+            _require(journal.get("taskContext") == _action_context(context), "Journal host action differs from approval.")
+        approved = [entry["approval"] for entry in records if entry.get("event") in {"approval_approved", "approval_applying"}]
+        _require({"approval_approved", "approval_applying"}.issubset({entry.get("event") for entry in records})
+                 and all(item.get("approvedUnityExecutionPlan") == approval.get("approvedUnityExecutionPlan")
+                 and all((item.get("taskContext") or {}).get(key) == context.get(key) for key in ("sessionId", "turnId", "actionId", "tool"))
+                 for item in approved), "Approved plan or host action drifted.")
+        _require((approval.get("resultSummary") or {}).get("jobId") == job_id, "Failed approval did not witness this job.")
+        approved_plan = approval.get("approvedUnityExecutionPlan")
+        authorized_at, failed_at = approval.get("approvedAt"), approval.get("failedAt")
+    frozen = validate_frozen_approved_unity_execution_plan(approved_plan)
     _require([call.tool_name for call in frozen.calls] == ["vrc_import_unitypackage", "vrc_refresh_asset_database"],
              "Recovery requires exactly one import and its known refresh tail.")
     paths = status.get("expectedAssetPaths")
@@ -249,7 +267,7 @@ def verify_interrupted_package_import(recovery: dict, status: dict, *, audit_pat
         PreparedOutfitImportApprovedWriteService._job_receipt(initial, {"projectPath": status["projectPath"]},
             {"path": status["unityPackagePath"], "sha256": status["expectedSha256"], "size": status["expectedSize"]}, paths)
         _verify_operation_sources(journal, package)
-    _require(_time(approval["approvedAt"]) <= _time(status["createdUtc"]) <= _time(approval["failedAt"])
+    _require(_time(authorized_at) <= _time(status["createdUtc"]) <= _time(failed_at)
              and _time(status["createdUtc"]) <= _time(status["completedUtc"]), "Import job time does not belong to this approval.")
     identity = {"path": package, "sha256": call["expectedSha256"], "size": call["expectedSize"]}
     # Existing production validators retain their path/hash/size and GUID/type requirements.
@@ -283,7 +301,8 @@ def verify_interrupted_package_import(recovery: dict, status: dict, *, audit_pat
     _require(before == after and digest == final_digest and content.get("verified") is True, "Source changed during recovery verification.")
     return {"schema": "vrcforge.verified_partial_import.v1", "jobId": job_id, "operationId": approval_id,
             "approvalId": approval_id, "sessionId": context.get("sessionId", ""), "turnId": context.get("turnId", ""), "actionId": context.get("actionId", ""),
-            "planDigest": frozen.plan_digest, "verified": True, "workflowComplete": False, "originalApprovalStatus": "failed",
+            "planDigest": frozen.plan_digest, "verified": True, "workflowComplete": False,
+            **({"originalOperationStatus": "failed"} if external else {"originalApprovalStatus": "failed"}),
             "assetCount": len(assets), "contentReadback": {"verified": True, "checked": content["checked"]},
             "remainingPostImportSteps": ["asset_database_refresh", "temporary_materialization_cleanup_if_present"],
             "sourceCleanupPerformed": False}

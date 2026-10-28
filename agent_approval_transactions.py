@@ -2742,35 +2742,17 @@ class AgentApprovalTransactionService:
             frozen_execution_plan,
         )
         try:
-            from unity_import_recovery import make_import_operation_journal, import_operation_journal_path
             from prepared_outfit_import_workflow_service import bind_import_operation_journal
-            journal_writer = None
-            journal = make_import_operation_journal(
-                recovery or {}, {"id": approval_id, "targetTool": target_tool,
-                                 "taskContext": task_context, "approvedUnityExecutionPlan": frozen_execution_plan},
+            journal_writer = self._prepare_import_operation_journal(
+                recovery, {"id": approval_id, "targetTool": target_tool,
+                           "taskContext": task_context, "approvedUnityExecutionPlan": frozen_execution_plan},
                 handler_arguments,
             )
-            if journal is not None:
-                journal_path = import_operation_journal_path(approval_id, self._ports.audit_log_path())
-                # Full private source facts must not pass through audit redaction
-                # or summaries. Atomic persistence precedes remote dispatch.
-                atomic_write_json(journal_path, journal)
-                recovery["importOperation"] = {
-                    "schema": journal["schema"], "journalFile": journal_path.name,
-                    "sealSha256": journal["preparedSeal"]["sealSha256"],
-                }
-                saved = self._ports.checkpoint.append_apply_recovery_entry(recovery)
-                recovery.update(saved)
-                def journal_writer(progress):
-                    updated = {**journal, **copy.deepcopy(progress)}
-                    atomic_write_json(journal_path, updated)
-                    journal.clear()
-                    journal.update(updated)
             with bind_approved_unity_execution(execution_plan), bind_import_operation_journal(journal_writer):
                 with self._scan_mutation(project_root, target_tool, recovery) as mutation:
                     result = write_handler.handler(handler_arguments)
                     if journal_writer is not None and isinstance(result, dict) and result.get("ok") is False:
-                        journal_writer({"handlerResult": result})
+                        journal_writer({"handlerResult": result, "handlerFinishedAt": utc_now_iso()})
                     mutation["outcome"] = _domain_write_receipt(result)
         finally:
             if not execution_plan.consumed:
@@ -3104,6 +3086,28 @@ class AgentApprovalTransactionService:
     def _apply_recovery_blocks_writes(self, recovery: dict[str, Any]) -> bool:
         return str(recovery.get("status") or "") in APPLY_RECOVERY_ACTIVE_STATUSES
 
+    def _prepare_import_operation_journal(self, recovery, owner, arguments):
+        """Persist one import's existing host-owned seal before either lane dispatches."""
+        from unity_import_recovery import make_import_operation_journal, import_operation_journal_path
+        if not isinstance(recovery, dict):
+            return None
+        journal = make_import_operation_journal(recovery, owner, arguments)
+        if journal is None:
+            return None
+        journal_path = import_operation_journal_path(owner["id"], self._ports.audit_log_path())
+        atomic_write_json(journal_path, journal)
+        recovery["importOperation"] = {
+            "schema": journal["schema"], "journalFile": journal_path.name,
+            "sealSha256": journal["preparedSeal"]["sealSha256"],
+        }
+        recovery.update(self._ports.checkpoint.append_apply_recovery_entry(recovery))
+        def journal_writer(progress):
+            updated = {**journal, **copy.deepcopy(progress)}
+            atomic_write_json(journal_path, updated)
+            journal.clear()
+            journal.update(updated)
+        return journal_writer
+
     def _start_apply_recovery(
         self,
         approval: dict[str, Any],
@@ -3255,7 +3259,7 @@ class AgentApprovalTransactionService:
         import tarfile
 
         project_root = extract_project_root(arguments)
-        if (not project_root or arguments.get("jobId", arguments.get("job_id")) != status.get("jobId")
+        if (not project_root or str(arguments.get("jobId", arguments.get("job_id")) or "").strip().lower() != status.get("jobId")
                 or status.get("ok") is not True or status.get("status") != "completed"):
             return []
         key, acquired = self._try_acquire_project_write(project_root)
@@ -3282,7 +3286,7 @@ class AgentApprovalTransactionService:
                     continue
                 saved = self._finish_apply_recovery(
                     recovery, status="resolved", resolution="verified_partial_import", result_summary=proof,
-                    note="The single package commit was independently verified. The original approval remains failed; refresh requires normal approval.",
+                    note="The single package commit was independently verified. The original execution remains failed; refresh requires normal approval.",
                 )
                 try:
                     cleanup = release_verified_import_sources(saved, self._ports.audit_log_path())
@@ -4269,12 +4273,21 @@ class AgentApprovalTransactionService:
         )
         result: Any = None
         try:
-            with bind_approved_unity_execution(execution_plan):
+            from prepared_outfit_import_workflow_service import bind_import_operation_journal
+            journal_writer = self._prepare_import_operation_journal(
+                recovery, {"id": operation_id, "targetTool": target_tool,
+                           "approvedUnityExecutionPlan": frozen_execution_plan,
+                           "executionLane": "external_mcp_write", "authorizedAt": utc_now_iso()},
+                handler_arguments,
+            )
+            with bind_approved_unity_execution(execution_plan), bind_import_operation_journal(journal_writer):
                 with bind_operation_context(operation_id, execution_target if isinstance(execution_target, Mapping) else None):
                     with (nullcontext() if arguments.get("preview") is True else self._scan_mutation(
                         project_root, target_tool, recovery
                     )) as mutation:
                         result = write_handler.handler(handler_arguments)
+                        if journal_writer is not None and isinstance(result, dict) and result.get("ok") is False:
+                            journal_writer({"handlerResult": result, "handlerFinishedAt": utc_now_iso()})
                         if isinstance(mutation, dict):
                             mutation["outcome"] = _domain_write_receipt(result)
         finally:
