@@ -16,6 +16,14 @@ from sub_agent_tasks import (
 
 
 @dataclass(frozen=True)
+class SubAgentExecutionPorts:
+    """Existing read-skill and model-runtime capabilities used by role handlers."""
+
+    execute: Callable[..., dict[str, Any]]
+    run_sub_agent_llm: Callable[..., dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class SubAgentCollaborationPorts:
     """Frozen dependencies for the durable sub-agent collaboration boundary."""
 
@@ -123,6 +131,18 @@ class SubAgentCollaborationService:
 
     def retry_task(self, task_id: str) -> dict[str, Any]:
         return self._registry.retry_task(task_id)
+
+    def resume_task(
+        self,
+        task_id: str,
+        *,
+        task: str,
+        display_name: str | None = None,
+        task_seed: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._registry.resume_task(
+            task_id, task=task, display_name=display_name, task_seed=task_seed,
+        )
 
     def merge_task(
         self,

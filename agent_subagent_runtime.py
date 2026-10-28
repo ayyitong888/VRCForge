@@ -19,11 +19,14 @@ def forward_child_cancellation(gateway: Any) -> None:
 
 def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: str,
                       system_prompt: str, max_steps: int, project_path: str,
-                      selected_materials: list[dict], cancel_event: Event) -> dict:
+                      selected_materials: list[dict], cancel_event: Event,
+                      client_turn_id: str = "", is_resume: bool = False,
+                      allowed_tools: list[str] | tuple[str, ...] | None = None,
+                      provider: str = "") -> dict:
     if cancel_event.is_set():
         return {"ok": False, "status": "cancelled", "childSessionId": child_session_id,
                 "finalReport": "Request cancelled.", "rawResult": {}, "stepCount": 0}
-    client_turn_id = child_session_id + ":initial"
+    client_turn_id = str(client_turn_id or "").strip() or child_session_id + ":initial"
     message = task
     if selected_materials:
         message += "\n\nSelected materials (quoted task data):\n" + json.dumps(selected_materials, ensure_ascii=False)
@@ -32,6 +35,13 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
         "clientTurnId": client_turn_id, "projectRoot": project_path,
         "model": model, "planMode": True, "maxAgenticTurns": max_steps,
     }
+    if provider:
+        params["provider"] = provider
+    if is_resume:
+        # The gateway checks for an existing conversation under the exact
+        # current Provider/project binding before runtime admission. A route
+        # mismatch must fail closed, never start an empty child history.
+        params["_requireNativeHistory"] = True
     finished = Event()
 
     def watch_cancel() -> None:
@@ -46,12 +56,14 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
     token = _CURRENT_CHILD.set({"event": cancel_event, "clientTurnId": client_turn_id})
     watcher.start()
     try:
-        with gateway.runtime_planner.bind_role_instructions(system_prompt):
+        with gateway.runtime_planner.bind_role_instructions(system_prompt, allowed_tools=allowed_tools):
             raw = gateway.runtime_message(params, agent_name="sub-agent")
     finally:
         finished.set()
         watcher.join()
         _CURRENT_CHILD.reset(token)
+    provider_route = raw.pop("_resolvedSubAgentRoute", {}) if isinstance(raw, dict) else {}
+    resumable = raw.pop("_subAgentResumable", False) is True if isinstance(raw, dict) else False
     plan = raw.get("plan") or {}
     report = str(plan.get("reply") or plan.get("summary") or "")
     run_status = AgentRuntimeRunLedger.turn_run_status(
@@ -68,4 +80,10 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
         "childSessionId": child_session_id,
         "finalReport": report, "rawResult": raw,
         "stepCount": len(raw.get("steps") or []),
+        "providerRoute": {
+            key: provider_route[key]
+            for key in ("provider", "model")
+            if isinstance(provider_route, dict) and isinstance(provider_route.get(key), str)
+        },
+        "resumable": resumable,
     }

@@ -106,6 +106,7 @@ from agent_runtime_event_projection import project_runtime_turn_event
 from request_usage_reconciliation import reconcile_request_usage
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
 from agent_task_loop import (
+    SUB_AGENT_TASK_TOOLS,
     AgentTaskLoop,
     approval_task_context,
     canonical_action_id,
@@ -729,6 +730,7 @@ class AgentGateway:
         self._runtime_continuation_condition = threading.Condition(self._lock)
         self._question_continuations_inflight: set[str] = set()
         self._runtime_subagent_list_tasks = runtime_subagent_list_tasks
+        self._runtime_subagent_role_catalog: Callable[[], Any] | None = None
         self._runtime_subagent_cancel_task = runtime_subagent_cancel_task
         self._tool_agent_context: contextvars.ContextVar[str] = contextvars.ContextVar(
             "vrcforge_tool_agent",
@@ -1293,6 +1295,7 @@ class AgentGateway:
         ) -> Any:
             if tool.name in {
                 "vrcforge_delegate_subagent",
+                "vrcforge_resume_subagent",
                 "vrcforge_vision_audit_multi",
                 "vrcforge_ask_user",
                 "vrcforge_call_user",
@@ -1930,6 +1933,7 @@ class AgentGateway:
         *,
         list_tasks: Callable[[], Any],
         cancel_task: Callable[[str], Any],
+        role_catalog: Callable[[], Any] | None = None,
     ) -> None:
         """Bind the app-owned cooperative sub-agent cancellation port."""
 
@@ -1937,6 +1941,7 @@ class AgentGateway:
             raise TypeError("sub-agent control callbacks must be callable")
         self._runtime_subagent_list_tasks = list_tasks
         self._runtime_subagent_cancel_task = cancel_task
+        self._runtime_subagent_role_catalog = role_catalog
 
     def _cancel_runtime_subagents(
         self,
@@ -4807,11 +4812,14 @@ class AgentGateway:
     def run_sub_agent_llm(self, *, task: str, child_session_id: str, model: str = "",
                           system_prompt: str = "", max_steps: int = 4,
                           project_path: str = "", selected_materials: list[dict] | None = None,
-                          cancel_event: threading.Event) -> dict[str, Any]:
+                          cancel_event: threading.Event, client_turn_id: str = "", is_resume: bool = False,
+                          allowed_tools: list[str] | tuple[str, ...] | None = None, provider: str = "") -> dict[str, Any]:
         from agent_subagent_runtime import run_child_runtime
         return run_child_runtime(self, task=task, child_session_id=child_session_id, model=model,
                                  system_prompt=system_prompt, max_steps=max_steps, project_path=project_path,
-                                 selected_materials=selected_materials or [], cancel_event=cancel_event)
+                                 selected_materials=selected_materials or [], cancel_event=cancel_event,
+                                 client_turn_id=client_turn_id, is_resume=is_resume,
+                                 allowed_tools=allowed_tools, provider=provider)
 
     def runtime_message(
         self,
@@ -4825,8 +4833,22 @@ class AgentGateway:
             with self.runtime_planner.bind_turn(params) as metadata:
                 params["_contextCompactionLimit"] = metadata.verified_context_limit
                 params["_plannerAttemptLabel"] = metadata.planner_label
+                if agent_name == "sub-agent":
+                    if metadata.provider:
+                        params["provider"] = metadata.provider
+                    if metadata.model:
+                        params["model"] = metadata.model
+                if params.pop("_requireNativeHistory", False):
+                    binding = self.runtime_planner.native_conversation_binding(str(params.get("projectRoot") or ""))
+                    session_id = str(params.get("session_id") or params.get("sessionId") or "")
+                    if not binding or self.runtime_sessions.native_conversation(session_id, binding=binding) is None:
+                        raise AgentGatewayError("The original child history is unavailable for this provider/model route; no new conversation was started.", status_code=409)
                 with self._desktop.runtime_turn_context(params):
-                    return self._runtime_message_impl(params, agent_name=agent_name)
+                    result = self._runtime_message_impl(params, agent_name=agent_name)
+                if agent_name == "sub-agent":
+                    result["_resolvedSubAgentRoute"] = {"provider": str(params.get("provider") or ""), "model": str(params.get("model") or "")}
+                    result["_subAgentResumable"] = bool(metadata.native_binding)
+                return result
         except DesktopActionBrokerError as exc:
             error = AgentGatewayError(str(exc), status_code=exc.status_code)
             error.runtime_admitted = params.get("_runtimeAdmitted") is True
@@ -5143,7 +5165,7 @@ class AgentGateway:
         if isinstance(result_summary, dict):
             result_summary = json.dumps(result_summary, ensure_ascii=False, sort_keys=True, default=str)
         continuation["plannerObservation"] = {
-            "tool": "vrcforge_delegate_subagent",
+            "tool": str(ensure_dict(event.get("taskSeed")).get("requestedTool") or "vrcforge_delegate_subagent"),
             "kind": "skill",
             "status": str(event.get("status") or ""),
             "result": {
@@ -6796,7 +6818,7 @@ class AgentGateway:
                 or plan.get("shellCommand")
                 or plan_tool_name in self._write_handlers
                 or (plan_tool is not None and plan_tool.write)
-                or plan_tool_name == "vrcforge_delegate_subagent"
+                or plan_tool_name in SUB_AGENT_TASK_TOOLS
                 or (plan.get("skillNeeded") and plan_tool is None)
             ):
                 last_plan = {
@@ -7051,7 +7073,9 @@ class AgentGateway:
                 if action_kind == "shell"
                 else str(plan.get("writeTool") or plan.get("skillTool") or "").strip()
             )
-            skill_policy_reason = task_loop.skill_policy_block_reason(policy_tool)
+            role_policy_denied = not self.runtime_planner.role_tool_allowed(policy_tool)
+            skill_policy_reason = "sub_agent_tool_not_allowed" if role_policy_denied else task_loop.skill_policy_block_reason(policy_tool)
+            policy_owner = "declared sub-agent role" if role_policy_denied else "loaded Skill"
             if skill_policy_reason:
                 blocked_outcome = normalize_agent_tool_result(
                     {
@@ -7061,15 +7085,15 @@ class AgentGateway:
                             "type": "skill_policy",
                             "code": skill_policy_reason,
                             "likelyCauses": [
-                                "The loaded Skill does not grant this tool to its instruction path."
+                                f"The {policy_owner} does not grant this tool to its instruction path."
                             ],
                             "nextActions": [
-                                "Choose one of the Skill's allowed tools or stop and explain the mismatch."
+                                f"Choose one of the {policy_owner}'s allowed tools or stop and explain the mismatch."
                             ],
                             "retryable": True,
                         },
                     },
-                    fallback_summary="The loaded Skill does not allow that tool.",
+                    fallback_summary=f"The {policy_owner} does not allow that tool.",
                     write=action_kind in {"write", "shell"},
                 )
                 loop_state.append(
@@ -7511,7 +7535,7 @@ class AgentGateway:
                     "vrcforge_search_text",
                 }:
                     step_params["_generalAllowedRoots"] = list(general_allowed_roots)
-                if step_tool == "vrcforge_delegate_subagent":
+                if step_tool in SUB_AGENT_TASK_TOOLS:
                     # The task seed is runtime-only metadata. Keep it on a
                     # detached execution payload so later injection cannot
                     # back-reference the arguments used for action identity.
@@ -9805,7 +9829,7 @@ class AgentGateway:
             "modelInvocable": model_invocable,
         }
         serialized["inputSchema"] = (
-            build_sub_agent_input_schema()
+            build_sub_agent_input_schema(self._runtime_subagent_role_catalog() if self._runtime_subagent_role_catalog else None)
             if tool.name == "vrcforge_delegate_subagent"
             else canonical_unity_read_tool_input_schema(tool.name)
         )

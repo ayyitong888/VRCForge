@@ -1,0 +1,7 @@
+{
+  "id": "outfit_package_inspection",
+  "title": "Outfit package inspection",
+  "description": "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab folder without reading asset payload bytes. Required in params: packagePath or package_path.",
+  "handler": "outfit_package_inspection",
+  "toolProfile": "read-only"
+}

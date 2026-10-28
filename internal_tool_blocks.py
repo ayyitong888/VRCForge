@@ -246,6 +246,7 @@ _CORE_TOOLS = frozenset(
         "vrcforge_call_user",
         "vrcforge_request_project_selection",
         "vrcforge_delegate_subagent",
+        "vrcforge_resume_subagent",
         "vrcforge_list_internal_tool_blocks",
         "vrcforge_load_internal_tool_block",
         "vrcforge_unload_internal_tool_block",

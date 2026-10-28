@@ -59,6 +59,12 @@ foreach ($relativePath in $bundledDocsFiles) {
     }
 }
 
+$bundledRoles = Join-Path $repoRoot "resources\sub-agents"
+$bundledRoleFiles = @(Get-ChildItem -LiteralPath $bundledRoles -Filter "*.json" -File)
+if ($bundledRoleFiles.Count -eq 0) {
+    throw "Built-in sub-agent role declarations are missing."
+}
+
 & $pyinstaller.Source `
     --noconfirm `
     --clean `
@@ -75,6 +81,7 @@ foreach ($relativePath in $bundledDocsFiles) {
     --hidden-import tools.vrcforge_cli `
     --add-data "$bundledGuide;examples/skill-packages/vrcforge-first-run-guide" `
     --add-data "$bundledDocs;examples/skill-packages/vrcforge-docs" `
+    --add-data "$bundledRoles;resources/sub-agents" `
     @excludeArgs `
     --distpath $tempDist `
     --specpath (Join-Path $repoRoot "build\pyinstaller") `
@@ -105,6 +112,13 @@ foreach ($relativePath in $bundledDocsFiles) {
     }
     if ((Get-FileHash -LiteralPath $collectedPath).Hash -ne (Get-FileHash -LiteralPath (Join-Path $bundledDocs $relativePath)).Hash) {
         throw "Bundled VRCForge Docs differs from its source: $relativePath"
+    }
+}
+foreach ($roleFile in $bundledRoleFiles) {
+    $collectedPath = Join-Path $sourceOutputDir "_internal\resources\sub-agents\$($roleFile.Name)"
+    if (-not (Test-Path -LiteralPath $collectedPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $collectedPath).Hash -ne (Get-FileHash -LiteralPath $roleFile.FullName).Hash) {
+        throw "Bundled sub-agent role declaration missing or changed: $($roleFile.Name)"
     }
 }
 $requiredWinPtyFiles = @(

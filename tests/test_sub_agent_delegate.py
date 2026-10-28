@@ -291,11 +291,16 @@ def test_readonly_llm_agent_forwards_only_selected_context_and_child_identity():
     result = run_readonly_llm_agent(gateway, {
         "task": "Review these facts", "childSessionId": "child-1", "model": "fixture",
         "systemPrompt": "Be concise", "maxSteps": 3, "projectPath": "ProjectA",
+        "taskId": "task-child-1", "isResume": False,
+        "tools": ("vrcforge_read_text_file",),
         "selectedMaterials": [{"name": "notes", "text": "fact"}],
         "_taskSeed": {"_nativeConversation": {"messages": [{"content": "parent secret"}]}},
         "parentSessionId": "parent-1",
     }, _idle_event())
     assert gateway.request["child_session_id"] == "child-1"
+    assert gateway.request["client_turn_id"] == "task-child-1"
+    assert gateway.request["is_resume"] is False
+    assert gateway.request["allowed_tools"] == ("vrcforge_read_text_file",)
     assert gateway.request["selected_materials"] == [{"name": "notes", "text": "fact"}]
     assert "parent secret" not in repr(gateway.request)
     assert "parent_session_id" not in gateway.request

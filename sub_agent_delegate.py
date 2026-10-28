@@ -8,9 +8,11 @@ skills fail visibly through the durable task registry.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from sub_agent_tasks import CancelledError, SubAgentRole
+from sub_agent_roles import load_sub_agent_roles
 
 
 class RuntimeSkillGateway(Protocol):
@@ -23,9 +25,11 @@ class RuntimeSkillGateway(Protocol):
         agent_name: str,
     ) -> dict[str, Any]: ...
 
-    def run_sub_agent_llm(self, *, task: str, child_session_id: str, model: str,
+    def run_sub_agent_llm(self, *, task: str, child_session_id: str, provider: str, model: str,
                           system_prompt: str, max_steps: int, project_path: str,
-                          selected_materials: list[dict[str, Any]], cancel_event: Any) -> dict[str, Any]: ...
+                          selected_materials: list[dict[str, Any]], client_turn_id: str,
+                          is_resume: bool, allowed_tools: list[str] | tuple[str, ...] | None,
+                          cancel_event: Any) -> dict[str, Any]: ...
 
 
 def _checkpoint(cancel_event: Any) -> None:
@@ -358,88 +362,53 @@ def run_readonly_llm_agent(gateway: RuntimeSkillGateway, payload: dict[str, Any]
     response = gateway.run_sub_agent_llm(
         task=task,
         child_session_id=child_session_id,
+        provider=str(payload.get("provider") or ""),
         model=str(payload.get("model") or "").strip(),
         system_prompt=str(payload.get("systemPrompt") or payload.get("system_prompt") or "").strip(),
-        max_steps=max(1, min(int(payload.get("maxSteps", payload.get("max_steps", 4))), 12)),
+        max_steps=payload["maxSteps"],
         project_path=str(payload.get("projectPath") or "").strip(),
         selected_materials=materials,
+        client_turn_id=str(payload.get("taskId") or ""),
+        is_resume=bool(payload.get("isResume")),
+        allowed_tools=payload["tools"],
         cancel_event=cancel_event,
     )
     _checkpoint(cancel_event)
     if not isinstance(response, dict) or not isinstance(response.get("finalReport"), str):
         raise RuntimeError("Native child runtime did not return a final report.")
+    role_id = str(payload.get("roleId") or "llm_readonly")
+    raw_route = response.get("providerRoute")
+    provider_route = {
+        key: raw_route[key]
+        for key in ("provider", "model")
+        if isinstance(raw_route, dict) and isinstance(raw_route.get(key), str)
+    }
     return {
         "ok": bool(response.get("ok", True)),
         "schema": "vrcforge.sub_agent.llm_readonly.v1",
-        "role": "llm_readonly",
+        "role": role_id,
         "readOnly": True,
         "childSessionId": child_session_id,
         "summaryText": response["finalReport"][:1000],
         "finalReport": response["finalReport"],
-        "plannerEvidence": {"role": "llm_readonly", "childSessionId": child_session_id,
+        "plannerEvidence": {"role": role_id, "childSessionId": child_session_id,
                             "stepCount": int(response.get("stepCount") or 0)},
         "rawResult": response.get("rawResult", response),
+        "providerRoute": provider_route,
+        "resumable": response.get("resumable") is True,
     }
 
 
-def build_sub_agent_roles() -> list[SubAgentRole]:
-    """组合根用的完整角色清单（六个既有角色 + skill_delegate）。"""
-    return [
-        SubAgentRole(
-            id="project_index_review",
-            title="Project index review",
-            description="Scan the local Unity project index and summarize changed scanner families. Required: projectPath, projectRoot, or project_path.",
-            tool_profile="local-index-only",
-        ),
-        SubAgentRole(
-            id="outfit_package_inspection",
-            title="Outfit package inspection",
-            description="Inspect a UnityPackage, Booth ZIP/folder, or loose prefab folder without reading asset payload bytes. Required in params: packagePath or package_path.",
-            tool_profile="read-only",
-        ),
-        SubAgentRole(
-            id="validation_triage",
-            title="Validation triage",
-            description="Run the read-only validation report and summarize errors, warnings, and likely next plans.",
-            tool_profile="read-only",
-        ),
-        SubAgentRole(
-            id="selected_context_review",
-            title="Selected context review",
-            description="Open a scoped read-only sub-agent thread from selected chat text.",
-            tool_profile="read-only",
-        ),
-        SubAgentRole(
-            id="package_install_diagnosis",
-            title="Package install diagnosis",
-            description="Classify package install output and Unity compile errors without repairing automatically.",
-            tool_profile="read-only",
-        ),
-        SubAgentRole(
-            id="outfit_import_plan_review",
-            title="Outfit import plan review",
-            description="Inspect a package and build a supervised import plan without writing to Unity. Required in params: packagePath.",
-            tool_profile="plan-only",
-        ),
-        SubAgentRole(
-            id="skill_delegate",
-            title="Skill delegate",
-            description="Run one allowlisted read-only or plan-only runtime skill by name and report its output. Required in params: toolName or tool_name; pass skill inputs in skillParams when needed.",
-            tool_profile="runtime-allowlist",
-        ),
-        SubAgentRole(
-            id="llm_readonly",
-            title="Read-only LLM sub-agent",
-            description="Reason over the task using an independent child session and read-only tools.",
-            tool_profile="read-only",
-        ),
-    ]
+def build_sub_agent_roles(*, data_dir: str | Path | None = None,
+                          builtin_dir: str | Path | None = None) -> list[SubAgentRole]:
+    """Load packaged role declarations and user additions from DATA_DIR."""
+    return load_sub_agent_roles(data_dir=data_dir, builtin_dir=builtin_dir)
 
 
-def build_sub_agent_input_schema() -> dict[str, Any]:
+def build_sub_agent_input_schema(roles: list[SubAgentRole] | None = None) -> dict[str, Any]:
     """Build the public delegate schema from the executable role catalogue."""
 
-    roles = build_sub_agent_roles()
+    roles = roles if roles is not None else build_sub_agent_roles()
     role_ids = [role.id for role in roles]
     return {
         "type": "object",
@@ -489,9 +458,10 @@ def build_sub_agent_input_schema() -> dict[str, Any]:
 
 def build_sub_agent_role_handlers(
     gateway: RuntimeSkillGateway,
+    roles: list[SubAgentRole] | None = None,
 ) -> dict[str, Callable[[dict[str, Any], Any], dict[str, Any]]]:
-    """组合根用的 role -> handler 映射；gateway 在这里一次性绑定。"""
-    return {
+    """Bind legacy fixed handlers and the generic read-only LLM executor."""
+    handlers = {
         "project_index_review": lambda payload, cancel_event: run_project_index_review(gateway, payload, cancel_event),
         "outfit_package_inspection": lambda payload, cancel_event: run_outfit_package_inspection(gateway, payload, cancel_event),
         "validation_triage": lambda payload, cancel_event: run_validation_triage(gateway, payload, cancel_event),
@@ -501,3 +471,12 @@ def build_sub_agent_role_handlers(
         "skill_delegate": lambda payload, cancel_event: run_skill_delegate(gateway, payload, cancel_event),
         "llm_readonly": lambda payload, cancel_event: run_readonly_llm_agent(gateway, payload, cancel_event),
     }
+    for role in roles if roles is not None else build_sub_agent_roles():
+        if role.handler == "llm_readonly":
+            def run_role(payload: dict[str, Any], cancel_event: Any, *, role_id: str = role.id) -> dict[str, Any]:
+                role_payload = dict(payload)
+                role_payload.setdefault("roleId", role_id)
+                return run_readonly_llm_agent(gateway, role_payload, cancel_event)
+
+            handlers[role.id] = run_role
+    return handlers

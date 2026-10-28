@@ -62,7 +62,8 @@ def test_llm_task_fields_and_child_identity_are_durable_and_retry_gets_new_ident
 
     registry = SubAgentTaskRegistry(
         tmp_path,
-        roles=[SubAgentRole("llm_readonly", "Read only", "LLM", tool_profile="read-only")],
+        roles=[SubAgentRole("llm_readonly", "Read only", "LLM", tool_profile="read-only",
+                            handler="llm_readonly")],
         handlers={"llm_readonly": handler},
     )
     created = registry.create_task(role="llm_readonly", task="Review", display_name="Manuka",

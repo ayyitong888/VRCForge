@@ -1,0 +1,7 @@
+{
+  "id": "package_install_diagnosis",
+  "title": "Package install diagnosis",
+  "description": "Classify package install output and Unity compile errors without repairing automatically.",
+  "handler": "package_install_diagnosis",
+  "toolProfile": "read-only"
+}

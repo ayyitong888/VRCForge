@@ -1,0 +1,8 @@
+{
+  "id": "llm_readonly",
+  "title": "Read-only LLM sub-agent",
+  "description": "Reason over the task using an independent child session and read-only tools.",
+  "handler": "llm_readonly",
+  "toolProfile": "read-only",
+  "maxSteps": 4
+}

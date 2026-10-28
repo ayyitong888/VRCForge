@@ -112,6 +112,84 @@ def test_plan_mode_blocks_proposed_write_before_handler_dispatch(tmp_path):
     assert result["ok"] is False
 
 
+def _register_second_read_tool(gateway, invoked):
+    gateway.register_tool(
+        "vrcforge_search_text", "When to use: search selected text. When NOT to use: write.",
+        "plan/preview", lambda params: invoked.append(("search", params)) or {"matches": []},
+    )
+
+
+def _native_function_names(request):
+    names = []
+    for item in request.get("tools", []):
+        function = item.get("function") if isinstance(item, dict) else None
+        name = function.get("name") if isinstance(function, dict) else None
+        if isinstance(name, str):
+            names.append(name)
+    return names
+
+
+def _native_available_tool_names(request):
+    for message in request.get("messages", []):
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str) and content.startswith("Current runtime state (data): "):
+            return json.loads(content.partition(": ")[2]).get("availableToolNames", [])
+    raise AssertionError("native request did not include runtime catalog state")
+
+
+def test_role_allowlist_filters_native_and_legacy_tool_catalogs_including_empty_list(tmp_path):
+    gateway, model, invoked = _child_gateway(tmp_path, [_finish])
+    _register_second_read_tool(gateway, invoked)
+    result = _run(gateway, tmp_path, allowed_tools=("vrcforge_read_text_file",))
+    assert result["ok"] is True
+    exposed = _native_available_tool_names(model.requests[0])
+    assert "vrcforge_read_text_file" in exposed
+    assert "vrcforge_search_text" not in exposed
+
+    with gateway.runtime_planner.bind_role_instructions(
+        "Role instructions", allowed_tools=("vrcforge_read_text_file",),
+    ):
+        legacy_allowed_prompt = gateway.runtime_planner._build_llm_plan_prompt(
+            "Read selected project files.", [], observe={"planMode": True},
+            exposure_layer="planning", project_context_active=True,
+            project_path=str(tmp_path), global_instructions="", project_instructions="",
+        )
+    assert "vrcforge_read_text_file" in legacy_allowed_prompt
+    assert "vrcforge_search_text" not in legacy_allowed_prompt
+
+    with gateway.runtime_planner.bind_role_instructions("Role instructions", allowed_tools=()):
+        legacy_prompt = gateway.runtime_planner._build_llm_plan_prompt(
+            "Read selected project files.", [], observe={"planMode": True},
+            exposure_layer="planning", project_context_active=True,
+            project_path=str(tmp_path), global_instructions="", project_instructions="",
+        )
+    assert "vrcforge_read_text_file" not in legacy_prompt
+    assert "vrcforge_search_text" not in legacy_prompt
+
+    empty_path = tmp_path / "empty-role"
+    empty_path.mkdir()
+    empty_gateway, empty_model, _ = _child_gateway(empty_path, [_finish])
+    empty_invoked = []
+    _register_second_read_tool(empty_gateway, empty_invoked)
+    empty_result = _run(empty_gateway, empty_path, allowed_tools=())
+    assert empty_result["ok"] is True
+    empty_exposed = _native_available_tool_names(empty_model.requests[0])
+    assert "vrcforge_read_text_file" not in empty_exposed
+    assert "vrcforge_search_text" not in empty_exposed
+
+
+def test_native_child_cannot_invoke_a_read_tool_not_in_the_declared_role_allowlist(tmp_path):
+    gateway, model, invoked = _child_gateway(tmp_path, [
+        call("guessed-search", "vrcforge_search_text", {"query": "must not execute"}),
+        {"role": "assistant", "content": "The selected role cannot run that tool."},
+    ])
+    _register_second_read_tool(gateway, invoked)
+    result = _run(gateway, tmp_path, allowed_tools=("vrcforge_read_text_file",))
+    assert "vrcforge_search_text" not in _native_available_tool_names(model.requests[0])
+    assert not invoked
+    assert "tool_not_visible" in json.dumps(result["rawResult"])
+
+
 def test_child_cancel_event_stops_runtime_before_later_tool_dispatch(tmp_path):
     cancel = threading.Event()
     gateway, model, invoked = _child_gateway(tmp_path, [

@@ -1,0 +1,7 @@
+{
+  "id": "validation_triage",
+  "title": "Validation triage",
+  "description": "Run the read-only validation report and summarize errors, warnings, and likely next plans.",
+  "handler": "validation_triage",
+  "toolProfile": "read-only"
+}

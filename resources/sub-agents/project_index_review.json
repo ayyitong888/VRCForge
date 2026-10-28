@@ -1,0 +1,7 @@
+{
+  "id": "project_index_review",
+  "title": "Project index review",
+  "description": "Scan the local Unity project index and summarize changed scanner families. Required: projectPath, projectRoot, or project_path.",
+  "handler": "project_index_review",
+  "toolProfile": "local-index-only"
+}

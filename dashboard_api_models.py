@@ -1181,6 +1181,13 @@ class SubAgentCreateRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class SubAgentResumeRequest(BaseModel):
+    task: str = Field(min_length=1)
+    display_name: str | None = Field(default=None, alias="displayName")
+
+    model_config = {"populate_by_name": True}
+
+
 class SubAgentMergeRequest(BaseModel):
     decision: str = Field(default="adopted")
     chat_id: str = Field(default="", alias="chatId")

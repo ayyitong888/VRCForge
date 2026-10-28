@@ -1,0 +1,7 @@
+{
+  "id": "outfit_import_plan_review",
+  "title": "Outfit import plan review",
+  "description": "Inspect a package and build a supervised import plan without writing to Unity. Required in params: packagePath.",
+  "handler": "outfit_import_plan_review",
+  "toolProfile": "plan-only"
+}

@@ -3,11 +3,11 @@ from __future__ import annotations
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 from context_compaction import MAX_SUMMARY_CHARS, normalize_compaction_recovery
-from agent_task_loop import _running_state
+from agent_task_loop import _running_state, SUB_AGENT_TASK_TOOLS
 from planner_structured_tool_evidence import project_structured_tool_evidence
 from provider_runtime_adapters import ProviderTokenLimitError
 from responses_native_protocol import public_assistant_messages
@@ -266,6 +266,12 @@ def bounded_planner_tool_schema(value: object) -> dict[str, object]:
 
 
 def planner_tool_input_schema(name: str, *, tool_block_ids: list[str] | None = None) -> dict[str, object]:
+    if name == "vrcforge_resume_subagent":
+        from dashboard_api_models import SubAgentResumeRequest
+        schema = SubAgentResumeRequest.model_json_schema(by_alias=True)
+        schema["properties"]["taskId"] = {"type": "string", "minLength": 1}
+        schema["required"] = [*schema.get("required", []), "taskId"]
+        return bounded_planner_tool_schema(schema)
     if name in {"vrcforge_vision_audit", "vrcforge_vision_audit_multi"}:
         from dashboard_api_models import AgentVisionAuditRequest, ManagedVisionAuditMultiRequest
         request_model = (
@@ -627,6 +633,8 @@ class PlannerTurnMetadata:
     verified_context_limit: int | None = None
     planner_label: str = ""
     native_binding: str = ""
+    provider: str = ""
+    model: str = ""
 
 
 class PlannerTurnPort(Protocol):
@@ -1777,14 +1785,31 @@ class RuntimePlannerService:
         self._native_binding = ContextVar("runtime_native_binding", default="")
         self._verified_context_limit = ContextVar("verified_context_limit", default=None)
         self._role_instructions = ContextVar("runtime_role_instructions", default="")
+        self._role_tool_names = ContextVar("runtime_role_tool_names", default=None)
 
     @contextmanager
-    def bind_role_instructions(self, instructions: str):
+    def bind_role_instructions(self, instructions: str, *, allowed_tools=None):
         token = self._role_instructions.set(str(instructions or ""))
+        tools_token = self._role_tool_names.set(None if allowed_tools is None else frozenset(allowed_tools))
         try:
             yield
         finally:
             self._role_instructions.reset(token)
+            self._role_tool_names.reset(tools_token)
+
+    def role_tool_allowed(self, tool_name: str) -> bool:
+        allowed = self._role_tool_names.get()
+        return allowed is None or tool_name in allowed
+
+    def _read_catalog(self, exposure_layer: str, *, project_context_active: bool = True):
+        catalog = self._catalog.read(exposure_layer, project_context_active=project_context_active)
+        allowed = self._role_tool_names.get()
+        if allowed is None:
+            return catalog
+        return replace(catalog,
+            visible_tools=tuple(tool for tool in catalog.visible_tools if not tool.write and tool.runtime_name in allowed),
+            routable_tools=tuple(tool for tool in catalog.routable_tools if not tool.write and tool.runtime_name in allowed),
+            skills=(), computer_use_model_invocable=False)
 
     def _read_global_instructions(self) -> str:
         try:
@@ -1833,7 +1858,7 @@ class RuntimePlannerService:
                 and result.get("status") in {"loaded", "reused"}
                 and step.get("status") not in {"failed", "error", "rejected"}
                 and ensure_dict(step.get("outcome")).get("status") not in {"failed", "error", "denied"}):
-            catalog = self._catalog.read(normalize_exposure_layer(result.get("exposureLayer")),
+            catalog = self._read_catalog(normalize_exposure_layer(result.get("exposureLayer")),
                                          project_context_active=project_context_active)
             names = result.get("selectedTools")
             retained_definitions = retained_tool_definitions or {}
@@ -1868,7 +1893,7 @@ class RuntimePlannerService:
                 and step.get("status") not in {"failed", "error", "rejected"}
                 and ensure_dict(step.get("outcome")).get("status") not in {"failed", "error", "denied"}):
             from skill_tool_load_plan import skill_read_loads
-            loads = skill_read_loads(result, self._catalog.read(
+            loads = skill_read_loads(result, self._read_catalog(
                 EXPOSURE_LAYER_PLANNING, project_context_active=project_context_active),
                 retained_tool_definitions=retained_tool_definitions)
             if loads:
@@ -1897,7 +1922,7 @@ class RuntimePlannerService:
             return step
         # The result reader belongs to the common read-only catalog in both
         # project profiles and exposure layers; this does not load any tool.
-        tool = resolve_catalog_tool(self._catalog.read(EXPOSURE_LAYER_PLANNING).visible_tools, TOOL_NAME)
+        tool = resolve_catalog_tool(self._read_catalog(EXPOSURE_LAYER_PLANNING).visible_tools, TOOL_NAME)
         if tool is None or tool.name == TOOL_NAME:
             return step
         projected = dict(step)
@@ -2511,7 +2536,7 @@ class RuntimePlannerService:
             *,
             exposure_layer: str,
         ) -> dict[str, object]:
-            catalog = self._catalog.read(exposure_layer)
+            catalog = self._read_catalog(exposure_layer)
             requested_name = str(tool_name or "").strip()
             tool = next(
                 (
@@ -2800,7 +2825,7 @@ class RuntimePlannerService:
                         native_tools = [tool for tool in native_tools
                                         if tool.name in (native_turn.admitted_tool_names or set())]
                         payload, rejection = self._native_action_payload(
-                            receipt, native_tools, catalog=self._catalog.read(
+                            receipt, native_tools, catalog=self._read_catalog(
                                 exposure_layer, project_context_active=project_context_active,
                             ),
                         )
@@ -2973,7 +2998,7 @@ class RuntimePlannerService:
                     "nextStep": "enter_execution",
                 }
             if action == "skill":
-                catalog = self._catalog.read(
+                catalog = self._read_catalog(
                     exposure_layer,
                     project_context_active=project_context_active,
                 )
@@ -3159,7 +3184,7 @@ class RuntimePlannerService:
                         "nextStep": "call_skill",
                     }
             elif action == "write" and exposure_layer == EXPOSURE_LAYER_EXECUTION:
-                catalog = self._catalog.read(
+                catalog = self._read_catalog(
                     exposure_layer,
                     project_context_active=project_context_active,
                 )
@@ -3241,7 +3266,7 @@ class RuntimePlannerService:
                     }
             requested_tool_hint = skill_tool or write_tool or action
             if requested_tool_hint:
-                correction_catalog = self._catalog.read(
+                correction_catalog = self._read_catalog(
                     exposure_layer,
                     project_context_active=project_context_active,
                 )
@@ -4613,9 +4638,9 @@ class RuntimePlannerService:
             return observation_prefix(observation_limit)
 
     @staticmethod
-    def _select_plan_tools(catalog, internal_tool_blocks, observe, *, project_context_active=False):
+    def _select_plan_tools(catalog, internal_tool_blocks, observe, *, project_context_active=False, preloaded=False):
         selected_blocks = None
-        if internal_tool_blocks is not None:
+        if internal_tool_blocks is not None and not preloaded:
             raw_blocks = (
                 [internal_tool_blocks] if isinstance(internal_tool_blocks, str)
                 else list(internal_tool_blocks)
@@ -4623,14 +4648,14 @@ class RuntimePlannerService:
             )
             selected_blocks = {str(item or "").strip() for item in raw_blocks if str(item or "").strip()}
             selected_blocks.add("core")
-        selections = ensure_dict(observe.get("internalToolSelections"))
+        selections = {} if preloaded else ensure_dict(observe.get("internalToolSelections"))
         selected = []
         for tool in catalog.visible_tools:
             if tool.runtime_name == "vrcforge_list_internal_tool_blocks" and any(
                 candidate.runtime_name == "vrcforge_load_internal_tool_block" for candidate in catalog.visible_tools
             ):
                 continue
-            if observe.get("planMode") is True and (tool.write or tool.runtime_name == "vrcforge_delegate_subagent"):
+            if observe.get("planMode") is True and (tool.write or tool.runtime_name in SUB_AGENT_TASK_TOOLS):
                 continue
             resident_binding = (project_context_active and tool.runtime_name == "vrcforge_bind_execution_target"
                                 and not tool.write and not tool.requires_user_activation)
@@ -4647,7 +4672,7 @@ class RuntimePlannerService:
     def _binding_tool_definition(self, project_context_active: bool) -> dict | None:
         if not project_context_active:
             return None
-        catalog = self._catalog.read(EXPOSURE_LAYER_PLANNING, project_context_active=True)
+        catalog = self._read_catalog(EXPOSURE_LAYER_PLANNING, project_context_active=True)
         tool = resolve_catalog_tool(catalog.visible_tools, "vrcforge_bind_execution_target")
         if tool is None or tool.write or tool.requires_user_activation:
             return None
@@ -4665,10 +4690,10 @@ class RuntimePlannerService:
     ):
         """Project the existing catalog once; do not repeat native history or schemas in prose."""
         exposure_layer = normalize_exposure_layer(exposure_layer)
-        catalog = self._catalog.read(exposure_layer, project_context_active=project_context_active)
+        catalog = self._read_catalog(exposure_layer, project_context_active=project_context_active)
         if tool_block_ids is None:
             tool_block_ids = sorted({"core", *(row["id"] for row in canonical_tool_tree()["roots"])})
-        blocks, selected = self._select_plan_tools(catalog, internal_tool_blocks, observe, project_context_active=project_context_active)
+        blocks, selected = self._select_plan_tools(catalog, internal_tool_blocks, observe, project_context_active=project_context_active, preloaded=self._role_tool_names.get() is not None)
         explicit_plan = observe.get("planMode") is True
         control_actions = ["reply", "shell", "correct", "enter_execution"]
         action_descriptions = {
@@ -4753,7 +4778,7 @@ class RuntimePlannerService:
         # Build the resident prefix from the stable routing inventory, not the
         # currently authorized subset. Descriptions never grant execution rights.
         resident_catalog = (catalog if exposure_layer == EXPOSURE_LAYER_PLANNING else
-            self._catalog.read(EXPOSURE_LAYER_PLANNING, project_context_active=project_context_active))
+            self._read_catalog(EXPOSURE_LAYER_PLANNING, project_context_active=project_context_active))
         resident_tools = sorted((tool for tool in (resident_catalog.routable_tools or resident_catalog.visible_tools)
             if tool.block == "core" and not tool.write and not tool.requires_user_activation
             and tool.runtime_name not in {"vrcforge_list_internal_tool_blocks", "vrcforge_load_internal_tool_block",
@@ -5013,14 +5038,14 @@ class RuntimePlannerService:
             observe = observe or {}
             tool_lines: list[str] = []
             exposure_layer = normalize_exposure_layer(exposure_layer)
-            catalog = self._catalog.read(
+            catalog = self._read_catalog(
                 exposure_layer,
                 project_context_active=project_context_active,
             )
             message = self._message_with_runtime_context(message, observe, exposure_layer=exposure_layer,
                                                         project_context_active=project_context_active,
                                                         catalog=catalog)
-            selected_blocks, selected_tools = self._select_plan_tools(catalog, internal_tool_blocks, observe, project_context_active=project_context_active)
+            selected_blocks, selected_tools = self._select_plan_tools(catalog, internal_tool_blocks, observe, project_context_active=project_context_active, preloaded=self._role_tool_names.get() is not None)
             tool_selections = ensure_dict(observe.get("internalToolSelections"))
             projected_schemas = [bounded_planner_tool_schema(tool.input_schema) for tool in selected_tools]
             shared_schema_defs = _shared_planner_schema_defs(projected_schemas)

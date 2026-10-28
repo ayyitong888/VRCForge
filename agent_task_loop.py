@@ -25,6 +25,7 @@ from request_usage_reconciliation import usage_snapshot_sha256
 
 
 TASK_LOOP_SCHEMA = "vrcforge.agent_task_loop.v2"
+SUB_AGENT_TASK_TOOLS = frozenset({"vrcforge_delegate_subagent", "vrcforge_resume_subagent"})
 TASK_APPROVAL_CONTEXT_SCHEMA = "vrcforge.agent_task_approval.v1"
 WRITE_TRANSACTION_SCHEMA = "vrcforge.approved_write_transaction.v1"
 _RUNNING_STATUSES = frozenset(
@@ -1326,9 +1327,12 @@ def prepare_sub_agent_task_continuation(
     requested_arguments = seed.get("requestedArguments")
     if not isinstance(requested_arguments, Mapping):
         return None
+    task_tool = str(seed.get("requestedTool") or seed.get("tool") or "vrcforge_delegate_subagent")
+    if task_tool not in SUB_AGENT_TASK_TOOLS:
+        return None
     context = approval_task_context(
         seed,
-        tool="vrcforge_delegate_subagent",
+        tool=task_tool,
         arguments=dict(requested_arguments),
     )
     if context is None:

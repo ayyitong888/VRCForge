@@ -36,6 +36,11 @@ class SubAgentRole:
     description: str
     tool_profile: str = "read-only"
     read_only: bool = True
+    handler: str = "skill"
+    model: str = ""
+    system_prompt: str = ""
+    max_steps: int = 4
+    tools: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -51,6 +56,10 @@ class SubAgentTask:
     model: str = ""
     system_prompt: str = ""
     max_steps: int = 4
+    tools: tuple[str, ...] | None = None
+    handler: str = "skill"
+    provider: str = ""
+    resumable: bool = False
     child_session_id: str = ""
     status: str = "queued"
     created_at: str = field(default_factory=lambda: utc_now())
@@ -67,6 +76,7 @@ class SubAgentTask:
     event_count: int = 0
     revision: int = 0
     retry_of: str = ""
+    resume_of: str = ""
     handoff_status: str = ""
     handoff_at: str = ""
     merged_at: str = ""
@@ -102,6 +112,7 @@ class SubAgentTaskRegistry:
         self._tasks: dict[str, SubAgentTask] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._active_child_sessions: set[str] = set()
         self._parent_continuations_inflight: set[str] = set()
         self._lock = threading.RLock()
         self._parent_continuation_condition = threading.Condition(self._lock)
@@ -320,6 +331,8 @@ class SubAgentTaskRegistry:
         project_path: str = "",
         params: dict[str, Any] | None = None,
         retry_of: str = "",
+        _child_session_id: str = "",
+        _resume_of: str = "",
     ) -> dict[str, Any]:
         role_id = str(role or "").strip() or "project_index_review"
         if role_id not in self.roles:
@@ -328,6 +341,30 @@ class SubAgentTaskRegistry:
             raise ValueError(f"Sub-agent role is not executable: {role_id}")
         task_text = str(task or "").strip() or self.roles[role_id].title
         role_spec = self.roles[role_id]
+        task_params = copy.deepcopy(params or {})
+        model_value = task_params.get("model")
+        model = str(model_value if model_value is not None else role_spec.model or "").strip()
+        system_prompt_value = task_params.get(
+            "system_prompt",
+            task_params.get("systemPrompt", role_spec.system_prompt),
+        )
+        system_prompt = str(system_prompt_value or "").strip()
+        max_steps_value = task_params.get("max_steps", task_params.get("maxSteps", role_spec.max_steps))
+        if max_steps_value is None:
+            max_steps_value = role_spec.max_steps or 4
+        max_steps = max(1, min(int(max_steps_value), 12))
+
+        role_tools = self._normalize_tool_allowlist(role_spec.tools)
+        requested_tools = self._normalize_tool_allowlist(task_params.get("tools")) \
+            if "tools" in task_params and task_params.get("tools") is not None else None
+        if role_tools is None:
+            tools = requested_tools
+        elif requested_tools is None:
+            tools = role_tools
+        else:
+            requested_set = set(requested_tools)
+            tools = tuple(tool for tool in role_tools if tool in requested_set)
+
         with self._lock:
             self._ensure_accepting_locked()
             if self._running_count_locked() >= self.max_concurrent:
@@ -356,19 +393,27 @@ class SubAgentTaskRegistry:
                 parent_session_id=str(parent_session_id or "").strip(),
                 project_path=str(project_path or "").strip(),
                 tool_profile=role_spec.tool_profile,
-                model=str((params or {}).get("model") or "").strip(),
-                system_prompt=str((params or {}).get("system_prompt") or (params or {}).get("systemPrompt") or "").strip(),
-                max_steps=max(1, min(int((params or {}).get("max_steps", (params or {}).get("maxSteps", 4))), 12)),
-                child_session_id=(f"sub-session-{task_id}" if role_id == "llm_readonly" else ""),
-                params=copy.deepcopy(params or {}),
+                model=model,
+                system_prompt=system_prompt,
+                max_steps=max_steps,
+                tools=tools,
+                handler=str(role_spec.handler or "skill").strip() or "skill",
+                provider=str(task_params.get("provider") or "").strip(),
+                child_session_id=(
+                    str(_child_session_id or "").strip()
+                    or (f"sub-session-{task_id}" if role_spec.handler == "llm_readonly" else "")
+                ),
+                params=task_params,
                 retry_of=str(retry_of or "").strip(),
+                resume_of=str(_resume_of or "").strip(),
             )
             try:
                 sub_task = self._commit_task_event_locked(
                     None,
                     sub_task,
                     "created",
-                    {"role": role_id, "task": task_text, "retryOf": sub_task.retry_of},
+                    {"role": role_id, "task": task_text, "retryOf": sub_task.retry_of,
+                     "resumeOf": sub_task.resume_of},
                 )
                 event = threading.Event()
                 self._cancel_events[task_id] = event
@@ -385,6 +430,21 @@ class SubAgentTaskRegistry:
                 if self._lane_budget is not None:
                     self._lane_budget.release(task_id)
                 raise
+
+    @staticmethod
+    def _normalize_tool_allowlist(value: Any) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("sub-agent tools must be a list of tool names or null.")
+        names: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("sub-agent tool names must be non-empty strings.")
+            name = item.strip()
+            if name not in names:
+                names.append(name)
+        return tuple(names)
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         with self._lock:
@@ -419,6 +479,61 @@ class SubAgentTaskRegistry:
                 params=copy.deepcopy(task.params),
                 retry_of=task.id,
             )
+
+    def resume_task(
+        self,
+        task_id: str,
+        *,
+        task: str,
+        display_name: str | None = None,
+        task_seed: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Start a new turn in a stopped LLM child, preserving its native session."""
+
+        new_task_text = str(task or "").strip()
+        if not new_task_text:
+            return {"ok": False, "error": "resume requires a new task message."}
+        if task_seed is not None and not isinstance(task_seed, dict):
+            return {"ok": False, "error": "resume task seed must be a trusted object."}
+        with self._lock:
+            source = self._tasks.get(str(task_id or "").strip())
+            if source is None:
+                return {"ok": False, "error": "sub-agent task was not found."}
+            if source.status not in _RETRYABLE_STATUSES:
+                return {"ok": False, "error": "only stopped sub-agent tasks can be resumed."}
+            if source.handler != "llm_readonly" or not source.child_session_id:
+                return {"ok": False, "error": "this sub-agent role does not support history resume."}
+            if not source.resumable:
+                return {"ok": False, "error": "this child has no resumable native history."}
+            if source.child_session_id in self._active_child_sessions:
+                return {"ok": False, "error": "this child session already has an active turn."}
+            seed_session_id = str((task_seed or {}).get("sessionId") or "").strip()
+            if seed_session_id and seed_session_id != source.parent_session_id:
+                return {"ok": False, "error": "resume task seed belongs to a different parent session."}
+            role = self.roles.get(source.role)
+            if role is None or role.handler != "llm_readonly" or source.role not in self.handlers:
+                return {"ok": False, "error": "the original read-only child role is unavailable."}
+
+            # A resumed turn must never dispatch the original task's automatic
+            # parent continuation a second time. The explicit resume request is
+            # the owner of this turn and its result stays on the child lineage.
+            params = copy.deepcopy(source.params)
+            params.pop("_taskSeed", None)
+            params.pop("taskSeed", None)
+            if task_seed is not None:
+                params["_taskSeed"] = copy.deepcopy(task_seed)
+            resumed = self.create_task(
+                role=source.role,
+                task=new_task_text,
+                display_name=display_name or source.display_name,
+                parent_chat_id=source.parent_chat_id,
+                parent_session_id=source.parent_session_id,
+                project_path=source.project_path,
+                params=params,
+                _child_session_id=source.child_session_id,
+                _resume_of=source.id,
+            )
+            return resumed
 
     def acknowledge_handoff(self, task_id: str, *, expected_revision: int | None = None) -> dict[str, Any]:
         """Acknowledge that the stable result card was saved in the parent chat."""
@@ -622,7 +737,18 @@ class SubAgentTaskRegistry:
             if cancel_event.is_set():
                 raise CancelledError("Sub-agent task was cancelled before execution.")
             handler = self.handlers[task.role]
-            result = handler(self._task_payload(task), cancel_event)
+            child_session_id = task.child_session_id
+            if child_session_id:
+                with self._lock:
+                    if child_session_id in self._active_child_sessions:
+                        raise RuntimeError("Child session already has an active runtime owner.")
+                    self._active_child_sessions.add(child_session_id)
+            try:
+                result = handler(self._task_payload(task), cancel_event)
+            finally:
+                if child_session_id:
+                    with self._lock:
+                        self._active_child_sessions.discard(child_session_id)
             summary = summarize_worker_result(result)
         except CancelledError as exc:
             with self._lock:
@@ -695,7 +821,7 @@ class SubAgentTaskRegistry:
         summary: str,
     ) -> SubAgentTask:
         if result.get("ok") is not False:
-            return cls._completed_task(task, result, summary)
+            return cls._freeze_runtime_metadata(cls._completed_task(task, result, summary), result)
         next_task = copy.deepcopy(task)
         next_task.status = "failed"
         next_task.result = copy.deepcopy(result)
@@ -706,7 +832,23 @@ class SubAgentTaskRegistry:
         next_task.cancel_requested = False
         next_task.stopped_at = utc_now()
         next_task.handoff_status = "handoff_pending"
-        return next_task
+        return cls._freeze_runtime_metadata(next_task, result)
+
+    @staticmethod
+    def _freeze_runtime_metadata(task: SubAgentTask, result: dict[str, Any]) -> SubAgentTask:
+        task.resumable = result.get("resumable") is True
+        route = result.get("providerRoute")
+        if not isinstance(route, dict):
+            return task
+        provider = route.get("provider")
+        model = route.get("model")
+        if isinstance(provider, str) and provider.strip():
+            task.provider = provider.strip()[:160]
+            task.params["provider"] = task.provider
+        if isinstance(model, str) and model.strip():
+            task.model = model.strip()[:300]
+            task.params["model"] = task.model
+        return task
 
     def _recover_completion_persistence_error_locked(self, task: SubAgentTask, error: Exception) -> None:
         """Prefer a durable result sidecar over a transient event-append error."""
@@ -762,14 +904,31 @@ class SubAgentTaskRegistry:
             payload.setdefault("parentTurnId", str(seed.get("turnId") or "")[:180])
             payload.setdefault("parentClientTurnId", str(seed.get("clientTurnId") or "")[:240])
         payload.setdefault("displayName", task.display_name)
-        payload.setdefault("model", task.model)
-        payload.setdefault("systemPrompt", task.system_prompt)
-        payload.setdefault("maxSteps", task.max_steps)
-        if task.child_session_id:
+        if task.handler == "llm_readonly":
             # The registry owns child identity and the persisted execution
             # choices; arbitrary task params cannot redirect it into a parent.
-            payload.update(childSessionId=task.child_session_id, model=task.model,
-                           systemPrompt=task.system_prompt, maxSteps=task.max_steps)
+            payload.update(
+                taskId=task.id,
+                task=task.task,
+                childSessionId=task.child_session_id,
+                model=task.model,
+                systemPrompt=task.system_prompt,
+                maxSteps=task.max_steps,
+                tools=list(task.tools) if task.tools is not None else None,
+                provider=task.provider,
+                handler=task.handler,
+                clientTurnId=task.id,
+                resumeOf=task.resume_of,
+                isResume=bool(task.resume_of),
+            )
+        else:
+            # Preserve the seven fixed handler contracts; their arguments can
+            # still supply explicit per-task values as before.
+            payload.setdefault("model", task.model)
+            payload.setdefault("systemPrompt", task.system_prompt)
+            payload.setdefault("maxSteps", task.max_steps)
+            payload.setdefault("tools", list(task.tools) if task.tools is not None else None)
+            payload.setdefault("handler", task.handler)
         payload.setdefault("retryOf", task.retry_of)
         return payload
 
@@ -780,6 +939,11 @@ class SubAgentTaskRegistry:
             "description": role.description,
             "toolProfile": role.tool_profile,
             "readOnly": role.read_only,
+            "handler": role.handler,
+            "model": role.model,
+            "systemPrompt": role.system_prompt,
+            "maxSteps": role.max_steps,
+            "tools": list(role.tools) if role.tools is not None else None,
         }
 
     def _serialize_task(self, task: SubAgentTask, include_events: bool = False) -> dict[str, Any]:
@@ -788,6 +952,14 @@ class SubAgentTaskRegistry:
         payload["result"] = copy.deepcopy(task.result)
         payload["paramsSummary"] = summarize_params(public_runtime_payload(task.params))
         payload.pop("params", None)
+        with self._lock:
+            payload["canResume"] = bool(
+                task.handler == "llm_readonly"
+                and task.child_session_id
+                and task.resumable
+                and task.status in _RETRYABLE_STATUSES
+                and task.child_session_id not in self._active_child_sessions
+            )
         if include_events:
             payload["events"] = [event for event in self.recent_events(limit=500) if event.get("taskId") == task.id]
         return payload
@@ -808,8 +980,12 @@ class SubAgentTaskRegistry:
             "projectPath": task.project_path,
             "toolProfile": task.tool_profile,
             "model": task.model,
+            "provider": task.provider,
+            "resumable": task.resumable,
             "systemPrompt": task.system_prompt,
             "maxSteps": task.max_steps,
+            "tools": list(task.tools) if task.tools is not None else None,
+            "handler": task.handler,
             "childSessionId": task.child_session_id,
             "status": task.status,
             "createdAt": task.created_at,
@@ -822,6 +998,7 @@ class SubAgentTaskRegistry:
             "eventCount": task.event_count,
             "revision": task.revision,
             "retryOf": task.retry_of,
+            "resumeOf": task.resume_of,
             "handoffStatus": task.handoff_status,
             "handoffAt": task.handoff_at,
             "mergedAt": task.merged_at,
@@ -838,9 +1015,12 @@ class SubAgentTaskRegistry:
         if not task_id:
             return None
         params = snapshot.get("params")
+        role_id = str(snapshot.get("role") or "project_index_review")
+        role_spec = self.roles.get(role_id)
+        handler = str(snapshot.get("handler") or (role_spec.handler if role_spec else "skill"))
         return SubAgentTask(
             id=task_id,
-            role=str(snapshot.get("role") or "project_index_review"),
+            role=role_id,
             display_name=str(snapshot.get("displayName") or "Manuka"),
             task=str(snapshot.get("task") or ""),
             parent_chat_id=str(snapshot.get("parentChatId") or ""),
@@ -848,8 +1028,12 @@ class SubAgentTaskRegistry:
             project_path=str(snapshot.get("projectPath") or ""),
             tool_profile=str(snapshot.get("toolProfile") or "read-only"),
             model=str(snapshot.get("model") or ""),
+            provider=str(snapshot.get("provider") or ((params or {}).get("provider") if isinstance(params, dict) else "") or ""),
+            resumable=bool(snapshot.get("resumable")),
             system_prompt=str(snapshot.get("systemPrompt") or ""),
             max_steps=int(snapshot.get("maxSteps") or 4),
+            tools=self._normalize_tool_allowlist(snapshot.get("tools", role_spec.tools if role_spec else None)),
+            handler=handler,
             child_session_id=str(snapshot.get("childSessionId") or ""),
             status=str(snapshot.get("status") or "queued"),
             created_at=str(snapshot.get("createdAt") or utc_now()),
@@ -865,6 +1049,7 @@ class SubAgentTaskRegistry:
             event_count=int(snapshot.get("eventCount") or 0),
             revision=int(snapshot.get("revision") or 0),
             retry_of=str(snapshot.get("retryOf") or ""),
+            resume_of=str(snapshot.get("resumeOf") or ""),
             handoff_status=str(snapshot.get("handoffStatus") or ""),
             handoff_at=str(snapshot.get("handoffAt") or ""),
             merged_at=str(snapshot.get("mergedAt") or ""),

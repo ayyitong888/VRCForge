@@ -1,0 +1,7 @@
+{
+  "id": "selected_context_review",
+  "title": "Selected context review",
+  "description": "Review selected chat text using the existing local read-only handler.",
+  "handler": "selected_context_review",
+  "toolProfile": "read-only"
+}

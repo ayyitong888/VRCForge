@@ -652,7 +652,7 @@ from shader_vision_protection_service import (
 )
 from shader_material_inventory import project_selected_material_summary, require_material_inventory
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
-from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService
+from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService, SubAgentExecutionPorts
 from vrchat_blendshape_agent import (
     BlendshapePlan,
     DEFAULT_LLM_PROVIDER,
@@ -1141,6 +1141,7 @@ from dashboard_api_models import (
     PackageInstallDiagnosticsRequest,
     PackageInstallPlanRequest,
     SubAgentCreateRequest,
+    SubAgentResumeRequest,
     SubAgentMergeRequest,
     SubAgentHandoffAckRequest,
     ProviderTestRequest,
@@ -1895,19 +1896,21 @@ BACKEND_OWNER_LEASE = BackendOwnerLease(lambda: AGENT_GATEWAY.audit_dir / "backe
 # 统一经 AGENT_GATEWAY.runtime_skills 的 allowlist 路径分发，
 # 组合根只负责把 gateway 绑进去。
 # The service itself exclusively owns the durable registry, handlers and workers.
+_SUB_AGENT_ROLES = build_sub_agent_roles()
 SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
     SubAgentCollaborationPorts(
         artifact_dir=SUB_AGENT_TASK_DIR,
-        gateway=AGENT_GATEWAY.runtime_skills,
+        gateway=SubAgentExecutionPorts(execute=AGENT_GATEWAY.runtime_skills.execute, run_sub_agent_llm=AGENT_GATEWAY.run_sub_agent_llm),
         lane_budget=RUNTIME_LANE_BUDGET,
-        build_roles=build_sub_agent_roles,
-        build_handlers=build_sub_agent_role_handlers,
+        build_roles=lambda: _SUB_AGENT_ROLES,
+        build_handlers=lambda gateway: build_sub_agent_role_handlers(gateway, _SUB_AGENT_ROLES),
         task_finished=_sub_agent_task_finished,
     )
 )
 AGENT_GATEWAY.bind_runtime_subagent_control(
     list_tasks=SUB_AGENT_COLLABORATION.list_tasks,
     cancel_task=SUB_AGENT_COLLABORATION.cancel_task,
+    role_catalog=lambda: _SUB_AGENT_ROLES,
 )
 AGENT_MCP_MOUNT = AgentMcpMount()
 AGENT_MCP_APP = None
@@ -7843,6 +7846,20 @@ async def app_retry_sub_agent(task_id: str) -> dict[str, Any]:
     payload = SUB_AGENT_COLLABORATION.retry_task(task_id)
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Sub-agent task was not found.")
+    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_COLLABORATION.list_tasks())
+    return payload
+
+
+@app.post("/api/app/sub-agents/{task_id}/resume")
+async def app_resume_sub_agent(task_id: str, request: SubAgentResumeRequest) -> dict[str, Any]:
+    try:
+        payload = SUB_AGENT_COLLABORATION.resume_task(
+            task_id, task=request.task, display_name=request.display_name,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not payload.get("ok"):
+        raise HTTPException(status_code=409, detail=payload.get("error") or "Sub-agent could not be resumed.")
     await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_COLLABORATION.list_tasks())
     return payload
 
@@ -15960,6 +15977,8 @@ class _RuntimePlannerProviderTurnBinding:
                     verified_context_limit=verified_limit,
                     planner_label=label,
                     native_binding=config.native_binding(),
+                    provider=config.provider,
+                    model=config.model,
                 )
             finally:
                 self._config.reset(token)
@@ -26642,6 +26661,19 @@ def _expected_prefab_assets(plan_payload: dict[str, Any]) -> list[str]:
 
 
 
+def resume_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    arguments = dict(params or {})
+    task_seed, _session_id = AGENT_GATEWAY.consume_runtime_task_link(arguments)
+    result = SUB_AGENT_COLLABORATION.resume_task(
+        str(arguments.get("taskId") or ""), task=str(arguments.get("task") or ""),
+        display_name=arguments.get("displayName"), task_seed=task_seed or None)
+    if not result.get("ok"):
+        return result
+    task = result["task"]
+    return {"ok": True, "status": "running", "taskId": task["id"], "task": task,
+            "summary": "The existing sub-agent session is continuing with the new question."}
+
+
 def delegate_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create one task-linked read-only worker without exposing its task seed."""
 
@@ -27196,6 +27228,12 @@ def register_agent_gateway_tools() -> None:
         "When to use: delegate one bounded read-only review or inspection task to a named VRCForge sub-agent role when parallel specialist work materially helps the current task. When NOT to use: do not delegate a trivial one-step read, any direct Unity write, or work whose result is not needed by the current task.",
         "plan/preview",
         delegate_sub_agent_runtime,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_resume_subagent",
+        "When to use: continue an idle resumable sub-agent with an explicit new question and its exact taskId, retaining that child's history. "
+        "When NOT to use: start a new task, retry the original task, resume a running child, or request writes. Negative example: do not call without a new question.",
+        "plan/preview", resume_sub_agent_runtime,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_list_internal_tool_blocks",

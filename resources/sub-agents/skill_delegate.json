@@ -1,0 +1,7 @@
+{
+  "id": "skill_delegate",
+  "title": "Skill delegate",
+  "description": "Run one allowlisted read-only or plan-only runtime skill by name and report its output. Required in params: toolName or tool_name; pass skill inputs in skillParams when needed.",
+  "handler": "skill_delegate",
+  "toolProfile": "runtime-allowlist"
+}
