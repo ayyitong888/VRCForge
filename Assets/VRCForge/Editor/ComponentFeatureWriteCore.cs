@@ -1154,7 +1154,9 @@ namespace VRCForge.Editor
                     .SequenceEqual(parameters)).ToList();
             if (matches.Count != 1)
             {
-                throw new ComponentFeatureWriteException("The component feature public API method signature changed.");
+                var signature = type.FullName + "." + name + "(" + string.Join(", ", parameters.Select(parameter => parameter.FullName)) + ") -> " + returnType.FullName;
+                throw new ComponentFeatureWriteException("VRCFury public API method is missing or incompatible: " + signature
+                    + ". Check the installed VRCFury API/package compatibility, then rerun vrcforge_preview_component_feature before requesting a write.");
             }
             return matches[0];
         }
@@ -1167,10 +1169,11 @@ namespace VRCForge.Editor
             }
             catch (TargetInvocationException exception)
             {
-                throw new ComponentFeatureWriteException(
-                    exception.InnerException == null
-                        ? "The component feature public API invocation failed."
-                        : "The component feature public API rejected the fixed request.");
+                var cause = exception.InnerException ?? exception;
+                throw new InvalidOperationException(
+                    "VRCFury public API " + method.DeclaringType.FullName + "." + method.Name
+                    + " failed: " + cause.GetType().Name + ": " + cause.Message
+                    + ". Correct the reported cause and rerun vrcforge_preview_component_feature before requesting another write.", exception);
             }
         }
 

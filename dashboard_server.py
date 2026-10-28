@@ -26745,6 +26745,14 @@ def refresh_unity_project_path_guard() -> UnityPathGuard:
 
 
 def register_agent_gateway_tools() -> None:
+    component_configuration_guidance = (
+        "For Modular Avatar configuration, use vrcforge_inspect_modular_avatar_component, "
+        "vrcforge_preview_add_modular_avatar_component, then vrcforge_add_modular_avatar_component "
+        "(action=update for an existing inspected instance). For VRCFury, use vrcforge_scan_vrcfury, "
+        "then vrcforge_preview_component_feature and vrcforge_create_component_feature for a NEW "
+        "Toggle or Armature Link. Editing existing VRCFury features is unsupported by that writer: "
+        "report the capability gap; do not replace or duplicate an existing feature as a workaround. "
+    )
     def register_write_handler(
         name: str,
         description: str,
@@ -27613,7 +27621,7 @@ def register_agent_gateway_tools() -> None:
         "plan/preview",
         preview_unity_constraint_conversion_sync,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_get_property", "When to use: read a bound component using propertyPath for a direct field/property, or serializedPropertyPath for a nested serialized leaf or Array.data[n] element; object references retain exact identities. Use queries for one sample of simple properties across bound components. When NOT to use: do not write, mix scalar and batch arguments, or use nested paths inside queries. Negative example: assigning a renderer value requires the approved setter.", "read/debug", read_component_property_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_get_property", f"When to use: {component_configuration_guidance} read a bound component using propertyPath for a direct field/property, or serializedPropertyPath for a nested serialized leaf or Array.data[n] element; object references retain exact identities. Use queries for one sample of simple properties across bound components. When NOT to use: do not write, mix scalar and batch arguments, or use nested paths inside queries. Negative example: assigning a renderer value requires the approved setter.", "read/debug", read_component_property_sync)
     AGENT_GATEWAY.register_tool("vrcforge_inspect_editor_capabilities", "When to use: discover loaded Unity plugin MenuItem metadata or open Editor windows before selecting an exact entry point. When NOT to use: do not invoke callbacks or treat discovery as completed setup. Negative example: triggering a listed setup menu requires approval.", "read/debug", inspect_editor_capabilities_sync)
     AGENT_GATEWAY.register_tool("vrcforge_inspect_material_properties", "When to use: inspect actual Shader property names, types and values of one exact material, including dirty or variant assets. When NOT to use: do not assign values or infer fields from plugin names. Negative example: enabling a second texture layer requires the approved material writer after inspection.", "read/debug", inspect_material_properties_sync)
     AGENT_GATEWAY.register_tool(
@@ -28325,7 +28333,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_add_component",
-        "When to use: after reading the exact component type and binding one scene GameObject, add a legal built-in or custom MonoBehaviour component through approval. The known UnityEngine.CanvasGroup path uses a scene checkpoint; other types use a full-project checkpoint because their add callbacks may affect assets. Inspect the returned component and project after dispatch. When NOT to use: do not add an unknown component type without checking its exact assembly-qualified identity or bypass the checkpoint/approval path. Negative example: do not treat a custom plugin MonoBehaviour addition as scene-only; use vrcforge_preview_add_modular_avatar_component then vrcforge_add_modular_avatar_component for Modular Avatar types.",
+        f"When to use: {component_configuration_guidance} after reading the exact component type and binding one scene GameObject, add a legal built-in or custom MonoBehaviour component through approval. The known UnityEngine.CanvasGroup path uses a scene checkpoint; other types use a full-project checkpoint because their add callbacks may affect assets. Inspect the returned component and project after dispatch. When NOT to use: do not add an unknown component type without checking its exact assembly-qualified identity or bypass the checkpoint/approval path. Negative example: do not treat a custom plugin MonoBehaviour addition as scene-only; use vrcforge_preview_add_modular_avatar_component then vrcforge_add_modular_avatar_component for Modular Avatar types.",
         "medium",
         add_component_sync,
         verification_profile="persisted_scene_write_console",
@@ -28343,7 +28351,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_set_property",
-        "When to use: assign one component value through approval, using propertyPath for a direct field/property or serializedPropertyPath for a serialized nested scalar, Array.data[n] element or object-reference leaf. Read the exact component first. When NOT to use: do not mix both paths, invoke methods or edit unknown fields. Negative example: use the discovered menu execution tool for a plugin setup callback.",
+        f"When to use: {component_configuration_guidance} assign one component value through approval, using propertyPath for a direct field/property or serializedPropertyPath for a serialized nested scalar, Array.data[n] element or object-reference leaf. Read the exact component first. When NOT to use: do not mix both paths, invoke methods or edit unknown fields. Negative example: use the discovered menu execution tool for a plugin setup callback.",
         "medium",
         set_component_property_sync,
         verification_profile="persisted_scene_write_console",

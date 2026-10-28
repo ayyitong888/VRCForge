@@ -109,3 +109,32 @@ class Probe {
 }
 '''.replace("CONTRACT",contract).replace("SCENE",scene).replace("FEATURE",feature).replace("CONSTRAINT",constraint).replace("SAVE",first_save).replace("CURRENT",current_save).replace("BITPACK",bitpack_catch)
     assert "post-mutation, save and packing failure causes retained without changing recovery" in run(tmp_path, program)
+
+
+def test_vrcfury_api_failure_reports_exact_signature_and_original_cause(tmp_path):
+    raw = (ROOT / "Assets/VRCForge/Editor/ComponentFeatureWriteCore.cs").read_text(encoding="utf-8")
+    helpers = "\n".join(method(raw, name) for name in (
+        "private static MethodInfo RequireExactPublicMethod(", "private static object InvokeExact(",
+        "internal static object Failure(Exception exception)"))
+    contract = (ROOT / "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs").read_text(encoding="utf-8").replace("using System;", "").replace("using Newtonsoft.Json.Linq;", "")
+    program = r'''
+using System;using System.Linq;using System.Reflection;using Newtonsoft.Json.Linq;using VRCForge.Core.MCP;
+CONTRACT
+class ComponentFeatureWriteException:Exception{public ComponentFeatureWriteException(string s):base(s){}}
+class ApiFixture {public static void CreateToggle(string name){throw new ArgumentException("Menu path contains an empty segment.");}}
+class Probe {
+ HELPERS
+ static void Check(bool b,string s){if(!b)throw new Exception(s);}
+ static void Main(){
+  try{RequireExactPublicMethod(typeof(ApiFixture),"CreateToggle",typeof(void),true,typeof(int));throw new Exception("accepted wrong method");}
+  catch(ComponentFeatureWriteException e){Check(e.Message.Contains("ApiFixture")&&e.Message.Contains("CreateToggle")&&e.Message.Contains("System.Int32"),"missing API failure omits exact signature");}
+  var method=RequireExactPublicMethod(typeof(ApiFixture),"CreateToggle",typeof(void),true,typeof(string));
+  try{InvokeExact(method,null,"Bad//Path");throw new Exception("invocation unexpectedly passed");}
+  catch(Exception e){var failure=((VRCForgeToolResult)Failure(e)).ToStructuredContent();
+   Check(failure.ToString().Contains("Menu path contains an empty segment."),"VRCFury API original reason discarded");
+   Check(failure["data"]?["diagnostics"]?.ToString().Contains("System.ArgumentException")==true,"VRCFury inner exception missing");}
+  Console.WriteLine("VRCFury API signature and original cause preserved");
+ }
+}
+'''.replace("CONTRACT",contract).replace("HELPERS",helpers)
+    assert "VRCFury API signature and original cause preserved" in run(tmp_path,program)

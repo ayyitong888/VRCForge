@@ -1257,6 +1257,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
     },
     {
         "name": "modular-avatar-toolkit",
+        "instructions": "After scanning, discover/load behavior/interaction_generated_systems for vrcforge_inspect_modular_avatar_component, vrcforge_preview_add_modular_avatar_component and vrcforge_add_modular_avatar_component. Configure an existing MA instance with action=update and the inspected componentIndex/expectedComponentGlobalObjectId; do not add duplicates or fall back to generic set_property for structured configuration. This scan skill grants no write permission.",
         "title": "Modular Avatar Toolkit",
         "description": "Detect the Modular Avatar package and inspect Modular Avatar components before edits.",
         "category": "addon-scan",
@@ -1277,6 +1278,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
     },
     {
         "name": "vrcfury-toolkit",
+        "instructions": "After scanning, discover/load behavior/interaction_generated_systems for vrcforge_preview_component_feature and vrcforge_create_component_feature. These dedicated tools create a NEW Toggle or Armature Link through the public API. Editing/deleting an existing VRCFury feature is not covered: report that capability gap rather than retrying generic add_component/set_property or duplicating the feature. This scan skill grants no write permission.",
         "title": "VRCFury Toolkit",
         "description": "Detect the VRCFury package and inspect VRCFury components before edits.",
         "category": "addon-scan",

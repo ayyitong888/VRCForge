@@ -163,6 +163,7 @@ def test_registered_read_handler_returns_scope_without_getter_and_keeps_default_
         "internal static string ResolvePropertyPath(",
         "internal static FieldInfo ResolveSerializedRootField(",
         "internal static SerializedProperty ResolveSerializedProperty(",
+        "internal static string DedicatedConfigurationGuidance(",
         "internal static string SafeExceptionMessage(",
         "private static Exception UnwrapException(",
     ))
@@ -211,6 +212,12 @@ class Probe {
   ComponentCrudCore.rejectScope=true;var rejected=Call(p);Check(rejected["error"]!=null&&ComponentCrudCore.reads==2,"failed scope must never reach getter");
   Check((string)rejected["code"]=="component_property_read_failed"&&(string)rejected["diagnostics"]?["handlerException"]?["type"]=="System.InvalidOperationException","original exception type/code retained");
   Check(rejected["nextAction"]!=null&&(string)rejected["componentType"]=="Component"&&(string)rejected["propertyPath"]=="value","correction keeps requested field");
+  foreach(var typeName in new[]{"nadena.dev.modular_avatar.core.ModularAvatarMaterialSetter","ModularAvatarMaterialSetter","VF.Model.VRCFury","VRCFury"}){
+   var plugin=Args();plugin["componentType"]=typeName;plugin["includeCheckpointScope"]=true;
+   var failure=Call(plugin);var action=(string)failure["nextAction"];
+   if(typeName.Contains("ModularAvatar"))Check(action.Contains("vrcforge_add_modular_avatar_component")&&action.Contains("action=update"),"MA rejection lacks dedicated existing-instance entry");
+   else Check(action.Contains("vrcforge_scan_vrcfury")&&action.Contains("vrcforge_preview_component_feature")&&action.Contains("unsupported"),"VRCFury rejection lacks accurate dedicated entry/capability gap");
+  }
   var batch=new JObject{["queries"]=new JArray(),["includeCheckpointScope"]=true};Check(Call(batch)["error"]!=null&&UnityComponentPropertyBatch.calls==0,"batch silently ignored scope");
   batch.Remove("includeCheckpointScope");Check((bool)Call(batch)["batch"]&&UnityComponentPropertyBatch.calls==1,"default batch changed");
   Console.WriteLine("read scope and defaults passed");}

@@ -1455,6 +1455,17 @@ namespace VRCForge.Editor
                 });
         }
 
+        internal static string DedicatedConfigurationGuidance(string componentType)
+        {
+            var type = (componentType ?? string.Empty).Split(',')[0].Trim();
+            if (type.StartsWith("nadena.dev.modular_avatar.core.", StringComparison.Ordinal)
+                || type.StartsWith("ModularAvatar", StringComparison.Ordinal))
+                return "For MA configuration, use vrcforge_inspect_modular_avatar_component, then vrcforge_preview_add_modular_avatar_component and vrcforge_add_modular_avatar_component with action=update, the inspected componentIndex and expectedComponentGlobalObjectId for an existing instance. Do not add a duplicate to work around this rejection.";
+            if (type == "VRCFury" || type == "VF.Model.VRCFury" || type.StartsWith("VF.Component.", StringComparison.Ordinal))
+                return "Use vrcforge_scan_vrcfury to inspect the feature. For a NEW Toggle or Armature Link use vrcforge_preview_component_feature then vrcforge_create_component_feature. Editing/deleting existing VRCFury features is unsupported by that dedicated writer: report the capability gap; do not retry generic set_property or recreate/duplicate the feature.";
+            return null;
+        }
+
         internal static string SafeExceptionMessage(Exception exception)
         {
             var root = UnwrapException(exception);
@@ -1477,7 +1488,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_get_property",
-        Summary = "when-to-use: read a direct component property, a serialized leaf path, or a bounded batch of exact component identities and simple properties. when-NOT-to-use: do not write or mix scalar paths with batch queries. Negative example: changing a nested value requires the approved setter.",
+        Summary = "when-to-use: for MA configuration prefer vrc_inspect_modular_avatar_component and vrc_add_modular_avatar_component (action=update for existing); for VRCFury prefer the scan/preview entry and vrc_create_component_feature (new Toggle/Armature Link only; existing-feature edits are unsupported). For ordinary Unity components, read a direct component property, a serialized leaf path, or a bounded batch of exact component identities and simple properties. when-NOT-to-use: do not write or mix scalar paths with batch queries. Negative example: changing a nested value requires the approved setter.",
         Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class GetPropertyTool
@@ -1613,9 +1624,9 @@ namespace VRCForge.Editor
                         componentIndex = p.componentIndex ?? 0,
                         propertyPath = p.propertyPath,
                         serializedPropertyPath = p.serializedPropertyPath,
-                        nextAction = p.includeCheckpointScope == true
+                        nextAction = ComponentCrudCore.DedicatedConfigurationGuidance(p.componentType) ?? (p.includeCheckpointScope == true
                             ? "Use the reported checkpoint-owner or field reason to correct this request. Component callbacks require a project checkpoint, not an alternative avatar structure. If the loaded Core still rejects a valid serialized field, update the Core before retrying."
-                            : "Inspect the reported component/member, field type and requested path. Use serializedPropertyPath for serialized data; correct the specific cause in the exception before retrying.",
+                            : "Inspect the reported component/member, field type and requested path. Use serializedPropertyPath for serialized data; correct the specific cause in the exception before retrying."),
                     });
             }
         }
@@ -2279,7 +2290,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_add_component",
-        Summary = "when-to-use: preview or add one exact resolved Unity Component type to a scene GameObject through approval and checkpoint; the gateway uses a full-project checkpoint for types whose callbacks may affect assets. when-NOT-to-use: do not guess an ambiguous short type name or bypass approval/checkpoint. Negative example: do not treat a custom plugin MonoBehaviour add as a scene-only change."
+        Summary = "when-to-use: for MA configuration prefer vrc_inspect_modular_avatar_component and vrc_add_modular_avatar_component (action=update for existing); for VRCFury prefer the scan/preview entry and vrc_create_component_feature (new Toggle/Armature Link only; existing-feature edits are unsupported). For ordinary Unity components, preview or add one exact resolved Unity Component type to a scene GameObject through approval and checkpoint; the gateway uses a full-project checkpoint for types whose callbacks may affect assets. when-NOT-to-use: do not guess an ambiguous short type name or bypass approval/checkpoint. Negative example: do not treat a custom plugin MonoBehaviour add as a scene-only change."
     )]
     public static class AddComponentTool
     {
@@ -2534,7 +2545,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_set_property",
-        Summary = "when-to-use: preview or assign one direct property or serialized leaf on a saved scene component through approval and checkpoint. when-NOT-to-use: do not invoke methods or mix direct and serialized paths. Negative example: trigger plugin setup through its discovered menu instead of guessing a field."
+        Summary = "when-to-use: for MA configuration prefer vrc_inspect_modular_avatar_component and vrc_add_modular_avatar_component (action=update for existing); for VRCFury prefer the scan/preview entry and vrc_create_component_feature (new Toggle/Armature Link only; existing-feature edits are unsupported). For ordinary Unity components, preview or assign one direct property or serialized leaf on a saved scene component through approval and checkpoint. when-NOT-to-use: do not invoke methods or mix direct and serialized paths. Negative example: trigger plugin setup through its discovered menu instead of guessing a field."
     )]
     public static class SetPropertyTool
     {
@@ -2861,7 +2872,7 @@ namespace VRCForge.Editor
                         reason = ex.Message,
                         recommendedAction = selectedSceneIsDirty
                             ? "Save or revert the selected scene, then retry the exact same tool call."
-                            : "Read the reported component field using vrcforge_get_property. Correct the exact path or value type in this request; for nested data and object references use serializedPropertyPath and the returned field type. Do not replace the avatar design to bypass a tool rejection."
+                            : ComponentCrudCore.DedicatedConfigurationGuidance(p.componentType) ?? "Read the reported component field using vrcforge_get_property. Correct the exact path or value type in this request; for nested data and object references use serializedPropertyPath and the returned field type. Do not replace the avatar design to bypass a tool rejection."
                     },
                     exception: ex);
             }
