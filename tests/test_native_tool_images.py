@@ -292,3 +292,24 @@ def test_binds_idempotently_before_final_system_without_mutating_history_or_side
     assert "data:image/png;base64" not in json.dumps(original)
     cleared = bind_tool_images(bound, [])
     assert len(cleared["messages"]) == 2
+
+
+def test_rejected_image_reports_specific_field_and_correction_without_raw_payload():
+    png = _png()
+    item = _image_content(png)
+    item["mimeType"] = "image/svg+xml"
+    content = collect_tool_images([_successful_step("capture", {"content": [item]})], None, "D:/Project")
+    assert len(content) == 1
+    assert "mimeType is unsupported" in content[0]["text"]
+    assert "image/png" in content[0]["text"] and "image/jpeg" in content[0]["text"]
+    assert item["data"] not in content[0]["text"]
+    item["mimeType"] = "image/png"
+    assert collect_tool_images([_successful_step("capture", {"content": [item]})], None, "D:/Project")[1]["type"] == "image_url"
+
+
+def test_bad_image_hash_keeps_exact_reason_and_does_not_use_older_visual_evidence():
+    item = _image_content(_png())
+    item["sha256"] = "0" * 64
+    content = collect_tool_images([_successful_step("capture", {"content": [item]})], None, "D:/Project")
+    assert len(content) == 1 and "sha256 does not match image bytes" in content[0]["text"]
+    assert "without guessing or replacing the hash" in content[0]["text"]

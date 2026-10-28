@@ -91,8 +91,8 @@ def collect_tool_images(
                 try:
                     data, mime, digest = _decode_image_content(candidate)
                     content = _provider_content(step, data, mime, digest, uri)
-                except ValueError:
-                    content = _unavailable_content(step, "MCP ImageContent failed MIME, size, hash, or dimensions validation.")
+                except ValueError as exc:
+                    content = _unavailable_content(step, f"MCP ImageContent rejected: {exc}")
             else:
                 content = _collect_preview(step, candidate, resource_reader, project_path, kind)
             observations.append(content)
@@ -157,7 +157,7 @@ def _collect_preview(
 ) -> list[dict[str, Any]]:
     uri = _source_uri(preview.get("resourceUri"))
     if preview.get("schema") != expected_schema:
-        return _unavailable_content(step, "Tool image preview descriptor has an unsupported schema.", uri)
+        return _unavailable_content(step, f"Preview schema must be {expected_schema}. Obtain the current preview from its owning tool instead of guessing a descriptor.", uri)
     if expected_schema == "vrcforge.scene_capture_preview.v1" and not str(preview.get("captureId") or "").strip():
         return _unavailable_content(step, "Scene capture preview has no bound capture identity.", uri)
     if not uri or not callable(resource_reader):
@@ -167,18 +167,21 @@ def _collect_preview(
 
     try:
         resource = resource_reader(preview, project_path)
+    except Exception:  # Do not expose arbitrary reader exception strings or credentials.
+        return _unavailable_content(step, "The bound image Resource could not be read. Obtain the tool's current preview Resource and retry that exact read; do not reuse an older image as verification.", uri)
+    try:
         if not isinstance(resource, Mapping):
-            raise ValueError("Resource response is invalid")
+            raise ValueError("Resource response must be an object with a contents array")
         contents = resource.get("contents")
         if not isinstance(contents, list) or len(contents) != 1 or not isinstance(contents[0], Mapping):
-            raise ValueError("Resource content is invalid")
+            raise ValueError("contents must contain exactly one image Resource object")
         item = contents[0]
         mime = str(preview.get("mimeType") or "").strip().lower()
         if mime != "image/png" or item.get("uri") != preview.get("resourceUri") or item.get("mimeType") != mime:
-            raise ValueError("Resource identity or MIME mismatch")
+            raise ValueError("Resource uri and mimeType must match the bound preview; this preview requires image/png")
         meta = item.get("_meta")
         if not isinstance(meta, Mapping):
-            raise ValueError("Resource hash metadata is missing")
+            raise ValueError("Resource _meta must include sha256 and sourceSha256 from the same preview")
         preview_sha = _required_sha256(preview.get("sha256"))
         if meta.get("sha256") != preview_sha:
             raise ValueError("Resource hash metadata does not match the tool result")
@@ -188,7 +191,7 @@ def _collect_preview(
         width = _positive_dimension(preview.get("width"))
         height = _positive_dimension(preview.get("height"))
         if max(width, height) > _MAX_IMAGE_EDGE:
-            raise ValueError("Preview dimensions exceed the image edge limit")
+            raise ValueError(f"Preview width/height exceed {_MAX_IMAGE_EDGE} pixels; request a smaller capture")
         data, mime, digest = _decode_image_content({
             "data": item.get("blob"),
             "mimeType": item.get("mimeType"),
@@ -200,8 +203,10 @@ def _collect_preview(
             raise ValueError("Preview dimensions do not match the tool result")
         if digest != preview_sha:
             raise ValueError("Preview bytes do not match the tool result")
-    except Exception:  # Resource failures are reported as observations, never as successful visual evidence.
-        return _unavailable_content(step, "Tool preview image unavailable: the current Resource could not be verified and read.", uri)
+    except ValueError as exc:
+        return _unavailable_content(step, f"Tool preview rejected: {exc}. Re-read the current preview and its Resource together; do not alter hashes to bypass verification.", uri)
+    except Exception as exc:
+        return _unavailable_content(step, f"Tool preview metadata could not be processed ({type(exc).__name__}). Re-read the current preview and Resource; this image is unavailable for verification.", uri)
 
     return _provider_content(step, data, mime, digest, uri)
 
@@ -210,29 +215,29 @@ def _decode_image_content(item: Mapping[str, Any]) -> tuple[bytes, str, str]:
     mime_value = item.get("mimeType", item.get("mime_type"))
     mime = str(mime_value or "").strip().lower()
     if mime not in _SUPPORTED_FORMATS:
-        raise ValueError("Unsupported image MIME type")
+        raise ValueError("mimeType is unsupported; use one of " + ", ".join(_SUPPORTED_FORMATS))
     encoded = item.get("data")
     if not isinstance(encoded, str) or not encoded or len(encoded) > _MAX_BASE64_CHARS:
-        raise ValueError("Invalid or oversized image payload")
+        raise ValueError(f"data must be nonempty valid base64, at most {_MAX_BASE64_CHARS} characters; return a smaller image if needed")
     try:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise ValueError("Invalid image base64") from exc
+        raise ValueError("data is invalid base64; encode the image bytes as base64 without a data URL prefix") from exc
     if not data or len(data) > _MAX_IMAGE_BYTES:
-        raise ValueError("Image exceeds byte limit")
+        raise ValueError(f"decoded image must contain 1–{_MAX_IMAGE_BYTES} bytes; return a smaller image")
     digest = hashlib.sha256(data).hexdigest()
     declared_hash = item.get("sha256")
     metadata = item.get("_meta")
     if declared_hash is None and isinstance(metadata, Mapping):
         declared_hash = metadata.get("sha256")
     if declared_hash is not None and _required_sha256(declared_hash) != digest:
-        raise ValueError("Image SHA-256 mismatch")
+        raise ValueError("sha256 does not match image bytes; re-read the image and hash from the same capture, without guessing or replacing the hash")
 
     dimensions = _image_dimensions(data, mime)
     declared_width, declared_height = item.get("width"), item.get("height")
     if declared_width is not None or declared_height is not None:
         if (_positive_dimension(declared_width), _positive_dimension(declared_height)) != dimensions:
-            raise ValueError("Image dimensions do not match metadata")
+            raise ValueError("width/height do not match decoded image bytes; obtain dimensions and bytes from the same capture")
     return data, mime, digest
 
 
@@ -242,25 +247,25 @@ def _image_dimensions(data: bytes, mime: str) -> tuple[int, int]:
         with Image.open(io.BytesIO(data), formats=[expected_format]) as image:
             width, height = image.size
             if width < 1 or height < 1 or max(width, height) > _MAX_IMAGE_EDGE:
-                raise ValueError("Image dimensions exceed limit")
+                raise ValueError(f"image width/height must be 1–{_MAX_IMAGE_EDGE} pixels; request a smaller capture")
             if getattr(image, "n_frames", 1) != 1:
-                raise ValueError("Animated images are not supported")
+                raise ValueError("Animated images are not supported; return one still frame")
             image.verify()
     except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise ValueError("Image bytes are invalid") from exc
+        raise ValueError("image bytes cannot be decoded as the declared mimeType; return matching image bytes and MIME metadata") from exc
     return int(width), int(height)
 
 
 def _positive_dimension(value: Any) -> int:
     if type(value) is not int or value < 1:
-        raise ValueError("Image dimension is invalid")
+        raise ValueError("width/height metadata must be positive integers matching the image bytes")
     return value
 
 
 def _required_sha256(value: Any) -> str:
     digest = str(value or "").strip().lower()
     if not _SHA256_RE.fullmatch(digest):
-        raise ValueError("SHA-256 evidence is invalid")
+        raise ValueError("sha256 must contain 64 hexadecimal characters from the exact image bytes")
     return digest
 
 
