@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Current version](https://img.shields.io/badge/current-v1.9.1-d9487c?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.10.1-d9487c?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Platform Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
@@ -31,10 +31,18 @@ project, so verify the result in your own project.
 
 > Back up your Unity / VRChat Avatar project before using any asset-writing feature.
 
-The current source targets v1.9.1, which has not been formally published. Publication status and downloadable assets are authoritative on the [GitHub Releases page](https://github.com/ayyitong888/VRCForge/releases); do not infer publication from source or test status.
-Get matching installers and Unity packages from the same Release.
+**[1.10.1 is available](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.1)**: open sub-agent conversations, preview replies from the conversation rail, and retain 4 checkpoints by default. Tool errors and Unity import results are clearer. See the [release notes](docs/RELEASE_NOTES_1.10.1.md).
 
-**[Check Releases publication status](https://github.com/ayyitong888/VRCForge/releases)** · [Read the v1.9.1 Release Notes](docs/RELEASE_NOTES_1.9.1.md) · [Historical v1.8.8 Release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.8) · [Historical notes](docs/RELEASE_NOTES_1.8.8.md)
+## Download: install both the App and the Unity plugin
+
+**Download both items below from the same Release.**
+
+| Required download | Where to install |
+| --- | --- |
+| **[App offline installer (.exe)](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge_Offline_Installer_x64.exe)** | Run on Windows. You may use the [web installer](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge_Web_Installer_x64.exe) instead; choose one installer. |
+| **[Unity Core plugin (VRCForge.unitypackage)](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge.unitypackage)** | **Import All** into each Unity project you want to connect. Installing the App alone does not connect Unity. |
+
+Update both the App and the Unity plugin when upgrading.
 
 ## What VRCForge can do
 
@@ -82,11 +90,7 @@ Inspect → Plan → Check permissions → Apply → Read back and inspect → R
 
 ### 1. Install and connect Unity
 
-Download these files from the
-[latest Release](https://github.com/ayyitong888/VRCForge/releases/latest):
-
-- Use the selected release's `VRCForge_Web_Installer_x64.exe`, or `VRCForge_Offline_Installer_x64.exe` for an offline install.
-- `VRCForge.unitypackage`
+Download the **App installer + Unity Core plugin** listed above.
 
 Then connect in three steps:
 
@@ -152,13 +156,13 @@ confirm and execute in the terminal through the same backend approval and recove
 - Some read-only checks work without a Provider. AI chat, planning, and vision reasoning require a configured compatible Provider.
 - Optimization integrations require compatible installed plugins. Configuring AAO components does not itself perform AAO's build-time optimization. Head-swap and part-transplant workflows cannot replace required mesh seam, weight or UV editing.
 - The Avatar protection connector supports inspection, planning and previews; the public package does not include the private protection executor.
-- Protocol, source-test, or successful tool-call evidence does not establish visual correctness for every avatar. Verify the result on the avatar being edited and preserve its recovery point.
+- Known issues remain with the Optimization page freezing, some interrupted-turn recovery, and built-in desktop screenshot compatibility. Verify avatar results in your own project.
 - Quest/Android support, third-party asset licensing, and paid dependencies depend on the specific Avatar and assets.
 
 ## Documentation
 
 - [User Manual / 使用手册](USER_MANUAL.md)
-- [v1.9.1 candidate release notes](docs/RELEASE_NOTES_1.9.1.md)
+- [1.10.1 release notes](docs/RELEASE_NOTES_1.10.1.md)
 - [v1.7.10 stable release notes](docs/RELEASE_NOTES_1.7.10.md)
 - [Compatibility matrix](docs/COMPATIBILITY_MATRIX.md)
 - [Product regression contract](docs/PRODUCT_REGRESSION_CONTRACT.md)

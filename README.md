@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![稳定版](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=稳定版&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![当前版本](https://img.shields.io/badge/当前版本-v1.9.1-d9487c?style=flat-square)
+![当前版本](https://img.shields.io/badge/当前版本-v1.10.1-d9487c?style=flat-square)
 [![许可证 GPL-3.0-only](https://img.shields.io/badge/许可证-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![平台 Windows x64](https://img.shields.io/badge/平台-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
@@ -29,10 +29,18 @@ VRCForge 是给 VRChat Avatar 创作者使用的开源改模工具。你可以�
 
 > 使用任何会写入 Unity 资产的功能前，请先备份 Unity / VRChat Avatar 工程。
 
-当前源码目标为 v1.9.1，尚未正式发布。发布状态与可下载资产请以 [GitHub Releases 页面](https://github.com/ayyitong888/VRCForge/releases) 为准，不从源码或测试状态推断已发布。
-安装与升级请获取同一 Release 的配套安装器与 Unity 包。
+**[1.10.1 已发布](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.1)**：支持打开子智能体工作对话、对话刻度悬浮预览，检查点默认保留 4 个；改进工具报错和 Unity 导入结果。详见 [更新说明](docs/RELEASE_NOTES_1.10.1.md)。
 
-**[查看 Releases 发布状态](https://github.com/ayyitong888/VRCForge/releases)** · [查看 v1.9.1 Release Notes](docs/RELEASE_NOTES_1.9.1.md) · [历史 v1.8.8 Release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.8) · [历史说明](docs/RELEASE_NOTES_1.8.8.md)
+## 下载：App 和 Unity 插件都要装
+
+**下面两项都要下载，使用同一 Release 的配套版本。**
+
+| 必需下载 | 安装到哪里 |
+| --- | --- |
+| **[App 离线安装包（.exe）](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge_Offline_Installer_x64.exe)** | 在 Windows 运行安装；也可改用 [在线安装包](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge_Web_Installer_x64.exe)，两种安装器选一个。 |
+| **[Unity Core 插件（VRCForge.unitypackage）](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge.unitypackage)** | 在每个要连接的 Unity 工程中 **Import All**。只安装 App 无法连接 Unity。 |
+
+升级时也请同时更新 App 和 Unity 插件。
 
 ## VRCForge 能做什么
 
@@ -84,10 +92,7 @@ VRCForge 对 Unity 资产写入采用以下受监督流程：
 
 ### 1. 安装并连接 Unity
 
-从 [最新 Release](https://github.com/ayyitong888/VRCForge/releases/latest) 下载：
-
-- 请使用所选 Release 的 `VRCForge_Web_Installer_x64.exe`，或离线安装器 `VRCForge_Offline_Installer_x64.exe`
-- `VRCForge.unitypackage`
+先下载上方的 **App 安装包 + Unity Core 插件**。
 
 推荐在准备工程时使用 [Creator Companion（VCC）](https://vcc.docs.vrchat.com/guides/getting-started/) 或 ALCOM 创建、管理 Avatar 工程。直接使用 Unity 的用户也可在现有工程内补齐官方 Avatar SDK；无需为了使用 VRCForge 更换项目管理器。
 
@@ -148,13 +153,13 @@ python tools\vrcforge_cli.py validation run --project C:\Path\To\UnityProject
 - VRCForge 可以在无 Provider 模式下完成部分只读检查；AI 对话、规划和视觉推理需要已配置的兼容 Provider。
 - 优化插件集成需要已安装的兼容版本；配置 AAO 等组件不等于已经完成其构建阶段优化。换头与部件移植工作流不能代替必要的网格接缝、权重或 UV 编辑。
 - Avatar 保护连接器提供检查、规划与预览；公开包不包含私有保护执行组件。
-- `v1.9.1` 的发布状态请以 Releases 页面为准；协议、源码测试或工具调用成功仍不能替代具体模型的视觉与恢复验收。
+- 优化页面卡住、部分中断会话恢复和内置桌面截图兼容问题仍待修复；具体模型效果请在自己的工程中验收。
 - Quest/Android、第三方资产许可和付费依赖由具体 Avatar 与资源决定。
 
 ## 文档入口
 
 - [用户手册 / User Manual](USER_MANUAL.md)
-- [v1.9.1 候选版本说明](docs/RELEASE_NOTES_1.9.1.md)
+- [1.10.1 更新说明](docs/RELEASE_NOTES_1.10.1.md)
 - [v1.7.10 稳定版说明](docs/RELEASE_NOTES_1.7.10.md)
 - [兼容性矩阵](docs/COMPATIBILITY_MATRIX.md)
 - [产品回归契约](docs/PRODUCT_REGRESSION_CONTRACT.md)

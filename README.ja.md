@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Current version](https://img.shields.io/badge/current-v1.8.1-d9487c?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.10.1-d9487c?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 
@@ -29,7 +29,18 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 
 > Unity / VRChat Avatar プロジェクトを書き換える機能を使う前に、必ずバックアップしてください。
 
-**[VRCForge v1.8.1 をダウンロード](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.1)**
+**[1.10.1 公開済み](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.1)**：サブエージェントの会話表示、会話レールのホバープレビュー、チェックポイントの既定保持数 4 件に対応。ツールのエラーと Unity インポート結果も改善しました。[更新内容](docs/RELEASE_NOTES_1.10.1.md)。
+
+## ダウンロード：App と Unity プラグインの両方が必要
+
+**同じ Release から、以下の両方をダウンロードしてください。**
+
+| 必須ダウンロード | インストール先 |
+| --- | --- |
+| **[App オフラインインストーラー（.exe）](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge_Offline_Installer_x64.exe)** | Windows で実行。[Web インストーラー](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge_Web_Installer_x64.exe) でも可。どちらか一つを選びます。 |
+| **[Unity Core プラグイン（VRCForge.unitypackage）](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge.unitypackage)** | 接続する各 Unity プロジェクトに **Import All**。App のインストールだけでは Unity に接続できません。 |
+
+アップグレード時も App と Unity プラグインの両方を更新してください。
 
 ## できること
 
@@ -51,8 +62,7 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 
 ## Booth のアバターを始める手順
 
-1. [v1.8.1 Release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.1) から
-   修正済みの Web Installer または Offline Installer と `VRCForge.unitypackage` を取得します。実行中のアプリを終了した後、「再試行」でインストールを続行できます。
+1. 上記の **App インストーラーと Unity Core プラグイン** を取得し、App をインストールします。
 2. Unity 2022.3 LTS の VRChat SDK3 Avatar プロジェクトをバックアップし、
    package を Import All します。コンパイル完了後、`[VRCForge MCP] Core Ready` を確認します。
 3. VRCForge を起動し、対象プロジェクトと Avatar を選びます。最初は Doctor、
@@ -73,11 +83,11 @@ VRCForge を起動したままにし、クライアントに `vrcforge` Server �
 
 衣装・表情・マテリアル・アニメーションは実際に編集できます。最適化連携には対応するプラグインが必要で、AAO の設定だけでビルド時の最適化が完了するわけではありません。頭部交換やパーツ移植でも、メッシュの継ぎ目・ウェイト・UV の編集が別途必要になる場合があります。
 
-Avatar 保護コネクターは確認・計画・プレビューに対応します。公開パッケージには非公開の保護実行コンポーネントを含みません。
+最適化ページのフリーズ、一部の中断会話の復元、内蔵デスクトップ操作のスクリーンショット互換性には既知の問題があり、修正待ちです。
 
 ## リンク
 
-- [v1.8.1 Release / Download](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.1)
+- [1.10.1 Release / Download](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.1)
 - [Release Notes](https://github.com/ayyitong888/VRCForge/releases)
 - [User Manual](USER_MANUAL.md)
 - [English README](README.en.md) · [简体中文 README](README.md)
