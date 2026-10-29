@@ -516,3 +516,45 @@ def test_scalar_enum_and_escaped_member_pointer_share_comparison():
     assert not _requested_value_matches("FlagsA, FlagsB", True, evidence)
     evidence = {"/a~1b~0c": {"type": "Fixture.Kind", "name": "Set", "value": 1}}
     assert _requested_value_matches({"a/b~c": "Set"}, {"a/b~c": 1}, evidence)
+
+
+def _material_setter_readback_values():
+    expected = [{"Object": {"referencePath": name}, "MaterialIndex": 0,
+                 "Material": f"Assets/Materials/{name}.mat"}
+                for name in ("Body", "Face", "Tail")]
+    observed = [{"Object": {"referencePath": row["Object"]["referencePath"],
+                            "targetObject": {"type": "UnityEngine.GameObject", "hierarchyPath": "Avatar/" + row["Object"]["referencePath"]}},
+                 "MaterialIndex": 0, "Material": {"type": "UnityEngine.Material",
+                     "assetPath": row["Material"], "assetGuid": "a" * 32, "localFileId": 2100000}}
+                for row in expected]
+    return expected, observed
+
+
+def test_material_setter_verifies_nested_string_material_paths_against_object_readback():
+    expected, observed = _material_setter_readback_values()
+    result = finalize_add_modular_avatar_component_verification(
+        {"componentType": "MaterialSetter", "saveScene": True, "fields": {"Objects": expected}},
+        _write_result(), lambda _: _inspection(),
+        lambda _: {"ok": True, "propertyValue": observed, "valueTruncated": False},
+    )
+    assert result.get("verified") is True, result
+    assert result["commitState"] == "committed"
+    assert result["readback"]["fields"]["Objects"] == observed
+
+
+@pytest.mark.parametrize("changed", [
+    None, {"assetPath": "Assets/Materials/Wrong.mat"}, {"name": "Body"},
+    {"assetPath": "Assets/Materials/Body.mat", "__incomplete": True},
+    {"assetPath": "Assets/Materials/Body.mat", "__truncated": True},
+    {"assetPath": "Assets/Materials/Body.mat", "__cycle": True},
+])
+def test_material_setter_rejects_missing_changed_or_incomplete_nested_material(changed):
+    expected, observed = _material_setter_readback_values()
+    observed[0]["Material"] = changed
+    result = finalize_add_modular_avatar_component_verification(
+        {"componentType": "MaterialSetter", "fields": {"Objects": expected}},
+        _write_result(), lambda _: _inspection(),
+        lambda _: {"ok": True, "propertyValue": observed},
+    )
+    assert result.get("verified") is not True
+    assert "mismatched field 'Objects'" in result["error"]

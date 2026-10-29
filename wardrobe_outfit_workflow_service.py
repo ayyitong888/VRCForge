@@ -1522,6 +1522,8 @@ def _object_reference_intent_matches(observed: Any, expected: Mapping[str, Any])
 def _direct_unity_object_matches(observed: Any, expected: Any) -> bool:
     if not isinstance(observed, dict) or not isinstance(expected, str):
         return False
+    if any(observed.get(marker) is True for marker in ("__incomplete", "__truncated", "__cycle")):
+        return False
     expected_path = _normalize_reference_path(expected)
     return bool(expected_path) and (
         _normalize_reference_path(observed.get("assetPath")) == expected_path
@@ -1565,6 +1567,8 @@ def _requested_value_matches(
             and all(_requested_value_matches(actual, wanted, enum_values, pointer + "/" + str(index))
                     for index, (actual, wanted) in enumerate(zip(observed, expected)))
         )
+    if isinstance(expected, str) and isinstance(observed, dict):
+        return _direct_unity_object_matches(observed, expected)
     if isinstance(expected, bool):
         return isinstance(observed, bool) and observed is expected
     # Enum names remain the public display value. Numeric equivalence requires
