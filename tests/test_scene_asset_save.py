@@ -215,6 +215,36 @@ def test_unity_source_saves_existing_unsaved_scene_without_replacing_it() -> Non
     assert "checkpointRestoreRequired" in source
 
 
+def test_scene_save_as_rejects_missing_parent_before_mutation_and_rechecks_apply() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "Assets"
+        / "VRCForge"
+        / "Editor"
+        / "Stage1SceneTools.cs"
+    ).read_text(encoding="utf-8-sig")
+    save_tool = source[
+        source.index("public static class SceneSaveTool"):
+        source.index("public static class SceneTransitionTool")
+    ]
+    preview_boundary = save_tool.index('if (preview)')
+    apply_mutation = save_tool.index("mutationStarted = true;")
+    scene_save_call = save_tool.index("EditorSceneManager.SaveScene(scene,")
+    parent_checks = [
+        index for index in range(len(save_tool))
+        if save_tool.startswith("RequireDestinationParentExists(destination, action)", index)
+    ]
+
+    assert parent_checks, "save_as must reject an absent destination parent"
+    assert parent_checks[0] < preview_boundary, "preview must report the missing parent"
+    assert any(index > preview_boundary and index < apply_mutation for index in parent_checks), (
+        "apply must recheck that the destination parent still exists before mutation"
+    )
+    assert "Directory.Exists(parent)" in source
+    assert apply_mutation < scene_save_call, "the write must remain inside the unknown-after-mutation boundary"
+    assert "UnknownAfterMutation" in save_tool, "post-write failures must continue to require recovery"
+
+
 def test_checkpoint_restore_refuses_to_discard_dirty_scenes() -> None:
     source = (
         Path(__file__).resolve().parents[1]

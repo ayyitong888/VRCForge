@@ -31,6 +31,13 @@ namespace VRCForge.Editor
             return SceneObjectCopyCore.NormalizeSceneAssetPath(value, name);
         }
 
+        internal static void RequireDestinationParentExists(string destination, string operation)
+        {
+            var parent = Path.GetDirectoryName(SceneObjectCopyCore.ToAbsoluteAssetPath(destination));
+            if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent))
+                throw new SceneObjectCopyException("The " + operation + " destination folder must already exist.");
+        }
+
         internal static bool IsHex(string value, int length)
         {
             return !string.IsNullOrEmpty(value) && value.Length == length
@@ -212,6 +219,7 @@ namespace VRCForge.Editor
                     throw new SceneObjectCopyException("scenePath must identify the active saved scene.");
                 if (action == "save_as" && SceneObjectCopyCore.AssetOrMetaExists(destination))
                     throw new SceneObjectCopyException("The save_as destination or its metadata exists; overwrite is unsupported.");
+                if (action == "save_as") Stage1SceneToolCore.RequireDestinationParentExists(destination, action);
                 var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scenePath, "scene asset");
                 var hierarchy = Stage1SceneToolCore.HierarchyDigest(scene);
                 var setup = Stage1SceneToolCore.SetupDigest();
@@ -245,6 +253,7 @@ namespace VRCForge.Editor
                 if (action == "save" && !scene.isDirty && dirtyAssets.Length == 0)
                     return VRCForgeToolResult.Completed("No requested scene or project assets need saving.", SavePayload(action, project, scenePath, destination, digest, binding, scene, evidence, hierarchy, setup, open, saveProjectAssets, false, true));
                 if (action == "save_as" && SceneObjectCopyCore.AssetOrMetaExists(destination)) throw new SceneObjectCopyException("The save_as destination appeared after preview; overwrite is unsupported.");
+                if (action == "save_as") Stage1SceneToolCore.RequireDestinationParentExists(destination, action);
                 mutationStarted = true;
                 if ((action == "save_as" || scene.isDirty) && !EditorSceneManager.SaveScene(scene, action == "save_as" ? destination : scenePath, false))
                     throw new SceneObjectCopyException("Unity did not confirm the scene save.");
@@ -337,9 +346,7 @@ namespace VRCForge.Editor
                     throw new SceneObjectCopyException("The new_saved destination or its metadata exists; overwrite is unsupported.");
                 if (action == "new_saved")
                 {
-                    var parent = Path.GetDirectoryName(SceneObjectCopyCore.ToAbsoluteAssetPath(destination));
-                    if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent))
-                        throw new SceneObjectCopyException("The new_saved destination folder must already exist.");
+                    Stage1SceneToolCore.RequireDestinationParentExists(destination, action);
                 }
                 StableAssetEvidence targetEvidence = null;
                 if (action != "new_saved")
