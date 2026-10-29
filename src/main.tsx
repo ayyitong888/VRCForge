@@ -1,21 +1,26 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
-import { initializeI18n } from "./i18n";
-import "./styles.css";
-
 async function main() {
   const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
   metrics.mainModuleStartedMs ??= Math.round(performance.now());
+  await window.__vrcforgeStartupShellPaintedPromise;
+  const reactModule = import("react");
+  const reactDomModule = import("react-dom/client");
+  const i18nModule = import("./i18n").then(async (module) => {
+    await module.initializeI18n();
+    return module;
+  });
   const appModule = import("./App");
-  const [, { default: App }] = await Promise.all([initializeI18n(), appModule]);
+  const appStyles = import.meta.glob("./styles.css", { eager: false });
+  const [{ default: React }, { createRoot }, , , { default: App }] = await Promise.all([
+    reactModule,
+    reactDomModule,
+    i18nModule,
+    appStyles["./styles.css"](),
+    appModule,
+  ]);
   metrics.appDependenciesReadyMs ??= Math.round(performance.now());
 
-  const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
-  root.render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>,
-  );
+  const root = createRoot(document.getElementById("root") as HTMLElement);
+  root.render(React.createElement(React.StrictMode, null, React.createElement(App)));
   metrics.appRenderRequestedMs ??= Math.round(performance.now());
 }
 

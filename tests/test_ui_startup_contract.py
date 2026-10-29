@@ -273,7 +273,11 @@ def test_startup_loads_the_app_while_showing_a_real_noninteractive_shell() -> No
     probe_source = _read("scripts/diagnose_packaged_latency.mjs")
 
     assert 'const appModule = import("./App")' in main_source
-    assert "Promise.all([initializeI18n(), appModule])" in main_source
+    assert "__vrcforgeStartupShellPaintedPromise" in index_source
+    assert "await window.__vrcforgeStartupShellPaintedPromise" in main_source
+    assert 'import.meta.glob("./styles.css", { eager: false })' in main_source
+    assert 'import "./styles.css"' not in main_source
+    assert 'appStyles["./styles.css"]()' in main_source
     assert "data-vrcforge-startup-shell" in index_source
     assert 'aria-hidden="true"' in index_source
     assert 'data-vrcforge-startup-frame="header"' in index_source
@@ -287,13 +291,15 @@ def test_startup_loads_the_app_while_showing_a_real_noninteractive_shell() -> No
     assert index_source.index("window.requestAnimationFrame") < index_source.index('src="/src/main.tsx"')
     assert "startupShellPaintedMs" in index_source
     assert 'src="/src/main.tsx"' in index_source
-    assert "startupShellPaintedPromise" not in main_source
+    shell_ready = main_source.index("await window.__vrcforgeStartupShellPaintedPromise")
+    assert shell_ready < main_source.index('const appModule = import("./App")')
+    assert shell_ready < main_source.index('import.meta.glob("./styles.css"')
     assert "startupShellPaintedMs" not in main_source
     assert "flushSync" not in main_source
-    assert main_source.index("await Promise.all") < main_source.index("ReactDOM.createRoot")
+    assert main_source.index("await Promise.all") < main_source.index("const root = createRoot")
     assert "const AsyncAppSidebar = lazy" in app_source
     assert "const AsyncRightRuntimeSidebar = lazy" in app_source
-    assert "const AsyncSubAgentWorkspaceSurface = lazy" in app_source
+    assert "const AsyncSubAgentSidebar = lazy" in app_source
     assert 'import { AppSidebar }' not in app_source
     assert 'import { RightRuntimeSidebar }' not in app_source
     assert 'import { SubAgentWorkspaceSurface }' not in app_source
@@ -317,6 +323,35 @@ def test_startup_loads_the_app_while_showing_a_real_noninteractive_shell() -> No
     assert "metrics.centerUsableMs <= metrics.sidebarsRequestedMs" in probe_source
     assert "metrics.sidebarsRequestedMs <= metrics.sidebarsMountedMs" in probe_source
     assert "process.exitCode = 1" in probe_source
+
+
+def test_startup_shell_paints_before_loading_app_and_global_styles() -> None:
+    index_source = _read("index.html")
+    main_source = _read("src/main.tsx")
+
+    assert index_source.index("window.__vrcforgeStartupShellPaintedPromise = new Promise") < index_source.index(
+        'src="/src/main.tsx"'
+    )
+    shell_ready = main_source.index("await window.__vrcforgeStartupShellPaintedPromise")
+    for dynamic_import in (
+        'const reactModule = import("react")',
+        'const reactDomModule = import("react-dom/client")',
+        'const i18nModule = import("./i18n")',
+        'const appModule = import("./App")',
+    ):
+        assert shell_ready < main_source.index(dynamic_import)
+    assert shell_ready < main_source.index('import.meta.glob("./styles.css", { eager: false })')
+    assert 'import "./styles.css"' not in main_source
+    assert 'import React from "react"' not in main_source
+    assert 'import ReactDOM from "react-dom/client"' not in main_source
+    assert 'import { initializeI18n } from "./i18n"' not in main_source
+    assert "await module.initializeI18n();" in main_source
+    app_dependencies = main_source[main_source.index("const [{ default: React }") : main_source.index("metrics.appDependenciesReadyMs")]
+    assert "i18nModule," in app_dependencies
+    assert 'appStyles["./styles.css"](),' in app_dependencies
+    assert "appModule," in app_dependencies
+    assert main_source.index("await Promise.all") < main_source.index("const root = createRoot")
+    assert "React.createElement(React.StrictMode, null, React.createElement(App))" in main_source
 
 
 def test_app_bootstrap_defers_heavy_catalog_and_hydrates_skills_asynchronously() -> None:
