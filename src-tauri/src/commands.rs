@@ -3553,16 +3553,6 @@ pub async fn abort_chat_attachment_upload(
 }
 
 #[tauri::command]
-pub async fn request_chat_attachment_import(
-    request: DesktopJsonBodyRequest,
-) -> Result<serde_json::Value, String> {
-    blocking_backend_json_request(move || {
-        post_json_body_command("/api/app/chat-attachments/import", request, 120_000)
-    })
-    .await
-}
-
-#[tauri::command]
 pub fn fetch_optimization_proofs(
     request: DesktopOptimizationProofsRequest,
 ) -> Result<serde_json::Value, String> {

@@ -281,8 +281,6 @@ _ATTACHMENT_TOOLS = frozenset(
         "vrcforge_capture_multi_screenshot",
         "vrcforge_capture_screenshot",
         "vrcforge_capture_status",
-        "vrcforge_import_chat_archive",
-        "vrcforge_import_chat_image",
         "vrcforge_inspect_chat_attachment",
         "vrcforge_vision_audit",
         "vrcforge_vision_audit_multi",

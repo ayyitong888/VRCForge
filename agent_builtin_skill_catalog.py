@@ -131,20 +131,6 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "reads the local attachment vault only; bytes never enter the prompt",
         "tags": ["attachment", "vault", "inspection"],
     },
-    "vrcforge_import_chat_image": {
-        "title": "Chat Image Import",
-        "inputs": ["Vault payloadHash, Unity project path, and optional Assets/ target folder."],
-        "outputs": ["Copied asset path and asset database refresh result."],
-        "sideEffects": "writes one image file under Assets/ after approval",
-        "tags": ["attachment", "vault", "import"],
-    },
-    "vrcforge_import_chat_archive": {
-        "title": "Chat Archive Import",
-        "inputs": ["Vault payloadHash, Unity project path, and optional managed Assets/ target folder."],
-        "outputs": ["Supervised outfit import result or conservative managed ZIP extraction result."],
-        "sideEffects": "re-verifies the content hash and archive guards, then imports or extracts safe asset types after approval and checkpoint",
-        "tags": ["attachment", "vault", "archive", "import", "write"],
-    },
     "vrcforge_unity_status": {
         "title": "Unity MCP Status",
         "inputs": ["Optional Unity MCP host, port, and instance."],

@@ -1964,7 +1964,6 @@
     "readTextFailed": "无法读取文本正文，未向模型提供内容。",
     "readFileFailed": "读取文件载荷失败。",
     "vaultStored": "已本地保存，不发送给模型",
-    "importToProject": "导入到项目",
     "vaultUploadFailed": "本地保存失败（{{reason}}），已回退为仅元数据。"
   },
   "goal": {

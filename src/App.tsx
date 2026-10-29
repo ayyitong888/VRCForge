@@ -205,7 +205,6 @@ import {
   mergeSubAgent,
   requestAgentDesktopAction,
   requestAgentRunCancel,
-  requestChatAttachmentImport,
   resumeSubAgent,
   refreshProjects,
   setAppSessionToken,
@@ -3624,30 +3623,6 @@ export default function App() {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
   }
 
-  async function importVaultAttachment(attachment: ChatAttachment) {
-    const payloadHash = attachment.payloadKind === "vault_file" ? attachment.payloadHash : attachment.vaultPayloadHash;
-    if (!payloadHash) {
-      return;
-    }
-    setError("");
-    try {
-      const response = await requestChatAttachmentImport(endpoint, {
-        payloadHash,
-        projectPath: activeChat?.projectPath || activeProjectPath || undefined,
-      });
-      const approval = response?.approval as AgentApproval | undefined;
-      if (approval && typeof approval.id === "string" && approval.id) {
-        // Surface the pending import approval immediately; runtime polling keeps it in sync.
-        setAgentApprovals((current) => {
-          const existing = current ?? [];
-          return existing.some((item) => item.id === approval.id) ? existing : [approval, ...existing];
-        });
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
   async function reconcileSubAgentHandoffs(tasks: SubAgentTask[]) {
     for (const task of tasks) {
       if (!task.parentChatId) {
@@ -4719,7 +4694,6 @@ export default function App() {
               onApprove={approveShell}
               onReject={rejectShell}
               onModifyApproval={modifyApprovalInComposer}
-              onImportAttachment={(attachment) => void importVaultAttachment(attachment)}
               onOpenDoctor={() => void openDoctor()}
               runtimeRuns={runtimeRuns}
               onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}

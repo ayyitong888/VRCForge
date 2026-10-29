@@ -752,13 +752,10 @@ function SelectedTextHoverPreview({ text, children }: { text: string; children: 
 export function AttachmentStrip({
   attachments,
   onRemove,
-  onImport,
   compact = false,
 }: {
   attachments: ChatAttachment[];
   onRemove?: (id: string) => void;
-  /** 1.3.2: import affordance for vault-stored attachments (archives / oversized images). */
-  onImport?: (attachment: ChatAttachment) => void;
   compact?: boolean;
 }) {
   const { t } = useTranslation();
@@ -805,30 +802,10 @@ export function AttachmentStrip({
                       <span>{extension}</span>
                       {capabilityReason ? <span data-attachment-capability className="truncate normal-case text-amber-700" title={capabilityReason}>{capabilityReason}</span> : null}
                       {isVaultFile ? <span className="normal-case text-sky-700">{t("attachments.vaultStored")}</span> : null}
-                      {isVaultFile && onImport ? (
-                        <button
-                          type="button"
-                          className="shrink-0 rounded border border-border px-1.5 py-0.5 normal-case text-foreground transition-colors hover:bg-muted"
-                          onClick={() => onImport(attachment)}
-                          title={t("attachments.importToProject")}
-                        >
-                          {t("attachments.importToProject")}
-                        </button>
-                      ) : null}
                     </div>
                   </div>
                 </div>
               )}
-              {isImage && isVaultFile && onImport ? (
-                <button
-                  type="button"
-                  className="absolute bottom-2 left-2 rounded border border-border bg-background/90 px-1.5 py-0.5 text-[10px] text-foreground shadow-sm"
-                  onClick={() => onImport(attachment)}
-                  title={t("attachments.importToProject")}
-                >
-                  {t("attachments.importToProject")}
-                </button>
-              ) : null}
               {onRemove ? (
                 <button
                   type="button"
@@ -878,16 +855,6 @@ export function AttachmentStrip({
             {!isSelectedText ? <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span> : null}
             {capabilityReason ? <span data-attachment-capability className="max-w-[260px] truncate text-amber-700" title={capabilityReason}>{capabilityReason}</span> : null}
             {isVaultFile ? <span className="shrink-0 text-sky-700">{t("attachments.vaultStored")}</span> : null}
-            {isVaultFile && onImport ? (
-              <button
-                type="button"
-                className="shrink-0 rounded border border-border px-1.5 py-0.5 text-foreground transition-colors hover:bg-muted"
-                onClick={() => onImport(attachment)}
-                title={t("attachments.importToProject")}
-              >
-                {t("attachments.importToProject")}
-              </button>
-            ) : null}
             {onRemove ? (
               <button
                 type="button"

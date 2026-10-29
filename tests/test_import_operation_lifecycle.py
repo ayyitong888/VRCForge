@@ -75,7 +75,7 @@ def _install_journal(receipt, *, nested=False):
         "materializationIndex": 0 if nested else None}], "materializations": materializations, "targetIndex": 0,
         "expectedAssetPaths": receipt.status["expectedAssetPaths"], "projectIdentity": {"projectPath": str(receipt.project)}}
     arguments = install_prepared_calls({}, calls, {"branch": "unitypackage", "payloadHash": digest, "outfitEvidence": evidence})
-    tool = "vrcforge_import_chat_archive"
+    tool = "vrcforge_import_outfit_package"
     receipt.approval["targetTool"] = receipt.recovery["targetTool"] = tool
     receipt.approval["taskContext"]["tool"] = receipt.event["steps"][0]["tool"] = tool
     journal = make_import_operation_journal(receipt.recovery, receipt.approval, arguments)

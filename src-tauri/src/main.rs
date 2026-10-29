@@ -349,7 +349,6 @@ fn main() {
             request_agent_desktop_action,
             request_agent_run_cancel,
             request_approval_revision,
-            request_chat_attachment_import,
             request_optimization_apply,
             request_outfit_import,
             request_package_install,

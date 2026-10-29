@@ -1957,7 +1957,6 @@
     "readTextFailed": "本文を読み取れないため、内容はモデルに提供していません。",
     "readFileFailed": "ファイルペイロードを読み取れませんでした。",
     "vaultStored": "ローカル保存済み、モデルには送信されません",
-    "importToProject": "プロジェクトへインポート",
     "vaultUploadFailed": "ローカル保存に失敗しました（{{reason}}）。メタデータのみへフォールバックしました。"
   },
   "goal": {

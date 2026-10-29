@@ -128,7 +128,7 @@ def test_missing_package_path_preserves_supervised_request_400(
     assert str(exc_info.value) == "packagePath is required."
 
 
-def test_dashboard_registry_and_chat_archive_share_the_typed_owners() -> None:
+def test_dashboard_registry_uses_the_typed_outfit_import_owners() -> None:
     handler = dashboard_server.AGENT_GATEWAY._write_handlers[
         "vrcforge_import_outfit_package"
     ]
@@ -148,16 +148,6 @@ def test_dashboard_registry_and_chat_archive_share_the_typed_owners() -> None:
         dashboard_server.PREPARED_OUTFIT_IMPORT_APPROVED_WRITE,
         PreparedOutfitImportApprovedWriteService,
     )
-    prepare_source = inspect.getsource(
-        dashboard_server.prepare_import_chat_archive_request
-    )
-    execute_source = inspect.getsource(
-        dashboard_server.import_chat_archive_approved_sync
-    )
-    assert "PREPARED_OUTFIT_IMPORT_PREPARER.prepare" in prepare_source
-    assert "PREPARED_OUTFIT_IMPORT_APPROVED_WRITE.execute" in execute_source
-    assert "if kind == \"unitypackage\"" in prepare_source
-    assert "if branch == \"unitypackage\"" in execute_source
 
 
 def test_legacy_dashboard_import_roots_are_absent() -> None:

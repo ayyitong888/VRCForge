@@ -1964,7 +1964,6 @@
     "readTextFailed": "Text content could not be read; no content provided to the model.",
     "readFileFailed": "Failed to read file payload.",
     "vaultStored": "stored locally, not sent to model",
-    "importToProject": "Import to project",
     "vaultUploadFailed": "Local storage failed ({{reason}}); falling back to metadata."
   },
   "goal": {

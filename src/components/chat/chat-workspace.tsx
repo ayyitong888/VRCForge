@@ -179,7 +179,6 @@ export function ChatWorkspace({
   onApprove,
   onReject,
   onModifyApproval,
-  onImportAttachment,
   onOpenDoctor,
   runtimeRuns,
   onSaveOperationAsSkill,
@@ -278,7 +277,6 @@ export function ChatWorkspace({
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
   onModifyApproval: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
-  onImportAttachment?: (attachment: ChatAttachment) => void;
   onOpenDoctor: () => void;
   runtimeRuns: AgentRuntimeRun[];
   onSaveOperationAsSkill: (summary: PathToSkillOperationSummary) => void;
@@ -696,7 +694,6 @@ export function ChatWorkspace({
                       onEditItem={onEditItem}
                       onEditItemSave={onEditItemSave}
                       onEditItemCancel={onEditItemCancel}
-                      onImportAttachment={onImportAttachment}
                     />
                   </div>
                 ) : undefined}
@@ -724,7 +721,6 @@ export function ChatWorkspace({
                 onApprove={onApprove}
                 onReject={onReject}
                 onModifyApproval={onModifyApproval}
-                onImportAttachment={onImportAttachment}
                 onOpenDoctor={onOpenDoctor}
                 saveOperationSummary={capturedOperation?.summary}
                 saveOperationTool={capturedOperation?.tool}

@@ -5,9 +5,9 @@
     "runtimeCommit": "49aa5d1"
   },
   "routes": {
-    "count": 267,
+    "count": 266,
     "kinds": {
-      "APIRoute": 258,
+      "APIRoute": 257,
       "APIWebSocketRoute": 1,
       "Mount": 4,
       "Route": 4
@@ -16,10 +16,10 @@
       "DELETE": 6,
       "GET": 74,
       "HEAD": 4,
-      "POST": 179,
+      "POST": 178,
       "PUT": 3
     },
-    "tableSha256": "7de8483856185206aa0dde7821a7d39c71cad4bd6fae1f63c94ec0b3156ebf5b",
+    "tableSha256": "e29cece5fd81b49931b4d573a5c74f8db11e790543f4ee7e63383328ceca0992",
     "items": [
       {
         "kind": "Route",
@@ -993,14 +993,6 @@
         "path": "/api/app/chat-attachments/{payload_hash}",
         "methods": [
           "GET"
-        ]
-      },
-      {
-        "kind": "APIRoute",
-        "name": "app_request_chat_attachment_import",
-        "path": "/api/app/chat-attachments/import",
-        "methods": [
-          "POST"
         ]
       },
       {
@@ -2154,8 +2146,8 @@
     ]
   },
   "openApi": {
-    "pathCount": 232,
-    "schemaCount": 134,
+    "pathCount": 231,
+    "schemaCount": 133,
     "schemaNames": [
       "AdjustmentCheckpointCreateRequest",
       "AdjustmentCheckpointOverwriteRequest",
@@ -2205,7 +2197,6 @@
       "AvatarScopedConnectionRequest",
       "BuildTestReadinessRequest",
       "CameraVector3",
-      "ChatAttachmentImportRequest",
       "ChatAttachmentUploadBeginRequest",
       "ChatAttachmentUploadFinishRequest",
       "ChatTranscriptsRequest",

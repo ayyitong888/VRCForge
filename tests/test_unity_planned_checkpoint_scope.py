@@ -49,63 +49,6 @@ def test_direct_ensure_seals_and_reuses_core_checkpoint_plan(checkpoint_server, 
     )
 
 
-def test_chat_image_stays_prewrite_blocked_until_persisted_receipt_gate_is_supported(checkpoint_server):
-    from prepared_unity_execution import install_prepared_calls
-    from prepared_file_imports import capture_directory, capture_regular_file
-    server, root, prepared = checkpoint_server
-    source = root.parent / "vault-face.png"
-    source.write_bytes(b"image")
-    source_identity, source_hash = capture_regular_file(source, label="Chat attachment")
-    args = install_prepared_calls(
-        {"projectPath": str(root), "payloadHash": source_hash},
-        [("vrc_refresh_asset_database", {"projectPath": str(root), "resolvePackages": False,
-                                          "packageResolveTimeoutSeconds": 120})],
-        {"attachment": {"payloadHash": source_hash, "name": "face.png"},
-         "sourceIdentity": source_identity, "sourceSha256": source_hash,
-         "target": {"targetRelativePath": "Assets/Imports/face.png",
-                    "project": capture_directory(root, label="Unity project"),
-                    "assets": capture_directory(root / "Assets", label="Unity Assets"),
-                    "parentIdentities": [],
-                    "absentParentRelativePaths": ["Assets/Imports"]}},
-    )
-    result = server.prepare_authoritative_unity_checkpoint_sync(
-        root, {**args, "_checkpointTargetTool": "vrcforge_import_chat_image"},
-    )
-    assert result["ok"] is False and result["blocking"] is True
-    assert result["code"] == "checkpoint_scope_unresolved"
-    assert result["mutationStarted"] is False and result["saved"] is False
-    assert prepared == []
-
-
-def test_chat_zip_stays_prewrite_blocked_until_persisted_receipt_gate_is_supported(checkpoint_server):
-    from prepared_unity_execution import install_prepared_calls
-    from prepared_file_imports import capture_directory, capture_regular_file
-    server, root, prepared = checkpoint_server
-    source = root.parent / "vault-archive.zip"
-    source.write_bytes(b"zip-source")
-    source_identity, source_hash = capture_regular_file(source, label="Chat archive")
-    args = install_prepared_calls(
-        {"projectPath": str(root), "payloadHash": source_hash},
-        [("vrc_refresh_asset_database", {"projectPath": str(root), "resolvePackages": False,
-                                          "packageResolveTimeoutSeconds": 120})],
-        {"branch": "zip", "payloadHash": source_hash,
-         "zipFacts": {"targetRootRelativePath": "Assets/Imports/archive",
-                      "project": capture_directory(root, label="Unity project"),
-                      "assets": capture_directory(root / "Assets", label="Unity Assets"),
-                      "parentIdentities": [], "sourceIdentity": source_identity,
-                      "sourceSha256": source_hash,
-                      "absentParentRelativePaths": ["Assets/Imports", "Assets/Imports/archive"],
-                      "manifest": [{"path": "nested/file.prefab", "sha256": "d" * 64}]}}
-    )
-    result = server.prepare_authoritative_unity_checkpoint_sync(
-        root, {**args, "_checkpointTargetTool": "vrcforge_import_chat_archive"},
-    )
-    assert result["ok"] is False and result["blocking"] is True
-    assert result["code"] == "checkpoint_scope_unresolved"
-    assert result["mutationStarted"] is False and result["saved"] is False
-    assert prepared == []
-
-
 def test_menu_missing_root_uses_core_planned_new_menu_outputs(checkpoint_server, monkeypatch):
     server, root, prepared = checkpoint_server
     plan = {"action": "create", "targetMenuExists": False,

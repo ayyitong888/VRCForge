@@ -40,8 +40,6 @@ WORKFLOW_EXECUTION_PLAN_TARGETS = frozenset(
 _RUNTIME_FACT_WORKFLOWS: dict[str, str] = {
     "vrcforge_add_outfit": "resolved prefab asset identity and wardrobe scan/readback",
     "vrcforge_import_outfit_package": "frozen outfit-import queue and verified source file identities",
-    "vrcforge_import_chat_image": "resolved vault attachment identity and destination file identity",
-    "vrcforge_import_chat_archive": "resolved vault archive guard result and frozen extraction/import queue",
     "vrcforge_install_vpm_package": "selected package-manager executable, package resolution, and package-state readback",
     "vrcforge_configure_optimizer_component": "component inspection/readback and the resolved optimizer property set",
 }

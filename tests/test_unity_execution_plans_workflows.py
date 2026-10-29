@@ -390,8 +390,8 @@ def test_deterministic_workflows_freeze_one_core_call(target: str, tool: str) ->
 
 
 @pytest.mark.parametrize("target", [
-    "vrcforge_add_outfit", "vrcforge_import_outfit_package", "vrcforge_import_chat_image",
-    "vrcforge_import_chat_archive", "vrcforge_install_vpm_package", "vrcforge_configure_optimizer_component",
+    "vrcforge_add_outfit", "vrcforge_import_outfit_package",
+    "vrcforge_install_vpm_package", "vrcforge_configure_optimizer_component",
 ])
 def test_runtime_dependent_workflows_fail_closed_with_missing_fact(target: str) -> None:
     with pytest.raises(ValueError, match="runtime readback"):

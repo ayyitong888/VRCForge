@@ -895,19 +895,6 @@ class SessionHandoffSendRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-class ChatAttachmentImportRequest(BaseModel):
-    payload_hash: str = Field(alias="payloadHash")
-    project_path: str = Field(default="", alias="projectPath")
-    target_folder: str = Field(default="", alias="targetFolder")
-    selected_unitypackage: str = Field(default="", alias="selectedUnityPackage")
-    dependency_mode: Literal["auto", "selected_only"] = Field(default="auto", alias="dependencyMode")
-    selected_prefab: str = Field(default="", alias="selectedPrefab")
-    base_avatar_name: str = Field(default="", alias="baseAvatarName")
-    max_entries: int = Field(default=5000, alias="maxEntries", ge=1, le=50000)
-
-    model_config = {"populate_by_name": True}
-
-
 class ChatAttachmentUploadBeginRequest(BaseModel):
     name: str = Field(min_length=1, max_length=512)
     chat_id: str = Field(alias="chatId", min_length=1, max_length=256)

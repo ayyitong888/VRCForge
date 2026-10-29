@@ -349,15 +349,10 @@ from approved_unity_execution import current_approved_unity_execution
 from prepared_file_imports import (
     capture_directory,
     capture_regular_file,
-    cleanup_owned_import,
-    copy_approved_file_create_new,
-    prepare_project_asset_target,
 )
 from prepared_archive_imports import (
     cleanup_owned_zip_materialization,
-    execute_zip_extract,
     execute_zip_member_materialization,
-    prepare_zip_extract,
     prepare_zip_member_materialization,
 )
 from prepared_loose_outfit_import import execute_loose_outfit_import, prepare_loose_outfit_import
@@ -796,8 +791,6 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_manage_fx_animator",
         "vrcforge_add_outfit",
         "vrcforge_import_outfit_package",
-        "vrcforge_import_chat_image",
-        "vrcforge_import_chat_archive",
         "vrcforge_refresh_asset_database",
         "vrcforge_execute_unity_editor_menu",
         "vrcforge_add_component",
@@ -1113,7 +1106,6 @@ from dashboard_api_models import (
     AgentNotesRequest,
     ChatTranscriptsRequest,
     SessionHandoffSendRequest,
-    ChatAttachmentImportRequest,
     ChatAttachmentUploadBeginRequest,
     ChatAttachmentUploadFinishRequest,
     ProjectPrefsRequest,
@@ -5947,90 +5939,6 @@ def app_read_chat_attachment(payload_hash: str) -> dict[str, Any]:
     return {"ok": True, "attachment": resolved}
 
 
-@app.post("/api/app/chat-attachments/import")
-async def app_request_chat_attachment_import(request: ChatAttachmentImportRequest) -> dict[str, Any]:
-    vault = chat_attachment_vault_store()
-    try:
-        resolved = await asyncio.to_thread(vault.resolve, request.payload_hash)
-    except ChatAttachmentVaultError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=f"{exc} (reason: {exc.reason})") from exc
-    if resolved is None:
-        raise HTTPException(status_code=404, detail="Chat attachment was not found in the local vault.")
-    params = request.model_dump(by_alias=True)
-    try:
-        if resolved["category"] == "archive":
-            # 归档物化复用既有 outfit-import 写通道（vault 文件名保留扩展名，
-            # 计划器/导入器按磁盘路径工作，无需感知 vault）。
-            plan_params = {**params, "packagePath": resolved["path"]}
-            guard = await asyncio.to_thread(
-                guard_vault_archive,
-                Path(str(resolved["path"])),
-                str(resolved["kind"]),
-            )
-            preview = await asyncio.to_thread(
-                WARDROBE_OUTFIT_WORKFLOWS.plan_outfit_import,
-                plan_params,
-            )
-            plan_payload = preview.get("plan") if isinstance(preview.get("plan"), dict) else {}
-            if not preview.get("ok") or not plan_payload.get("readyToApply"):
-                if resolved["kind"] != "zip":
-                    raise HTTPException(status_code=400, detail=preview.get("error") or "Outfit import plan is not ready to apply.")
-                preview = {
-                    "ok": True,
-                    "schema": CHAT_ATTACHMENT_INSPECTION_SCHEMA,
-                    "archiveGuard": guard,
-                    "chatAttachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "kind", "category")},
-                    "plan": {
-                        "kind": "managed_zip_extract",
-                        "readyToApply": True,
-                        "targetFolder": request.target_folder or "Assets/VRCForge/Imports",
-                    },
-                }
-            payload = AGENT_GATEWAY.approval_transactions.create_apply_request(
-                {
-                    "target_tool": "vrcforge_import_chat_archive",
-                    "arguments": params,
-                    "reason": f"Import chat attachment {resolved['name']} through the supervised outfit-import lane.",
-                    "preview": {**preview, "chatAttachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "kind", "category")}},
-                    "agent_name": "desktop-agent",
-                }
-            )
-        else:
-            preview = {
-                "ok": True,
-                "schema": CHAT_ATTACHMENT_INSPECTION_SCHEMA,
-                "chatAttachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "kind", "category")},
-                "image": await asyncio.to_thread(
-                    inspect_image_bytes,
-                    Path(resolved["path"]),
-                    resolved["kind"],
-                    resolved["size"],
-                ),
-                "plan": {
-                    "kind": "chat_image_copy",
-                    "readyToApply": True,
-                    "targetFolder": request.target_folder or "Assets/VRCForge/Imports",
-                },
-            }
-            payload = AGENT_GATEWAY.approval_transactions.create_apply_request(
-                {
-                    "target_tool": "vrcforge_import_chat_image",
-                    "arguments": {
-                        "payloadHash": resolved["payloadHash"],
-                        "projectPath": request.project_path,
-                        "targetFolder": request.target_folder or "Assets/VRCForge/Imports",
-                    },
-                    "reason": f"Copy chat image {resolved['name']} into the Unity project imports folder.",
-                    "preview": preview,
-                    "agent_name": "desktop-agent",
-                }
-            )
-    except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
-    return payload
-
-
 def inspect_chat_attachment_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     payload_hash = str(params.get("payloadHash") or params.get("payload_hash") or "").strip().lower()
@@ -6100,271 +6008,6 @@ def _chat_attachment_listing_summary(listing: Any) -> str:
         if len(names) >= 24:
             break
     return "Detected import candidates:\n" + "\n".join(f"- {name}" for name in names) if names else "No supported import candidates detected."
-
-
-def prepare_import_chat_image_request(
-    arguments: dict[str, Any], preview: Any,
-) -> tuple[dict[str, Any], Any]:
-    """Bind one vault image and one currently absent Assets target before approval."""
-    if PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
-        raise RuntimeError("Caller may not provide the reserved prepared Unity execution key.")
-    params = dict(arguments or {})
-    payload_hash = str(params.get("payloadHash") or params.get("payload_hash") or "").strip().lower()
-    if not payload_hash:
-        raise AgentGatewayError("payloadHash is required.", status_code=400)
-    try:
-        resolved = chat_attachment_vault_store().resolve(payload_hash)
-    except ChatAttachmentVaultError as exc:
-        raise AgentGatewayError(f"{exc} (reason: {exc.reason})", status_code=exc.status_code) from exc
-    if resolved is None:
-        raise AgentGatewayError("Chat attachment was not found in the local vault.", status_code=404)
-    if resolved["category"] != "image":
-        raise AgentGatewayError("vrcforge_import_chat_image only accepts image attachments; archives go through the outfit-import lane.", status_code=400)
-    project_root = _resolve_unity_project_root_for_import(params, {})
-    target_folder = str(params.get("targetFolder") or params.get("target_folder") or "Assets/VRCForge/Imports")
-    target_root = _resolve_import_target_folder(project_root, target_folder)
-    source_identity, source_sha256 = capture_regular_file(Path(str(resolved["path"])), label="Chat attachment")
-    if source_sha256 != payload_hash or int(source_identity["size"]) != int(resolved["size"]):
-        raise AgentGatewayError("Chat attachment changed before approval.", status_code=409)
-    stem = sanitize_artifact_name(Path(str(resolved["name"])).stem) or "chat-image"
-    extension = str(resolved["extension"])
-    filename = f"{stem}{extension}"
-    candidate = target_root / filename
-    if candidate.exists() or candidate.is_symlink():
-        filename = f"{stem}_{payload_hash[:8]}{extension}"
-    target_facts = prepare_project_asset_target(project_root, target_folder, filename)
-    prepared = {
-        "payloadHash": payload_hash,
-        "projectPath": str(project_root),
-        "targetFolder": target_folder,
-    }
-    refresh_arguments = {
-        "projectPath": str(project_root),
-        "resolvePackages": False,
-        "packageResolveTimeoutSeconds": 120,
-    }
-    return install_prepared_calls(
-        prepared,
-        [("vrc_refresh_asset_database", refresh_arguments)],
-        {
-            "attachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "kind", "extension")},
-            "sourceIdentity": source_identity,
-            "sourceSha256": source_sha256,
-            "target": target_facts,
-        },
-    ), preview
-
-
-def import_chat_image_sync(params: dict[str, Any]) -> dict[str, Any]:
-    """Copy only the approval-sealed vault image into its exact Assets target."""
-    evidence = prepared_evidence(params)
-    if not isinstance(evidence, dict):
-        raise RuntimeError("Prepared chat image evidence is invalid.")
-    attachment = evidence.get("attachment")
-    target_facts = evidence.get("target")
-    source_identity = evidence.get("sourceIdentity")
-    source_sha256 = evidence.get("sourceSha256")
-    if not isinstance(attachment, dict) or not isinstance(target_facts, dict) or not isinstance(source_identity, dict) or not isinstance(source_sha256, str):
-        raise RuntimeError("Prepared chat image evidence is incomplete.")
-    calls = build_prepared_execution_plan(params)
-    project_path = str(params.get("projectPath") or "")
-    expected_call = (
-        "vrc_refresh_asset_database",
-        {"projectPath": project_path, "resolvePackages": False, "packageResolveTimeoutSeconds": 120},
-    )
-    if calls != [expected_call]:
-        raise RuntimeError("Prepared chat image Core call is invalid.")
-    target: Path | None = None
-    ownership: dict[str, Any] = {
-        "schema": "vrcforge.owned-import-output.v1",
-        "targetIdentity": None,
-        "targetSha256": None,
-        "createdDirectories": [],
-    }
-    try:
-        target, copied_hash, ownership = copy_approved_file_create_new(
-            source_identity=source_identity,
-            source_sha256=source_sha256,
-            project_identity=ensure_dict(target_facts.get("project") or {}),
-            assets_identity=ensure_dict(target_facts.get("assets") or {}),
-            parent_identities=[item for item in target_facts.get("parentIdentities") or [] if isinstance(item, dict)],
-            absent_parent_relative_paths=[str(item) for item in target_facts.get("absentParentRelativePaths") or []],
-            target_relative_path=str(target_facts.get("targetRelativePath") or ""),
-        )
-        refresh = refresh_asset_database_sync(expected_call[1])
-        if refresh.get("ok") is not True:
-            raise RuntimeError(refresh.get("error") or "Unity AssetDatabase refresh failed after chat image copy.")
-        asset_path = str(target_facts["targetRelativePath"])
-        return {
-            "ok": True,
-            "kind": "chat_image_copy",
-            "assetPath": asset_path,
-            "copiedFiles": [asset_path],
-            "copiedFileCount": 1,
-            "attachment": attachment,
-            "copiedSha256": copied_hash,
-            "assetDatabaseRefresh": refresh,
-        }
-    except Exception as exc:
-        cleanup_error = cleanup_owned_import(target, ownership)
-        if cleanup_error:
-            raise RuntimeError(f"Chat image import failed; recovery cleanup also failed: {cleanup_error}") from exc
-        raise
-
-
-CHAT_ZIP_SAFE_EXTRACT_SUFFIXES = {
-    ".prefab", ".mat", ".png", ".jpg", ".jpeg", ".tga", ".psd", ".exr",
-    ".fbx", ".blend", ".obj", ".asset", ".controller", ".anim",
-    ".txt", ".md", ".json",
-}
-
-
-def prepare_import_chat_archive_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], Any]:
-    if PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
-        raise RuntimeError("Caller may not provide the reserved prepared Unity execution key.")
-    payload_hash = str(arguments.get("payloadHash") or arguments.get("payload_hash") or "").strip().lower()
-    if not is_vault_payload_hash(payload_hash):
-        raise RuntimeError("payloadHash is invalid.")
-    try:
-        resolved = chat_attachment_vault_store().resolve(payload_hash)
-    except ChatAttachmentVaultError as exc:
-        raise RuntimeError(f"{exc} (reason: {exc.reason})") from exc
-    if resolved is None:
-        raise RuntimeError("Chat archive was not found in the local vault.")
-    if resolved.get("category") != "archive":
-        raise RuntimeError("vrcforge_import_chat_archive only accepts archive attachments.")
-    source = Path(str(resolved.get("path") or ""))
-    kind = str(resolved.get("kind") or "")
-    try:
-        archive_guard = guard_vault_archive(source, kind)
-    except ChatAttachmentVaultError as exc:
-        raise RuntimeError(f"{exc} (reason: {exc.reason})") from exc
-
-    if kind == "unitypackage":
-        nested_arguments = {**arguments, "packagePath": str(source)}
-        nested_prepared, nested_preview = PREPARED_OUTFIT_IMPORT_PREPARER.prepare(
-            nested_arguments,
-            preview,
-        )
-        calls = build_prepared_execution_plan(nested_prepared)
-        nested_evidence = prepared_evidence(nested_prepared)
-        queue = ensure_dict(nested_evidence).get("queue")
-        target_hashes = [
-            str(ensure_dict(ensure_dict(item).get("identity")).get("sha256") or "")
-            for item in (queue if isinstance(queue, list) else [])
-            if ensure_dict(item).get("role") == "target"
-        ]
-        if target_hashes != [payload_hash]:
-            raise RuntimeError("Vault UnityPackage identity did not match payloadHash.")
-        evidence = {
-            "branch": "unitypackage",
-            "payloadHash": payload_hash,
-            "archiveGuard": archive_guard,
-            "outfitEvidence": nested_evidence,
-        }
-        base_arguments = {key: value for key, value in nested_prepared.items() if key != PREPARED_UNITY_EXECUTION_ARGUMENT_KEY}
-        prepared = install_prepared_calls(base_arguments, calls, evidence)
-        return prepared, {"ok": True, "branch": "unitypackage", "payloadHash": payload_hash, "outfit": nested_preview}
-
-    if kind != "zip":
-        raise RuntimeError("Prepared chat archive branch is unsupported.")
-    project_root = _resolve_unity_project_root_for_import(arguments, {})
-    target_folder = str(arguments.get("targetFolder") or arguments.get("target_folder") or "Assets/VRCForge/Imports")
-    stem = sanitize_artifact_name(Path(str(resolved.get("name") or "")).stem) or "chat-archive"
-    target_root_name = f"{stem}_{payload_hash[:8]}"
-    zip_facts = prepare_zip_extract(
-        source=source,
-        project_root=project_root,
-        target_folder=target_folder,
-        target_root_name=target_root_name,
-        allowed_suffixes=CHAT_ZIP_SAFE_EXTRACT_SUFFIXES,
-    )
-    if zip_facts.get("sourceSha256") != payload_hash:
-        raise RuntimeError("Vault ZIP identity did not match payloadHash.")
-    project_path = str(ensure_dict(zip_facts.get("project")).get("path") or "")
-    refresh_arguments = {"projectPath": project_path, "resolvePackages": False, "packageResolveTimeoutSeconds": 120}
-    evidence = {
-        "branch": "zip",
-        "payloadHash": payload_hash,
-        "archiveGuard": archive_guard,
-        "zipFacts": zip_facts,
-    }
-    prepared = install_prepared_calls(arguments, [("vrc_refresh_asset_database", refresh_arguments)], evidence)
-    return prepared, {"ok": True, "branch": "zip", "payloadHash": payload_hash, "targetRoot": zip_facts["targetRootRelativePath"], "fileCount": len(zip_facts["manifest"])}
-
-
-def import_chat_archive_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    committed = False
-    try:
-        evidence = prepared_evidence(arguments)
-        if not isinstance(evidence, dict):
-            raise RuntimeError("Prepared chat archive evidence is invalid.")
-        branch = str(evidence.get("branch") or "")
-        payload_hash = str(evidence.get("payloadHash") or "")
-        if not is_vault_payload_hash(payload_hash):
-            raise RuntimeError("Prepared chat archive payloadHash is invalid.")
-        if branch == "unitypackage":
-            nested_evidence = evidence.get("outfitEvidence")
-            if not isinstance(nested_evidence, dict):
-                raise RuntimeError("Prepared chat UnityPackage evidence is invalid.")
-            calls = build_prepared_execution_plan(arguments)
-            nested_base = {key: value for key, value in arguments.items() if key != PREPARED_UNITY_EXECUTION_ARGUMENT_KEY}
-            nested_arguments = install_prepared_calls(nested_base, calls, nested_evidence)
-            result = PREPARED_OUTFIT_IMPORT_APPROVED_WRITE.execute(nested_arguments)
-            return {**result, "payloadHash": payload_hash, "archiveGuard": evidence.get("archiveGuard")}
-        if branch != "zip":
-            raise RuntimeError("Prepared chat archive branch is invalid.")
-        zip_facts = evidence.get("zipFacts")
-        if not isinstance(zip_facts, dict) or zip_facts.get("sourceSha256") != payload_hash:
-            raise RuntimeError("Prepared chat ZIP facts are invalid.")
-        extraction = execute_zip_extract(zip_facts)
-        committed = True
-        tool_name, tool_arguments = prepared_call(arguments)
-        expected_refresh = {
-            "projectPath": str(ensure_dict(zip_facts.get("project")).get("path") or ""),
-            "resolvePackages": False,
-            "packageResolveTimeoutSeconds": 120,
-        }
-        if tool_name != "vrc_refresh_asset_database":
-            raise RuntimeError("Prepared chat archive refresh call is invalid.")
-        _require_prepared_import_evidence(expected_refresh, tool_arguments, "chat archive refresh arguments")
-        settings = load_dashboard_settings(build_agent_connection_request(arguments))
-        refresh = ensure_dict_payload(
-            extract_tool_result_payload(invoke_unity_mcp(settings, tool_name, tool_arguments)),
-            "prepared chat archive refresh",
-        )
-        if refresh.get("ok") is not True:
-            return {
-                "ok": False,
-                "committed": True,
-                "commitState": "committed",
-                "checkpointRecoveryRequired": True,
-                "payloadHash": payload_hash,
-                "extraction": extraction,
-                "assetDatabaseRefresh": refresh,
-                "error": refresh.get("error") or "Asset refresh failed after archive extraction.",
-            }
-        return {
-            "ok": True,
-            "kind": "managed_zip_extract",
-            "payloadHash": payload_hash,
-            "targetFolder": zip_facts["targetRootRelativePath"],
-            "copiedFiles": extraction["files"][:256],
-            "copiedFileCount": extraction["fileCount"],
-            "archiveGuard": evidence.get("archiveGuard"),
-            "assetDatabaseRefresh": refresh,
-        }
-    except (RuntimeError, UnityMcpError, ValueError, OSError, zipfile.BadZipFile) as exc:
-        emit_log("error", "archive", "Prepared chat archive import failed.", {"error": str(exc)})
-        if committed or "recovery cleanup also failed" in str(exc):
-            return {
-                "ok": False,
-                "committed": True,
-                "commitState": "unknown" if "recovery cleanup also failed" in str(exc) else "committed",
-                "checkpointRecoveryRequired": True,
-                "error": str(exc),
-            }
-        raise to_http_exception(exc) from exc
 
 
 PROJECT_PREFS_MAX_PATHS = 64
@@ -21748,36 +21391,6 @@ def prepare_authoritative_unity_checkpoint_sync(
         )
     nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
 
-    if checkpoint_target in {"vrcforge_import_chat_image", "vrcforge_import_chat_archive"}:
-        from prepared_unity_execution import prepared_evidence as read_prepared_evidence
-
-        evidence = read_prepared_evidence(arguments)
-        if checkpoint_target == "vrcforge_import_chat_archive" and ensure_dict(evidence).get("branch") == "unitypackage":
-            nested_evidence = ensure_dict(evidence).get("outfitEvidence")
-            if not isinstance(nested_evidence, dict):
-                return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
-                        "error": "The sealed UnityPackage import has no nested import plan."}
-            queue = nested_evidence.get("queue")
-            payload_hash = str(ensure_dict(evidence).get("payloadHash") or "")
-            target_hashes = [str(ensure_dict(ensure_dict(item).get("identity")).get("sha256") or "")
-                             for item in (queue if isinstance(queue, list) else [])
-                             if ensure_dict(item).get("role") == "target"]
-            if target_hashes != [payload_hash]:
-                return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
-                        "error": "The sealed chat archive identity differs from its nested import plan."}
-            nested = {key: value for key, value in arguments.items()
-                      if key != PREPARED_UNITY_EXECUTION_ARGUMENT_KEY}
-            nested = install_prepared_calls(nested, build_prepared_execution_plan(arguments), nested_evidence)
-            from unity_import_checkpoint import prepare_import_asset_checkpoint
-
-            return prepare_import_asset_checkpoint(
-                project_root, nested, verify_project=_verify_prepared_import_project_identity,
-                prepare=prepare_unity_checkpoint_sync,
-            )
-        return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
-                "error": "This chat import cannot proceed until its writer returns a persisted, identity-checked receipt that passes the created-asset gate.",
-                "mutationStarted": False, "saved": False}
-
     if checkpoint_target in {
         "vrcforge_apply_clothing_fx", "vrcforge_apply_parameter_optimization",
         "vrcforge_install_user_unity_tools", "vrcforge_invoke_user_unity_tool",
@@ -27374,7 +26987,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.inspect_outfit_package)
     AGENT_GATEWAY.register_tool(
         "vrcforge_inspect_chat_attachment",
-        "Inspect a vault-stored chat attachment by payloadHash: bounded archive listing with bomb/zip-slip guards, single-entry text extract via entryPath, or image header metadata. Read-only; materialization goes through the supervised import lane.",
+        "Inspect a vault-stored chat attachment by payloadHash: bounded archive listing with bomb/zip-slip guards, single-entry text extract via entryPath, or image header metadata. Read-only; attachment contents stay in the chat and are not copied into Unity projects.",
         "read/debug",
         inspect_chat_attachment_sync,
     )
@@ -28394,24 +28007,6 @@ def register_agent_gateway_tools() -> None:
         verification_profile="unity_asset_write_console",
         verification_prepare_handler=prepare_persisted_scene_console_verification,
         verification_finalize_handler=finalize_persisted_scene_console_verification,
-    )
-    register_write_handler(
-        "vrcforge_import_chat_image",
-        "Copy a vault-stored chat image attachment into the Unity project's Assets/VRCForge/Imports folder through VRCForge.",
-        "high",
-        import_chat_image_sync,
-        request_preparer=prepare_import_chat_image_request,
-        requires_approved_execution_context=True,
-        approved_execution_plan_builder=build_prepared_execution_plan,
-    )
-    register_write_handler(
-        "vrcforge_import_chat_archive",
-        "Re-verify and import a vault-stored chat archive through the supervised outfit lane or conservative managed ZIP extraction.",
-        "high",
-        import_chat_archive_approved_sync,
-        request_preparer=prepare_import_chat_archive_request,
-        requires_approved_execution_context=True,
-        approved_execution_plan_builder=build_prepared_execution_plan,
     )
     register_write_handler(
         "vrcforge_add_component",

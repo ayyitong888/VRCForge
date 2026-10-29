@@ -1957,7 +1957,6 @@
     "readTextFailed": "無法讀取文字正文，未向模型提供內容。",
     "readFileFailed": "讀取檔案載荷失敗。",
     "vaultStored": "已本機保存，不傳送給模型",
-    "importToProject": "匯入到專案",
     "vaultUploadFailed": "本機保存失敗（{{reason}}），已回退為僅元資料。"
   },
   "goal": {

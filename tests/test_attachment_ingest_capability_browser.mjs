@@ -15,6 +15,7 @@ const fixture = `
   import en from "./src/locales/en-US.json";
   import { readChatAttachment, appendAttachmentSummary, serializeChatAttachments } from "./src/lib/conversation-utils";
   import { AttachmentStrip } from "./src/components/chat/composer";
+  import { UserImageAttachments } from "./src/components/chat/conversation-card";
   await i18n.use(initReactI18next).init({ lng: "en-US", resources: { "en-US": { translation: en } } });
   const root = createRoot(document.getElementById("root"));
   window.replay = async ({ name, type, bytes }) => {
@@ -27,6 +28,13 @@ const fixture = `
       serialized: serializeChatAttachments([attachment])[0],
       normal: document.querySelector('[data-card="normal"]').textContent,
       compact: document.querySelector('[data-card="compact"]').textContent };
+  };
+  window.vaultPreview = (dataUrl) => {
+    const image = {id:"screenshot",name:"reported-error.png",type:"image/png",size:68,payloadKind:"data_url",dataUrl,vaultPayloadHash:"stored-image"};
+    const archive = {id:"archive",name:"reference.zip",type:"application/zip",size:120,payloadKind:"vault_file",payloadHash:"stored-archive"};
+    root.render(<><section data-preview><UserImageAttachments attachments={[image]} /></section>
+      <section data-card="normal"><AttachmentStrip attachments={[image,archive]} onRemove={()=>{window.removed=true}} /></section>
+      <section data-card="compact"><AttachmentStrip attachments={[image,archive]} compact /></section></>);
   };
   window.legacySummary = () => appendAttachmentSummary("", [{id:"legacy",name:"old.pdf",type:"application/pdf",size:10,payloadKind:"data_url",dataUrl:"data:application/pdf;base64,JVBERg=="}], i18n.t.bind(i18n));
 `;
@@ -86,6 +94,18 @@ try {
       expected, payloadKind: attachment.payloadKind, textBytes: attachment.text === undefined ? null : Buffer.byteLength(attachment.text),
       hasDataUrl: Boolean(attachment.dataUrl), error: attachment.error || null, normal, compact, summary, errors});
   }
+  await page.evaluate(dataUrl=>window.vaultPreview(dataUrl), `data:image/png;base64,${png.toString("base64")}`);
+  await page.locator('[data-preview] img').waitFor();
+  assert.equal(await page.getByRole("button", {name:"Import to project",exact:true}).count(),0);
+  assert.equal(await page.locator('[data-card="normal"] img').count(),1);
+  assert.ok((await page.locator('[data-card="compact"]').textContent()).includes("reference.zip"));
+  await page.locator('[data-preview] button').click();
+  await page.getByRole("dialog").waitFor();
+  assert.equal(await page.getByRole("dialog").locator('img').count(),1);
+  await page.keyboard.press("Escape");
+  await page.getByRole("dialog").waitFor({state:"detached"});
+  await page.locator('[data-card="normal"]').getByRole("button",{name:"Remove",exact:true}).first().click();
+  assert.equal(await page.evaluate(()=>window.removed),true);
   const legacySummary = await page.evaluate(() => window.legacySummary());
   if (/payload attached/i.test(legacySummary)) failures.push({name:"legacy non-image data URL",errors:["summary still claims payload attached"]});
   const report = {method:"Real browser File/Blob/FileReader and actual AttachmentStrip; no model or backend request.", actualPdf: Boolean(process.env.VRCFORGE_ATTACHMENT_PDF), rows, legacySummary, failures};

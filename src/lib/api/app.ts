@@ -281,38 +281,6 @@ export async function updateAdvancedSettings(
   });
 }
 
-export type ChatAttachmentImportBody = {
-  payloadHash: string;
-  projectPath?: string;
-  targetFolder?: string;
-  selectedUnityPackage?: string;
-  selectedPrefab?: string;
-  baseAvatarName?: string;
-  maxEntries?: number;
-};
-
-/**
- * Ask the backend to stage a vault-stored chat attachment for import. The
- * response is an approval request routed through the normal apply lane; no
- * bytes are written until the user approves it there.
- */
-export async function requestChatAttachmentImport(
-  endpoint: string,
-  body: ChatAttachmentImportBody,
-): Promise<{ ok?: boolean; approval?: Record<string, unknown>; preview?: Record<string, unknown> }> {
-  if (hasTauriInternals()) {
-    return invokeTauriWithAbort("request_chat_attachment_import", {
-      request: { body, timeoutMs: 120000 },
-    });
-  }
-  return requestJson(`${endpoint}/api/app/chat-attachments/import`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    timeoutMs: 120000,
-  });
-}
-
 export async function updateApiConfig(
   endpoint: string,
   config: { provider: string; api_key: string; base_url?: string; model?: string; api_type?: ProviderApiType; thinking_level?: string; context_window: number },

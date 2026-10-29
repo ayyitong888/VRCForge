@@ -53,7 +53,6 @@ export function ConversationCard({
   onRetryItem,
   onEditItem,
   onModifyApproval,
-  onImportAttachment,
   onOpenDoctor,
   saveOperationSummary,
   saveOperationTool,
@@ -85,7 +84,6 @@ export function ConversationCard({
   onApprove?: (approvalId: string) => void;
   onReject?: (approvalId: string) => void;
   onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
-  onImportAttachment?: (attachment: ChatAttachment) => void;
   onOpenDoctor?: () => void;
   saveOperationSummary?: PathToSkillOperationSummary;
   saveOperationTool?: string;
@@ -207,7 +205,7 @@ export function ConversationCard({
     return (
       <div className="group flex min-w-0 justify-end">
         <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
-          {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} onImport={onImportAttachment} /> : null}
+          {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} /> : null}
           {item.text ? (
             <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
               <UserMessageText text={item.text} />
@@ -215,7 +213,7 @@ export function ConversationCard({
           ) : null}
           {otherAttachments.length ? (
             <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm">
-              <AttachmentStrip attachments={otherAttachments} onImport={onImportAttachment} compact />
+              <AttachmentStrip attachments={otherAttachments} compact />
             </div>
           ) : null}
           <MessageActions
@@ -238,14 +236,14 @@ export function ConversationCard({
     return (
       <div className="group flex min-w-0 justify-end" data-question-answer={item.questionId} data-question-continuation-input>
         <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
-          {images.length ? <UserImageAttachments messageId={item.id} attachments={images} onImport={onImportAttachment} /> : null}
+          {images.length ? <UserImageAttachments messageId={item.id} attachments={images} /> : null}
           {item.question || item.text ? (
             <div className="min-w-0 max-w-full space-y-2 rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-question-answer-text data-chat-quote-content>
               {item.question ? <div data-question-answer-question><ChatMarkdown text={`**${item.question}**`} /></div> : null}
               {item.text ? <div className="font-normal" data-question-answer-value><ChatMarkdown text={item.text} /></div> : null}
             </div>
           ) : null}
-          {otherAttachments.length ? <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm"><AttachmentStrip attachments={otherAttachments} onImport={onImportAttachment} compact /></div> : null}
+          {otherAttachments.length ? <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm"><AttachmentStrip attachments={otherAttachments} compact /></div> : null}
           {reopenQuestionId && onReopenQuestion ? (
             <button type="button" className="rounded-md px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:bg-background hover:text-foreground hover:underline" onClick={() => onReopenQuestion(reopenQuestionId)} data-question-reopen={reopenQuestionId}>
               {t("questionCard.replyInChat")}
@@ -296,7 +294,7 @@ export function ConversationCard({
       interleavedUserMessages,
       interleavedUsersExpanded,
       onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
-      renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, onImportAttachment),
+      renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads),
     });
     return (
       <ChatResourceImageContext.Provider value={liveImageContext}>
@@ -424,7 +422,7 @@ export function ConversationCard({
     interleavedUserMessages,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
-    renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, onImportAttachment),
+    renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads),
     live: runtimeActive ?? false,
     t,
   });
@@ -453,7 +451,6 @@ export function ConversationCard({
 function renderInterleavedUserMessage(
   message: Extract<ConversationItem, { type: "user" }>,
   attachmentPayloads?: AttachmentPayloadVault,
-  onImportAttachment?: (attachment: ChatAttachment) => void,
 ) {
   const attachments = resolveAttachmentPayloadReferences(message.attachments || [], attachmentPayloads);
   const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
@@ -461,7 +458,7 @@ function renderInterleavedUserMessage(
   return (
     <div key={`steering-${message.id}`} className="group flex min-w-0 justify-end" data-chat-steering-message={message.id}>
       <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
-        {images.length ? <UserImageAttachments messageId={message.id} attachments={images} onImport={onImportAttachment} /> : null}
+        {images.length ? <UserImageAttachments messageId={message.id} attachments={images} /> : null}
         {message.text ? (
           <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
             <UserMessageText text={message.text} />
@@ -469,7 +466,7 @@ function renderInterleavedUserMessage(
         ) : null}
         {otherAttachments.length ? (
           <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm">
-            <AttachmentStrip attachments={otherAttachments} onImport={onImportAttachment} compact />
+            <AttachmentStrip attachments={otherAttachments} compact />
           </div>
         ) : null}
         <MessageActions createdAt={message.createdAt} />
@@ -481,11 +478,9 @@ function renderInterleavedUserMessage(
 export function UserImageAttachments({
   messageId,
   attachments,
-  onImport,
 }: {
   messageId?: string;
   attachments: ChatAttachment[];
-  onImport?: (attachment: ChatAttachment) => void;
 }) {
   const [preview, setPreview] = useState<ChatAttachment | null>(null);
   const { t } = useTranslation();
@@ -539,16 +534,6 @@ export function UserImageAttachments({
             >
               <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-cover transition group-hover/image:scale-[1.02]" />
             </button>
-            {attachment.vaultPayloadHash && onImport ? (
-              <button
-                type="button"
-                className="absolute bottom-1 left-1 rounded border border-border bg-background/90 px-1.5 py-0.5 text-[10px] text-foreground"
-                onClick={() => onImport(attachment)}
-                title={t("attachments.importToProject")}
-              >
-                {t("attachments.importToProject")}
-              </button>
-            ) : null}
           </div>
         ))}
       </div>
