@@ -151,3 +151,19 @@ def test_public_parameter_scope_metadata_and_schema():
   jsonschema.validate({**values,"executionTarget":target},descriptor["inputSchema"])
   target["scope"]="component"
   with pytest.raises(jsonschema.ValidationError):jsonschema.validate({**values,"executionTarget":target},descriptor["inputSchema"])
+
+
+def test_public_renderer_slot_descriptor_matches_single_and_batch_identity_scopes():
+ from mcp_tool_descriptor import standardize_tool_descriptor
+ base=request()
+ descriptor=standardize_tool_descriptor({"name":"vrcforge_set_renderer_material_slot","inputSchema":RENDERER_MATERIAL_SLOT_PUBLIC_INPUT_SCHEMA},write=True,add_identity_schema=True)
+ single={"projectPath":base["projectPath"],"rendererPath":"Avatar/Body","slotIndex":0,"newMaterialAssetPath":"Assets/New.mat","executionTarget":{"schema":"vrcforge.execution_target.v1","namespace":"test","scope":"component","project":{},"editor":{}}}
+ jsonschema.validate(single,descriptor["inputSchema"])
+ batch={**base,"executionTarget":{"schema":"vrcforge.execution_target.v1","namespace":"test","scope":"scene","project":{},"editor":{},"scene":base["executionTarget"]["scene"]}}
+ jsonschema.validate(batch,descriptor["inputSchema"])
+ batch["executionTarget"]["scope"]="avatar"
+ batch["executionTarget"]["avatar"]={"exactHierarchyPath":"Avatar"}
+ jsonschema.validate(batch,descriptor["inputSchema"])
+ batch["executionTarget"]["scope"]="component"
+ with pytest.raises(jsonschema.ValidationError):jsonschema.validate(batch,descriptor["inputSchema"])
+ assert "scene or avatar scope" in RENDERER_MATERIAL_SLOT_PUBLIC_INPUT_SCHEMA["properties"]["assignments"]["description"]

@@ -594,3 +594,14 @@ def test_classified_folder_apply_verifies_exact_created_chain():
     assert validate_apply_result(canonical["arguments"], result)["verified"] is True
     result["target"]["createdFolders"] = []
     with pytest.raises(ProjectAssetCopyError): validate_apply_result(canonical["arguments"], result)
+
+
+def test_asset_copy_and_checkpoint_tool_descriptions_match_actual_modes():
+    copy_description = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_duplicate_project_asset"].description
+    assert "Single-copy mode may preview and create missing destination parent folders" in copy_description
+    assert "Batch copies (1..128) require existing destination parent folders" in copy_description
+    checkpoint_description = dashboard_server.AGENT_GATEWAY._tools["vrcforge_list_checkpoints"].description
+    assert "git checkpoints" not in checkpoint_description.lower()
+    assert "project-file archives" in checkpoint_description
+    assert "local-state archives" in checkpoint_description
+    assert "project chat archives" in checkpoint_description

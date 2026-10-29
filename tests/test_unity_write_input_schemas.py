@@ -18,7 +18,7 @@ def test_write_schemas_keep_one_owner_and_reviewed_texture_mask_contract() -> No
     # separately covered and excluded from this reviewed contract digest.
     existing = {name: schema for name, schema in schemas.items() if name != "vrcforge_relocate_generated_assets"}
     encoded = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "04158091bba9f1874f7eb879c714965ed6bcfba9d2084cdd5aafda171ae23ac3"
+    assert hashlib.sha256(encoded).hexdigest() == "9b23426204a4ae1b66b4c79c670d5d5adf6fdea4655b882f18aedcd1c7483e63"
     for name, schema in schemas.items():
         preview = "vrcforge_preview_" + name.removeprefix("vrcforge_")
         read = unity_read_input_schemas.UNITY_READ_TOOL_INPUT_SCHEMAS.get(preview)

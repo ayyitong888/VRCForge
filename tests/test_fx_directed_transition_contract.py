@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import jsonschema
 import dashboard_server
 from unity_execution_plans_scene import build_scene_execution_plan
 
@@ -101,3 +102,24 @@ def test_omitting_source_retains_legacy_any_state_request() -> None:
     arguments = {"action": "ensure_transition", "layerName": "GeneralMotion", "stateName": "RaiseArm"}
     plan = build_scene_execution_plan("vrcforge_manage_fx_animator", arguments)
     assert "sourceStateName" not in plan[0][1]
+
+
+def test_fx_single_and_batch_schema_describes_creation_boundaries():
+    schema = unity_write_input_schemas.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_manage_fx_animator"]
+    single = {"projectPath": "D:/Unity", "avatarPath": "Milltina", "action": "ensure_state", "layerName": "Wardrobe", "stateName": "Mellow"}
+    jsonschema.validate(single, schema)
+    batch = {
+        "projectPath": "D:/Unity", "controllerPath": "Assets/FX.controller",
+        "animatorRootPath": "Milltina", "edits": [{
+            "action": "ensure_state", "layerName": "Wardrobe", "stateName": "Mellow",
+            "motionClipPath": "Assets/Mellow.anim",
+        }],
+    }
+    jsonschema.validate(batch, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({key: value for key, value in batch.items() if key != "controllerPath"}, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**batch, "avatarPath": "Milltina"}, schema)
+    assert "single ensure_state creates a missing layer and state" in dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_manage_fx_animator"].description
+    assert "Batch mode requires controllerPath and existing unambiguous layers" in dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_manage_fx_animator"].description
+    assert unity_read_input_schemas.UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_manage_fx_animator"] is schema

@@ -717,12 +717,12 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["gameObjectPath", "componentType"],
         "properties": {
             "projectPath": {"type": "string", "description": "Unity project root; omit for the active project."},
-            "avatarPath": {"type": "string", "description": "Optional scene hierarchy path of the containing avatar root."},
-            "gameObjectPath": {"type": "string", "description": "Exact scene hierarchy path of the component carrier."},
+            "avatarPath": {"type": "string", "description": "Optional hierarchy path of the containing avatar root; when supplied, the carrier path may be relative to this root."},
+            "gameObjectPath": {"type": "string", "description": "Hierarchy path of the GameObject carrying the component. Prefer the exact path returned by vrcforge_get_gameobject."},
             "componentType": {
                 "type": "string",
-                "enum": ["MergeArmature", "BoneProxy", "MenuInstaller", "MergeAnimator", "Parameters"],
-                "description": "Supported Modular Avatar component family to inspect.",
+                "minLength": 1,
+                "description": "Modular Avatar alias (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters, MenuItem) or exact fully qualified installed component type, such as nadena.dev.modular_avatar.core.ModularAvatarMaterialSetter. Runtime resolves the type and rejects missing or non-Component types.",
             },
         },
     },

@@ -44,8 +44,10 @@ EDITOR_MENU_SCHEMA = {
     "required": ["projectPath", "menuItemPath", "selectionGlobalObjectIds"],
     "properties": {
         "projectPath": {"type": "string", "minLength": 1},
-        "menuItemPath": {"type": "string", "minLength": 1},
+        "menuItemPath": {"type": "string", "minLength": 1,
+                         "description": "Exact menu path returned by vrcforge_inspect_editor_capabilities(kind='menus'), including its full prefix. This field is menuItemPath, not menuPath; do not guess a translated display label."},
         "selectionGlobalObjectIds": {"type": "array", "maxItems": 32, "uniqueItems": True,
+                                     "description": "Explicit selection for the callback: exact Unity object GlobalObjectIds from a current read. Use [] for no selection; never rely on Unity's current selection or send hierarchy paths here. Dispatch is not proof the plugin finished setup.",
                                      "items": {"type": "string", "minLength": 1}},
     },
 }

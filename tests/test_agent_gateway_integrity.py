@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from agent_gateway import (
     EXTERNAL_MCP_WRITE_TOOL_BLOCKS,
@@ -978,8 +979,31 @@ def test_unity_read_schemas_are_precise_for_both_external_and_internal_agents(tm
     assert bone_schema["required"] == ["gameObjectPath"]
     assert bone_schema["properties"]["minimumWeight"]["maximum"] == 1.0
     modular_schema = external["vrcforge_inspect_modular_avatar_component"]["inputSchema"]
+    assert internal["vrcforge_inspect_modular_avatar_component"]["inputsSchema"] == modular_schema
     assert modular_schema["required"] == ["gameObjectPath", "componentType"]
-    assert "MergeAnimator" in modular_schema["properties"]["componentType"]["enum"]
+    component_type_schema = modular_schema["properties"]["componentType"]
+    assert component_type_schema["type"] == "string"
+    assert "fully qualified installed component type" in component_type_schema["description"]
+    validator = Draft202012Validator(modular_schema)
+    for component_type in (
+        "MergeAnimator",
+        "MenuItem",
+        "nadena.dev.modular_avatar.core.ModularAvatarMaterialSetter",
+    ):
+        arguments = {}
+        for field in modular_schema["required"]:
+            if field == "projectPath":
+                arguments[field] = "C:/Unity/AvatarProject"
+            elif field == "executionTarget":
+                arguments[field] = {
+                    "schema": "vrcforge.execution_target_ref.v1",
+                    "ref": "0123456789abcdef",
+                }
+            elif field == "gameObjectPath":
+                arguments[field] = "Avatar/Body"
+            elif field == "componentType":
+                arguments[field] = component_type
+        validator.validate(arguments)
     assert internal["vrcforge_scan_fx_animator"]["inputsSchema"] == external[
         "vrcforge_scan_fx_animator"
     ]["inputSchema"]
