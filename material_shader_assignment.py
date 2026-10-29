@@ -427,7 +427,11 @@ def _canonical_shared_impact(value: Any) -> dict[str, Any]:
         scene_path = _optional_asset_path(
             slot.get("scenePath"),
             label="scenePath",
-            roots=("Assets",),
+            # Shared-impact evidence may include renderers in package-owned
+            # preview scenes (for example NDMF's temporary preview Scene).
+            # This path is read-only evidence; writable material targets remain
+            # constrained to Assets by their own validators.
+            roots=("Assets", "Packages"),
         )
         if scene_path and not scene_path.lower().endswith(".unity"):
             raise MaterialShaderAssignmentError("scenePath has an unsupported file type.")

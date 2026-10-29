@@ -17,6 +17,7 @@ from material_shader_assignment import (
     compute_shared_impact_commitment,
     compute_shared_impact_digest,
     compute_shared_impact_tail_digest,
+    _canonical_shared_impact,
 )
 
 
@@ -454,6 +455,27 @@ def test_impact_slot_order_uses_utf16_ordinal_semantics() -> None:
     refresh_impact_receipts(reversed_payload)
     with pytest.raises(MaterialShaderAssignmentError, match="sorted and unique"):
         bind_authoritative_preview(wrapper_arguments(), reversed_payload)
+
+
+def test_shared_impact_accepts_package_owned_preview_scenes() -> None:
+    impact = preview_payload()["sharedImpact"]
+    impact["loadedRendererSlots"][0]["scenePath"] = (
+        "Packages/nadena.dev.ndmf/Runtime/___NDMF Preview___.unity"
+    )
+
+    canonical = _canonical_shared_impact(impact)
+
+    assert canonical["loadedRendererSlots"][0]["scenePath"] == (
+        "Packages/nadena.dev.ndmf/Runtime/___NDMF Preview___.unity"
+    )
+
+
+def test_shared_impact_still_rejects_non_asset_scene_roots() -> None:
+    impact = preview_payload()["sharedImpact"]
+    impact["loadedRendererSlots"][0]["scenePath"] = "Library/Preview.unity"
+
+    with pytest.raises(MaterialShaderAssignmentError, match="outside the allowed asset roots"):
+        _canonical_shared_impact(impact)
 
 
 def test_impact_distinguishes_same_path_renderer_components_by_stable_or_session_identity() -> None:
