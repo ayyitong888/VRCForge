@@ -400,6 +400,21 @@ def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
             receipt["readback"] = {"verifiedChanges": [dict(item) for item in verified_changes]}
             return receipt
         if (
+            current.get("preview") is False
+            and current.get("sceneSaved") is True
+            and current.get("persistedReadback") is True
+            and not any(_failed_view(view) for view in (*ancestors, current))
+        ):
+            # Legacy scene writers already saved and read back their target.
+            # Reuse those facts; no additional Core call or evidence check.
+            current = dict(current)
+            current.setdefault("schema", "vrcforge.persisted_scene_write.v1")
+            changed = current.get("changed")
+            current.setdefault("mutationStarted", changed if isinstance(changed, bool) else True)
+            current.setdefault("mutationApplied", current["mutationStarted"])
+            current.setdefault("committed", True)
+            current.setdefault("commitState", "no_change" if changed is False else "committed")
+        if (
             isinstance(current.get("schema"), str)
             and str(current.get("schema") or "").startswith("vrcforge.")
             and any(

@@ -111,3 +111,25 @@ def test_failed_transport_cannot_promote_nested_success_receipt():
     outcome = normalize_agent_tool_result(receipt, fallback_summary="write", write=True)
     assert outcome["status"] == "failed"
     assert receipt.get("verified") is not True
+
+
+@pytest.mark.parametrize("override", [
+    {"ok": False}, {"preview": True}, {"sceneSaved": False},
+    {"persistedReadback": False},
+])
+def test_legacy_scene_receipt_does_not_invent_missing_success_facts(override):
+    core = {"ok": True, "preview": False, "sceneSaved": True,
+            "persistedReadback": True, **override}
+    projected = _domain_write_receipt(_transport(core))
+    assert projected.get("committed") is not True
+    assert projected.get("mutationApplied") is not True
+
+
+def test_legacy_saved_no_change_preserves_no_mutation():
+    core = {"ok": True, "preview": False, "sceneSaved": True,
+            "persistedReadback": True, "changed": False}
+    projected = _domain_write_receipt(core)
+    assert projected["committed"] is True
+    assert projected["commitState"] == "no_change"
+    assert projected["mutationStarted"] is False
+    assert projected["mutationApplied"] is False

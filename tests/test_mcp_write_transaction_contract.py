@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -232,6 +233,50 @@ def test_nested_core_persisted_receipt_projects_same_success_facts_to_external_a
     assert result["persistenceState"] == "persisted"
     assert result["readbackState"] == "verified"
     assert result["outcome"]["commitState"] == "committed"
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_legacy_saved_scene_receipt_reaches_both_agents_without_unknown_commit(tmp_path, external):
+    gateway = _gateway(tmp_path)
+    project = _unity_project(tmp_path)
+    calls = []
+    # Original active-toggle incident: Core saved and read back the change,
+    # but its legacy payload has no schema or transaction aliases.
+    core = {"ok": True, "action": "set_gameobject_active", "preview": False,
+            "gameObjectPath": "Comparison/Hand", "oldActive": True, "newActive": False,
+            "activeInHierarchy": False, "scenePath": "Assets/Avatar.unity",
+            "sceneSaved": True, "persistedReadback": True}
+
+    def handler(arguments):
+        calls.append(arguments)
+        return deepcopy(core)
+
+    tool = "vrcforge_contract_legacy_scene_write"
+    gateway.approval_transactions.register_write_handler(
+        tool, "Legacy saved scene receipt", "high", handler,
+        pre_write_checkpoint_required=False,
+    )
+    arguments = {"projectRoot": str(project)}
+    if external:
+        gateway.register_external_mcp_unity_tool(tool, "avatar")
+        proposal = gateway.call_external_mcp_tool(tool, arguments)
+        result = gateway.call_external_mcp_tool(tool, {
+            **arguments, "confirmation": {**proposal["confirmation"], "decision": "approve"},
+        })
+        assert result["mutationStarted"] is True
+        assert result["mutationApplied"] is True
+        assert result["persistenceState"] == "persisted"
+        assert result["readbackState"] == "verified"
+    else:
+        request = gateway.approval_transactions.create_apply_request({"target_tool": tool, "arguments": arguments})
+        gateway.approval_transactions.approve(request["approval"]["id"])
+        result = gateway.approval_transactions.apply_approved({"approval_id": request["approval"]["id"]})
+    assert result["ok"] is True
+    assert len(calls) == 1
+    assert result["outcome"]["mutationStarted"] is True
+    assert result["outcome"]["commitState"] in {"committed", "complete"}
+    assert result["outcome"].get("nextAction") != "Read back the exact target state before retrying the write."
+    assert result["result"] == core
 
 
 def test_confirmation_binds_execution_target_digest() -> None:
