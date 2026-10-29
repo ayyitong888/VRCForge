@@ -239,9 +239,13 @@ export function agentReplyPreviewText(response: AgentRuntimeResponse): string {
       && (!hasUnacceptedFinal || message.phase !== "final_answer"));
   const finalMessage = [...publicMessages].reverse().find((message) => message.phase === "final_answer");
   if (finalMessage) return finalMessage.text;
+  const terminalStatuses = [response.status, response.plan?.nextStep]
+    .map((status) => String(status || "").trim().toLowerCase());
+  const isFailedTerminal = terminalStatuses.some((status) => status === "failed" || status.endsWith("_failed"))
+    || Boolean(response.plan?.plannerFailure);
   const reply = String(response.plan?.reply || "").trim();
   if (reply && !isCancellationMarkerAssistantText(reply)
-    && !hasUnacceptedFinal) return reply;
+    && !hasUnacceptedFinal && !isFailedTerminal) return reply;
   return spoken.at(-1)?.text || publicMessages.at(-1)?.text || "";
 }
 

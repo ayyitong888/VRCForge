@@ -18,10 +18,10 @@ import { loadChatResourceImage, type ChatResourceImageContext as ChatResourceIma
 
 export const ChatResourceImageContext = createContext<ChatResourceImageRequestContext | null>(null);
 
-export function ChatMarkdown({ text, variant = "agent" }: { text?: string; variant?: "agent" | "user" }) {
+export function ChatMarkdown({ text, variant = "agent", allowImages = true }: { text?: string; variant?: "agent" | "user"; allowImages?: boolean }) {
   const inverted = variant === "user";
   const resourceContext = useContext(ChatResourceImageContext);
-  const components = useMemo(() => buildChatMarkdownComponents(inverted), [inverted]);
+  const components = useMemo(() => buildChatMarkdownComponents(inverted, allowImages), [allowImages, inverted]);
   const instanceId = useId().replace(/[^A-Za-z0-9_-]/g, "");
   const clobberPrefix = useMemo(() => `vrcforge-${instanceId}-`, [instanceId]);
   const sanitizeSchema = useMemo(() => ({ ...CHAT_MARKDOWN_SANITIZE_SCHEMA, clobberPrefix }), [clobberPrefix]);
@@ -94,7 +94,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   },
 };
 
-function buildChatMarkdownComponents(inverted: boolean): Components {
+function buildChatMarkdownComponents(inverted: boolean, allowImages: boolean): Components {
   const textClass = inverted ? "text-primary-foreground" : "text-foreground";
   const mutedClass = inverted ? "text-primary-foreground/80" : "text-muted-foreground";
   const borderClass = inverted ? "border-primary-foreground/35" : "border-border";
@@ -147,7 +147,9 @@ function buildChatMarkdownComponents(inverted: boolean): Components {
     del: ({ node: _node, ...props }) => <del className={mutedClass} {...props} />,
     input: ({ node: _node, className, ...props }) => <input className={cn("mr-2 align-middle", className)} disabled {...props} />,
     mark: ({ node: _node, ...props }) => <mark className={inverted ? "rounded bg-primary-foreground px-1 text-primary" : "rounded bg-yellow-200 px-1 text-yellow-950"} {...props} />,
-    img: ({ node: _node, ...props }) => <ChatMarkdownImage inverted={inverted} {...props} />,
+    img: ({ node: _node, alt, ...props }) => allowImages
+      ? <ChatMarkdownImage inverted={inverted} alt={alt} {...props} />
+      : alt ? <span>{alt}</span> : null,
   };
 }
 

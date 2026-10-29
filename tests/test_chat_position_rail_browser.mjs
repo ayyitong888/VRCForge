@@ -37,6 +37,9 @@ function Fixture(){
  window.cancelledPreview=(reply=true)=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,status:'cancelled',clientTurnId:'turn-2',plan:{nextStep:'cancelled',summary:'Runtime turn was cancelled by the user.',reply:reply?'继续，只修你确认的这两处。保存后展示静态效果，状态标为待你验收。':''},timeline:[{id:'cancelled-tool',sequence:0,kind:'tool_call',payload:{tool:'unity_preview_add_modular_avatar_component',actionId:'ma-preview',status:'ok'}}]}}]);
  window.commentaryPreview=()=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,status:'cancelled',clientTurnId:'turn-2',plan:{nextStep:'cancelled',summary:'Runtime turn was cancelled by the user.'},timeline:[{id:'spoken',sequence:0,kind:'assistant',payload:{phase:'commentary',status:'progress',summary:'正在检查衣服引用。'}},{id:'cancelled-tool',sequence:1,kind:'tool_result',payload:{tool:'unity_bind_execution_target',actionId:'bind',status:'ok',summary:'UNRELATED TOOL RESULT'}}]}}]);
  window.unacceptedPreview=()=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,clientTurnId:'turn-2',plan:{reply:'UNACCEPTED FINAL',publicMessages:[{phase:'final_answer',text:'UNACCEPTED FINAL'}]},timeline:[{id:'unaccepted',sequence:0,kind:'assistant',payload:{phase:'final_answer',status:'completion_unverified',summary:'UNACCEPTED FINAL'}}]}}]);
+ window.internalFailurePreview=()=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:true,clientTurnId:'turn-2',plan:{nextStep:'failed',summary:'',reply:'native conversation has pending tool calls'},timeline:[]}}]);
+ window.modelFailureExplanationPreview=()=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,status:'failed',clientTurnId:'turn-2',plan:{nextStep:'failed',reply:'model fallback should not win',publicMessages:[{phase:'final_answer',text:'## Could not finish\\n\\nThe model explains the failure: **the outfit reference is missing**.'}]},timeline:[]}}]);
+ window.markdownPreview=()=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:true,clientTurnId:'turn-2',plan:{nextStep:'done',reply:'## Result\\n\\n**Fixed** and \`verified\`.\\n\\n![no image request](https://example.invalid/paid-image.png)'},timeline:[]}}]);
  window.long=()=>setItems(Array.from({length:260},(_,i)=>[user(i),answer(i)]).flat());
  window.restoreRun=(status,sessionId='fixture-session')=>{setItems([user(5),{...answer(5),response:{...answer(5).response,sessionId:'fixture-session',timeline:[{id:'tool-start',sequence:0,kind:'tool_call',payload:{actionId:'read-5',tool:'vrcforge_read_text_file',status:'started'}}]}}]);setRuns([{sessionId,clientTurnId:'turn-5',status}]);};
  return <><output id='pinned' className='sr-only'>{String(scroll.pinned)}</output><ChatWorkspace
@@ -150,6 +153,21 @@ try {
   await page.evaluate(() => window.unacceptedPreview());
   await page.waitForFunction(() => !document.querySelector('[data-chat-position-preview]')?.textContent?.includes('正在检查衣服引用。'));
   assert.equal((await preview.textContent()).trim(), 'Prompt 2: inspect this part of the conversation.', 'unaccepted final cannot return through legacy reply or publicMessages fields');
+  await page.evaluate(() => window.internalFailurePreview());
+  await page.waitForFunction(() => document.querySelector('[data-chat-position-marker]'));
+  await marks.last().hover();
+  await preview.waitFor({ state: 'visible' });
+  assert.equal((await preview.textContent()).trim(), 'Prompt 2: inspect this part of the conversation.', 'runtime failure text without assistant provenance is not shown as an agent answer');
+  await page.evaluate(() => window.modelFailureExplanationPreview());
+  await page.waitForFunction(() => document.querySelector('[data-chat-position-preview]')?.textContent?.includes('Could not finish'));
+  assert.ok(await preview.locator('h2').count(), 'a real model failure explanation keeps Markdown headings');
+  assert.ok(await preview.locator('strong').count(), 'a real model failure explanation keeps Markdown emphasis');
+  await page.evaluate(() => window.markdownPreview());
+  await page.waitForFunction(() => document.querySelector('[data-chat-position-preview]')?.textContent?.includes('Result'));
+  assert.ok(await preview.locator('h2').count(), 'public assistant preview renders Markdown headings');
+  assert.ok(await preview.locator('strong').count(), 'public assistant preview renders Markdown emphasis');
+  assert.ok(await preview.locator('code').count(), 'public assistant preview renders inline code');
+  assert.equal(await preview.locator('img').count(), 0, 'hover preview does not load Markdown images');
   await page.evaluate(() => window.long());
   await page.waitForFunction(() => document.querySelectorAll('[data-chat-position-marker]').length === 260);
   await scroller.evaluate(e => { e.scrollTop = e.scrollHeight; });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { ChatMarkdown } from "./chat-markdown";
 
 export type ChatPositionMarker = {
   key: string;
@@ -233,9 +234,9 @@ export function ChatPositionRail({ markers, scrollContainerRef, scopeKey = "" }:
         >
           <p className="whitespace-pre-wrap break-words">{activePreview.preview}</p>
           {assistantPreview ? (
-            <p className="mt-3 whitespace-pre-wrap break-words border-t border-border pt-3 text-muted-foreground">
-              {assistantPreview}
-            </p>
+            <div className="mt-3 border-t border-border pt-3 text-muted-foreground" data-chat-position-assistant-preview>
+              <ChatMarkdown text={assistantPreview} allowImages={false} />
+            </div>
           ) : null}
         </div>,
         document.body,
