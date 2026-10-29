@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import struct
 import subprocess
 import tempfile
@@ -10,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
+
+from PIL import Image
 
 from agent_gateway import AgentGateway
 from desktop_apps import WindowsAppCatalog
@@ -260,6 +263,10 @@ class DesktopExecutorTests(unittest.TestCase):
             bmp = struct.pack("<2sIHHI", b"BM", 14 + len(dib) + len(pixels), 0, 0, 14 + len(dib)) + dib + pixels
             path = capture_dir / "screen.bmp"
             path.write_bytes(bmp)
+            png_buffer = io.BytesIO()
+            Image.new("RGB", (2, 2), (20, 40, 60)).save(png_buffer, format="PNG")
+            png_path = capture_dir / "screen.png"
+            png_path.write_bytes(png_buffer.getvalue())
             gateway = AgentGateway(root / "config.json", root / "audit")
             seen: list[dict[str, Any]] = []
 
@@ -268,8 +275,11 @@ class DesktopExecutorTests(unittest.TestCase):
                 return {"status": "analyzed", "text": "A settings window is visible."}
 
             gateway.vision_analyze_fn = analyze
-            result = {"status": "completed", "result": {"operation": "screenshot", "artifactPath": str(path), "width": 2, "height": 2}}
-            vision = gateway._desktop_action_vision_analysis("inspect settings", result)  # noqa: SLF001
+            for screenshot_path in (path, png_path):
+                result = {"status": "completed", "result": {"operation": "screenshot", "artifactPath": str(screenshot_path), "width": 2, "height": 2}}
+                vision = gateway._desktop_action_vision_analysis("inspect settings", result)  # noqa: SLF001
+                self.assertEqual(vision["status"], "analyzed")
+                self.assertTrue(seen[-1]["dataUrl"].startswith("data:image/png;base64,"))
             planner = object.__new__(RuntimePlannerService)
             planner._desktop = SimpleNamespace(  # type: ignore[attr-defined]  # noqa: SLF001
                 summarize_action_result=gateway.desktop.desktop_action_observation
@@ -278,7 +288,7 @@ class DesktopExecutorTests(unittest.TestCase):
                 {"tool": "vrcforge_agent_desktop_action", "result": result, "desktopVision": vision}
             )
 
-        self.assertTrue(seen[0]["dataUrl"].startswith("data:image/png;base64,"))
+        self.assertEqual(len(seen), 2)
         self.assertIn("operation=screenshot", observation)
         self.assertIn("A settings window is visible", observation)
 

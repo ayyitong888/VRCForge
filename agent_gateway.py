@@ -26,6 +26,7 @@ import base64
 import asyncio
 import contextvars
 import hashlib
+import io
 from itertools import count
 import hmac
 import json
@@ -48,6 +49,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
+from PIL import Image
 
 from agent_memory_store import AgentMemoryStore
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS, bind_memory_tool_context, safe_memory_record, requested_memory_tool
@@ -10328,35 +10330,50 @@ def desktop_screenshot_attachment(path: Path, *, allowed_root: Path) -> dict[str
         resolved.relative_to(root)
     except ValueError as exc:
         raise ValueError("Desktop screenshot is outside the managed capture directory.") from exc
-    bitmap = resolved.read_bytes()
-    if len(bitmap) < 54 or bitmap[:2] != b"BM":
-        raise ValueError("Desktop screenshot is not a supported BMP file.")
-    pixel_offset = struct.unpack_from("<I", bitmap, 10)[0]
-    width, signed_height, planes, bit_count, compression = struct.unpack_from("<iiHHI", bitmap, 18)
-    if width <= 0 or signed_height == 0 or planes != 1 or bit_count != 32 or compression != 0:
-        raise ValueError("Desktop screenshot must be an uncompressed 32-bit BMP.")
-    height = abs(signed_height)
-    source_stride = width * 4
-    if pixel_offset + source_stride * height > len(bitmap):
-        raise ValueError("Desktop screenshot pixel data is incomplete.")
-    scale = min(1.0, DESKTOP_VISION_MAX_WIDTH / width, DESKTOP_VISION_MAX_HEIGHT / height)
-    target_width = max(1, int(width * scale))
-    target_height = max(1, int(height * scale))
-    top_down = signed_height < 0
-    scanlines = bytearray()
-    for target_y in range(target_height):
-        source_y = min(height - 1, int(target_y * height / target_height))
-        if not top_down:
-            source_y = height - 1 - source_y
-        row_offset = pixel_offset + source_y * source_stride
-        scanlines.append(0)
-        for target_x in range(target_width):
-            source_x = min(width - 1, int(target_x * width / target_width))
-            offset = row_offset + source_x * 4
-            blue, green, red = bitmap[offset : offset + 3]
-            scanlines.extend((red, green, blue))
-    header = struct.pack(">IIBBBBB", target_width, target_height, 8, 2, 0, 0, 0)
-    png = b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", header) + _png_chunk(b"IDAT", zlib.compress(bytes(scanlines), 6)) + _png_chunk(b"IEND", b"")
+    image_bytes = resolved.read_bytes()
+    if image_bytes.startswith(b"BM"):
+        if len(image_bytes) < 54:
+            raise ValueError("Desktop screenshot is not a supported BMP file.")
+        pixel_offset = struct.unpack_from("<I", image_bytes, 10)[0]
+        width, signed_height, planes, bit_count, compression = struct.unpack_from("<iiHHI", image_bytes, 18)
+        if width <= 0 or signed_height == 0 or planes != 1 or bit_count != 32 or compression != 0:
+            raise ValueError("Desktop screenshot must be an uncompressed 32-bit BMP.")
+        height = abs(signed_height)
+        source_stride = width * 4
+        if pixel_offset + source_stride * height > len(image_bytes):
+            raise ValueError("Desktop screenshot pixel data is incomplete.")
+        scale = min(1.0, DESKTOP_VISION_MAX_WIDTH / width, DESKTOP_VISION_MAX_HEIGHT / height)
+        target_width = max(1, int(width * scale))
+        target_height = max(1, int(height * scale))
+        top_down = signed_height < 0
+        scanlines = bytearray()
+        for target_y in range(target_height):
+            source_y = min(height - 1, int(target_y * height / target_height))
+            if not top_down:
+                source_y = height - 1 - source_y
+            row_offset = pixel_offset + source_y * source_stride
+            scanlines.append(0)
+            for target_x in range(target_width):
+                source_x = min(width - 1, int(target_x * width / target_width))
+                offset = row_offset + source_x * 4
+                blue, green, red = image_bytes[offset : offset + 3]
+                scanlines.extend((red, green, blue))
+        header = struct.pack(">IIBBBBB", target_width, target_height, 8, 2, 0, 0, 0)
+        png = b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", header) + _png_chunk(b"IDAT", zlib.compress(bytes(scanlines), 6)) + _png_chunk(b"IEND", b"")
+    elif image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                if image.format != "PNG":
+                    raise ValueError("Desktop screenshot does not contain a valid PNG image.")
+                image.load()
+                image.thumbnail((DESKTOP_VISION_MAX_WIDTH, DESKTOP_VISION_MAX_HEIGHT), Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                image.convert("RGB").save(output, format="PNG")
+                png = output.getvalue()
+        except (OSError, Image.DecompressionBombError) as exc:
+            raise ValueError("Desktop screenshot does not contain a valid PNG image.") from exc
+    else:
+        raise ValueError("Desktop screenshot must be a PNG or supported BMP file.")
     data_url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
     if len(data_url) > RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS:
         raise ValueError("Desktop screenshot is too large for bounded vision analysis.")
