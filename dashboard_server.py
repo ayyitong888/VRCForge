@@ -21608,11 +21608,48 @@ def prepare_authoritative_unity_checkpoint_sync(
             approved_write_arguments,
             None,
         )
-    except AgentGatewayError:
-        return {
+    except AgentGatewayError as exc:
+        # Keep the authoritative preview's rejection visible to the Agent.
+        # Replacing it with a generic checkpoint message hid the Core cause.
+        details = ensure_dict(getattr(exc, "details", None))
+        external_error = ensure_dict(getattr(exc, "external_error", None))
+        # AgentGatewayError's generic wrapper fields can coexist with the more
+        # specific details copied from AuthoritativeUnityWriteError.
+        diagnostic = {**external_error, **details}
+        result = {
             "ok": False,
-            "error": "The approved Unity state could not be revalidated before checkpointing.",
+            "blocking": True,
+            "code": str(diagnostic.get("errorCode") or diagnostic.get("code")
+                        or getattr(exc, "cause_code", "") or "unity_checkpoint_revalidation_failed"),
+            "error": str(exc).strip() or "The approved Unity state could not be revalidated before checkpointing.",
+            "mutationStarted": False,
+            "saved": False,
         }
+        for key in ("failureLayer", "failurePhase", "failureCause", "rootCause", "causeChain", "nextAction"):
+            value = diagnostic.get(key)
+            if value not in (None, "", [], {}):
+                result[key] = copy.deepcopy(value)
+        raw_result = getattr(exc, "raw_result", None)
+        if isinstance(raw_result, Mapping):
+            structured = raw_result.get("structuredContent")
+            structured = structured if isinstance(structured, Mapping) else raw_result
+            diagnostics = {
+                key: copy.deepcopy(structured[key])
+                for key in ("code", "errorCode", "message", "error", "failureLayer", "failurePhase",
+                            "failureCause", "rootCause", "causeChain", "nextAction", "diagnostics")
+                if key in structured
+            }
+            if diagnostics:
+                result["diagnostics"] = diagnostics
+                for key in ("failureLayer", "failurePhase", "failureCause", "rootCause", "causeChain", "nextAction"):
+                    value = diagnostics.get(key)
+                    if value not in (None, "", [], {}):
+                        result[key] = copy.deepcopy(value)
+        result.setdefault(
+            "nextAction",
+            "Correct the reported preview rejection and retry; checkpoint preparation failed before the Unity write started.",
+        )
+        return result
     if refreshed_arguments != approved_write_arguments:
         return {
             "ok": False,
