@@ -104,7 +104,7 @@ export function RightRuntimeSidebar({
 
   return (
     <aside
-      className="flex h-screen min-w-0 flex-col overflow-hidden border-l border-border/80 bg-sidebar"
+      className="flex h-full min-w-0 flex-col overflow-hidden border-l border-border/80 bg-sidebar"
       data-vrcforge-environment-status={projectWorkspace ? undefined : true}
       data-vrcforge-project-workbench={projectWorkspace || undefined}
     >

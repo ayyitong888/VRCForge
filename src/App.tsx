@@ -1,7 +1,7 @@
 import { projectDiscoveryState } from "./lib/project-discovery-state";
 import { conversationQuoteFromSelection } from "./lib/chat-selection-quote";
 import { hasRecentConnectorSelfTest } from "./lib/connector-verification";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Camera,
@@ -38,6 +38,7 @@ import { PendingApprovalsStrip } from "./components/approvals/pending-approvals-
 import { ChatWorkspace } from "./components/chat/chat-workspace";
 import { LayoutSplitter } from "./components/workspace/layout-splitter";
 import { WorkspaceHeader } from "./components/workspace/workspace-header";
+import { DesktopTitlebar } from "./components/workspace/desktop-titlebar";
 import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { OptimizationWorkspace } from "./components/optimization/optimization-workspace";
 import { ProtectionWorkspace } from "./components/protection/protection-workspace";
@@ -289,7 +290,7 @@ const AsyncSubAgentSidebar = lazy(() =>
 function SidebarPlaceholder({ side }: { side: "left" | "right" }) {
   return (
     <aside
-      className={side === "left" ? "h-screen border-r border-border/70 bg-sidebar" : "h-screen border-l border-border/70 bg-sidebar"}
+      className={side === "left" ? "h-full border-r border-border/70 bg-sidebar" : "h-full border-l border-border/70 bg-sidebar"}
       data-vrcforge-sidebar-placeholder={side}
       aria-hidden="true"
     />
@@ -4239,9 +4240,13 @@ export default function App() {
     </div>
   ) : null;
 
+  const desktopWindow = isTauri();
+
+
   return (
-    <main className="h-screen overflow-hidden bg-background text-foreground">
-      <div className="grid h-screen" style={{ gridTemplateColumns: workspaceGridColumns }}>
+    <main className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground" data-desktop-window={desktopWindow || undefined}>
+      <DesktopTitlebar theme={theme} onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")} />
+      <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)]" style={{ gridTemplateColumns: workspaceGridColumns }}>
         {sidebarsVisible ? (
           <Suspense fallback={<SidebarPlaceholder side="left" />}>
             <SidebarMountTracker side="left" onMounted={markLeftSidebarMounted}>
@@ -4317,8 +4322,9 @@ export default function App() {
           onPointerDown={(event) => startLayoutResize("left", event)}
         />
 
-        <section className="relative flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
+        <section className="relative flex h-full min-w-0 flex-col overflow-hidden bg-workspace">
           <WorkspaceHeader
+            hideWindowHeader={desktopWindow}
             activeProjectLabel={activeProjectPath ? activeProjectName : t("sidebar.tempChat")}
             activeView={activeView}
             activeChatTitle={displayChat ? displayChat.title || t("header.currentSession") : activeChatPending ? t("header.currentSession") : ""}
@@ -4753,7 +4759,7 @@ export default function App() {
               onPointerDown={(event) => startLayoutResize("right", event)}
             />
             {rightSidebarCollapsed ? (
-          <aside className="flex h-screen items-start justify-center border-l border-border/80 bg-sidebar pt-2">
+          <aside className="flex h-full items-start justify-center border-l border-border/80 bg-sidebar pt-2">
             <button
               type="button"
               className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"

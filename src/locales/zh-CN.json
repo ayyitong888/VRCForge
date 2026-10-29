@@ -1,4 +1,10 @@
 {
+  "window": {
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "还原窗口",
+    "toggleTheme": "切换主题"
+  },
   "coreConnection": {
     "title": "Unity 暂时无法执行工具",
     "compileErrors": "Unity 项目有编译错误。请打开 Unity 的 Console，先处理第一条红色编译错误，等编译完成后再检查连接。",

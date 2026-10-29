@@ -1,4 +1,55 @@
 @layer base {
+  .desktop-titlebar {
+    display: flex;
+    align-items: center;
+    flex: 0 0 36px;
+    height: 36px;
+    min-width: 0;
+    padding-left: 16px;
+    background: transparent;
+    color: hsl(var(--foreground));
+    font-size: 12px;
+    user-select: none;
+  }
+
+  .desktop-titlebar [data-tauri-drag-region],
+  .desktop-titlebar[data-tauri-drag-region] {
+    app-region: drag;
+  }
+
+  .desktop-titlebar-brand {
+    display: flex;
+    align-items: baseline;
+    flex-shrink: 0;
+    gap: 8px;
+    padding-right: 24px;
+  }
+
+  .desktop-titlebar-version {
+    color: hsl(var(--muted-foreground));
+  }
+
+  .desktop-titlebar-version { font-size: 11px; }
+  .desktop-titlebar-space { flex: 1; align-self: stretch; }
+  .desktop-titlebar-error { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: hsl(var(--destructive)); }
+
+  .desktop-titlebar > button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 46px;
+    align-self: stretch;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    app-region: no-drag;
+  }
+
+  .desktop-titlebar > button:hover { background: hsl(var(--foreground) / 0.08); }
+  .desktop-titlebar > button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: -3px; }
+  .desktop-titlebar > button.desktop-titlebar-close:hover { background: #c42b1c; color: white; }
+
   :root {
     --background: 0 0% 98%;
     --foreground: 223 26% 13%;

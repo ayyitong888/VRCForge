@@ -1,4 +1,10 @@
 {
+  "window": {
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restore": "Restore window",
+    "toggleTheme": "Toggle theme"
+  },
   "coreConnection": {
     "title": "Unity tools are not ready",
     "compileErrors": "The Unity project has compilation errors. Open Unity Console, resolve the first red compilation error, then wait for compilation to finish before checking the connection again.",

@@ -1,4 +1,10 @@
 {
+  "window": {
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "還原視窗",
+    "toggleTheme": "切換主題"
+  },
   "coreConnection": {
     "title": "Unity 暫時無法執行工具",
     "compileErrors": "Unity 專案有編譯錯誤。請開啟 Unity 的 Console，先處理第一條紅色編譯錯誤，等編譯完成後再檢查連線。",

@@ -18,7 +18,7 @@ export function LayoutSplitter({ side, value, min, max, title, onPointerDown }: 
       aria-valuemin={min}
       aria-valuemax={max}
       data-layout-splitter={side}
-      className="group relative h-screen cursor-col-resize touch-none bg-transparent"
+      className="group relative h-full min-h-0 cursor-col-resize touch-none bg-transparent"
       onPointerDown={onPointerDown}
       title={title}
     >

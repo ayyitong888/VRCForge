@@ -5,6 +5,7 @@ import type { ThemeMode } from "../../lib/app-preferences";
 import { Button } from "../ui/button";
 
 export function WorkspaceHeader({
+  hideWindowHeader = false,
   activeProjectLabel,
   activeView,
   activeChatTitle,
@@ -23,6 +24,7 @@ export function WorkspaceHeader({
   onDismissDoctorPrompt,
   onStartRuntime,
 }: {
+  hideWindowHeader?: boolean;
   activeProjectLabel: string;
   activeView: ActiveView;
   activeChatTitle: string;
@@ -59,10 +61,12 @@ export function WorkspaceHeader({
 
   return (
     <>
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/80 px-3 md:px-5">
+      {!hideWindowHeader && <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/80 px-3 md:px-5">
         <div className="flex min-w-0 items-center gap-2 text-sm">
-          <span className="truncate text-muted-foreground">{activeProjectLabel}</span>
-          <span className="text-muted-foreground">/</span>
+          {activeView !== "settings" && <>
+            <span className="truncate text-muted-foreground">{activeProjectLabel}</span>
+            <span className="text-muted-foreground">/</span>
+          </>}
           <span className="truncate font-medium">{activeTitle}</span>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -70,7 +74,7 @@ export function WorkspaceHeader({
             {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </Button>
         </div>
-      </header>
+      </header>}
 
       {showDoctorStartupPrompt ? (
         <div className="mx-auto mt-3 w-full max-w-4xl px-4">
