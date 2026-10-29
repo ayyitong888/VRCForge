@@ -183,7 +183,10 @@ class AgentRuntimeRunLedger:
         session = str(event.get("sessionId") or "").strip()
         client = str(event.get("clientTurnId") or "").strip()
         turn = str(event.get("turnId") or "").strip()
-        return f"{session}\0{client or turn}" if session and (client or turn) else ""
+        # One host client id can be reused for multiple server-side turns.
+        # Server turn identity owns lifecycle and timeline grouping; retain
+        # client id only for older rows that did not persist a turn id.
+        return f"{session}\0{turn or client}" if session and (turn or client) else ""
 
     def append_timeline_event(
         self,
@@ -437,6 +440,17 @@ class AgentRuntimeRunLedger:
                 event_approval_ids=lambda _event: set(),
                 limit=0,
             )
+        started_turn_ids = [
+            str(row.get("turnId") or "").strip()
+            for row in timeline_rows
+            if row.get("event") == "runtime_turn_started" and str(row.get("turnId") or "").strip()
+        ]
+        if started_turn_ids:
+            latest_turn_id = started_turn_ids[-1]
+            timeline_rows = [
+                row for row in timeline_rows
+                if str(row.get("turnId") or "").strip() == latest_turn_id
+            ]
         for row in timeline_rows:
             name = row.get("event")
             if name == "runtime_turn_completed":
@@ -767,9 +781,6 @@ class AgentRuntimeRunLedger:
             key = f"{session_id}:{client_turn_id or turn_id}"
             if key not in by_key:
                 order.append(key)
-            elif (continuation.get("continuationSource") == "foreground_interrupted"
-                  and by_key[key].get("continuationSource") != "foreground_interrupted"):
-                continue
             # Older receipt rows can replace a terminal projection without
             # carrying its timestamp. Retain that same turn's terminal fact;
             # issuing a receipt or reconnecting must never move the clock.

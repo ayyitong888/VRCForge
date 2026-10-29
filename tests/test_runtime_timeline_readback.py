@@ -39,6 +39,26 @@ def test_long_timeline_keeps_first_page_and_run_start(tmp_path):
     assert [row["sequence"] for row in last["events"]] == [10_003, 10_004]
 
 
+def test_reused_client_turn_id_readback_selects_latest_server_turn(tmp_path):
+    ledger, _ = make_ledger(tmp_path)
+    ledger.append({"event": "runtime_turn_started", "status": "running", "sessionId": "session",
+                   "turnId": "old-turn", "clientTurnId": "reused"})
+    add_timeline(ledger, 0, client="reused")
+    ledger.append({"event": "runtime_turn_completed", "status": "completed", "sessionId": "session",
+                   "turnId": "old-turn", "clientTurnId": "reused"})
+    ledger.append({"event": "runtime_turn_started", "status": "running", "sessionId": "session",
+                   "turnId": "new-turn", "clientTurnId": "reused"})
+    ledger.append_timeline_event(
+        session_id="session", turn_id="new-turn", client_turn_id="reused",
+        event={"id": "new-event", "sequence": 0, "kind": "assistant",
+               "payload": {"summary": "New turn"}},
+    )
+
+    result = ledger.read_timeline(session_id="session", client_turn_id="reused")
+    assert result["run"]["turnId"] == "new-turn"
+    assert [event["id"] for event in result["events"]] == ["new-event"]
+
+
 def test_exact_timeline_pages_survive_unrelated_global_churn(tmp_path):
     ledger, _ = make_ledger(tmp_path)
     ledger.append({"event": "runtime_turn_started", "status": "running", "sessionId": "session",

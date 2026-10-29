@@ -219,6 +219,40 @@ def test_list_runtime_continuations_is_read_only_until_explicit_recovery(tmp_pat
     assert restarted.list_runtime_continuations()[0]["continuationSource"] == "foreground_interrupted"
 
 
+def test_recovery_uses_server_turn_when_client_turn_id_is_reused(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    old_identity = {"sessionId": "s", "turnId": "old-turn", "clientTurnId": "reused"}
+    old_timeline = {"id": "old-event", "sequence": 0, "kind": "assistant",
+                    "payload": {"summary": "Old finished turn"}}
+    ledger.append({**old_identity, "event": "runtime_turn_started", "status": "running"})
+    ledger.append_timeline_event(session_id="s", turn_id="old-turn", client_turn_id="reused",
+                                 event=old_timeline)
+    ledger.append({**old_identity, "event": "runtime_turn_completed", "status": "completed",
+                   "continuationEvent": {
+                       "schema": "vrcforge.runtime_turn_event.v1",
+                       "continuationSource": "foreground_completed", **old_identity,
+                       "timeline": [old_timeline], "plan": {"reply": "old done"},
+                   }})
+    ledger.append({"event": "runtime_turn_started", "status": "running", "sessionId": "s",
+                   "turnId": "new-turn", "clientTurnId": "reused"})
+    new_timeline = {"id": "new-event", "sequence": 0, "kind": "assistant",
+                    "payload": {"summary": "New interrupted turn"}}
+    ledger.append_timeline_event(session_id="s", turn_id="new-turn", client_turn_id="reused",
+                                 event=new_timeline)
+
+    restarted, _ = make_ledger(tmp_path)
+    assert restarted.recover_interrupted_runs() == 1
+    continuations = restarted.list_runtime_continuations()
+    assert len(continuations) == 1
+    assert continuations[0]["turnId"] == "new-turn"
+    assert continuations[0]["continuationSource"] == "foreground_interrupted"
+    assert continuations[0]["timeline"] == [new_timeline]
+    old_terminal = restarted.read_terminal_continuation(
+        session_id="s", client_turn_id="reused", turn_id="old-turn"
+    )
+    assert [event["id"] for event in old_terminal["timeline"]] == ["old-event"]
+
+
 def test_recovery_seeds_continuation_reader_and_incrementally_adds_recovered_rows(tmp_path: Path, monkeypatch) -> None:
     ledger, _lock = make_ledger(tmp_path)
     legacy = {
