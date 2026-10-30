@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Callable
+from execution_target import execution_target_identity
 from prepared_unity_execution import build_prepared_execution_plan, prepared_evidence
 
 
@@ -176,10 +177,6 @@ def prepare_scene_workflow_checkpoint(
         and valid_scene_path
         and target_absolute_scene_path == expected_absolute_scene_path
         and bool(scene.get("guid"))
-        and bool(scene.get("revision"))
-        and isinstance(scene.get("digest"), str)
-        and len(scene["digest"]) == 64
-        and all(char in "0123456789abcdef" for char in scene["digest"])
     )
     if not valid_identity:
         return reject("The approved write does not identify one complete saved-scene session.")
@@ -274,7 +271,12 @@ def prepare_scene_workflow_checkpoint(
             "mutationStarted": False,
             "saved": False,
         }
-    if live.get("ok") is not True or live.get("targets") != [target]:
+    targets = live.get("targets")
+    if (live.get("ok") is not True or not isinstance(targets, list) or len(targets) != 1
+            or not isinstance(targets[0], dict)
+            or targets[0].get("ambiguous") is True
+            or targets[0].get("resolutionCandidateCount") not in (None, 1)
+            or execution_target_identity(targets[0]) != execution_target_identity(target)):
         return reject("The approved scene workflow identity changed before checkpointing.")
 
     prepared = prepare(project_root, checkpoint_files=[archive_scene_path])

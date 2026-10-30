@@ -85,13 +85,25 @@ def test_unproven_or_outside_footprints_are_rejected(wardrobe_case, path):
     assert result["ok"] is False and inspected == []
 
 
-@pytest.mark.parametrize("section,key,value", [("scene", "digest", "b" * 64), ("avatar", "globalObjectId", "other"), ("editor", "coreInstanceId", "other")])
+@pytest.mark.parametrize("section,key,value", [("scene", "guid", "other-scene"), ("avatar", "globalObjectId", "other"), ("editor", "coreInstanceId", "other")])
 def test_fresh_identity_drift_blocks_before_checkpoint(wardrobe_case, monkeypatch, section, key, value):
     server, root, arguments, target, paths, inspected = wardrobe_case
     live = deepcopy(target); live[section][key] = value
     monkeypatch.setattr(server, "list_execution_targets_sync", lambda query: {"ok": True, "targets": [live]})
     result = server.prepare_authoritative_unity_checkpoint_sync(root, arguments)
     assert result["ok"] is False and inspected == []
+
+
+def test_wardrobe_checkpoint_ignores_scene_content_snapshot(wardrobe_case, monkeypatch):
+    server, root, arguments, target, paths, inspected = wardrobe_case
+    target["scene"].pop("digest")
+    target["scene"].pop("revision")
+    live = deepcopy(target)
+    live["scene"].update(digest="current-content", revision="new")
+    monkeypatch.setattr(server, "list_execution_targets_sync", lambda query: {"ok": True, "targets": [live]})
+    result = server.prepare_authoritative_unity_checkpoint_sync(root, arguments)
+    assert result["ok"] is True, result
+    assert len(inspected) == 1
 
 
 def test_unsealed_wardrobe_plan_is_rejected(wardrobe_case):

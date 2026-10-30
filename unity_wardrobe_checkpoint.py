@@ -1,6 +1,7 @@
 """Preview-bound wardrobe creation calls and their exact asset rollback footprint."""
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
+from execution_target import execution_target_identity
 
 from checkpoint_asset_footprint import validate_asset_footprint
 from prepared_unity_execution import build_prepared_execution_plan, install_prepared_calls, prepared_evidence
@@ -67,12 +68,17 @@ def prepare_wardrobe_checkpoint(project_root, arguments, *, discover, preview, p
                 or not Path(project["root"]).is_absolute() or Path(project["root"]).resolve() != project_root.resolve()
                 or not project.get("projectId") or not avatar.get("globalObjectId")
                 or not editor.get("unityPid") or not editor.get("processStartTime") or not editor.get("coreInstanceId")
-                or not scene.get("guid") or not scene.get("revision") or not scene.get("digest")):
+                or not scene.get("guid")):
             raise ValueError("Wardrobe creation requires one complete bound Avatar session.")
         query = {"projectPath": str(project_root), "scope": "avatar", "avatarGlobalObjectId": avatar["globalObjectId"]}
         def fresh():
             live = discover(query)
-            if live.get("ok") is not True or live.get("targets") != [target]:
+            targets = live.get("targets")
+            if (live.get("ok") is not True or not isinstance(targets, list) or len(targets) != 1
+                    or not isinstance(targets[0], dict)
+                    or targets[0].get("ambiguous") is True
+                    or targets[0].get("resolutionCandidateCount") not in (None, 1)
+                    or execution_target_identity(targets[0]) != execution_target_identity(target)):
                 raise ValueError("The approved wardrobe Avatar identity changed before checkpointing.")
         fresh()
         evidence = prepared_evidence(arguments)

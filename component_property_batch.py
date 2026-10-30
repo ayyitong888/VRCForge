@@ -2,7 +2,7 @@
 from collections.abc import Mapping
 import re
 
-from execution_target import validate_execution_target, validate_runtime_execution_target
+from execution_target import scene_identity_matches, validate_execution_target, validate_runtime_execution_target
 
 
 def _fields(*names):
@@ -84,7 +84,9 @@ def prepare_component_property_batch(params):
         if type(component_index) is not int or component_index < 0:
             raise ValueError(f"{location}.componentIndex must be a nonnegative integer from inspection, not a string or a guessed component index.")
         target = validate_execution_target(query.get("executionTarget"), project_root=project_root, required_scope="component")
-        if target.get("scope") != "component" or any(target.get(group) != anchor.get(group) for group in ("project", "editor", "scene", "avatar")):
+        if (target.get("scope") != "component"
+                or any(target.get(group) != anchor.get(group) for group in ("project", "editor", "avatar"))
+                or not scene_identity_matches(target.get("scene"), anchor.get("scene"))):
             raise ValueError(f"{location}.executionTarget must share the verified anchor project/editor/scene/avatar identity. Rebind this component in the anchor's current scene or read it in a separate batch; do not edit identity fields.")
         if query.get("gameObjectPath") != target["object"]["exactHierarchyPath"] or query.get("componentType") != target["component"]["type"]:
             raise ValueError(f"{location}.gameObjectPath/componentType differs from its bound component identity. Expected gameObjectPath={target['object']['exactHierarchyPath']!r}, componentType={target['component']['type']!r}. Bind the intended component and copy its returned path/type; do not edit identity fields.")

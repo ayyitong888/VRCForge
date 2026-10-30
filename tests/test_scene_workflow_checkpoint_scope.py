@@ -120,7 +120,7 @@ def _run_installation(root, monkeypatch, *, mutate=None, drift=False, unpack=Fal
     args = install_prepared_calls({"executionTarget":target,"_checkpointTargetTool":"vrcforge_add_outfit"},calls,evidence)
     fresh = deepcopy(target)
     if drift:
-        fresh["scene"]["digest"] = "e"*64
+        fresh["scene"]["guid"] = "other-scene-guid"
     observed = []
     monkeypatch.setattr(dashboard,"list_execution_targets_sync",lambda _query:{"ok":True,"targets":[fresh]})
     monkeypatch.setattr(dashboard,"prepare_unity_checkpoint_sync",lambda _root,**kw:observed.append(kw) or {"ok":True})
@@ -351,7 +351,6 @@ def test_unbound_or_ambiguous_selectors_fail_before_discovery(scene_case, tool, 
         lambda target, root: target["scene"].update(assetPath="Assets/../Outside.unity"),
         lambda target, root: target["scene"].update(absolutePath=str(root / "Outside.unity")),
         lambda target, root: target["scene"].update(guid=""),
-        lambda target, root: target["scene"].update(digest="wrong"),
         lambda target, root: target.update(ambiguous=True),
     ],
 )
@@ -374,7 +373,7 @@ def test_fresh_identity_or_scene_owner_drift_blocks_checkpoint(scene_case, drift
     if drift == "editor":
         fresh_target["editor"]["coreInstanceId"] = "other-core"
     elif drift == "scene":
-        fresh_target["scene"]["digest"] = "b" * 64
+        fresh_target["scene"]["guid"] = "other-scene-guid"
     elif drift == "avatar":
         fresh_target["avatar"]["globalObjectId"] = "other-avatar"
     else:
@@ -389,7 +388,7 @@ def test_fresh_identity_or_scene_owner_drift_blocks_checkpoint(scene_case, drift
     assert [item[0] for item in observed] == ["discover"]
 
 
-@pytest.mark.parametrize("drift", ["path", "digest"])
+@pytest.mark.parametrize("drift", ["path", "guid"])
 def test_scene_root_instantiate_rejects_scene_identity_drift(scene_case, drift):
     target = _target(scene_case, "scene")
     changed = deepcopy(target)
@@ -397,7 +396,7 @@ def test_scene_root_instantiate_rejects_scene_identity_drift(scene_case, drift):
         changed["scene"]["assetPath"] = "Assets/Other.unity"
         changed["scene"]["absolutePath"] = str((scene_case / "Assets/Other.unity").resolve())
     else:
-        changed["scene"]["digest"] = "b" * 64
+        changed["scene"]["guid"] = "other-scene-guid"
     result, observed = _run(
         scene_case,
         "vrcforge_instantiate_prefab",
@@ -406,6 +405,23 @@ def test_scene_root_instantiate_rejects_scene_identity_drift(scene_case, drift):
     )
     assert result["ok"] is False and "archiveAssetPaths" not in result
     assert [item[0] for item in observed] == ["discover"]
+
+
+@pytest.mark.parametrize("snapshot", [{}, {"digest": "not-a-hash", "revision": "old"}])
+def test_scene_workflow_uses_scene_identity_without_content_snapshot_gate(scene_case, snapshot):
+    target = _target(scene_case, "scene")
+    target["scene"].pop("digest")
+    target["scene"].pop("revision")
+    target["scene"].update(snapshot)
+    fresh = deepcopy(target)
+    fresh["scene"].update(digest="different-current-content", revision="new")
+    result, observed = _run(
+        scene_case, "vrcforge_instantiate_prefab",
+        {"executionTarget": target, "assetPath": "Assets/Item.prefab", "parentPath": ""},
+        fresh={"ok": True, "targets": [fresh]},
+    )
+    assert result["ok"] is True
+    assert observed[-1] == ("prepare", scene_case, ["Assets/Main.unity"])
 
 
 def test_scene_root_instantiate_preserves_dirty_scene_checkpoint_refusal(scene_case):

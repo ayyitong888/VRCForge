@@ -21087,6 +21087,8 @@ def prepare_authoritative_unity_checkpoint_sync(
     project_root: Path,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
+    from execution_target import execution_target_identity
+
     arguments = dict(arguments)
     checkpoint_target = arguments.pop("_checkpointTargetTool", "")
     execution_target = arguments.get("executionTarget")
@@ -21097,12 +21099,6 @@ def prepare_authoritative_unity_checkpoint_sync(
                 "project_root": str(project_root),
                 "required_scope": identity_scope(checkpoint_target, write=True),
             }
-            if checkpoint_target in {"vrcforge_set_property", "vrcforge_remap_skinned_mesh_bone", "vrcforge_save_asset"}:
-                # The following Core owner read supplies the current scene
-                # digest and exact component/property owner. Resolve the
-                # session-bound target's project/editor/scene identity without
-                # hashing the same scene first.
-                resolve_options["refresh_scene_snapshot"] = False
             arguments["executionTarget"] = AGENT_GATEWAY.resolve_execution_target_reference(
                 execution_target, **resolve_options,
             )
@@ -21355,7 +21351,12 @@ def prepare_authoritative_unity_checkpoint_sync(
         if target["scope"] == "component":
             query["componentGlobalObjectId"] = component.get("globalObjectId")
         live = list_execution_targets_sync(query)
-        if live.get("ok") is not True or live.get("targets") != [target]:
+        targets = live.get("targets")
+        if (live.get("ok") is not True or not isinstance(targets, list) or len(targets) != 1
+                or not isinstance(targets[0], dict)
+                or targets[0].get("ambiguous") is True
+                or targets[0].get("resolutionCandidateCount") not in (None, 1)
+                or execution_target_identity(targets[0]) != execution_target_identity(target)):
             return {"ok": False, "error": "The approved component scene identity changed before checkpointing."}
         if checkpoint_target in {"vrcforge_add_component", "vrcforge_remove_component"} and not canvas_group_only:
             # Non-native component callbacks are outside the scene file
@@ -21386,7 +21387,12 @@ def prepare_authoritative_unity_checkpoint_sync(
         if ensure_dict(target.get("avatar")).get("globalObjectId"):
             query["avatarGlobalObjectId"] = target["avatar"]["globalObjectId"]
         live = list_execution_targets_sync(query)
-        if live.get("ok") is not True or live.get("targets") != [target]:
+        targets = live.get("targets")
+        if (live.get("ok") is not True or not isinstance(targets, list) or len(targets) != 1
+                or not isinstance(targets[0], dict)
+                or targets[0].get("ambiguous") is True
+                or targets[0].get("resolutionCandidateCount") not in (None, 1)
+                or execution_target_identity(targets[0]) != execution_target_identity(target)):
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                     "error": "The approved visibility target changed before checkpointing."}
         return {"ok": True, "projectPath": str(project_root),
@@ -21596,7 +21602,12 @@ def prepare_authoritative_unity_checkpoint_sync(
             "projectPath": str(project_root), "scope": "avatar",
             "avatarGlobalObjectId": avatar_id,
         })
-        if live.get("ok") is not True or live.get("targets") != [target]:
+        targets = live.get("targets")
+        if (live.get("ok") is not True or not isinstance(targets, list) or len(targets) != 1
+                or not isinstance(targets[0], dict)
+                or targets[0].get("ambiguous") is True
+                or targets[0].get("resolutionCandidateCount") not in (None, 1)
+                or execution_target_identity(targets[0]) != execution_target_identity(target)):
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                     "error": "The approved descriptor scene identity changed before checkpointing.",
                     "mutationStarted": False, "saved": False}
@@ -24564,7 +24575,7 @@ def refresh_execution_target_sync(params: dict[str, Any]) -> dict[str, Any]:
     if not project_root:
         raise RuntimeError("projectPath is required for ExecutionTarget refresh.")
     previous_target = AGENT_GATEWAY.resolve_execution_target_reference(
-        previous, project_root=project_root, refresh_scene_snapshot=False,
+        previous, project_root=project_root,
     )
     request: dict[str, Any] = {
         "projectPath": project_root,

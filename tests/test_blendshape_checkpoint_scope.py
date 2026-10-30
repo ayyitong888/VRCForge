@@ -104,7 +104,7 @@ def test_blendshape_checkpoint_accepts_saved_scene_revision_change_with_same_con
 
 
 @pytest.mark.parametrize("section,key,value", [
-    ("scene", "digest", "b" * 64), ("scene", "guid", "other-guid"),
+    ("scene", "guid", "other-guid"),
     ("scene", "assetPath", "Assets/Other.unity"),
     ("avatar", "globalObjectId", "other-avatar"), ("avatar", "exactHierarchyPath", "OtherAvatar"),
     ("project", "projectId", "other-project"), ("project", "root", str(ROOT / "Other")),
@@ -112,7 +112,7 @@ def test_blendshape_checkpoint_accepts_saved_scene_revision_change_with_same_con
     ("editor", "coreInstanceId", "other-core"),
     ("object", "exactHierarchyPath", "OtherAvatar/Body"),
 ])
-def test_blendshape_checkpoint_still_rejects_content_or_identity_change(section, key, value):
+def test_blendshape_checkpoint_still_rejects_identity_change(section, key, value):
     bound, fresh = saved_scene_identities()
     fresh[section][key] = value
     result, captured = run_saved_scene(bound, fresh)
@@ -121,14 +121,16 @@ def test_blendshape_checkpoint_still_rejects_content_or_identity_change(section,
 
 
 @pytest.mark.parametrize("digest", [None, "", "not-sha256", "a" * 63, "A" * 64])
-def test_scene_revision_exception_requires_a_complete_valid_content_hash(digest):
+def test_blendshape_checkpoint_does_not_require_a_scene_content_hash(digest):
     bound, fresh = saved_scene_identities()
     bound["scene"]["digest"] = fresh["scene"]["digest"] = digest
+    fresh["scene"]["digest"] = "different-current-content"
     result, captured = run_saved_scene(bound, fresh)
-    assert result["ok"] is False and captured["prepare"] == []
+    assert result["ok"] is True
+    assert captured["prepare"] == [(ROOT, [SCENE["assetPath"]])]
 
 
-def test_scene_revision_exception_does_not_ignore_additional_scene_fields():
+def test_scene_identity_still_compares_additional_scene_fields():
     bound, fresh = saved_scene_identities()
     fresh["scene"]["unexpectedIdentityField"] = "changed"
     result, captured = run_saved_scene(bound, fresh)

@@ -85,7 +85,7 @@ def test_batch_checks_all_identities_and_projects_compact_core_rows(monkeypatch)
 
 @pytest.mark.parametrize("group,key,value", [
     ("project", "projectId", "other"), ("editor", "coreInstanceId", "other"),
-    ("scene", "guid", "other"), ("scene", "digest", "other"),
+    ("scene", "guid", "other"), ("scene", "assetPath", "Assets/Other.unity"),
     ("avatar", "globalObjectId", "other"), ("object", "exactHierarchyPath", "Other/Part"),
     ("component", "type", "UnityEngine.Transform"),
 ])
@@ -94,6 +94,16 @@ def test_batch_rejects_mixed_scope_and_changed_target_before_core(monkeypatch, g
     args["queries"][1]["executionTarget"][group][key] = value
     with pytest.raises(ValueError):
         prepared(monkeypatch, args)
+
+
+def test_batch_reuses_bound_components_after_scene_save_without_comparing_content(monkeypatch):
+    args = request()
+    args["executionTarget"]["scene"].pop("digest")
+    args["executionTarget"]["scene"].pop("revision")
+    args["queries"][1]["executionTarget"]["scene"].update(digest="new saved contents", revision="new save")
+    result, checks = prepared(monkeypatch, args)
+    assert len(result["queries"]) == 2
+    assert checks == ["runtime", "component", "component"]
 
 
 def test_batch_rejects_actual_property_budget_and_duplicates(monkeypatch):

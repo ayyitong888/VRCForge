@@ -86,15 +86,34 @@ def test_custom_component_remove_keeps_existing_path_and_uses_full_project_check
     assert calls==[(root,(),{})]
 
 
-@pytest.mark.parametrize('kind',['scene','object','editor','ambiguous'])
+@pytest.mark.parametrize('kind',['scene','object','editor','ambiguous','ambiguous_flag','candidate_count'])
 def test_fresh_identity_drift_blocks_archive_offer(case,monkeypatch,kind):
     server,root,target,request=case;fresh=deepcopy(target)
-    if kind=='scene':fresh['scene']['digest']='b'*64
+    if kind=='scene':fresh['scene']['guid']='other-scene'
     elif kind=='object':fresh['object']['globalObjectId']='other'
     elif kind=='editor':fresh['editor']['coreInstanceId']='other'
+    elif kind=='ambiguous_flag':fresh['ambiguous']=True
+    elif kind=='candidate_count':fresh['resolutionCandidateCount']=2
     monkeypatch.setattr(server,'list_execution_targets_sync',lambda *_:{'ok':True,'targets':[fresh,fresh] if kind=='ambiguous' else [fresh]})
     result=server.prepare_authoritative_unity_checkpoint_sync(root,{**request,'_checkpointTargetTool':'vrcforge_add_component'})
     assert result['ok'] is False and 'archiveAssetPaths' not in result
+
+
+@pytest.mark.parametrize('tool', ['vrcforge_add_component', 'vrcforge_remove_component', 'vrcforge_toggle_scene_object'])
+def test_saved_scene_content_changes_do_not_replace_bound_checkpoint_owner(case, monkeypatch, tool):
+    server, root, target, request = case
+    target.update(ambiguous=False, resolutionCandidateCount=1)
+    if tool == 'vrcforge_remove_component':
+        target['scope'] = 'component'
+        target['component'] = {'globalObjectId': 'component', 'type': 'UnityEngine.CanvasGroup'}
+    request.update(objectPath='Avatar/Clothing', active=False)
+    fresh = deepcopy(target)
+    target['scene'].pop('digest')
+    fresh['scene'].update(digest='different saved bytes', revision='later save')
+    monkeypatch.setattr(server, 'list_execution_targets_sync', lambda *_: {'ok': True, 'targets': [fresh]})
+    result = server.prepare_authoritative_unity_checkpoint_sync(root, {**request, '_checkpointTargetTool': tool})
+    assert result['ok'] is True, result
+    assert result['archiveAssetPaths'] == ['Assets/Main.unity']
 
 
 def test_remove_discovery_uses_complete_component_query_once(case,monkeypatch):

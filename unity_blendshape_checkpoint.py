@@ -43,7 +43,7 @@ def prepare_blendshape_checkpoint(
             or Path(str(project.get("root") or "")).resolve() != project_root.resolve()
             or not avatar.get("globalObjectId")
             or not avatar.get("exactHierarchyPath")
-            or not scene.get("assetPath") or not scene.get("guid") or not scene.get("digest")):
+            or not scene.get("assetPath") or not scene.get("guid")):
         return reject("The approved write does not identify one complete Avatar and saved scene.")
 
     if (len(calls) != 1 or calls[0][0] != "vrc_apply_blendshapes"
@@ -146,7 +146,7 @@ def prepare_blendshape_checkpoint(
         scope = owner.get("checkpointScope") if owner.get("ok") is True else None
         expected = {
             "ownerKind": "scene", "scenePath": scene_path,
-            "sceneGuid": scene["guid"], "sceneDigest": scene["digest"],
+            "sceneGuid": scene["guid"],
             "objectGlobalObjectId": obj.get("globalObjectId"),
             "componentGlobalObjectId": component.get("globalObjectId"),
             "componentType": "UnityEngine.SkinnedMeshRenderer", "componentIndex": 0,

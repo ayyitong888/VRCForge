@@ -89,6 +89,23 @@ def test_descriptor_checkpoint_rejects_stale_authoritative_scene_before_core_pre
     assert result["mutationStarted"] is False
 
 
+def test_descriptor_checkpoint_reuses_scene_owner_after_unrelated_scene_save(tmp_path, monkeypatch):
+    project = _unity_project(tmp_path)
+    target = _target(project)
+    target['scene'].pop('digest')
+    target['scene'].pop('revision')
+    changed = {**target, 'scene': {**target['scene'], 'digest': 'new saved contents', 'revision': '2'}}
+    monkeypatch.setattr(server, 'list_execution_targets_sync', lambda query: {'ok': True, 'targets': [changed]})
+    calls = []
+    monkeypatch.setattr(server, 'prepare_unity_checkpoint_sync', lambda root, **kw: calls.append(kw) or {'ok': True})
+    result = server.prepare_authoritative_unity_checkpoint_sync(
+        project, {**_arguments(project, target), '_checkpointTargetTool': 'vrcforge_write_avatar_descriptor'}
+    )
+    assert result['ok'] is True, result
+    assert result['archiveAssetPaths'] == [SCENE_PATH]
+    assert calls == [{'checkpoint_files': [SCENE_PATH]}]
+
+
 def _method_body(source: str, class_name: str, signature: str) -> str:
     class_start = source.index(f"class {class_name}")
     method_start = source.index(signature, class_start)
