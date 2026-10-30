@@ -375,6 +375,9 @@ from prepared_file_imports import verify_directory, verify_regular_file
 from unity_execution_plans_scene import (
     SCENE_EXECUTION_PLAN_TARGETS,
     build_scene_execution_plan,
+    ASSET_SAVE_CORE_TOOL,
+    build_save_asset_core_arguments,
+    build_save_asset_wrapper_arguments,
     build_ensure_expression_parameter_request,
     build_ensure_expression_menu_control_request,
     build_ensure_animator_state_request,
@@ -821,6 +824,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_atomic_reference_rename",
         "vrcforge_create_component_feature",
         "vrcforge_scene_save",
+        "vrcforge_save_asset",
         "vrcforge_scene_transition",
         "vrcforge_texture_patch",
         "vrcforge_user_adjustment_handoff",
@@ -855,6 +859,7 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         GENERATED_ASSET_RELOCATION_TOOL,
         SCENE_ASSET_DUPLICATE_TOOL,
         "vrc_save_scene_object_as_prefab",
+        "vrc_save_asset",
         "vrc_set_texture_import_settings",
         "vrc_set_constraint_sources",
         "vrc_convert_unity_constraint",
@@ -21025,6 +21030,40 @@ def prepare_save_current_scene_request(
     return prepare_unity_mcp_write_request(wrapper, caller_preview)
 
 
+def save_asset_sync(params: dict[str, Any], *, preview: bool = False) -> dict[str, Any]:
+    """Call Core for one exact asset, returning its authoritative payload."""
+    request = dict(params or {})
+    arguments = build_save_asset_core_arguments(request, preview=preview)
+    settings = load_dashboard_settings(build_agent_connection_request(request))
+    result = invoke_unity_mcp(
+        settings,
+        ASSET_SAVE_CORE_TOOL,
+        arguments,
+        execution_context={"lane": "app_preview"} if preview else None,
+        preserve_tool_error=True,
+    )
+    payload = extract_tool_result_payload(result)
+    if isinstance(payload, dict):
+        if result.exit_code != 0:
+            return {
+                **payload,
+                "ok": False,
+                "error": str(payload.get("error") or payload.get("message")
+                             or "Unity Core rejected the single-asset preview."),
+            }
+        return payload
+    return {
+        "ok": False,
+        "preview": preview,
+        "assetPath": arguments["assetPath"],
+        "error": "Unity Core returned no structured single-asset save result.",
+    }
+
+
+def preview_save_asset_sync(params: dict[str, Any]) -> dict[str, Any]:
+    return save_asset_sync(params or {}, preview=True)
+
+
 def prepare_stage1_atomic_request(
     params: dict[str, Any],
     caller_preview: Any,
@@ -21058,7 +21097,7 @@ def prepare_authoritative_unity_checkpoint_sync(
                 "project_root": str(project_root),
                 "required_scope": identity_scope(checkpoint_target, write=True),
             }
-            if checkpoint_target in {"vrcforge_set_property", "vrcforge_remap_skinned_mesh_bone"}:
+            if checkpoint_target in {"vrcforge_set_property", "vrcforge_remap_skinned_mesh_bone", "vrcforge_save_asset"}:
                 # The following Core owner read supplies the current scene
                 # digest and exact component/property owner. Resolve the
                 # session-bound target's project/editor/scene identity without
@@ -21070,6 +21109,20 @@ def prepare_authoritative_unity_checkpoint_sync(
         except AgentGatewayError as exc:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                     "error": str(exc), "mutationStarted": False, "saved": False}
+    if checkpoint_target == "vrcforge_save_asset":
+        nested = arguments.get("arguments")
+        if not isinstance(nested, dict):
+            nested = arguments.get("params")
+        nested = nested if isinstance(nested, dict) else {}
+        try:
+            save_arguments = build_save_asset_core_arguments(nested, preview=False)
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": str(exc), "mutationStarted": False, "saved": False}
+        return {"ok": True, "projectPath": str(project_root),
+                "mode": "read_only_disk_snapshot",
+                "archiveAssetPaths": [save_arguments["assetPath"]],
+                "archiveScopeReason": "explicit_single_existing_asset_save"}
     if checkpoint_target in {"vrcforge_refresh_asset_database", "vrcforge_execute_unity_editor_menu"}:
         # Package resolution may reinstall/remove packages and importer repair
         # may update metadata. Their existing conditional policy requires the
@@ -27198,6 +27251,12 @@ def register_agent_gateway_tools() -> None:
         write=True,
     )
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_parameter", "Preview creating or updating an avatar expression parameter without writing.", "plan/preview", lambda params: ensure_expression_parameter_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_save_asset",
+        "When to use: preview saving one exact existing dirty Unity project asset after the user explicitly asked to persist that asset. This preview reads the loaded asset's dirty state and never writes. When NOT to use: do not use it for a Scene, for all dirty assets, or to trigger implicit autosave. Negative example: if the target is clean, report that no save is needed.",
+        "plan/preview",
+        preview_save_asset_sync,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_menu_control", "Preview creating or updating an expression menu control without writing.", "plan/preview", lambda params: ensure_expression_menu_control_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_read_avatar_descriptor", "Read VRCAvatarDescriptor viewpoint, lip sync, visemes, expression assets, playable layers, and eye-look summary.", "read/debug", read_avatar_descriptor_sync)
@@ -28224,6 +28283,14 @@ def register_agent_gateway_tools() -> None:
         "Mark an interrupted approved write as manually resolved after explicit confirmation.",
         "medium",
         lambda params: AGENT_GATEWAY.checkpoint_recovery.resolve_interrupted_apply_recovery(params or {}),
+    )
+    register_write_handler(
+        "vrcforge_save_asset",
+        "When to use: after the user explicitly asks to save one exact existing dirty project asset, preview and approve this operation. It saves only that asset; a clean asset is a no-op and unrelated dirty assets remain untouched. When NOT to use: do not use for Scenes, project-wide SaveAssets, implicit persistence, or a different path. Negative example: use vrcforge_scene_save for a Scene and do not save other dirty assets as a side effect.",
+        "medium",
+        unity_mcp_write_sync,
+        request_preparer=lambda params, _preview: (build_save_asset_wrapper_arguments(params or {}), None),
+        approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
     )
     register_write_handler(
         "vrcforge_scene_save",

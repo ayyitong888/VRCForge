@@ -81,6 +81,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_inspect_unity_editor_dialogs",
             "vrcforge_project_lifecycle_status",
             "vrcforge_project_create_plan",
+            "vrcforge_preview_save_asset",
             "vrcforge_project_catalog_registration_status",
             "vrcforge_scan_project_index",
         }
@@ -270,6 +271,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_confirm_unity_reload_dialog",
             "vrcforge_handle_unity_editor_dialog",
             "vrcforge_scene_transition",
+            "vrcforge_save_asset",
         }
     ),
     "avatar": frozenset(

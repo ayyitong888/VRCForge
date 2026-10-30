@@ -50,6 +50,8 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
     normalized = str(name or "").casefold()
     if normalized.endswith(("inspect_editor_capabilities", "execute_unity_editor_menu", "inspect_material_properties")):
         return "project"
+    if normalized.endswith(("preview_save_asset", "save_asset")):
+        return "project"
     # Prepared calls execute their nested arguments; idle outer fields cannot choose scope.
     values = arguments or {}
     for key in ("arguments", "params"):

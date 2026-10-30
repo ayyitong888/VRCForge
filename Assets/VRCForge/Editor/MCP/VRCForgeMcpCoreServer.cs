@@ -65,6 +65,7 @@ namespace VRCForge.Editor
             "vrc_save_current_scene",
             "vrc_save_new_scene",
             "vrc_scene_save",
+            "vrc_save_asset",
             "vrc_scene_transition",
             "vrc_texture_patch",
             "vrc_user_adjustment_handoff",

@@ -59,6 +59,15 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["projectPath"],
         "properties": {"projectPath": _PROJECT_PATH_PROPERTY},
     },
+    "vrcforge_preview_save_asset": {
+        "type": "object", "additionalProperties": False,
+        "required": ["projectPath", "assetPath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "assetPath": {"type": "string", "pattern": "^Assets/.+", "description": "Exact path of one existing asset already loaded in the selected Unity project."},
+        },
+        "description": "Preview saving one explicitly selected, existing dirty project asset. Does not save it. Use when a user explicitly asks to persist that exact asset; do not use for scenes, all assets, or implicit autosave.",
+    },
     "vrcforge_preview_unpack_prefab": {
         "type": "object", "additionalProperties": False,
         "required": ["projectPath", "gameObjectPath"],

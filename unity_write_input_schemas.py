@@ -297,6 +297,16 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "destinationScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$", "description": "Required only for save_as and must not exist."},
         },
     },
+    "vrcforge_save_asset": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "assetPath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "assetPath": {"type": "string", "pattern": "^Assets/.+", "description": "Exact path of one existing project asset. Only this asset is saved; unrelated dirty assets remain untouched."},
+        },
+        "description": "Explicitly save one existing dirty Unity project asset after preview and approval. Clean assets are a no-op. Does not save scenes or other dirty assets.",
+    },
     "vrcforge_scene_transition": {
         "type": "object",
         "additionalProperties": False,

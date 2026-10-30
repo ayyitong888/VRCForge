@@ -40,6 +40,28 @@ SCENE_EXECUTION_PLAN_TARGETS = frozenset(
     }
 )
 
+ASSET_SAVE_CORE_TOOL = "vrc_save_asset"
+
+
+def build_save_asset_core_arguments(params: dict[str, Any], *, preview: bool = False) -> dict[str, Any]:
+    """Build the exact one-asset Core request; project scope stays at the App boundary."""
+    asset_path = _text(params.get("assetPath") or params.get("asset_path"))
+    if not asset_path:
+        raise ValueError("assetPath is required and must name one existing project asset.")
+    return {"assetPath": asset_path, "preview": bool(preview)}
+
+
+def build_save_asset_wrapper_arguments(params: dict[str, Any]) -> dict[str, Any]:
+    """Build the approved static Core call without an extra preview round trip."""
+    request: dict[str, Any] = {
+        "toolName": ASSET_SAVE_CORE_TOOL,
+        "arguments": build_save_asset_core_arguments(params, preview=False),
+    }
+    for key in ("projectPath", "project_path", "projectRoot", "executionTarget"):
+        if key in params:
+            request[key] = params[key]
+    return request
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip()

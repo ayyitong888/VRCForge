@@ -488,6 +488,10 @@
     {
       "path": "Assets/VRCForge/Editor/Generic/UnityMaterialPropertyInspect.cs",
       "guid": "0f1a95b3b6f349a2b9ecb6d5a2f8c7e1"
+    },
+    {
+      "path": "Assets/VRCForge/Editor/Generic/UnityAssetSaveTool.cs",
+      "guid": "68d64e6bf1ea4b2c8fb2ff1d9a213f27"
     }
   ]
 }

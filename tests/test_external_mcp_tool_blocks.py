@@ -14,7 +14,7 @@ BASELINE_AST_SHA256 = {
     'EXTERNAL_MCP_TOOL_BLOCK_BRANCHES': '2ff86db4033cd36d6d68dae15a438cd9a280fd9a99485e36b93a2563aab42dd9',
     'EXTERNAL_MCP_TOOL_BLOCK_ROOTS': '1ce6ef051989a1d3394f7244594809cb0e5d2d3e42f2d4cc4218cacea4218eda',
     'EXTERNAL_MCP_TOOL_BLOCKS': '3aa389653eb4c2f04b76a8b206cd54039353ccb96c38704be9ad8caeff2ed915',
-    'EXTERNAL_MCP_READ_TOOL_BLOCKS': 'dd9643d707819deff10a5a854a1bbca3e0d5704af652237aba3c0e8305050007',
+    'EXTERNAL_MCP_READ_TOOL_BLOCKS': '67ff41356b82992ee1dcab14f0f3583b7658ae9e37b7f41b55d6e8bd3b107d4f',
     'EXTERNAL_MCP_WRITE_TOOL_BLOCKS': 'bd9bac78acd577411f4e70fd25c7ec151194d25b419a96ce93707f78a3743e4a',
 }
 
@@ -40,6 +40,8 @@ def test_tool_blocks_keep_one_definition_and_existing_exports() -> None:
                         isinstance(item, ast.Constant) and item.value in extensions)]
                     return self.generic_visit(current)
             node = _RemoveReviewedEditorExtensions().visit(node)
+        if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS":
+            assert "vrcforge_preview_save_asset" in external_mcp_tool_blocks.EXTERNAL_MCP_READ_TOOL_BLOCKS["project"]
         if name in {"EXTERNAL_MCP_READ_TOOL_BLOCKS", "EXTERNAL_MCP_WRITE_TOOL_BLOCKS"}:
             dialog_tool = "vrcforge_inspect_unity_editor_dialogs" if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS" else "vrcforge_handle_unity_editor_dialog"
             assert dialog_tool in getattr(external_mcp_tool_blocks, name)["project"]
@@ -62,6 +64,7 @@ def test_tool_blocks_keep_one_definition_and_existing_exports() -> None:
             # Reviewed relocation and typed chat repair are additive entries;
             # retain the immutable AST digest for every other membership.
             assert "vrcforge_repair_project_chat_store" in external_mcp_tool_blocks.EXTERNAL_MCP_WRITE_TOOL_BLOCKS["checkpoint"]
+            assert "vrcforge_save_asset" in external_mcp_tool_blocks.EXTERNAL_MCP_WRITE_TOOL_BLOCKS["project"]
             class _RemoveReviewedAdditions(ast.NodeTransformer):
                 def visit_Set(self, current):
                     current = self.generic_visit(current)
@@ -69,7 +72,7 @@ def test_tool_blocks_keep_one_definition_and_existing_exports() -> None:
                         item for item in current.elts
                         if not (
                             isinstance(item, ast.Constant)
-                            and item.value in {"vrcforge_relocate_generated_assets", "vrcforge_repair_project_chat_store"}
+                            and item.value in {"vrcforge_relocate_generated_assets", "vrcforge_repair_project_chat_store", "vrcforge_save_asset"}
                         )
                     ]
                     return current

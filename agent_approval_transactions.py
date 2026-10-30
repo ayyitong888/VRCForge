@@ -3073,8 +3073,11 @@ class AgentApprovalTransactionService:
         elif target_tool in {"vrcforge_manage_expression_menu", "vrcforge_set_renderer_material_slot"} and archive_files is not None:
             record["archiveScopeReason"] = "full_project_prepared_asset_scope_invalid"
 
-        if archive_files and dedicated_checkpoint_prepare is None and not record.get("archiveFiles"):
-            record.update(ok=False, blocking=True, status="failed", error="Exact checkpoint files changed after preparation.")
+        if archive_files and (dedicated_checkpoint_prepare is None or target_tool == "vrcforge_save_asset") and not record.get("archiveFiles"):
+            record.update(ok=False, blocking=True, status="failed", error=(
+                f"Cannot save the requested asset: its file or Unity .meta is missing or outside the project: {archive_files[0]}. Provide an existing Assets/... asset path."
+                if target_tool == "vrcforge_save_asset" else "Exact checkpoint files changed after preparation."
+            ))
             self._ports.checkpoint.append_checkpoint(record)
             return record
         if record.get("archiveFiles"):
