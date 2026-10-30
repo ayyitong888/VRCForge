@@ -1,4 +1,4 @@
-"""Credential detection must not splice opaque tool selectors into new values."""
+"""Local execution data must retain exact values; privacy redaction belongs to log export."""
 import json
 
 import pytest
@@ -40,25 +40,23 @@ def test_credential_shaped_fragment_inside_complete_identifier_is_preserved(frag
 
 @pytest.mark.parametrize("credential", (*KEY_FIXTURES, JWT_FIXTURE))
 @pytest.mark.parametrize("wrapper", ("{}", 'value="{}"', "({}), next", "凭据：{}；结束"))
-def test_standalone_credentials_still_redact(credential, wrapper):
+def test_local_observations_preserve_standalone_values(credential, wrapper):
     projected = sanitize_planner_observation_text(wrapper.format(credential), None)
-    assert credential not in projected
-    assert "<redacted>" in projected
+    assert projected == wrapper.format(credential)
 
 
 @pytest.mark.parametrize("field", ("api_key", "token", "authorization", "password", "secret"))
-def test_sensitive_field_semantics_override_opaque_identifier_shape(field):
+def test_local_field_names_do_not_rewrite_values(field):
     identifier = "opaque-random-hf_fixture123456-continuation"
     projected = _sanitize_complete_planner_value(redact_sensitive({"nested": [{field: identifier}]}))
-    assert projected == {"nested": [{field: "<redacted>"}]}
+    assert projected == {"nested": [{field: identifier}]}
 
 
-def test_explicit_bearer_and_secret_assignments_still_redact_complete_value():
+def test_local_bearer_and_assignment_text_remains_exact():
     identifier = "opaque-random-hf_fixture123456-continuation"
     for text in ("Bearer " + identifier, "api_key=" + identifier, "token=" + identifier):
         projected = sanitize_planner_observation_text(text, None)
-        assert identifier not in projected
-        assert "<redacted>" in projected
+        assert projected == text
 
 
 @pytest.mark.parametrize("native", (False, True))
@@ -78,15 +76,30 @@ def test_bind_target_reference_reaches_model_observation_unchanged(native):
     assert "<redacted>" not in observation
 
 
-def test_natural_language_observation_preserves_ref_and_redacts_adjacent_credential():
+def test_local_observation_preserves_ref_and_adjacent_field_value():
     reference = "opaque-random-hf_fixture123456-continuation"
     observation = service()._llm_loop_step_observation({
         "tool": "fixture_read", "status": "executed",
         "result": {"message": "Continue using " + reference + "; api_key=standalone-secret"},
     })
     assert reference in observation
-    assert "standalone-secret" not in observation
-    assert "<redacted>" in observation
+    assert "api_key=standalone-secret" in observation
+    assert "<redacted>" not in observation
+
+
+@pytest.mark.parametrize("native", (False, True))
+def test_internal_model_receives_executable_file_continuation_unchanged(native):
+    root = "C:/Users/Local Workspace/" + "long-folder/" * 14
+    arguments = {"projectPath": root, "path": "Assets/Data/fixture.txt",
+                 "textOffset": 80, "snapshotDigest": "fixture-snapshot"}
+    observation = service()._llm_loop_step_observation({
+        "tool": "vrcforge_read_text_file", "kind": "skill", "status": "executed",
+        "result": {"ok": True, "path": root + arguments["path"], "text": "source body",
+                   "hasMore": True, "nextRequest": {"tool": "vrcforge_read_text_file", "arguments": arguments}},
+    }, native_contract=native)
+    assert root in observation
+    assert arguments["path"] in observation
+    assert "source body" in observation
 
 
 @pytest.mark.parametrize("collection", ("rows", "mapping"))

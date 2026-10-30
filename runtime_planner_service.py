@@ -734,29 +734,6 @@ _PLANNER_TOOL_OBSERVATION_EXCLUDED_FIELDS = {
     "attachments",
 }
 
-_PLANNER_TOOL_OBSERVATION_SECRET_PATTERN = re.compile(
-    r"(?i)\b(api[_ -]?key|token|authorization|password|secret)\b\s*[:=]\s*[^\s,;]+"
-)
-
-_PLANNER_TOOL_OBSERVATION_BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/-]+")
-
-_PLANNER_TOOL_OBSERVATION_KNOWN_TOKEN_PATTERN = re.compile(
-    # Hyphens belong to opaque identifiers; a word boundary inside one is not
-    # a standalone credential boundary. Sensitive fields remain redacted above.
-    r"(?<![\w-])(?:(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|hf_|xox[baprs]-)[A-Za-z0-9_-]{4,}|"
-    r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})",
-    re.IGNORECASE,
-)
-
-_PLANNER_TOOL_OBSERVATION_JWT_PATTERN = re.compile(
-    r"(?<![\w-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
-)
-
-_PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w])(?:[a-z]:[\\/]|\\\\)[^\s,;]+", re.IGNORECASE)
-
-_PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN = re.compile(r"(?<![\w:])/(?:[^\s,;]+)")
-
-
 _PLANNER_NATIVE_TOOL_CALL_PATTERN = re.compile(
     r"\A\s*<tool_call>\s*<function=(?P<function>[A-Za-z0-9_.:-]{1,160})>"
     r"(?P<body>.*?)</function>\s*</tool_call>\s*\Z",
@@ -1255,47 +1232,11 @@ def planner_tool_usage_description(name: str, summary: str, *, write: bool) -> s
 
 def summarize_params(value: object) -> dict[str, object]:
     if isinstance(value, dict):
-        return {
-            str(key): summarize_value(key, item)
-            for key, item in value.items()
-            if str(key).lower()
-            not in {
-                "token",
-                "app_token",
-                "artifact_sig",
-                "artifact_signature",
-                "artifact_token",
-                "authorization",
-                "api_key",
-                "apikey",
-                "access_token",
-                "approval_token",
-                "refresh_token",
-                "secret",
-                "user_constraints",
-                "userconstraints",
-                "_vrcforge_user_constraints",
-            }
-        }
+        return {str(key): summarize_value(key, item) for key, item in value.items()}
     return {"value": summarize_value("value", value)}
 
+
 def summarize_value(key: object, value: object) -> object:
-    key_text = str(key).lower()
-    if key_text in {
-        "token",
-        "app_token",
-        "artifact_sig",
-        "artifact_signature",
-        "artifact_token",
-        "authorization",
-        "api_key",
-        "apikey",
-        "access_token",
-        "approval_token",
-        "refresh_token",
-        "secret",
-    }:
-        return "<redacted>"
     if isinstance(value, dict):
         return {"type": "object", "keys": sorted(str(item) for item in value.keys())[:20], "keyCount": len(value)}
     if isinstance(value, list):
@@ -1303,8 +1244,6 @@ def summarize_value(key: object, value: object) -> object:
     if isinstance(value, str):
         if len(value) > 140:
             return value[:137] + "..."
-        if "\\" in value or "/" in value:
-            return Path(value).name or "<path>"
         return value
     return value
 
@@ -1339,34 +1278,15 @@ def _planner_tool_observation_candidates(value: dict[object, object]) -> list[tu
     return ordered + counts
 
 def sanitize_planner_observation_text(value: object, limit: int | None = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS, *, preserve_whitespace: bool = False, preserve_urls: bool = False, preserve_paths: bool = False) -> str:
-    """Make a short, model-visible tool summary safe even when a tool mislabeled it.
-
-    This is intentionally stricter than UI/audit redaction: planning observations
-    must never disclose credential-like strings. Absolute filesystem locations
-    are redacted unless preserving the already-submitted execution receipt.
-    """
+    """Format local observations without redacting paths or executable values."""
     text = "" if value is None else str(value)
-    text = _PLANNER_TOOL_OBSERVATION_BEARER_PATTERN.sub("Bearer <redacted>", text)
-    text = _PLANNER_TOOL_OBSERVATION_SECRET_PATTERN.sub(r"\1=<redacted>", text)
-    text = _PLANNER_TOOL_OBSERVATION_KNOWN_TOKEN_PATTERN.sub("<redacted>", text)
-    text = _PLANNER_TOOL_OBSERVATION_JWT_PATTERN.sub("<redacted>", text)
-    if preserve_urls:
-        text = re.sub(r"(https?://)[^/\s]*@", r"\1", text, flags=re.IGNORECASE)
-    # Public web evidence contains URLs whose slash components are not local
-    # paths. Protect those spans only after credential redaction has run.
-    parts = re.split(r'(https?://[^\s<>"\']+)', text, flags=re.IGNORECASE) if preserve_urls else [text]
-    if not preserve_paths:
-        for index in range(0, len(parts), 2):
-            parts[index] = _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN.sub("<path redacted>", parts[index])
-            parts[index] = _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN.sub("<path redacted>", parts[index])
-    text = "".join(parts)
     if limit is None:
         return text if preserve_whitespace else " ".join(text.split())
     return text[:limit] if preserve_whitespace else summarize_text(text, limit)
 
 
 def _sanitize_complete_planner_value(value: object) -> object:
-    """Redact complete causal evidence before serializing, keeping valid JSON."""
+    """Serialize complete local causal evidence without rewriting its values."""
     if isinstance(value, tuple):
         value = redact_sensitive(list(value))
     if isinstance(value, dict):
@@ -1393,34 +1313,9 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
         original = str(value or "")
         return sanitize_planner_observation_text(original, None, preserve_whitespace=True, preserve_urls=web_evidence)
 
-    # Preserve the complete asset-relative identity without exposing the host
-    # prefix. This is a lexical locator relation, not proof of Avatar binding.
-    result_root = str(result.get("path") or "").replace("\\", "/").rstrip("/")
-    asset_segment = re.search(r"(^|/)Assets(?:/|$)", result_root)
-    asset_prefix = result_root[:asset_segment.start() + len(asset_segment.group(1))] if asset_segment else ""
-
     def source(value: object, root: object = "") -> str:
-        nonlocal omitted_chars
-        path = str(value or "").replace("\\", "/")
-        base = str(root or "").replace("\\", "/").rstrip("/")
-        if asset_segment and path.casefold().startswith(asset_prefix.casefold() + "assets"):
-            path = path[len(asset_prefix):]
-        elif base and path.casefold() == base.casefold():
-            path = "."
-        elif base and path.casefold().startswith(base.casefold() + "/"):
-            path = path[len(base) + 1:]
-        elif ntpath.isabs(path):
-            path = ntpath.basename(path)
-        # Paths are structured selectors, not prose: slash after punctuation is
-        # not an absolute path. Apply credential checks without path rewriting.
-        safe = _PLANNER_TOOL_OBSERVATION_BEARER_PATTERN.sub("Bearer <redacted>", path)
-        safe = _PLANNER_TOOL_OBSERVATION_SECRET_PATTERN.sub(r"\1=<redacted>", safe)
-        safe = _PLANNER_TOOL_OBSERVATION_KNOWN_TOKEN_PATTERN.sub("<redacted>", safe)
-        safe = _PLANNER_TOOL_OBSERVATION_JWT_PATTERN.sub("<redacted>", safe)
-        if safe != path:
-            omitted_chars += len(path)
-            return ""
-        return path
+        # A local path is an executable selector, not an export-safe label.
+        return str(value or "")
 
     def web_url(value: object) -> str:
         nonlocal omitted_chars
@@ -1736,20 +1631,8 @@ def planner_log_read_evidence(result: dict[str, object]) -> dict[str, object]:
 
 
 def redact_sensitive(value: object) -> object:
-    if isinstance(value, dict):
-        result: dict[str, object] = {}
-        for key, item in value.items():
-            lowered = str(key).lower()
-            if lowered in RECURSIVE_SENSITIVE_FIELDS:
-                result[str(key)] = "<redacted>"
-            elif lowered in {"arguments"} and isinstance(item, dict):
-                result[str(key)] = summarize_params(item)
-            else:
-                result[str(key)] = redact_sensitive(item)
-        return result
-    if isinstance(value, list):
-        return [redact_sensitive(item) for item in value]
-    return value
+    """Retain local planner data; log export owns privacy redaction."""
+    return deepcopy(value)
 
 
 def public_runtime_payload(value: object) -> object:

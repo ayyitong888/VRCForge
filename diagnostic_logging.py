@@ -177,7 +177,7 @@ def parse_log_line(line: str) -> dict[str, Any] | None:
 
 
 class DiagnosticLogManager:
-    """Thread-safe rotating text logger that redacts before every observable sink."""
+    """Thread-safe rotating local logger; support exports own redaction."""
 
     def __init__(
         self,
@@ -309,9 +309,9 @@ class DiagnosticLogManager:
             "maxFileBytes": self.max_file_bytes,
             "activeLogFile": active.name if active is not None else "",
             "redaction": {
-                "enabled": True,
-                "beforeDisk": True,
-                "stableAliases": True,
+                "enabled": False,
+                "beforeDisk": False,
+                "stableAliases": False,
                 "mappingExcludedFromBundles": True,
                 "mappingAvailable": mapping_available,
             },
@@ -362,11 +362,10 @@ class DiagnosticLogManager:
                     "message": str(message or "")[:32_768],
                     "data": entry_data,
                 }
-                safe_entry = self.privacy.redact(raw_entry, context=context)
+                safe_entry = raw_entry
                 if context and any(str(value or "").strip() for value in context.values()):
-                    safe_context = self.privacy.redact(context)
                     safe_data = safe_entry.get("data") if isinstance(safe_entry.get("data"), dict) else {}
-                    safe_entry["data"] = {**safe_data, "identityContext": safe_context}
+                    safe_entry["data"] = {**safe_data, "identityContext": dict(context)}
                 safe_entry["level"] = normalized_level
                 safe_entry["data"] = self._bounded_data(safe_entry.get("data"))
                 safe_entry = self._coalesce_error_locked(safe_entry, emitted_at)
@@ -379,7 +378,7 @@ class DiagnosticLogManager:
                 self._append_line_locked(line)
                 self.recent_entries.append(dict(safe_entry))
                 self._prune_recent_locked()
-            except Exception:  # noqa: BLE001 - never break product work or fall back to raw output.
+            except Exception:  # noqa: BLE001 - local logging must not break product work.
                 return None
             return dict(safe_entry)
 
@@ -633,7 +632,7 @@ class DiagnosticLogManager:
         for raw_line in lines:
             parsed = parse_log_line(raw_line.decode("utf-8", errors="replace"))
             if parsed is not None:
-                entries.append(self.privacy.redact(parsed))
+                entries.append(parsed)
         available = len(entries)
         actual_offset = max(0, available - bounded) if offset is None else offset
         if actual_offset < 0 or actual_offset > available:
@@ -669,8 +668,8 @@ class DiagnosticLogManager:
         lines: list[str] = []
         for entry in self.tail_entries(limit):
             try:
-                lines.append(format_log_line(self.privacy.redact(entry)))
-            except Exception:  # noqa: BLE001 - omit a line that cannot be safely re-redacted.
+                lines.append(format_log_line(entry))
+            except Exception:  # noqa: BLE001 - omit malformed local entries.
                 continue
         return lines
 

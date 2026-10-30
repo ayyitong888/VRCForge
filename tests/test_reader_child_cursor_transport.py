@@ -72,14 +72,17 @@ def test_redaction_twice_preserves_owner_model_child_cursor_and_source():
     assert values == [{"name": f"clip_{i}"} for i in range(1200)]
 
 
-def test_invalid_parent_does_not_preserve_nested_cursor_arguments():
+def test_local_transport_preserves_cursor_and_reader_rejects_forged_parent():
     step = _step({"controls": [{"fxCandidates": [{"name": "clip"}] * 1200}]})
     with bind_tool_result_context("session", "turn", "project", [step]):
         page = _page(step)
     page["items"][0]["nextRequest"]["arguments"]["resultRef"] = "result_" + "0" * 32
     transported = redact_sensitive(page)
     child = transported["items"][0]["childReferences"][0]
-    assert child["nextRequest"]["arguments"]["jsonPointer"] != child["jsonPointer"]
+    assert child["nextRequest"]["arguments"]["jsonPointer"] == child["jsonPointer"]
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        with pytest.raises((PermissionError, ValueError)):
+            read_tool_result(transported["items"][0]["nextRequest"]["arguments"], sanitize=sanitize)
 
 
 @pytest.mark.parametrize("field,value", [

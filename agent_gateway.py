@@ -53,7 +53,7 @@ from PIL import Image
 
 from agent_memory_store import AgentMemoryStore
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS, bind_memory_tool_context, safe_memory_record, requested_memory_tool
-from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, is_scan_tool, page_item_request_arguments, page_next_request_arguments, read_tool_result, result_continuation, retain_model_information
+from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, is_scan_tool, read_tool_result, result_continuation, retain_model_information
 from agent_scan_result_store import ScanResultStore
 from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
@@ -9654,7 +9654,7 @@ class AgentGateway:
         return False
 
     def append_audit(self, entry: dict[str, Any]) -> None:
-        safe_entry = redact_sensitive({
+        safe_entry = ({
             "timestamp": utc_now_iso(),
             **entry,
         })
@@ -9668,7 +9668,7 @@ class AgentGateway:
                     flush_and_fsync(log_file)
 
     def _append_jsonl(self, path: Path, schema: str, entry: dict[str, Any]) -> dict[str, Any]:
-        safe_entry = redact_sensitive(
+        safe_entry = (
             {
                 "schema": schema,
                 "id": f"evt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}",
@@ -11159,33 +11159,11 @@ def normalize_checkpoint_archive_dir(value: Any) -> str:
 
 def summarize_params(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
-        return {
-            str(key): summarize_value(key, item)
-            for key, item in value.items()
-            if str(key).lower() not in planner_policy.RECURSIVE_SENSITIVE_FIELDS
-        }
+        return {str(key): summarize_value(key, item) for key, item in value.items()}
     return {"value": summarize_value("value", value)}
 
 
 def summarize_value(key: Any, value: Any) -> Any:
-    key_text = str(key).lower()
-    if key_text in {
-        "token",
-        "app_token",
-        "artifact_sig",
-        "artifact_signature",
-        "artifact_token",
-        "authorization",
-        "api_key",
-        "apikey",
-        "access_token",
-        "approval_token",
-        "control_token",
-        "controltoken",
-        "refresh_token",
-        "secret",
-    }:
-        return "<redacted>"
     if isinstance(value, dict):
         return {"type": "object", "keys": sorted(str(item) for item in value.keys())[:20], "keyCount": len(value)}
     if isinstance(value, list):
@@ -11193,8 +11171,6 @@ def summarize_value(key: Any, value: Any) -> Any:
     if isinstance(value, str):
         if len(value) > 140:
             return value[:137] + "..."
-        if "\\" in value or "/" in value:
-            return Path(value).name or "<path>"
         return value
     return value
 
@@ -11209,160 +11185,26 @@ _RUNTIME_HOST_ONLY_RESULT_FIELDS = frozenset({"_generalallowedroots", "_nativere
 
 
 def redact_sensitive(value: Any) -> Any:
-    return _redact_tool_value(value, summarize_arguments=True, filter_host_fields=False)
+    """Preserve local audit and execution values; sanitize only log exports."""
+    return _redact_tool_value(value, filter_host_fields=False)
 
 
 def redact_runtime_tool_result(value: Any) -> Any:
-    """Secret-redact runtime results while preserving executable argument data."""
-    return _redact_tool_value(value, summarize_arguments=False, filter_host_fields=True)
+    """Keep executable data intact while omitting private host-only fields."""
+    return _redact_tool_value(value, filter_host_fields=True)
 
 
-def _redact_tool_value(value: Any, *, summarize_arguments: bool, filter_host_fields: bool) -> Any:
+def _redact_tool_value(value: Any, *, filter_host_fields: bool) -> Any:
     if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            lowered = str(key).lower()
-            if lowered == "_nativereadobservation":
-                continue
-            if filter_host_fields and lowered in _RUNTIME_HOST_ONLY_RESULT_FIELDS:
-                continue
-            if lowered in planner_policy.RECURSIVE_SENSITIVE_FIELDS:
-                result[str(key)] = "<redacted>"
-            elif summarize_arguments and lowered == "arguments" and isinstance(item, dict):
-                result[str(key)] = summarize_params(item)
-            else:
-                result[str(key)] = _redact_tool_value(
-                    item,
-                    summarize_arguments=summarize_arguments,
-                    filter_host_fields=filter_host_fields,
-                )
-        # Reader continuations are executable selectors, not diagnostic path
-        # summaries. Preserve only the validated four scalar argument fields.
-        reader_arguments = page_next_request_arguments(value)
-        if reader_arguments is not None:
-            result["nextRequest"]["arguments"] = {
-                key: _redact_tool_value(
-                    item,
-                    summarize_arguments=summarize_arguments,
-                    filter_host_fields=filter_host_fields,
-                )
-                for key, item in reader_arguments.items()
-            }
-        elif not summarize_arguments:
-            request = value.get("nextRequest")
-            arguments = request.get("arguments") if isinstance(request, dict) else None
-            if (
-                isinstance(request, dict)
-                and request.get("tool") == RESULT_READER_TOOL
-                and isinstance(arguments, dict)
-            ):
-                result["nextRequest"]["arguments"] = summarize_params(arguments)
-        if isinstance(value.get("items"), list):
-            for index, row in enumerate(value["items"]):
-                if not isinstance(row, dict):
-                    continue
-                arguments = page_item_request_arguments(value, row)
-                if arguments is not None:
-                    result["items"][index]["nextRequest"]["arguments"] = {
-                        key: _redact_tool_value(
-                            item,
-                            summarize_arguments=summarize_arguments,
-                            filter_host_fields=filter_host_fields,
-                        )
-                        for key, item in arguments.items()
-                    }
-                elif not summarize_arguments:
-                    request = row.get("nextRequest")
-                    request_arguments = request.get("arguments") if isinstance(request, dict) else None
-                    if (
-                        isinstance(request, dict)
-                        and request.get("tool") == RESULT_READER_TOOL
-                        and isinstance(request_arguments, dict)
-                    ):
-                        result["items"][index]["nextRequest"]["arguments"] = summarize_params(request_arguments)
-                children = row.get("childReferences")
-                if arguments is not None and isinstance(children, list):
-                    child_page = {
-                        **value,
-                        "items": children,
-                        "jsonPointer": row.get("jsonPointer"),
-                        "totalItems": 1,
-                    }
-                    for child_index, child in enumerate(children):
-                        if not isinstance(child, dict):
-                            continue
-                        arguments = page_item_request_arguments(child_page, child)
-                        if arguments is None:
-                            request = child.get("nextRequest")
-                            request_arguments = request.get("arguments") if isinstance(request, dict) else None
-                            if (
-                                not summarize_arguments
-                                and isinstance(request, dict)
-                                and request.get("tool") == RESULT_READER_TOOL
-                                and isinstance(request_arguments, dict)
-                            ):
-                                result["items"][index]["childReferences"][child_index]["nextRequest"]["arguments"] = summarize_params(request_arguments)
-                            continue
-                        result["items"][index]["childReferences"][child_index]["nextRequest"]["arguments"] = {
-                            key: _redact_tool_value(
-                                item,
-                                summarize_arguments=summarize_arguments,
-                                filter_host_fields=filter_host_fields,
-                            )
-                            for key, item in arguments.items()
-                        }
-        return result
+        return {
+            str(key): _redact_tool_value(item, filter_host_fields=filter_host_fields)
+            for key, item in value.items()
+            if str(key).lower() not in {"_nativereadobservation", "_nativeconversation"}
+            and not (filter_host_fields and str(key).lower() in _RUNTIME_HOST_ONLY_RESULT_FIELDS)
+        }
     if isinstance(value, list):
-        return [
-            _redact_tool_value(
-                item,
-                summarize_arguments=summarize_arguments,
-                filter_host_fields=filter_host_fields,
-            )
-            for item in value
-        ]
-    if isinstance(value, str):
-        return re.sub(
-            r"(?i)\bbearer\s+[a-z0-9._~+/-]+",
-            "Bearer <redacted>",
-            value,
-        )
+        return [_redact_tool_value(item, filter_host_fields=filter_host_fields) for item in value]
     return value
-
-
-_BACKGROUND_GOAL_SECRET_FIELDS = {
-    "token",
-    "app_token",
-    "artifact_sig",
-    "artifact_signature",
-    "artifact_token",
-    "authorization",
-    "api_key",
-    "apikey",
-    "access_token",
-    "approval_token",
-    "control_token",
-    "controltoken",
-    "refresh_token",
-    "secret",
-    "user_constraints",
-    "userconstraints",
-    "_vrcforge_user_constraints",
-}
-_BACKGROUND_GOAL_PATH_FIELDS = {
-    "cwd",
-    "directory",
-    "file",
-    "path",
-    "project_path",
-    "project_root",
-    "projectpath",
-    "projectroot",
-    "workspace_path",
-    "workspace_root",
-    "workspacepath",
-    "workspaceroot",
-}
 
 
 def redact_background_goal_persistence(value: Any, *, depth: int = 0) -> Any:

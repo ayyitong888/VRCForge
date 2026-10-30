@@ -63,7 +63,7 @@ def make_manager(
     return privacy, manager
 
 
-def test_read_history_selected_file_returns_redacted_entries_and_truncation(tmp_path: Path) -> None:
+def test_read_history_selected_file_returns_raw_entries_and_truncation(tmp_path: Path) -> None:
     _, manager = make_manager(tmp_path)
     path = tmp_path / "logs" / "vrcforge_2026-09-12_01-02-03_1.log"
     path.parent.mkdir(parents=True)
@@ -80,7 +80,7 @@ def test_read_history_selected_file_returns_redacted_entries_and_truncation(tmp_
     assert result["file"] == path.name
     assert result["truncated"] is True
     assert [entry["message"] for entry in result["logs"]] == ["second"]
-    assert full["logs"][0]["data"]["token"] != "secret-token"
+    assert full["logs"][0]["data"]["token"] == "secret-token"
 
 
 def test_read_history_bounds_an_unterminated_oversized_line(tmp_path: Path) -> None:
@@ -472,97 +472,31 @@ def test_file_size_limit_rotates_to_a_new_same_second_shard() -> None:
         assert all(len(path.read_text(encoding="utf-8").splitlines()) == 1 for path in files)
 
 
-def test_privacy_sentinels_and_quoted_and_unquoted_space_paths_never_reach_disk() -> None:
-    user = "Probe User"
-    project = windows_user_path(user, "My Private Project")
-    quoted_asset = project + chr(92) + "Assets" + chr(92) + "Avatar File.prefab"
-    unquoted_asset = project + chr(92) + "Library" + chr(92) + "Artifact Cache.bin"
-    blueprint = "avtr_TESTONLY_ABC123"
-    token = "TEST_ONLY_BEARER_123456"
-    api_secret = "TEST_ONLY_QUERY_SECRET_789"
-    basic_secret = "TEST_ONLY_BASIC_SECRET_246"
-    cookie_secret = "TEST_ONLY_COOKIE_SECRET_135"
-    quoted_secret = "TEST ONLY QUOTED SECRET 864"
-    client_secret = "TEST_ONLY_CLIENT_SECRET_975"
-    oauth_secret = "TEST_ONLY_OAUTH_SECRET_531"
-    credential_secret = "TEST_ONLY_CREDENTIAL_642"
-    private_key_secret = "TEST_ONLY_PRIVATE_KEY_753"
-    mac = "02:42:ac:11:00:02"
-    private_ip = "192.168.77.31"
-    link_local_ipv6 = "fe80::1234"
-    ula_ipv6 = "fc00::abcd"
+def test_local_log_disk_memory_and_history_preserve_original_paths_and_values() -> None:
+    project = windows_user_path("Probe User", "My Private Project")
+    source = project + chr(92) + "Assets" + chr(92) + "Long Asset " * 20 + ".prefab"
+    token = "TEST_ONLY_LOCAL_LOG_TOKEN"
+    payload = {"projectPath": project, "authorization": f"Bearer {token}", "detail": "detail " * 100,
+               "nextRequest": {"tool": "read", "arguments": {"projectPath": project,
+                   "path": source, "textOffset": 4000}}, "tokenCount": 37}
+    context = {"projectPath": project, "avatarName": "Probe Avatar"}
     with TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
-        _, manager = make_manager(root)
-        manager.update_config(log_level="trace")
-        manager.emit(
-            "error",
-            "privacy",
-            f'quoted "{quoted_asset}"; unquoted {unquoted_asset} failed badly',
-            {
-                "projectPath": project,
-                "avatarName": "Probe Avatar",
-                "blueprintId": blueprint,
-                "authorization": f"Bearer {token}",
-                "endpoint": (
-                    f"https://example.invalid/run?api_key={api_secret}&client_secret={client_secret}"
-                    f"&oauth_token={oauth_secret}&mode=test"
-                ),
-                "headers": (
-                    f"Authorization: Basic {basic_secret}==\n"
-                    f"Cookie: session={cookie_secret}; preference=private"
-                ),
-                "serialized": (
-                    "{'api_key': '" + quoted_secret + "'} "
-                    + '{"clientSecret":"' + client_secret + '"}'
-                ),
-                "clientSecret": client_secret,
-                "oauthToken": oauth_secret,
-                "credential": credential_secret,
-                "privateKey": private_key_secret,
-                "tokenCount": 37,
-                "untrustedMetrics": {"tokenCount": credential_secret},
-                "network": f"client={private_ip} ipv6={link_local_ipv6} ula={ula_ipv6} mac={mac}",
-                "exception": f"at {unquoted_asset}:42 token={token}",
-            },
-        )
-
-        content = "\n".join(path.read_text(encoding="utf-8") for path in (root / "logs").glob("*.log"))
-        mapping_content = (root / "config" / "diagnostic-identities.json").read_text(encoding="utf-8")
-        for sentinel in (
-            project,
-            quoted_asset,
-            unquoted_asset,
-            blueprint,
-            token,
-            api_secret,
-            basic_secret,
-            cookie_secret,
-            quoted_secret,
-            client_secret,
-            oauth_secret,
-            credential_secret,
-            private_key_secret,
-            mac,
-            private_ip,
-            link_local_ipv6,
-            ula_ipv6,
-        ):
-            assert sentinel not in content
-        assert "TEST_ONLY_SECRET_LEVEL" not in content
-        assert "prj_" in content
-        assert "avt_" in content
-        assert "path_" in content
-        assert "net_" in content
-        parsed = manager.tail_entries(1)[0]
-        assert parsed["data"]["tokenCount"] == 37
-        assert parsed["data"]["untrustedMetrics"]["tokenCount"] == "[REDACTED]"
-        # Generic paths may be retained only inside the private local mapping;
-        # their labels are generic and can never reflect swallowed tail text.
-        mapping = json.loads(mapping_content)
-        path_rows = [row for row in mapping["records"] if row["kind"] == "path"]
-        assert path_rows
-        assert all(row["label"] == "local path" for row in path_rows)
+        privacy, manager = make_manager(root)
+        with patch.object(privacy, "redact", side_effect=AssertionError("local logs must not redact")):
+            emitted = manager.emit("info", "runtime", f"Read {source}", payload, context=context)
+            assert emitted is not None
+            assert emitted["message"] == f"Read {source}"
+            assert emitted["data"] == {**payload, "identityContext": context}
+            assert manager.recent_snapshot()[-1]["data"] == emitted["data"]
+            assert manager.tail_entries(1)[0]["data"] == emitted["data"]
+            assert manager.read_history(manager.active_path.name)["logs"][0]["data"] == emitted["data"]
+            assert parse_log_line(manager.tail_lines(1)[0])["data"] == emitted["data"]
+        disk = parse_log_line(manager.active_path.read_text(encoding="utf-8").strip())
+        assert disk["data"] == emitted["data"]
+        assert manager.status()["redaction"]["beforeDisk"] is False
+        assert dashboard_server.summarize_debug_payload(payload) == payload
+        assert not (root / "config" / "diagnostic-identities.json").exists()
 
 
 def test_aliases_are_stable_per_install_context_separated_and_summaries_are_safe() -> None:
@@ -651,7 +585,7 @@ def test_drive_project_uses_os_user_fallback_and_multiple_projects_do_not_collap
         assert project_b not in serialized
 
 
-def test_ordinary_log_carries_only_safe_identity_context_aliases() -> None:
+def test_ordinary_log_preserves_identity_context_and_encoded_diagnostics() -> None:
     windows_user = "Context Probe"
     project = windows_user_path(windows_user, "Unity Projects", "Mapped Project")
     context = {
@@ -679,20 +613,12 @@ def test_ordinary_log_carries_only_safe_identity_context_aliases() -> None:
         )
         assert entry is not None
         identity = entry["data"]["identityContext"]
-        assert identity["projectPath"].startswith("prj_")
-        assert identity["avatarPath"].startswith("avt_")
-        assert identity["avatarName"] == identity["avatarPath"]
-        serialized = json.dumps(entry, ensure_ascii=False)
-        assert "usr_" in entry["message"]
-        assert "prj_" in entry["message"]
-        assert "avt_" in entry["message"]
-        assert project not in serialized
-        assert windows_user not in serialized
-        assert "Mapped Project" not in serialized
-        assert "Mapped Avatar" not in serialized
-        assert encoded_project not in serialized
-        assert encoded_blueprint not in serialized
-        assert encoded_secret not in serialized
+        assert identity == context
+        assert entry["message"] == f"{windows_user} opened Mapped Project with Mapped Avatar"
+        detail = entry["data"]["thirdPartyError"]
+        assert encoded_project in detail
+        assert encoded_blueprint in detail
+        assert encoded_secret in detail
 
 
 def test_identity_mapping_prunes_after_five_days() -> None:
@@ -857,29 +783,22 @@ def test_redaction_is_idempotent_and_tail_does_not_expand_identity_mapping() -> 
         after = json.loads(mapping_path.read_text(encoding="utf-8"))["records"]
         assert len(after) == len(before)
         assert {row["alias"] for row in after} == {row["alias"] for row in before}
-        assert entry["data"]["projectPath"] in lines[0]
+        assert parse_log_line(lines[0])["data"]["projectPath"] == entry["data"]["projectPath"]
 
 
-def test_logging_io_and_privacy_failures_drop_safely_without_breaking_stream_or_writing_raw() -> None:
-    sentinel = "TEST_ONLY_MUST_NOT_REACH_DISK_123"
+def test_local_logging_ignores_export_privacy_failure_and_survives_disk_failure() -> None:
+    sentinel = "TEST_ONLY_LOCAL_LOG_VALUE"
     with TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
         privacy, manager = make_manager(root)
-        with patch.object(privacy, "redact", side_effect=OSError("private map unavailable")):
-            assert manager.emit("error", "failure", sentinel, {"token": sentinel}) is None
-        assert not list((root / "logs").glob("*.log")) if (root / "logs").exists() else True
-        assert manager.recent_snapshot() == []
-
+        with patch.object(privacy, "redact", side_effect=OSError("export mapping unavailable")):
+            assert manager.emit("error", "failure", sentinel, {"token": sentinel}) is not None
+        before = manager.active_path.read_text(encoding="utf-8")
+        assert sentinel in before
         with patch.object(manager, "_append_line_locked", side_effect=OSError("disk full")):
-            assert manager.emit("error", "failure", "safe event", {"token": sentinel}) is None
-        disk_content = "\n".join(
-            path.read_text(encoding="utf-8", errors="replace")
-            for path in root.rglob("*")
-            if path.is_file() and path.name != "diagnostic-alias.key"
-        )
-        assert sentinel not in disk_content
-        assert manager.recent_snapshot() == []
-
+            assert manager.emit("error", "failure", "second event", {"token": sentinel}) is None
+        assert manager.active_path.read_text(encoding="utf-8") == before
+        assert len(manager.recent_snapshot()) == 1
         stream = DiagnosticTextStream(manager, level="error", scope="backend.stderr")
         with patch.object(manager, "emit", side_effect=OSError("unexpected logger error")):
             assert stream.write(sentinel + "\n") == len(sentinel) + 1
@@ -1350,8 +1269,14 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
             for row in json.loads(privacy.mapping_path.read_text(encoding="utf-8"))["records"]
             if row["kind"] in {"project", "avatar"}
         }
+        local_logs_before = {
+            path: path.read_bytes() for path in (root / "logs").glob("vrcforge_*.log")
+        }
+        assert project in manager.tail_entries(2)[0]["data"]["projectPath"]
+        assert secret in manager.tail_entries(2)[1]["data"]["query"]["api_key"]
         support_dir = root / "support"
         with (
+            patch.object(dashboard_server, "emit_log"),
             patch.object(dashboard_server, "DIAGNOSTIC_PRIVACY", privacy),
             patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager),
             patch.object(dashboard_server, "SUPPORT_BUNDLE_DIR", support_dir),
@@ -1395,6 +1320,7 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
             )
 
         assert result["redacted"] is True
+        assert {path: path.read_bytes() for path in local_logs_before} == local_logs_before
         bundle_path = Path(result["bundlePath"])
         with zipfile.ZipFile(bundle_path) as bundle:
             names = set(bundle.namelist())
@@ -1486,7 +1412,7 @@ def test_recent_unity_error_reads_new_text_parser_and_safe_memory() -> None:
             result = dashboard_server.recent_unity_mcp_execution_error()
         assert result["level"] == "error"
         assert "disconnected while awaiting command_result" in result["message"]
-        assert "prj_" in json.dumps(result)
+        assert result["detail"]["projectPath"] == windows_user_path("ProbeUser", "Project")
 
 
 def test_developer_challenge_rest_contract_uses_no_body_delete_and_server_guard() -> None:
@@ -1575,8 +1501,8 @@ def test_developer_challenge_rest_contract_uses_no_body_delete_and_server_guard(
             path.read_text(encoding="utf-8") for path in (Path(temp_dir) / "logs").glob("vrcforge_*.log")
         )
         assert issued_ids
-        assert all(challenge_id not in log_content for challenge_id in issued_ids)
-        assert "/developer-challenge/[REDACTED]" in log_content
+        assert issued_ids[-1] in log_content
+        assert "/developer-challenge/[REDACTED]" not in log_content
 
     routes = {
         (route.path, method)

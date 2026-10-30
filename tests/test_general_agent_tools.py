@@ -82,12 +82,11 @@ def test_search_text_accepts_exact_authorized_file_without_expanding_scope(tmp_p
         search_text(sibling, "EVIDENCE_TAIL", allowed_roots=[target])
 
 
-def test_search_exact_file_retains_bounds_redaction_and_pattern(tmp_path: Path) -> None:
+def test_search_exact_file_retains_source_text_bounds_and_pattern(tmp_path: Path) -> None:
     target = tmp_path / "fixture.txt"
     target.write_text("api_key = fixture-secret\nneedle\nneedle\n", encoding="utf-8")
     result = search_text(target, "api_key", allowed_roots=[target])
-    assert "fixture-secret" not in str(result)
-    assert "[REDACTED]" in result["matches"][0]["text"]
+    assert result["matches"][0]["text"] == "api_key = fixture-secret"
     assert search_text(target, "needle", allowed_roots=[target], max_count=1)["truncated"] is True
     bounded = search_text(target, "needle", allowed_roots=[target], max_file_bytes=4)
     assert bounded["matches"] == [] and bounded["skipped_binary"] == 0
@@ -126,18 +125,17 @@ def test_tools_reject_unscoped_paths_symlinks_sensitive_files_and_excessive_limi
         list_directory(link, allowed_roots=[allowed])
 
 
-def test_explicit_message_path_scope_and_content_redaction(tmp_path: Path) -> None:
+def test_explicit_message_path_scope_preserves_local_source_content(tmp_path: Path) -> None:
     target = tmp_path / "target directory"
     target.mkdir()
     config = target / "ordinary-config.txt"
-    config.write_text('api_key = "secret-value"\nmode = safe\n', encoding="utf-8")
+    config.write_bytes('api_key = "secret-value"\nmode = safe\n'.encode("utf-8"))
 
     roots = extract_explicit_local_roots(f"请检查{target}是怎么工作的")
     assert roots == [str(target.resolve())]
     payload = read_text_file(config, allowed_roots=roots)
-    assert payload["redacted"] is True
-    assert "secret-value" not in payload["text"]
-    assert "[REDACTED]" in payload["text"]
+    assert payload["redacted"] is False
+    assert payload["text"] == 'api_key = "secret-value"\nmode = safe\n'
 
 
 def test_relative_paths_resolve_against_single_authorized_root(tmp_path: Path) -> None:

@@ -1,12 +1,10 @@
 """Request-owned, read-only UTF-8 source paging; no retained files or global store.
 
-Paged input uses conservative streaming credential recognition. Ambiguous long
-credential headers and unterminated private keys fail before any page is returned.
-This is not an atomic filesystem snapshot or an exact malformed-regex emulator.
+Source text is returned unchanged. Privacy redaction belongs to log export.
+The existing snapshot rejects source changes between page reads.
 """
 from __future__ import annotations
 
-from collections import deque
 import codecs
 import hashlib
 import json
@@ -17,9 +15,6 @@ from typing import BinaryIO, Iterator
 
 
 CHUNK_BYTES = 16_384
-PREFIX_LIMIT = 256
-_KEY = re.compile(r"(?i)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization)\b")
-_BEARER_CHAR = re.compile(r"[A-Za-z0-9._~+/=-]", re.IGNORECASE)
 _LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
 
@@ -37,115 +32,6 @@ def _decoded_chars(handle: BinaryIO, digest) -> Iterator[str]:
         yield from decoder.decode(b"", final=True)
     except UnicodeDecodeError as exc:
         raise ValueError("file is not complete valid UTF-8") from exc
-
-
-class _Characters:
-    def __init__(self, chars: Iterator[str]):
-        self.chars, self.buffer = chars, deque()
-
-    def peek(self, count: int = 1) -> str:
-        while len(self.buffer) < count:
-            value = next(self.chars, None)
-            if value is None:
-                break
-            self.buffer.append(value)
-        if count == 1:
-            return self.buffer[0] if self.buffer else ""
-        return "".join(self.buffer)[:count]
-
-    def take(self, count: int = 1) -> str:
-        self.peek(count)
-        return "".join(self.buffer.popleft() for _ in range(min(count, len(self.buffer))))
-
-
-def _pem_header(chars: _Characters, prefix: str) -> tuple[str, bool]:
-    header = chars.take(len(prefix))
-    while chars.peek() and chars.peek() not in "-\r\n":
-        if len(header) >= PREFIX_LIMIT:
-            raise ValueError("sensitive PEM header exceeds safe recognition prefix")
-        header += chars.take()
-    if chars.peek(5) == "-----":
-        header += chars.take(5)
-    return header, re.search(r"PRIVATE KEY-----\Z", header, re.IGNORECASE) is not None
-
-
-def _safe_chars(chars: _Characters, state: dict, *, preserve_lines: bool) -> Iterator[str]:
-    previous = ""
-    while current := chars.peek():
-        boundary = not (previous.isalnum() or previous == "_")
-        if current == "-" and re.fullmatch(r"-----BEGIN ", chars.peek(11), re.IGNORECASE):
-            header, private = _pem_header(chars, "-----BEGIN ")
-            if not private:
-                if _KEY.search(header) or re.search(r"(?i)\bBearer\s", header):
-                    raise ValueError("ambiguous sensitive PEM header")
-                yield from header
-                previous = header[-1:]
-                continue
-            state["redacted"] = True
-            yield from "[REDACTED PRIVATE KEY]"
-            while True:
-                if not chars.peek():
-                    raise ValueError("unterminated private key block")
-                if chars.peek() == "-" and re.fullmatch(r"-----END ", chars.peek(9), re.IGNORECASE):
-                    ending, closed = _pem_header(chars, "-----END ")
-                    if closed:
-                        break
-                    if preserve_lines:
-                        yield from (value for value in ending if value in _LINE_BREAKS)
-                else:
-                    value = chars.take()
-                    if preserve_lines and value in _LINE_BREAKS:
-                        yield value
-            previous = "-"
-            continue
-        key = _KEY.match(chars.peek(20)) if boundary and current.casefold() in "aprs" else None
-        if key:
-            # Prefix/whitespace is public in the old projection, so emit it as
-            # it arrives rather than retaining an unbounded whitespace run.
-            yield from chars.take(key.end())
-            while chars.peek() and chars.peek().isspace():
-                yield chars.take()
-            if chars.peek() not in {"=", ":"}:
-                previous = " "
-                continue
-            yield chars.take()
-            while chars.peek() and chars.peek().isspace():
-                yield chars.take()
-            if chars.peek() in {"'", '"'}:
-                yield chars.take()
-            if chars.peek() and chars.peek() not in "\r\n\"'":
-                state["redacted"] = True
-                yield from "[REDACTED]"
-                while chars.peek() and chars.peek() not in "\r\n\"'":
-                    if chars.peek() == "-" and re.fullmatch(r"-----BEGIN ", chars.peek(11), re.IGNORECASE):
-                        raise ValueError("ambiguous private key inside credential assignment")
-                    chars.take()
-                if chars.peek() in {"'", '"'}:
-                    yield chars.take()
-            previous = " "
-            continue
-        if boundary and current.casefold() == "b" and chars.peek(6).casefold() == "bearer":
-            prefix = chars.take(6)
-            while chars.peek() and chars.peek().isspace():
-                if len(prefix) >= PREFIX_LIMIT:
-                    raise ValueError("sensitive Bearer prefix exceeds safe recognition bound")
-                prefix += chars.take()
-            if len(prefix) > 6 and len(chars.peek(8)) == 8 and all(_BEARER_CHAR.fullmatch(c) for c in chars.peek(8)):
-                state["redacted"] = True
-                yield from "Bearer [REDACTED]"
-                if preserve_lines:
-                    yield from (value for value in prefix if value in _LINE_BREAKS)
-                while chars.peek() and _BEARER_CHAR.fullmatch(chars.peek()):
-                    if chars.peek() == "-" and re.fullmatch(r"-----BEGIN ", chars.peek(11), re.IGNORECASE):
-                        raise ValueError("ambiguous private key inside Bearer credential")
-                    chars.take()
-                previous = " "
-            else:
-                yield from prefix
-                previous = prefix[-1:]
-            continue
-        previous = chars.take()
-        yield previous
 
 
 def _identity(stat) -> tuple[int, ...]:
@@ -170,7 +56,6 @@ def read_source_page(path: Path, *, text_offset: int, page_chars: int,
         raise ValueError("startLine/endLine must be positive inclusive line numbers")
     selected_lines = start_line is not None or end_line is not None
     digest = hashlib.sha256()
-    state = {"redacted": False}
     page, total = [], 0
     line, previous_cr, last_break, saw_char = 1, False, False, False
     before_path = path.stat()
@@ -180,7 +65,7 @@ def read_source_page(path: Path, *, text_offset: int, page_chars: int,
         before = os.fstat(handle.fileno())
         if _identity(before) != _identity(before_path):
             raise ValueError("file changed before source scan")
-        chars = _safe_chars(_Characters(_decoded_chars(handle, digest)), state, preserve_lines=selected_lines)
+        chars = _decoded_chars(handle, digest)
         for char in chars:
             saw_char = True
             char_line = line - 1 if previous_cr and char == "\n" else line
@@ -205,12 +90,12 @@ def read_source_page(path: Path, *, text_offset: int, page_chars: int,
     if selected_lines and start > line_count:
         raise ValueError("startLine exceeds the file's line count")
     digest.update(json.dumps({"path": str(path), "startLine": start_line, "endLine": end_line,
-                              "projection": "credential-stream-v1"}, sort_keys=True).encode())
+                              "projection": "utf8-source-v1"}, sort_keys=True).encode())
     snapshot = digest.hexdigest()
     if snapshot_digest is not None and snapshot_digest != snapshot:
         raise ValueError("file snapshot changed; restart pagination at text_offset 0")
     more = text_offset + len(page) < total
-    return {"path": str(path), "text": "".join(page), "bytes": before.st_size, **state,
+    return {"path": str(path), "text": "".join(page), "bytes": before.st_size, "redacted": False,
             "textOffset": text_offset, "nextTextOffset": text_offset + len(page) if more else None,
             "hasMore": more, "totalChars": total, "snapshotDigest": snapshot, "truncated": more,
             **({"startLine": start, "endLine": min(end_line or line_count, line_count)} if selected_lines else {})}

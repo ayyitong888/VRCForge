@@ -169,14 +169,6 @@ _SENSITIVE_NAMES = {
     "id_rsa",
 }
 _SAFE_ENV_SUFFIXES = {".example", ".sample", ".template"}
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?im)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization)\b\s*[=:]\s*)([\"']?)([^\r\n\"']+)([\"']?)"
-)
-_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
-_PRIVATE_KEY = re.compile(
-    r"-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----",
-    re.IGNORECASE,
-)
 _WINDOWS_PATH_START = re.compile(r"(?i)[a-z]:[\\/]")
 
 
@@ -283,26 +275,6 @@ def _sensitive_file(path: Path) -> bool:
     if lowered.startswith(".env.") and not any(lowered.endswith(suffix) for suffix in _SAFE_ENV_SUFFIXES):
         return True
     return False
-
-
-def _redact_sensitive_text(text: str, *, preserve_lines: bool = False) -> tuple[str, bool]:
-    redacted = False
-
-    def assignment(match: re.Match[str]) -> str:
-        nonlocal redacted
-        redacted = True
-        return f"{match.group(1)}{match.group(2)}[REDACTED]{match.group(4)}"
-
-    text = _SECRET_ASSIGNMENT.sub(assignment, text)
-    updated = _BEARER.sub("Bearer [REDACTED]", text)
-    redacted = redacted or updated != text
-    text = updated
-    updated = _PRIVATE_KEY.sub(
-        lambda match: "[REDACTED PRIVATE KEY]" + (
-            "".join(re.findall(r"\r\n|\r|\n", match.group(0))) if preserve_lines else ""
-        ), text)
-    redacted = redacted or updated != text
-    return updated, redacted
 
 
 def extract_explicit_local_roots(message: object, *, max_roots: int = 8) -> list[str]:
@@ -511,7 +483,6 @@ def read_text_file(
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(f"binary file rejected: {file_path}") from exc
-    text, redacted = _redact_sensitive_text(text, preserve_lines=start_line is not None or end_line is not None)
     line_range: dict[str, int] = {}
     if start_line is not None or end_line is not None:
         start = 1 if start_line is None else start_line
@@ -524,7 +495,7 @@ def read_text_file(
         end = min(len(lines), end_line if end_line is not None else len(lines))
         text = "".join(lines[start - 1:end])
         line_range = {"startLine": start, "endLine": end}
-    return {"path": str(file_path), "text": text, "truncated": False, "bytes": len(data), "redacted": redacted, **line_range}
+    return {"path": str(file_path), "text": text, "truncated": False, "bytes": len(data), "redacted": False, **line_range}
 
 
 def _iter_files(root: Path, max_depth: int) -> Iterator[Path]:

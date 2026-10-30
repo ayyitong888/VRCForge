@@ -7036,7 +7036,7 @@ def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, A
         }
     if config_path:
         action.setdefault("configPath", config_path)
-    action_diagnostics = redact_support_payload({key: action[key] for key in ("error", "suggestion") if key in action})
+    action_diagnostics = redact_sensitive({key: action[key] for key in ("error", "suggestion") if key in action})
     action = {**CONNECTOR_ACTION_STATUS.record(str(AGENT_GATEWAY.config_path), project_path, action), **action_diagnostics}
     emit_log(
         "success" if action.get("ok") else "warn",
@@ -7074,7 +7074,7 @@ def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str,
         }
     if config_path:
         action.setdefault("configPath", config_path)
-    action_diagnostics = redact_support_payload({key: action[key] for key in ("error", "suggestion") if key in action})
+    action_diagnostics = redact_sensitive({key: action[key] for key in ("error", "suggestion") if key in action})
     action = {**CONNECTOR_ACTION_STATUS.record(str(AGENT_GATEWAY.config_path), project_path, action), **action_diagnostics}
     emit_log(
         "success" if action.get("ok") else "warn",
@@ -7929,15 +7929,7 @@ def debug_logging_enabled() -> bool:
 
 
 def summarize_debug_payload(value: Any) -> Any:
-    value = DIAGNOSTIC_PRIVACY.redact(value, context=current_diagnostic_identity_context())
-    if isinstance(value, dict):
-        return {str(key): summarize_debug_payload(item) for key, item in list(value.items())[:40]}
-    if isinstance(value, list):
-        return {"type": "list", "count": len(value), "items": [summarize_debug_payload(item) for item in value[:5]]}
-    if isinstance(value, str):
-        if _looks_like_local_path(value):
-            return _redact_local_path(value)
-        return value[:500] + ("..." if len(value) > 500 else "")
+    """Keep local diagnostic input intact; support exports redact their copy."""
     return value
 
 
@@ -8124,7 +8116,8 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
             "includesScreenshots": False,
             "includesPaidAssetContents": False,
             "includesFullPaths": False,
-            "redactsBeforeDisk": True,
+            "redactsBeforeDisk": False,
+            "redactsOnExport": True,
             "includesIdentityMapping": False,
         },
     }
@@ -23991,7 +23984,7 @@ def build_test_readiness_sync(params: dict[str, Any]) -> dict[str, Any]:
         "checks": checks,
         "validationSummary": validation.get("summary"),
         "validationSections": validation.get("sections"),
-        "packageDiagnostics": redact_support_payload(package_diagnostics),
+        "packageDiagnostics": redact_sensitive(package_diagnostics),
         "suggestedFixPlans": _build_test_fix_suggestions(validation, package_diagnostics),
         "rules": {
             "readOnly": True,
@@ -24302,7 +24295,7 @@ def configure_optimizer_component_sync(params: dict[str, Any]) -> dict[str, Any]
             if "newValue" not in result:
                 raise RuntimeError(f"Optimizer Core write omitted readback value: {property_path}")
             written_values[property_path] = copy.deepcopy(result["newValue"])
-        steps.append({"id": f"core_{index}", "tool": tool_name, "status": "done", "result": redact_support_payload(result)})
+        steps.append({"id": f"core_{index}", "tool": tool_name, "status": "done", "result": redact_sensitive(result)})
         if tool_name == "vrc_add_component":
             added_present, added_index, _added_component, _added_components = _optimizer_component_snapshot(
                 project_path, target_path, component_type,
@@ -28863,7 +28856,7 @@ PACKAGE_INSTALL_WORKFLOWS = PackageInstallWorkflowService(
         optimizer_dependencies=OPTIMIZER_DEPENDENCIES,
         summarize_debug=summarize_debug_payload,
         read_compile_errors=read_agent_compile_errors,
-        redact_support=redact_support_payload,
+        redact_support=redact_sensitive,
         create_apply_request=AGENT_GATEWAY.approval_transactions.create_apply_request,
     )
 )

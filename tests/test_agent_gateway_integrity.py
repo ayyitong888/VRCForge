@@ -843,7 +843,7 @@ def test_external_read_exception_preserves_raw_core_result_and_cause_chain(tmp_p
     } in result["outcome"]["causeChain"]
 
 
-def test_external_read_structured_content_recursively_redacts_causal_secrets(
+def test_external_local_read_preserves_exact_causal_values(
     tmp_path: Path,
 ) -> None:
     gateway = _external_gateway(tmp_path)
@@ -893,7 +893,7 @@ def test_external_read_structured_content_recursively_redacts_causal_secrets(
         "gateway-authorization-sentinel",
         "gateway-free-bearer-sentinel",
     ):
-        assert sentinel not in serialized
+        assert sentinel in serialized
     visible_cause = result["result"]["failureCause"]
     assert visible_cause["code"] == "precise_domain_rejection"
     assert visible_cause["message"] == "The exact non-sensitive cause remains visible."
@@ -906,8 +906,8 @@ def test_external_read_structured_content_recursively_redacts_causal_secrets(
         "token",
         "authorization",
     ):
-        assert visible_cause[key] == "<redacted>"
-    assert visible_cause["transportTrace"] == "Bearer <redacted>"
+        assert visible_cause[key] == raw_result["failureCause"][key]
+    assert visible_cause["transportTrace"] == raw_result["failureCause"]["transportTrace"]
 
 
 def test_external_catalogue_shares_only_explicit_unity_tools_and_blocks(tmp_path: Path) -> None:

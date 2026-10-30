@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -125,3 +126,39 @@ def test_external_mcp_dispatches_each_general_read_handler(tmp_path: Path) -> No
     assert listed["result"]["entries"][0]["name"] == "note.txt"
     assert found["result"]["files"][0]["name"] == "note.txt"
     assert searched["result"]["matches"][0]["text"] == "needle"
+
+
+def test_external_file_continuation_is_executable_without_rebuilding_paths(tmp_path):
+    gateway = _gateway(tmp_path)
+    root = tmp_path / "source workspace"
+    folder = root / ("nested_" + "a" * 80) / ("nested_" + "b" * 80)
+    folder.mkdir(parents=True)
+    target = folder / "read fixture.txt"
+    original = "source path C:/Local/Avatar/Materials/Face.mat\nvalue=opaque-token-fixture\n" * 4
+    target.write_text(original, encoding="utf-8", newline="")
+    args = {"projectPath": str(root.resolve()), "path": str(target.relative_to(root)),
+            "maxBytes": 64, "pageChars": 80}
+    parts = []
+    for _ in range(30):
+        result = gateway.call_external_mcp_tool("vrcforge_read_text_file", args)
+        assert result["ok"] is True
+        body = result["result"]
+        parts.append(body["text"])
+        if not body["hasMore"]:
+            break
+        args = body["nextRequest"]["arguments"]
+        assert args["projectPath"] == str(root.resolve())
+        assert args["path"] == str(target.relative_to(root))
+    else:
+        raise AssertionError("Original-source pagination did not complete")
+    assert "".join(parts) == original
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_local_gateway_audit_preserves_arguments_and_values(tmp_path):
+    gateway = _gateway(tmp_path)
+    original = {"projectPath": str(tmp_path.resolve()), "path": "Assets/" + "nested/" * 30 + "read.txt",
+                "token": "local-fixture-value", "items": [{"field": "unchanged"}]}
+    gateway.append_audit({"event": "local-original-values", "arguments": original})
+    row = json.loads(gateway.audit_log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["arguments"] == original
