@@ -1522,8 +1522,6 @@ namespace VRCForge.Editor
                 var target = ResolveMenu(root, normalizedMenuPath, create: action == "create", assetDir: assetDir, plannedMenuPaths: plannedMenuPaths);
                 Undo.RegisterCompleteObjectUndo(target, "Manage expression menu");
                 Apply(action, target, @params, assetDir, plannedMenuPaths);
-                EditorUtility.SetDirty(target);
-                EditorUtility.SetDirty(root);
                 var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, actualPlanAssetPaths, target);
                 var rootAssetPath = AssetDatabase.GetAssetPath(root);
                 AssetDatabase.ImportAsset(rootAssetPath, ImportAssetOptions.ForceSynchronousImport);
@@ -1675,7 +1673,6 @@ namespace VRCForge.Editor
                 AssetDatabase.CreateAsset(sub, subPath);
                 Undo.RegisterCreatedObjectUndo(sub, "Create submenu");
                 current.controls.Add(new VRCExpressionsMenu.Control { name = part, type = VRCExpressionsMenu.Control.ControlType.SubMenu, subMenu = sub });
-                EditorUtility.SetDirty(current);
                 current = sub;
             }
             return current;

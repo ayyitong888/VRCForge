@@ -33,13 +33,13 @@ namespace UnityEditor.SceneManagement {public static class EditorSceneManager {
 }}
 class VRCAvatarDescriptor {public string name="Avatar";public UnityEngine.GameObject gameObject;public UnityEngine.Transform transform;public VRCExpressionsMenu expressionsMenu;public UnityEngine.Object expressionParameters;}
 class VRCExpressionsMenu:UnityEngine.Object {public List<Control> controls=new List<Control>();public class Control{public enum ControlType{Toggle,SubMenu} public string name;public ControlType type;public VRCExpressionsMenu subMenu;}}
-static class AvatarPrimitiveCrudCore {public static string GetTransformPath(UnityEngine.Transform t)=>t.path;public static string NormalizePath(string p)=>p;}
+static class AvatarPrimitiveCrudCore {public static string GetTransformPath(UnityEngine.Transform t)=>t.path;public static string NormalizePath(string p)=>p;public static void EnsureAssetFolder(string p){}}
 static class AvatarAuthoringCrudCore {public static string GetTransformPath(UnityEngine.Transform t)=>t.path;}
 class GlobalObjectId {public ulong targetObjectId=1;public static GlobalObjectId GetGlobalObjectIdSlow(object o)=>new GlobalObjectId();}
-static class Undo {public static void FlushUndoRecordObjects(){}}
+static class Undo {public static void FlushUndoRecordObjects(){}public static void RegisterCompleteObjectUndo(object a,string s){}public static void RegisterCreatedObjectUndo(object a,string s){}}
 [Flags] enum ImportAssetOptions{ForceSynchronousImport=1,ForceUpdate=2}
 static class EditorUtility {public static void SetDirty(UnityEngine.Object a){a.dirty=true;}public static bool IsDirty(UnityEngine.Object a)=>a.dirty;}
-static class EditorJsonUtility {public static string ToJson(UnityEngine.Object a)=>a.json;}
+static class EditorJsonUtility {public static string ToJson(UnityEngine.Object a){var menu=a as VRCExpressionsMenu;return menu==null?a.json:Newtonsoft.Json.JsonConvert.SerializeObject(new {json=a.json,controls=menu.controls.Select(c=>new {name=c.name,type=c.type.ToString(),subMenu=c.subMenu?.path})});}}
 static class AssetDatabase {
  public static Dictionary<string,UnityEngine.Object> live=new Dictionary<string,UnityEngine.Object>();
  public static Dictionary<string,string> disk=new Dictionary<string,string>();
@@ -48,19 +48,26 @@ static class AssetDatabase {
  public static string GetAssetPath(UnityEngine.Object a)=>a?.path??"";
  public static string AssetPathToGUID(string p)=>"guid:"+p;
  public static T LoadAssetAtPath<T>(string p) where T:UnityEngine.Object=>live.TryGetValue(p,out var a)?a as T:null;
- public static void SaveAssetIfDirty(UnityEngine.Object a){if(a.dirty){disk[a.path]=a.json;saved.Add(a.path);a.dirty=false;}}
- public static void ImportAsset(string p,ImportAssetOptions flags){live[p].json=p==corruptPath?"{\"wrong\":true}":disk[p];}
+ public static void CreateAsset(UnityEngine.Object a,string p){a.path=p;live[p]=a;disk[p]=EditorJsonUtility.ToJson(a);}
+ public static void SaveAssetIfDirty(UnityEngine.Object a){if(a.dirty){disk[a.path]=EditorJsonUtility.ToJson(a);saved.Add(a.path);a.dirty=false;}}
+ public static void ImportAsset(string p,ImportAssetOptions flags){if(!(live[p] is VRCExpressionsMenu))live[p].json=p==corruptPath?"{\"wrong\":true}":disk[p];}
 }
 static class SceneObjectCopyCore {
  public class FileInfo {public string Digest="digest";}public class Evidence {public string Guid;public FileInfo File=new FileInfo();}
  public static Evidence ReadStableAssetEvidence(string p,string label,Action<string,string> probe=null)=>new Evidence{Guid=p==AssetDatabase.wrongGuidPath?"wrong":"guid:"+p};
 }
+static class ScriptableObject {public static T CreateInstance<T>() where T:new()=>new T();}
 '''
     runner=r'''
 class Probe {
  static int failures; static void Check(bool b,string n){Console.WriteLine((b?"PASS ":"FAIL ")+n);if(!b)failures++;}
  static bool Reject(Action a){try{a();return false;}catch(InvalidOperationException){return true;}}
  static UnityEngine.Object Make(string p,string j){var o=new UnityEngine.Object{path=p,json=j};AssetDatabase.live[p]=o;AssetDatabase.disk[p]=j;return o;}
+ private static VRCExpressionsMenu.Control BuildControl(JObject p,string assetDir,VRCExpressionsMenu.Control existing,Queue<string> plannedMenuPaths)=>new VRCExpressionsMenu.Control{name=p["controlName"]?.ToString(),type=VRCExpressionsMenu.Control.ControlType.SubMenu,subMenu=AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(p["subMenuAssetPath"]?.ToString())};
+ private static void Reorder(VRCExpressionsMenu menu,JObject p){}
+ private static int ResolveControlIndex(VRCExpressionsMenu menu,JObject p)=>0;
+__MENU_METHODS__
+__MENU_WRITE_WRAPPER__
  public static int Main(){
   var target=Make("Assets/P.asset","{\"parameters\":[1]}");var neighbor=Make("Assets/Unrelated.mat","{}");neighbor.dirty=true;
   var before=ExpressionWritePersistence.Capture(target);target.json="{\"parameters\":[2]}";
@@ -78,6 +85,24 @@ class Probe {
   Check(AssetDatabase.saved.Count==2&&AssetDatabase.saved.Contains(root.path)&&AssetDatabase.saved.Contains(child.path),"changed parent and target submenu both saved");
   before=ExpressionWritePersistence.Capture(root);AssetDatabase.saved.Clear();ExpressionWritePersistence.SaveAndVerify(before,root,null,false,true,new[]{root.path,child.path},child);
   Check(AssetDatabase.saved.SequenceEqual(new[]{child.path}),"no-op still independently verifies exact target, not unrelated root");
+  var actualRoot=new VRCExpressionsMenu{path="Assets/ActualRoot.asset"};var actualTarget=new VRCExpressionsMenu{path="Assets/Wardrobe.asset"};var actualLinked=new VRCExpressionsMenu{path="Assets/Accessories.asset"};
+  actualRoot.controls.Add(new VRCExpressionsMenu.Control{name="Wardrobe",type=VRCExpressionsMenu.Control.ControlType.SubMenu,subMenu=actualTarget});
+  AssetDatabase.live[actualRoot.path]=actualRoot;AssetDatabase.live[actualTarget.path]=actualTarget;AssetDatabase.live[actualLinked.path]=actualLinked;
+  AssetDatabase.disk[actualRoot.path]=EditorJsonUtility.ToJson(actualRoot);AssetDatabase.disk[actualTarget.path]=EditorJsonUtility.ToJson(actualTarget);AssetDatabase.disk[actualLinked.path]=EditorJsonUtility.ToJson(actualLinked);
+  before=ExpressionWritePersistence.Capture(actualRoot);
+  AssetDatabase.saved.Clear();
+  var actualResolved=ReplayMenuWrite(actualRoot,"Wardrobe",JObject.Parse(@"{'action':'create','controlName':'Accessories','subMenuAssetPath':'Assets/Accessories.asset'}"),"Assets/Menus",new List<string>(),new[]{actualRoot.path,actualTarget.path},null,false,before);
+  Check(AssetDatabase.saved.SequenceEqual(new[]{actualTarget.path})&&AssetDatabase.disk[actualTarget.path]==EditorJsonUtility.ToJson(actualTarget)&&!EditorUtility.IsDirty(actualRoot)&&!EditorUtility.IsDirty(actualTarget),"actual handler submenu create persists target and leaves unchanged root clean");
+  var directRoot=new VRCExpressionsMenu{path="Assets/DirectRoot.asset"};var directLinked=new VRCExpressionsMenu{path="Assets/DirectLinked.asset"};
+  AssetDatabase.live[directRoot.path]=directRoot;AssetDatabase.live[directLinked.path]=directLinked;AssetDatabase.disk[directRoot.path]=EditorJsonUtility.ToJson(directRoot);AssetDatabase.disk[directLinked.path]=EditorJsonUtility.ToJson(directLinked);
+  before=ExpressionWritePersistence.Capture(directRoot);AssetDatabase.saved.Clear();
+  ReplayMenuWrite(directRoot,"",JObject.Parse(@"{'action':'create','controlName':'Direct','subMenuAssetPath':'Assets/DirectLinked.asset'}"),"Assets/Menus",new List<string>(),new[]{directRoot.path},null,false,before);
+  Check(AssetDatabase.saved.SequenceEqual(new[]{directRoot.path})&&!EditorUtility.IsDirty(directRoot),"actual handler direct root edit persists and leaves root clean");
+  var newParentRoot=new VRCExpressionsMenu{path="Assets/NewParentRoot.asset"};
+  AssetDatabase.live[newParentRoot.path]=newParentRoot;AssetDatabase.disk[newParentRoot.path]=EditorJsonUtility.ToJson(newParentRoot);
+  before=ExpressionWritePersistence.Capture(newParentRoot);AssetDatabase.saved.Clear();
+  var actualNewParent=ReplayMenuWrite(newParentRoot,"NewParent",JObject.Parse(@"{'action':'create','controlName':'ChildControl','subMenuAssetPath':'Assets/DirectLinked.asset'}"),"Assets/Menus",new List<string>{"Assets/Menus/NewParent.asset"},new[]{newParentRoot.path,"Assets/Menus/NewParent.asset"},null,false,before);
+  Check(AssetDatabase.saved.OrderBy(p=>p).SequenceEqual(new[]{newParentRoot.path,"Assets/Menus/NewParent.asset"}.OrderBy(p=>p))&&!EditorUtility.IsDirty(newParentRoot)&&!EditorUtility.IsDirty(actualNewParent),"actual handler new parent link persists root and new submenu");
   var linked=new VRCExpressionsMenu{path="Assets/AuthorMenu.asset",json="{\"unsaved\":true}",dirty=true};
   var linkRoot=new VRCExpressionsMenu{path="Assets/IndependentMenu.asset",json="{}"};
   AssetDatabase.live[linked.path]=linked;AssetDatabase.disk[linked.path]="{}";
@@ -126,8 +151,14 @@ class Probe {
 }
 '''
     menu_source=(ROOT/"Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs").read_text(encoding="utf-8").split("public static class ManageExpressionMenuTool",1)[1].split("public static class ManageFxAnimatorTool",1)[0]
+    handler=menu_source.split("public static object HandleCommand(JObject @params)",1)[1].split("catch (Exception ex)",1)[0]
+    menu_methods=method(menu_source,"private static VRCExpressionsMenu ResolveMenu")+method(menu_source,"private static void Apply(string action, VRCExpressionsMenu menu")
+    write_start="var plannedMenuPaths = new Queue<string>(newMenuAssetPaths);"
+    write_end="var rootAssetPath = AssetDatabase.GetAssetPath(root);"
+    menu_write_block=handler.split(write_start,1)[1].split(write_end,1)[0]
+    menu_write_wrapper="static VRCExpressionsMenu ReplayMenuWrite(VRCExpressionsMenu root,string normalizedMenuPath,JObject parameters,string assetDir,List<string> newMenuAssetPaths,string[] actualPlanAssetPaths,VRCAvatarDescriptor descriptor,bool rootWasMissing,Dictionary<string,JToken> persistenceBefore){var @params=parameters;var action=@params[\"action\"]?.ToString()??\"\";"+write_start+menu_write_block+"return target;}"
     plan_probe="static class MenuPlanProbe {"+method(menu_source,"private static object BuildPlan")+method(menu_source,"private static VRCExpressionsMenu TryResolveMenu")+'public static JObject Plan(VRCExpressionsMenu root, VRCAvatarDescriptor d)=>JObject.FromObject(BuildPlan("create",d,root,new JObject(),"Assets",root?.path??"Assets/NewRoot.asset",new List<string>()));}'
-    program="using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;"+stubs+helper+plan_probe+runner
+    program="using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;"+stubs+helper+plan_probe+runner.replace("__MENU_METHODS__",menu_methods).replace("__MENU_WRITE_WRAPPER__",menu_write_wrapper)
     cs=tmp_path/"Probe.cs";cs.write_text(program,encoding="utf-8");dll=tmp_path/"Probe.dll"
     command=[dotnet,str(compiler),"-nologo","-target:exe","-nostdlib+","-langversion:8.0",f"-out:{dll}"]+[f"-r:{p}" for p in refs[-1].glob("*.dll")]+[f"-r:{newtonsoft}",str(cs)]
     compiled=subprocess.run(command,capture_output=True,text=True,timeout=60)
@@ -136,4 +167,4 @@ class Probe {
     (tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8")
     result=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
-    assert result.stdout.count("PASS ")==22
+    assert result.stdout.count("PASS ")==25
