@@ -251,10 +251,9 @@ def test_material_scan_alias_uses_core_scope_and_unproven_snapshot_is_unreadable
         },
     }
 
-    def validate_target(value, *, project_root, required_scope, refresh_scene_snapshot):
+    def validate_target(value, *, project_root, required_scope):
         assert Path(project_root) == tmp_path
         assert required_scope == "avatar"
-        assert refresh_scene_snapshot is False
         return value
 
     monkeypatch.setattr(scope_module, "validate_runtime_execution_target", validate_target)

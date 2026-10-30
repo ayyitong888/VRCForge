@@ -54,7 +54,7 @@ def test_successful_bound_read_produces_identity_evidence(monkeypatch):
     target = {"scope": "project", "editor": {"unityPid": 12}}
     calls = []
     def validate(*args, **kwargs):
-        assert kwargs["refresh_scene_snapshot"] is False
+        assert kwargs["required_scope"] == "project"
         calls.append(1)
         return dict(target)
     monkeypatch.setattr(domain, "validate_runtime_execution_target", validate)

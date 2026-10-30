@@ -209,7 +209,7 @@ def _live_runtime_target(tmp_path: Path) -> dict:
     return target
 
 
-def test_runtime_target_rechecks_descriptor_and_reports_current_scene_state(tmp_path: Path):
+def test_runtime_target_rechecks_identity_without_replacing_core_scene_state(tmp_path: Path):
     target = _live_runtime_target(tmp_path)
     assert validate_runtime_execution_target(
         target,
@@ -222,7 +222,7 @@ def test_runtime_target_rechecks_descriptor_and_reports_current_scene_state(tmp_
     refreshed_state = validate_runtime_execution_target(
         stale, project_root=str(tmp_path), required_scope="avatar",
     )
-    assert refreshed_state["scene"]["digest"] == target["scene"]["digest"]
+    assert refreshed_state["scene"]["digest"] == stale["scene"]["digest"]
     assert execution_target_digest(refreshed_state) == execution_target_digest(target)
 
 
@@ -359,8 +359,7 @@ def test_public_reference_survives_scene_state_change_and_ambiguous_capture(tmp_
         session_context="runtime:session-a",
         required_scope="avatar",
     )
-    assert resolved["scene"]["revision"] != target["scene"]["revision"]
-    assert resolved["scene"]["digest"] != target["scene"]["digest"]
+    assert resolved["scene"] == target["scene"]
     assert execution_target_digest(resolved) == bound["executionTargetDigest"]
     refreshed = registry.refresh(
         bound["executionTarget"],
@@ -538,23 +537,25 @@ def test_runtime_target_rejects_descriptor_from_another_project(tmp_path: Path):
     assert exc_info.value.code == "project_root_drifted"
 
 
-@pytest.mark.parametrize("refresh", [False, True])
-def test_runtime_identity_validation_reads_scene_only_for_requested_snapshot(tmp_path, monkeypatch, refresh):
+def test_default_reference_and_runtime_reads_need_no_scene_content_snapshot(tmp_path, monkeypatch):
     target = _live_runtime_target(tmp_path)
+    target["scene"].pop("digest")
+    target["scene"].pop("revision")
     scene = Path(target["scene"]["absolutePath"])
-    scene.write_bytes(b"changed scene contents")
     original_read = Path.read_bytes
-    reads = []
-    def read_bytes(path):
+
+    def no_scene_bytes(path):
         if path == scene:
-            reads.append(path)
+            pytest.fail("Identity resolution must not read the whole scene file")
         return original_read(path)
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
-    verified = validate_runtime_execution_target(
-        target, project_root=str(tmp_path), required_scope="avatar", refresh_scene_snapshot=refresh)
-    assert len(reads) == int(refresh)
-    assert execution_target_digest(verified) == execution_target_digest(target)
-    assert verified["scene"]["digest"] == (hashlib.sha256(b"changed scene contents").hexdigest() if refresh else target["scene"]["digest"])
+
+    monkeypatch.setattr(Path, "read_bytes", no_scene_bytes)
+    registry = ExecutionTargetBindingRegistry()
+    bound = registry.bind(target, project_root=str(tmp_path), session_context="session:default")
+    scene.write_bytes(b"an unrelated save changes scene content")
+    resolved = registry.resolve(bound["executionTarget"], project_root=str(tmp_path), session_context="session:default")
+    assert resolved["scene"] == target["scene"]
+    assert validate_runtime_execution_target(target, project_root=str(tmp_path), required_scope="avatar")["scene"] == target["scene"]
 
 
 @pytest.mark.parametrize("drift", ["scene_missing", "guid_changed", "process_changed"])
@@ -568,7 +569,7 @@ def test_runtime_identity_only_retains_disk_and_lifetime_validation(tmp_path, dr
     else:
         target["editor"]["processStartTime"] = "1.000000"
     with pytest.raises(ExecutionTargetError):
-        validate_runtime_execution_target(target, project_root=str(tmp_path), required_scope="avatar", refresh_scene_snapshot=False)
+        validate_runtime_execution_target(target, project_root=str(tmp_path), required_scope="avatar")
 
 
 def test_component_binding_identity_only_resolve_skips_scene_bytes_for_owner_snapshot(tmp_path, monkeypatch):
@@ -594,7 +595,7 @@ def test_component_binding_identity_only_resolve_skips_scene_bytes_for_owner_sna
     monkeypatch.setattr(Path, 'read_bytes', tracked_read)
     resolved = gateway.resolve_execution_target_reference(
         binding['executionTarget'], project_root=str(tmp_path),
-        required_scope='component', refresh_scene_snapshot=False,
+        required_scope='component',
     )
     assert reads == []
     assert resolved['scene']['digest'] == target['scene']['digest']

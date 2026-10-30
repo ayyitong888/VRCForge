@@ -67,7 +67,7 @@ def live_core_checks_off(monkeypatch):
     monkeypatch.setattr(
         execution_target,
         "validate_runtime_execution_target",
-        lambda target, *, project_root, required_scope, refresh_scene_snapshot=True: dict(target),
+        lambda target, *, project_root, required_scope: dict(target),
     )
 
 

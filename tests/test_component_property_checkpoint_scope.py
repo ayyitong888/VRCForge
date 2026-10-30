@@ -146,7 +146,6 @@ def test_internal_property_reference_is_resolved_without_changing_approved_argum
         assert value == reference
         assert kwargs == {
             'project_root': str(root), 'required_scope': 'component',
-            'refresh_scene_snapshot': False,
         }
         return deepcopy(target)
     monkeypatch.setattr(server.AGENT_GATEWAY, 'resolve_execution_target_reference', resolve)
@@ -226,7 +225,7 @@ def test_identity_drift_blocks_before_owner_preview(case, monkeypatch):
     reference = {'schema': 'vrcforge.execution_target_ref.v1', 'ref': 'session-bound-reference'}
     args['executionTarget'] = reference
     def resolve(_reference, **kwargs):
-        assert kwargs['refresh_scene_snapshot'] is False
+        assert kwargs['required_scope'] == 'component'
         raise server.AgentGatewayError('Unity editor identity changed.')
     monkeypatch.setattr(server.AGENT_GATEWAY, 'resolve_execution_target_reference', resolve)
     monkeypatch.setattr(server, 'read_component_property_sync', lambda _: pytest.fail('stale target must not reach preview'))

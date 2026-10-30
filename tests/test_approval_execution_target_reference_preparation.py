@@ -62,9 +62,8 @@ def test_public_reference_is_expanded_before_common_write_preparer(
     gateway._mcp_resource_context.set("session:fixture-owner")
     resolution = []
 
-    def resolve(reference, *, project_root, session_context, required_scope, refresh_scene_snapshot):
+    def resolve(reference, *, project_root, session_context, required_scope):
         resolution.append((reference, project_root, session_context, required_scope))
-        assert refresh_scene_snapshot is True
         assert reference == _reference()
         if required_scope != bound_target["scope"]:
             raise AgentGatewayError("The target reference does not cover this write scope.", status_code=409)
@@ -113,9 +112,8 @@ def test_reference_scope_rejection_blocks_preparer_and_expanded_target_stays_dom
     gateway._mcp_resource_context.set("session:fixture-owner")
     seen = []
 
-    def reject_wrong_scope(reference, *, project_root, session_context, required_scope, refresh_scene_snapshot):
+    def reject_wrong_scope(reference, *, project_root, session_context, required_scope):
         seen.append((project_root, session_context, required_scope))
-        assert refresh_scene_snapshot is True
         raise AgentGatewayError("ExecutionTarget reference scope mismatch.", status_code=409)
 
     monkeypatch.setattr(gateway._execution_target_bindings, "resolve", reject_wrong_scope)

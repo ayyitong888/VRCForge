@@ -141,27 +141,13 @@ def canonical_namespace(target: Mapping[str, Any]) -> str:
     return EXECUTION_NAMESPACE_PREFIX + "/".join(parts)
 
 
-def same_scene_content(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    """Prove scene bytes are unchanged for checkpoint continuity checks."""
-    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
-        return False
-    digest = left.get("digest")
-    return bool(left.get("guid")) and left.get("guid") == right.get("guid") and (
-        isinstance(digest, str) and len(digest) == 64
-        and all(char in "0123456789abcdef" for char in digest)
-        and digest == right.get("digest")
-    )
-
-
 def scene_identity_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    """Compare checkpoint scene snapshots, allowing only proven mtime drift."""
+    """Compare scene identity independently of saved content and timestamps."""
     if not isinstance(left, Mapping) or not isinstance(right, Mapping):
         return False
-    if left == right:
-        return True
-    return same_scene_content(left, right) and (
-        {key: value for key, value in left.items() if key != "revision"}
-        == {key: value for key, value in right.items() if key != "revision"}
+    return bool(left.get("guid")) and left.get("guid") == right.get("guid") and (
+        {key: value for key, value in left.items() if key not in {"revision", "digest"}}
+        == {key: value for key, value in right.items() if key not in {"revision", "digest"}}
     )
 
 
@@ -217,8 +203,6 @@ def validate_execution_target(
         if not scene_path.casefold().endswith(".unity"):
             raise ExecutionTargetError("scene_path_invalid", "ExecutionTarget scene must be a Unity scene asset.")
         _required_string(scene.get("guid"), "scene.guid")
-        _required_string(scene.get("revision"), "scene.revision")
-        _required_string(scene.get("digest"), "scene.digest")
         if core_identity is not None:
             # Revision and digest describe current scene state, not stable
             # identity. Saves and writes can change them while the loaded scene
@@ -278,13 +262,8 @@ def validate_runtime_execution_target(
     *,
     project_root: str,
     required_scope: str,
-    refresh_scene_snapshot: bool = True,
 ) -> dict[str, Any]:
-    """Validate live identity, optionally refreshing the scene content snapshot.
-
-    Identity-only callers retain the supplied revision/digest without reading
-    scene bytes. Public snapshot consumers retain fresh content by default.
-    """
+    """Validate live identity without reading scene contents; retain Core state."""
 
     root = normalize_project_root(project_root)
     descriptor_path = Path(root) / "Library" / "VRCForge" / "mcp-core.json"
@@ -342,8 +321,7 @@ def validate_runtime_execution_target(
         scene = _mapping(target_mapping.get("scene"), "scene")
         scene_path = _scene_absolute_path(scene, root)
         try:
-            stat = Path(scene_path).stat()
-            digest = hashlib.sha256(Path(scene_path).read_bytes()).hexdigest() if refresh_scene_snapshot else None
+            Path(scene_path).stat()
             meta_lines = Path(scene_path + ".meta").read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError) as exc:
             raise ExecutionTargetError(
@@ -356,30 +334,17 @@ def validate_runtime_execution_target(
         )
         if not guid:
             raise ExecutionTargetError("scene_identity_unavailable", "The bound Unity scene GUID is unavailable.")
-        # .NET DateTime ticks and Python nanoseconds both preserve the NTFS
-        # 100 ns file timestamp used by Unity Core.
-        core.update(
-            {
-                "sceneGuid": guid,
-                "sceneRevision": str(621355968000000000 + stat.st_mtime_ns // 100),
-                "sceneDigest": digest,
-            }
-        )
-    verified = validate_execution_target(
+        core["sceneGuid"] = guid
+    return validate_execution_target(
         value,
         project_root=root,
         core_identity=core,
         required_scope=required_scope,
     )
-    # Revision and digest remain visible as current state for previews and
-    # callers, but do not alter stable identity references.
-    if target_scope != "project" and refresh_scene_snapshot:
-        verified["scene"]["revision"] = core["sceneRevision"]
-        verified["scene"]["digest"] = core["sceneDigest"]
-    return verified
 
 
-def execution_target_digest(value: Mapping[str, Any]) -> str:
+def execution_target_identity(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the stable fields already used by bound target references."""
     target = dict(value)
     identity: dict[str, Any] = {
         "schema": target.get("schema"),
@@ -397,7 +362,11 @@ def execution_target_digest(value: Mapping[str, Any]) -> str:
         source = target.get(section)
         if isinstance(source, Mapping):
             identity[section] = {field: source.get(field) for field in fields if field in source}
-    encoded = json.dumps(identity, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return identity
+
+
+def execution_target_digest(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(execution_target_identity(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -436,7 +405,6 @@ class ExecutionTargetBindingRegistry:
             target,
             project_root=normalized_root,
             required_scope=str(target.get("scope") or "project"),
-            refresh_scene_snapshot=False,
         )
         digest = execution_target_digest(verified)
         with self._lock:
@@ -566,7 +534,6 @@ class ExecutionTargetBindingRegistry:
         project_root: str,
         session_context: str,
         required_scope: str | None = None,
-        refresh_scene_snapshot: bool = True,
     ) -> dict[str, Any]:
         """Restore a bound identity; an explicit operation scope stays strict."""
         normalized_root = normalize_project_root(project_root)
@@ -578,7 +545,6 @@ class ExecutionTargetBindingRegistry:
             target,
             project_root=normalized_root,
             required_scope=_identity_scope_for_target(target) if required_scope is None else required_scope,
-            refresh_scene_snapshot=refresh_scene_snapshot,
         )
         if execution_target_digest(verified) != prior.get("digest"):
             raise ExecutionTargetError(
@@ -636,7 +602,6 @@ class ExecutionTargetBindingRegistry:
             observed_target,
             project_root=normalized_root,
             required_scope=str(observed_target.get("scope") or "project"),
-            refresh_scene_snapshot=False,
         )
         prior_target = prior.get("target") if isinstance(prior.get("target"), Mapping) else {}
         if str(prior_target.get("scope") or "project") != str(verified.get("scope") or "project"):
@@ -694,7 +659,7 @@ class ExecutionTargetBindingRegistry:
 def standard_identity_metadata(*, scope: str, write: bool) -> dict[str, Any]:
     required = ["project.root", "project.projectId", "editor.unityPid", "editor.processStartTime", "editor.coreInstanceId"]
     if scope in {"scene", "avatar", "object", "component"}:
-        required.extend(["scene.absolutePath", "scene.guid", "scene.revision", "scene.digest"])
+        required.extend(["scene.absolutePath", "scene.guid"])
     if scope == "avatar":
         required.extend(["avatar.globalObjectId", "avatar.exactHierarchyPath"])
     if scope in {"object", "component"}:

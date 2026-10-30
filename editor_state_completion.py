@@ -79,7 +79,7 @@ def bound_editor_readback(arguments):
     project = arguments.get("projectPath") or arguments.get("project_path") or arguments.get("projectRoot")
     if not project:
         raise ValueError("Editor readback requires the original explicit project path.")
-    verified = validate_runtime_execution_target(target, project_root=project, required_scope="project", refresh_scene_snapshot=False)
+    verified = validate_runtime_execution_target(target, project_root=project, required_scope="project")
     avatar = arguments.get("avatarPath") or arguments.get("avatar_path")
     bound_avatar = (target.get("avatar") or {}).get("exactHierarchyPath")
     if avatar and bound_avatar and avatar.strip("/") != bound_avatar.strip("/"):
@@ -92,7 +92,7 @@ def bound_editor_readback(arguments):
     }
     with bind_operation_context(operation.get("operationId") or "editor_readback_" + uuid4().hex, verified):
         yield evidence
-    after = validate_runtime_execution_target(target, project_root=project, required_scope="project", refresh_scene_snapshot=False)
+    after = validate_runtime_execution_target(target, project_root=project, required_scope="project")
     after_digest = execution_target_digest(after)
     if after_digest != evidence["beforeExecutionTargetDigest"]:
         raise ValueError("Editor identity changed during independent readback.")

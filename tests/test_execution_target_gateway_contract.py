@@ -196,7 +196,7 @@ def test_refresh_accepts_public_reference_and_returns_no_target_paths(monkeypatc
     }]
     assert refresh_calls == [(reference, target, "D:/Unity/Avatar")]
     assert resolve_calls == [{
-        "project_root": "D:/Unity/Avatar", "refresh_scene_snapshot": False,
+        "project_root": "D:/Unity/Avatar",
     }]
     assert result["executionTarget"] == reference
     assert "D:/Unity/Avatar" not in str(result)
