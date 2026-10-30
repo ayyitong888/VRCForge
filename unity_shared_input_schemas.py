@@ -247,6 +247,7 @@ AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
 
 ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "description": "For shader Color/Vector component animation, explicitly preserve every intended component with curves in each affected state; omitted components are not guaranteed to inherit static material values and can become zero. Use inspected original values, not assumed white/zero defaults. bindingTargetValidated only establishes binding resolution, and verified asset readback only establishes stored curves; neither proves the running Renderer MaterialPropertyBlock or transitions. A static Material read does not include PropertyBlock overrides.",
     "additionalProperties": False,
     "required": ["projectPath"],
     "properties": {
@@ -258,7 +259,7 @@ ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
         "bindingPath": {"type": "string", "description": "Animation binding path relative to animatorRootPath, excluding the Animator root name; use an empty string for the root itself. Do not pass a full hierarchy path here."},
         "objectPath": {"type": "string", "description": "Compatibility alias for bindingPath; supply one path field, not both."},
         "componentType": {"type": "string", "default": "GameObject", "description": "Exact bound Unity component type, normally copied from vrcforge_scan_animation_bindings."},
-        "propertyName": {"type": "string", "description": "Exact serialized animation property from the binding scan; required for a single-binding operation."},
+        "propertyName": {"type": "string", "description": "Exact serialized animation property from the binding scan; required for a single-binding operation. A shader color component such as material._Color.a does not promise preservation of .r/.g/.b; supply their inspected values as explicit curves when preserving the full color."},
         "sourceBindingPath": {"type": "string", "description": "Retarget source path relative to animatorRootPath; omitted uses bindingPath."},
         "sourceComponentType": {"type": "string", "description": "Retarget source component type; omitted uses componentType."},
         "sourcePropertyName": {"type": "string", "description": "Exact retarget source property name from the binding scan."},
@@ -274,7 +275,7 @@ ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "bindingPath": {"type": "string"}, "objectPath": {"type": "string"},
                     "componentType": {"type": "string", "default": "GameObject"},
-                    "propertyName": {"type": "string", "minLength": 1},
+                    "propertyName": {"type": "string", "minLength": 1, "description": "Exact binding property. For shader Color/Vector components, include explicit curves for all components whose values must be preserved; an alpha-only curve can leave RGB zero at runtime."},
                     "overwriteExisting": {"type": "boolean", "default": False},
                     "keys": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"type": "object"}, "description": "Same key-object format as single mode: explicit time in seconds and value (or curveValue), unique times, optional tangents/weights/weightedMode. Not frame numbers or normalized motion time."},
                     "constantFloat": {"type": "number"},
@@ -294,6 +295,19 @@ ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
              "sourceComponentType", "sourcePropertyName", "deleteSource", "overwriteExisting", "keys", "constantFloat",
          )]}},
     ],
+    "examples": [{
+        "projectPath": "D:/AvatarProject", "animatorRootPath": "Avatar",
+        "clipPath": "Assets/Appearance.anim",
+        "curves": [{
+            "bindingPaths": ["Body"], "componentType": "SkinnedMeshRenderer",
+            "properties": [
+                {"propertyName": "material._Color.r", "constantFloat": 1},
+                {"propertyName": "material._Color.g", "constantFloat": 1},
+                {"propertyName": "material._Color.b", "constantFloat": 1},
+                {"propertyName": "material._Color.a", "keys": [{"time": 0, "value": 1}, {"time": 1, "value": 0}]},
+            ],
+        }],
+    }],
 }
 
 # A group is one explicit path/property product, never a nested template.
