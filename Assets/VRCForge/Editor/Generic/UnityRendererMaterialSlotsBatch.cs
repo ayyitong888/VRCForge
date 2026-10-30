@@ -79,8 +79,7 @@ namespace VRCForge.Editor
 
         private static JObject SceneEvidence(SavedSceneSnapshot scene)
         {
-            return JObject.FromObject(new { scenePath = scene.Path, sceneGuid = scene.Guid, sceneHandle = scene.Handle,
-                sceneFileDigest = scene.FileDigest, sceneMetaDigest = scene.MetaDigest, sceneMetaIdentity = scene.MetaIdentity });
+            return JObject.FromObject(new { scenePath = scene.Path, sceneGuid = scene.Guid, sceneHandle = scene.Handle });
         }
 
         private static JObject RendererEvidence(RendererMaterialSlotTool.Target target)
@@ -103,7 +102,10 @@ namespace VRCForge.Editor
                 var target = plan.Targets.FirstOrDefault(t => t.Identity.componentId == rendererId && t.Identity.rendererPath == rendererPath);
                 if (target == null)
                 {
-                    var scene = RendererMaterialSlotTool.ResolveTarget(rendererPath, rendererId, out target, plan.Scene);
+                    var scenePath = RendererMaterialSlotTool.FindScenePath(rendererPath);
+                    var scene = plan.Scene != null && plan.Scene.Path == scenePath
+                        ? plan.Scene : SceneObjectCopyCore.ResolveSavedSceneOwner(scenePath, "renderer batch scene");
+                    RendererMaterialSlotTool.ResolveTarget(rendererPath, rendererId, out target, scene);
                     if (plan.Scene == null) plan.Scene = scene;
                     else Verify(SceneEvidence(plan.Scene), SceneEvidence(scene));
                     if (!plan.Targets.Any(t => t.Identity.componentId == target.Identity.componentId)) { plan.Targets.Add(target); before.Add(RendererEvidence(target)); }
@@ -165,11 +167,9 @@ namespace VRCForge.Editor
                 EditorSceneManager.MarkSceneDirty(plan.Scene.Scene);
                 if (!EditorSceneManager.SaveScene(plan.Scene.Scene)) throw new InvalidOperationException("The renderer batch scene could not be saved.");
                 AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                var saved = SceneObjectCopyCore.ResolveSavedScene(plan.Scene.Path, "renderer batch persisted scene");
+                var saved = SceneObjectCopyCore.ResolveSavedSceneOwner(plan.Scene.Path, "renderer batch persisted scene");
                 var sceneAfter = SceneEvidence(saved);
-                var sceneWithoutDigest = (JObject)sceneAfter.DeepClone(); sceneWithoutDigest["sceneFileDigest"] = plan.Scene.FileDigest;
-                Verify(plan.Evidence["scene"], sceneWithoutDigest);
-                if (saved.FileDigest == plan.Scene.FileDigest) throw new InvalidOperationException("Renderer batch scene bytes did not change.");
+                Verify(plan.Evidence["scene"], sceneAfter);
                 var actual = ReadRenderers(plan, saved);
                 Verify(plan.Evidence["afterRenderers"], actual);
                 var persistedMaterials = new Dictionary<string, RendererMaterialSlotTool.MaterialEvidence>(StringComparer.Ordinal);
@@ -210,7 +210,7 @@ namespace VRCForge.Editor
                     {
                         Undo.RevertAllDownToGroup(undoGroup);
                         if (!EditorSceneManager.SaveScene(plan.Scene.Scene)) throw new InvalidOperationException("Batch restoration save failed.");
-                        var restoredScene = SceneObjectCopyCore.ResolveSavedScene(plan.Scene.Path, "restored renderer batch scene");
+                        var restoredScene = SceneObjectCopyCore.ResolveSavedSceneOwner(plan.Scene.Path, "restored renderer batch scene");
                         Verify(plan.Evidence["scene"], SceneEvidence(restoredScene));
                         Verify(plan.Evidence["beforeRenderers"], ReadRenderers(plan, restoredScene));
                         restored = true;

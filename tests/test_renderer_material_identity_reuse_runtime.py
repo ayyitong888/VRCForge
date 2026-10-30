@@ -68,16 +68,17 @@ static class RendererComponentIdentity {
 static class EditorUtility { public static bool IsDirty(object value) => false; }
 static class AssetDatabase { public static string GetAssetPath(Material value) => value.Path; }
 static class SceneObjectCopyCore {
- public static int Reads; public static string Digest="before";
+ public static int Reads, HashReads; public static string Digest="before";
  public static readonly Dictionary<string,Renderer> Renderers = new Dictionary<string,Renderer>();
- public static SavedSceneSnapshot ResolveSavedScene(string path,string label) { Reads++; return new SavedSceneSnapshot {Path=path,Scene=path,FileDigest=Digest}; }
+ public static SavedSceneSnapshot ResolveSavedScene(string path,string label) { HashReads++; return ResolveSavedSceneOwner(path,label); }
+ public static SavedSceneSnapshot ResolveSavedSceneOwner(string path,string label) { Reads++; return new SavedSceneSnapshot {Path=path,Scene=path,FileDigest=Digest}; }
  public static GameObject ResolveUniqueGameObject(object scene,string path,string label) { return new GameObject { Value=Renderers[path] }; }
 }
 static class RendererMaterialSlotTool {
  internal static int MaterialReads;
  internal sealed class Target { internal SavedSceneSnapshot Scene; internal Renderer Renderer; internal RendererComponentIdentityEvidence Identity; }
  internal sealed class MaterialEvidence { internal Material Material; internal string Path, Guid="material-guid", Digest="material-digest"; }
- static string FindScenePath(string path) => path.StartsWith("Other/") ? "Assets/Other.unity" : "Assets/Main.unity";
+ internal static string FindScenePath(string path) => path.StartsWith("Other/") ? "Assets/Other.unity" : "Assets/Main.unity";
  internal static string NormalizeMaterialPath(string path) => path;
  internal static MaterialEvidence ReadMaterial(string path,string label) { MaterialReads++; return new MaterialEvidence {Path=path,Material=new Material {Path=path}}; }
  internal static MaterialEvidence ReadMaterialAsset(Material value,string label) => ReadMaterial(value.Path,label);
@@ -101,6 +102,7 @@ BATCH_METHODS
   var first=Build(Rows());
   Console.WriteLine("COUNTS first scene="+SceneObjectCopyCore.Reads+" renderer="+RendererComponentIdentity.Calls);
   Check(SceneObjectCopyCore.Reads==1,"one scene observation for three assignments");
+  Check(SceneObjectCopyCore.HashReads==0,"batch planning does not hash scene content");
   Check(RendererComponentIdentity.Calls==2,"one identity per unique renderer");
   Check(RendererMaterialSlotTool.MaterialReads==2,"one new and one shared old material read");
   Check(first.Targets.Count==2 && ((JArray)first.Evidence["assignments"]).Count==3,"plan preserves assignments");
@@ -109,12 +111,15 @@ BATCH_METHODS
   Check(RendererMaterialSlotTool.MaterialReads==4,"unique material evidence reused in each Build");
   Verify(first.Evidence,second.Evidence);
   SceneObjectCopyCore.Digest="after";
-  var saved=SceneObjectCopyCore.ResolveSavedScene("Assets/Main.unity","saved");
+  var saved=SceneObjectCopyCore.ResolveSavedSceneOwner("Assets/Main.unity","saved");
   var reads=SceneObjectCopyCore.Reads; var identities=RendererComponentIdentity.Calls;
   var readback=READBACK;
   Check(SceneObjectCopyCore.Reads==reads && RendererComponentIdentity.Calls==identities+2,"readback uses fresh saved scene and fresh renderer identities");
   Check(readback.Count==2,"readback retains both renderers");
-  Check(Reject(()=>Verify(first.Evidence,Build(Rows()).Evidence)),"scene drift remains rejected at next boundary");
+  Verify(first.Evidence,Build(Rows()).Evidence);
+  Check(SceneObjectCopyCore.HashReads==0,"unrelated scene bytes do not block batch identity");
+  SceneObjectCopyCore.Renderers["Avatar/A"].sharedMaterials[1]=null;
+  Check(Reject(()=>Verify(first.Evidence,Build(Rows()).Evidence)),"actual slot drift remains rejected at next boundary");
   var other=Rows(); other[2]["rendererPath"]="Other/C";other[2]["rendererComponentId"]="ccc";
   Check(Reject(()=>Build(other)),"cross-scene batch remains rejected");
   var bad=Rows();bad[1]["rendererPath"]="Avatar/B";

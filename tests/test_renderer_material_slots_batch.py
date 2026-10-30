@@ -35,7 +35,7 @@ def preview():
  new={**old,"name":"New","assetPath":"Assets/New.mat","assetGuid":"d"*32,"fileDigest":"e"*64}
  before={"rendererPath":row["rendererPath"],"rendererComponentId":row["rendererComponentId"],"rendererComponentType":"UnityEngine.SkinnedMeshRenderer","rendererComponentIndex":0,"slots":["Assets/Old.mat|"+"b"*32,"null","Assets/Keep.mat|"+"f"*32]}
  after=deepcopy(before);after["slots"][0]="Assets/New.mat|"+"d"*32
- plan={"scene":{"scenePath":"Assets/Main.unity","sceneGuid":"1"*32,"sceneHandle":1,"sceneFileDigest":"2"*64,"sceneMetaDigest":"3"*64,"sceneMetaIdentity":"4"*64},"beforeRenderers":[before],"afterRenderers":[after],"assignments":[{**row,"beforeMaterial":old,"newMaterial":new}]}
+ plan={"scene":{"scenePath":"Assets/Main.unity","sceneGuid":"1"*32,"sceneHandle":1},"beforeRenderers":[before],"afterRenderers":[after],"assignments":[{**row,"beforeMaterial":old,"newMaterial":new}]}
  return {"schema":"vrcforge.renderer_material_slot.v1","batch":True,"preview":True,"verified":True,"mutationStarted":False,"applied":False,"committed":False,"sceneSaved":False,"persistedReadback":False,"plan":plan}
 
 
@@ -44,6 +44,14 @@ def test_batch_preview_seals_exact_arrays_and_project_for_one_existing_apply():
  assert canonical["arguments"]["expectedProjectPath"]=="D:/Unity"
  assert canonical["arguments"]["expectedBatchPlan"]==preview()["plan"]
  assert approval["assignmentCount"]==1 and approval["rendererCount"]==1
+
+
+@pytest.mark.parametrize("digest", [None, "stale scene content"])
+def test_batch_scene_identity_does_not_require_or_compare_content_digest(digest):
+ args=request()
+ if digest is None: args["executionTarget"]["scene"].pop("digest")
+ else: args["executionTarget"]["scene"]["digest"]=digest
+ assert bind_authoritative_preview(build_wrapper_arguments(args),preview())[1]["assignmentCount"]==1
 
 
 @pytest.mark.parametrize("mutation", [
@@ -72,7 +80,6 @@ def test_batch_explicit_plan_is_not_refreshed():
 def applied():
  result=preview();result.update(preview=False,mutationStarted=True,applied=True,committed=True,sceneSaved=True,persistedReadback=True,commitState="committed",commitStateKnown=True,assignmentCount=1,rendererCount=1)
  result["readback"]={"scene":deepcopy(result["plan"]["scene"]),"renderers":deepcopy(result["plan"]["afterRenderers"])}
- result["readback"]["scene"]["sceneFileDigest"]="5"*64
  return result
 
 
@@ -81,7 +88,7 @@ def test_batch_apply_requires_independent_saved_arrays():
  assert validate_apply_result(canonical["arguments"],applied())["persistedReadback"] is True
 
 
-@pytest.mark.parametrize("mutation", [lambda p:p.update(persistedReadback=False),lambda p:p["readback"]["scene"].update(sceneHandle=2),lambda p:p["readback"]["scene"].update(sceneFileDigest="2"*64),lambda p:p["readback"]["renderers"][0]["slots"].__setitem__(2,"changed"),lambda p:p.update(assignmentCount=2)])
+@pytest.mark.parametrize("mutation", [lambda p:p.update(persistedReadback=False),lambda p:p["readback"]["scene"].update(sceneHandle=2),lambda p:p["readback"]["scene"].update(sceneGuid="3"*32),lambda p:p["readback"]["renderers"][0]["slots"].__setitem__(2,"changed"),lambda p:p.update(assignmentCount=2)])
 def test_batch_apply_rejects_bad_persistence_or_untouched_slot_drift(mutation):
  canonical,_=bind_authoritative_preview(build_wrapper_arguments(request()),preview());result=applied();mutation(result)
  with pytest.raises(RendererMaterialSlotError):validate_apply_result(canonical["arguments"],result)

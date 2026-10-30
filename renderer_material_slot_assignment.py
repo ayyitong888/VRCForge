@@ -265,8 +265,6 @@ def _validate_batch_plan(rows: list[dict[str, Any]], value: Any) -> dict[str, An
     scene = _object(plan["scene"], "scene")
     _asset_path(scene.get("scenePath"), "scenePath", ".unity")
     _hex(scene.get("sceneGuid"), "sceneGuid", _GUID)
-    for field in ("sceneFileDigest", "sceneMetaDigest", "sceneMetaIdentity"):
-        _hex(scene.get(field), field, _DIGEST)
     if _integer(scene.get("sceneHandle"), "sceneHandle", -2147483648, 2147483647) == 0:
         raise RendererMaterialSlotError("sceneHandle must be nonzero.")
     before = plan["beforeRenderers"]
@@ -327,7 +325,7 @@ def _bind_batch(wrapper: dict[str, Any], payload: Any) -> tuple[dict[str, Any], 
     scene = _object(target.get("scene"), "ExecutionTarget scene")
     expected_path = os.path.normcase(os.path.abspath(os.path.join(str(wrapper.get("projectPath") or ""), plan["scene"]["scenePath"])))
     actual_path = os.path.normcase(os.path.abspath(str(scene.get("absolutePath") or scene.get("path") or "")))
-    if actual_path != expected_path or scene.get("guid") != plan["scene"]["sceneGuid"] or scene.get("digest") != plan["scene"]["sceneFileDigest"]:
+    if actual_path != expected_path or scene.get("guid") != plan["scene"]["sceneGuid"]:
         raise RendererMaterialSlotError("Batch scene differs from its ExecutionTarget namespace.")
     if target["scope"] == "avatar":
         root = str(_object(target.get("avatar"), "ExecutionTarget avatar").get("exactHierarchyPath") or "")
@@ -356,10 +354,7 @@ def _validate_batch_apply(arguments: dict[str, Any], payload: Any) -> dict[str, 
     if result.get("plan") != expected or result.get("assignmentCount") != len(rows) or result.get("rendererCount") != len(expected["beforeRenderers"]):
         raise RendererMaterialSlotError("Batch apply differs from sealed plan.")
     readback = _object(result.get("readback"), "batch readback")
-    scene = deepcopy(_object(readback.get("scene"), "readback scene"))
-    digest = _hex(scene.get("sceneFileDigest"), "sceneFileDigest", _DIGEST)
-    if digest == expected["scene"]["sceneFileDigest"]: raise RendererMaterialSlotError("Batch scene digest did not change.")
-    scene["sceneFileDigest"] = expected["scene"]["sceneFileDigest"]
+    scene = _object(readback.get("scene"), "readback scene")
     if scene != expected["scene"] or readback.get("renderers") != expected["afterRenderers"]:
         raise RendererMaterialSlotError("Batch independent readback differs from expected arrays or scene identity.")
     return result

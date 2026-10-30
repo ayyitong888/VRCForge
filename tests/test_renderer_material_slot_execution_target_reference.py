@@ -61,8 +61,7 @@ def _preview():
     plan = {
         "scene": {
             "scenePath": "Assets/Main.unity", "sceneGuid": "1" * 32,
-            "sceneHandle": 1, "sceneFileDigest": "2" * 64,
-            "sceneMetaDigest": "3" * 64, "sceneMetaIdentity": "4" * 64,
+            "sceneHandle": 1,
         },
         "beforeRenderers": [before],
         "afterRenderers": [after],

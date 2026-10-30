@@ -187,7 +187,7 @@ namespace VRCForge.Editor
             output = new Target { Scene = scene, Renderer = identity.renderer, Identity = identity };
             return scene;
         }
-        private static string FindScenePath(string rendererPath)
+        internal static string FindScenePath(string rendererPath)
         {
             var matches = Enumerable.Range(0, SceneManager.sceneCount).Select(SceneManager.GetSceneAt).Where(s => s.IsValid() && s.isLoaded && s.path.Length > 0).Select(s => s.path).Distinct(StringComparer.Ordinal).ToList();
             var path = rendererPath ?? "";

@@ -38,7 +38,7 @@ def test_registered_prepare_and_archive_use_only_revalidated_scene(tmp_path,monk
     assert (root/scene).read_text(encoding='utf8')==scene
     assert (root/'Assets/Unrelated.mat').read_text(encoding='utf8')=='preserve'
     # Fresh authoritative preview drift must block before any archive offer.
-    if batch:preview['plan']['scene']['sceneFileDigest']='9'*64
+    if batch:preview['plan']['scene']['sceneGuid']='9'*32
     else:preview['sceneFileDigest']='9'*64
     rejected=handler.checkpoint_prepare_handler(root,{**canonical,'_checkpointTargetTool':TOOL})
     assert rejected['ok'] is False and 'archiveAssetPaths' not in rejected
