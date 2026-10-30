@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Current version](https://img.shields.io/badge/current-v1.10.1-d9487c?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.10.2-d9487c?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 
@@ -29,7 +29,7 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 
 > Unity / VRChat Avatar プロジェクトを書き換える機能を使う前に、必ずバックアップしてください。
 
-**[1.10.1 公開済み](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.1)**：サブエージェントの会話表示、会話レールのホバープレビュー、チェックポイントの既定保持数 4 件に対応。ツールのエラーと Unity インポート結果も改善しました。[更新内容](docs/RELEASE_NOTES_1.10.1.md)。
+**[1.10.2](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.2)**：単一アセットの保存を追加。メニュー保存、中断した会話の復元、PNG スクリーンショットを修正し、重複するシーン全体のハッシュ計算を削減。タイトルバーと会話プレビューも改善しました。[更新内容](docs/RELEASE_NOTES_1.10.2.md)。
 
 ## ダウンロード：App と Unity プラグインの両方が必要
 
@@ -37,8 +37,8 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 
 | 必須ダウンロード | インストール先 |
 | --- | --- |
-| **[App オフラインインストーラー（.exe）](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge_Offline_Installer_x64.exe)** | Windows で実行。[Web インストーラー](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge_Web_Installer_x64.exe) でも可。どちらか一つを選びます。 |
-| **[Unity Core プラグイン（VRCForge.unitypackage）](https://github.com/ayyitong888/VRCForge/releases/latest/download/VRCForge.unitypackage)** | 接続する各 Unity プロジェクトに **Import All**。App のインストールだけでは Unity に接続できません。 |
+| **[App オフラインインストーラー（.exe）](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.2/VRCForge_Offline_Installer_x64.exe)** | Windows で実行。[Web インストーラー](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.2/VRCForge_Web_Installer_x64.exe) でも可。どちらか一つを選びます。 |
+| **[Unity Core プラグイン（VRCForge.unitypackage）](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.2/VRCForge.unitypackage)** | 接続する各 Unity プロジェクトに **Import All**。App のインストールだけでは Unity に接続できません。 |
 
 アップグレード時も App と Unity プラグインの両方を更新してください。
 
@@ -83,11 +83,11 @@ VRCForge を起動したままにし、クライアントに `vrcforge` Server �
 
 衣装・表情・マテリアル・アニメーションは実際に編集できます。最適化連携には対応するプラグインが必要で、AAO の設定だけでビルド時の最適化が完了するわけではありません。頭部交換やパーツ移植でも、メッシュの継ぎ目・ウェイト・UV の編集が別途必要になる場合があります。
 
-最適化ページのフリーズ、一部の中断会話の復元、内蔵デスクトップ操作のスクリーンショット互換性には既知の問題があり、修正待ちです。
+起動時の初回描画が 100ms の目標を超えること、ホバープレビューで Markdown の改行が崩れることなど、既知の問題が残っています。見た目の結果は自分のプロジェクトで確認してください。
 
 ## リンク
 
-- [1.10.1 Release / Download](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.1)
+- [1.10.2 Release / Download](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.2)
 - [Release Notes](https://github.com/ayyitong888/VRCForge/releases)
 - [User Manual](USER_MANUAL.md)
 - [English README](README.en.md) · [简体中文 README](README.md)
