@@ -40,8 +40,6 @@ fn remove_secret_response_fields_with_memory_candidate_mode(
                 "apiKey",
                 "authorization",
                 "Authorization",
-                "configPath",
-                "backupPath",
             ] {
                 object.remove(key);
             }
@@ -822,8 +820,6 @@ pub(crate) fn sanitize_text_for_webview(value: &str) -> String {
     if contains_secret_key_prefix(value)
         || lower.contains("api_key")
         || lower.contains("apikey")
-        || lower.contains("configpath")
-        || lower.contains("backuppath")
         || has_sensitive_assignment
         || (lower.contains("bearer ") && !is_env_placeholder_template(value))
         || (lower.contains("authorization") && !is_env_placeholder_template(value))
@@ -1133,10 +1129,9 @@ mod memory_review_sanitizer_tests {
     }
 
     #[test]
-    fn whitespace_separated_secrets_and_paths_stay_redacted_globally_and_for_memory() {
+    fn whitespace_separated_secrets_stay_redacted_globally_and_for_memory() {
         for text in [
             "api_key private-value",
-            r"configPath C:\Users\Private\config.json",
             "Remember API_KEY variable naming and password=private-value",
         ] {
             assert_eq!(sanitize_text_for_webview(text), "[redacted]");
@@ -1148,6 +1143,21 @@ mod memory_review_sanitizer_tests {
                 serde_json::Value::String("[redacted]".to_string())
             );
         }
+    }
+
+    #[test]
+    fn local_connector_paths_survive_without_exposing_credentials() {
+        let path = r"C:\Users\Local\.dsh\profiles\desktop\cordis.patch.yml";
+        let backup = format!("{path}.backup");
+        let result = sanitize_webview_response(serde_json::json!({
+            "clients": {"deepseekHarness": {"configPath": path}},
+            "action": {"backupPath": backup, "apiKey": "private-value"},
+            "message": format!("Update configPath {path}"),
+        }));
+        assert_eq!(result["clients"]["deepseekHarness"]["configPath"], path);
+        assert_eq!(result["action"]["backupPath"], backup);
+        assert_eq!(result["message"], format!("Update configPath {path}"));
+        assert!(result["action"].get("apiKey").is_none());
     }
 
     #[test]

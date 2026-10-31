@@ -598,7 +598,6 @@ export function SettingsWorkspace({
 
         {visibleSection === "connectors" ? (
         <section className="grid gap-6 pb-6">
-          <TelegramSettingsPanel endpoint={endpoint} selectedProjectPath={selectedProjectPath} />
           <ExternalAgentConnectorsPanel
             status={connectorStatus}
             loading={loadingConnectors}
@@ -612,6 +611,12 @@ export function SettingsWorkspace({
             onUninstall={(client, configPath) => onRunConnectorAction(client, "uninstall", configPath)}
             onCopy={onCopyConnectorText}
           />
+          <details className="rounded-lg border border-border bg-card p-3">
+            <summary className="cursor-pointer text-sm font-semibold">{t("connector.telegramRemoteAccess")}</summary>
+            <div className="mt-4">
+              <TelegramSettingsPanel endpoint={endpoint} selectedProjectPath={selectedProjectPath} />
+            </div>
+          </details>
         </section>
         ) : null}
 

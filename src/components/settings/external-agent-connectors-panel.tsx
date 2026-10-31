@@ -63,6 +63,8 @@ export function ExternalAgentConnectorsPanel({
   onCopy,
 }: ExternalAgentConnectorsPanelProps) {
   const { t } = useTranslation();
+  const [setupClient, setSetupClient] = useState<ExternalAgentConnectorClient>("deepseekHarness");
+  const [genericConfigPath, setGenericConfigPath] = useState(readStoredGenericConfigPath);
   const gateway = status?.gateway;
   const codexText = status?.clientConfigs?.codex?.text || "";
   const codexStdioText = status?.clientConfigs?.codexStdio?.text || "";
@@ -78,7 +80,29 @@ export function ExternalAgentConnectorsPanel({
   const genericStdioText = status?.clientConfigs?.generic?.text || claudeStdioText;
   const genericHttpText = status?.clientConfigs?.genericHttp?.text || claudeText;
   const deepseekHarnessText = status?.clientConfigs?.deepseekHarness?.text || "";
+  const agentConfig = status?.clientConfigs?.generic?.text || "";
   const clients = status?.clients;
+  const setupConfig = setupClient === "codexApp" || setupClient === "codexCli"
+    ? codexStdioText
+    : setupClient === "claudeCode" || setupClient === "claudeCowork"
+      ? claudeStdioText
+      : setupClient === "deepseekHarness"
+        ? deepseekHarnessText
+        : genericStdioText;
+  const setupState = clients?.[setupClient];
+  const setupAction = status?.connectorActions?.[setupClient];
+  const setupActionVisible = setupAction?.action === "install"
+    && (setupClient !== "generic" || sameConnectorConfigPath(setupAction.configPath, genericConfigPath.trim()));
+  const needsProject = setupClient === "claudeCode" && !selectedProjectPath;
+  const bindingConflict = Boolean(setupState?.bindingConflict);
+  const installable = setupState?.installable !== false && !needsProject;
+  const genericPath = genericConfigPath.trim();
+  const genericInstalledHere = setupClient === "generic" && Boolean(setupState?.installed)
+    && sameConnectorConfigPath(setupState?.requestedConfigPath || setupState?.configPath, genericPath);
+  const setupInstalled = setupClient === "generic" ? genericInstalledHere : Boolean(setupState?.installed);
+  const setupPrompt = agentConfig
+    ? `${t("connector.agentPrompt")}\n\n${agentConfig}`
+    : "";
   const connectorRows: Array<{
     client: ExternalAgentConnectorClient;
     title: string;
@@ -130,111 +154,105 @@ export function ExternalAgentConnectorsPanel({
       <div className="flex min-w-0 items-center gap-2">
         <Shield className="h-4 w-4 shrink-0 text-primary" />
         <h2 className="min-w-0 flex-1 truncate text-base font-semibold">{t("connector.title")}</h2>
-        <Badge tone={gateway?.enabled ? "ok" : "muted"} className="shrink-0">
-          {gateway?.enabled ? t("skills.enabled") : t("connector.disabled")}
-        </Badge>
       </div>
       <p className="mt-2 text-xs text-muted-foreground">{t("connector.configStatusHint")}</p>
 
-      <div className="mt-4 grid gap-3">
-        <DataLine label={t("connector.endpoint")} value={status?.mcp?.url || gateway?.mcpUrl || "http://127.0.0.1:8757/mcp"} mono />
-        <DataLine label={t("connector.tokenEnv")} value={status?.auth?.tokenEnvVar || "VRCFORGE_AGENT_TOKEN"} mono />
-        <DataLine label={t("connector.stdioBridge")} value={launcherCommand || "-"} mono />
-        <DataLine label={t("connector.smoke")} value={smokeCommand || "-"} mono />
-        <DataLine label={t("connector.tools")} value={`${toolCount} read tools / ${writeTargetCount} write-request targets`} />
-        <DataLine label={t("connector.config")} value={gateway?.configPath || "-"} />
-      </div>
-
-      <div className="mt-5 grid gap-3 md:grid-cols-2">
+      <div className="mt-4 grid gap-3 rounded-lg border border-border bg-background p-3" data-onboarding-client={setupClient} data-onboarding-client-label={t(`connector.hosts.${setupClient}`)}>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-semibold">1. {t("connector.stepEnable")}</span>
+          <Badge tone={gateway?.enabled ? "ok" : "muted"}>{gateway?.enabled ? t("connector.enabled") : t("connector.disabled")}</Badge>
+        </div>
         <div data-onboarding-external="gateway" className="grid">
-          <ConnectorToggle
-            label={t("connector.gateway")}
-            checked={Boolean(gateway?.enabled)}
-            disabled={loading || !status}
-            onChange={onToggleGateway}
-          />
+          <ConnectorToggle label={t("connector.gateway")} checked={Boolean(gateway?.enabled)} disabled={loading || !status} onChange={onToggleGateway} />
         </div>
-        <ConnectorToggle
-          label={t("connector.writeRequests")}
-          checked={Boolean(gateway?.allowWriteRequests)}
-          disabled={loading || !status}
-          onChange={onToggleWriteRequests}
-        />
-      </div>
-
-      <div className="mt-5 grid gap-3">
-        {connectorRows.map((row) => (
-          <ConnectorClientRow
-            key={row.client}
-            client={row.client}
-            title={row.title}
-            mode={row.mode}
-            state={clients?.[row.client]}
-            loading={loading}
-            copyText={row.copyText}
-            copyLabel={row.copyLabel}
-            shared={row.shared}
-            selectedProjectPath={selectedProjectPath}
-            lastAction={status?.connectorActions?.[row.client]}
-            onInstall={onInstall}
-            onUninstall={onUninstall}
-            onCopy={onCopy}
-          />
-        ))}
-        <GenericConnectorRow
-          loading={loading}
-          state={clients?.generic}
-          lastAction={status?.connectorActions?.generic}
-          stdioText={genericStdioText}
-          httpText={genericHttpText}
-          onInstall={onInstall}
-          onUninstall={onUninstall}
-          onCopy={onCopy}
-        />
-      </div>
-
-      <div className="mt-5 flex flex-wrap justify-end gap-2">
-        {message ? (
-          <Badge tone={status?.lastConnectorAction?.ok === false ? "danger" : "ok"} className="mr-auto shrink-0">
-            {message}
-          </Badge>
-        ) : null}
-        <Button type="button" variant="outline" disabled={loading} onClick={onRefresh}>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          Refresh
-        </Button>
-        <Button type="button" variant="outline" disabled={!codexText} onClick={() => onCopy(codexText, "Codex HTTP config")}>
-          <Copy className="h-4 w-4" />
-          {t("connector.codexHttp")}
-        </Button>
-        <Button type="button" variant="outline" disabled={!claudeText} onClick={() => onCopy(claudeText, "Claude HTTP config")}>
-          <Copy className="h-4 w-4" />
-          {t("connector.claudeHttp")}
-        </Button>
-        <Button type="button" variant="danger" disabled={loading || !status} onClick={onRevoke}>
-          {t("connector.revokeToken")}
-        </Button>
-      </div>
-
-      {status?.lastCalls?.length ? (
-        <div className="mt-5 overflow-hidden rounded-lg border border-border">
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_120px] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
-            <span className="truncate">{t("connector.event")}</span>
-            <span className="truncate">{t("proof.tool")}</span>
-            <span className="truncate">{t("connector.status")}</span>
+        <div className="grid gap-1">
+          <ConnectorToggle label={t("connector.allowProjectChanges")} checked={Boolean(gateway?.allowWriteRequests)} disabled={loading || !status} onChange={onToggleWriteRequests} />
+          <p className="px-1 text-xs text-muted-foreground">{t("connector.writePolicyHint")}</p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+          <label className="grid gap-1 text-xs font-medium text-muted-foreground" htmlFor="connector-setup-client">
+            {t("connector.chooseHost")}
+            <select id="connector-setup-client" value={setupClient} onChange={(event) => setSetupClient(event.target.value as ExternalAgentConnectorClient)} disabled={loading} className="h-9 min-w-0 rounded-md border border-border bg-card px-2 text-sm text-foreground">
+              {(["deepseekHarness", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"] as const).map((client) => (
+                <option key={client} value={client}>{t(`connector.hosts.${client}`)}</option>
+              ))}
+            </select>
+          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={setupInstalled ? "ok" : setupState?.conflict || setupState?.lastError ? "warn" : "muted"}>
+              {setupState ? (setupState.conflict || setupState.lastError ? t("connector.needsAttention") : setupInstalled ? t("connector.installed") : t("connector.notInstalled")) : t("connector.notChecked")}
+            </Badge>
+            <Button type="button" disabled={loading || !setupState || !installable || bindingConflict || (setupClient === "generic" && !genericPath)} onClick={() => onInstall(setupClient, setupClient === "generic" ? genericPath : undefined)}>
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              {t("connector.install")}
+            </Button>
           </div>
-          {status.lastCalls.slice(0, 8).map((call, index) => (
-            <div
-              key={`${call.event}-${call.createdAt}-${index}`}
-              className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_120px] gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0"
-            >
-              <span className="truncate">{call.event || "-"}</span>
-              <span className="truncate font-mono">{call.targetTool || "-"}</span>
-              <span className="truncate">{call.status || call.riskLevel || "-"}</span>
-            </div>
-          ))}
         </div>
-      ) : null}
+        {setupClient === "generic" ? (
+          <label className="grid gap-1 text-xs font-medium text-muted-foreground" htmlFor="connector-agent-config-path">
+            {t("connector.genericPathLabel")}
+            <input id="connector-agent-config-path" type="text" value={genericConfigPath} disabled={loading} placeholder={t("connector.genericPathPlaceholder")} onChange={(event) => { setGenericConfigPath(event.target.value); storeGenericConfigPath(event.target.value.trim()); }} className="h-9 w-full min-w-0 rounded-md border border-border bg-card px-2 font-mono text-xs text-foreground" />
+          </label>
+        ) : null}
+        {needsProject ? <div className="text-xs text-amber-700 dark:text-amber-300">{t("connector.needsProjectHint")}</div> : null}
+        {!installable ? <div className="text-xs text-amber-700 dark:text-amber-300">{t("connector.notInstallableHint")}</div> : null}
+        {setupActionVisible && setupAction ? <div className={cn("rounded-md px-3 py-2 text-xs", setupAction.ok ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-destructive/10 text-destructive")}>
+          <div className="font-medium">{setupAction.ok ? t("connector.bridgeTestPassed", { host: t(`connector.hosts.${setupClient}`) }) : t("connector.selfTestFailed")}</div>
+          {setupAction.error ? <div className="mt-1 break-words">{setupAction.error}</div> : null}
+          {setupAction.suggestion || setupAction.handshake?.suggestion ? <div className="mt-1 break-words">{setupAction.suggestion || setupAction.handshake?.suggestion}</div> : null}
+        </div> : null}
+        {message && !setupActionVisible ? <p role="status" className="text-xs text-muted-foreground">{message}</p> : null}
+        <div className="text-xs text-muted-foreground">2. {t("connector.stepInstall")}<br />3. {t("connector.stepReload", { host: t(`connector.hosts.${setupClient}`) })}</div>
+      </div>
+
+      <section className="mt-4 grid gap-3 rounded-lg border border-primary/30 bg-primary/5 p-3" data-connector-agent-instructions>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h3 className="min-w-0 flex-1 text-sm font-semibold">{t("connector.agentSetupTitle")}</h3>
+          <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={!setupPrompt} onClick={() => onCopy(setupPrompt, t("connector.agentSetupTitle"))}>
+            <Copy className="h-3.5 w-3.5" />
+            {t("connector.copyAgentSetup")}
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">{t("connector.agentSetupHint")}</p>
+        {agentConfig ? <>
+          <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">{t("connector.agentPrompt")}</div>
+          <pre className="max-w-full overflow-x-auto whitespace-pre-wrap break-all rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed text-foreground">{agentConfig}</pre>
+        </> : <p className="text-xs text-muted-foreground">{t("connector.noConfigYet")}</p>}
+      </section>
+
+      <details className="mt-4 rounded-lg border border-border bg-background p-3">
+        <summary className="cursor-pointer text-sm font-semibold">{t("connector.diagnostics")}</summary>
+        <div className="mt-3 grid gap-3">
+          <div className="grid gap-2">
+            <DataLine label={t("connector.endpoint")} value={status?.mcp?.url || gateway?.mcpUrl || "http://127.0.0.1:8757/mcp"} mono />
+            <DataLine label={t("connector.tokenEnv")} value={status?.auth?.tokenEnvVar || "VRCFORGE_AGENT_TOKEN"} mono />
+            <DataLine label={t("connector.stdioBridge")} value={launcherCommand || "-"} mono />
+            <DataLine label={t("connector.smoke")} value={smokeCommand || "-"} mono />
+            <DataLine label={t("connector.tools")} value={`${toolCount} read tools / ${writeTargetCount} write-request targets`} />
+            <DataLine label={t("connector.config")} value={gateway?.configPath || "-"} />
+          </div>
+          <div className="grid gap-3">
+            {connectorRows.map((row) => (
+              <ConnectorClientRow key={row.client} client={row.client} title={row.title} mode={row.mode} state={clients?.[row.client]} loading={loading} copyText={row.copyText} copyLabel={row.copyLabel} shared={row.shared} selectedProjectPath={selectedProjectPath} lastAction={status?.connectorActions?.[row.client]} onInstall={onInstall} onUninstall={onUninstall} onCopy={onCopy} />
+            ))}
+            <GenericConnectorRow loading={loading} state={clients?.generic} lastAction={status?.connectorActions?.generic} stdioText={genericStdioText} httpText={genericHttpText} onInstall={onInstall} onUninstall={onUninstall} onCopy={onCopy} />
+          </div>
+          {status?.lastCalls?.length ? (
+            <div className="overflow-hidden rounded-lg border border-border">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_120px] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground"><span className="truncate">{t("connector.event")}</span><span className="truncate">{t("proof.tool")}</span><span className="truncate">{t("connector.status")}</span></div>
+              {status.lastCalls.slice(0, 8).map((call, index) => <div key={`${call.event}-${call.createdAt}-${index}`} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_120px] gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0"><span className="truncate">{call.event || "-"}</span><span className="truncate font-mono">{call.targetTool || "-"}</span><span className="truncate">{call.status || call.riskLevel || "-"}</span></div>)}
+            </div>
+          ) : null}
+          {message ? <p role="status" className="text-xs text-muted-foreground">{message}</p> : null}
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button type="button" variant="outline" disabled={loading} onClick={onRefresh}>{loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}{t("connector.refresh")}</Button>
+            <Button type="button" variant="outline" disabled={!codexText} onClick={() => onCopy(codexText, "Codex HTTP config")}><Copy className="h-4 w-4" />{t("connector.codexHttp")}</Button>
+            <Button type="button" variant="outline" disabled={!claudeText} onClick={() => onCopy(claudeText, "Claude HTTP config")}><Copy className="h-4 w-4" />{t("connector.claudeHttp")}</Button>
+            <Button type="button" variant="danger" disabled={loading || !status} onClick={onRevoke}>{t("connector.revokeToken")}</Button>
+          </div>
+        </div>
+      </details>
+
     </div>
   );
 }
