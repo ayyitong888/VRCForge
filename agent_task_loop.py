@@ -15,7 +15,7 @@ import hashlib
 import json
 from typing import Any
 
-from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result, runtime_observation_receipt
+from agent_tool_result_contract import completion_gate_plan, invoked_dispatch_receipt, normalize_agent_tool_result, runtime_observation_receipt
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
 from checkpoint_user_policy import (
     checkpoint_skip_authority_for_context,
@@ -395,6 +395,12 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
         "nextAction",
         "recovery",
         "mutationStarted",
+        "mutationMayHaveStarted",
+        "triggered",
+        "dispatchState",
+        "resultVerification",
+        "persistenceState",
+        "readbackState",
         "committed",
         "commitState",
         "commitStateKnown",
@@ -952,7 +958,7 @@ def approval_completion(
     status = _status(verified.get("status"))
     if status == "ok":
         task_status = "completed"
-    elif status == "pending" and runtime_observation_receipt(raw_result):
+    elif status == "pending" and (runtime_observation_receipt(raw_result) or invoked_dispatch_receipt(raw_result)):
         task_status = "running"
     elif status == "failed":
         task_status = "failed"

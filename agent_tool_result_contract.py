@@ -96,6 +96,13 @@ def runtime_observation_receipt(value: Any) -> Mapping[str, Any] | None:
         and isinstance(view.get("coreIdentity"), str) and view["coreIdentity"]), None)
 
 
+def invoked_dispatch_receipt(value: Any) -> Mapping[str, Any] | None:
+    """Recognize a returned invocation without claiming its callback's outcome."""
+    return next((view for view in _views(value)
+        if view.get("triggered") is True and view.get("state") == "invoked"
+        and view.get("resultVerification") == "pending"), None)
+
+
 def _bounded_text_list(value: Any, *, limit: int = 6) -> list[str]:
     if not isinstance(value, (list, tuple)):
         return []
@@ -427,6 +434,7 @@ def normalize_agent_tool_result(
         for view in views
     )
     observation = runtime_observation_receipt(value)
+    dispatch = invoked_dispatch_receipt(value)
     observation_pending = bool(observation and observation.get("status") == "pending"
         and observation.get("ok") is True and observation.get("mutationStarted") is True
         and observation.get("verified") is False and observation.get("commitState") == "pending")
@@ -514,6 +522,11 @@ def normalize_agent_tool_result(
             "likelyCauses": [],
             "nextActions": ["Inspect the failed checks, correct the cause, and verify again."],
         }
+    elif dispatch:
+        status = "pending"
+        summary = "The command was invoked; inspect its actual result without repeating the dispatch."
+        verification = {"state": "pending", "checks": []}
+        error = None
     elif observation_pending:
         status = "pending"
         summary = "Runtime observation is sampling. Poll the same job; do not repeat start."
@@ -581,13 +594,25 @@ def normalize_agent_tool_result(
         "evidence": _evidence_refs(views),
         "verification": verification,
     }
+    dispatch_pending = bool(dispatch and status == "pending")
     canonical_facts = canonical_result_facts(
         causal_views,
-        success=status == "ok",
-        status="ok" if status == "ok" else "failed",
+        success=None if dispatch_pending else status == "ok",
+        status=None if dispatch_pending else "ok" if status == "ok" else "failed",
     )
     canonical_status = canonical_facts.pop("status", None)
     result.update(canonical_facts)
+    if dispatch_pending:
+        result.update({
+            "triggered": True,
+            "dispatchState": "invoked",
+            "resultVerification": "pending",
+            "mutationMayHaveStarted": dispatch.get("mutationMayHaveStarted"),
+            "commitState": "unknown",
+            "persistenceState": "pending",
+            "readbackState": "pending",
+            "nextAction": "Inspect the actual objects, assets or window. Do not repeat the dispatch to verify it.",
+        })
     # These are deliberately shared diagnostic facts, not transport-only
     # decorations.  Keep them in the normalized outcome so the internal loop
     # and the external MCP boundary expose the same failed step and evidence
