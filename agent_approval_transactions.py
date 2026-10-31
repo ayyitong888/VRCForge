@@ -4828,38 +4828,25 @@ class AgentApprovalTransactionService:
                 )
                 result = failed_readback
                 raise AgentGatewayError(str(failed_readback["error"]))
-            mutation_started = receipt.get("mutationStarted")
+            # Use the shared normalized facts as the settlement source. Raw
+            # handler aliases remain available for details, but cannot override
+            # a canonical unknown/no-write/pending result.
+            mutation_started = completion_outcome.get("mutationStarted")
             if not isinstance(mutation_started, bool):
-                mutation_started = completion_outcome.get("mutationStarted")
-            mutation_applied = receipt.get("mutationApplied")
+                mutation_started = receipt.get("mutationStarted")
+            mutation_applied = completion_outcome.get("mutationApplied")
+            if not isinstance(mutation_applied, bool):
+                mutation_applied = receipt.get("mutationApplied")
             if not isinstance(mutation_applied, bool) and isinstance(receipt.get("changed"), bool):
                 mutation_applied = receipt["changed"]
-            if not isinstance(mutation_applied, bool):
-                mutation_applied = completion_outcome.get("mutationApplied")
-            commit_state = str(
-                receipt.get("commitState")
-                or completion_outcome.get("commitState")
-                or "unknown"
-            )
+            commit_state = str(completion_outcome.get("commitState") or "unknown")
             persistence_state = (
-                "pending"
-                if operation_pending
-                else
-                "persisted"
-                if receipt_verified and commit_state in {"committed", "no_change"}
-                else "verified"
-                if write_handler.verification_finalize_handler is not None
-                else "handler_reported"
+                "pending" if operation_pending
+                else str(completion_outcome.get("persistenceState") or "handler_reported")
             )
             readback_state = (
-                "pending"
-                if operation_pending
-                else
-                "verified"
-                if receipt_verified and isinstance(receipt_readback, Mapping)
-                else "verified"
-                if write_handler.verification_finalize_handler is not None
-                else "handler_reported"
+                "pending" if operation_pending
+                else str(completion_outcome.get("readbackState") or "handler_reported")
             )
             completion_outcome.update(
                 {
@@ -4870,33 +4857,9 @@ class AgentApprovalTransactionService:
                     "readbackState": readback_state,
                 }
             )
-            finalize_verification = (
-                isinstance(result, Mapping)
-                and isinstance(result.get("consoleVerification"), Mapping)
-                and str(result["consoleVerification"].get("status") or "").casefold()
-                in {"passed", "verified"}
-            )
             checkpoint = self._finish_created_asset_checkpoint(checkpoint, result, pending=operation_pending)
             if recovery is not None:
                 recovery["checkpoint"] = checkpoint
-            if recovery is not None:
-                if not gm_entry_pending and pending_execution is None and not receipt_verified and not finalize_verification:
-                    console_verification = (
-                        result.get("consoleVerification") if isinstance(result, Mapping) else None
-                    )
-                    if (
-                        isinstance(console_verification, Mapping)
-                        and str(console_verification.get("status") or "").casefold() == "failed"
-                    ):
-                        raise AgentGatewayError(
-                            str(console_verification.get("summary") or "Unity completion verification failed."),
-                            status_code=409,
-                            cause_code=str(console_verification.get("code") or "unity_completion_verification_failed"),
-                        )
-                    raise AgentGatewayError(
-                        "The external Unity write returned success without explicit verification.",
-                        status_code=409,
-                    )
                 if not gm_entry_pending:
                     recovery = self._finish_apply_recovery(
                         recovery,

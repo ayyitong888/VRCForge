@@ -52,6 +52,7 @@ _KNOWN_NESTED_KEYS = (
     "entrypoint",
     "toolResult",
     "errorDetails",
+    "consoleVerification",
 )
 
 
@@ -453,6 +454,17 @@ def normalize_agent_tool_result(
     )
     pending_execution = pending_execution_receipt(value)
     dispatch = pending_execution if pending_execution and pending_execution.get("triggered") is True else None
+    running_write_without_job = (
+        write
+        and pending_execution is None
+        and not gm_entry_pending
+        and any(
+            _status(view.get("status")) == "running"
+            and view.get("mutationStarted") is True
+            and _status(view.get("commitState")) == "unknown"
+            for view in views
+        )
+    )
 
     failed_view: Mapping[str, Any] | None = None
     top_level_execution_status = _status(
@@ -466,6 +478,12 @@ def normalize_agent_tool_result(
     )
     for view in views:
         if view.get("isError") is True:
+            failed_view = view
+            break
+        if (
+            _status(view.get("persistenceState")) in _FAILED_STATUSES
+            or _status(view.get("readbackState")) in _FAILED_STATUSES
+        ):
             failed_view = view
             break
         execution_status = _status(view.get("toolExecutionStatus"))
@@ -549,6 +567,16 @@ def normalize_agent_tool_result(
         status = "pending"
         summary = "Gesture Manager Play Mode entry was requested and is pending."
         error = None
+    elif running_write_without_job:
+        status = "failed"
+        summary = "The write is still reported as running but has no job handle; completion is unknown."
+        error = {
+            "type": "execution",
+            "code": "running_write_without_job_handle",
+            "retryable": False,
+            "likelyCauses": [],
+            "nextActions": ["Inspect the exact target before retrying; do not repeat the write."],
+        }
     elif needs_action:
         status = "needs_user_action"
         projected_error = _structured_error(causal_views)
@@ -612,6 +640,7 @@ def normalize_agent_tool_result(
         causal_views,
         success=None if execution_pending else status == "ok",
         status=None if execution_pending else "ok" if status == "ok" else "failed",
+        write=write,
     )
     canonical_status = canonical_facts.pop("status", None)
     result.update(canonical_facts)

@@ -39,6 +39,111 @@ def test_internal_and_external_outcomes_project_the_same_cause_facts() -> None:
     assert {key: internal.get(key) for key in shared} == {key: external.get(key) for key in shared}
 
 
+def test_internal_and_external_outcomes_share_commit_persistence_and_readback_facts() -> None:
+    raw = {
+        "ok": True,
+        "status": "completed",
+        "pending": False,
+        "sceneSaved": True,
+        "committed": True,
+        "commitState": "complete",
+        "componentCountBefore": 0,
+        "componentCountAfter": 1,
+    }
+    internal = normalize_agent_tool_result(raw, fallback_summary="Write completed.", write=True)
+    external = build_external_tool_error(raw_result=raw, operation_kind="write")
+    state_fields = ("commitState", "persistenceState", "readbackState")
+
+    assert {key: internal.get(key) for key in state_fields} == {
+        "commitState": "complete",
+        "persistenceState": "persisted",
+        "readbackState": "handler_reported",
+    }
+    assert {key: internal.get(key) for key in state_fields} == {
+        key: external.get(key) for key in state_fields
+    }
+
+
+def test_unknown_commit_keeps_its_state_and_preserves_explicit_persistence() -> None:
+    raw = {
+        "ok": True,
+        "commitState": "unknown",
+        "committed": True,
+        "persistenceState": "persisted",
+    }
+    outcome = normalize_agent_tool_result(raw, fallback_summary="Write completed.", write=True)
+
+    assert outcome["commitState"] == "unknown"
+    assert outcome["persistenceState"] == "persisted"
+    assert outcome["readbackState"] == "unknown"
+
+
+def test_verified_readback_requires_independent_readback_evidence() -> None:
+    raw = {
+        "ok": True,
+        "committed": True,
+        "commitState": "committed",
+        "saved": True,
+        "verified": True,
+    }
+    outcome = normalize_agent_tool_result(raw, fallback_summary="Write completed.", write=True)
+    assert outcome["commitState"] == "complete"
+    assert outcome["persistenceState"] == "persisted"
+    assert outcome["readbackState"] == "handler_reported"
+
+    verified = normalize_agent_tool_result(
+        {**raw, "readback": {"target": "observed"}},
+        fallback_summary="Write completed.",
+        write=True,
+    )
+    assert verified["readbackState"] == "verified"
+
+
+def test_shared_completion_facts_normalize_no_change_without_claiming_readback() -> None:
+    outcome = normalize_agent_tool_result(
+        {"ok": True, "committed": True, "commitState": "no_change", "saved": True},
+        fallback_summary="Write completed.",
+        write=True,
+    )
+
+    assert outcome["commitState"] == "no_change"
+    assert outcome["persistenceState"] == "persisted"
+    assert outcome["readbackState"] == "handler_reported"
+
+
+def test_completed_setup_with_save_scene_false_is_not_reported_as_persisted() -> None:
+    outcome = normalize_agent_tool_result(
+        {
+            "ok": True,
+            "status": "completed",
+            "committed": True,
+            "commitState": "complete",
+            "sceneSaved": False,
+        },
+        fallback_summary="Setup Outfit",
+        write=True,
+    )
+
+    assert outcome["commitState"] == "complete"
+    assert outcome["persistenceState"] == "handler_reported"
+
+
+def test_explicit_verification_failures_use_shared_failed_status() -> None:
+    for raw in (
+        {"ok": True, "readbackState": "failed"},
+        {"ok": True, "persistenceState": "failed"},
+        {"ok": True, "consoleVerification": {"status": "failed", "summary": "compile errors remain"}},
+    ):
+        outcome = normalize_agent_tool_result(raw, fallback_summary="Write completed.", write=True)
+        assert outcome["status"] == "failed"
+    console = normalize_agent_tool_result(
+        {"ok": True, "consoleVerification": {"status": "failed", "summary": "compile errors remain"}},
+        fallback_summary="Write completed.",
+        write=True,
+    )
+    assert console["summary"] == "compile errors remain"
+
+
 def test_nested_tool_failure_cannot_be_wrapped_as_success() -> None:
     outcome = normalize_agent_tool_result(
         {
@@ -242,25 +347,17 @@ def test_completion_gate_does_not_preserve_reply_without_explicit_false_claim() 
     assert "modelFailureReplyPreserved" not in gated["completionGate"]
 
 
-def test_verified_or_read_only_results_stay_lightweight() -> None:
+def test_verified_write_and_read_only_results_keep_distinct_settlement_facts() -> None:
     verified = normalize_agent_tool_result(
         {"ok": True, "summary": "Applied and verified.", "readbackVerified": True},
         fallback_summary="Apply the change.",
         write=True,
     )
-    assert verified == {
-        "schema": "vrcforge.tool_result.v1",
-        "success": True,
-        "status": "ok",
-        "summary": "Applied and verified.",
-        "data": {},
-        "error": None,
-        "evidence": [],
-        "verification": {
-            "state": "passed",
-            "checks": [{"kind": "readback", "state": "passed"}],
-        },
-    }
+    assert verified["status"] == "ok"
+    assert verified["verification"]["state"] == "passed"
+    assert verified["commitState"] == "unknown"
+    assert verified["persistenceState"] == "unknown"
+    assert verified["readbackState"] == "verified"
 
     read_only = normalize_agent_tool_result(
         "plain result",

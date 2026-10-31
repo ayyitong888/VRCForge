@@ -229,10 +229,119 @@ def test_nested_core_persisted_receipt_projects_same_success_facts_to_external_a
     assert result["ok"] is True
     assert result["mutationStarted"] is True
     assert result["mutationApplied"] is True
-    assert result["commitState"] == "committed"
+    assert result["commitState"] == "complete"
     assert result["persistenceState"] == "persisted"
     assert result["readbackState"] == "verified"
-    assert result["outcome"]["commitState"] == "committed"
+    assert result["outcome"]["commitState"] == "complete"
+
+
+@pytest.mark.parametrize(
+    ("core_result", "commit_state", "persistence_state", "readback_state"),
+    [
+        (
+            {"ok": True, "status": "completed", "pending": False, "sceneSaved": True,
+             "committed": True, "commitState": "complete", "componentCountBefore": 0,
+             "componentCountAfter": 1},
+            "complete", "persisted", "handler_reported",
+        ),
+        ({"ok": True}, "unknown", "unknown", "unknown"),
+        ({"ok": True, "persistenceState": "persisted"}, "unknown", "persisted", "unknown"),
+        (
+            {"ok": True, "mutationStarted": False, "committed": False,
+             "commitState": "not_started"},
+            "not_started", "not_started", "not_started",
+        ),
+    ],
+)
+def test_external_recovery_uses_shared_completion_facts_without_generic_verified_gate(
+    tmp_path: Path, monkeypatch, core_result, commit_state, persistence_state, readback_state,
+) -> None:
+    gateway = _gateway(tmp_path)
+    project = _unity_project(tmp_path)
+    operation = gateway.approval_transactions
+    monkeypatch.setattr(
+        type(operation),
+        "_create_pre_write_checkpoint",
+        lambda _self, _approval, _arguments: {"ok": True, "id": "checkpoint-fixture", "projectRoot": str(project)},
+    )
+    tool = "vrcforge_contract_anonymous_terminal_write"
+    operation.register_write_handler(
+        tool, "Anonymous terminal write fixture", "high", lambda _args: deepcopy(core_result),
+        external_mcp_capability="avatar",
+    )
+    gateway.register_external_mcp_unity_tool(tool, "avatar")
+
+    proposal = gateway.call_external_mcp_tool(tool, {"projectRoot": str(project)})
+    result = gateway.call_external_mcp_tool(tool, {
+        "projectRoot": str(project),
+        "confirmation": {**proposal["confirmation"], "decision": "approve"},
+    })
+
+    assert result["ok"] is True
+    assert result["commitState"] == commit_state
+    assert result["persistenceState"] == persistence_state
+    assert result["readbackState"] == readback_state
+    assert result["recovery"]["status"] == "applied"
+    assert result["outcome"]["commitState"] == commit_state
+
+
+def test_explicit_failed_console_verification_still_rejects_external_recovery(tmp_path: Path, monkeypatch) -> None:
+    gateway = _gateway(tmp_path)
+    project = _unity_project(tmp_path)
+    operation = gateway.approval_transactions
+    monkeypatch.setattr(
+        type(operation),
+        "_create_pre_write_checkpoint",
+        lambda _self, _approval, _arguments: {"ok": True, "id": "checkpoint-fixture", "projectRoot": str(project)},
+    )
+    tool = "vrcforge_contract_console_failure_write"
+    operation.register_write_handler(
+        tool,
+        "Console failure fixture",
+        "high",
+        lambda _args: {"ok": True, "consoleVerification": {
+            "status": "failed", "summary": "compile errors remain",
+            "code": "unity_completion_verification_failed",
+        }},
+        external_mcp_capability="avatar",
+    )
+    gateway.register_external_mcp_unity_tool(tool, "avatar")
+    proposal = gateway.call_external_mcp_tool(tool, {"projectRoot": str(project)})
+    result = gateway.call_external_mcp_tool(tool, {
+        "projectRoot": str(project),
+        "confirmation": {**proposal["confirmation"], "decision": "approve"},
+    })
+
+    assert result["ok"] is False
+    assert "compile errors remain" in json.dumps(result["errorDetails"])
+
+
+def test_explicit_failed_readback_still_rejects_external_recovery(tmp_path: Path, monkeypatch) -> None:
+    gateway = _gateway(tmp_path)
+    project = _unity_project(tmp_path)
+    operation = gateway.approval_transactions
+    monkeypatch.setattr(
+        type(operation),
+        "_create_pre_write_checkpoint",
+        lambda _self, _approval, _arguments: {"ok": True, "id": "checkpoint-fixture", "projectRoot": str(project)},
+    )
+    tool = "vrcforge_contract_readback_failure_write"
+    operation.register_write_handler(
+        tool,
+        "Readback failure fixture",
+        "high",
+        lambda _args: {"ok": True, "commitState": "complete", "committed": True, "readbackState": "failed"},
+        external_mcp_capability="avatar",
+    )
+    gateway.register_external_mcp_unity_tool(tool, "avatar")
+    proposal = gateway.call_external_mcp_tool(tool, {"projectRoot": str(project)})
+    result = gateway.call_external_mcp_tool(tool, {
+        "projectRoot": str(project),
+        "confirmation": {**proposal["confirmation"], "decision": "approve"},
+    })
+
+    assert result["ok"] is False
+    assert "readback" in json.dumps(result["errorDetails"]).lower()
 
 
 @pytest.mark.parametrize("external", [False, True])

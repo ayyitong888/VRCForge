@@ -9,7 +9,7 @@ EXTERNAL_TOOL_ERROR_SCHEMA = "vrcforge.external_tool_error.v1"
 WRITE_FAILURE_SCHEMA = "vrcforge.write_failure.v1"
 _EXCEPTION_CHAIN_LIMIT = 6
 _KNOWN_COMMIT_STATES = frozenset(
-    {"not_started", "partial", "complete", "rolled_back", "unknown"}
+    {"not_started", "pending", "partial", "complete", "no_change", "rolled_back", "unknown"}
 )
 _UNSET = object()
 _GENERIC_ERROR_CODES = frozenset(
@@ -139,7 +139,8 @@ def _bounded_contract_value(value: Any, *, depth: int = 0) -> Any:
 
 
 def canonical_result_facts(
-    sources: list[Mapping[str, Any]], *, success: bool | None = None, status: str | None = None
+    sources: list[Mapping[str, Any]], *, success: bool | None = None, status: str | None = None,
+    write: bool = False,
 ) -> dict[str, Any]:
     """Project the shared result/cause fields for internal and external agents."""
 
@@ -298,6 +299,10 @@ def canonical_result_facts(
         else:
             commit_state = "unknown"
         facts["commitState"] = commit_state
+    raw_persistence = _first_present(expanded_sources, "persistenceState")
+    raw_readback = _first_present(expanded_sources, "readbackState")
+    if write and not commit_state:
+        commit_state = facts["commitState"] = "unknown"
     if (
         commit_state == "not_started"
         and facts.get("mutationStarted") is False
@@ -353,6 +358,28 @@ def canonical_result_facts(
                 ),
             },
         )
+
+    if write:
+        persistence_state = str(raw_persistence).strip().casefold() if isinstance(raw_persistence, str) else ""
+        readback_state = str(raw_readback).strip().casefold() if isinstance(raw_readback, str) else ""
+        saved_false = any(source.get("saved") is False or source.get("sceneSaved") is False for source in expanded_sources)
+        saved_true = any(source.get("saved") is True or source.get("sceneSaved") is True or source.get("persistedReadback") is True for source in expanded_sources)
+        committed = facts.get("committed") is True and commit_state in {"complete", "no_change"}
+        facts["persistenceState"] = persistence_state or (
+            "persisted" if committed and saved_true and not saved_false else commit_state
+            if commit_state in {"not_started", "pending", "unknown"} else "handler_reported"
+        )
+        if not readback_state:
+            has_readback_evidence = any(
+                source.get("readbackVerified") is True
+                or source.get("persistedReadback") is True
+                or (source.get("verified") is True and isinstance(source.get("readback"), Mapping))
+                for source in expanded_sources
+            )
+            readback_state = "verified" if has_readback_evidence else commit_state
+            if readback_state not in {"verified", "not_started", "pending", "unknown"}:
+                readback_state = "handler_reported"
+        facts["readbackState"] = readback_state
 
     precise_present = cause_relevant and any(
         _result_source_priority(source) <= 1 for source in expanded_sources
@@ -839,11 +866,13 @@ def build_external_tool_error(
         [result, *sources],
         success=False,
         status="failed",
+        write=operation_kind.casefold() == "write",
     )
     resolved_write_facts = canonical_result_facts(
         [resolved_contract_source],
         success=False,
         status="failed",
+        write=True,
     )
     for key in (
         "mutationStarted",
@@ -851,8 +880,12 @@ def build_external_tool_error(
         "commitState",
         "commitStateKnown",
         "safeToRetry",
+        "persistenceState",
+        "readbackState",
     ):
-        if key in resolved_write_facts:
+        if key in resolved_write_facts and (
+            key not in {"persistenceState", "readbackState"} or key not in shared_facts
+        ):
             shared_facts[key] = resolved_write_facts[key]
     if resolved_commit_state == "unknown":
         shared_facts.setdefault("nextAction", resolved_write_facts.get("nextAction"))

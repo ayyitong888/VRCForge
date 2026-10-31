@@ -164,7 +164,13 @@ def test_failed_status_read_closes_only_the_same_job_as_failed(pending_case, pha
 def test_unverified_asset_without_job_id_does_not_gain_pending_starter_semantics(pending_case):
     _, service, base, receipts, _, _ = pending_case
     name = "vrcforge_fixture_unverified_asset"
-    receipts[name] = {"ok": True, "status": "running", "mutationStarted": True, "commitState": "unknown"}
+    raw = {"ok": True, "status": "running", "mutationStarted": True, "commitState": "unknown"}
+    receipts[name] = raw
+    outcome = normalize_agent_tool_result(raw, fallback_summary="Write the fixture asset.", write=True)
+    assert outcome["status"] == "failed"
+    assert outcome["commitState"] == "unknown"
+    assert outcome["safeToRetry"] is False
+    assert outcome["error"]["code"] == "running_write_without_job_handle"
     service.register_write_handler(
         name, "Write a fixture asset with no asynchronous job.", "low", lambda _: receipts[name],
         requires_approved_execution_context=True,
@@ -172,7 +178,7 @@ def test_unverified_asset_without_job_id_does_not_gain_pending_starter_semantics
     )
     result = _execute(pending_case, "external", name, {"projectPath": base["projectPath"]})
     assert result["ok"] is False, result
-    assert "without explicit verification" in result["error"]
+    assert "no job handle" in result["error"]
     assert service._ports.checkpoint.active_apply_recoveries()
 
 
