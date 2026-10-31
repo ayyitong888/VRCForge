@@ -36,6 +36,18 @@
 
 优先以 `vrcforge_get_asset_info` 对精确菜单/参数资产执行 `includeText=true`，确认文本完整 (`sourceComplete=true`) 后，从真实序列化源核对目标控件名称、类型、参数、值、图标与 submenu 引用，以及 Expression Parameters 项的类型/默认/Saved/Synced。该工具返回原始 UTF-8 文本和完整文本 Resource，不会把普通 asset metadata 伪装成控件字段；二进制/不可读资产不能据此通过。此时可用 `vrcforge_scan_avatar_controls`、`vrcforge_scan_parameters` 对指定 Avatar 做只读实际状态核验，并仅核对匹配请求的控件和参数；scanner 只有 `projectPath` / `avatarPath` 范围且菜单扫描会遍历整树，因此这是按需 fallback，不是局部读的强制步骤。scanner 不暴露图标字段时，图标读回仍属未验证。只对照批准的 delta；验证报告/build readiness 不等于构建或运行时验证。
 
+<a id="linked-removal"></a>
+
+## 删除菜单与参数的双向关联清理
+
+删除一个功能的菜单控件时，同时列出它使用的参数及实际引用：相关菜单控件（含子参数）、Expression Parameters、Animator 参数、状态/转换/BlendTree/Parameter Driver，以及现场实际使用的 MA 等生成配置。只沿这些引用检查，不把全项目清理当成前提。删除子菜单入口时，检查其分支是否仍从其他入口可达；导航入口本身不一定有参数。
+
+删菜单后，对不再被保留功能使用的关联参数，分别用 `vrcforge_preview_manage_expression_parameters` / `vrcforge_manage_expression_parameters` 和 `vrcforge_preview_manage_fx_animator` / `vrcforge_manage_fx_animator` 清理 Expression 与 Animator 两处声明；只删一处不算完成。反过来，用户删除参数时，用菜单管理工具一起删除或按用户目标改接引用它的控件，并处理仍引用该参数的驱动，不能留下失效开关或悬空引用。共享参数仍有保留用途时不连带删掉其他功能；说明保留原因，只有与用户明确删除目标实际冲突时才询问取舍。
+
+FX 是否删除取决于实际用途：仅服务已删除功能且不再需要的层/状态可随之清理；仍用于物理、面捕、自动控制、默认外观或其他开关的部分保留，必要时只去掉该参数的条件或驱动。删层不等于删 AnimationClip；共享 clip 和子资产保留，不因菜单消失就删除源资产。使用当前工具实际支持的 action，沿用本次已授权范围、preview 和 checkpoint，不额外增加审批轮次或门禁。
+
+写后回读受影响菜单、两类参数声明及相关驱动，确认删除项消失、保留引用有效，当前默认外观与保留开关未被改变。只有改动了 FX/动画行为时，才对受影响的开关/恢复路径做相应运行核验。
+
 **每笔写入都遵守当前用户配置的权限策略，并绑定精确目标、preview、checkpoint 和写后回读；回滚必须单独确认。**
 
 ## 参考资料

@@ -22,6 +22,10 @@ allowed-tools:
   - vrcforge_ensure_expression_menu_control
   - vrcforge_preview_ensure_expression_parameter
   - vrcforge_ensure_expression_parameter
+  - vrcforge_preview_manage_expression_parameters
+  - vrcforge_manage_expression_parameters
+  - vrcforge_preview_manage_fx_animator
+  - vrcforge_manage_fx_animator
   - vrcforge_run_validation_report
   - vrcforge_build_test_readiness
 support-files:
@@ -55,6 +59,8 @@ support-files:
 已有研究仍匹配实际版本和配置、没有新疑点时直接复用，不要求每个普通步骤重新搜索。用户明确纠正立即调整；只研究尚未解决的方法或根因，不用无关研究拖延已授权的简单动作。
 
 只读时优先读取 Descriptor 与用户指定菜单/参数资产；不得为了局部请求强制展开整棵菜单树。创建或修改控件时，仅在该控件确实需要新增/变更参数时，由 Agent 根据工程证据和用户意图拟定精确参数名、类型与行为；这些字段须列入完整设计，经 preview 展示并获批准后才创建/更新 Expression Parameters 项。不得要求用户预先手写 Unity 参数字段。写后精确回读目标菜单控件和关联参数；保留用户范围外的层级、名称、图标、alias 与参数。
+
+删除菜单或参数时，按[双向关联清理](references/workflow.md#linked-removal)一起处理：删菜单清理不再使用的关联参数，删参数同步处理引用它的菜单控件；Expression Parameters 与 Animator 参数分别核对。共享引用保留并说明，FX 层、状态和动画按实际用途决定，不一律删除，也不留下对已删参数的引用。
 
 详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [工作流指引](workflows/expression-menu.json)；由 Agent 根据现场证据选择适用路线与真实原子工具。
 每项写入通过用户当前配置的权限策略、现有监督通道、精确 preview 和检查点；回滚需要单独确认。

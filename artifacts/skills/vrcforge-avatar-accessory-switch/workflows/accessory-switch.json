@@ -100,6 +100,13 @@
       "runtimeEvidenceDoesNotRewriteConfiguration": true
     }
   },
+  "linkedRemoval": {
+    "menuRemoval": "clean_unused_related_expression_and_animator_parameters",
+    "parameterRemoval": "remove_or_retarget_referencing_menu_controls_and_resolve_driver_references",
+    "references": "inspect_actual_menu_conditions_blend_trees_parameter_drivers_and_generated_configuration; preserve_shared_uses",
+    "fxRemoval": "decide_by_actual_remaining_use; preserve_default_appearance_retained_physics_shared_clips_and_source_assets",
+    "readback": "affected_menu_both_parameter_declarations_and_drivers; runtime_check_affected_paths_only_when_fx_behavior_changes"
+  },
   "steps": [
     {
       "name": "read_booth_asset_author_evidence_before_asset_change",
@@ -191,6 +198,15 @@
       ],
       "writes": true,
       "conditional": "only_if_requested_menu_change_requires_it_after_inspection",
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "clean_linked_menu_parameters_and_fx_only_for_requested_removal",
+      "when": "the user removes a menu control, parameter, or its function; follow linkedRemoval within the same requested scope",
+      "tool": "vrcforge_preview_manage_expression_parameters",
+      "tools": ["vrcforge_manage_expression_parameters", "vrcforge_preview_manage_expression_menu", "vrcforge_manage_expression_menu", "vrcforge_preview_manage_fx_animator", "vrcforge_manage_fx_animator"],
+      "writes": true,
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },

@@ -25,6 +25,8 @@ allowed-tools:
   - vrcforge_add_modular_avatar_component
   - vrcforge_preview_ensure_expression_parameter
   - vrcforge_ensure_expression_parameter
+  - vrcforge_preview_manage_expression_parameters
+  - vrcforge_manage_expression_parameters
   - vrcforge_preview_ensure_animator_state
   - vrcforge_ensure_animator_state
   - vrcforge_preview_write_animation_curve
@@ -72,6 +74,8 @@ support-files:
 已有研究仍匹配实际版本和配置、没有新疑点时直接复用，不要求每个普通步骤重新搜索。用户明确纠正立即调整；只研究尚未解决的方法或根因，不用无关研究拖延已授权的简单动作。
 
 详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [社区操作指引](workflows/accessory-switch.json)；不对已有饰品套用固定 Bool、菜单路径或动画时序，由 Agent 根据现场证据选择适用路线与真实原子工具。
+
+删除开关时，菜单与参数双向联动：删菜单同时清理不再使用的 Expression Parameters 和 Animator 参数；删参数同时处理引用它的菜单控件及驱动。沿实际菜单、FX 条件、BlendTree、Parameter Driver 和生成配置检查共享用途，保留仍服务其他功能的部分。FX 层、状态、clip 按实际用途决定，不因删开关而一律删除，也不能留下已删参数的引用。保持当前默认外观与仍需运行的物理/自动控制，不连带删除饰品对象、共享动画或源资产；按本次授权差异执行并回读关联项，FX 行为改变时核验受影响的开关与恢复路径。
 
 修改场景中的 Prefab instance 前，必须先对精确 instance 执行 `vrcforge_unpack_prefab` preview，核对 GlobalObjectId、源 prefab GUID、依赖 hash 和场景路径，再在批准与 checkpoint 边界内使用 `mode=completely` 完全解包。解包后重新绑定并读回新的场景对象身份；源 prefab 资产、作者 Modular Avatar 组件、骨架、动画与约束来源必须保留。普通材质属性按实际材质工具契约处理，不把材质字段写入错误地描述为必须破坏源 prefab。
 

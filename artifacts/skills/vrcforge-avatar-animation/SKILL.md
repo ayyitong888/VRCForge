@@ -17,6 +17,10 @@ allowed-tools:
   - vrcforge_get_gameobject
   - vrcforge_scan_avatar_controls
   - vrcforge_scan_parameters
+  - vrcforge_preview_manage_expression_menu
+  - vrcforge_manage_expression_menu
+  - vrcforge_preview_manage_expression_parameters
+  - vrcforge_manage_expression_parameters
   - vrcforge_preview_ensure_animator_state
   - vrcforge_ensure_animator_state
   - vrcforge_preview_write_animation_curve
@@ -62,4 +66,6 @@ support-files:
 详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [工作流指引](workflows/animation.json)；由 Agent 根据现场证据选择适用路线与真实原子工具。
 修改已有衣柜中的少量曲线时，直接按[目标绑定与现状盘点](references/workflow.md#existing-clip-targeted-read)读取指定 clip 和绑定，不先展开整个 FX 或面捕。
 同一 controller 删除多个精确层时，加载当前工具 schema；支持 `edits[].action=delete_layer` 时使用一个有序批次，先删同步依赖层再删目标层。整批 preview、批准、检查点和写后回读一次完成；不要拆成多个并发写入或擅自清理共享子资产。
+
+删除功能时，菜单与参数双向联动：删除菜单要同时清理不再使用的 Expression Parameters 和 Animator 参数；删除参数要处理引用它的菜单控件及驱动。沿实际菜单、条件、BlendTree、Parameter Driver 和生成配置核对共享用途，保留仍服务其他功能的部分。FX 层、状态、clip 按实际用途决定是否清理，不因菜单删除一律删 FX；不留下已删参数的悬空引用，也不顺手删除共享动画或源资产。按本次授权差异执行并回读关联项，FX 行为改变时核验受影响的开关与恢复路径。
 每项写入通过用户当前配置的权限策略、现有监督通道、精确 preview 和检查点；回滚需要单独确认。
