@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import io
+import os
 import tarfile
 import zipfile
 from pathlib import Path
@@ -166,39 +167,76 @@ def test_booth_zip_inspects_nested_unitypackage_pathnames_without_asset_payload(
     assert "SECRET_PREVIEW_BYTES" not in rendered
 
 
-def test_nested_unitypackage_inspection_respects_size_limit(tmp_path: Path, monkeypatch) -> None:
+def test_nested_unitypackage_uses_shared_scan_input_limit(tmp_path: Path, monkeypatch) -> None:
     package = tmp_path / "oversized.zip"
     with zipfile.ZipFile(package, mode="w") as archive:
         archive.writestr("Product/Dress.unitypackage", b"not-read")
 
-    monkeypatch.setattr("outfit_package_inspector.MAX_NESTED_UNITYPACKAGE_BYTES", 1)
+    monkeypatch.setattr("outfit_package_inspector.MAX_UNITYPACKAGE_SCAN_INPUT_BYTES", 1)
     result = inspect_outfit_package(package)
 
     assert result["summary"]["nestedUnityPackageCount"] == 0
-    assert result["unityPackages"][0]["inspectionSkipped"] == "nested_package_size_limit"
-    assert any("pathname inspection for oversized" in warning for warning in result["warnings"])
+    assert result["unityPackages"][0]["inspectionSkipped"] == "invalid_nested_package"
+    assert any("scan input byte limit exceeded" in warning for warning in result["warnings"])
 
 
-def test_nested_unitypackage_inspection_stops_at_decompressed_byte_limit(tmp_path: Path, monkeypatch) -> None:
+def test_large_asset_member_does_not_hide_later_pathname(tmp_path: Path, monkeypatch) -> None:
     unitypackage = io.BytesIO()
     with tarfile.open(fileobj=unitypackage, mode="w:gz") as archive:
         write_tar_member(archive, "0001/pathname", b"Assets/Outfits/BeforeLimit.prefab")
         write_tar_member(archive, "0001/asset", b"")
         write_tar_member(archive, "0002/asset", b"X" * 30000)
         write_tar_member(archive, "0003/pathname", b"Assets/Outfits/AfterLimit.prefab")
+        write_tar_member(archive, "0003/asset", b"")
 
     package = tmp_path / "byte-limited.zip"
     with zipfile.ZipFile(package, mode="w") as outer:
         outer.writestr("Product/Large.unitypackage", unitypackage.getvalue())
 
-    monkeypatch.setattr("outfit_package_inspector.MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES", 20000)
+    monkeypatch.setattr("outfit_package_inspector.MAX_UNITYPACKAGE_SCAN_INPUT_BYTES", 20000)
+    result = inspect_outfit_package(package)
+
+    assert result["summary"]["nestedUnityPackageCount"] == 1
+    assert result["summary"]["nestedPathnamesTruncated"] is False
+    assert [item["path"].split("!/")[-1] for item in result["prefabCandidates"]] == [
+        "Assets/Outfits/BeforeLimit.prefab",
+        "Assets/Outfits/AfterLimit.prefab",
+    ]
+
+
+def test_nested_unitypackage_enforces_scan_input_byte_limit(tmp_path: Path, monkeypatch) -> None:
+    unitypackage = io.BytesIO()
+    with tarfile.open(fileobj=unitypackage, mode="w:gz") as archive:
+        write_tar_member(archive, "0001/pathname", b"Assets/Outfits/Probe.prefab")
+        write_tar_member(archive, "0001/asset", os.urandom(30000))
+    package = tmp_path / "input-byte-limited.zip"
+    with zipfile.ZipFile(package, mode="w") as outer:
+        outer.writestr("Product/Large.unitypackage", unitypackage.getvalue())
+    monkeypatch.setattr("outfit_package_inspector.MAX_UNITYPACKAGE_SCAN_INPUT_BYTES", 20000)
+
     result = inspect_outfit_package(package)
 
     assert result["summary"]["nestedUnityPackageCount"] == 1
     assert result["summary"]["nestedPathnamesTruncated"] is True
-    assert result["prefabCandidates"]
-    assert all("AfterLimit" not in item["path"] for item in result["prefabCandidates"])
-    assert any("configured member, byte, or entry limit" in warning for warning in result["warnings"])
+    assert result["unityPackages"][0]["pathnamesEvidenceComplete"] is False
+    assert any("scan input byte limit" in warning for warning in result["warnings"])
+
+
+def test_unitypackage_member_limit_still_truncates_inventory(tmp_path: Path, monkeypatch) -> None:
+    package = tmp_path / "member-limited.unitypackage"
+    with tarfile.open(package, mode="w:gz") as archive:
+        write_tar_member(archive, "0001/pathname", b"Assets/Outfits/Before.prefab")
+        write_tar_member(archive, "0001/asset", b"")
+        write_tar_member(archive, "0002/pathname", b"Assets/Outfits/After.prefab")
+    monkeypatch.setattr("outfit_package_inspector.MAX_UNITYPACKAGE_MEMBERS", 2)
+
+    result = inspect_outfit_package(package)
+
+    assert result["summary"]["truncated"] is True
+    assert result["unityPackages"][0]["archiveMemberCount"] == 3
+    assert [item["path"] for item in result["unityPackages"][0]["pathnamesEvidence"]] == [
+        "Assets/Outfits/Before.prefab",
+    ]
 
 
 def test_nested_unitypackage_pathname_traversal_is_rejected(tmp_path: Path) -> None:

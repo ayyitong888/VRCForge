@@ -14,8 +14,7 @@ ASSEMBLY_DEFINITION_EXTENSIONS = {".asmdef"}
 TEXTURE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tga", ".psd", ".exr"}
 MATERIAL_EXTENSIONS = {".mat"}
 MODEL_EXTENSIONS = {".fbx", ".blend", ".obj"}
-MAX_NESTED_UNITYPACKAGE_BYTES = 256 * 1024 * 1024
-MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_UNITYPACKAGE_SCAN_INPUT_BYTES = 512 * 1024 * 1024
 MAX_UNITYPACKAGE_MEMBERS = 200_000
 
 
@@ -56,7 +55,7 @@ class _BoundedArchiveReader:
         data = self._reader.read(size)
         self.bytes_read += len(data)
         if self.bytes_read > self._limit:
-            raise tarfile.ReadError("UnityPackage uncompressed byte limit exceeded")
+            raise tarfile.ReadError("UnityPackage scan input byte limit exceeded")
         return data
 
     def tell(self) -> int:
@@ -266,24 +265,12 @@ def inspect_zip(path: Path, max_entries: int) -> dict[str, Any]:
             seen_paths.add(lower)
             entries.append(file_entry(normalized, int(info.file_size)))
             if normalized.lower().endswith(".unitypackage"):
-                if info.file_size > MAX_NESTED_UNITYPACKAGE_BYTES:
-                    nested_warnings.append(
-                        f"Skipped pathname inspection for oversized nested UnityPackage {normalized} ({info.file_size} bytes; limit {MAX_NESTED_UNITYPACKAGE_BYTES})."
-                    )
-                    nested_package_results.append({
-                        "path": normalized,
-                        "size": int(info.file_size),
-                        "parsedPathnameCount": 0,
-                        "pathnamesEvidenceComplete": False,
-                        "inspectionSkipped": "nested_package_size_limit",
-                    })
-                    continue
                 remaining = max(0, max_entries - len(nested_pathnames))
                 try:
                     with archive.open(info, "r") as nested_file:
                         bounded_nested_file = _BoundedArchiveReader(
                             nested_file,
-                            MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES,
+                            MAX_UNITYPACKAGE_SCAN_INPUT_BYTES,
                         )
                         parsed = inspect_unitypackage_stream(
                             bounded_nested_file,
@@ -380,7 +367,7 @@ def inspect_zip(path: Path, max_entries: int) -> dict[str, Any]:
 def inspect_unitypackage(path: Path, max_entries: int) -> dict[str, Any]:
     with path.open("rb") as package_file:
         parsed = inspect_unitypackage_stream(
-            _BoundedArchiveReader(package_file, MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES),
+            _BoundedArchiveReader(package_file, MAX_UNITYPACKAGE_SCAN_INPUT_BYTES),
             max_entries=max_entries,
             package_path=path.name,
         )
@@ -423,17 +410,12 @@ def inspect_unitypackage_stream(package_file: Any, max_entries: int, package_pat
     member_count = 0
     pathname_count = 0
     unsafe_pathname_count = 0
-    uncompressed_bytes = 0
     byte_limited = False
     with tarfile.open(fileobj=package_file, mode="r|*") as archive:
         try:
             for member in archive:
                 member_count += 1
                 if member_count > MAX_UNITYPACKAGE_MEMBERS:
-                    truncated = True
-                    break
-                uncompressed_bytes += max(0, int(member.size))
-                if uncompressed_bytes > MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES:
                     truncated = True
                     break
                 if not member.isfile():
@@ -475,7 +457,7 @@ def inspect_unitypackage_stream(package_file: Any, max_entries: int, package_pat
                     else:
                         record["path"] = name
         except tarfile.ReadError as exc:
-            if "byte limit exceeded" not in str(exc):
+            if "scan input byte limit exceeded" not in str(exc):
                 raise
             truncated = True
             byte_limited = True
@@ -503,7 +485,7 @@ def inspect_unitypackage_stream(package_file: Any, max_entries: int, package_pat
     if truncated:
         warnings.append("UnityPackage pathname inspection reached a configured member, byte, or entry limit.")
     if byte_limited:
-        warnings.append("UnityPackage pathname inspection stopped at the decompressed byte limit.")
+        warnings.append("UnityPackage pathname inspection stopped at the scan input byte limit.")
     return {
         "pathnamesEvidence": pathnames,
         "archiveMemberCount": member_count,
