@@ -30,7 +30,16 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Newtonsoft.Json.Linq;
-namespace UnityEngine { public class Object { public bool Persistent = true; } }
+using UnityEngine;
+namespace UnityEngine {
+    public class Object { public bool Persistent = true; }
+    public enum LogType { Error, Assert, Warning, Log, Exception }
+    public static class Application {
+        public delegate void LogCallback(string condition, string stackTrace, LogType type);
+        public static event LogCallback logMessageReceived;
+        public static void Emit(string condition, LogType type) => logMessageReceived?.Invoke(condition, "", type);
+    }
+}
 public class AnimationClip : UnityEngine.Object {}
 public class Transition { public bool hasFixedDuration; }
 public class State { public Transition[] transitions = new Transition[] { new Transition() }; }
@@ -44,6 +53,7 @@ public static class AssetDatabase {
     public static AnimatorController Controller;
     public static UnityEngine.Object[] Objects = Array.Empty<UnityEngine.Object>();
     public static int Saves;
+    public static bool LogSaveError;
     public static string AssetPathToGUID(string path) => "guid:" + path;
     public static string GetAssetPath(UnityEngine.Object value) => value == null ? "" : "Assets/FX.controller";
     public static UnityEngine.Object[] LoadAllAssetsAtPath(string path) => Objects;
@@ -52,7 +62,10 @@ public static class AssetDatabase {
         if (typeof(T) == typeof(AnimationClip)) return new AnimationClip() as T;
         return null;
     }
-    public static void SaveAssetIfDirty(UnityEngine.Object value) { Saves++; }
+    public static void SaveAssetIfDirty(UnityEngine.Object value) {
+        Saves++;
+        if (LogSaveError) UnityEngine.Application.Emit("Could not save Assets/FX.controller", UnityEngine.LogType.Error);
+    }
     public static void ImportAsset(string path, ImportAssetOptions options) {}
 }
 public static class SceneObjectCopyCore {
@@ -111,11 +124,33 @@ public static int Main() {
         Check(WriteAnimationCurveTool.AssetEditRecovery.Captures == 0 && WriteAnimationCurveTool.AssetEditRecovery.Begins == 0, "locked path does not capture or begin recovery");
         Check(Undo.Registers == 0 && ManageFxAnimatorTool.Applied == 0 && AssetDatabase.Saves == 0, "locked path does not Undo, apply, or save");
     }
+    using (var heldMeta = new FileStream(asset + ".meta", FileMode.Open, FileAccess.Read, FileShare.Read)) {
+        ResetCounters();
+        var result = (Result)HandleCommand(request);
+        Check(!result.ok && !result.mutationStarted, "write-denying metadata reader rejects before mutation");
+        Check(WriteAnimationCurveTool.AssetEditRecovery.Captures == 0 && WriteAnimationCurveTool.AssetEditRecovery.Begins == 0, "write-denying metadata reader does not begin recovery");
+        Check(Undo.Registers == 0 && ManageFxAnimatorTool.Applied == 0 && AssetDatabase.Saves == 0, "write-denying metadata reader does not Undo, apply, or save");
+    }
+    foreach (var candidate in new[] { asset, asset + ".meta" }) {
+        using (var reader = new FileStream(candidate, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+            ResetCounters();
+            var result = (Result)HandleCommand(request);
+            Check(result.ok && result.mutationStarted, "write-sharing reader permits HandleCommand: " + Path.GetExtension(candidate));
+            Check(WriteAnimationCurveTool.AssetEditRecovery.Captures == 1 && WriteAnimationCurveTool.AssetEditRecovery.Begins == 1, "write-sharing reader reaches recovery capture and begin");
+            Check(Undo.Registers == 1 && ManageFxAnimatorTool.Applied == 1 && AssetDatabase.Saves == 1, "write-sharing reader permits Undo, apply, and save");
+        }
+    }
     ResetCounters();
     var success = (Result)HandleCommand(request);
     Check(success.ok && success.mutationStarted, "unlocked HandleCommand completes");
     Check(WriteAnimationCurveTool.AssetEditRecovery.Captures == 1 && WriteAnimationCurveTool.AssetEditRecovery.Begins == 1, "unlocked path captures and begins recovery");
     Check(Undo.Registers == 1 && ManageFxAnimatorTool.Applied == 1 && AssetDatabase.Saves == 1, "unlocked path reaches Undo, apply, and save");
+    ResetCounters();
+    AssetDatabase.LogSaveError = true;
+    var failedSave = (Result)HandleCommand(request);
+    Check(!failedSave.ok && failedSave.mutationStarted, "Unity save error cannot complete the batch successfully");
+    Check(Undo.Registers == 1 && ManageFxAnimatorTool.Applied == 1 && AssetDatabase.Saves == 1, "save error is reported after the actual save attempt");
+    AssetDatabase.LogSaveError = false;
     Directory.Delete(root, true);
     return failures == 0 ? 0 : 1;
 }
@@ -137,7 +172,7 @@ def compile_and_run(source: str, output: Path) -> subprocess.CompletedProcess:
         extract_method(source, "internal static object HandleCommand"),
         extract_method(source, "private static UnityEngine.Object[] LoadPersistenceObjects"),
         extract_method(source, "private static void ValidatePersistenceObjectSet"),
-        extract_method(source, "private static void ProbeExclusiveAssetFiles"),
+        extract_method(source, "private static void ProbeWritableAssetFiles"),
     ]
     # These pure planning/readback methods are replaced by deterministic test stubs;
     # HandleCommand and the production preflight methods remain the code under test.
@@ -150,7 +185,10 @@ private static JObject Projection(JObject value) => value;
 private static void Verify(JObject expected, JObject actual) {}
 private static void ApplyLayerDeletion(AnimatorController controller, string layerName) {}
 '''
-    program = STUBS + "public class Probe {\n" + "\n".join(selected) + replacements + PROBE + "\n}"
+    save_source = (SOURCE.parent / "UnityAssetSaveTool.cs").read_text(encoding="utf-8")
+    save_helper = extract_method(save_source, "internal static void SaveAssetIfDirtyOrThrow")
+    program = (STUBS + "public static class UnityAssetSaveTool {\n" + save_helper + "\n}\n"
+               + "public class Probe {\n" + "\n".join(selected) + replacements + PROBE + "\n}")
     cs = output / "Probe.cs"
     cs.write_text(program, encoding="utf-8")
     dll = output / "Probe.dll"
@@ -167,7 +205,7 @@ private static void ApplyLayerDeletion(AnimatorController controller, string lay
     return subprocess.run([dotnet, str(dll)], capture_output=True, text=True, timeout=30)
 
 
-def test_handle_command_stops_before_undo_apply_and_save_when_locked(tmp_path: Path) -> None:
+def test_handle_command_allows_write_sharing_readers_and_rejects_write_denial(tmp_path: Path) -> None:
     completed = compile_and_run(SOURCE.read_text(encoding="utf-8"), tmp_path / "csharp")
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert completed.stdout.count("PASS ") == 6
+    assert completed.stdout.count("PASS ") == 17

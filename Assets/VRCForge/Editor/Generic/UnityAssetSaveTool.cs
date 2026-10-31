@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -65,7 +67,7 @@ namespace VRCForge.Editor.Generic
 
             try
             {
-                AssetDatabase.SaveAssetIfDirty(asset);
+                SaveAssetIfDirtyOrThrow(asset, path);
             }
             catch (Exception exception)
             {
@@ -84,6 +86,37 @@ namespace VRCForge.Editor.Generic
                 mutationStarted = true, mutationApplied = true, committed = true,
                 verified = true, verification = "asset_is_clean_after_save"
             });
+        }
+
+        internal static void SaveAssetIfDirtyOrThrow(UnityEngine.Object asset, string assetPath)
+        {
+            if (asset == null) throw new ArgumentNullException(nameof(asset));
+            var normalizedPath = (assetPath ?? string.Empty).Replace('\\', '/');
+            var saveErrors = new List<string>();
+            Application.LogCallback callback = (condition, stackTrace, type) =>
+            {
+                if ((type == LogType.Error || type == LogType.Exception || type == LogType.Assert)
+                    && !string.IsNullOrEmpty(normalizedPath)
+                    && !string.IsNullOrEmpty(condition)
+                    && condition.IndexOf(normalizedPath, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    saveErrors.Add(condition);
+                }
+            };
+
+            Application.logMessageReceived += callback;
+            try
+            {
+                AssetDatabase.SaveAssetIfDirty(asset);
+            }
+            finally
+            {
+                Application.logMessageReceived -= callback;
+            }
+
+            if (saveErrors.Count > 0)
+                throw new IOException("Unity reported an error while saving " + normalizedPath + ": "
+                    + string.Join(Environment.NewLine, saveErrors));
         }
 
         private static object SaveStateUnknown(string path, string reason)

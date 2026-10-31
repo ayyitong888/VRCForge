@@ -22,16 +22,26 @@ def test_single_asset_save_runtime(tmp_path):
 using System;
 using System.Collections.Generic;
 using Newtonsoft.Json.Linq;
-namespace UnityEngine { public class Object { public string path; public bool dirty; public int saves; } }
+namespace UnityEngine {
+ public class Object { public string path; public bool dirty; public int saves; }
+ public enum LogType { Error, Assert, Warning, Log, Exception }
+ public static class Application {
+  public delegate void LogCallback(string condition,string stackTrace,LogType type);
+  public static event LogCallback logMessageReceived;
+  public static int ListenerCount=>logMessageReceived?.GetInvocationList().Length??0;
+  public static void Emit(string condition,LogType type)=>logMessageReceived?.Invoke(condition,"",type);
+ }
+}
 namespace UnityEditor {
  public class SceneAsset : UnityEngine.Object {}
  public static class EditorUtility { public static bool IsDirty(UnityEngine.Object o)=>o.dirty; }
  public static class AssetDatabase {
   public static readonly Dictionary<string,UnityEngine.Object> Assets=new Dictionary<string,UnityEngine.Object>();
   public static int Loads, Saves; public static bool ThrowOnSave, LeaveDirty;
+  public static string SaveLog; public static UnityEngine.LogType SaveLogType;
   public static UnityEngine.Object LoadMainAssetAtPath(string p){Loads++;Assets.TryGetValue(p,out var o);return o;}
   public static string GetAssetPath(UnityEngine.Object o)=>o.path;
-  public static void SaveAssetIfDirty(UnityEngine.Object o){Saves++;o.saves++;if(ThrowOnSave)throw new Exception("save failed");if(!LeaveDirty)o.dirty=false;}
+  public static void SaveAssetIfDirty(UnityEngine.Object o){Saves++;o.saves++;if(ThrowOnSave)throw new Exception("save failed");if(SaveLog!=null)UnityEngine.Application.Emit(SaveLog,SaveLogType);if(!LeaveDirty)o.dirty=false;}
   public static void SaveAssets(){throw new Exception("global save is forbidden");}
  }
 }
@@ -59,6 +69,19 @@ class Probe {
   var missing=Call("Assets/Missing.asset");Check((string)Field(missing,"Code")=="asset_not_found","missing path rejected clearly");
   AssetDatabase.Assets["Assets/Test.unity"]=new SceneAsset{path="Assets/Test.unity",dirty=true};var scene=Call("Assets/Test.unity");Check((string)Field(scene,"Code")=="scene_requires_scene_save","scene directs caller to scene_save");
   target.dirty=true;AssetDatabase.ThrowOnSave=true;var uncertain=Call(target.path);Check((string)Field(uncertain,"Code")=="asset_save_unconfirmed"&&(bool)Field(Field(uncertain,"Payload"),"mutationStarted"),"save exception reports mutation uncertainty");
+  Check(Application.ListenerCount==0,"save exception releases the log callback");
+  AssetDatabase.ThrowOnSave=false;
+  foreach(var type in new[]{LogType.Error,LogType.Exception,LogType.Assert}){
+   target.dirty=true;AssetDatabase.SaveLogType=type;AssetDatabase.SaveLog="Could not save "+target.path;
+   var logged=Call(target.path);
+   Check((string)Field(logged,"Kind")=="failed"&&(string)Field(logged,"Code")=="asset_save_unconfirmed"&&!(bool)Field(Field(logged,"Payload"),"verified")&&((string)Field(logged,"Message")).Contains(target.path),"target save log cannot report success: "+type);
+   Check(Application.ListenerCount==0,"save log failure releases the callback: "+type);
+  }
+  target.dirty=true;AssetDatabase.SaveLogType=LogType.Error;AssetDatabase.SaveLog="Could not save Assets/Unrelated.asset";
+  Check((string)Field(Call(target.path),"Kind")=="completed","unrelated asset error does not reject this save");
+  target.dirty=true;AssetDatabase.SaveLogType=LogType.Warning;AssetDatabase.SaveLog="Warning for "+target.path;
+  Check((string)Field(Call(target.path),"Kind")=="completed","target warning does not reject this save");
+  Check(Application.ListenerCount==0,"successful save releases the log callback");
   return failures==0?0:1;
  }
 }
@@ -67,7 +90,7 @@ class Probe {
     cs = tmp_path / "Probe.cs"
     source_text = "\n".join(line for line in source.read_text(encoding="utf-8").splitlines() if not line.startswith("using "))
     runner_text = "\n".join(line for line in runner.splitlines() if not line.startswith("using "))
-    imports = "using System;using System.Collections.Generic;using System.Linq;using System.Reflection;using Newtonsoft.Json.Linq;using UnityEditor;using UnityEngine;using VRCForge.Core.MCP;\n"
+    imports = "using System;using System.IO;using System.Collections.Generic;using System.Linq;using System.Reflection;using Newtonsoft.Json.Linq;using UnityEditor;using UnityEngine;using VRCForge.Core.MCP;\n"
     cs.write_text(imports + stubs + "\n" + source_text + "\n" + runner_text, encoding="utf-8")
     compiler = compilers[-1]
     newtonsoft = compiler.parents[2] / "Newtonsoft.Json.dll"
@@ -81,4 +104,4 @@ class Probe {
     (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions": {"tfm": "netcoreapp3.1", "framework": {"name": "Microsoft.NETCore.App", "version": "3.1.0"}}}), encoding="utf-8")
     result = subprocess.run([dotnet, str(output)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("PASS ") == 8
+    assert result.stdout.count("PASS ") == 18

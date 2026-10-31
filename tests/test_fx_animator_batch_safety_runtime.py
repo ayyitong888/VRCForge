@@ -71,13 +71,24 @@ public static int Main() {
     var asset = Path.Combine(root, "FX.controller");
     File.WriteAllBytes(asset, new byte[] { 1, 2, 3 });
     File.WriteAllBytes(asset + ".meta", new byte[] { 4, 5, 6 });
-    ProbeExclusiveAssetFiles(asset);
+    ProbeWritableAssetFiles(asset);
     Check(true, "unlocked controller and metadata pass the write probe");
     using (var held = new FileStream(asset, FileMode.Open, FileAccess.Read, FileShare.Read))
-        Check(Reject(() => ProbeExclusiveAssetFiles(asset)), "shared-read lock rejects before mutation");
+        Check(Reject(() => ProbeWritableAssetFiles(asset)), "write-denying reader rejects before mutation");
     using (var heldMeta = new FileStream(asset + ".meta", FileMode.Open, FileAccess.Read, FileShare.Read))
-        Check(Reject(() => ProbeExclusiveAssetFiles(asset)), "metadata shared-read lock rejects before mutation");
+        Check(Reject(() => ProbeWritableAssetFiles(asset)), "write-denying metadata reader rejects before mutation");
+    foreach (var candidate in new[] { asset, asset + ".meta" }) {
+        using (var reader = new FileStream(candidate, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            Check(!Reject(() => ProbeWritableAssetFiles(asset)), "write-sharing reader permits the write probe: " + Path.GetExtension(candidate));
+        File.SetAttributes(candidate, File.GetAttributes(candidate) | FileAttributes.ReadOnly);
+        try { Check(Reject(() => ProbeWritableAssetFiles(asset)), "read-only file rejects before mutation: " + Path.GetExtension(candidate)); }
+        finally { File.SetAttributes(candidate, File.GetAttributes(candidate) & ~FileAttributes.ReadOnly); }
+    }
+    File.Delete(asset + ".meta");
+    Check(Reject(() => ProbeWritableAssetFiles(asset)), "missing metadata rejects before mutation");
+    File.WriteAllBytes(asset + ".meta", new byte[] { 4, 5, 6 });
     Check(File.ReadAllBytes(asset).SequenceEqual(new byte[] { 1, 2, 3 }), "lock probe does not modify controller bytes");
+    Check(File.ReadAllBytes(asset + ".meta").SequenceEqual(new byte[] { 4, 5, 6 }), "write probe does not modify metadata bytes");
     Directory.Delete(root, true);
     return failures == 0 ? 0 : 1;
 }
@@ -95,7 +106,7 @@ def compile_and_run(source: str, output: Path) -> subprocess.CompletedProcess:
     selected = [
         extract_method(source, "private static UnityEngine.Object[] LoadPersistenceObjects"),
         extract_method(source, "private static void ValidatePersistenceObjectSet"),
-        extract_method(source, "private static void ProbeExclusiveAssetFiles"),
+        extract_method(source, "private static void ProbeWritableAssetFiles"),
     ]
     program = STUBS + "public class Probe {\n" + "\n".join(selected) + RUNNER + "\n}"
     cs = output / "Probe.cs"
@@ -113,7 +124,7 @@ def compile_and_run(source: str, output: Path) -> subprocess.CompletedProcess:
     return subprocess.run([dotnet, str(dll)], capture_output=True, text=True, timeout=30)
 
 
-def test_fx_batch_preflight_rejects_incomplete_objects_and_shared_locks(tmp_path: Path) -> None:
+def test_fx_batch_preflight_rejects_incomplete_objects_and_unwritable_files(tmp_path: Path) -> None:
     completed = compile_and_run(SOURCE.read_text(encoding="utf-8"), tmp_path / "csharp")
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert completed.stdout.count("PASS ") == 10
+    assert completed.stdout.count("PASS ") == 16

@@ -9,6 +9,7 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 using VRCForge.Core.MCP;
+using VRCForge.Editor.Generic;
 
 namespace VRCForge.Editor
 {
@@ -243,7 +244,7 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed("Preview: would apply one controller batch.", new {
                         ok = true, preview = true, batch = true, controllerPath = path, editCount = edits.Count,
                         plan = Projection(expected) });
-                ProbeExclusiveAssetFiles(path);
+                ProbeWritableAssetFiles(path);
                 persistenceObjects = LoadPersistenceObjects(path, controller);
                 recovery.Capture(path); recovery.Begin();
                 Undo.RegisterCompleteObjectUndo(persistenceObjects, "FX animator batch");
@@ -262,7 +263,7 @@ namespace VRCForge.Editor
                     }
                 }
                 Verify(expected, Snapshot(controller));
-                phase = "asset_save"; EditorUtility.SetDirty(controller); AssetDatabase.SaveAssetIfDirty(controller);
+                phase = "asset_save"; EditorUtility.SetDirty(controller); UnityAssetSaveTool.SaveAssetIfDirtyOrThrow(controller, path);
                 phase = "persisted_readback";
                 AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 var actual = AssetDatabase.LoadAssetAtPath<AnimatorController>(path)
@@ -315,7 +316,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static void ProbeExclusiveAssetFiles(string path)
+        private static void ProbeWritableAssetFiles(string path)
         {
             var absolute = SceneObjectCopyCore.ToAbsoluteAssetPath(path);
             foreach (var candidate in new[] { absolute, absolute + ".meta" })
@@ -324,11 +325,11 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException("FX controller or metadata is missing.");
                 try
                 {
-                    using (var stream = new FileStream(candidate, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+                    using (var stream = new FileStream(candidate, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete)) { }
                 }
                 catch (IOException exception)
                 {
-                    throw new InvalidOperationException("FX controller or metadata is locked by another process.", exception);
+                    throw new InvalidOperationException("FX controller or metadata cannot currently be opened for writing: " + candidate, exception);
                 }
                 catch (UnauthorizedAccessException exception)
                 {
