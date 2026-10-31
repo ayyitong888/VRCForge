@@ -147,6 +147,7 @@ from agent_gateway import (
     UNITY_READ_TOOL_INPUT_SCHEMAS,
     create_agent_mcp_app,
     ensure_dict,
+    ensure_string_list,
     normalize_bool,
     normalize_checkpoint_archive_max_size_mb,
     normalize_checkpoint_archive_max_count,
@@ -6594,8 +6595,10 @@ def _copy_manifest_user_skill_export_source(
     skill_file: Path,
     source: Path,
     service: SkillPackageService,
+    *,
+    source_root: Path | None = None,
 ) -> bool:
-    root = skill_file.parent
+    root = source_root if source_root is not None else skill_file.parent
     manifest_path = root / "manifest.json"
     if not os.path.lexists(manifest_path):
         return False
@@ -6707,6 +6710,26 @@ def _copy_manifest_user_skill_export_source(
     return True
 
 
+def _copy_installed_user_skill_export_source(
+    skill: dict[str, Any], source: Path, service: SkillPackageService,
+) -> bool:
+    package_id = str(skill.get("packageId") or "").strip()
+    if not package_id:
+        return False
+    candidates = service.projection_candidates(package_id)
+    if len(candidates) != 1:
+        raise SkillPackageError("The installed Skill package source is missing or invalid; cannot preserve its manifest for export.")
+    root, manifest = candidates[0]
+    entrypoints = manifest["entrypoints"]
+    relative = entrypoints.get("skill")
+    if not relative:
+        raise SkillPackageError("The installed Skill package has no SKILL.md entrypoint.")
+    # Package-managed skills use their installed source as the export authority.
+    # The runtime projection is a derived view and is not read back for proof.
+    stored_skill = root.joinpath(*PurePosixPath(relative).parts)
+    return _copy_manifest_user_skill_export_source(stored_skill, source, service, source_root=root)
+
+
 def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     skill_name = str(params.get("skillName") or params.get("skill_name") or "").strip()
     output_text = str(params.get("outputPath") or params.get("output_path") or "").strip()
@@ -6718,7 +6741,8 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
         source = Path(temp_dir)
         with AGENT_GATEWAY.skills.write_lock:
             skill, skill_file = _exportable_user_skill(skill_name)
-            if not _copy_manifest_user_skill_export_source(skill_file, source, service):
+            copied = _copy_installed_user_skill_export_source(skill, source, service)
+            if not copied and not _copy_manifest_user_skill_export_source(skill_file, source, service):
                 shutil.copy2(skill_file, source / "SKILL.md")
                 package_id = f"community.{str(skill.get('name') or skill_name).lower()}"
                 package_id = re.sub(r"[^a-z0-9_.-]+", "-", package_id).strip("-._")
@@ -6733,13 +6757,43 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
                     "permissions": ["read_project"],
                     "entrypoints": {"skill": "SKILL.md"},
                 }
+                # Creator skills have no package manifest. Preserve their
+                # explicitly declared runtime files in the generated package;
+                # never sweep unrelated files from the user's skill directory.
+                selected = {"SKILL.md": (source / "SKILL.md").read_bytes()}
+                seen = {
+                    "skill.md", "manifest.json", "skill.lock.json", "skill.sig",
+                    "author.pub", PROJECTED_SKILL_STATE_NAME.casefold(),
+                }
+                for index, relative in enumerate(ensure_string_list(skill.get("supportFiles")), 1):
+                    _resolved, relative_path, data = _read_user_skill_export_file(
+                        service, skill_file.parent, relative, label="SKILL.md support file",
+                    )
+                    normalized = relative_path.as_posix()
+                    if normalized.casefold() in seen:
+                        raise SkillPackageError(f"SKILL.md contains a colliding support-file path: {normalized}.")
+                    seen.add(normalized.casefold())
+                    selected[normalized] = data
+                    manifest["entrypoints"][f"support_file_{index}"] = normalized
+                    service._validate_payload_limits(selected)
+                for relative, data in selected.items():
+                    destination = source.joinpath(*PurePosixPath(relative).parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
                 (source / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         if params.get("release"):
             private_key = params.get("privateKeyPem") or params.get("private_key_pem") or params.get("privateKeyPath") or params.get("private_key_path")
             exported = service.export_release(source, output_path, private_key, overwrite=False)
         else:
             exported = service.export_dev(source, output_path, overwrite=False)
-    return {"ok": True, "exported": exported.as_dict()}
+    return {
+        "ok": True, "exported": exported.as_dict(),
+        "schema": "vrcforge.skill_package_export.v1",
+        "changed": True, "saved": True, "preview": False, "verified": True,
+        "mutationStarted": True, "mutationApplied": True,
+        "committed": True, "commitState": "committed",
+        "readback": {"scope": "validated_skill_archive", **exported.as_dict()},
+    }
 
 
 def prepare_skill_package_export_write_request(

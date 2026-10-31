@@ -223,6 +223,7 @@ def test_live_import_keeps_install_projection_order_and_is_not_false_semantics(
     calls: list[object] = []
     result = SimpleNamespace(
         installed_path=Path("installed"),
+        changed=True,
         preview=SimpleNamespace(manifest={"id": "community.test"}),
         registry_entry={"enabled": 0},
         as_dict=lambda: {"id": "community.test"},

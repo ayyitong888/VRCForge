@@ -156,6 +156,12 @@ for _runtime_name, _owner in {
     "vrcforge_plan_outfit_import": "project_environment/assets_packages",
     "vrcforge_import_outfit_package": "project_environment/assets_packages",
     "vrcforge_apply_tuning_preset": "behavior/face_eye_lipsync",
+    # VSK preview/import/export is shared with external MCP's skills/vsk
+    # leaf, whose canonical internal route is the Files leaf.
+    "vrcforge_preflight_skill_package": "project_environment/files",
+    "vrcforge_import_skill_package": "project_environment/files",
+    "vrcforge_export_skill_package": "project_environment/files",
+    "vrcforge_set_skill_package_enabled": "project_environment/files",
 }.items():
     _EXACT_TOOL_OWNERS[_runtime_name] = _owner
     _EXACT_TOOL_OWNERS[_runtime_name.replace("vrcforge_", "unity_", 1)] = _owner

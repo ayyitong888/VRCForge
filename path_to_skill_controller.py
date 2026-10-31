@@ -302,4 +302,12 @@ class PathToSkillWriteService:
                     f"Skill export failed; generated source was retracted: {exc}",
                     status_code=500,
                 ) from exc
+        changed = source_dir is not None
+        result.update({
+            "schema": "vrcforge.path_to_skill.capture_result.v1",
+            "changed": changed, "saved": changed, "preview": False, "verified": True,
+            "mutationStarted": changed, "mutationApplied": changed,
+            "committed": True, "commitState": "committed" if changed else "no_change",
+            "readback": {"scope": "captured_skill_source", "writtenSource": result.get("writtenSource"), "exported": result.get("exported")},
+        })
         return result

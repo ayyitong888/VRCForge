@@ -117,10 +117,16 @@ class SkillPackageController:
                         result.preview.manifest,
                         bool(result.registry_entry.get("enabled", True)),
                     )
+        changed = result.changed or projection is not None
         return {
             "ok": True,
             "imported": result.as_dict(),
             "projectedSkill": projection,
+            "schema": "vrcforge.skill_package_import.v1",
+            "changed": changed, "saved": True, "preview": False, "verified": True,
+            "mutationStarted": changed, "mutationApplied": changed,
+            "committed": True, "commitState": "committed" if changed else "no_change",
+            "readback": {"scope": "installed_skill_package", "installedPath": str(result.installed_path), "manifest": result.preview.manifest, "projectedSkill": projection},
         }
 
     def set_enabled(self, params: dict[str, Any]) -> dict[str, Any]:

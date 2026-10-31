@@ -224,9 +224,15 @@ class ExternalInstalledSkillRegistryService:
         }
         result = self._registry.create_user_skill(payload)
         skill = ensure_dict(result.get("skill"))
+        observed = next((item for item in ensure_list(result.get("skills")) if isinstance(item, dict) and item.get("source") == "user" and item.get("name") == name), {})
+        verified = bool(observed.get("storagePath") and not observed.get("loadError") and observed.get("instructions") == skill.get("instructions"))
         return {
             "ok": True,
             "schema": "vrcforge.installed_skill_created.v1",
+            "changed": True, "saved": True, "preview": False,
+            "mutationStarted": True, "mutationApplied": True,
+            "committed": True, "commitState": "committed", "verified": verified,
+            "readback": {"name": observed.get("name"), "enabled": observed.get("enabled"), "scope": "installed_skill_manifest"},
             "installed": True,
             "installedSkill": {
                 "name": str(skill.get("name") or ""),

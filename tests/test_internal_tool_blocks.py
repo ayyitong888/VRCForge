@@ -314,6 +314,45 @@ def test_path_to_skill_creator_is_lazy_shared_and_reuses_controller_owners() -> 
     assert {preview_name, write_name} <= external_execution
 
 
+def test_vsk_creator_and_package_tools_share_internal_files_route() -> None:
+    catalog = dashboard_server._RuntimePlannerCatalog()
+    planning = {tool.runtime_name: tool for tool in catalog.read("planning").visible_tools}
+    execution = {tool.runtime_name: tool for tool in catalog.read("execution").visible_tools}
+
+    assert planning["vrcforge_preview_path_to_skill"].block == "project_environment/files"
+    assert execution["vrcforge_write_path_to_skill"].block == "project_environment/files"
+    assert planning["vrcforge_preflight_skill_package"].block == "project_environment/files"
+    assert execution["vrcforge_create_installed_skill"].block == "project_environment/files"
+    for name in (
+        "vrcforge_import_skill_package",
+        "vrcforge_export_skill_package",
+        "vrcforge_set_skill_package_enabled",
+    ):
+        assert execution[name].block == "project_environment/files"
+        assert "When to use:" in execution[name].description
+        assert "When NOT to use:" in execution[name].description
+
+    external = {
+        item["name"]: item
+        for item in dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+            "execution", tool_blocks=["skills/vsk"]
+        )
+    }
+    assert {"vrcforge_import_skill_package", "vrcforge_export_skill_package"} <= set(external)
+    assert all(external[name]["_meta"]["toolBlock"] == "skills/vsk" for name in (
+        "vrcforge_import_skill_package", "vrcforge_export_skill_package"
+    ))
+    assert all(
+        external[name]["description"] == execution[name].description
+        for name in ("vrcforge_import_skill_package", "vrcforge_export_skill_package")
+    )
+    external_creator = dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+        "execution", tool_blocks=["skills/installed"]
+    )
+    creator = next(item for item in external_creator if item["name"] == "vrcforge_create_installed_skill")
+    assert creator["description"] == execution["vrcforge_create_installed_skill"].description
+
+
 def test_shared_unity_facades_reuse_external_blocks_and_schemas_inside() -> None:
     projection = lambda name: SimpleNamespace(
         model_name=name,
