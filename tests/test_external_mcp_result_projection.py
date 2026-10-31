@@ -61,6 +61,24 @@ def test_large_public_result_is_compact_and_resource_expansion_never_replays_wri
 
 
 @pytest.mark.parametrize("transport", ["2026", "standard"])
+def test_compact_diagnostics_keep_sdk_messages_and_targets_for_correction(transport):
+    alerts = [{"category": "error", "severity": "blocking", "blocker": True,
+               "message": "Mesh Body must have Read/Write enabled.",
+               "target": {"hierarchyPath": "Avatar/Body"}, "unused": "x" * 15000}]
+    raw = {"ok": True, "operationResource": URI, "result": {
+        "available": True, "authoritativeForCurrentCachedPanelAlerts": True,
+        "blockingAlertCount": 1, "alerts": alerts}}
+    request, calls = protocol(transport, raw)
+    compact = request()["result"]["structuredContent"]["result"]
+    assert compact["available"] is True
+    assert compact["blockingAlertCount"] == 1
+    assert compact["alerts"][0]["message"] == alerts[0]["message"]
+    assert compact["alerts"][0]["target"] == alerts[0]["target"]
+    assert "unused" not in compact["alerts"][0]
+    assert calls == [("fixture", {"value": 3})]
+
+
+@pytest.mark.parametrize("transport", ["2026", "standard"])
 def test_full_mode_is_discoverable_validated_and_not_forwarded(transport):
     raw = {"ok": True, "operationResource": URI, "result": {"items": list(range(10000))}}
     request, calls = protocol(transport, raw)

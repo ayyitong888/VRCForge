@@ -297,13 +297,37 @@ def _summary(value: Any) -> Any:
         return {"itemCount": len(value)} if isinstance(value, list) else value
     summary: dict[str, Any] = {}
     omitted: dict[str, Any] = {}
+    diagnostic_bytes = 0
     for key, item in value.items():
         if item is None or isinstance(item, (bool, int, float, str)):
             summary[key] = item
         elif key in {"summary", "selection", "paging", "readHints", "index"} and _bytes(item) <= INLINE_RESULT_BYTES:
             summary[key] = item
         elif isinstance(item, list):
-            omitted[key] = {"itemCount": len(item)}
+            if key in {"errors", "warnings", "alerts", "findings"}:
+                rows = []
+                for row in item:
+                    if isinstance(row, str):
+                        diagnostic = {"message": row}
+                    elif isinstance(row, Mapping):
+                        diagnostic = {name: row[name] for name in (
+                            "id", "severity", "category", "scope", "title", "message", "target", "blocker",
+                        ) if name in row}
+                        detail = row.get("detail")
+                        if isinstance(detail, Mapping) and "target" in detail:
+                            diagnostic["target"] = detail["target"]
+                    else:
+                        continue
+                    row_bytes = _bytes(diagnostic)
+                    if diagnostic_bytes + row_bytes > INLINE_RESULT_BYTES:
+                        break
+                    rows.append(diagnostic)
+                    diagnostic_bytes += row_bytes
+                summary[key] = rows
+                if len(rows) < len(item):
+                    omitted[key] = {"itemCount": len(item), "returnedCount": len(rows)}
+            else:
+                omitted[key] = {"itemCount": len(item)}
         elif isinstance(item, Mapping):
             # Persistence and verification receipts often nest their scalar facts one level.
             summary[key] = {k: v for k, v in item.items() if v is None or isinstance(v, (bool, int, float, str))}
