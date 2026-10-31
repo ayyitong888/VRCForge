@@ -49,8 +49,26 @@ def test_deepseek_harness_patch_uses_official_insert_row_shape_and_standard_prof
     assert row["name"] == "@deepseek-ai/dsh-mcp-client"
     assert row["config"]["serverName"] == DEFAULT_SERVER_NAME
     assert row["config"]["transport"] == "stdio"
-    assert row["config"]["args"][-4:] == ["--protocol-profile", "auto", "--exposure-layer", "planning"]
+    assert row["config"]["args"][-2:] == ["--protocol-profile", "auto"]
+    assert "--exposure-layer" not in row["config"]["args"]
     assert "token" not in json.dumps(patch, ensure_ascii=False).casefold()
+
+
+def test_deepseek_harness_defers_exposure_to_existing_gateway_config(tmp_path, monkeypatch) -> None:
+    from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge, parse_args
+
+    monkeypatch.delenv("VRCFORGE_MCP_EXPOSURE_LAYER", raising=False)
+    args = build_deepseek_harness_patch()[0]["insert"][0]["config"]["args"]
+    parsed = parse_args(args[1:])
+    assert parsed.exposure_layer is None
+    config = tmp_path / "gateway.json"
+    bridge = VRCForgeBridge(
+        base_url="http://127.0.0.1:17831", config_path=config,
+        timeout_seconds=30, start_runtime=False,
+    )
+    for layer in ("execution", "planning"):
+        config.write_text(json.dumps({"external_mcp_exposure_layer": layer}), encoding="utf-8")
+        assert bridge.resolve_exposure_layer(parsed.exposure_layer) == layer
 
 
 def test_connector_bundle_uses_loopback_endpoint_and_env_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:

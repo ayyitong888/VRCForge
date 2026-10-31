@@ -7026,8 +7026,13 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
     config = AGENT_GATEWAY.ensure_config()
     if params.get("enabled") is not None:
         config.enabled = bool(params.get("enabled"))
-    if params.get("allowWriteRequests") is not None or params.get("allow_write_requests") is not None:
+    write_setting_provided = params.get("allowWriteRequests") is not None or params.get("allow_write_requests") is not None
+    if write_setting_provided:
         config.allow_write_requests = bool(params.get("allowWriteRequests", params.get("allow_write_requests")))
+    if write_setting_provided or params.get("enabled") is True:
+        # The UI's write toggle also controls the catalogue standard stdio
+        # clients see. Execution approval/checkpoint policy stays independent.
+        config.external_mcp_exposure_layer = "execution" if config.allow_write_requests else "planning"
     checkpoint_limit = params.get("checkpointArchiveMaxSizeMb", params.get("checkpoint_archive_max_size_mb"))
     checkpoint_count = params.get("checkpointArchiveMaxCount", params.get("checkpoint_archive_max_count"))
     prune_summary: dict[str, Any] | None = None

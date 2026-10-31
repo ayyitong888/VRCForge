@@ -9439,6 +9439,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("approval_token", serialized)
         self.assertNotIn(original_token.lower(), serialized)
 
+    def test_external_gateway_write_toggle_controls_standard_stdio_catalogue(self) -> None:
+        from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge
+
+        gateway = dashboard_server.AGENT_GATEWAY
+        config = gateway.ensure_config()
+        config.allow_write_requests = True
+        config.external_mcp_exposure_layer = "planning"
+        config.execution_mode = "approval"
+        gateway.save_config(config)
+        checkpoint_limits = (config.checkpoint_archive_max_size_mb, config.checkpoint_archive_max_count)
+        bridge = VRCForgeBridge(
+            base_url="http://127.0.0.1:8757", config_path=gateway.config_path,
+            timeout_seconds=5, start_runtime=False,
+        )
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VRCFORGE_MCP_EXPOSURE_LAYER", None)
+            with TestClient(dashboard_server.app) as client:
+                for settings, layer in (
+                    ({"enabled": True}, "execution"),
+                    ({"allowWriteRequests": False}, "planning"),
+                    ({"allowWriteRequests": True}, "execution"),
+                ):
+                    with self.subTest(settings=settings):
+                        response = client.post("/api/app/external-agent/gateway", json=settings)
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertEqual(bridge.resolve_exposure_layer(None), layer)
+                        persisted = gateway.ensure_config()
+                        self.assertEqual(persisted.execution_mode, "approval")
+                        self.assertEqual((persisted.checkpoint_archive_max_size_mb, persisted.checkpoint_archive_max_count), checkpoint_limits)
+                        tools = {tool["name"] for tool in gateway.build_external_mcp_tools(layer, ["skills/vsk"])}
+                        for name in ("vrcforge_write_path_to_skill", "vrcforge_import_skill_package", "vrcforge_export_skill_package"):
+                            self.assertEqual(name in tools, layer == "execution", name)
+
     def test_external_agent_gateway_checkpoint_archive_limit_prunes_old_archives(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

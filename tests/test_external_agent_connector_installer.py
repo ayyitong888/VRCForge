@@ -61,6 +61,9 @@ def test_deepseek_harness_install_preserves_other_mcp_rows_and_uninstalls_exact_
     rows = [row for operation in payload for row in operation.get("insert", [])]
     assert installed["ok"] is True
     assert [row["id"] for row in rows] == ["mcp-existing", "mcp-vrcforge"]
+    managed_args = rows[1]["config"]["args"]
+    assert managed_args[-2:] == ["--protocol-profile", "auto"]
+    assert "--exposure-layer" not in managed_args
 
     removed = uninstall_connector("deepseekHarness", root_dir=root)
     payload_after = yaml.safe_load(patch_path.read_text(encoding="utf-8"))

@@ -141,8 +141,6 @@ def build_deepseek_harness_patch(options: ExternalAgentConnectorOptions | None =
                             *opts.stdio_extra_args,
                             "--protocol-profile",
                             "auto",
-                            "--exposure-layer",
-                            "planning",
                         ],
                         "cwd": opts.stdio_cwd,
                         "env": {},
