@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlsplit
 import pytest
 from agent_mcp_2026 import Mcp2026Router, PROTOCOL_VERSION
 from agent_mcp_standard import McpStandardRouter, LATEST_PROTOCOL_VERSION
@@ -133,3 +134,70 @@ def test_stdio_selects_once_after_original_resource_read(monkeypatch,transport):
     result=json.loads(requester(captured['router'],transport)({'pointer':'/array','offset':1,'limit':1})['result']['contents'][0]['text'])
     assert result['value']==[{'value':2}]
     assert bridge.calls==[URI]
+
+@pytest.mark.parametrize('transport',['2026','standard'])
+def test_uri_query_selection_is_readable_without_request_meta_and_returns_next_page_uri(transport):
+    source_uri='vrcforge://operation/receipt/plan?context=external%3Acurrent&revision=7&store=epoch123'
+    rows=[{'path':f'Assets/item-{index}.prefab','kind':'prefab','ignored':index} for index in range(266)]
+    original=resource({'data':{'result':{'result':{'plan':{'expectedAssetPaths':rows}}}},'revision':7,'contentHash':'source-hash'})
+    original['contents'][0]['uri']=source_uri
+    original['structuredContent']={'revision':7,'contentHash':'source-hash'}
+    calls=[]
+    request=router_for(transport,lambda uri:(calls.append(uri) or deepcopy(original)))
+    query=[('vrcforge.pointer','/data/result/result/plan/expectedAssetPaths'),('vrcforge.offset','0'),('vrcforge.limit','128'),('vrcforge.fields','path'),('vrcforge.fields','kind')]
+    page_uri=source_uri+'&'+urlencode(query,doseq=True)
+    pages=[]
+    for expected_offset in (0,128,256):
+        response=request(uri=page_uri)['result']
+        selected=json.loads(response['contents'][0]['text'])
+        assert selected['schema']=='vrcforge.resource_selection.v1'
+        assert selected['sourceUri']==source_uri
+        assert selected['sourceRevision']==7 and selected['sourceContentHash']=='source-hash'
+        assert selected['arrayCount']==266 and selected['offset']==expected_offset
+        assert selected['selectedFields']==['path','kind']
+        expected_rows=rows[expected_offset:expected_offset+128]
+        assert selected['value']==[{key:item[key] for key in ('path','kind')} for item in expected_rows]
+        pages.extend(selected['value'])
+        if expected_offset < 256:
+            next_uri=selected['nextPageUri']
+            assert next_uri in selected['nextAction']
+            parsed=urlsplit(next_uri)
+            next_query=parse_qs(parsed.query)
+            assert (parsed.scheme,parsed.netloc,parsed.path)==('vrcforge','operation','/receipt/plan')
+            assert next_query['context']==['external:current']
+            assert next_query['revision']==['7'] and next_query['store']==['epoch123']
+            assert next_query['vrcforge.pointer']==['/data/result/result/plan/expectedAssetPaths']
+            assert next_query['vrcforge.offset']==[str(expected_offset+128)]
+            assert next_query['vrcforge.limit']==['128']
+            assert next_query['vrcforge.fields']==['path','kind']
+            page_uri=next_uri
+        else:
+            assert selected['nextOffset'] is None
+            assert 'nextPageUri' not in selected
+            assert 'final selected page' in selected['nextAction']
+    assert pages==[{key:item[key] for key in ('path','kind')} for item in rows]
+    assert calls==[source_uri]*3
+
+@pytest.mark.parametrize('transport',['2026','standard'])
+def test_uri_query_selection_rejects_invalid_or_ambiguous_selectors_without_reading(transport):
+    calls=[]
+    request=router_for(transport,lambda uri:(calls.append(uri) or resource({'array':[1]})))
+    for suffix in ('&vrcforge.offset=0','&vrcforge.pointer=%2Farray&vrcforge.offset=-1',
+                   '&vrcforge.pointer=%2Farray&vrcforge.limit=129',
+                   '&vrcforge.pointer=%2Farray&vrcforge.fields=',
+                   '&vrcforge.pointer=%2Farray&vrcforge.pointer=%2Farray'):
+        response=request(uri=URI+suffix)
+        assert response['error']['code']==-32602
+        assert 'result' not in response
+    both=request({'pointer':'/array'},uri=URI+'&vrcforge.pointer=%2Farray')
+    assert both['error']['code']==-32602
+    assert calls==[]
+
+@pytest.mark.parametrize('transport',['2026','standard'])
+def test_uri_query_selection_keeps_unknown_query_parameters_on_original_read(transport):
+    uri=URI+'&unknown=kept'
+    calls=[]
+    request=router_for(transport,lambda selected_uri:(calls.append(selected_uri) or resource({'array':[1]})))
+    result=request(uri=uri)['result']
+    assert result['contents']==resource({'array':[1]})['contents']
+    assert calls==[uri]

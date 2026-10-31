@@ -27,6 +27,10 @@ from backend_owner_lease import BackendOwnerLease
 
 RESOURCE_SCHEMA = "vrcforge.resource.v1"
 RESOURCE_MIME_TYPE = "application/vnd.vrcforge.resource+json"
+RESOURCE_PAGING_DESCRIPTION = (
+    "Large arrays: append vrcforge.pointer, vrcforge.offset and vrcforge.limit (1–128); "
+    "pages return nextPageUri."
+)
 
 # Admission to current Prompt context only; immutable history never expires.
 CURRENT_CONTEXT_TTL_SECONDS = 300
@@ -67,7 +71,7 @@ RESOURCE_TEMPLATES: tuple[dict[str, Any], ...] = (
     {
         "uriTemplate": "vrcforge://operation/{operationId}/receipt?revision={revision}&store={store}",
         "name": "Operation Receipt",
-        "description": "Immutable read or supervised-write result, including operationId, ExecutionTarget digest, commit and readback state.",
+        "description": "Immutable read or supervised-write result, including operationId, ExecutionTarget digest, commit and readback state. " + RESOURCE_PAGING_DESCRIPTION,
         "mimeType": RESOURCE_MIME_TYPE,
         "resourceType": "operation_receipt",
     },
@@ -317,7 +321,10 @@ class McpResourceRegistry:
                 {
                     "uri": item["uri"],
                     "name": item["name"],
-                    "description": item["description"],
+                    "description": (
+                        item["description"]
+                        + (" " + RESOURCE_PAGING_DESCRIPTION if item["resourceType"] == "operation_receipt" else "")
+                    ),
                     "mimeType": "image/png" if item["resourceType"] in {"runtime_observation_frame", "texture_asset_preview", "scene_capture_preview"} else RESOURCE_MIME_TYPE,
                     "_meta": {
                         "resourceType": item["resourceType"],

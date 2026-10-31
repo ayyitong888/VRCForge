@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import json
 import re
 from typing import Any
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 from jsonpointer import JsonPointer, JsonPointerException
 
 RESULT_MODE_META_KEY = "io.vrcforge/resultMode"
@@ -16,13 +17,17 @@ TOOL_SELECTION = {
     "usage": "tools/list only. Use exact names from vrcforge_list_tool_blocks for a leaf, then load that leaf. Omit for all visible tools. Selection does not activate or authorize tools.",
 }
 RESOURCE_SELECTION_META_KEY = "io.vrcforge/resourceSelection"
+RESOURCE_SELECTION_URI_PREFIX = "vrcforge."
+RESOURCE_SELECTION_URI_KEYS = {
+    f"{RESOURCE_SELECTION_URI_PREFIX}{name}" for name in ("pointer", "offset", "limit", "fields")
+}
 RESOURCE_SELECTION = {
     "requestMetaKey": RESOURCE_SELECTION_META_KEY,
     "schema": {"type": "object", "additionalProperties": False, "required": ["pointer"],
                "properties": {"pointer": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
                               "limit": {"type": "integer", "minimum": 1, "maximum": 128},
                               "fields": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": True, "items": {"type": "string", "minLength": 1}}}},
-    "usage": "resources/read only; RFC6901 pointer starts at contents[0].text JSON. VRCForge envelopes store the original receipt at /data/result; its result is /data/result/result. Append exact object keys (~ becomes ~0, / becomes ~1). Optional offset/limit page arrays; fields select exact top-level object keys without trimming their values. Omit this metadata for the original full resource.",
+    "usage": "resources/read only; either send this in params._meta or add URI query parameters vrcforge.pointer, optional vrcforge.offset/vrcforge.limit, and repeated vrcforge.fields. Percent-encode values. The RFC6901 pointer starts at contents[0].text JSON; VRCForge envelopes store the original receipt at /data/result and its result at /data/result/result. Append exact object keys (~ becomes ~0, / becomes ~1). Omit all vrcforge.* selection parameters for the original full resource. Paged results include a directly readable nextPageUri.",
 }
 INLINE_RESULT_BYTES = 12_000
 RESULT_PRESENTATION = {
@@ -99,9 +104,12 @@ def select_tools(tools: list[dict[str, Any]], names: list[str] | None, *, mode: 
 
 
 def resource_selection(params: Mapping[str, Any], method: str) -> dict[str, Any] | None:
+    uri_selection = _resource_selection_from_uri(str(params.get("uri") or "")) if method == "resources/read" else None
     meta = params.get("_meta")
     if not isinstance(meta, Mapping) or RESOURCE_SELECTION_META_KEY not in meta:
-        return None
+        return uri_selection
+    if uri_selection is not None:
+        raise ValueError("Specify resource selection either in params._meta or URI query, not both")
     selection = meta[RESOURCE_SELECTION_META_KEY]
     if method != "resources/read" or not isinstance(selection, Mapping):
         raise ValueError(f"{RESOURCE_SELECTION_META_KEY} requires an object on resources/read")
@@ -122,6 +130,60 @@ def resource_selection(params: Mapping[str, Any], method: str) -> dict[str, Any]
     except JsonPointerException as exc:
         raise ValueError(f"{RESOURCE_SELECTION_META_KEY} pointer must follow RFC6901") from exc
     return dict(selection)
+
+
+def _resource_selection_from_uri(uri: str) -> dict[str, Any] | None:
+    """Read the standard-host-compatible selector from resource URI query parameters."""
+    if not uri:
+        return None
+    values: dict[str, list[str]] = {}
+    for key, value in parse_qsl(urlsplit(uri).query, keep_blank_values=True):
+        if key in RESOURCE_SELECTION_URI_KEYS:
+            values.setdefault(key, []).append(value)
+    if not values:
+        return None
+    selection: dict[str, Any] = {}
+    for key in ("pointer", "offset", "limit"):
+        matches = values.get(f"{RESOURCE_SELECTION_URI_PREFIX}{key}", [])
+        if len(matches) > 1:
+            raise ValueError(f"URI query vrcforge.{key} must appear at most once")
+        if matches:
+            raw = matches[0]
+            if key == "pointer":
+                selection[key] = raw
+            else:
+                if not re.fullmatch(r"0|[1-9][0-9]*", raw):
+                    raise ValueError(f"URI query vrcforge.{key} must be a non-negative integer")
+                selection[key] = int(raw)
+    fields = values.get(f"{RESOURCE_SELECTION_URI_PREFIX}fields", [])
+    if fields:
+        selection["fields"] = fields
+    if "pointer" not in selection:
+        raise ValueError("URI query resource selection requires vrcforge.pointer")
+    # Reuse the same limits and RFC6901 checks as params._meta.
+    return resource_selection({"_meta": {RESOURCE_SELECTION_META_KEY: selection}}, "resources/read")
+
+
+def resource_uri_without_selection(uri: str) -> str:
+    """Remove only VRCForge selection parameters before immutable resource lookup."""
+    parts = urlsplit(uri)
+    remaining = [
+        pair for pair in parts.query.split("&")
+        if unquote_plus(pair.partition("=")[0]) not in RESOURCE_SELECTION_URI_KEYS
+    ]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "&".join(remaining), parts.fragment))
+
+
+def _resource_selection_uri(uri: str, selection: Mapping[str, Any], *, offset: int, limit: int) -> str:
+    parts = urlsplit(resource_uri_without_selection(uri))
+    pairs = [
+        (f"{RESOURCE_SELECTION_URI_PREFIX}pointer", str(selection["pointer"])),
+        (f"{RESOURCE_SELECTION_URI_PREFIX}offset", str(offset)),
+        (f"{RESOURCE_SELECTION_URI_PREFIX}limit", str(limit)),
+    ]
+    pairs.extend((f"{RESOURCE_SELECTION_URI_PREFIX}fields", str(field)) for field in selection.get("fields", []))
+    query = "&".join(value for value in (parts.query, urlencode(pairs, doseq=True)) if value)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
 def project_resource(value: Mapping[str, Any], selection: dict[str, Any] | None) -> dict[str, Any]:
@@ -162,7 +224,15 @@ def project_resource(value: Mapping[str, Any], selection: dict[str, Any] | None)
             raise ValueError(f"{RESOURCE_SELECTION_META_KEY} offset is outside the selected array")
         count = len(node)
         node = node[offset:offset + limit]
-        view.update(arrayCount=count, offset=offset, returnedCount=len(node), nextOffset=offset + len(node) if offset + len(node) < count else None)
+        next_offset = offset + len(node) if offset + len(node) < count else None
+        view.update(arrayCount=count, offset=offset, returnedCount=len(node), nextOffset=next_offset)
+        if next_offset is not None:
+            view["nextPageUri"] = _resource_selection_uri(
+                str(contents[0].get("uri") or ""), selection, offset=next_offset, limit=limit
+            )
+            view["nextAction"] = f"Read the next page with resources/read using URI {view['nextPageUri']}"
+        elif paged:
+            view["nextAction"] = "This is the final selected page. Omit all vrcforge.* selection query parameters to read the original complete resource."
     if "fields" in selection:
         fields = selection["fields"]
         objects = node if isinstance(node, list) else [node]

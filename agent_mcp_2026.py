@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
 from operation_context import ensure_operation_result
-from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, result_mode, result_resource_links, select_tools, tool_names
+from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, resource_uri_without_selection, result_mode, result_resource_links, select_tools, tool_names
 
 
 PROTOCOL_VERSION = "2026-07-28"
@@ -543,7 +543,7 @@ class Mcp2026Router:
                 if not _is_nonempty_string(uri):
                     raise Mcp2026Error(-32602, "resources/read requires a non-empty uri")
                 try:
-                    supplied = await _resolve(self._resource_read(str(uri)))
+                    supplied = await _resolve(self._resource_read(resource_uri_without_selection(str(uri))))
                 except ValueError as exc:
                     raise Mcp2026Error(-32002, str(exc), 404) from exc
                 if not isinstance(supplied, Mapping) or not isinstance(supplied.get("contents"), Sequence):

@@ -66,3 +66,19 @@ def test_existing_refresh_semantics_reload_changed_index(tmp_path) -> None:
     writer = McpResourceRegistry(store)
     writer.publish(**_spec(2))
     assert len(registry.list()["resources"]) == 2
+
+
+def test_operation_receipt_resource_description_documents_standard_uri_paging(tmp_path) -> None:
+    registry = McpResourceRegistry(tmp_path / "resources")
+    registry.publish(
+        base_uri="vrcforge://operation/test/receipt",
+        name="plan receipt",
+        description="Immutable operation receipt.",
+        resource_type="operation_receipt",
+        data={"result": {}},
+        source_mode="test",
+        refresh_rule="Immutable.",
+    )
+
+    description = registry.list()["resources"][0]["description"]
+    assert "Large arrays: append vrcforge.pointer, vrcforge.offset and vrcforge.limit (1–128); pages return nextPageUri." in description
