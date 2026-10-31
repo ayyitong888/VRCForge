@@ -10,26 +10,18 @@
 
 **简体中文** · [English](README.en.md) · [日本語](README.ja.md)
 
-🌙 **VRCForge 创作工房** · 把灵感带进 Unity，把每一步改模留在掌控之中 ✨
-
-**[🌸 粉色创作工房官网](https://ayyitong888.github.io/VRCForge/)**
+**[官网](https://ayyitong888.github.io/VRCForge/)**
 
 </div>
 
-# VRCForge：用 AI Agent + MCP 辅助 VRChat Avatar 改模
+# 用 AI 辅助 VRChat Avatar 改模
 
 VRCForge 是给 VRChat Avatar 创作者使用的开源改模工具。你可以用自然语言说出想改的
 脸型、衣服、材质或动画，让助手查看工程、提出修改并实际应用。
-**AI-assisted VRChat avatar editor · Unity MCP tools · アバター改変支援**
-
-从检查模型到换装、调材质、编辑动画，以及头部和部件移植，VRCForge 会显示要改的对象，
-帮助你在应用后检查结果。你可以选择每次修改前确认，也可以让符合条件的修改自动进行；
-恢复始终需要再次确认。不同 Avatar、插件和 Unity 工程的支持情况各不相同，
-请以自己的工程结果为准。
 
 > 使用任何会写入 Unity 资产的功能前，请先备份 Unity / VRChat Avatar 工程。
 
-**[1.10.2](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.2)**：新增单资产保存，修复菜单保存、会话恢复与 PNG 截图兼容，精简重复场景摘要计算，并改进顶栏和对话预览。详见 [更新说明](docs/RELEASE_NOTES_1.10.2.md)。
+当前正式版：[1.10.2](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.2) · [更新说明](docs/RELEASE_NOTES_1.10.2.md)
 
 ## 下载：App 和 Unity 插件都要装
 
@@ -42,125 +34,31 @@ VRCForge 是给 VRChat Avatar 创作者使用的开源改模工具。你可以�
 
 升级时也请同时更新 App 和 Unity 插件。
 
-## VRCForge 能做什么
+## 三步开始
 
-从调整细节到搭配整套造型，把重复的操作交给 AI，留更多时间给创作。
+1. **备份工程，安装 App。** 安装后先不要启动 App。
+2. **导入 Unity 插件。** 在目标 Unity 2022.3 LTS 工程中 Import All，按设置窗口提示补齐 VRChat Avatar SDK 等依赖，等待编译完成并出现 `[VRCForge MCP] Core Ready`。
+3. **打开 App，选择工程和 Avatar。** 配置下方一种 AI 入口，先只读检查模型，再尝试一个小范围修改并查看效果。
 
-| 你想做什么 | VRCForge 怎么帮你 |
-| --- | --- |
-| 调整外形与表情 | 调整模型已有的脸型、身材和表情选项，一边看效果，一边改到喜欢。 |
-| 搭配衣服与配饰 | 给模型穿上衣服、加上配饰，整理好游戏里的换装菜单。 |
-| 制作换装动画 | 让衣服随着动画切换，为换装加入渐变、溶解等演出效果。 |
-| 调整颜色与质感 | 修改衣服、头发和配饰的颜色、贴图与材质，让整套搭配更协调。 |
-| 组合模型与部件 | 跟着换头和部件移植工作流，把喜欢的模型部件组合起来，并检查连接效果。 |
-| 减轻模型负担 | 查看哪些贴图或部件占用较多资源，调整贴图大小和压缩，配合已安装的插件继续优化。 |
-| 选择顺手的 AI | 填入 API Key 使用内置 AI，或通过 MCP 连接你常用的 AI 助手。你可以选择逐步确认，也可以允许它自动操作。 |
-| 保存常用做法 | 把常用操作保存成技能，下次继续用；也可以导入、导出 .vsk 技能包。 |
-| 查看效果，恢复修改 | 查看修改后的画面和动画，保存阶段性备份；需要恢复时，选好备份并确认。 |
+新建工程可用 [Creator Companion（VCC）](https://vcc.docs.vrchat.com/guides/getting-started/) 或 ALCOM；已有工程无需更换管理工具。旧版本升级请查看 [Release Notes](https://github.com/ayyitong888/VRCForge/releases)，`1.4.0` 不能直接覆盖 `1.3.6`。
 
-能调整的内容取决于模型本身。比如，捏脸需要模型带有脸型调节选项，部分换装和优化功能还需要配套插件。
+## 选择 AI 入口
 
-## 按改模任务选择入口
+- **内置 AI：** 在 AI 设置中填写模型服务的 API Key、选择模型并测试连接，然后在对话中提出需求。
+- **外部 MCP Agent：** 在设置的连接器页面选择客户端，安装配置，或把页面提供的配置交给 Agent。保持 VRCForge 运行，重启或重新连接客户端，再让 Agent 测试连接。配置已安装不等于客户端已连接。[连接说明](USER_MANUAL.md#external-agent-connectors)
 
-| 你想做什么 | 对应流程 |
-| --- | --- |
-| 捏脸、调整表情（BlendShape editing） | 先扫描形态键，再预览小范围脸部调整并复核效果。 |
-| 换装、整理衣柜（Outfits / avatar wardrobe） | 绑定衣物，编辑衣柜、菜单和参数，再制作和检查换装动画。 |
-| 调整材质与着色器（Shader / material editing） | 读取 Shader 属性，修改材质、贴图与材质槽，再检查效果。 |
-| 优化模型（Avatar optimization） | 根据诊断调整贴图导入设置，或配置已安装的优化插件。 |
-| 用 AI 操作 Unity（Unity MCP / AI agent） | [连接 MCP 客户端](#连接-codexclaude-code-或其他-mcp-agent)，复用同一套审批与验证流程。 |
+## 修改、恢复与复用
 
-> 日本語：VRCForge は VRChat アバター改変を支援するオープンソースの Unity ツールです。
-> 表情・BlendShape 調整、衣装・着せ替え、マテリアル確認、最適化診断を AI Agent と MCP で支援します。
-> 導入手順は [日本語 README](README.ja.md) を参照してください。
+修改前确认目标和方案，修改后检查外观与结果。可选择逐项确认、自动或完全权限模式；自动模式保留高风险操作确认，**恢复检查点始终需要单独确认**。检查点不能代替工程备份。
 
-## 工作方式
+常用操作可保存为 **Skills**，也可导入、导出 **.vsk 技能包**。[技能使用说明](USER_MANUAL.md#skill-packages-and-path-to-skill)
 
-VRCForge 对 Unity 资产写入采用以下受监督流程：
-
-```text
-读取 → 规划 → 按权限确认 → 执行修改 → 读回与效果检查 → 按需恢复
-```
-
-- 默认在本机保存项目索引、聊天、记忆、检查点和连接配置。
-- 支持逐项确认、自动和完全权限模式；自动模式保留高风险操作的确认，恢复检查点始终单独确认。
-- 写入目标绑定到具体项目和 Unity Editor 实例，完成后通过读回或验证结果确认状态。
-- 恢复是独立操作，需要再次确认；检查点不能代替工程备份。
-- 外部模型服务会接收哪些内容，取决于你选择的 Provider、模型和具体操作。
-
-## 快速开始
-
-### 1. 安装并连接 Unity
-
-先下载上方的 **App 安装包 + Unity Core 插件**。
-
-推荐在准备工程时使用 [Creator Companion（VCC）](https://vcc.docs.vrchat.com/guides/getting-started/) 或 ALCOM 创建、管理 Avatar 工程。直接使用 Unity 的用户也可在现有工程内补齐官方 Avatar SDK；无需为了使用 VRCForge 更换项目管理器。
-
-然后完成三步连接：
-
-1. 安装 VRCForge，但先不要启动 App。
-2. 在目标 Unity 2022.3 LTS 工程中完整导入 `VRCForge.unitypackage`。若尚未安装 VRChat Avatar SDK，VRCForge 设置窗口会引导下载并导入官方 Avatar SDK；若安装不完整，按窗口提示在当前工程补齐缺项，等待编译结束并出现 `[VRCForge MCP] Core Ready`。可从 `VRCForge → Setup → Check Dependencies` 重新打开检查窗口。
-3. 启动 `VRCForge.exe`，选择该工程并连接。App 会发现工程内的 VRCForge Core，无需单独安装 MCP Server 或复制 MCP Token。
-
-升级旧版本前请阅读对应 [Release Notes](https://github.com/ayyitong888/VRCForge/releases)。
-`1.4.0` 是破坏性安装边界，不能直接覆盖 `1.3.6`。
-
-### 2. 做第一次安全检查
-
-1. 在 VRCForge 中选择项目和 Avatar。
-2. 运行 Doctor，确认 App、Provider、Unity 和 MCP 连接状态。
-3. 先运行只读扫描或 Validation Report。
-4. 请求一个小范围修改，审查目标、方案和审批卡。
-5. 应用后查看检查点、读回结果和验证差异；需要时单独申请恢复。
-
-完整操作流程见 [用户手册](USER_MANUAL.md)。
-
-## 连接 Codex、Claude Code 或其他 MCP Agent
-
-VRCForge 同时支持内置 Agent 和外部 MCP 客户端。外部客户端通过本地 MCP + REST
-网关访问同一套公开工具契约：规划阶段提供读取与规划能力，执行阶段可修改 Unity，遵循所选权限模式；需要人工确认的操作会显示审批请求。
-
-在 VRCForge 中打开 **设置 → 连接器 → 通用 MCP 客户端**：
-
-1. 找到客户端实际使用的 MCP 配置文件，并确认格式是 JSON、TOML 还是 YAML。
-2. 本地桌面或 CLI 客户端优先选择 **STDIO**；只有客户端明确支持时才使用 **Streamable HTTP**。
-3. 保持 VRCForge 运行，重启或重新连接客户端，确认出现名为 `vrcforge` 的 Server 和工具列表。
-
-自动安装接受 JSON 配置文件的完整路径。TOML/YAML 客户端请复制配置块后手动加入。
-HTTP 模式还需要启用 Agent Gateway，并把所需 Token 传给客户端进程；不要把明文凭据提交到仓库。
-
-更多细节见 [External Agent Connectors](USER_MANUAL.md#external-agent-connectors)。
-
-## 命令行工具
-
-VRCForge Desktop 运行后，可以用本地 CLI 做诊断、检查点查询和 Validation Report：
-
-```powershell
-# 安装版
-backend\vrcforge_backend.exe --cli doctor
-backend\vrcforge_backend.exe --cli checkpoint list --project C:\Path\To\UnityProject
-
-# 源码版
-python tools\vrcforge_cli.py doctor
-python tools\vrcforge_cli.py validation run --project C:\Path\To\UnityProject
-```
-
-`apply`、`rollback` 默认创建审批请求；添加 `--execute` 可在终端确认并执行，仍经过同一套后端审批与恢复流程。
-
-## 适用范围与当前边界
-
-- 目标平台是 Windows x64、Unity 2022.3 LTS 和 VRChat SDK3 Avatar 工程。
-- VRCForge 可以在无 Provider 模式下完成部分只读检查；AI 对话、规划和视觉推理需要已配置的兼容 Provider。
-- 优化插件集成需要已安装的兼容版本；配置 AAO 等组件不等于已经完成其构建阶段优化。换头与部件移植工作流不能代替必要的网格接缝、权重或 UV 编辑。
-- Avatar 保护连接器提供检查、规划与预览；公开包不包含私有保护执行组件。
-- 仍有已知问题，包括启动首绘未达到 100ms 目标、悬浮预览的 Markdown 换行排版；具体模型效果请在自己的工程中验收。
-- Quest/Android、第三方资产许可和付费依赖由具体 Avatar 与资源决定。
+支持 Windows x64、Unity 2022.3 LTS 和 VRChat SDK3 Avatar 工程。可编辑范围取决于模型自带的调节项和已安装插件；换头、部件移植可能仍需手工处理网格、权重和 UV。更多支持范围与限制见 [用户手册](USER_MANUAL.md) 和 [兼容性矩阵](docs/COMPATIBILITY_MATRIX.md)。
 
 ## 文档入口
 
 - [用户手册 / User Manual](USER_MANUAL.md)
 - [1.10.2 更新说明](docs/RELEASE_NOTES_1.10.2.md)
-- [v1.7.10 稳定版说明](docs/RELEASE_NOTES_1.7.10.md)
 - [兼容性矩阵](docs/COMPATIBILITY_MATRIX.md)
 - [产品回归契约](docs/PRODUCT_REGRESSION_CONTRACT.md)
 - [优化策略](docs/OPTIMIZATION_STRATEGY.md)
@@ -180,8 +78,6 @@ start_dashboard.cmd
 
 ## 隐私与许可证
 
-VRCForge 采用 local-first 设计。API Key、Gateway Token、付费资产内容和私有文件默认不应进入
-仓库或公开诊断材料；分享 Support Bundle 前仍应人工检查。
+项目索引、聊天、记忆和检查点默认保存在本机。使用外部模型服务时，发送的内容取决于模型和操作。不要公开密钥、付费资产或私有文件；分享诊断包前请检查内容。[隐私说明](USER_MANUAL.md#privacy-boundary)
 
-项目使用 [GPL-3.0-only](LICENSE) 许可证。VRCForge 的 Unity MCP Core、命令目录、
-输入 Schema 元数据和工具结果契约为项目自有实现；发行门禁要求公开包不捆绑第三方 Unity MCP 运行时代码。
+项目采用 [GPL-3.0-only](LICENSE)。Unity MCP Core 与工具契约为项目自有实现，公开包不捆绑第三方 Unity MCP 运行时代码。第三方依赖与声明见 [DEPENDENCIES](DEPENDENCIES.md) 和 [NOTICE](NOTICE)。
