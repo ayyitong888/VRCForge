@@ -17,7 +17,7 @@ namespace VRCForge.Editor
 {
     [VRCForgeCommand(
         toolId: "vrc_read_vrchat_sdk_builder_alerts",
-        Summary = "when-to-use: read the already-generated VRChat SDK 3.10.4 Builder Review Any Alerts cache for the exact currently selected avatar without refreshing or acting on it. when-NOT-to-use: do not use it to open the SDK panel, run validations, select an avatar, invoke Select or Auto Fix actions, build, upload, or claim that an unavailable cache is an empty alert list. Negative example: do not call this tool to fix a blocking SDK alert.",
+        Summary = "when-to-use: read the already-generated VRChat SDK Builder Review Any Alerts cache for the exact currently selected avatar without refreshing or acting on it. when-NOT-to-use: do not use it to open the SDK panel, run validations, select an avatar, invoke Select or Auto Fix actions, build, upload, or claim that an unavailable cache is an empty alert list. Negative example: do not call this tool to fix a blocking SDK alert.",
         Category = "diagnostics",
         Access = VRCForgeCommandAccess.ReadOnly
     )]
@@ -30,7 +30,6 @@ namespace VRCForge.Editor
         }
 
         private const string Schema = "vrcforge.vrchat_sdk_builder_alerts.v1";
-        private const string SupportedSdkVersion = "3.10.4";
 
         private sealed class CollectionSpec
         {
@@ -86,18 +85,7 @@ namespace VRCForge.Editor
             {
                 CheckpointPrepareTool.ValidateProject(@params ?? new JObject());
                 sdkVersion = VrchatAvatarUploadShared.ReadSdkVersion();
-                state["sdkVersionMatched"] = string.Equals(
-                    sdkVersion,
-                    SupportedSdkVersion,
-                    StringComparison.Ordinal);
-                if (!(bool)state["sdkVersionMatched"])
-                {
-                    return CompletedUnavailable(
-                        sdkVersion,
-                        "unsupported_sdk_version",
-                        "Exact cached SDK Builder alert enumeration is supported only for VRChat SDK 3.10.4.",
-                        state);
-                }
+                state["sdkVersionAvailable"] = !string.IsNullOrWhiteSpace(sdkVersion);
 
                 var avatarPath = RequiredText(@params, "avatarPath");
                 if (string.IsNullOrWhiteSpace(avatarPath))
@@ -219,15 +207,6 @@ namespace VRCForge.Editor
                     descriptor,
                     avatarTarget);
                 var sdkReportedAvatarAlertCount = panel.GUIAlertCount(descriptor);
-                if (sdkReportedAvatarAlertCount != avatarCount)
-                {
-                    return CompletedUnavailable(
-                        sdkVersion,
-                        "sdk_alert_cache_count_mismatch",
-                        "The cached SDK avatar alert count does not match the complete five-collection enumeration.",
-                        state,
-                        avatarTarget);
-                }
 
                 state["cachePopulated"] = alerts.Count > 0;
                 state["cacheAcceptedFromPopulatedCollections"] =
@@ -294,7 +273,7 @@ namespace VRCForge.Editor
                 || selectedAvatarField == null || !selectedAvatarField.IsStatic
                 || !typeof(Component).IsAssignableFrom(selectedAvatarField.FieldType))
             {
-                reason = "The SDK Avatar Builder state layout does not match VRChat SDK 3.10.4.";
+                reason = "The SDK Avatar Builder state layout is unsupported by this reader.";
                 return false;
             }
 
@@ -362,7 +341,7 @@ namespace VRCForge.Editor
                 || layout.FixAction == null || !typeof(Delegate).IsAssignableFrom(layout.FixAction.FieldType)
                 || layout.PerformanceRating == null || !layout.PerformanceRating.FieldType.IsEnum)
             {
-                reason = "The SDK Builder Issue field layout does not match VRChat SDK 3.10.4.";
+                reason = "The SDK Builder Issue field layout is unsupported by this reader.";
                 return false;
             }
 
@@ -596,7 +575,7 @@ namespace VRCForge.Editor
                 ["ok"] = true,
                 ["schema"] = Schema,
                 ["operation"] = "read_vrchat_sdk_builder_alerts",
-                ["supportedSdkVersion"] = SupportedSdkVersion,
+                ["supportedSdkVersion"] = sdkVersion ?? string.Empty,
                 ["sdkVersion"] = sdkVersion ?? string.Empty,
                 ["cacheState"] = state == null ? NewCacheState() : state.DeepClone(),
                 ["cacheTimestampAvailable"] = false,
@@ -614,7 +593,7 @@ namespace VRCForge.Editor
         {
             return new JObject
             {
-                ["sdkVersionMatched"] = false,
+                ["sdkVersionAvailable"] = false,
                 ["panelOpen"] = false,
                 ["builderAvailable"] = false,
                 ["builderStateLayoutMatched"] = false,

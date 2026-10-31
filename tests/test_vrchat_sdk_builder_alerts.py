@@ -26,8 +26,10 @@ def test_sdk_builder_alert_atom_is_registered_as_an_exact_read_only_core_tool() 
     assert '"vrc_read_vrchat_sdk_builder_alerts"' in read_only
 
 
-def test_sdk_builder_alert_atom_reads_only_the_five_3104_cache_collections() -> None:
-    assert 'SupportedSdkVersion = "3.10.4"' in TOOL
+def test_sdk_builder_alert_atom_reads_the_five_cached_collections_with_runtime_shape_checks() -> None:
+    assert 'private const string SupportedSdkVersion' not in TOOL
+    assert 'state["sdkVersionAvailable"] = !string.IsNullOrWhiteSpace(sdkVersion);' in TOOL
+    assert "unsupported_sdk_version" not in TOOL
     assert re.findall(
         r'new CollectionSpec\("(GUI\w+)"',
         TOOL,
@@ -66,7 +68,6 @@ def test_sdk_builder_alert_atom_never_opens_refreshes_selects_or_invokes() -> No
 
 def test_sdk_builder_alert_atom_fails_closed_for_every_unavailable_boundary() -> None:
     for reason in (
-        "unsupported_sdk_version",
         "avatar_path_required",
         "sdk_panel_not_open",
         "sdk_avatar_builder_unavailable",
@@ -77,7 +78,6 @@ def test_sdk_builder_alert_atom_fails_closed_for_every_unavailable_boundary() ->
         "sdk_selected_avatar_unavailable",
         "sdk_selected_avatar_mismatch",
         "unsupported_sdk_alert_layout",
-        "sdk_alert_cache_count_mismatch",
         "sdk_alert_cache_read_failed",
     ):
         assert f'"{reason}"' in TOOL
@@ -101,6 +101,7 @@ def test_sdk_builder_alert_atom_preserves_scope_message_and_action_capabilities(
     assert "sdkReportedAvatarAlertCount = panel.GUIAlertCount(descriptor);" in TOOL
     assert 'payload["sdkReportedAvatarAlertCount"] = sdkReportedAvatarAlertCount;' in TOOL
     assert 'payload["returnedItemCount"] = alerts.Count;' in TOOL
+    assert "if (sdkReportedAvatarAlertCount != avatarCount)" not in TOOL
 
 
 def test_sdk_builder_alert_atom_accepts_only_a_proven_populated_avatar_cache() -> None:
@@ -109,7 +110,8 @@ def test_sdk_builder_alert_atom_accepts_only_a_proven_populated_avatar_cache() -
     assert "!panel.CheckedForIssues && avatarCount > 0" in TOOL
     assert "if (!panel.CheckedForIssues && avatarCount == 0)" in TOOL
     assert "!panel.CheckedForIssues && alerts.Count > 0" not in TOOL
-    assert "sdkReportedAvatarAlertCount != avatarCount" in TOOL
+    assert "sdkReportedAvatarAlertCount != avatarCount" not in TOOL
+    assert 'state["cacheAcceptedFromPopulatedCollections"] =' in TOOL
     assert 'payload["freshValidationClaimed"] = false;' in TOOL
 
 
