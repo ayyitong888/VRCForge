@@ -37,6 +37,37 @@ def test_import_content_readback_compares_package_asset_and_persisted_target(tmp
     assert result["assets"][0]["targetSha256"] == result["assets"][0]["packageSha256"]
 
 
+def test_import_content_readback_streams_assets_that_precede_pathnames(tmp_path: Path):
+    package = tmp_path / "streamed.unitypackage"
+    project = tmp_path / "Project"
+    target = project / "Assets" / "Shaders" / "streamed.hlsl"
+    target.parent.mkdir(parents=True)
+    content = b"streamed package payload\n"
+    target.write_bytes(content)
+    with tarfile.open(package, "w:gz") as archive:
+        for name, data in (
+            ("guid/asset", content),
+            ("guid/asset.meta", b"fileFormatVersion: 2\nguid: " + b"a" * 32 + b"\n"),
+            ("guid/pathname", b"Assets/Shaders/streamed.hlsl"),
+            ("other/asset", b"unselected payload"),
+            ("other/pathname", b"Assets/Shaders/unselected.hlsl"),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+
+    result = verify_unitypackage_asset_content(
+        package, project, ["Assets/Shaders/streamed.hlsl"],
+        lambda path, label: capture_regular_file(path, label=label),
+    )
+
+    expected_digest = hashlib.sha256(content).hexdigest()
+    assert result["verified"] is True
+    assert result["checked"] == 1
+    assert result["assets"][0]["packageSha256"] == expected_digest
+    assert result["assets"][0]["targetSha256"] == expected_digest
+
+
 def test_import_content_readback_fails_closed_on_target_content_drift(tmp_path: Path):
     package = tmp_path / "candidate.unitypackage"
     project = tmp_path / "Project"

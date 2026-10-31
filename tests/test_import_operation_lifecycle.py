@@ -12,15 +12,41 @@ from tests.test_prepared_outfit_import_writes import _project, _prepare, _approv
 from tests.test_unity_import_recovery import receipt
 
 
+def _nested_unitypackage_plan(project: Path, source: Path) -> dict:
+    expected_asset_paths = ["Assets/Outfits/Dress.prefab"]
+    return {
+        "plan": {
+            "readyToApply": True,
+            "kind": "unitypackage_import",
+            "projectPath": str(project),
+            "expectedAssetPaths": expected_asset_paths,
+            "expectedAssetPathsComplete": True,
+            "source": {
+                "path": str(source),
+                "importQueue": [
+                    {
+                        "sourceType": "zip",
+                        "path": "source.unitypackage",
+                        "role": "target",
+                        "order": 1,
+                        "expectedAssetPaths": expected_asset_paths,
+                        "expectedAssetPathsComplete": True,
+                    }
+                ],
+            },
+        }
+    }
+
+
 @pytest.mark.parametrize("failure", ["poll", "start", "refresh", "readback"])
 def test_nested_source_is_retained_until_verified_completion(tmp_path, monkeypatch, failure):
     project = _project(tmp_path)
     source = tmp_path / "bundle.zip"
     with zipfile.ZipFile(source, "w") as archive:
         archive.writestr("source.unitypackage", b"package")
-    prepared, _ = _prepare(tmp_path, {"plan": {"readyToApply": True, "kind": "unitypackage_import",
-        "projectPath": str(project), "source": {"path": str(source), "importQueue": [
-            {"sourceType": "zip", "path": "source.unitypackage", "role": "target", "order": 1}]}}},
+    prepared, _ = _prepare(
+        tmp_path,
+        _nested_unitypackage_plan(project, source),
         {"projectPath": str(project), "packagePath": str(source)})
     from prepared_unity_execution import build_prepared_execution_plan
     from tests.test_prepared_outfit_import_writes import _completed_import
@@ -171,9 +197,9 @@ def test_host_journals_full_seal_before_dispatch_and_fails_closed_on_storage_err
     source = tmp_path / "bundle.zip"
     with zipfile.ZipFile(source, "w") as archive:
         archive.writestr("source.unitypackage", b"package")
-    arguments, _ = _prepare(tmp_path, {"plan": {"readyToApply": True, "kind": "unitypackage_import",
-        "projectPath": str(project), "source": {"path": str(source), "importQueue": [
-            {"sourceType": "zip", "path": "source.unitypackage", "role": "target", "order": 1}]}}},
+    arguments, _ = _prepare(
+        tmp_path,
+        _nested_unitypackage_plan(project, source),
         {"projectPath": str(project), "packagePath": str(source)})
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     service = gateway.approval_transactions

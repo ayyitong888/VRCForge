@@ -56,43 +56,60 @@ def verify_unitypackage_asset_content(
     if not expected:
         return {"verified": True, "checked": 0, "assets": []}
     package_assets: dict[str, tuple[str, str | None]] = {}
-    with tarfile.open(Path(package_path), mode="r:*") as archive:
-        members_by_path: dict[str, tarfile.TarInfo] = {}
-        for member in archive.getmembers():
+    guid_assets: dict[str, dict[str, Any]] = {}
+    pathname_order = 0
+    with tarfile.open(Path(package_path), mode="r|*") as archive:
+        for member in archive:
             if not member.isfile():
                 continue
             parts = unitypackage_member_parts(member.name)
-            if parts is not None and parts[1] in {"pathname", "asset", "asset.meta"}:
-                members_by_path["/".join(parts)] = member
-        for member in archive.getmembers():
-            if not member.isfile():
+            if parts is None or parts[1] not in {"pathname", "asset", "asset.meta"}:
                 continue
-            parts = unitypackage_member_parts(member.name)
-            if parts is None or parts[1] != "pathname":
-                continue
-            pathname_file = archive.extractfile(member)
-            if pathname_file is None:
-                continue
-            asset_path = pathname_file.read(32768).decode("utf-8", errors="replace").strip().replace("\\", "/")
-            if asset_path not in expected:
-                continue
-            prefix = parts[0]
-            asset_meta = members_by_path.get(f"{prefix}/asset.meta")
-            asset_meta_file = archive.extractfile(asset_meta) if asset_meta is not None else None
-            meta_text = asset_meta_file.read(32768).decode("utf-8", errors="replace") if asset_meta_file is not None else ""
-            asset_member = members_by_path.get(f"{prefix}/asset")
-            if asset_member is None:
-                if "folderAsset: yes" in meta_text:
-                    package_assets[asset_path] = ("folder", None)
+            guid, leaf = parts
+            record = guid_assets.setdefault(
+                guid,
+                {"hasAsset": False, "assetSha256": None, "folderAsset": False, "pathnames": []},
+            )
+            extracted = archive.extractfile(member)
+            if leaf == "pathname":
+                if extracted is None:
                     continue
-                raise RuntimeError(f"UnityPackage asset payload is missing for file {asset_path}.")
-            asset_file = archive.extractfile(asset_member)
-            if asset_file is None:
+                asset_path = extracted.read(32768).decode("utf-8", errors="replace").strip().replace("\\", "/")
+                if asset_path in expected:
+                    record["pathnames"].append((pathname_order, asset_path))
+                pathname_order += 1
+            elif leaf == "asset.meta":
+                record["folderAsset"] = (
+                    extracted is not None
+                    and b"folderAsset: yes" in extracted.read(32768)
+                )
+            else:
+                record["hasAsset"] = True
+                if extracted is None:
+                    record["assetSha256"] = None
+                    continue
+                digest = hashlib.sha256()
+                while chunk := extracted.read(1024 * 1024):
+                    digest.update(chunk)
+                record["assetSha256"] = digest.hexdigest()
+
+    pathname_records = sorted(
+        (
+            (order, asset_path, record)
+            for record in guid_assets.values()
+            for order, asset_path in record["pathnames"]
+        ),
+        key=lambda item: item[0],
+    )
+    for _, asset_path, record in pathname_records:
+        if record["hasAsset"]:
+            if record["assetSha256"] is None:
                 raise RuntimeError(f"UnityPackage asset payload is missing for {asset_path}.")
-            digest = hashlib.sha256()
-            while chunk := asset_file.read(1024 * 1024):
-                digest.update(chunk)
-            package_assets[asset_path] = ("file", digest.hexdigest())
+            package_assets[asset_path] = ("file", record["assetSha256"])
+        elif record["folderAsset"]:
+            package_assets[asset_path] = ("folder", None)
+        else:
+            raise RuntimeError(f"UnityPackage asset payload is missing for file {asset_path}.")
     missing = sorted(set(expected) - set(package_assets))
     if missing:
         raise RuntimeError(f"UnityPackage content readback is incomplete for: {missing}")
