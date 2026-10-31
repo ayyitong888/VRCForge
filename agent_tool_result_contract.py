@@ -42,6 +42,9 @@ _TOP_LEVEL_PENDING_STATUSES = frozenset(
 _SUCCESSFUL_EXECUTION_STATUSES = frozenset(
     {"ok", "success", "executed", "completed", "passed"}
 )
+TERMINAL_JOB_STATUSES = _FAILED_STATUSES | _SUCCESSFUL_EXECUTION_STATUSES | {
+    "done", "cancelled", "canceled", "expired", "interrupted", "not_found", "no_change", "not_started",
+}
 _KNOWN_NESTED_KEYS = (
     "structuredContent",
     "result",
@@ -96,11 +99,26 @@ def runtime_observation_receipt(value: Any) -> Mapping[str, Any] | None:
         and isinstance(view.get("coreIdentity"), str) and view["coreIdentity"]), None)
 
 
-def invoked_dispatch_receipt(value: Any) -> Mapping[str, Any] | None:
-    """Recognize a returned invocation without claiming its callback's outcome."""
+def job_receipt(value: Any) -> Mapping[str, Any] | None:
+    """Find an existing job handle, without guessing its owning tool."""
     return next((view for view in _views(value)
-        if view.get("triggered") is True and view.get("state") == "invoked"
-        and view.get("resultVerification") == "pending"), None)
+        if isinstance(view.get("jobId", view.get("job_id")), str)
+        and view.get("jobId", view.get("job_id")).strip()), None)
+
+
+def pending_execution_receipt(value: Any) -> Mapping[str, Any] | None:
+    """Recognize accepted work whose callback or job has not finished."""
+    for view in _views(value):
+        if (view.get("triggered") is True and view.get("state") == "invoked"
+                and view.get("resultVerification") == "pending"):
+            return view
+    job = job_receipt(value)
+    if job is None or job.get("completedAt"):
+        return None
+    status = _status(job.get("status"))
+    if status and status not in TERMINAL_JOB_STATUSES | _NEEDS_ACTION_STATUSES | {"unknown"}:
+        return job
+    return None
 
 
 def _bounded_text_list(value: Any, *, limit: int = 6) -> list[str]:
@@ -433,11 +451,8 @@ def normalize_agent_tool_result(
         is_gesture_manager_entry_pending(str(view.get("tool") or ""), view)
         for view in views
     )
-    observation = runtime_observation_receipt(value)
-    dispatch = invoked_dispatch_receipt(value)
-    observation_pending = bool(observation and observation.get("status") == "pending"
-        and observation.get("ok") is True and observation.get("mutationStarted") is True
-        and observation.get("verified") is False and observation.get("commitState") == "pending")
+    pending_execution = pending_execution_receipt(value)
+    dispatch = pending_execution if pending_execution and pending_execution.get("triggered") is True else None
 
     failed_view: Mapping[str, Any] | None = None
     top_level_execution_status = _status(
@@ -522,14 +537,12 @@ def normalize_agent_tool_result(
             "likelyCauses": [],
             "nextActions": ["Inspect the failed checks, correct the cause, and verify again."],
         }
-    elif dispatch:
+    elif pending_execution:
         status = "pending"
-        summary = "The command was invoked; inspect its actual result without repeating the dispatch."
-        verification = {"state": "pending", "checks": []}
-        error = None
-    elif observation_pending:
-        status = "pending"
-        summary = "Runtime observation is sampling. Poll the same job; do not repeat start."
+        summary = (
+            "The command was invoked; inspect its actual result without repeating the dispatch."
+            if dispatch else "The job is still running; poll the existing job without starting it again."
+        )
         verification = {"state": "pending", "checks": []}
         error = None
     elif gm_entry_pending:
@@ -594,24 +607,34 @@ def normalize_agent_tool_result(
         "evidence": _evidence_refs(views),
         "verification": verification,
     }
-    dispatch_pending = bool(dispatch and status == "pending")
+    execution_pending = bool(pending_execution and status == "pending")
     canonical_facts = canonical_result_facts(
         causal_views,
-        success=None if dispatch_pending else status == "ok",
-        status=None if dispatch_pending else "ok" if status == "ok" else "failed",
+        success=None if execution_pending else status == "ok",
+        status=None if execution_pending else "ok" if status == "ok" else "failed",
     )
     canonical_status = canonical_facts.pop("status", None)
     result.update(canonical_facts)
-    if dispatch_pending:
+    if execution_pending:
+        result.update({
+            "persistenceState": "pending",
+            "readbackState": "pending",
+        })
+    if execution_pending and dispatch:
         result.update({
             "triggered": True,
             "dispatchState": "invoked",
             "resultVerification": "pending",
             "mutationMayHaveStarted": dispatch.get("mutationMayHaveStarted"),
             "commitState": "unknown",
-            "persistenceState": "pending",
-            "readbackState": "pending",
             "nextAction": "Inspect the actual objects, assets or window. Do not repeat the dispatch to verify it.",
+        })
+    elif execution_pending:
+        job_id = pending_execution.get("jobId", pending_execution.get("job_id"))
+        result.update({
+            "jobId": job_id,
+            "jobStatus": pending_execution.get("status"),
+            "nextAction": f"Poll the existing job {job_id} until it reaches a terminal state. Do not start it again.",
         })
     # These are deliberately shared diagnostic facts, not transport-only
     # decorations.  Keep them in the normalized outcome so the internal loop

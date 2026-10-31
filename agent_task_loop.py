@@ -15,7 +15,14 @@ import hashlib
 import json
 from typing import Any
 
-from agent_tool_result_contract import completion_gate_plan, invoked_dispatch_receipt, normalize_agent_tool_result, runtime_observation_receipt
+from agent_tool_result_contract import (
+    TERMINAL_JOB_STATUSES,
+    completion_gate_plan,
+    job_receipt,
+    normalize_agent_tool_result,
+    pending_execution_receipt,
+    runtime_observation_receipt,
+)
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
 from checkpoint_user_policy import (
     checkpoint_skip_authority_for_context,
@@ -401,6 +408,8 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
         "resultVerification",
         "persistenceState",
         "readbackState",
+        "jobId",
+        "jobStatus",
         "committed",
         "commitState",
         "commitStateKnown",
@@ -958,7 +967,7 @@ def approval_completion(
     status = _status(verified.get("status"))
     if status == "ok":
         task_status = "completed"
-    elif status == "pending" and (runtime_observation_receipt(raw_result) or invoked_dispatch_receipt(raw_result)):
+    elif status == "pending" and (runtime_observation_receipt(raw_result) or pending_execution_receipt(raw_result)):
         task_status = "running"
     elif status == "failed":
         task_status = "failed"
@@ -1774,7 +1783,8 @@ class AgentTaskLoop:
         outcome_status = _status(effective.get("status"))
         running_state = _running_state(raw_result)
         observation = runtime_observation_receipt(raw_result)
-        if outcome_status == "pending" and observation:
+        job = job_receipt(raw_result)
+        if outcome_status == "pending" and job:
             running_state = "polling"
         if outcome_status == "failed":
             lifecycle = "failed"
@@ -1810,6 +1820,15 @@ class AgentTaskLoop:
             record["_nativeReadObservation"] = True
         if running_state:
             record["runtimeStatus"] = running_state
+        if job and not observation:
+            job_id = job.get("jobId", job.get("job_id"))
+            if _status(job.get("status")) in TERMINAL_JOB_STATUSES and outcome_status in {"ok", "failed"}:
+                for prior in self._actions.values():
+                    if (isinstance(prior.get("outcome"), Mapping)
+                            and prior["outcome"].get("jobId") == job_id and prior.get("status") == "running"):
+                        prior["status"] = lifecycle
+                        prior["outcome"] = effective
+                        prior.pop("runtimeStatus", None)
         if observation and tool in {"vrcforge_start_runtime_observation", "vrcforge_get_runtime_observation"}:
             identity = {key: observation[key] for key in ("jobId", "avatarPath", "coreIdentity")}
             record["_runtimeObservation"] = identity

@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from agent_command_safety import is_path_within, looks_like_absolute_path, normalize_filesystem_path
 from agent_task_loop import TASK_APPROVAL_CONTEXT_SCHEMA, approval_completion, approval_task_context
-from agent_tool_result_contract import invoked_dispatch_receipt, normalize_agent_tool_result
+from agent_tool_result_contract import normalize_agent_tool_result, pending_execution_receipt
 from external_tool_result_contract import (
     build_external_tool_error,
     external_exception_details,
@@ -2315,9 +2315,11 @@ class AgentApprovalTransactionService:
             if completion_status == "failed":
                 failure_layer = "result_verification"
                 raise AgentGatewayError(str(completion_outcome["summary"]))
-            dispatch_invoked = invoked_dispatch_receipt(result) is not None
+            pending_execution = pending_execution_receipt(result)
+            dispatch_invoked = bool(pending_execution and pending_execution.get("triggered") is True)
+            job_pending = pending_execution is not None and not dispatch_invoked
             failure_layer = "checkpoint_finalize"
-            checkpoint = self._finish_created_asset_checkpoint(checkpoint, result, pending=observation_pending)
+            checkpoint = self._finish_created_asset_checkpoint(checkpoint, result, pending=observation_pending or job_pending)
             if checkpoint:
                 approval["checkpoint"] = checkpoint
             if recovery is not None:
@@ -2394,16 +2396,14 @@ class AgentApprovalTransactionService:
                 self._finish_apply_recovery(
                     recovery,
                     status="applied",
-                    resolution="dispatch_completed" if dispatch_invoked else "write_completed",
+                    resolution="dispatch_completed" if dispatch_invoked else "job_scheduled" if job_pending else "write_completed",
                     result_summary=summarize_params(result if isinstance(result, dict) else {"result": result}),
                 )
             payload = {
                 "ok": True,
                 "status": (
                     "invoked" if dispatch_invoked else "pending"
-                    if target_tool == "vrcforge_start_runtime_observation"
-                    and isinstance(result, Mapping)
-                    and str(result.get("status") or "").casefold() == "pending"
+                    if job_pending or observation_pending
                     else "needs_user_action" if completion_status == "needs_user_action" else "applied"
                 ),
                 "approval": approval,
@@ -2418,7 +2418,7 @@ class AgentApprovalTransactionService:
                     "persistenceState": "pending",
                     "readbackState": "pending",
                 })
-            if dispatch_invoked:
+            if pending_execution is not None:
                 for key in ("commitState", "persistenceState", "readbackState", "nextAction"):
                     payload[key] = completion_outcome.get(key)
             if task_completion is not None:
@@ -2764,7 +2764,7 @@ class AgentApprovalTransactionService:
                 and str(result.get("status") or "").casefold() == "pending"
             )
             gm_entry_pending = is_gesture_manager_entry_pending(target_tool, result)
-            operation_pending = observation_pending or gm_entry_pending
+            operation_pending = observation_pending or gm_entry_pending or pending_execution_receipt(result) is not None
             if write_handler.verification_finalize_handler is not None and not operation_pending:
                 result = write_handler.verification_finalize_handler(
                     dict(handler_arguments),
@@ -2866,7 +2866,7 @@ class AgentApprovalTransactionService:
             and isinstance(result, Mapping)
             and str(result.get("status") or "").casefold() == "pending"
         )
-        if write_handler.verification_finalize_handler is not None and not observation_pending:
+        if write_handler.verification_finalize_handler is not None and not observation_pending and pending_execution_receipt(result) is None:
             result = write_handler.verification_finalize_handler(
                 dict(handler_arguments),
                 dict(verification_baseline),
@@ -4734,7 +4734,9 @@ class AgentApprovalTransactionService:
                 and str(result.get("status") or "").casefold() == "pending"
             )
             gm_entry_pending = is_gesture_manager_entry_pending(target_tool, result)
-            operation_pending = observation_pending or gm_entry_pending
+            pending_execution = pending_execution_receipt(result)
+            job_pending = bool(pending_execution and pending_execution.get("triggered") is not True)
+            operation_pending = observation_pending or gm_entry_pending or pending_execution is not None
             if write_handler.verification_finalize_handler is not None and not operation_pending:
                 failure_layer = "completion_verification_finalize"
                 verification_arguments = dict(arguments)
@@ -4773,7 +4775,9 @@ class AgentApprovalTransactionService:
             if str(completion_outcome.get("status") or "").casefold() == "failed":
                 failure_layer = "result_verification"
                 raise AgentGatewayError(str(completion_outcome.get("summary") or "Write failed."))
-            dispatch_invoked = invoked_dispatch_receipt(result) is not None
+            pending_execution = pending_execution_receipt(result)
+            dispatch_invoked = bool(pending_execution and pending_execution.get("triggered") is True)
+            job_pending = pending_execution is not None and not dispatch_invoked
 
             if gm_entry_pending:
                 # Core has only scheduled entry into Play Mode.  The status
@@ -4839,7 +4843,7 @@ class AgentApprovalTransactionService:
             )
             persistence_state = (
                 "pending"
-                if operation_pending or dispatch_invoked
+                if operation_pending
                 else
                 "persisted"
                 if receipt_verified and commit_state in {"committed", "no_change"}
@@ -4849,7 +4853,7 @@ class AgentApprovalTransactionService:
             )
             readback_state = (
                 "pending"
-                if operation_pending or dispatch_invoked
+                if operation_pending
                 else
                 "verified"
                 if receipt_verified and isinstance(receipt_readback, Mapping)
@@ -4876,7 +4880,7 @@ class AgentApprovalTransactionService:
             if recovery is not None:
                 recovery["checkpoint"] = checkpoint
             if recovery is not None:
-                if not gm_entry_pending and not dispatch_invoked and not receipt_verified and not finalize_verification:
+                if not gm_entry_pending and pending_execution is None and not receipt_verified and not finalize_verification:
                     console_verification = (
                         result.get("consoleVerification") if isinstance(result, Mapping) else None
                     )
@@ -4897,7 +4901,7 @@ class AgentApprovalTransactionService:
                     recovery = self._finish_apply_recovery(
                         recovery,
                         status="applied",
-                        resolution="dispatch_completed" if dispatch_invoked else "write_completed",
+                        resolution="dispatch_completed" if dispatch_invoked else "job_scheduled" if job_pending else "write_completed",
                         result_summary=summarize_params(completion_outcome),
                     )
             payload: dict[str, Any] = {
