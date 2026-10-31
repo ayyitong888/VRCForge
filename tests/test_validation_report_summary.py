@@ -5,6 +5,7 @@ from pathlib import Path
 
 import dashboard_server
 import validation_report_summary as summary
+from sdk_panel_alerts import apply_sdk_panel_coverage, sdk_panel_alert_report
 
 
 def test_summary_has_no_runtime_owner_dependency() -> None:
@@ -17,7 +18,7 @@ def test_summary_has_no_runtime_owner_dependency() -> None:
 
 def test_findings_redaction_keeps_root_callback_late_bound(monkeypatch) -> None:
     seen = []
-    monkeypatch.setattr(dashboard_server, "_redact_doctor_detail", lambda detail: seen.append(detail) or {"redacted": True})
+    monkeypatch.setattr(dashboard_server, "redact_sensitive", lambda detail: seen.append(detail) or {"redacted": True})
     findings = []
     dashboard_server._validation_add_finding(findings, "Custom section", "unknown", "Title", "Message", "source", {"private": "value"})
     dashboard_server._validation_add_finding(findings, "Unity compile", "Error", "Failure", "Compile failed", "compile")
@@ -38,7 +39,7 @@ def test_findings_redaction_keeps_root_callback_late_bound(monkeypatch) -> None:
 
 def test_source_summary_is_bounded_before_redaction(monkeypatch) -> None:
     seen = []
-    monkeypatch.setattr(dashboard_server, "_redact_doctor_detail", lambda value: seen.append(value) or value)
+    monkeypatch.setattr(dashboard_server, "redact_sensitive", lambda value: seen.append(value) or value)
     value = dashboard_server._validation_source_summary({
         "ok": False, "error": "failed", "discard": "hidden", "summary": {str(i): i for i in range(20)},
     })
@@ -57,3 +58,95 @@ def test_recursive_counts_and_empty_sections_keep_existing_semantics() -> None:
     sections = summary._validation_section_summaries([])
     assert [section["name"] for section in sections] == list(summary.VALIDATION_SECTION_ORDER)
     assert all(section["status"] == "not_run" for section in sections)
+
+
+def test_sdk_panel_alert_report_distinguishes_unknown_from_available_zero() -> None:
+    unavailable, unknown_findings = sdk_panel_alert_report({
+        "available": False,
+        "exact": False,
+        "authoritativeForCurrentCachedPanelAlerts": False,
+        "reasonCode": "sdk_selected_avatar_mismatch",
+        "alerts": [],
+    }, sdk_version="3.10.4")
+    assert unavailable["status"] == "unknown"
+    assert unavailable["authoritativeForSdkPanelAlerts"] is False
+    assert unavailable["returnedAlertCount"] is None
+    assert unknown_findings[0]["severity"] == "Warning"
+    assert "unavailable" in unknown_findings[0]["message"]
+
+    clear, clear_findings = sdk_panel_alert_report({
+        "available": True,
+        "exact": True,
+        "authoritativeForCurrentCachedPanelAlerts": True,
+        "sdkVersion": "3.10.4",
+        "alerts": [],
+        "countsByCategory": {"error": 0, "warning": 0},
+    })
+    assert clear["status"] == "read"
+    assert clear["authoritativeForSdkPanelAlerts"] is True
+    assert clear["returnedAlertCount"] == 0
+    assert len(clear_findings) == 1
+    assert clear_findings[0]["severity"] == "Info"
+    assert "current SDK panel cache" in clear_findings[0]["message"]
+
+
+def test_sdk_panel_alert_rows_retain_target_and_only_offer_supervised_guidance() -> None:
+    coverage, findings = sdk_panel_alert_report({
+        "available": True,
+        "exact": True,
+        "authoritativeForCurrentCachedPanelAlerts": True,
+        "alerts": [{
+            "index": 2,
+            "scope": "avatar",
+            "category": "error",
+            "severity": "error",
+            "message": "Missing component",
+            "target": {"kind": "avatar", "name": "Test"},
+            "blocker": True,
+            "selectable": True,
+            "fixable": True,
+            "autoFixAvailable": True,
+            "actionsExecuted": False,
+        }],
+    })
+    assert coverage["status"] == "read"
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["severity"] == "Error"
+    assert finding["message"] == "avatar: Missing component"
+    assert finding["detail"]["target"] == {"kind": "avatar", "name": "Test"}
+    assert finding["detail"]["fixable"] is True
+    assert finding["detail"]["actionsExecuted"] is False
+
+
+def test_sdk_panel_coverage_changes_only_report_status_and_preserves_check_status() -> None:
+    blocked = apply_sdk_panel_coverage({"enabled": False, "status": "blocked", "message": "blocked"}, {"status": "unknown"})
+    assert blocked["status"] == "blocked"
+    assert blocked["checksStatus"] == "blocked"
+    assert "current cached panel" in blocked["message"]
+
+    unknown = apply_sdk_panel_coverage({"enabled": False, "status": "pass"}, {"status": "unknown"})
+    assert unknown["status"] == "incomplete"
+    assert unknown["checksStatus"] == "pass"
+    assert "Build & Test success" in unknown["message"]
+
+    read = apply_sdk_panel_coverage({"enabled": True, "status": "pass"}, {"status": "read"})
+    assert read["status"] == "pass"
+    assert read["checksStatus"] == "pass"
+    assert "current panel cache" in read["message"]
+
+
+def test_sdk_panel_report_keeps_performance_alert_as_warning_and_unknown_malformed_shape() -> None:
+    coverage, findings = sdk_panel_alert_report({
+        "available": True,
+        "exact": False,
+        "authoritativeForCurrentCachedPanelAlerts": False,
+        "alerts": [{"category": "performance", "severity": "performance", "message": "Review draw calls"}],
+    })
+    assert coverage["status"] == "read"
+    assert coverage["exact"] is False
+    assert findings[0]["severity"] == "Warning"
+
+    unknown, unknown_findings = sdk_panel_alert_report({"available": True, "alerts": None})
+    assert unknown["status"] == "unknown"
+    assert unknown_findings[0]["severity"] == "Warning"

@@ -5838,8 +5838,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("VRChat SDK", section_names)
         self.assertIn("MCP bridge", section_names)
         self.assertIn("Generated asset residue", section_names)
-        self.assertEqual(payload["gate"]["status"], "pass")
-        self.assertEqual(payload["summary"]["gateStatus"], "pass")
+        self.assertEqual(payload["gate"]["status"], "incomplete")
+        self.assertEqual(payload["gate"]["checksStatus"], "pass")
+        self.assertEqual(payload["summary"]["gateStatus"], "incomplete")
         self.assertNotIn(r"C:\Private\UnityProject".lower(), json.dumps(payload).lower())
 
         manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
@@ -5934,7 +5935,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["failedSourceCount"], 1)
         warnings = [finding for finding in payload["findings"] if finding["severity"] == "Warning"]
         self.assertTrue(any("parameter scanner down" in finding["message"] for finding in warnings))
-        self.assertEqual(payload["gate"]["status"], "pass")
+        self.assertEqual(payload["gate"]["status"], "incomplete")
+        self.assertEqual(payload["gate"]["checksStatus"], "pass")
 
     def test_build_test_readiness_is_read_only_gate(self) -> None:
         readiness = {

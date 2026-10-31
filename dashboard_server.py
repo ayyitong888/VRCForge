@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import validation_report_summary
+from sdk_panel_alerts import apply_sdk_panel_coverage, sdk_panel_alert_report
 from validation_report_summary import (
     VALIDATION_SEVERITIES,
     VALIDATION_BLOCKING_SEVERITIES,
@@ -23316,7 +23317,7 @@ def _validation_add_finding(
 ) -> None:
     validation_report_summary._validation_add_finding(
         findings, section, severity, title, message, source, detail,
-        redact_detail=_redact_doctor_detail,
+        redact_detail=redact_sensitive,
     )
 
 
@@ -23336,7 +23337,7 @@ def _validation_add_finding(
 
 def _validation_source_summary(payload: Any) -> dict[str, Any]:
     return validation_report_summary._validation_source_summary(
-        payload, redact_detail=_redact_doctor_detail,
+        payload, redact_detail=redact_sensitive,
     )
 
 
@@ -23697,20 +23698,6 @@ def _dependency_validation(findings: list[dict[str, Any]], result: dict[str, Any
         _validation_add_finding(findings, "VRChat SDK", "Warning", "Unity project path is not readable", "VRChat SDK package detection could not read the configured Unity project.", "dependencies")
     elif vrchat_sdk.get("installed"):
         _validation_add_finding(findings, "VRChat SDK", "Info", "VRChat SDK detected", "VRChat SDK package metadata is present.", "dependencies", vrchat_sdk)
-        _validation_add_finding(
-            findings,
-            "VRChat SDK",
-            "Warning",
-            "SDK Control Panel alerts not enumerated",
-            "This SDK version exposes blocking validation errors during Build & Test, but it has no supported public API for the complete Review Any Alerts list. Readiness is advisory until Build & Test succeeds or the user reviews the SDK panel.",
-            "sdk_control_panel_alert_coverage",
-            {
-                "status": "unavailable",
-                "exact": False,
-                "sdkVersion": str(vrchat_sdk.get("version") or ""),
-                "reasonCode": "sdk_public_alert_enumeration_api_unavailable",
-            },
-        )
     else:
         _validation_add_finding(findings, "VRChat SDK", "Error", "VRChat SDK not detected", "Avatar validation and Build & Test require the VRChat Avatar SDK package.", "dependencies")
 
@@ -23836,6 +23823,12 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
 
     sources: dict[str, dict[str, Any]] = {
         "compile": _run_validation_source("compile", lambda: read_agent_compile_errors(base_params)),
+        "sdk_panel_alerts": _run_validation_source(
+            "sdk_panel_alerts",
+            lambda: read_vrchat_sdk_builder_alerts_sync(base_params) if avatar_path else {
+                "ok": True, "available": False, "reasonCode": "avatar_path_required", "alerts": [],
+            },
+        ),
         "parameters": _run_validation_source("parameters", lambda: scan_avatar_parameters_gateway_sync(base_params)),
         "menu": _run_validation_source(
             "menu",
@@ -23897,8 +23890,6 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
     if include_quest:
         _performance_validation(findings, sources["performance_quest"], "Performance Quest", "performance_quest")
 
-    counts = _validation_severity_counts(findings)
-    gate = _validation_gate(findings, enabled=gate_build)
     source_summaries = {
         name: (
             {"ok": bool(result.get("ok")), "error": result.get("error")}
@@ -23911,8 +23902,8 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
         for name, result in sources.items():
             if result.get("ok") and isinstance(result.get("payload"), dict):
                 source_summaries[name]["payload"] = (
-                    validation_report_summary.material_source_payload(result["payload"], redact_detail=_redact_doctor_detail)
-                    if name == "materials" else _redact_doctor_detail(result["payload"])
+                    validation_report_summary.material_source_payload(result["payload"], redact_detail=redact_sensitive)
+                    if name == "materials" else redact_sensitive(result["payload"])
                 )
 
     dependency_payload = (
@@ -23930,20 +23921,18 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
         if isinstance(dependency_packages, dict)
         else {}
     )
-    sdk_alert_coverage = {
-        "status": "unavailable",
-        "exact": False,
-        "sdkVersion": str(vrchat_sdk.get("version") or "") if isinstance(vrchat_sdk, dict) else "",
-        "reasonCode": "sdk_public_alert_enumeration_api_unavailable",
-        "authoritativeForSdkPanelAlerts": False,
-        "blockingErrorsAuthoritativeOnlyAfterBuildAndTest": True,
-    }
-    gate["authoritativeForSdkPanelAlerts"] = False
-    if gate.get("status") == "pass":
-        gate["message"] = (
-            "No blocking errors were found by the available checks. "
-            "The SDK Control Panel alert list was not enumerated; a successful Build & Test is the authoritative public-API gate for SDK blocking errors."
+    sdk_alert_coverage, sdk_findings = sdk_panel_alert_report(
+        sources["sdk_panel_alerts"].get("payload"),
+        sdk_version=str(vrchat_sdk.get("version") or "") if isinstance(vrchat_sdk, dict) else "",
+    )
+    for finding in sdk_findings:
+        _validation_add_finding(
+            findings, "VRChat SDK", finding["severity"], finding["title"],
+            finding["message"], "sdk_panel_alerts", finding["detail"],
         )
+    counts = _validation_severity_counts(findings)
+    gate = apply_sdk_panel_coverage(_validation_gate(findings, enabled=gate_build), sdk_alert_coverage)
+    gate["authoritativeForSdkPanelAlerts"] = sdk_alert_coverage["authoritativeForSdkPanelAlerts"]
 
     return {
         "ok": counts["Error"] == 0,
@@ -23955,11 +23944,12 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
         "avatarPath": avatar_path,
         "projectPathConfigured": bool(project_path),
         "sdkControlPanelAlertCoverage": sdk_alert_coverage,
-        "authoritativeForSdkPanelAlerts": False,
+        "authoritativeForSdkPanelAlerts": sdk_alert_coverage["authoritativeForSdkPanelAlerts"],
         "summary": {
             "findingCount": len(findings),
             "severityCounts": counts,
             "gateStatus": gate["status"],
+            "checksStatus": gate["checksStatus"],
             "sourceCount": len(sources),
             "failedSourceCount": sum(1 for result in sources.values() if not result.get("ok")),
         },
@@ -27229,7 +27219,7 @@ def register_agent_gateway_tools() -> None:
         "read/debug",
         scan_avatar_parameters_gateway_sync,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, SDK, avatar, hierarchy, parameters, menu, FX, bindings, materials, performance, plugin, MCP, package, and residue checks.", "read/debug", build_validation_report_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "When to use: read available avatar checks and the selected avatar's existing SDK Builder alert cache in one report. Unknown SDK coverage is incomplete, not a clean result. When NOT to use: do not refresh the SDK panel, fix assets, build, or treat cached checks as Build & Test success. Negative example: compile-clean alone does not establish SDK-panel readiness.", "read/debug", build_validation_report_sync)
     AGENT_GATEWAY.register_tool("vrcforge_build_test_readiness", "Run the read-only Build & Test readiness gate without building, publishing, or repairing automatically.", "read/debug", build_test_readiness_sync)
     AGENT_GATEWAY.register_tool("vrcforge_optimization_plan", "Build the read-only vrcforge.optimization.v1 model optimization dashboard plan and recommended step order without modifying the Unity project.", "plan/preview", OPTIMIZATION.build_plan)
     AGENT_GATEWAY.register_tool("vrcforge_optimization_validation_delta", "Compare before/after/rollback vrcforge.validation.v1 reports for one optimizer step without writing project files.", "read/debug", OPTIMIZATION.build_validation_delta)
@@ -27420,7 +27410,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_get_compile_errors",
-        "When to use: read the stable Unity C# compile error and warning snapshot before or after a change. When NOT to use: do not use it to change scripts, clear Console rows, or claim compilation passed while Unity is still compiling. Negative example: do not call this tool merely because the user mentioned C# without asking to inspect the current project.",
+        "When to use: read Unity C# compiler errors and warnings before or after a change. For SDK Builder errors use vrcforge_read_vrchat_sdk_builder_alerts; for NDMF use vrcforge_get_ndmf_errors. When NOT to use: do not clear Console rows, change scripts, or treat compilation as SDK-panel validation. Negative example: zero compiler errors does not mean the SDK Builder has no alerts.",
         "read/debug",
         read_agent_compile_errors,
     )
