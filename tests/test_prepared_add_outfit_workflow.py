@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import dashboard_server
+from agent_gateway import AgentGateway
 from prepared_add_outfit_workflow_service import ADD_OUTFIT_CONTINUATION_NONCE_KEY
 from prepared_unity_execution import (
     PREPARED_UNITY_EXECUTION_ARGUMENT_KEY,
@@ -53,6 +54,8 @@ def _read_mock(project: Path, state: dict[str, bool], write_calls: list[tuple[st
             if path == "Avatar/Hoodie":
                 if not state["created"]:
                     return _mcp({"ok": False, "error": "not found"})
+                if state.get("target_missing"):
+                    return _mcp({"ok": False, "error": "not found after instantiate"})
                 return _mcp({
                     "ok": True,
                     "gameObjectPath": path,
@@ -84,6 +87,7 @@ def _read_mock(project: Path, state: dict[str, bool], write_calls: list[tuple[st
                 "wardrobeCandidates": [],
             })
         if tool == "vrc_setup_outfit" and "jobId" in arguments:
+            scene_saved = state.get("setup_scene_saved", True)
             return _mcp({
                 "ok": True,
                 "status": "completed",
@@ -92,9 +96,14 @@ def _read_mock(project: Path, state: dict[str, bool], write_calls: list[tuple[st
                 "committed": True,
                 "commitState": "complete",
                 "checkpointRecoveryRequired": False,
+                "sceneSaved": scene_saved,
             })
+        if tool == "vrc_setup_outfit":
+            state["setup_scene_saved"] = arguments.get("saveScene") is not False
         write_calls.append((tool, arguments))
         if tool == "vrc_instantiate_prefab":
+            if state.get("instantiate_failure"):
+                return _mcp({"ok": False, "error": "synthetic instantiate failure"})
             state["created"] = True
             return _mcp({
                 "ok": True,
@@ -107,6 +116,11 @@ def _read_mock(project: Path, state: dict[str, bool], write_calls: list[tuple[st
                 "globalObjectId": "gid-outfit",
                 "continuationRegistered": bool(arguments.get("approvedContinuationTools")),
                 "continuationCount": len(arguments.get("approvedContinuationTools") or []),
+                "sceneSaved": True,
+                "persistedReadback": True,
+                "readbackVerified": True,
+                "verified": True,
+                "readback": {"persisted": True, "gameObjectPath": arguments["expectedResultPath"]},
             })
         if tool == "vrc_unpack_prefab":
             return _mcp({
@@ -115,6 +129,9 @@ def _read_mock(project: Path, state: dict[str, bool], write_calls: list[tuple[st
                 "globalObjectId": "gid-outfit",
                 "unpacked": True,
                 "continuationConsumed": bool(arguments.get("approvedObjectReceiptNonce")),
+                "sceneSaved": True,
+                "persistedReadback": True,
+                "verified": True,
             })
         if tool == "vrc_setup_outfit":
             return _mcp({
@@ -124,6 +141,7 @@ def _read_mock(project: Path, state: dict[str, bool], write_calls: list[tuple[st
                 "jobId": "1" * 32,
                 "outfitGlobalObjectId": "gid-outfit",
                 "continuationConsumed": False,
+                "sceneSaved": False,
             })
         if tool == "vrc_add_wardrobe_outfit":
             state["wardrobe_added"] = True
@@ -134,6 +152,9 @@ def _read_mock(project: Path, state: dict[str, bool], write_calls: list[tuple[st
                 "assignedValue": arguments["expectedAssignedValue"],
                 "continuationConsumed": bool(arguments.get("approvedObjectReceiptNonce")),
                 "wardrobeFingerprint": "d" * 64,
+                "sceneSaved": True,
+                "persistedReadback": True,
+                "verified": True,
             })
         raise AssertionError(tool)
 
@@ -181,11 +202,185 @@ def test_add_outfit_preparer_freezes_exact_calls_and_executor_checks_readback(tm
     assert result["mutationStarted"] is True
     assert result["commitState"] == "complete"
     assert result["checkpointRecoveryRequired"] is False
+    assert result["verified"] is True
+    assert result["readback"] == result["finalObject"]
+    assert result["persistedReadback"] is False
     from agent_tool_result_contract import normalize_agent_tool_result
     outcome = normalize_agent_tool_result(result,write=True,fallback_summary="Add Outfit did not complete")
     assert outcome["commitState"] == "complete"
     assert outcome["recovery"] is False
     assert [tool for tool, _arguments in write_calls] == [tool for tool, _arguments in calls]
+
+
+def test_add_outfit_does_not_claim_persistence_when_setup_did_not_save_scene(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path)
+    state = {
+        "created": False,
+        "wardrobe_added": False,
+        "target_drift": False,
+        "setup_scene_saved": False,
+    }
+    monkeypatch.setattr(
+        dashboard_server,
+        "load_dashboard_settings",
+        lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30),
+    )
+    monkeypatch.setattr(
+        dashboard_server,
+        "invoke_unity_mcp",
+        _read_mock(project, state, []),
+    )
+    prepared, _preview = dashboard_server.PREPARED_ADD_OUTFIT_PREPARER.prepare(
+        {
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "assetPath": "Assets/Outfits/Hoodie.prefab",
+            "saveScene": False,
+        },
+        None,
+    )
+
+    result = dashboard_server.PREPARED_ADD_OUTFIT_APPROVED_WRITE.execute(prepared)
+
+    assert result["ok"] is True
+    assert result["verified"] is True
+    assert result["sceneSaved"] is False
+    assert result["persistedReadback"] is False
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_add_outfit_receipt_completes_internal_and_external_transactions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    external: bool,
+) -> None:
+    project = _project(tmp_path)
+    state = {"created": False, "wardrobe_added": False, "target_drift": False}
+    monkeypatch.setattr(
+        dashboard_server,
+        "load_dashboard_settings",
+        lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30),
+    )
+    monkeypatch.setattr(
+        dashboard_server,
+        "invoke_unity_mcp",
+        _read_mock(project, state, []),
+    )
+    prepared, _preview = dashboard_server.PREPARED_ADD_OUTFIT_PREPARER.prepare(
+        {"projectPath": str(project), "avatarPath": "Avatar", "assetPath": "Assets/Outfits/Hoodie.prefab"},
+        None,
+    )
+
+    gateway = AgentGateway(tmp_path / "app" / "config.json", tmp_path / "app" / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    gateway.save_config(config)
+    service = gateway.approval_transactions
+    service.checkpoint_prepare_handler = lambda _root, **_kwargs: {"ok": True}
+    service.register_write_handler(
+        "vrcforge_add_outfit",
+        "Install the fixture outfit.",
+        "high",
+        lambda _arguments: dashboard_server.PREPARED_ADD_OUTFIT_APPROVED_WRITE.execute(prepared),
+        external_mcp_capability="fixture_add_outfit_v1",
+        pre_write_checkpoint_required=True,
+    )
+    arguments = {"projectPath": str(project)}
+
+    if external:
+        gateway.register_external_mcp_unity_tool(
+            "vrcforge_add_outfit", "integrations/modular-avatar"
+        )
+        proposal = gateway.call_external_mcp_tool("vrcforge_add_outfit", arguments)
+        result = gateway.call_external_mcp_tool(
+            "vrcforge_add_outfit",
+            {
+                **arguments,
+                "confirmation": {**proposal["confirmation"], "decision": "approve"},
+            },
+        )
+    else:
+        request = service.create_apply_request(
+            {"target_tool": "vrcforge_add_outfit", "arguments": arguments}
+        )
+        service.approve(request["approval"]["id"])
+        result = service.apply_approved({"approval_id": request["approval"]["id"]})
+
+    assert result["ok"] is True, result
+    assert "The external Unity write returned success without explicit verification." not in str(result)
+    assert "gid-outfit" in str(result)
+
+
+@pytest.mark.parametrize("failure", ["target_missing", "instantiate_failure"])
+@pytest.mark.parametrize("external", [False, True])
+def test_add_outfit_transaction_keeps_missing_object_and_core_failure_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    external: bool,
+) -> None:
+    project = _project(tmp_path)
+    state = {
+        "created": False,
+        "wardrobe_added": False,
+        "target_drift": False,
+        failure: True,
+    }
+    monkeypatch.setattr(
+        dashboard_server,
+        "load_dashboard_settings",
+        lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30),
+    )
+    monkeypatch.setattr(
+        dashboard_server,
+        "invoke_unity_mcp",
+        _read_mock(project, state, []),
+    )
+    prepared, _preview = dashboard_server.PREPARED_ADD_OUTFIT_PREPARER.prepare(
+        {"projectPath": str(project), "avatarPath": "Avatar", "assetPath": "Assets/Outfits/Hoodie.prefab"},
+        None,
+    )
+
+    gateway = AgentGateway(tmp_path / "app" / "config.json", tmp_path / "app" / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    gateway.save_config(config)
+    service = gateway.approval_transactions
+    service.checkpoint_prepare_handler = lambda _root, **_kwargs: {"ok": True}
+    service.register_write_handler(
+        "vrcforge_add_outfit",
+        "Install the fixture outfit.",
+        "high",
+        lambda _arguments: dashboard_server.PREPARED_ADD_OUTFIT_APPROVED_WRITE.execute(prepared),
+        external_mcp_capability="fixture_add_outfit_v1",
+        pre_write_checkpoint_required=True,
+    )
+    arguments = {"projectPath": str(project)}
+
+    if external:
+        gateway.register_external_mcp_unity_tool(
+            "vrcforge_add_outfit", "integrations/modular-avatar"
+        )
+        proposal = gateway.call_external_mcp_tool("vrcforge_add_outfit", arguments)
+        result = gateway.call_external_mcp_tool(
+            "vrcforge_add_outfit",
+            {
+                **arguments,
+                "confirmation": {**proposal["confirmation"], "decision": "approve"},
+            },
+        )
+    else:
+        request = service.create_apply_request(
+            {"target_tool": "vrcforge_add_outfit", "arguments": arguments}
+        )
+        service.approve(request["approval"]["id"])
+        result = service.apply_approved({"approval_id": request["approval"]["id"]})
+
+    assert result["ok"] is False, result
 
 
 def test_add_outfit_target_drift_stops_before_any_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -881,9 +881,29 @@ class PreparedAddOutfitApprovedWriteService:
                     "parameterName": evidence.get("parameterName"),
                 },
             )
+            step_receipts = [
+                step["receipt"]
+                for step in steps
+                if isinstance(step.get("receipt"), dict)
+            ]
+            # Reaching this return means every approved step passed its existing
+            # receipt checks and the final object readback matched the approved
+            # path, scene, and GlobalObjectId. Surface that workflow-level proof
+            # to the approval transaction instead of leaving it buried in steps.
+            scene_saved = all(
+                receipt.get("sceneSaved") is True for receipt in step_receipts
+            )
+            persisted_readback = all(
+                receipt.get("persistedReadback") is True
+                for receipt in step_receipts
+            )
             return {
                 "ok": True,
                 "preview": False,
+                "verified": True,
+                "sceneSaved": scene_saved,
+                "persistedReadback": persisted_readback,
+                "readback": final_object,
                 "mutationStarted": True,
                 "committed": True,
                 "commitState": "complete",
