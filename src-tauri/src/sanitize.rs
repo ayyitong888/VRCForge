@@ -1147,7 +1147,7 @@ mod memory_review_sanitizer_tests {
 
     #[test]
     fn local_connector_paths_survive_without_exposing_credentials() {
-        let path = r"C:\Users\Local\.dsh\profiles\desktop\cordis.patch.yml";
+        let path = r"C:\VRCForge-TestData\.dsh\profiles\desktop\cordis.patch.yml";
         let backup = format!("{path}.backup");
         let result = sanitize_webview_response(serde_json::json!({
             "clients": {"deepseekHarness": {"configPath": path}},
