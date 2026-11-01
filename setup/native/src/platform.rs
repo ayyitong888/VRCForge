@@ -517,7 +517,7 @@ fn set_program_permissions(user: &UserContext, directory: &Path) -> Result<(), S
 pub fn register_install(user: &UserContext, directory: &Path, version: &str, size_bytes: u64, desktop: bool, start_menu: bool) -> Result<(), String> {
     set_program_permissions(user, directory)?;
     let machine = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let (key, _) = machine.create_subkey_with_flags(UNINSTALL_KEY, KEY_WRITE | KEY_WOW64_64KEY)
+    let (key, _) = machine.create_subkey_with_flags(UNINSTALL_KEY, KEY_SET_VALUE | KEY_WOW64_64KEY)
         .map_err(|error| format!("Could not register VRCForge in Apps & features: {error}"))?;
     for (name, value) in [
         ("DisplayName", "VRCForge".to_owned()), ("DisplayVersion", version.to_owned()),
@@ -529,13 +529,13 @@ pub fn register_install(user: &UserContext, directory: &Path, version: &str, siz
         key.set_value(name, &value).map_err(|error| format!("Could not write install registration '{name}': {error}"))?;
     }
     let users = RegKey::predef(HKEY_USERS);
-    let (settings, _) = users.create_subkey_with_flags(format!(r"{}\{USER_KEY}", user.sid), KEY_WRITE | KEY_WOW64_64KEY)
+    let (settings, _) = users.create_subkey_with_flags(format!(r"{}\{USER_KEY}", user.sid), KEY_SET_VALUE | KEY_WOW64_64KEY)
         .map_err(|error| format!("Could not save the logged-in user's data location: {error}"))?;
     settings.set_value("DataDir", &data_dir(user)?.to_string_lossy().into_owned())
         .map_err(|error| format!("Could not save the logged-in user's data location: {error}"))?;
     let (app_id, _) = users.create_subkey_with_flags(
         format!(r"{}\Software\Classes\AppUserModelId\app.vrcforge.agentic", user.sid),
-        KEY_WRITE | KEY_WOW64_64KEY,
+        KEY_SET_VALUE | KEY_WOW64_64KEY,
     ).map_err(|error| format!("Could not register VRCForge's taskbar identity: {error}"))?;
     for (name, value) in [("DisplayName", "VRCForge".to_owned()),
         ("IconBackgroundColor", "0".to_owned()),
@@ -553,23 +553,50 @@ pub fn register_install(user: &UserContext, directory: &Path, version: &str, siz
     Ok(())
 }
 
+fn read_default_value(root: &RegKey, path: &str) -> Result<Option<String>, String> {
+    let key = match root.open_subkey_with_flags(path, KEY_QUERY_VALUE | KEY_WOW64_64KEY) {
+        Ok(key) => key,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not read Windows file association '{path}': {error}")),
+    };
+    match key.get_value("") {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Could not read Windows file association value '{path}': {error}")),
+    }
+}
+
 fn register_vsk(directory: &Path) -> Result<(), String> {
-    let classes = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(r"Software\Classes", KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)
-        .map_err(|error| format!("Could not open Windows file associations: {error}"))?;
-    let command = format!("\"{}\" \"%1\"", directory.join("VRCForge.exe").display());
-    let command_path = format!(r"{VSK_PROGID}\shell\open\command");
-    let (key, _) = classes.create_subkey(&command_path).map_err(|error| format!("Could not register .vsk files: {error}"))?;
-    key.set_value("", &command).map_err(|error| format!("Could not register .vsk opening: {error}"))?;
-    let (key, _) = classes.create_subkey(VSK_PROGID).map_err(|error| format!("Could not register .vsk files: {error}"))?;
-    key.set_value("", &"VRCForge Skill Package").map_err(|error| format!("Could not name the .vsk file association: {error}"))?;
-    let (key, _) = classes.create_subkey(format!(r"{VSK_PROGID}\DefaultIcon")).map_err(|error| format!("Could not register the .vsk icon: {error}"))?;
-    key.set_value("", &format!("\"{}\",0", directory.join("VRCForge.exe").display())).map_err(|error| format!("Could not register the .vsk icon: {error}"))?;
-    let (extension, _) = classes.create_subkey(".vsk").map_err(|error| format!("Could not register .vsk files: {error}"))?;
-    let selected = extension.get_value::<String, _>("").unwrap_or_default();
-    if selected.is_empty() || selected == VSK_PROGID { extension.set_value("", &VSK_PROGID).map_err(|error| format!("Could not select the .vsk file association: {error}"))?; }
-    let (open_with, _) = extension.create_subkey("OpenWithProgids").map_err(|error| format!("Could not register .vsk Open With: {error}"))?;
-    open_with.set_value(VSK_PROGID, &"").map_err(|error| format!("Could not register .vsk Open With: {error}"))?;
+    write_vsk_registration(&RegKey::predef(HKEY_LOCAL_MACHINE), directory)?;
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None); }
+    Ok(())
+}
+
+fn write_vsk_registration(machine: &RegKey, directory: &Path) -> Result<(), String> {
+    // Do not request write access to Software\Classes itself. Only the concrete
+    // VRCForge/extension keys need writable handles; RegCreateKeyEx handles the
+    // parent traversal and checks creation against the parent security descriptor.
+    let command = format!("\"{}\" \"%1\"", directory.join("VRCForge.exe").display());
+    for (path, value) in [
+        (format!(r"Software\Classes\{VSK_PROGID}\shell\open\command"), command),
+        (format!(r"Software\Classes\{VSK_PROGID}"), "VRCForge Skill Package".to_owned()),
+        (format!(r"Software\Classes\{VSK_PROGID}\DefaultIcon"), format!("\"{}\",0", directory.join("VRCForge.exe").display())),
+    ] {
+        let (key, _) = machine.create_subkey_with_flags(&path, KEY_SET_VALUE | KEY_WOW64_64KEY)
+            .map_err(|error| format!("Could not open Windows file association '{path}' for setting its value: {error}"))?;
+        key.set_value("", &value).map_err(|error| format!("Could not write Windows file association '{path}': {error}"))?;
+    }
+    let extension_path = r"Software\Classes\.vsk";
+    let selected = read_default_value(machine, extension_path)?.unwrap_or_default();
+    if selected.is_empty() || selected == VSK_PROGID {
+        let (extension, _) = machine.create_subkey_with_flags(extension_path, KEY_SET_VALUE | KEY_WOW64_64KEY)
+            .map_err(|error| format!("Could not open '{extension_path}' to select its association: {error}"))?;
+        extension.set_value("", &VSK_PROGID).map_err(|error| format!("Could not select the .vsk file association: {error}"))?;
+    }
+    let open_with_path = r"Software\Classes\.vsk\OpenWithProgids";
+    let (open_with, _) = machine.create_subkey_with_flags(open_with_path, KEY_SET_VALUE | KEY_WOW64_64KEY)
+        .map_err(|error| format!("Could not open '{open_with_path}' to register VRCForge: {error}"))?;
+    open_with.set_value(VSK_PROGID, &"").map_err(|error| format!("Could not register .vsk Open With: {error}"))?;
     Ok(())
 }
 
@@ -583,28 +610,48 @@ fn delete_key_if_present(root: &RegKey, path: &str) -> Result<(), String> {
 
 pub fn remove_registration(user: &UserContext, directory: &Path) -> Result<(), String> {
     remove_product_shortcuts(user, directory)?;
-    let machine = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags("Software", KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)
-        .map_err(|error| format!("Could not open the machine installation registration: {error}"))?;
-    let classes = machine.open_subkey_with_flags("Classes", KEY_READ | KEY_WRITE)
-        .map_err(|error| format!("Could not open file associations for removal: {error}"))?;
-    let command_path = format!(r"{VSK_PROGID}\shell\open\command");
-    let command = classes.open_subkey(&command_path).and_then(|key| key.get_value::<String, _>("")).unwrap_or_default();
+    let machine = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let command_path = format!(r"Software\Classes\{VSK_PROGID}\shell\open\command");
+    let command = read_default_value(&machine, &command_path)?;
     let expected = format!("\"{}\" \"%1\"", directory.join("VRCForge.exe").display());
-    if command.eq_ignore_ascii_case(&expected) {
-        delete_key_if_present(&classes, VSK_PROGID)?;
-        if let Ok(key) = classes.open_subkey_with_flags(r".vsk\OpenWithProgids", KEY_WRITE) {
-            match key.delete_value(VSK_PROGID) { Ok(()) => {}, Err(error) if error.kind() == ErrorKind::NotFound => {}, Err(error) => return Err(format!("Could not remove .vsk Open With registration: {error}")), }
+    if command.is_some_and(|command| command.eq_ignore_ascii_case(&expected)) {
+        match machine.open_subkey_with_flags(r"Software\Classes\.vsk\OpenWithProgids", KEY_SET_VALUE | KEY_WOW64_64KEY) {
+            Ok(key) => match key.delete_value(VSK_PROGID) {
+                Ok(()) => {}, Err(error) if error.kind() == ErrorKind::NotFound => {},
+                Err(error) => return Err(format!("Could not remove .vsk Open With registration: {error}")),
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            Err(error) => return Err(format!("Could not open .vsk Open With registration for removal: {error}")),
         }
+        let extension_path = r"Software\Classes\.vsk";
+        if read_default_value(&machine, extension_path)?.as_deref() == Some(VSK_PROGID) {
+            match machine.open_subkey_with_flags(extension_path, KEY_SET_VALUE | KEY_WOW64_64KEY) {
+                Ok(key) => match key.delete_value("") {
+                    Ok(()) => {}, Err(error) if error.kind() == ErrorKind::NotFound => {},
+                    Err(error) => return Err(format!("Could not remove VRCForge's default .vsk association: {error}")),
+                },
+                Err(error) if error.kind() == ErrorKind::NotFound => {},
+                Err(error) => return Err(format!("Could not open the default .vsk association for removal: {error}")),
+            }
+        }
+        // Keep the owning command until both extension values are removed,
+        // so an interrupted association cleanup remains retryable.
+        delete_key_if_present(&machine, &format!(r"Software\Classes\{VSK_PROGID}"))?;
     }
     let users = RegKey::predef(HKEY_USERS);
     delete_key_if_present(&users, &format!(r"{}\Software\Classes\AppUserModelId\app.vrcforge.agentic", user.sid))?;
     // DataDir remains available when the user keeps data, so reinstall can reuse it.
-    if let Ok(key) = users.open_subkey_with_flags(format!(r"{}\{USER_KEY}", user.sid), KEY_WRITE) {
-        match key.delete_value("InstallerLanguage") { Ok(()) => {}, Err(error) if error.kind() == ErrorKind::NotFound => {}, Err(error) => return Err(format!("Could not remove saved installer language: {error}")), }
+    match users.open_subkey_with_flags(format!(r"{}\{USER_KEY}", user.sid), KEY_SET_VALUE | KEY_WOW64_64KEY) {
+        Ok(key) => match key.delete_value("InstallerLanguage") {
+            Ok(()) => {}, Err(error) if error.kind() == ErrorKind::NotFound => {},
+            Err(error) => return Err(format!("Could not remove saved installer language: {error}")),
+        },
+        Err(error) if error.kind() == ErrorKind::NotFound => {},
+        Err(error) => return Err(format!("Could not open the saved installer language for removal: {error}")),
     }
     // Keep the uninstall location available if any preceding cleanup fails,
     // so Apps & features can still reopen this uninstaller for a retry.
-    delete_key_if_present(&machine, r"Microsoft\Windows\CurrentVersion\Uninstall\VRCForge")?;
+    delete_key_if_present(&machine, UNINSTALL_KEY)?;
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None); }
     Ok(())
 }
@@ -749,7 +796,7 @@ fn write_tree(key: &RegKey, tree: &RegistryTree) -> Result<(), String> {
         key.set_raw_value(name, value).map_err(|error| format!("Could not restore registration value '{name}': {error}"))?;
     }
     for (name, child) in &tree.children {
-        let (key, _) = key.create_subkey_with_flags(name, KEY_WRITE | KEY_WOW64_64KEY)
+        let (key, _) = key.create_subkey_with_flags(name, KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_WOW64_64KEY)
             .map_err(|error| format!("Could not restore registration subkey '{name}': {error}"))?;
         write_tree(&key, child)?;
     }
@@ -768,7 +815,7 @@ pub fn restore_registration(_user: &UserContext, snapshot: &RegistrationSnapshot
         let result = (|| {
             delete_key_if_present(&root, &saved.path)?;
             if let Some(tree) = &saved.tree {
-                let (key, _) = root.create_subkey_with_flags(&saved.path, KEY_WRITE | KEY_WOW64_64KEY)
+                let (key, _) = root.create_subkey_with_flags(&saved.path, KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_WOW64_64KEY)
                     .map_err(|error| format!("Could not restore '{}': {error}", saved.path))?;
                 write_tree(&key, tree)?;
             }
