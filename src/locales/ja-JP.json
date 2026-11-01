@@ -1830,6 +1830,7 @@
       "devExported": "Dev パッケージをエクスポートしました",
       "packageEnabled": "有効化しました",
       "packageDisabled": "無効化しました",
+      "stateNotConfirmed": "スキルの状態を確認できません。一覧を更新して再試行してください。",
       "packageUninstalled": "パッケージをアンインストールしました",
       "safeModeEnabled": "Safe Mode を有効にしました",
       "safeModeDisabled": "Safe Mode を無効にしました",

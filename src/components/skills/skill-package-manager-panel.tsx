@@ -16,6 +16,7 @@ import type { PathToSkillDraftSeed } from "../../lib/path-to-skill-context";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
+import { cn } from "../../lib/utils";
 import { PathToSkillCapturePanel } from "./path-to-skill-capture-panel";
 import { SkillPackageAuditList } from "./skill-package-audit-list";
 import { hasTauriInternals } from "../../lib/api/http";
@@ -360,7 +361,7 @@ export function SkillPackageManagerPanel({
             event.stopPropagation();
             onRefresh();
           }}
-          disabled={loading}
+          disabled={loading || Boolean(packageActionId)}
         >
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
         </Button>
@@ -383,7 +384,7 @@ export function SkillPackageManagerPanel({
           {packages.map((pkg, index) => {
             const id = skillPackageId(pkg);
             const enabled = skillPackageEnabled(pkg);
-            const busy = loading || packageActionId === id;
+            const busy = loading || Boolean(packageActionId);
             const hasUnityTools = hasUnityToolEntrypoint(pkg);
             return (
               <div key={`${id}-${index}`} className="grid min-w-0 gap-3 rounded-lg border border-border/60 bg-card px-3 py-3 text-xs sm:grid-cols-[minmax(0,1fr)_auto]" data-vrcforge-installed-skill-card>
@@ -676,9 +677,15 @@ function SkillSwitch({ checked, busy, label, onChange }: { checked: boolean; bus
       data-vrcforge-skill-package-enabled={checked ? "true" : "false"}
       disabled={busy}
       onClick={onChange}
-      className={`relative h-7 w-12 shrink-0 overflow-hidden rounded-full border transition-colors ${checked ? "border-primary bg-primary" : "border-border bg-muted"} ${busy ? "cursor-not-allowed opacity-50" : ""}`}
+      className={cn(
+        "relative h-7 w-12 shrink-0 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+        checked ? "border-primary bg-primary" : "border-border bg-muted",
+      )}
     >
-      <span className={`absolute left-0 top-1/2 h-5 w-5 -translate-y-1/2 rounded-full bg-white shadow-sm transition-transform ${checked ? "translate-x-[26px]" : "translate-x-[2px]"}`} />
+      <span className={cn(
+        "absolute left-0 top-1/2 h-5 w-5 -translate-y-1/2 rounded-full bg-white shadow-sm transition-transform",
+        checked ? "translate-x-6" : "translate-x-[2px]",
+      )} />
     </button>
   );
 }

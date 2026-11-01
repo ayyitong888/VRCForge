@@ -1830,6 +1830,7 @@
       "devExported": "Dev 套件已匯出",
       "packageEnabled": "已啟用",
       "packageDisabled": "已停用",
+      "stateNotConfirmed": "無法確認技能狀態，請重新整理清單後再試。",
       "packageUninstalled": "套件已解除安裝",
       "safeModeEnabled": "Safe Mode 已啟用",
       "safeModeDisabled": "Safe Mode 已停用",

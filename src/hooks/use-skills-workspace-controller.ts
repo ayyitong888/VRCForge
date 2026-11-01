@@ -253,22 +253,34 @@ export function useSkillsWorkspaceController({
 
   async function setVskPackageEnabled(skillPackageId: string, enabled: boolean) {
     const registryToken = skillRegistryRequestGateRef.current.beginAuthoritative();
-    setLoadingSkillPackages(true);
     setSkillPackageMessage("");
     setSkillPackageError("");
     try {
       const payload = await setSkillPackageEnabled(endpoint, skillPackageId, { enabled, syncProjectedSkill: true });
-      setSkillPackageMessage(enabled ? t("package.messages.packageEnabled") : t("package.messages.packageDisabled"));
-      const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
+      const registryEntry = payload.state?.registry_entry || payload.state?.registryEntry;
+      let actualEnabled: boolean;
+      if (registryEntry && typeof registryEntry.enabled === "boolean") {
+        actualEnabled = registryEntry.enabled;
+        setSkillPackages((current) => current.map((pkg) =>
+          String(pkg.id || pkg.name || pkg.manifest?.id || "-") === skillPackageId
+            ? { ...pkg, ...registryEntry }
+            : pkg,
+        ));
+      } else {
+        const refreshedPackages = await fetchSkillPackages(endpoint);
+        setSkillPackages(refreshedPackages.installed || []);
+        const updatedPackage = (refreshedPackages.installed || []).find((pkg) => String(pkg.id || pkg.name || pkg.manifest?.id || "-") === skillPackageId);
+        if (typeof updatedPackage?.enabled !== "boolean") {
+          throw new Error(t("package.messages.stateNotConfirmed"));
+        }
+        actualEnabled = updatedPackage.enabled;
+      }
+      setSkillPackageMessage(actualEnabled ? t("package.messages.packageEnabled") : t("package.messages.packageDisabled"));
+      const skillsPayload = await fetchSkills(endpoint);
       const committedRevision = skillRegistryRequestGateRef.current.commitAuthoritative(registryToken);
       if (committedRevision !== null) {
         setSkillRegistry(skillsPayload);
       }
-      const check = await checkSkills(endpoint);
-      if (committedRevision !== null && skillRegistryRequestGateRef.current.isCurrent(committedRevision)) {
-        setSkillCheck(check);
-      }
-      await refresh(endpoint);
       return payload;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -276,28 +288,24 @@ export function useSkillsWorkspaceController({
       throw cause;
     } finally {
       skillRegistryRequestGateRef.current.endForeground(registryToken);
-      setLoadingSkillPackages(false);
     }
   }
 
   async function uninstallVskPackage(skillPackageId: string) {
     const registryToken = skillRegistryRequestGateRef.current.beginAuthoritative();
-    setLoadingSkillPackages(true);
     setSkillPackageMessage("");
     setSkillPackageError("");
     try {
       const payload = await uninstallSkillPackage(endpoint, skillPackageId, { removeProjectedSkill: true });
+      setSkillPackages((current) => current.filter((pkg) =>
+        String(pkg.id || pkg.name || pkg.manifest?.id || "-") !== skillPackageId,
+      ));
       setSkillPackageMessage(t("package.messages.packageUninstalled"));
-      const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
+      const skillsPayload = await fetchSkills(endpoint);
       const committedRevision = skillRegistryRequestGateRef.current.commitAuthoritative(registryToken);
       if (committedRevision !== null) {
         setSkillRegistry(skillsPayload);
       }
-      const check = await checkSkills(endpoint);
-      if (committedRevision !== null && skillRegistryRequestGateRef.current.isCurrent(committedRevision)) {
-        setSkillCheck(check);
-      }
-      await refresh(endpoint);
       return payload;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -305,7 +313,6 @@ export function useSkillsWorkspaceController({
       throw cause;
     } finally {
       skillRegistryRequestGateRef.current.endForeground(registryToken);
-      setLoadingSkillPackages(false);
     }
   }
 

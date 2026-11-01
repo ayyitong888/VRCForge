@@ -1837,6 +1837,7 @@
       "devExported": "Dev package exported",
       "packageEnabled": "已启用",
       "packageDisabled": "已禁用",
+      "stateNotConfirmed": "未能确认技能状态，请刷新列表后重试。",
       "packageUninstalled": "Package uninstalled",
       "safeModeEnabled": "Safe Mode enabled",
       "safeModeDisabled": "Safe Mode disabled",

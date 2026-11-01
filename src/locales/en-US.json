@@ -1837,6 +1837,7 @@
       "devExported": "Dev package exported",
       "packageEnabled": "Enabled",
       "packageDisabled": "Disabled",
+      "stateNotConfirmed": "Could not confirm the skill state. Refresh the list and try again.",
       "packageUninstalled": "Package uninstalled",
       "safeModeEnabled": "Safe Mode enabled",
       "safeModeDisabled": "Safe Mode disabled",
