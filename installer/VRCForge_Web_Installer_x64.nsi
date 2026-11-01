@@ -51,7 +51,6 @@ Unicode true
 !include LogicLib.nsh
 !include nsDialogs.nsh
 !include "MUI2.nsh"
-!include "VRCForge_InstallerTheme.nsh"
 Var ClearUserDataCheckbox
 Var ClearUserData
 Var PayloadStatePath
@@ -69,6 +68,7 @@ OutFile "${OUTFILE}"
 InstallDir "$PROGRAMFILES64\${INSTALL_LEAF}"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
+!include "VRCForge_InstallerTheme.nsh"
 !include "VRCForge_VskAssociation.nsh"
 BrandingText "VRCForge ${VERSION}"
 
@@ -380,6 +380,7 @@ Function DataDirPage
   !insertmacro MUI_HEADER_TEXT "$(DataDirPageTitle)" "$(DataDirPageSubtitle)"
   nsDialogs::Create 1018
   Pop $0
+  SetCtlColors $0 "" "${MUI_BGCOLOR}"
   ${NSD_CreateLabel} 0 0 100% 34u "$(DataDirPageText)"
   Pop $1
   !insertmacro VRCFORGE_STYLE_BODY_LABEL $1
@@ -420,6 +421,7 @@ Function un.UserDataOptionsPage
   !insertmacro MUI_HEADER_TEXT "$(ClearUserDataTitle)" "$(ClearUserDataSubtitle)"
   nsDialogs::Create 1018
   Pop $0
+  SetCtlColors $0 "" "${MUI_BGCOLOR}"
   ${NSD_CreateLabel} 0 0 100% 40u "$(ClearUserDataText)"
   Pop $1
   !insertmacro VRCFORGE_STYLE_BODY_LABEL $1
