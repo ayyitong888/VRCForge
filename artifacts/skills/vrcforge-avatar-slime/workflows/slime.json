@@ -5,6 +5,7 @@
   "requiresOtherSkills": [],
   "guidanceFiles": [
     "references/workflow.md",
+    "references/parameter-tuning.md",
     "references/surface-and-transition.md"
   ],
   "scope": [
@@ -28,9 +29,7 @@
       "official_documentation"
     ],
     "onInsufficientEvidence": {
-      "capabilityGap": true,
-      "ready": false,
-      "action": "stop_dependent_action_and_report_continue_supported_work"
+      "action": "read_missing_relevant_data_then_report_exact_remaining_gap_continue_independent_work"
     }
   },
   "steps": [
@@ -38,99 +37,180 @@
       "name": "inspect_current_avatar_and_materials",
       "tool": "vrcforge_scan_materials",
       "tools": [
+        "vrcforge_list_avatars",
         "vrcforge_bind_execution_target",
-        "vrcforge_find_assets",
-        "vrcforge_get_asset_info",
-        "vrcforge_get_gameobject",
-        "vrcforge_inspect_material_properties"
+        "vrcforge_get_gameobject"
       ],
       "writes": false,
-      "optional": true
+      "optional": true,
+      "guide": {
+        "file": "references/workflow.md",
+        "step": 1
+      }
     },
     {
-      "name": "read_existing_drivers_and_author_evidence",
-      "tool": "vrcforge_scan_animation_bindings",
+      "name": "inspect_shader_capabilities_and_write_route",
+      "tool": "vrcforge_inspect_material_properties",
       "tools": [
-        "vrcforge_scan_fx_animator",
-        "vrcforge_scan_parameters",
-        "vrcforge_scan_modular_avatar",
-        "vrcforge_inspect_modular_avatar_component"
+        "vrcforge_get_asset_info",
+        "vrcforge_preview_material_shader_assignment",
+        "vrcforge_preview_shader_apply",
+        "vrcforge_plan_shader_tuning"
       ],
       "writes": false,
-      "optional": true
+      "optional": true,
+      "guide": {
+        "file": "references/workflow.md",
+        "step": 2
+      }
     },
     {
-      "name": "prepare_independent_work_materials",
+      "name": "prepare_independent_materials_and_textures",
       "tool": "vrcforge_preview_project_asset_duplicate",
       "tools": [
+        "vrcforge_find_assets",
         "vrcforge_duplicate_project_asset",
-        "vrcforge_preview_material_shader_assignment",
         "vrcforge_set_material_shader",
         "vrcforge_preview_renderer_material_slot",
-        "vrcforge_set_renderer_material_slot"
+        "vrcforge_set_renderer_material_slot",
+        "vrcforge_preview_material_texture_assignment",
+        "vrcforge_set_material_texture",
+        "vrcforge_preview_texture_import_settings",
+        "vrcforge_set_texture_import_settings"
       ],
       "writes": true,
       "optional": true,
+      "guide": {
+        "file": "references/workflow.md",
+        "step": 3
+      },
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
     {
-      "name": "tune_surface_from_observed_properties",
-      "tool": "vrcforge_plan_shader_tuning",
+      "name": "tune_static_surface_and_parts",
+      "tool": "vrcforge_preview_material_shader_assignment",
       "tools": [
+        "vrcforge_set_material_shader",
+        "vrcforge_preview_shader_apply",
         "vrcforge_apply_shader_tuning",
-        "vrcforge_preview_material_texture_assignment",
-        "vrcforge_set_material_texture"
+        "vrcforge_texture_patch"
       ],
       "writes": true,
       "optional": true,
+      "guide": {
+        "file": "references/workflow.md",
+        "step": 4
+      },
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "author_independent_ripple_animation",
+      "tool": "vrcforge_scan_animation_bindings",
+      "tools": [
+        "vrcforge_preview_material_texture_assignment",
+        "vrcforge_set_material_texture",
+        "vrcforge_preview_write_animation_curve",
+        "vrcforge_write_animation_curve"
+      ],
+      "writes": true,
+      "optional": true,
+      "guide": {
+        "file": "references/workflow.md",
+        "step": 5
+      },
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
     {
       "name": "author_normal_slime_toggle_and_transition",
-      "tool": "vrcforge_preview_write_animation_curve",
+      "tool": "vrcforge_scan_modular_avatar",
       "tools": [
-        "vrcforge_write_animation_curve",
-        "vrcforge_preview_manage_fx_animator",
-        "vrcforge_manage_fx_animator",
+        "vrcforge_inspect_modular_avatar_component",
+        "vrcforge_scan_parameters",
+        "vrcforge_scan_fx_animator",
+        "vrcforge_preview_add_modular_avatar_component",
+        "vrcforge_add_modular_avatar_component",
         "vrcforge_preview_manage_expression_parameters",
         "vrcforge_manage_expression_parameters",
         "vrcforge_preview_manage_expression_menu",
         "vrcforge_manage_expression_menu",
-        "vrcforge_preview_add_modular_avatar_component",
-        "vrcforge_add_modular_avatar_component"
+        "vrcforge_preview_manage_fx_animator",
+        "vrcforge_manage_fx_animator",
+        "vrcforge_preview_write_animation_curve",
+        "vrcforge_write_animation_curve"
       ],
       "writes": true,
       "optional": true,
+      "guide": {
+        "file": "references/workflow.md",
+        "step": 6
+      },
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
     {
-      "name": "verify_visual_runtime_and_restore_edit_state",
+      "name": "diagnose_layers_and_test_interior_visibility",
+      "tool": "vrcforge_inspect_material_properties",
+      "tools": [
+        "vrcforge_get_property",
+        "vrcforge_set_property",
+        "vrcforge_preview_scene_object_duplicate",
+        "vrcforge_duplicate_scene_object",
+        "vrcforge_set_gameobject_active",
+        "vrcforge_capture_screenshot"
+      ],
+      "writes": true,
+      "optional": true,
+      "guide": {
+        "file": "references/workflow.md",
+        "step": 7
+      },
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "observe_runtime_save_and_read_relevant_reports",
       "tool": "vrcforge_gesture_manager_status",
       "tools": [
         "vrcforge_gesture_manager_enter_play_mode",
         "vrcforge_gesture_manager_set_parameter",
-        "vrcforge_set_play_mode",
+        "vrcforge_start_runtime_observation",
+        "vrcforge_get_runtime_observation",
         "vrcforge_capture_screenshot",
-        "vrcforge_capture_multi_screenshot"
+        "vrcforge_capture_multi_screenshot",
+        "vrcforge_set_play_mode",
+        "vrcforge_preview_save_asset",
+        "vrcforge_save_asset",
+        "vrcforge_scene_save",
+        "vrcforge_get_compile_errors",
+        "vrcforge_get_ndmf_errors",
+        "vrcforge_read_vrchat_sdk_builder_alerts",
+        "vrcforge_preview_diagnostic_fix",
+        "vrcforge_apply_diagnostic_fix"
       ],
       "writes": true,
       "optional": true,
+      "guide": {
+        "file": "references/workflow.md",
+        "step": 8
+      },
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
     {
-      "name": "read_report_and_deliver_actual_images",
-      "tool": "vrcforge_get_ndmf_errors",
+      "name": "compare_performance_and_deliver_actual_images",
+      "tool": "vrcforge_scan_avatar_performance",
       "tools": [
-        "vrcforge_get_compile_errors",
-        "vrcforge_read_vrchat_sdk_builder_alerts",
-        "vrcforge_scan_avatar_performance"
+        "vrcforge_run_validation_report"
       ],
       "writes": false,
-      "optional": true
+      "optional": true,
+      "guide": {
+        "file": "references/workflow.md",
+        "step": 9
+      }
     }
   ],
   "approval": {

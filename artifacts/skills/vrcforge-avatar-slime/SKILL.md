@@ -12,6 +12,7 @@ allowed-tools:
   - vrcforge_get_asset_info
   - vrcforge_get_gameobject
   - vrcforge_get_property
+  - vrcforge_set_property
   - vrcforge_scan_materials
   - vrcforge_inspect_material_properties
   - vrcforge_preview_project_asset_duplicate
@@ -21,6 +22,7 @@ allowed-tools:
   - vrcforge_preview_renderer_material_slot
   - vrcforge_set_renderer_material_slot
   - vrcforge_plan_shader_tuning
+  - vrcforge_preview_shader_apply
   - vrcforge_apply_shader_tuning
   - vrcforge_preview_material_texture_assignment
   - vrcforge_set_material_texture
@@ -53,6 +55,8 @@ allowed-tools:
   - vrcforge_gesture_manager_status
   - vrcforge_gesture_manager_enter_play_mode
   - vrcforge_gesture_manager_set_parameter
+  - vrcforge_start_runtime_observation
+  - vrcforge_get_runtime_observation
   - vrcforge_set_play_mode
   - vrcforge_get_compile_errors
   - vrcforge_get_ndmf_errors
@@ -65,6 +69,7 @@ support-files:
   - workflows/slime.json
   - references/workflow.md
   - references/surface-and-transition.md
+  - references/parameter-tuning.md
 ---
 
 # 半透明 Slime Avatar 制作
@@ -78,11 +83,11 @@ support-files:
 ## 执行原则
 1. 先按当前用户目标确定部位、颜色、透明度、正常状态、菜单位置、同步与保存偏好；沿用已明确约定，不重复确认。默认复用原有正常外观。不要从本 Skill 自动套用蓝色、白毛、红眼、某个菜单层级、参数名或 Avatar 路径。
 2. 先读当前工具目录/schema，再选最窄 MCP 读写。使用 find_assets/get_asset_info 的结构化事实与 includeText/textSearch，inspect_material_properties 的属性与渲染状态，scan_animation_bindings 的精确 clip/binding 选择。不要转去 Shell、手改 Unity YAML/meta 或动态 C#；缺少实际原子能力时报告具体缺口，仅暂停依赖它的动作。
-3. 阅读 [工作流说明](references/workflow.md) 和 [表面、过渡与问题处理](references/surface-and-transition.md)，按现场需要选择 [步骤](workflows/slime.json)，不机械执行所有分支。后者把实际制作中遇到的问题与官方文档/实现分开标明，不把一次尝试当成通用成功方案。已有研究仍匹配配置时复用；陌生功能、用户纠正或根因不明时先读官方文档、作者说明和成熟源码。联网/图片读取使用当前宿主实际具备的工具，不把链接、文件名或搜索摘要说成已读。
+3. 按 [逐步操作说明](references/workflow.md) 选择当前需要的步骤；每步列出工具、先读数据、修改、检查与纠错。调数值时用 [参数起点与调整方向](references/parameter-tuning.md)，遇到对应现象时读 [表面、过渡与问题处理](references/surface-and-transition.md)。数值是带条件的美术试调起点，不是模型无关的正确答案。已有研究仍匹配配置时复用；陌生功能、用户纠正或根因不明时先读官方文档、作者说明和成熟源码。联网/图片读取使用当前宿主实际具备的工具，不把链接、文件名或搜索摘要说成已读。
 4. 用独立工作材质保留源资产及正常外观；从真实 Renderer/slot、Shader 属性和依赖确定修改范围。头、身体、发束、耳/角和尾巴按实际构造处理，不凭同名材质批量覆盖眼睛、口腔或备用表情。
 5. 低开销胶体优先现有透明着色器的光泽、Fresnel/边缘反射和少量平铺法线 UV 动画；真正需要折射时再核对性能。头部可比身体更不透明，但仍按用户目标保留可见的透过效果；不要靠全头不透明或关闭面捕掩盖内部表情穿出。
 6. 正常与 Slime 端点、过渡中途、反向切换都要实际检查。Color/Vector 属性在每个受影响状态明确保留完整 RGBA/XYZW，不能只写 alpha 后用静态材质读回代替运行态颜色证明。
-7. 复制/切换材质不应带入衣柜基线的袜口、吊带、胸形、脚跟收缩。Slime 与换装使用实际分工的驱动；若用户另授权体型补偿，按每套服装真实需要恢复，不能将穿袜压痕带入裸腿状态。
+7. Slime 只处理本次授权的表面和切换驱动，保留已有服装、体型、物理与面捕。仅核对 Slime 开关是否影响它们；不在本 Skill 中整理衣柜、修体型或配置物理插件，发现独立问题另报。
 8. 现有授权内必要步骤自主完成，沿用产品批准和检查点机制，不新增哈希、版本握手、保护门禁或重复确认。只保存本次涉及的精确资产/场景，不全局 SaveAssets。未知结果先读已提交操作/目标，不重放副作用；回滚遵循原有单独授权。
 9. 写入成功只代表存档成功。实际运行、材质视觉、性能和 VRChat 客户端验证分别报告；普通检查由 Agent 完成，按用户约定统一交付可见图片，不把“已查看 N 张图像”当成给用户发图。
 
