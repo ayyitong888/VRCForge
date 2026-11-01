@@ -24,6 +24,8 @@
 
 只读扫描层级、原始身体/服装/头发/饰品、实际加权骨骼、Modular Avatar 相关对象与引用闭包；保留系统对象和原始命名。
 
+需要定位 Unity 资产时用 `vrcforge_find_assets` 的 AssetDatabase query/type/folder；普通文件名搜索走 Files。找到单个 `.shader`、preset、`.mat` 或 `.anim` 后，可用 `vrcforge_get_asset_info` 的 `includeText=true` 读取 UTF-8 源、用 `textSearch.literal` 定位窄范围，或按返回的 Resource 分页续读。不要一次读取不相关的大批源文件。若要确认某个材质序列化后的 scalar、enum 或 Stencil 值，用 `vrcforge_inspect_material_properties` 指定精确 `.mat`，并按 `search` 与 `offset`/`limit` 续页；文本源或材质序列化值都不等于 GPU/运行时渲染状态。
+
 ## 3. 精确原子与适用条件
 
 扫描 expression menu、parameters、FX animator、animation bindings 和已有衣柜，核对 `菜单 → 参数 → FX → clip → 实际对象` 闭环。

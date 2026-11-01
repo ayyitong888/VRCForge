@@ -22,7 +22,7 @@
 
 绑定用户指定的 Avatar 与实际 FX controller。读取相关 state、transition、motion、clip 及其真实 binding、目标对象和 Body renderer/BlendShape；只深入足以判定用户目标的路径，不把全项目或无关 controller 扫描当成前提。需要补证时使用现有只读扫描工具，并遵循其分页/精确选择器。
 
-已有换衣动画只需改少量曲线时，先从衣柜状态定位现有 clip，再用 `vrcforge_scan_animation_bindings` 的 `clipPaths` 和 `bindingSelectors` 精读目标属性；先确认 index 中的精确绑定，再读所需 details/key 页。不要为局部体型补偿分页遍历完整 FX、面捕或无关 clip。调用前以当前目录和已加载工具 block 返回的 `selectedTools` 为准，使用其中的精确 Agent 工具名；若因跨 block 而拒绝，返回目录选择正确 block，不猜别名或重试相近名称。
+已有换衣动画只需改少量曲线时，先从衣柜状态定位现有 clip，再用 `vrcforge_scan_animation_bindings` 的 `clipPaths` 和 `bindingSelectors` 精读目标属性；先以 `bindingView=index` 确认精确绑定，再读所需 `details` 页。只在 key 列表未完整返回时，按该 binding 的 `nextKeyRequest` 续读；clip/binding 页跟随 `paging.nextRequest`，不要改 offset 猜页。不要为局部体型补偿分页遍历完整 FX、面捕或无关 clip。调用前以当前目录和已加载工具 block 返回的 `selectedTools` 为准，使用其中的精确 Agent 工具名；若因跨 block 而拒绝，返回目录选择正确 block，不猜别名或重试相近名称。
 
 ## 2. 真实结构和社区规则
 
