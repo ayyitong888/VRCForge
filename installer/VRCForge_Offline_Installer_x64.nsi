@@ -432,7 +432,7 @@ Section "Install"
   InitPluginsDir
   Call ValidateScopedInstallDir
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "The requested install directory does not match this installer identity." /SD IDOK
+    MessageBox MB_ICONSTOP "$(InstallDirectoryMismatchText)" /SD IDOK
     Abort
   ${EndIf}
   SetOutPath "$PLUGINSDIR"
@@ -445,7 +445,7 @@ Section "Install"
   StrCpy $HelperSourcePath "$PLUGINSDIR\VRCForge_WebPayload.ps1"
   Call ValidateInstallBoundary
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "The protected Program Files installation boundary could not be verified." /SD IDOK
+    MessageBox MB_ICONSTOP "$(InstallDirectoryUnavailableText)" /SD IDOK
     Abort
   ${EndIf}
   ; Retry stays in this installer. No payload work occurs while the app is busy.
@@ -490,7 +490,7 @@ Section "Uninstall"
   SetRegView 64
   Call un.ValidateScopedInstallDir
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "The uninstall directory does not match this installer identity." /SD IDOK
+    MessageBox MB_ICONSTOP "$(UninstallDirectoryMismatchText)" /SD IDOK
     Abort
   ${EndIf}
   ; $DataDir was already resolved in un.onInit from the recorded DataDir
@@ -502,7 +502,7 @@ Section "Uninstall"
   StrCpy $HelperSourcePath "$INSTDIR\installer\VRCForge_WebPayload.ps1"
   Call un.ValidateInstallBoundary
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "The protected Program Files uninstall boundary could not be verified." /SD IDOK
+    MessageBox MB_ICONSTOP "$(UninstallDirectoryUnavailableText)" /SD IDOK
     Abort
   ${EndIf}
   Delete "$DESKTOP\${DESKTOP_SHORTCUT}"

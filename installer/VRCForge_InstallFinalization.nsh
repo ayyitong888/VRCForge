@@ -5,6 +5,23 @@ Var InstallErrorDetail
 Var InstallBackupPath
 Var InstallFailureStage
 
+LangString InstallDirectoryMismatchText ${LANG_SIMPCHINESE} "此安装包不支持当前程序目录：$INSTDIR。请使用默认程序目录重新运行安装包。"
+LangString InstallDirectoryMismatchText ${LANG_TRADCHINESE} "此安裝程式不支援目前的程式目錄：$INSTDIR。請使用預設程式目錄重新執行安裝程式。"
+LangString InstallDirectoryMismatchText ${LANG_JAPANESE} "このインストーラーでは次のフォルダーにインストールできません: $INSTDIR。既定の保存先で再実行してください。"
+LangString InstallDirectoryMismatchText ${LANG_ENGLISH} "This installer cannot use the program folder: $INSTDIR. Run setup again with the default program location."
+LangString InstallDirectoryUnavailableText ${LANG_SIMPCHINESE} "程序目录暂不可用，尚未替换旧版文件。请检查目录权限并重新运行安装包；具体错误可在详情中查看。"
+LangString InstallDirectoryUnavailableText ${LANG_TRADCHINESE} "程式目錄目前無法使用，尚未取代舊版檔案。請檢查目錄權限並重新執行安裝程式；詳細錯誤可在詳情中查看。"
+LangString InstallDirectoryUnavailableText ${LANG_JAPANESE} "プログラムフォルダーを使用できないため、以前のファイルはまだ置き換えていません。アクセス権を確認して再実行し、詳細もご確認ください。"
+LangString InstallDirectoryUnavailableText ${LANG_ENGLISH} "The program folder is unavailable; prior program files have not been replaced. Check folder permissions and rerun setup. See Details for the error."
+LangString UninstallDirectoryMismatchText ${LANG_SIMPCHINESE} "卸载程序所在目录不正确：$INSTDIR。请运行当前 VRCForge 安装目录中的卸载程序。"
+LangString UninstallDirectoryMismatchText ${LANG_TRADCHINESE} "解除安裝程式所在目錄不正確：$INSTDIR。請執行目前 VRCForge 安裝目錄中的解除安裝程式。"
+LangString UninstallDirectoryMismatchText ${LANG_JAPANESE} "アンインストーラーのフォルダーが正しくありません: $INSTDIR。現在の VRCForge フォルダー内にあるアンインストーラーを実行してください。"
+LangString UninstallDirectoryMismatchText ${LANG_ENGLISH} "The uninstaller is in an unexpected folder: $INSTDIR. Run the uninstaller from the current VRCForge installation folder."
+LangString UninstallDirectoryUnavailableText ${LANG_SIMPCHINESE} "无法访问程序目录，卸载尚未开始。请检查目录权限，再运行当前安装目录中的卸载程序；具体错误可在详情中查看。"
+LangString UninstallDirectoryUnavailableText ${LANG_TRADCHINESE} "無法存取程式目錄，解除安裝尚未開始。請檢查目錄權限，再執行目前安裝目錄中的解除安裝程式；詳細錯誤可在詳情中查看。"
+LangString UninstallDirectoryUnavailableText ${LANG_JAPANESE} "プログラムフォルダーにアクセスできないため、削除はまだ開始していません。アクセス権を確認し、現在のインストール先から再実行してください。詳細もご確認ください。"
+LangString UninstallDirectoryUnavailableText ${LANG_ENGLISH} "The program folder is inaccessible; uninstall has not started. Check folder permissions and rerun the uninstaller from its installation folder. See Details for the error."
+
 LangString InstallConfigFailedText ${LANG_SIMPCHINESE} "程序文件已就位，但安装配置未完成：$InstallFailureStage。$\r$\n快捷方式或安装登记可能只完成了一部分。请重新运行安装器完成配置。"
 LangString InstallConfigFailedText ${LANG_TRADCHINESE} "程式檔案已就位，但安裝設定未完成：$InstallFailureStage。$\r$\n捷徑或安裝登錄可能只完成一部分。請重新執行安裝程式完成設定。"
 LangString InstallConfigFailedText ${LANG_JAPANESE} "プログラムの配置後、設定を完了できませんでした: $InstallFailureStage。$\r$\nショートカットや登録が一部だけ更新された可能性があります。インストーラーを再実行してください。"
