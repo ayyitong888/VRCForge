@@ -72,6 +72,12 @@ from texture_import_settings import (
     bind_authoritative_preview as bind_texture_import_settings_preview,
     build_preview_arguments as build_texture_import_settings_preview_arguments,
 )
+from model_import_settings import (
+    TOOL_NAME as MODEL_IMPORT_SETTINGS_TOOL,
+    ModelImportSettingsError,
+    bind_authoritative_preview as bind_model_import_settings_preview,
+    build_preview_arguments as build_model_import_settings_preview_arguments,
+)
 from scene_asset_save import (
     TOOL_NAME as SAVE_NEW_SCENE_TOOL,
     SceneAssetSaveError,
@@ -234,6 +240,16 @@ _SPECS = {
         domain_error=TextureImportSettingsError,
         build_preview=build_texture_import_settings_preview_arguments,
         bind_preview=bind_texture_import_settings_preview,
+        include_project_path_in_preview=True,
+    ),
+    MODEL_IMPORT_SETTINGS_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=MODEL_IMPORT_SETTINGS_TOOL,
+        request_error="Model import settings arguments are required.",
+        bridge_error="Model import settings preview could not be verified against the current project.",
+        receipt_error="Model import settings preview returned an invalid verification receipt.",
+        domain_error=ModelImportSettingsError,
+        build_preview=build_model_import_settings_preview_arguments,
+        bind_preview=bind_model_import_settings_preview,
         include_project_path_in_preview=True,
     ),
     CONSTRAINT_SOURCE_TOOL: AuthoritativeUnityWriteSpec(

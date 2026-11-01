@@ -283,6 +283,10 @@ from texture_import_settings import (
     TOOL_NAME as TEXTURE_IMPORT_SETTINGS_TOOL,
     build_wrapper_arguments as build_texture_import_settings_wrapper_arguments,
 )
+from model_import_settings import (
+    TOOL_NAME as MODEL_IMPORT_SETTINGS_TOOL,
+    build_wrapper_arguments as build_model_import_settings_wrapper_arguments,
+)
 from unity_editor_window_probe import (
     confirm_unity_reload_dialog,
     prepare_unity_reload_confirmation,
@@ -841,6 +845,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_export_vrm",
         "vrcforge_toggle_scene_object",
         "vrcforge_remap_skinned_mesh_bone",
+        "vrcforge_set_model_import_settings",
     }
 )
 VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
@@ -863,6 +868,7 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_save_scene_object_as_prefab",
         "vrc_save_asset",
         "vrc_set_texture_import_settings",
+        MODEL_IMPORT_SETTINGS_TOOL,
         "vrc_set_constraint_sources",
         "vrc_convert_unity_constraint",
         "vrc_create_component_feature",
@@ -21179,6 +21185,20 @@ def prepare_authoritative_unity_checkpoint_sync(
                 "mode": "read_only_disk_snapshot",
                 "archiveAssetPaths": [save_arguments["assetPath"]],
                 "archiveScopeReason": "explicit_single_existing_asset_save"}
+    if checkpoint_target == "vrcforge_set_model_import_settings":
+        nested = arguments.get("arguments")
+        nested = nested if isinstance(nested, dict) else arguments.get("params")
+        nested = nested if isinstance(nested, dict) else {}
+        asset_path = nested.get("modelAssetPath")
+        if (not isinstance(asset_path, str) or not asset_path.startswith("Assets/")
+                or "\\" in asset_path
+                or any(part in {"", ".", ".."} for part in asset_path.split("/"))):
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved model importer preview did not establish one exact Assets model path.",
+                    "mutationStarted": False, "saved": False}
+        return {"ok": True, "projectPath": str(project_root),
+                "mode": "read_only_disk_snapshot", "archiveAssetPaths": [asset_path],
+                "archiveScopeReason": "single_model_importer_asset_and_meta_only"}
     if checkpoint_target in {"vrcforge_refresh_asset_database", "vrcforge_execute_unity_editor_menu"}:
         # Package resolution may reinstall/remove packages and importer repair
         # may update metadata. Their existing conditional policy requires the
@@ -22136,6 +22156,26 @@ def prepare_texture_import_settings_request(
 
     return prepare_unity_mcp_write_request(
         build_texture_import_settings_wrapper_arguments(params or {}),
+        caller_preview,
+    )
+
+
+def preview_model_import_settings_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(
+        build_model_import_settings_wrapper_arguments(params or {}),
+        None,
+    )
+    return {"ok": True, "preview": preview}
+
+
+def prepare_model_import_settings_request(
+    params: dict[str, Any],
+    caller_preview: Any,
+) -> tuple[dict[str, Any], Any]:
+    """Bind one model importer setting to its authoritative Core preview."""
+
+    return prepare_unity_mcp_write_request(
+        build_model_import_settings_wrapper_arguments(params or {}),
         caller_preview,
     )
 
@@ -27564,6 +27604,12 @@ def register_agent_gateway_tools() -> None:
         preview_texture_import_settings_sync,
     )
     AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_model_import_settings",
+        "Preview the isReadable setting for one exact model asset. Use this for script access to imported mesh data; do not use it for Streaming Mip Maps or batches.",
+        "plan/preview",
+        preview_model_import_settings_sync,
+    )
+    AGENT_GATEWAY.register_tool(
         "vrcforge_preview_constraint_sources",
         "Preview one exact ordered constraint-source replacement without writing project files.",
         "plan/preview",
@@ -27801,6 +27847,15 @@ def register_agent_gateway_tools() -> None:
         "medium",
         unity_mcp_write_sync,
         request_preparer=prepare_texture_import_settings_request,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+    )
+    register_write_handler(
+        "vrcforge_set_model_import_settings",
+        "When to use: apply the approved isReadable change to one exact model asset after reviewing its importer preview. When NOT to use: do not batch models or change texture streaming; call once per reviewed model. Negative example: do not enable Read/Write on every model as a general fix.",
+        "medium",
+        unity_mcp_write_sync,
+        request_preparer=prepare_model_import_settings_request,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
     )

@@ -792,6 +792,7 @@ def test_fixed_lanes_derive_approved_write_without_stale_hardcoded_counts() -> N
     } <= preview_names
     assert "vrc_convert_unity_constraint" in preview_names
     assert "vrc_set_material_texture" in preview_names
+    assert "vrc_set_model_import_settings" in preview_names
     assert len(safety_names) == 2
     assert preview_names <= EXPECTED_TOOL_NAMES
     assert safety_names <= EXPECTED_TOOL_NAMES

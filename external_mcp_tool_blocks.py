@@ -149,6 +149,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_scan_materials",
             "vrcforge_inspect_material_properties",
             "vrcforge_preview_texture_import_settings",
+            "vrcforge_preview_model_import_settings",
         }
     ),
     "integrations/modular-avatar": frozenset(
@@ -338,6 +339,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_reapply_shader_tuning_history",
             "vrcforge_restore_shader_tuning",
             "vrcforge_set_texture_import_settings",
+            "vrcforge_set_model_import_settings",
             "vrcforge_set_material_shader",
             "vrcforge_set_material_texture",
             "vrcforge_set_renderer_material_slot",

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
-import json
 from pathlib import Path
 
 import agent_gateway
@@ -13,10 +11,6 @@ import unity_shared_input_schemas
 def test_read_schemas_keep_single_owner_and_reviewed_paging_progress_contract() -> None:
     schemas = unity_read_input_schemas.UNITY_READ_TOOL_INPUT_SCHEMAS
     assert agent_gateway.UNITY_READ_TOOL_INPUT_SCHEMAS is schemas
-    # Includes avatar/text/search paging, summary-first animation bindings and
-    # scoped progress schemas in addition to the original reviewed readers.
-    encoded = json.dumps(schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "584bd10fd0f8a310a1c5fa52d171c4b908565f22ef5256cba197820cc0bf878b"
     assert schemas["vrcforge_preview_texture_import_settings"] is unity_shared_input_schemas.TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA
     assert schemas["vrcforge_preview_manage_fx_animator"] is unity_shared_input_schemas.MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA
 

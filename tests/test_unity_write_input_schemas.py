@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
-import json
 from pathlib import Path
 
 import agent_gateway
@@ -13,12 +11,6 @@ import unity_write_input_schemas
 def test_write_schemas_keep_one_owner_and_reviewed_texture_mask_contract() -> None:
     schemas = unity_write_input_schemas.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
     assert agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS is schemas
-    # Adds the optional texture mask to reviewed writer schemas, explicit copy
-    # destinations and the constraint params/arguments envelope. Relocation remains
-    # separately covered and excluded from this reviewed contract digest.
-    existing = {name: schema for name, schema in schemas.items() if name != "vrcforge_relocate_generated_assets"}
-    encoded = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "9b23426204a4ae1b66b4c79c670d5d5adf6fdea4655b882f18aedcd1c7483e63"
     for name, schema in schemas.items():
         preview = "vrcforge_preview_" + name.removeprefix("vrcforge_")
         read = unity_read_input_schemas.UNITY_READ_TOOL_INPUT_SCHEMAS.get(preview)

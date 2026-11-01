@@ -70,6 +70,7 @@ namespace VRCForge.Editor
             "vrc_texture_patch",
             "vrc_user_adjustment_handoff",
             "vrc_set_texture_import_settings",
+            "vrc_set_model_import_settings",
             "vrc_set_constraint_sources",
             "vrc_create_component_feature",
             "vrc_configure_aao_merge_physbone",

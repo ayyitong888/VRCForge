@@ -116,6 +116,24 @@ TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+MODEL_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "modelAssetPath", "isReadable"],
+    "properties": {
+        "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this model importer operation."},
+        "modelAssetPath": {
+            "type": "string",
+            "pattern": "^Assets/[^/]+(?:/[^/]+)*$",
+            "description": "Exact model asset path under Assets/; Core accepts it only when Unity reports a ModelImporter.",
+        },
+        "isReadable": {
+            "type": "boolean",
+            "description": "Whether imported model mesh vertices and indices are accessible to scripts.",
+        },
+    },
+}
+
 _PROJECT_PATH_PROPERTY = {
     "type": "string",
     "description": "Exact existing Unity project root bound to this tool call.",

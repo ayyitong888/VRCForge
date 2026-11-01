@@ -21,6 +21,7 @@ from unity_shared_input_schemas import (
     SHADER_CATEGORY_OVERRIDES_SCHEMA,
     SHADER_CHANGE_INPUT_SCHEMA,
     TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA,
+    MODEL_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA,
     _AVATAR_PATH_PROPERTY,
     _PROJECT_PATH_PROPERTY,
     outfit_import_input_schema,
@@ -603,6 +604,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "vrcforge_preview_texture_import_settings": TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_preview_model_import_settings": MODEL_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_manage_fx_animator": MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA,
     "vrcforge_avatar_upload_readiness": {
         "type": "object",
