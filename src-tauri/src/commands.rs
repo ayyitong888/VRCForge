@@ -587,69 +587,75 @@ pub async fn desktop_runtime_snapshot(
 }
 
 #[tauri::command]
-pub fn update_api_config(
+pub async fn update_api_config(
     request: DesktopProviderConfigRequest,
 ) -> Result<serde_json::Value, String> {
-    let secret = request.api_key.clone().unwrap_or_default();
-    let mut body = provider_config_body(
-        request.provider,
-        request.api_key,
-        request.base_url,
-        request.model,
-        request.api_type,
-    );
-    if let serde_json::Value::Object(object) = &mut body {
-        if let Some(thinking_level) = request.thinking_level {
-            object.insert(
-                "thinking_level".to_string(),
-                serde_json::Value::String(thinking_level),
-            );
+    blocking_backend_json_request(move || {
+        let secret = request.api_key.clone().unwrap_or_default();
+        let mut body = provider_config_body(
+            request.provider,
+            request.api_key,
+            request.base_url,
+            request.model,
+            request.api_type,
+        );
+        if let serde_json::Value::Object(object) = &mut body {
+            if let Some(thinking_level) = request.thinking_level {
+                object.insert(
+                    "thinking_level".to_string(),
+                    serde_json::Value::String(thinking_level),
+                );
+            }
+            if let Some(context_window) = request.context_window {
+                object.insert(
+                    "context_window".to_string(),
+                    serde_json::Value::Number(context_window.into()),
+                );
+            }
         }
-        if let Some(context_window) = request.context_window {
-            object.insert(
-                "context_window".to_string(),
-                serde_json::Value::Number(context_window.into()),
-            );
-        }
-    }
-    sanitize_provider_result(
-        backend_json_request(
-            "POST",
-            "/api/config".to_string(),
-            Some(body),
-            request.timeout_ms,
-        ),
-        &[secret.as_str()],
-    )
+        sanitize_provider_result(
+            backend_json_request(
+                "POST",
+                "/api/config".to_string(),
+                Some(body),
+                request.timeout_ms,
+            ),
+            &[secret.as_str()],
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn update_vision_config(
+pub async fn update_vision_config(
     request: DesktopVisionConfigRequest,
 ) -> Result<serde_json::Value, String> {
-    let secret = request.api_key.clone().unwrap_or_default();
-    let mut body = provider_config_body(
-        request.provider,
-        request.api_key,
-        request.base_url,
-        request.model,
-        None,
-    );
-    if let serde_json::Value::Object(object) = &mut body {
-        object.insert(
-            "enabled".to_string(),
-            serde_json::Value::Bool(request.enabled),
+    blocking_backend_json_request(move || {
+        let secret = request.api_key.clone().unwrap_or_default();
+        let mut body = provider_config_body(
+            request.provider,
+            request.api_key,
+            request.base_url,
+            request.model,
+            None,
         );
-    }
-    sanitize_provider_result(
-        backend_json_request(
-            "POST",
-            "/api/config/vision".to_string(),
-            Some(body),
-            request.timeout_ms,
-        ),
-        &[secret.as_str()],
-    )
+        if let serde_json::Value::Object(object) = &mut body {
+            object.insert(
+                "enabled".to_string(),
+                serde_json::Value::Bool(request.enabled),
+            );
+        }
+        sanitize_provider_result(
+            backend_json_request(
+                "POST",
+                "/api/config/vision".to_string(),
+                Some(body),
+                request.timeout_ms,
+            ),
+            &[secret.as_str()],
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -733,18 +739,21 @@ pub async fn fetch_reasoning_variants(
 }
 
 #[tauri::command]
-pub fn update_permission_mode(
+pub async fn update_permission_mode(
     request: DesktopPermissionRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/permission".to_string(),
-        Some(serde_json::json!({
-            "execution_mode": request.execution_mode,
-            "acknowledge_roslyn_risk": request.acknowledge_roslyn_risk,
-        })),
-        request.timeout_ms,
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/permission".to_string(),
+            Some(serde_json::json!({
+                "execution_mode": request.execution_mode,
+                "acknowledge_roslyn_risk": request.acknowledge_roslyn_risk,
+            })),
+            request.timeout_ms,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -993,81 +1002,93 @@ pub async fn issue_computer_use_turn_grant(
 }
 
 #[tauri::command]
-pub fn request_agent_run_cancel(
+pub async fn request_agent_run_cancel(
     request: DesktopAgentRunCancelRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/agent/runs/cancel".to_string(),
-        Some(serde_json::json!({
-            "sessionId": request.session_id,
-            "turnId": request.turn_id,
-            "clientTurnId": request.client_turn_id,
-            "reason": request.reason,
-        })),
-        request.timeout_ms.or(Some(30_000)),
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/agent/runs/cancel".to_string(),
+            Some(serde_json::json!({
+                "sessionId": request.session_id,
+                "turnId": request.turn_id,
+                "clientTurnId": request.client_turn_id,
+                "reason": request.reason,
+            })),
+            request.timeout_ms.or(Some(30_000)),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn record_agent_run_queued(
+pub async fn record_agent_run_queued(
     request: DesktopAgentRunQueuedRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/agent/runs/queue".to_string(),
-        Some(serde_json::json!({
-            "sessionId": request.session_id,
-            "laneId": request.lane_id,
-            "clientTurnId": request.client_turn_id,
-            "targetClientTurnId": request.target_client_turn_id,
-            "planMode": request.plan_mode,
-            "message": request.message,
-            "attachments": request.attachments.unwrap_or_default(),
-            "provider": request.provider,
-            "providerLabel": request.provider_label,
-            "model": request.model,
-            "projectPath": request.project_path,
-            "projectRoot": request.project_root,
-            "projectType": request.project_type,
-        })),
-        request.timeout_ms.or(Some(30_000)),
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/agent/runs/queue".to_string(),
+            Some(serde_json::json!({
+                "sessionId": request.session_id,
+                "laneId": request.lane_id,
+                "clientTurnId": request.client_turn_id,
+                "targetClientTurnId": request.target_client_turn_id,
+                "planMode": request.plan_mode,
+                "message": request.message,
+                "attachments": request.attachments.unwrap_or_default(),
+                "provider": request.provider,
+                "providerLabel": request.provider_label,
+                "model": request.model,
+                "projectPath": request.project_path,
+                "projectRoot": request.project_root,
+                "projectType": request.project_type,
+            })),
+            request.timeout_ms.or(Some(30_000)),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn list_agent_run_followups(
+pub async fn list_agent_run_followups(
     request: DesktopAgentRunQueueListRequest,
 ) -> Result<serde_json::Value, String> {
-    let mut query = vec![format!("includeTerminal={}", request.include_terminal)];
-    if let Some(session_id) = request.session_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
-        query.push(format!("sessionId={}", percent_encode_query_component(session_id)));
-    }
-    backend_json_request(
-        "GET",
-        format!("/api/app/agent/runs/queue?{}", query.join("&")),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    )
+    blocking_backend_json_request(move || {
+        let mut query = vec![format!("includeTerminal={}", request.include_terminal)];
+        if let Some(session_id) = request.session_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            query.push(format!("sessionId={}", percent_encode_query_component(session_id)));
+        }
+        backend_json_request(
+            "GET",
+            format!("/api/app/agent/runs/queue?{}", query.join("&")),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cancel_agent_run_followup(
+pub async fn cancel_agent_run_followup(
     request: DesktopAgentRunQueueTransitionRequest,
 ) -> Result<serde_json::Value, String> {
-    let queue_id = percent_encode_query_component(request.queue_id.trim());
-    if queue_id.is_empty() || request.queue_id.len() > 180 {
-        return Err("Invalid Agent follow-up queue ID.".to_string());
-    }
-    backend_json_request(
-        "POST",
-        format!("/api/app/agent/runs/queue/{queue_id}/cancel"),
-        Some(serde_json::json!({
-            "sessionId": request.session_id,
-            "claimToken": request.claim_token,
-        })),
-        request.timeout_ms.or(Some(30_000)),
-    )
+    blocking_backend_json_request(move || {
+        let queue_id = percent_encode_query_component(request.queue_id.trim());
+        if queue_id.is_empty() || request.queue_id.len() > 180 {
+            return Err("Invalid Agent follow-up queue ID.".to_string());
+        }
+        backend_json_request(
+            "POST",
+            format!("/api/app/agent/runs/queue/{queue_id}/cancel"),
+            Some(serde_json::json!({
+                "sessionId": request.session_id,
+                "claimToken": request.claim_token,
+            })),
+            request.timeout_ms.or(Some(30_000)),
+        )
+    })
+    .await
 }
 
 pub(crate) fn normalized_approval_scope_body(
@@ -1134,33 +1155,39 @@ pub async fn approve_agent_approval(
 }
 
 #[tauri::command]
-pub fn reject_agent_approval(
+pub async fn reject_agent_approval(
     request: DesktopApprovalScopeRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/agent/approvals/{}/reject",
-            percent_encode_query_component(&request.approval_id)
-        ),
-        Some(approval_scope_body(&request)),
-        request.timeout_ms.or(Some(60_000)),
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/approvals/{}/reject",
+                percent_encode_query_component(&request.approval_id)
+            ),
+            Some(approval_scope_body(&request)),
+            request.timeout_ms.or(Some(60_000)),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn request_approval_revision(
+pub async fn request_approval_revision(
     request: DesktopApprovalRevisionRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/agent/approvals/{}/revision",
-            percent_encode_query_component(&request.approval_id)
-        ),
-        Some(approval_revision_body(&request)),
-        request.timeout_ms.or(Some(60_000)),
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/approvals/{}/revision",
+                percent_encode_query_component(&request.approval_id)
+            ),
+            Some(approval_revision_body(&request)),
+            request.timeout_ms.or(Some(60_000)),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1214,18 +1241,21 @@ pub async fn preview_restore_checkpoint(
 }
 
 #[tauri::command]
-pub fn request_restore_checkpoint(
+pub async fn request_restore_checkpoint(
     request: DesktopCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/checkpoints/{}/restore",
-            percent_encode_query_component(&request.checkpoint_id)
-        ),
-        None,
-        request.timeout_ms.or(Some(180_000)),
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/checkpoints/{}/restore",
+                percent_encode_query_component(&request.checkpoint_id)
+            ),
+            None,
+            request.timeout_ms.or(Some(180_000)),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1282,51 +1312,60 @@ pub async fn preview_interrupted_apply_recovery(
 }
 
 #[tauri::command]
-pub fn request_restore_interrupted_apply_recovery(
+pub async fn request_restore_interrupted_apply_recovery(
     request: DesktopRecoveryIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/recoveries/{}/restore",
-            percent_encode_query_component(&request.recovery_id)
-        ),
-        None,
-        request.timeout_ms.or(Some(180_000)),
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/recoveries/{}/restore",
+                percent_encode_query_component(&request.recovery_id)
+            ),
+            None,
+            request.timeout_ms.or(Some(180_000)),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn resolve_interrupted_apply_recovery(
+pub async fn resolve_interrupted_apply_recovery(
     request: DesktopResolveRecoveryRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/recoveries/{}/resolve",
-            percent_encode_query_component(&request.recovery_id)
-        ),
-        Some(serde_json::json!({
-            "confirmResolved": request.confirm_resolved,
-            "note": request.note,
-        })),
-        request.timeout_ms,
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/recoveries/{}/resolve",
+                percent_encode_query_component(&request.recovery_id)
+            ),
+            Some(serde_json::json!({
+                "confirmResolved": request.confirm_resolved,
+                "note": request.note,
+            })),
+            request.timeout_ms,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn export_interrupted_apply_incident_bundle(
+pub async fn export_interrupted_apply_incident_bundle(
     request: DesktopRecoveryIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/recoveries/{}/incident-bundle",
-            percent_encode_query_component(&request.recovery_id)
-        ),
-        None,
-        request.timeout_ms,
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/recoveries/{}/incident-bundle",
+                percent_encode_query_component(&request.recovery_id)
+            ),
+            None,
+            request.timeout_ms,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1725,20 +1764,23 @@ pub async fn fetch_project_prefs(
 }
 
 #[tauri::command]
-pub fn save_project_prefs(
+pub async fn save_project_prefs(
     request: DesktopProjectPrefsRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/projects/prefs".to_string(),
-        Some(serde_json::json!({
-            "customPaths": request.custom_paths.unwrap_or_default(),
-            "customProjects": request.custom_projects.unwrap_or_default(),
-            "hiddenPaths": request.hidden_paths.unwrap_or_default(),
-        })),
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/projects/prefs".to_string(),
+            Some(serde_json::json!({
+                "customPaths": request.custom_paths.unwrap_or_default(),
+                "customProjects": request.custom_projects.unwrap_or_default(),
+                "hiddenPaths": request.hidden_paths.unwrap_or_default(),
+            })),
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1834,101 +1876,119 @@ pub async fn fetch_adjustment_checkpoints(
 }
 
 #[tauri::command]
-pub fn create_adjustment_checkpoint(
+pub async fn create_adjustment_checkpoint(
     request: DesktopAdjustmentCheckpointBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/adjustment-checkpoints".to_string(),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/adjustment-checkpoints".to_string(),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn update_adjustment_checkpoint(
+pub async fn update_adjustment_checkpoint(
     request: DesktopAdjustmentCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "PUT",
-        format!(
-            "/api/app/adjustment-checkpoints/{}",
-            percent_encode_query_component(&request.checkpoint_id)
-        ),
-        Some(request.body.unwrap_or_else(|| serde_json::json!({}))),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "PUT",
+            format!(
+                "/api/app/adjustment-checkpoints/{}",
+                percent_encode_query_component(&request.checkpoint_id)
+            ),
+            Some(request.body.unwrap_or_else(|| serde_json::json!({}))),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_adjustment_checkpoint(
+pub async fn delete_adjustment_checkpoint(
     request: DesktopAdjustmentCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    let suffix = if request.hard_delete.unwrap_or(false) {
-        "?hardDelete=true"
-    } else {
-        ""
-    };
-    backend_json_request(
-        "DELETE",
-        format!(
-            "/api/app/adjustment-checkpoints/{}{suffix}",
-            percent_encode_query_component(&request.checkpoint_id)
-        ),
-        None,
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        let suffix = if request.hard_delete.unwrap_or(false) {
+            "?hardDelete=true"
+        } else {
+            ""
+        };
+        backend_json_request(
+            "DELETE",
+            format!(
+                "/api/app/adjustment-checkpoints/{}{suffix}",
+                percent_encode_query_component(&request.checkpoint_id)
+            ),
+            None,
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn overwrite_adjustment_checkpoint(
+pub async fn overwrite_adjustment_checkpoint(
     request: DesktopAdjustmentCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/adjustment-checkpoints/{}/overwrite",
-            percent_encode_query_component(&request.checkpoint_id)
-        ),
-        Some(request.body.unwrap_or_else(|| serde_json::json!({}))),
-        request.timeout_ms.or(Some(120_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/adjustment-checkpoints/{}/overwrite",
+                percent_encode_query_component(&request.checkpoint_id)
+            ),
+            Some(request.body.unwrap_or_else(|| serde_json::json!({}))),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn select_adjustment_checkpoint(
+pub async fn select_adjustment_checkpoint(
     request: DesktopAdjustmentCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/adjustment-checkpoints/{}/select",
-            percent_encode_query_component(&request.checkpoint_id)
-        ),
-        Some(request.body.unwrap_or_else(|| serde_json::json!({}))),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/adjustment-checkpoints/{}/select",
+                percent_encode_query_component(&request.checkpoint_id)
+            ),
+            Some(request.body.unwrap_or_else(|| serde_json::json!({}))),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn apply_adjustment_checkpoint(
+pub async fn apply_adjustment_checkpoint(
     request: DesktopAdjustmentCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/adjustment-checkpoints/{}/apply",
-            percent_encode_query_component(&request.checkpoint_id)
-        ),
-        None,
-        request.timeout_ms.or(Some(120_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/adjustment-checkpoints/{}/apply",
+                percent_encode_query_component(&request.checkpoint_id)
+            ),
+            None,
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2089,34 +2149,49 @@ pub async fn fetch_avatars(request: DesktopJsonBodyRequest) -> Result<serde_json
 }
 
 #[tauri::command]
-pub fn fetch_optimization_plan(
+pub async fn fetch_optimization_plan(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/optimization/plan", request, 120_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/optimization/plan", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn request_optimization_apply(
+pub async fn request_optimization_apply(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/optimization/apply-request", request, 120_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/optimization/apply-request", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn plan_outfit_import(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/outfit-imports/plan", request, 120_000)
+pub async fn plan_outfit_import(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/outfit-imports/plan", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn request_outfit_import(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/outfit-imports/request", request, 120_000)
+pub async fn request_outfit_import(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/outfit-imports/request", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn request_package_install(
+pub async fn request_package_install(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/package-install/request", request, 120_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/package-install/request", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2140,9 +2215,12 @@ pub async fn request_avatar_encryption_apply(
 }
 
 #[tauri::command]
-pub fn fetch_skill_packages() -> Result<serde_json::Value, String> {
-    backend_json_request("GET", "/api/app/skill-packages".to_string(), None, None)
-        .map(sanitize_webview_response)
+pub async fn fetch_skill_packages() -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request("GET", "/api/app/skill-packages".to_string(), None, None)
+            .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2188,78 +2266,105 @@ pub async fn import_official_skill_signing_key(
 }
 
 #[tauri::command]
-pub fn preflight_skill_package(
+pub async fn preflight_skill_package(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/skill-packages/preflight", request, 120_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skill-packages/preflight", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn import_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/skill-packages/import", request, 120_000)
+pub async fn import_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skill-packages/import", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn set_skill_package_safe_mode(
+pub async fn set_skill_package_safe_mode(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/skill-packages/safe-mode", request, 60_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skill-packages/safe-mode", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn trust_skill_package_signer(
+pub async fn trust_skill_package_signer(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/skill-packages/trust-signer", request, 60_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skill-packages/trust-signer", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn revoke_skill_package_signer(
+pub async fn revoke_skill_package_signer(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/skill-packages/revoke-signer", request, 60_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skill-packages/revoke-signer", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn block_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/skill-packages/block-package", request, 60_000)
+pub async fn block_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skill-packages/block-package", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn export_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/skill-packages/export", request, 120_000)
+pub async fn export_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skill-packages/export", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn set_skill_package_enabled(
+pub async fn set_skill_package_enabled(
     request: DesktopIdJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "PUT",
-        format!(
-            "/api/app/skill-packages/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "PUT",
+            format!(
+                "/api/app/skill-packages/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn uninstall_skill_package(
+pub async fn uninstall_skill_package(
     request: DesktopIdJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "DELETE",
-        format!(
-            "/api/app/skill-packages/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(120_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "DELETE",
+            format!(
+                "/api/app/skill-packages/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2354,58 +2459,79 @@ pub fn open_support_feedback_url() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn preview_path_to_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/path-to-skill/preview", request, 120_000)
+pub async fn preview_path_to_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/path-to-skill/preview", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn write_path_to_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/path-to-skill/write", request, 120_000)
+pub async fn write_path_to_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/path-to-skill/write", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn fetch_skills() -> Result<serde_json::Value, String> {
-    backend_json_request("GET", "/api/app/skills".to_string(), None, None)
+pub async fn fetch_skills() -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request("GET", "/api/app/skills".to_string(), None, None)
+            .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn check_skills() -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request("GET", "/api/app/skills/check".to_string(), None, None)
+            .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn create_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skills", request, 60_000)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn update_skill(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "PUT",
+            format!(
+                "/api/app/skills/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
         .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn check_skills() -> Result<serde_json::Value, String> {
-    backend_json_request("GET", "/api/app/skills/check".to_string(), None, None)
+pub async fn delete_skill(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "DELETE",
+            format!(
+                "/api/app/skills/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
         .map(sanitize_webview_response)
-}
-
-#[tauri::command]
-pub fn create_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/skills", request, 60_000)
-}
-
-#[tauri::command]
-pub fn update_skill(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "PUT",
-        format!(
-            "/api/app/skills/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
-}
-
-#[tauri::command]
-pub fn delete_skill(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "DELETE",
-        format!(
-            "/api/app/skills/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2930,47 +3056,59 @@ pub async fn fetch_agent_progress(
 }
 
 #[tauri::command]
-pub fn replace_agent_progress(
+pub async fn replace_agent_progress(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/agent/progress/replace", request, 60_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/progress/replace", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn create_agent_progress(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/agent/progress", request, 60_000)
+pub async fn create_agent_progress(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/progress", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn update_agent_progress(
+pub async fn update_agent_progress(
     request: DesktopIdJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/agent/progress/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/progress/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_agent_progress(
+pub async fn delete_agent_progress(
     request: DesktopIdJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "DELETE",
-        format!(
-            "/api/app/agent/progress/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "DELETE",
+            format!(
+                "/api/app/agent/progress/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2990,24 +3128,30 @@ pub async fn fetch_agent_questions(
 }
 
 #[tauri::command]
-pub fn create_agent_question(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/agent/questions", request, 60_000)
+pub async fn create_agent_question(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/questions", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn answer_agent_question(
+pub async fn answer_agent_question(
     request: DesktopIdJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/agent/questions/{}/answer",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/questions/{}/answer",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -3388,8 +3532,11 @@ pub async fn fetch_agent_notes() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn save_agent_notes(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/agent-notes", request, 60_000)
+pub async fn save_agent_notes(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent-notes", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -3553,33 +3700,39 @@ pub async fn abort_chat_attachment_upload(
 }
 
 #[tauri::command]
-pub fn fetch_optimization_proofs(
+pub async fn fetch_optimization_proofs(
     request: DesktopOptimizationProofsRequest,
 ) -> Result<serde_json::Value, String> {
-    let limit = request.limit.unwrap_or(8);
-    backend_json_request(
-        "GET",
-        format!("/api/app/optimization/proofs?limit={limit}"),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        let limit = request.limit.unwrap_or(8);
+        backend_json_request(
+            "GET",
+            format!("/api/app/optimization/proofs?limit={limit}"),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn fetch_optimization_proof(
+pub async fn fetch_optimization_proof(
     request: DesktopIdJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        format!(
-            "/api/app/optimization/proofs/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!(
+                "/api/app/optimization/proofs/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
