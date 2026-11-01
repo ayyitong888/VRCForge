@@ -17,8 +17,8 @@ namespace VRCForge.Editor
     // scanner reads (Int parameter + menu toggle values + FX Any-State Equals N),
     // then performs an ADD-ONLY edit:
     //   - assigns the next free int value N,
-    //   - aligns scene-default activeSelf for wardrobe-managed objects with the
-    //     Int parameter default, preserving that outfit and disabling alternates,
+    //   - sets the supplied new objects' scene defaults from the Int default,
+    //     preserving existing objects' scene state,
     //   - authors one clip that turns the new objects ON and "strips" the other
     //     outfits' objects OFF (default off-set = union of sibling on-objects),
     //   - adds an FX state (Write Defaults matched to the wardrobe convention) to
@@ -30,7 +30,7 @@ namespace VRCForge.Editor
     // wardrobe's Write Defaults + scene-default convention. Supports preview.
     [VRCForgeCommand(
         toolId: "vrc_add_wardrobe_outfit",
-        Summary = "Add one outfit to an existing int-exclusive wardrobe: assign next int value, align scene defaults for wardrobe-managed objects with the Int default selection, author a clip (own objects on, sibling objects off), add an FX state with Any-State Equals N (Write Defaults matched), and a menu toggle (nested SubMenu overflow). Add-only, never rewrites existing clips. Supports preview."
+        Summary = "Add one outfit to an existing int-exclusive wardrobe: assign next int value, set only the supplied objects' scene defaults from the Int default selection, author a clip (own objects on, sibling objects off), add an FX state with Any-State Equals N (Write Defaults matched), and a menu toggle (nested SubMenu overflow). Preserves existing objects' scene state and existing clips. Supports preview."
     )]
     public static class WardrobeOutfitWriter
     {
@@ -51,7 +51,7 @@ namespace VRCForge.Editor
             public bool? preview { get; set; } = false;
             [VRCForgeInput("Create a matching expression-menu toggle when capacity permits.", IsRequired = false)]
             public bool? addMenuToggle { get; set; } = true;
-            [VRCForgeInput("Align scene-default activeSelf for wardrobe-managed objects with the Int parameter default selection.", IsRequired = false)]
+            [VRCForgeInput("Set only objectPaths active when this new outfit is the Int default, otherwise inactive. False preserves all scene active states. Existing objects are never realigned.", IsRequired = false)]
             public bool? setObjectsDefaultOff { get; set; } = true;
             [VRCForgeInput("Permit a nested submenu when the menu is full.", IsRequired = false)]
             public bool? subMenuOverflow { get; set; } = true;
@@ -270,9 +270,9 @@ namespace VRCForge.Editor
                     offObjects = siblingOnObjects.Where(p => !onObjects.Contains(p)).OrderBy(p => p, StringComparer.Ordinal).ToList();
                 }
 
-                // Scene defaults are derived only from objects already owned by this
-                // int wardrobe's state clips, plus the newly supplied outfit roots.
-                // Keep the expression parameter's selected default outfit active.
+                // An existing clip's ON binding does not grant scene ownership:
+                // it may target a shared body or a separately controlled part.
+                // Only the supplied new outfit objects are in this scene edit.
                 var wardrobeDefaultValue = Mathf.RoundToInt(intParam.defaultValue);
                 var defaultWardrobeStateNames = existingEquals
                     .Where(item => item != null && item.value == wardrobeDefaultValue)
@@ -283,8 +283,7 @@ namespace VRCForge.Editor
                     .ToArray();
                 var sceneDefaultActiveByPath = setObjectsDefaultOff
                     ? BuildSceneDefaultActiveStates(
-                        wardrobeDefaultValue, newValue, onObjects,
-                        siblingOnObjects, existingEquals, stateByName)
+                        wardrobeDefaultValue, newValue, onObjects)
                     : new Dictionary<string, bool>(StringComparer.Ordinal);
                 var sceneDefaultChanges = new Dictionary<string, Transform>(StringComparer.Ordinal);
                 foreach (var desired in sceneDefaultActiveByPath)
@@ -308,10 +307,6 @@ namespace VRCForge.Editor
                 if (!writeDefaultsConsistent)
                 {
                     warnings.Add("Existing wardrobe states have inconsistent Write Defaults; new state uses " + newWriteDefaults + ". Verify exclusivity in-editor.");
-                }
-                if (newValue != wardrobeDefaultValue && defaultWardrobeStateNames.Length > 1)
-                {
-                    warnings.Add("Multiple existing FX states match the wardrobe Int default value; scene defaults preserve on-object roots from each matching state.");
                 }
                 if (!newWriteDefaults && offObjects.Count == 0 && siblingOnObjects.Count > 0)
                 {
@@ -745,35 +740,11 @@ namespace VRCForge.Editor
         private static Dictionary<string, bool> BuildSceneDefaultActiveStates(
             int defaultValue,
             int newValue,
-            IEnumerable<string> newOnObjects,
-            HashSet<string> siblingOnObjects,
-            List<EqualsInfo> existingEquals,
-            Dictionary<string, AnimatorState> stateByName)
+            IEnumerable<string> newOnObjects)
         {
-            var defaultOnObjects = new HashSet<string>(StringComparer.Ordinal);
-            if (defaultValue == newValue)
-            {
-                defaultOnObjects.UnionWith(newOnObjects ?? Enumerable.Empty<string>());
-            }
-            else
-            {
-                var defaultStateNames = (existingEquals ?? new List<EqualsInfo>())
-                    .Where(item => item != null && item.value == defaultValue)
-                    .Select(item => item.stateName ?? "")
-                    .Where(name => !string.IsNullOrWhiteSpace(name))
-                    .Distinct(StringComparer.Ordinal);
-                foreach (var stateName in defaultStateNames)
-                {
-                    if (stateByName != null && stateByName.TryGetValue(stateName, out var state) && state != null)
-                        defaultOnObjects.UnionWith(ReadClipOnObjects(state.motion as AnimationClip));
-                }
-            }
-
             var result = new Dictionary<string, bool>(StringComparer.Ordinal);
-            foreach (var path in (siblingOnObjects ?? new HashSet<string>(StringComparer.Ordinal)).OrderBy(item => item, StringComparer.Ordinal))
-                if (!string.IsNullOrWhiteSpace(path)) result[path] = defaultOnObjects.Contains(path);
             foreach (var path in newOnObjects ?? Enumerable.Empty<string>())
-                if (!string.IsNullOrWhiteSpace(path)) result[path] = defaultOnObjects.Contains(path);
+                if (!string.IsNullOrWhiteSpace(path)) result[path] = defaultValue == newValue;
             return result;
         }
 

@@ -950,7 +950,7 @@ _WARDROBE_PUBLIC_PROPERTIES = {
         "objectPaths": _WARDROBE_OBJECT_PATHS,
         "offObjectPaths": {**_WARDROBE_OBJECT_PATHS, "description": "Optional paths explicitly turned off by this outfit clip; array or single path."},
         "addMenuToggle": _WARDROBE_MENU_TOGGLE,
-        "setObjectsDefaultOff": _WARDROBE_DEFAULT_OFF,
+        "setObjectsDefaultOff": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Set only objectPaths active if the new outfit is the wardrobe Int default, otherwise inactive. False preserves all scene active states. Existing objects are unchanged; offObjectPaths affect only the new animation clip. Prefer a JSON boolean."},
         "subMenuOverflow": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Permit creating an overflow submenu when capacity is exhausted; prefer a JSON boolean."},
         "subMenuName": {"type": ["string", "null"], "default": "Wardrobe", "description": "Overflow submenu name."},
         "clipOutputDir": _WARDROBE_CLIP_DIRECTORY,

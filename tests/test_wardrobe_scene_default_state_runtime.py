@@ -1,4 +1,4 @@
-"""Execute the production managed-wardrobe scene default planner with a small Unity model."""
+"""Replay the real body-in-old-clip preview through the production scene planner."""
 import json
 import os
 from pathlib import Path
@@ -67,8 +67,8 @@ static class Probe {
             new EqualsInfo { value = 3, stateName = "CoatC" }
         };
         var actual = BuildSceneDefaultActiveStates(0, 4, new[] { "Custom/D" }, siblings, existing, states);
-        Check(actual, "Original/Default");
-        if (actual.ContainsKey("Avatar/Unmanaged")) throw new Exception("unmanaged avatar object entered plan");
+        Check(actual);
+        if (actual.Count != 1 || !actual.ContainsKey("Custom/D")) throw new Exception("existing scene object entered add-only plan");
         var selectingNew = BuildSceneDefaultActiveStates(4, 4, new[] { "Custom/D" }, siblings, existing, states);
         Check(selectingNew, "Custom/D");
         var ambiguous = new List<EqualsInfo> {
@@ -76,11 +76,23 @@ static class Probe {
             new EqualsInfo { value = 0, stateName = "CoatA" }
         };
         var preserveAmbiguous = BuildSceneDefaultActiveStates(0, 4, new[] { "Custom/D" }, siblings, ambiguous, states);
-        Check(preserveAmbiguous, "Original/Default", "Custom/A");
-        Console.WriteLine("PASS: managed alternates OFF, selected default preserved, new default honored, ambiguity preserved, unmanaged objects excluded");
+        Check(preserveAmbiguous);
+        if (preserveAmbiguous.Count != 1) throw new Exception("old ambiguous states expanded scene scope");
+        // Original preview mcpread_20261031_170818_906316_65125aff:
+        // Int default=0; an old value=4 clip enables the shared body.
+        // It is neither a newly supplied root nor explicitly requested OFF.
+        states["Emperor"] = new AnimatorState { motion = new AnimationClip { OnObjects = new[] { "Milltina_body" } } };
+        existing.Add(new EqualsInfo { value = 4, stateName = "Emperor" });
+        siblings.Add("Milltina_body");
+        var replay = BuildSceneDefaultActiveStates(0, 5, new[] { "Trench Coat" }, siblings, existing, states);
+        if (replay.ContainsKey("Milltina_body") || replay.ContainsKey("Original/Default")) throw new Exception("old body/clothing state was modified");
+        if (replay.Count != 1 || replay["Trench Coat"]) throw new Exception("new alternate was not OFF");
+        Console.WriteLine("PASS: original body preview replay, old scene scope preserved, new alternate OFF, new default ON");
     }
 }
 '''.replace("METHOD", method)
+    if 'HashSet<string> siblingOnObjects' not in method:
+        program = program.replace(', siblings, existing, states)', ')').replace(', siblings, ambiguous, states)', ')')
 
     dotnet = shutil.which("dotnet")
     base = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "dotnet"
