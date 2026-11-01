@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -51,10 +51,11 @@ export function DesktopTitlebar({ theme, onToggleTheme }: {
 
 
 export function DesktopTitlebarFrame({ version, theme, maximized = false, error = "", compact = false,
-  onToggleTheme, onMinimize, onMaximize, onClose,
+  onToggleTheme, onMinimize, onMaximize, onClose, children,
 }: {
   version: string; theme: ThemeMode; maximized?: boolean; error?: string; compact?: boolean;
   onToggleTheme?: () => void; onMinimize?: () => void; onMaximize?: () => void; onClose?: () => void;
+  children?: ReactNode;
 }) {
   const { t } = useTranslation();
   return (
@@ -64,6 +65,7 @@ export function DesktopTitlebarFrame({ version, theme, maximized = false, error 
         <span className="desktop-titlebar-version" data-app-version data-tauri-drag-region>{version}</span>
       </div>
       <span className="desktop-titlebar-space" data-tauri-drag-region />
+      {children}
       {error ? <span className="desktop-titlebar-error" role="alert">{error}</span> : null}
       {!compact ? <button type="button" className="desktop-titlebar-theme" aria-label={t("window.toggleTheme")}
         title={t("window.toggleTheme")} onClick={onToggleTheme}>
