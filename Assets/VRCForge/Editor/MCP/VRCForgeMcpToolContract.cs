@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.10.2";
-        internal const string ToolContractVersion = "193";
-        internal const int ToolCount = 105;
+        internal const string ToolContractVersion = "194";
+        internal const int ToolCount = 106;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -24,6 +24,7 @@ namespace VRCForge.Editor
                 { "vrc_inspect_editor_capabilities", "VRCForge.Editor.Generic.UnityEditorCapabilityDiscovery" },
                 { "vrc_save_asset", "VRCForge.Editor.Generic.UnityAssetSaveTool" },
                 { "vrc_inspect_material_properties", "VRCForge.Editor.Generic.UnityMaterialPropertyInspect" },
+                { "vrc_apply_diagnostic_fix", "VRCForge.Editor.NativeDiagnosticFixTool" },
                 { "vrc_execute_unity_editor_menu", "VRCForge.Editor.Generic.UnityEditorMenuExecuteTool" },
                 { "vrc_capture_scan_scope", "VRCForge.Editor.CaptureScanScopeTool" },
                 { "vrc_validate_scan_scope", "VRCForge.Editor.ValidateScanScopeTool" },

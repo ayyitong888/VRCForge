@@ -1300,3 +1300,6 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_add_outfit'] = {
 
 from unity_editor_extension_tools import EDITOR_MENU_SCHEMA
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_execute_unity_editor_menu"] = EDITOR_MENU_SCHEMA
+
+from unity_editor_extension_tools import DIAGNOSTIC_FIX_SCHEMA
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_apply_diagnostic_fix"] = DIAGNOSTIC_FIX_SCHEMA

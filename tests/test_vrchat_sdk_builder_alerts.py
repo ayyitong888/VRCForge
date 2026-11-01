@@ -62,7 +62,7 @@ def test_sdk_builder_alert_atom_never_opens_refreshes_selects_or_invokes() -> No
     assert "builder.SelectedAvatar" not in TOOL
     assert "selectedAvatarField.GetValue(null) as Component" in TOOL
     assert "showAction != null" in TOOL
-    assert "fixAction != null" in TOOL
+    assert "row.FixAction != null" in TOOL
     assert '["actionsExecuted"] = false' in TOOL
 
 
@@ -90,11 +90,11 @@ def test_sdk_builder_alert_atom_fails_closed_for_every_unavailable_boundary() ->
 def test_sdk_builder_alert_atom_preserves_scope_message_and_action_capabilities() -> None:
     assert '"project",\n                    panel' in TOOL
     assert '"avatar",\n                    descriptor' in TOOL
-    assert '["message"] = message' in TOOL
-    assert '["blocker"] = spec.Blocker' in TOOL
-    assert '["selectable"] = showAction != null' in TOOL
-    assert '["fixable"] = fixAction != null' in TOOL
-    assert '["autoFixAvailable"] = fixAction != null' in TOOL
+    assert '["message"] = row.Message' in TOOL
+    assert '["blocker"] = row.Spec.Blocker' in TOOL
+    assert '["selectable"] = row.ShowAction != null' in TOOL
+    assert '["fixable"] = row.FixAction != null' in TOOL
+    assert '["autoFixAvailable"] = row.FixAction != null' in TOOL
     assert 'new CollectionSpec("GUIErrors", "error", "blocking", "error", true)' in TOOL
     assert 'new CollectionSpec("GUIWarnings", "warning", "warning", "warning", false)' in TOOL
     assert 'new CollectionSpec("GUIStats", "performance", "warning", "performance", false, true)' in TOOL
@@ -113,6 +113,29 @@ def test_sdk_builder_alert_atom_accepts_only_a_proven_populated_avatar_cache() -
     assert "sdkReportedAvatarAlertCount != avatarCount" not in TOOL
     assert 'state["cacheAcceptedFromPopulatedCollections"] =' in TOOL
     assert 'payload["freshValidationClaimed"] = false;' in TOOL
+
+
+def test_sdk_native_auto_fix_is_a_current_row_selector_with_sdk_button_post_action_behavior() -> None:
+    assert '["fixActionAvailable"] = row.FixAction != null' in TOOL
+    assert '["autoFix"] = autoFix' in TOOL
+    assert '["source"] = "sdk", ["index"] = index, ["message"] = row.Message' in TOOL
+    assert '"available"] = row.FixAction != null' in TOOL
+    assert "EnumerateScopeIssues(layout, subject)" in TOOL
+    assert "EnumerateScopeIssues(layout, panel)" in TOOL
+    assert "EnumerateScopeIssues(layout, descriptor)" in TOOL
+    assert "layout.FixAction.FieldType != typeof(Action)" in TOOL
+    assert "The selected SDK alert row changed" in TOOL
+    assert "The selected SDK alert row is no longer present" in TOOL
+
+    adapter_path = ROOT / "Assets" / "VRCForge" / "Editor" / "NativeSdkFixActions.cs"
+    adapter = adapter_path.read_text(encoding="utf-8-sig")
+    assert "internal static Action Resolve(JObject selector)" in adapter
+    assert "VrchatSdkBuilderAlertsTool.ResolveNativeFixBinding(selector)" in adapter
+    assert "binding.FixAction();" in adapter
+    assert "EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());" in adapter
+    assert "EditorUtility.SetDirty(binding.Subject);" in adapter
+    assert '"RunValidations"' in adapter
+    assert "throw exception.InnerException;" in adapter
 
 
 def test_sdk_builder_alert_atom_does_not_invent_sdk_metadata() -> None:

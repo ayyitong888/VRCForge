@@ -240,6 +240,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_read_vrchat_sdk_builder_alerts",
             "vrcforge_read_recent_logs",
             "vrcforge_run_validation_report",
+            "vrcforge_preview_diagnostic_fix",
             "vrcforge_vision_audit",
         }
     ),
@@ -263,6 +264,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_install_vpm_package",
             "vrcforge_refresh_asset_database",
             "vrcforge_execute_unity_editor_menu",
+            "vrcforge_apply_diagnostic_fix",
             "vrcforge_register_project",
             "vrcforge_register_project_catalog",
             "vrcforge_rollback_project_catalog_registration",

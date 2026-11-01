@@ -802,6 +802,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_import_outfit_package",
         "vrcforge_refresh_asset_database",
         "vrcforge_execute_unity_editor_menu",
+        "vrcforge_apply_diagnostic_fix",
         "vrcforge_add_component",
         "vrcforge_remove_component",
         "vrcforge_set_property",
@@ -850,6 +851,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
 )
 VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
     {
+        "vrc_apply_diagnostic_fix",
         "vrc_apply_blendshapes",
         "vrc_apply_material_tuning",
         "vrc_apply_clothing_fx",
@@ -21199,7 +21201,7 @@ def prepare_authoritative_unity_checkpoint_sync(
         return {"ok": True, "projectPath": str(project_root),
                 "mode": "read_only_disk_snapshot", "archiveAssetPaths": [asset_path],
                 "archiveScopeReason": "single_model_importer_asset_and_meta_only"}
-    if checkpoint_target in {"vrcforge_refresh_asset_database", "vrcforge_execute_unity_editor_menu"}:
+    if checkpoint_target in {"vrcforge_refresh_asset_database", "vrcforge_execute_unity_editor_menu", "vrcforge_apply_diagnostic_fix"}:
         # Package resolution may reinstall/remove packages and importer repair
         # may update metadata. Their existing conditional policy requires the
         # full project snapshot; no exact asset list can describe that scope.
@@ -24522,6 +24524,14 @@ def inspect_material_properties_sync(params: dict[str, Any]) -> dict[str, Any]:
         settings, "vrc_inspect_material_properties", request)), "inspect material properties")
 
 
+def diagnostic_fix_sync(params: dict[str, Any], *, preview: bool = False) -> dict[str, Any]:
+    from unity_editor_extension_tools import diagnostic_fix_request
+    request = diagnostic_fix_request(params, preview=preview)
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    return ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(
+        settings, "vrc_apply_diagnostic_fix", request, preserve_tool_error=True)), "native diagnostic fix")
+
+
 def execute_unity_editor_menu_sync(params: dict[str, Any]) -> dict[str, Any]:
     from unity_editor_extension_tools import editor_menu_request
     request = editor_menu_request(params)
@@ -27509,8 +27519,9 @@ def register_agent_gateway_tools() -> None:
         preview_unity_constraint_conversion_sync,
     )
     AGENT_GATEWAY.register_tool("vrcforge_get_property", f"When to use: {component_configuration_guidance} read a bound component using propertyPath for a direct field/property, or serializedPropertyPath for a nested serialized leaf or Array.data[n] element; object references retain exact identities. Use queries for one sample of simple properties across bound components. When NOT to use: do not write, mix scalar and batch arguments, or use nested paths inside queries. Negative example: assigning a renderer value requires the approved setter.", "read/debug", read_component_property_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_diagnostic_fix", "When to use: resolve one autoFix.action from the current NDMF or SDK report without invoking it; retain its original message and actual targets. Native callback scope is opaque. When NOT to use: do not guess actions or treat a retained NDMF report as a fresh build. Negative example: availability does not prove the action will resolve the issue.", "plan/preview", lambda params: diagnostic_fix_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_inspect_editor_capabilities", "When to use: discover loaded Unity plugin MenuItem metadata or open Editor windows before selecting an exact entry point. When NOT to use: do not invoke callbacks or treat discovery as completed setup. Negative example: triggering a listed setup menu requires approval.", "read/debug", inspect_editor_capabilities_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_inspect_material_properties", "When to use: inspect actual Shader property names, types and values of one exact material, including dirty or variant assets. When NOT to use: do not assign values or infer fields from plugin names. Negative example: enabling a second texture layer requires the approved material writer after inspection.", "read/debug", inspect_material_properties_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_inspect_material_properties", "When to use: read actual serialized property names, types, and values for one exact Assets/*.mat, including scalar/color/texture fields and Stencil values; use search and offset/limit to narrow and page. When NOT to use: do not assign values, infer fields from plugin names, or claim GPU/rendered state. Negative example: to check a material's stencil reference, inspect its exact .mat and follow the returned page; do not infer it from the shader or material name.", "read/debug", inspect_material_properties_sync)
     AGENT_GATEWAY.register_tool(
         "vrcforge_scan_inbound_reference_closure",
         "When to use: prove which serialized object references, animation binding paths, framework paths, and PhysBone/Contact parameter consumers still point into exact scene roots or components before cleanup. "
@@ -28242,6 +28253,13 @@ def register_agent_gateway_tools() -> None:
         verification_profile="persisted_scene_write_console",
         verification_prepare_handler=prepare_persisted_scene_console_verification,
         verification_finalize_handler=finalize_persisted_scene_console_verification,
+    )
+    from unity_editor_extension_tools import diagnostic_fix_request
+    register_write_handler(
+        "vrcforge_apply_diagnostic_fix",
+        "When to use: after an explicit user instruction and its quote, invoke one native autoFix.action selected from the NDMF or SDK report through approval and a full-project checkpoint. Preserve the original message and actual associated targets. Callback return is not issue resolution; SDK runs its original validation refresh, NDMF requires a separately authorized build to recheck. When NOT to use: do not automatically fix all warnings, guess callback scope, upload, or replace native fixes with custom algorithms. Negative example: an exception can leave partial effects; preserve the scene and checkpoint for explicit recovery, do not automatically roll back.",
+        "high", diagnostic_fix_sync,
+        approved_execution_plan_builder=lambda args: [("vrc_apply_diagnostic_fix", diagnostic_fix_request(args))],
     )
     from unity_editor_extension_tools import editor_menu_request
     register_write_handler(

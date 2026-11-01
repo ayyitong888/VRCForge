@@ -30,8 +30,8 @@ def test_tool_blocks_keep_one_definition_and_existing_exports() -> None:
         assert getattr(agent_gateway, name) is getattr(external_mcp_tool_blocks, name)
         node = definitions[name]
         if name in {"EXTERNAL_MCP_READ_TOOL_BLOCKS", "EXTERNAL_MCP_WRITE_TOOL_BLOCKS"}:
-            extensions = ({"vrcforge_inspect_editor_capabilities", "vrcforge_inspect_material_properties", "vrcforge_preview_model_import_settings"}
-                          if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS" else {"vrcforge_execute_unity_editor_menu", "vrcforge_set_model_import_settings"})
+            extensions = ({"vrcforge_inspect_editor_capabilities", "vrcforge_inspect_material_properties", "vrcforge_preview_model_import_settings", "vrcforge_preview_diagnostic_fix"}
+                          if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS" else {"vrcforge_execute_unity_editor_menu", "vrcforge_set_model_import_settings", "vrcforge_apply_diagnostic_fix"})
             memberships = getattr(external_mcp_tool_blocks, name)
             assert extensions <= set().union(*memberships.values())
             class _RemoveReviewedEditorExtensions(ast.NodeTransformer):

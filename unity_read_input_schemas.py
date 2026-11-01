@@ -1171,3 +1171,6 @@ UNITY_READ_TOOL_INPUT_SCHEMAS.update({
     "vrcforge_inspect_editor_capabilities": EDITOR_CAPABILITIES_SCHEMA,
     "vrcforge_inspect_material_properties": MATERIAL_PROPERTIES_SCHEMA,
 })
+
+from unity_editor_extension_tools import DIAGNOSTIC_FIX_SCHEMA
+UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_diagnostic_fix"] = DIAGNOSTIC_FIX_SCHEMA

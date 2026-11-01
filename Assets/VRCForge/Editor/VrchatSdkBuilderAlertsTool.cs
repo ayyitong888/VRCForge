@@ -68,6 +68,22 @@ namespace VRCForge.Editor
                 new Dictionary<string, IDictionary>(StringComparer.Ordinal);
         }
 
+        internal sealed class NativeFixBinding
+        {
+            internal Action FixAction;
+            internal Object Subject;
+            internal VRCSdkControlPanel Panel;
+        }
+
+        private sealed class ScopedIssue
+        {
+            internal CollectionSpec Spec;
+            internal string Message;
+            internal Delegate ShowAction;
+            internal Action FixAction;
+            internal object Rating;
+        }
+
         private static readonly CollectionSpec[] CollectionOrder =
         {
             new CollectionSpec("GUIErrors", "error", "blocking", "error", true),
@@ -338,7 +354,7 @@ namespace VRCForge.Editor
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (layout.IssueText == null || layout.IssueText.FieldType != typeof(string)
                 || layout.ShowAction == null || !typeof(Delegate).IsAssignableFrom(layout.ShowAction.FieldType)
-                || layout.FixAction == null || !typeof(Delegate).IsAssignableFrom(layout.FixAction.FieldType)
+                || layout.FixAction == null || layout.FixAction.FieldType != typeof(Action)
                 || layout.PerformanceRating == null || !layout.PerformanceRating.FieldType.IsEnum)
             {
                 reason = "The SDK Builder Issue field layout is unsupported by this reader.";
@@ -375,83 +391,162 @@ namespace VRCForge.Editor
             JObject target)
         {
             var startCount = alerts.Count;
+            foreach (var row in EnumerateScopeIssues(layout, subject))
+            {
+                var index = alerts.Count;
+                JToken action = row.FixAction == null
+                    ? (JToken)JValue.CreateNull()
+                    : new JObject { ["source"] = "sdk", ["index"] = index, ["message"] = row.Message };
+                var autoFix = new JObject
+                {
+                    ["available"] = row.FixAction != null,
+                    ["action"] = action,
+                };
+                alerts.Add(new JObject
+                {
+                    ["index"] = index,
+                    ["scope"] = scope,
+                    ["category"] = row.Spec.Category,
+                    ["severity"] = row.Spec.Severity,
+                    ["iconKind"] = row.Spec.IconKind,
+                    ["performanceRating"] = row.Spec.SortByPerformanceRating && row.Rating != null
+                        ? (JToken)row.Rating.ToString()
+                        : JValue.CreateNull(),
+                    ["title"] = JValue.CreateNull(),
+                    ["titleAvailable"] = false,
+                    ["message"] = row.Message,
+                    ["target"] = target.DeepClone(),
+                    ["blocker"] = row.Spec.Blocker,
+                    ["selectable"] = row.ShowAction != null,
+                    ["fixable"] = row.FixAction != null,
+                    ["fixActionAvailable"] = row.FixAction != null,
+                    ["autoFixAvailable"] = row.FixAction != null,
+                    ["autoFix"] = autoFix,
+                    ["actionsExecuted"] = false,
+                    ["source"] = JValue.CreateNull(),
+                    ["sourceAvailable"] = false,
+                    ["sdkStableId"] = JValue.CreateNull(),
+                    ["sdkStableIdAvailable"] = false,
+                });
+                categoryCounts[row.Spec.Category]++;
+            }
+            return alerts.Count - startCount;
+        }
+
+        private static IEnumerable<ScopedIssue> EnumerateScopeIssues(AlertLayout layout, Object subject)
+        {
             foreach (var spec in CollectionOrder)
             {
                 var dictionary = layout.Collections[spec.FieldName];
-                if (!dictionary.Contains(subject))
-                {
-                    continue;
-                }
+                if (!dictionary.Contains(subject)) continue;
                 var rawList = dictionary[subject] as IEnumerable;
                 if (rawList == null)
-                {
-                    throw new InvalidOperationException(
-                        "The SDK Builder alert cache field '" + spec.FieldName + "' contains an unsupported value.");
-                }
+                    throw new InvalidOperationException("The SDK Builder alert cache field '" + spec.FieldName + "' contains an unsupported value.");
 
                 var issues = new List<object>();
                 foreach (var rawIssue in rawList)
                 {
                     if (rawIssue == null || !layout.IssueType.IsInstanceOfType(rawIssue))
-                    {
-                        throw new InvalidOperationException(
-                            "The SDK Builder alert cache contains an unsupported Issue value.");
-                    }
+                        throw new InvalidOperationException("The SDK Builder alert cache contains an unsupported Issue value.");
                     issues.Add(rawIssue);
                 }
                 if (spec.SortByPerformanceRating)
-                {
-                    issues = issues
-                        .OrderByDescending(issue => ReadRatingValue(layout, issue))
-                        .ToList();
-                }
+                    issues = issues.OrderByDescending(issue => ReadRatingValue(layout, issue)).ToList();
 
                 foreach (var issue in issues)
                 {
                     var message = layout.IssueText.GetValue(issue) as string;
-                    if (string.IsNullOrWhiteSpace(message))
-                    {
-                        continue;
-                    }
+                    if (string.IsNullOrWhiteSpace(message)) continue;
                     var showAction = layout.ShowAction.GetValue(issue);
-                    var fixAction = layout.FixAction.GetValue(issue);
+                    var fixValue = layout.FixAction.GetValue(issue);
                     if ((showAction != null && !(showAction is Delegate))
-                        || (fixAction != null && !(fixAction is Delegate)))
+                        || (fixValue != null && !(fixValue is Action)))
+                        throw new InvalidOperationException("The SDK Builder alert action capability has an unsupported layout.");
+                    yield return new ScopedIssue
                     {
-                        throw new InvalidOperationException(
-                            "The SDK Builder alert action capability has an unsupported layout.");
-                    }
-
-                    var rating = layout.PerformanceRating.GetValue(issue);
-                    var alert = new JObject
-                    {
-                        ["index"] = alerts.Count,
-                        ["scope"] = scope,
-                        ["category"] = spec.Category,
-                        ["severity"] = spec.Severity,
-                        ["iconKind"] = spec.IconKind,
-                        ["performanceRating"] = spec.SortByPerformanceRating && rating != null
-                            ? (JToken)rating.ToString()
-                            : JValue.CreateNull(),
-                        ["title"] = JValue.CreateNull(),
-                        ["titleAvailable"] = false,
-                        ["message"] = message,
-                        ["target"] = target.DeepClone(),
-                        ["blocker"] = spec.Blocker,
-                        ["selectable"] = showAction != null,
-                        ["fixable"] = fixAction != null,
-                        ["autoFixAvailable"] = fixAction != null,
-                        ["actionsExecuted"] = false,
-                        ["source"] = JValue.CreateNull(),
-                        ["sourceAvailable"] = false,
-                        ["sdkStableId"] = JValue.CreateNull(),
-                        ["sdkStableIdAvailable"] = false,
+                        Spec = spec,
+                        Message = message,
+                        ShowAction = showAction as Delegate,
+                        FixAction = fixValue as Action,
+                        Rating = layout.PerformanceRating.GetValue(issue),
                     };
-                    alerts.Add(alert);
-                    categoryCounts[spec.Category]++;
                 }
             }
-            return alerts.Count - startCount;
+        }
+
+        internal static NativeFixBinding ResolveNativeFixBinding(JObject parameters)
+        {
+            if (parameters == null) throw new ArgumentNullException(nameof(parameters));
+            CheckpointPrepareTool.ValidateProject(parameters);
+            var source = RequiredText(parameters, "source");
+            var indexToken = parameters["index"];
+            var message = parameters["message"]?.Type == JTokenType.String ? (string)parameters["message"] : null;
+            var avatarPath = RequiredText(parameters, "avatarPath");
+            if (!string.Equals(source, "sdk", StringComparison.Ordinal)
+                || indexToken == null || indexToken.Type != JTokenType.Integer || indexToken.Value<int>() < 0
+                || string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(avatarPath))
+                throw new ArgumentException("SDK Auto Fix selection requires source='sdk', non-negative index, exact message, projectPath and avatarPath.");
+
+            var panel = VRCSdkControlPanel.window;
+            if (panel == null) throw new InvalidOperationException("The VRChat SDK panel is not open; reread SDK diagnostics.");
+            IVRCSdkAvatarBuilderApi builder = null;
+            if (!VRCSdkControlPanel.TryGetBuilder(out builder) || builder == null)
+                throw new InvalidOperationException("The VRChat SDK Avatar Builder is unavailable; reread SDK diagnostics.");
+            VRCSdkControlPanel boundPanel;
+            GameObject selectedAvatar;
+            string builderStateReason;
+            if (!TryReadBuilderState(builder, out boundPanel, out selectedAvatar, out builderStateReason)
+                || !ReferenceEquals(panel, boundPanel))
+                throw new InvalidOperationException(string.IsNullOrEmpty(builderStateReason)
+                    ? "The active SDK Avatar Builder is not bound to the open SDK panel; reread SDK diagnostics."
+                    : builderStateReason);
+
+            var descriptor = VrchatAvatarUploadShared.ResolveExactAvatar(avatarPath);
+            if (selectedAvatar == null || selectedAvatar != descriptor.gameObject)
+                throw new InvalidOperationException("The SDK Builder selection changed; reread SDK diagnostics and select the current avatar.");
+            AlertLayout layout;
+            string layoutReason;
+            if (!TryReadLayout(panel, out layout, out layoutReason))
+                throw new InvalidOperationException(layoutReason);
+
+            var requestedIndex = indexToken.Value<int>();
+            var index = 0;
+            foreach (var row in EnumerateScopeIssues(layout, panel))
+            {
+                if (index++ == requestedIndex)
+                    return MatchNativeFix(row, message, panel);
+            }
+            foreach (var row in EnumerateScopeIssues(layout, descriptor))
+            {
+                if (index++ == requestedIndex)
+                    return MatchNativeFix(row, message, descriptor);
+            }
+            throw new InvalidOperationException("The selected SDK alert row is no longer present; reread SDK diagnostics.");
+        }
+
+        private static NativeFixBinding MatchNativeFix(ScopedIssue row, string message, Object subject)
+        {
+            if (!string.Equals(row.Message, message, StringComparison.Ordinal))
+                throw new InvalidOperationException("The selected SDK alert row changed; reread SDK diagnostics and select the current action.");
+            if (row.FixAction == null)
+                throw new InvalidOperationException("The selected SDK alert no longer has a native Auto Fix action; reread SDK diagnostics.");
+            var panel = VRCSdkControlPanel.window;
+            var refresh = FindInstanceMethod(panel == null ? null : panel.GetType(), "RunValidations");
+            if (refresh == null || refresh.GetParameters().Length != 0)
+                throw new InvalidOperationException("The SDK panel cannot refresh Builder validations; the native action was not invoked.");
+            return new NativeFixBinding { FixAction = row.FixAction, Subject = subject, Panel = panel };
+        }
+
+        internal static MethodInfo FindInstanceMethod(Type type, string methodName)
+        {
+            while (type != null)
+            {
+                var method = type.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public
+                    | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (method != null) return method;
+                type = type.BaseType;
+            }
+            return null;
         }
 
         private static int ReadRatingValue(AlertLayout layout, object issue)

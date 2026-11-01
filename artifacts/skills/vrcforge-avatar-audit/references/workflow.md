@@ -34,6 +34,8 @@
 
 检查 compile diagnostics、validation report 与 build readiness，区分已经读回的证据、仅推断项和 SDK 私有面板无法证明的内容。
 
+NDMF 用 `vrcforge_get_ndmf_errors` 读取最后保留的构建报告；SDK Builder 用 `vrcforge_read_vrchat_sdk_builder_alerts` 读取当前面板缓存。保留原始提示、实际关联对象或路径、`autoFix.available` 和 `autoFix.action`；未给出的具体资产/回调影响范围保持未知。可以用 `vrcforge_preview_diagnostic_fix` 解析一条已读取的原生 action，但审计阶段不执行。用户另行明确要求修复时，引用其指令，经批准和全项目 checkpoint 调用 `vrcforge_apply_diagnostic_fix`，复制原 action 的 source/index/message，SDK 另带实际 avatarPath。不得按插件名/标题映射修复、重写原生修复算法或自动处理全部告警。SDK 会沿用原按钮的 RunValidations 并返回一次缓存读回；NDMF 不自动 build/Play，旧报告仍是旧报告，`needsRecheck` 必须保留。回调返回不等于问题消失；异常保留现场和 checkpoint，不自动回滚，不自动上传。
+
 ## 5. 完整验收和停止条件
 
 输出目标身份、现有系统、缺口、异常和验收结果；不创建 checkpoint、不执行 Unity 写入、不上传，也不把 inspection-only 请求升级为修改。

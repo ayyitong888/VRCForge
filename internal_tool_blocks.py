@@ -137,6 +137,8 @@ def canonical_tool_block_description(block_id: str) -> str:
 _EXACT_TOOL_OWNERS: dict[str, str] = {}
 for _runtime_name, _owner in {
     "vrcforge_inspect_editor_capabilities": "project_environment/assets_packages",
+    "vrcforge_preview_diagnostic_fix": "diagnostics_build/build_runtime",
+    "vrcforge_apply_diagnostic_fix": "diagnostics_build/build_runtime",
     "vrcforge_execute_unity_editor_menu": "project_environment/assets_packages",
     "vrcforge_inspect_material_properties": "appearance/materials_shaders",
     "vrcforge_avatar_upload_readiness": "diagnostics_build/build_runtime",

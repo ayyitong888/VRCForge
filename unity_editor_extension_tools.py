@@ -51,3 +51,33 @@ EDITOR_MENU_SCHEMA = {
                                      "items": {"type": "string", "minLength": 1}},
     },
 }
+
+
+def diagnostic_fix_request(arguments: dict[str, Any], *, preview: bool = False) -> dict[str, Any]:
+    source, index, message = (arguments.get(key) for key in ("source", "index", "message"))
+    project = arguments.get("projectPath")
+    if source not in {"ndmf", "sdk"} or isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise ValueError("Select source and index from the current report autoFix.action.")
+    if not isinstance(message, str) or not message or not isinstance(project, str) or not project.strip():
+        raise ValueError("The exact original message and projectPath are required.")
+    request = {"projectPath": project, "source": source, "index": index, "message": message, "preview": preview}
+    if source == "sdk":
+        avatar = arguments.get("avatarPath")
+        if not isinstance(avatar, str) or not avatar.strip():
+            raise ValueError("SDK Auto Fix requires the report's exact selected avatarPath.")
+        request["avatarPath"] = avatar
+    return request
+
+
+DIAGNOSTIC_FIX_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["projectPath", "source", "index", "message"],
+    "properties": {
+        "projectPath": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "enum": ["ndmf", "sdk"]},
+        "index": {"type": "integer", "minimum": 0},
+        "message": {"type": "string", "minLength": 1, "description": "Exact original autoFix.action.message; do not summarize."},
+        "avatarPath": {"type": "string", "minLength": 1, "description": "Required for SDK: exact selected avatar hierarchy path from the report."},
+    },
+    "allOf": [{"if": {"properties": {"source": {"const": "sdk"}}}, "then": {"required": ["avatarPath"]}}],
+}
