@@ -110,7 +110,7 @@ try {
     }
 
     if ([string]::IsNullOrWhiteSpace($PayloadDownloadUrl)) {
-        $PayloadDownloadUrl = "https://github.com/ayyitong888/VRCForge/releases/download/v$Version/VRCForge_Windows_x64_$Version.zip"
+        $PayloadDownloadUrl = "https://github.com/ayyitong888/VRCForge/releases/download/v$Version/VRCForge_Windows_x64_$Version.tar.zst"
         Write-Host "PayloadDownloadUrl (baked into the web installer only): $PayloadDownloadUrl"
     }
 

@@ -261,7 +261,7 @@ function Assert-GitHubReleaseSnapshot {
         @($remoteAssetNames | Sort-Object -Unique -CaseSensitive).Count -ne $RequiredArtifactNames.Count -or
         @(Compare-Object -ReferenceObject $RequiredArtifactNames -DifferenceObject $remoteAssetNames -CaseSensitive).Count -ne 0
     ) {
-        throw "GitHub Release must contain exactly the four manifest-bound assets plus release-manifest.json after upload."
+        throw "GitHub Release must contain exactly the manifest-bound assets plus release-manifest.json after upload."
     }
     foreach ($artifactName in $RequiredArtifactNames) {
         $remoteEntries = @($remoteAssets | Where-Object { [string]$_.name -ceq $artifactName })
@@ -340,7 +340,10 @@ try {
     $offlineInstaller = Join-Path $resolvedReleaseDir "VRCForge_Offline_Installer_x64.exe"
     $payloadZip = Join-Path $resolvedReleaseDir "VRCForge_Windows_x64_$Version.zip"
     $unityPackage = Join-Path $resolvedReleaseDir "VRCForge.unitypackage"
-    $sourceArtifacts = @($unityPackage, $webInstaller, $offlineInstaller, $payloadZip)
+    $webPayloadArchive = Join-Path $resolvedReleaseDir "VRCForge_Windows_x64_$Version.tar.zst"
+    $avatarSkillSourceManifest = Get-Content -LiteralPath (Join-Path $repoRoot "artifacts\skills\vrcforge-avatar-slime\manifest.json") -Raw | ConvertFrom-Json
+    $avatarSkillArchive = Join-Path $resolvedReleaseDir ("VRCForge_Avatar_Slime_" + [string]$avatarSkillSourceManifest.version + ".vsk")
+    $sourceArtifacts = @($unityPackage, $webInstaller, $offlineInstaller, $payloadZip, $webPayloadArchive, $avatarSkillArchive)
     foreach ($artifact in $sourceArtifacts) {
         if (-not (Test-Path -LiteralPath $artifact)) {
             throw "Missing release artifact: $artifact"
@@ -406,19 +409,11 @@ try {
     $webPayloadDownloadUrl = [string](Get-RequiredProperty -InputObject $webPayload -Name "downloadUrl" -Context "Release manifest webPayload")
     $webPayloadLength = [uint64](Get-RequiredProperty -InputObject $webPayload -Name "length" -Context "Release manifest webPayload")
     $webPayloadSha256 = [string](Get-RequiredProperty -InputObject $webPayload -Name "sha256" -Context "Release manifest webPayload")
-    $webPayloadHelperSha256 = [string](Get-RequiredProperty -InputObject $webPayload -Name "helperSha256" -Context "Release manifest webPayload")
-    $expectedWebPayloadDownloadUrl = "https://github.com/ayyitong888/VRCForge/releases/download/v$Version/VRCForge_Windows_x64_$Version.zip"
-    $expectedWebPayloadHelperSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repoRoot "installer\VRCForge_WebPayload.ps1")).Hash.ToLowerInvariant()
-    $actualPayloadLength = [uint64](Get-Item -LiteralPath $payloadZip -Force).Length
-    if (
-        $webPayloadDownloadUrl -cne $expectedWebPayloadDownloadUrl -or
-        $webPayloadLength -le 0 -or
-        $webPayloadLength -ne $actualPayloadLength -or
-        $webPayloadSha256 -notmatch "^[0-9a-fA-F]{64}$" -or
-        $webPayloadHelperSha256 -notmatch "^[0-9a-fA-F]{64}$" -or
-        $webPayloadHelperSha256.ToLowerInvariant() -cne $expectedWebPayloadHelperSha256
-    ) {
-        throw "Release manifest web payload provenance is not bound to the exact official asset and secured helper."
+    $webPayloadFormat = [string](Get-RequiredProperty -InputObject $webPayload -Name "format" -Context "Release manifest webPayload")
+    $expectedWebPayloadDownloadUrl = "https://github.com/ayyitong888/VRCForge/releases/download/v$Version/VRCForge_Windows_x64_$Version.tar.zst"
+    $actualPayloadLength = [uint64](Get-Item -LiteralPath $webPayloadArchive -Force).Length
+    if ($webPayloadFormat -cne "tar.zst" -or $webPayloadDownloadUrl -cne $expectedWebPayloadDownloadUrl -or $webPayloadLength -ne $actualPayloadLength -or $webPayloadLength -le 0) {
+        throw "Release manifest web payload must describe the official versioned tar.zst asset."
     }
 
     $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vrcforge_release_publish_" + [System.Guid]::NewGuid().ToString("N"))
@@ -444,14 +439,14 @@ try {
         @($manifestArtifactNames | Sort-Object -Unique -CaseSensitive).Count -ne $manifestBoundArtifactNames.Count -or
         @(Compare-Object -ReferenceObject $manifestBoundArtifactNames -DifferenceObject $manifestArtifactNames -CaseSensitive).Count -ne 0
     ) {
-        throw "Release manifest must contain exactly the four publishable artifact names."
+        throw "Release manifest must contain exactly the publishable artifact names."
     }
-    $payloadManifestEntry = @($manifestArtifacts | Where-Object { [string]$_.name -ceq ([System.IO.Path]::GetFileName($payloadZip)) })
+    $payloadManifestEntry = @($manifestArtifacts | Where-Object { [string]$_.name -ceq ([System.IO.Path]::GetFileName($webPayloadArchive)) })
     if (
         $payloadManifestEntry.Count -ne 1 -or
         ([string]$payloadManifestEntry[0].sha256).ToLowerInvariant() -cne $webPayloadSha256.ToLowerInvariant()
     ) {
-        throw "Release manifest web payload digest must match the portable payload artifact digest."
+        throw "Release manifest web payload digest must match the compressed setup payload artifact digest."
     }
     foreach ($artifact in $artifacts | Where-Object { [System.IO.Path]::GetFileName($_) -cne $manifestArtifactName }) {
         $artifactName = [System.IO.Path]::GetFileName($artifact)

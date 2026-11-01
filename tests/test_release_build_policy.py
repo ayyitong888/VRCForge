@@ -805,57 +805,6 @@ def test_publish_path_requires_version_bound_release_notes_and_reads_them_back()
     assert "not code-signed" in notes
 
 
-def test_release_build_binds_web_payload_to_exact_official_url_and_length() -> None:
-    source = _build_script()
-
-    assert '"https://github.com/ayyitong888/VRCForge/releases/download/v$Version/VRCForge_Windows_x64_$Version.zip"' in source
-    assert "PayloadDownloadUrl must exactly match the official version-bound release asset URL" in source
-    assert '"/DPAYLOAD_LENGTH=$payloadLength"' in source
-    assert '"/DWEB_PAYLOAD_HELPER=$payloadWebPayloadHelper"' in source
-    assert '"/DWEB_PAYLOAD_HELPER_SHA256=$webPayloadHelperSha256"' in source
-    assert '"/DPAYLOAD_ZIP=$payloadZip"' in source
-    assert "VRCForge_WebPayload.ps1" in source
-    assert "Assert-MakeNsisVersion" in source
-    assert "NSIS 3.12 or newer is required" in source
-    assert "source or snapshot changed while the installers were being compiled." in source
-
-
-def test_installers_execute_only_the_protected_hash_checked_helper() -> None:
-    helper = (REPO_ROOT / "installer" / "VRCForge_WebPayload.ps1").read_text(encoding="utf-8")
-    build = _build_script()
-    installers = [
-        (REPO_ROOT / "installer" / "VRCForge_Offline_Installer_x64.nsi").read_text(encoding="utf-8"),
-        (REPO_ROOT / "installer" / "VRCForge_Web_Installer_x64.nsi").read_text(encoding="utf-8"),
-    ]
-
-    assert 'Copy-Item -LiteralPath $webPayloadHelper -Destination $payloadWebPayloadHelper -Force' in build
-    assert '$payloadWebPayloadHelperSha256 -cne $webPayloadHelperSha256' in build
-    assert "changed while it was being copied into the payload" in build
-    assert "Assert-InstallNotRunning" in helper
-    assert "Assert-NoReparseTree" in helper
-    assert "Get-InstallSiblingPath \"Stage\"" in helper
-    assert "Get-InstallSiblingPath \"Backup\"" in helper
-    assert "prior installation could not be restored" in helper
-    assert "FileShare]::None" in helper
-    for installer in installers:
-        assert '-File "$PLUGINSDIR' not in installer
-        assert "taskkill" not in installer
-        assert "WEB_PAYLOAD_GZIP_BASE64" not in installer
-        assert "EncodedCommand" not in installer
-        assert 'File "$PLUGINSDIR\\VRCForge_WebPayload.ps1"' not in installer
-        assert "GetTempFileName" in installer
-        assert "icacls.exe" in installer
-        assert "Get-FileHash -Algorithm SHA256" in installer
-        assert "$$a=(Get-FileHash" in installer
-        assert "if($$a -ieq" in installer
-        assert "if($$a -ceq" not in installer
-        assert 'DefineProtectedHelperFunctions "un."' in installer
-        assert "Call ValidateInstallBoundary" in installer
-        assert "Call un.ValidateInstallBoundary" in installer
-        assert "ExecutionPolicy Bypass" in installer
-    assert 'File /oname=payload.zip "${PAYLOAD_ZIP}"' in installers[0]
-
-
 def test_release_payload_bundles_public_docs_and_requires_all_license_notices() -> None:
     source = _build_script()
     payload_smoke = (
@@ -944,16 +893,6 @@ def test_packaged_public_docs_track_current_release_identity() -> None:
     assert f"releases/download/v{version}/VRCForge_Windows_x64_{version}.zip" in packaging_guide
     assert f"# VRCForge {version}" in release_notes
     assert "Windows x64" in release_notes
-
-
-def test_release_publish_rechecks_web_payload_manifest_binding() -> None:
-    source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
-
-    assert 'Get-RequiredProperty -InputObject $manifest -Name "webPayload"' in source
-    assert "$webPayloadDownloadUrl -cne $expectedWebPayloadDownloadUrl" in source
-    assert "$webPayloadLength -ne $actualPayloadLength" in source
-    assert "$webPayloadHelperSha256.ToLowerInvariant() -cne $expectedWebPayloadHelperSha256" in source
-    assert "web payload digest must match the portable payload artifact digest" in source
 
 
 def test_strict_evidence_attestor_stays_outside_candidate_payload() -> None:
