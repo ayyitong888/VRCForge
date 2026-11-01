@@ -34,18 +34,19 @@ VRCForge 是给 VRChat Avatar 创作者使用的开源改模工具。你可以�
 
 升级时也请同时更新 App 和 Unity 插件。
 
-## 三步开始
+## 第一次使用
 
-1. **备份工程，安装 App。** 安装后先不要启动 App。
-2. **导入 Unity 插件。** 在目标 Unity 2022.3 LTS 工程中 Import All，按设置窗口提示补齐 VRChat Avatar SDK 等依赖，等待编译完成并出现 `[VRCForge MCP] Core Ready`。
-3. **打开 App，选择工程和 Avatar。** 配置下方一种 AI 入口，先只读检查模型，再尝试一个小范围修改并查看效果。
+1. **备份工程，运行 App 安装包。** 按安装窗口提示完成安装。
+2. **打开 Unity 工程，导入插件。** 在 Unity 中选择 `Assets > Import Package > Custom Package…`，打开下载的 `VRCForge.unitypackage`，点击 **Import All**。如提示缺少 VRChat Avatar SDK，按提示补齐，等 Unity 编译完成。
+3. **打开 VRCForge，选择这个工程和 Avatar。** 保持 Unity 开着，确认 App 显示已连接。列表里没有工程时，用「新项目」添加工程文件夹（包含 `Assets` 和 `ProjectSettings` 的那层）。
+4. **选下面一种 AI 方式。** 连好后先试一句：“检查这个模型，先不要修改。”
 
-新建工程可用 [Creator Companion（VCC）](https://vcc.docs.vrchat.com/guides/getting-started/) 或 ALCOM；已有工程无需更换管理工具。旧版本升级请查看 [Release Notes](https://github.com/ayyitong888/VRCForge/releases)，`1.4.0` 不能直接覆盖 `1.3.6`。
+还没有 Avatar 工程？可先用 [Creator Companion（VCC）](https://vcc.docs.vrchat.com/guides/getting-started/) 或 ALCOM 创建。连接不上时，先确认 Unity 已打开、插件已导入、Console 没有红色编译错误。
 
 ## 选择 AI 入口
 
-- **内置 AI：** 在 AI 设置中填写模型服务的 API Key、选择模型并测试连接，然后在对话中提出需求。
-- **外部 MCP Agent：** 在设置的连接器页面选择客户端，安装配置，或把页面提供的配置交给 Agent。保持 VRCForge 运行，重启或重新连接客户端，再让 Agent 测试连接。配置已安装不等于客户端已连接。[连接说明](USER_MANUAL.md#external-agent-connectors)
+- **在 VRCForge 里聊天：** 打开「设置 → 模型」，选择模型服务、填写 API Key，保存后选择模型并测试连接。
+- **用已有的 MCP Agent：** 打开「设置 → 连接器」，开启「连接外部 Agent」，选择客户端并点击「安装 MCP 配置」；也可复制通用连接说明交给 Agent。保持 VRCForge 和 Unity 开着，重启或重新连接客户端，再让 Agent 检查模型。需要改模时再打开「允许修改项目」。[详细连接步骤](USER_MANUAL.md#external-agent-connectors)
 
 ## 修改、恢复与复用
 

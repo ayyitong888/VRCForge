@@ -36,18 +36,19 @@ Current release: [1.10.2](https://github.com/ayyitong888/VRCForge/releases/tag/v
 
 Update both the App and the Unity plugin when upgrading.
 
-## Start in three steps
+## First run
 
-1. **Back up your project and install the App.** Leave the App closed for now.
-2. **Import the Unity plugin.** Choose Import All in your Unity 2022.3 LTS project. Follow the setup window to add missing dependencies, including the VRChat Avatar SDK. Wait for compilation and `[VRCForge MCP] Core Ready`.
-3. **Open the App and select your project and Avatar.** Set up one AI option below. Start with a read-only inspection, then try a small change and check its result.
+1. **Back up your project and run the App installer.** Follow the installation prompts.
+2. **Open your Unity project and import the plugin.** In Unity, choose `Assets > Import Package > Custom Package…`, open the downloaded `VRCForge.unitypackage`, and click **Import All**. If prompted to install the VRChat Avatar SDK, follow the instructions. Wait for Unity to finish compiling.
+3. **Open VRCForge and select that project and Avatar.** Keep Unity open and check that the App shows it as connected. If the project is missing, use **New Project** to add its folder—the one containing `Assets` and `ProjectSettings`.
+4. **Set up one AI option below.** Start with: “Inspect this avatar without changing anything.”
 
-You can create Avatar projects with [Creator Companion (VCC)](https://vcc.docs.vrchat.com/guides/getting-started/) or ALCOM. Existing projects do not need a different project manager. Read the [release notes](https://github.com/ayyitong888/VRCForge/releases) before upgrading older versions; `1.4.0` cannot overwrite `1.3.6` directly.
+Need an Avatar project? Create one with [Creator Companion (VCC)](https://vcc.docs.vrchat.com/guides/getting-started/) or ALCOM. If the connection fails, check that Unity is open, the plugin is imported, and the Console has no red compilation errors.
 
 ## Choose your AI
 
-- **Built-in AI:** In AI settings, enter your model service's API key, select a model and test the connection. Then describe your task in chat.
-- **External MCP agent:** In Settings → Connectors, select your client and install its configuration, or give the generated configuration to your agent. Keep VRCForge running, restart or reconnect the client, and ask the agent to test the connection. An installed configuration does not confirm a connected client. [Connection details](USER_MANUAL.md#external-agent-connectors)
+- **Chat in VRCForge:** Open **Settings → Models**, choose your model service, enter your API key and save. Select a model and test the connection.
+- **Use an existing MCP agent:** Open **Settings → Connectors**, turn on **Connect external Agents**, select your client and click **Install MCP config**. You can also copy the general connection instructions to your agent. Keep VRCForge and Unity open, restart or reconnect the client, then ask the agent to inspect the avatar. Turn on **Allow project changes** when you want it to edit. [Detailed connection steps](USER_MANUAL.md#external-agent-connectors)
 
 ## Edit, restore and reuse
 

@@ -5,43 +5,11 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Latest published stable release: `1.8.8` (verify current publication status on the [GitHub Releases page](https://github.com/ayyitong888/VRCForge/releases)).
-Current source / target release: `1.9.1`.
-Manual version: `1.9.1` (`v1.9.1`). Download matching installers and Unity packages
-from the [latest published release](https://github.com/ayyitong888/VRCForge/releases/latest).
-The 1.8.0 version keeps internal Agent and external MCP tool results
-causally equivalent, reports the exact reason when a successful inspection is
-still not ready, and adds a true Bottom Scene-view capture for neck-seam review.
-The Avatar Encryption / Anti-Rip addon remains a connector preview
-for lilToon and Poiyomi with scan/plan/preview
-plus request-only interfaces for a separately installed private addon module.
-The public GitHub release does not include the encryption implementation.
-Approved execution still requires explicit approval, checkpoint, validation,
-and rollback.
+**第一次使用？从 [安装与入门](README.md#第一次使用) 开始。App 安装包和同版本的 Unity 插件都要下载。**
 
-Anti-Rip profiles:
+**New here? Start with the [installation guide](README.en.md#first-run). Download both the App installer and the Unity plugin from the same release.**
 
-The percentages below are illustrative planning estimates, not measured
-performance guarantees for `v1.4.0`. Actual impact depends on the avatar,
-shader, Unity environment, and separately installed private addon version.
-以下百分比仅为规划估算，不是 `v1.4.0` 的实测性能保证；实际影响取决于 Avatar、
-Shader、Unity 环境和另行安装的私有模块版本。
-
-| Profile | Best for | Protection | Estimated 90Hz impact at 50k / 100k / 200k triangles |
-| --- | --- | --- | --- |
-| Lite | Low-end Windows PC | Low-overhead encryption | ~0.6% / ~1.1% / ~1.9% |
-| Standard | Most PC avatars | Recommended encryption | ~2.0% / ~3.6% / ~6.5% |
-| Paranoid | High-end PC proof builds | Highest preview mode | ~5.5% / ~9.9% / ~17.9% |
-
-The documented connector profiles target Windows PC projects; Quest/Android
-requests are blocked for this feature. The public App can prepare supervised
-Lite or Standard connector requests for a separately installed compatible
-module. Availability and results depend on that module and the selected
-project; Paranoid remains preview-only pending additional proof.
-这些连接器档位面向 Windows PC 工程；Quest/Android 请求会被拦截。公开 App 可以为另行
-安装的兼容模块准备受监督的 Lite 或 Standard 请求，但可用性和结果取决于模块及所选工程；
-Paranoid 仍仅提供预览。
-本手册只说明公开使用流程和功能状态，不包含项目私有路径或本地配置细节。
+Download the matching files from [GitHub Releases](https://github.com/ayyitong888/VRCForge/releases/latest). This manual covers individual features in more detail.
 
 ## Feature Status / 功能状态
 
@@ -103,6 +71,25 @@ that are never treated as wardrobes automatically.
 
 ## External Agent Connectors
 
+连接外部 MCP Agent 不需要先配置 VRCForge 内置 AI。
+
+1. 打开 Unity 工程，在 VRCForge 中选中它，确认已连接。
+2. 打开「设置 → 连接器」，开启「连接外部 Agent」。
+3. 选择你使用的客户端，点击「安装 MCP 配置」。未列出的客户端可用「复制通用连接说明」，交给 Agent 按说明设置。
+4. 保持 VRCForge 和 Unity 开着，重启或重新连接客户端，然后让 Agent “检查当前 Avatar，先不要修改”。能读到当前模型才说明连接可用。
+5. 需要改模时，打开「允许修改项目」，说明目标和要改的内容，按提示确认。修改后检查效果；恢复检查点也需要确认。
+
+You do not need to configure VRCForge's built-in AI to use an external MCP agent.
+
+1. Open your Unity project, select it in VRCForge, and check that it is connected.
+2. Open **Settings → Connectors** and turn on **Connect external Agents**.
+3. Select your client and click **Install MCP config**. For other clients, use **Copy general connection instructions** and give them to your agent.
+4. Keep VRCForge and Unity open. Restart or reconnect the client, then ask it to “Inspect the current avatar without changing anything.” Reading the current avatar confirms the connection works.
+5. When you want to edit, turn on **Allow project changes**, describe the target and changes, and confirm when prompted. Check the result afterward. Restoring a checkpoint also requires confirmation.
+
+<details>
+<summary>Advanced connection settings and developer tests / 高级连接设置与开发测试</summary>
+
 Settings > Agent Connectors can generate loopback MCP config for local external
 agent clients. Use the HTTP config when VRCForge Desktop is already running.
 Use the stdio bridge config when the client needs a local token-free bridge;
@@ -139,41 +126,13 @@ the execution catalogue, a checkpoint was created, rollback completed,
 the temporary object is gone, and Unity compile errors stayed at zero.
 The preflight smoke does not write Unity; the live smoke does.
 
+</details>
+
 ## Stable Workflow
 
-This workflow emphasizes reviewable evidence instead of assuming that feature
-availability guarantees success for a particular project.
+先备份工程，让 AI 查看模型，再提出一项小范围修改。确认目标和方案后应用，回到 Unity 检查效果。不满意时可选择相应检查点并确认恢复；检查点不能替代工程备份。下面的功能按需使用，不必全部跑一遍才能开始。
 
-The 1.0 stable checklist is:
-
-1. Install and first run.
-2. Connect Unity.
-3. Configure Provider / BYOK / local-only / no-provider mode.
-4. Run Doctor.
-5. Create the first validation report.
-6. Perform the first rollback.
-7. Plan and supervise one Booth outfit workflow.
-8. Run one safe model optimization step.
-9. Use external agents only through read/plan/write-request.
-10. Import, dry-run, disable, uninstall, and optionally export a `.vsk`.
-11. Export a support bundle and attach it manually to an issue after review.
-
-Recommended flow:
-
-1. Run Doctor and fix any startup, Unity, provider, or gateway blockers.
-2. Run the Golden Path Matrix or follow its same order manually: connect Unity,
-   scan the avatar, run validation, request one supervised edit, review the
-   checkpoint, apply, validate, and roll back.
-3. Open the proof viewer for the run and review screenshots, validation deltas,
-   checkpoint ids, rollback status, and any skipped rows.
-4. Export a Doctor support bundle if the run fails or behaves unexpectedly.
-5. Open a GitHub issue and upload or paste the relevant support bundle artifact.
-   VRCForge does not attach the bundle automatically; review it first and
-   remove secrets, tokens, paid asset contents, and private files.
-
-The release evidence and proof matrix are the final acceptance record. Any row
-marked pending needs a real artifact path, size, hash, or explicit not-run /
-blocked reason before it can be treated as stable.
+Back up your project, ask the AI to inspect your avatar, then request one small change. Review the target and plan before applying it, and check the result in Unity. If needed, select the relevant checkpoint and confirm the restore. Checkpoints do not replace backups. Use the features below as needed; they are not a mandatory first-run checklist.
 
 ### Provider Modes
 
@@ -349,7 +308,7 @@ alias key and identity map stay local and are never bundled.
 - VRChat SDK3 Avatar project
 - Windows x64 installer users do not need Python, Git, uv, or manual `pip install`
 - Source/debug users need Python, Node.js, Rust/Tauri tooling, and the package dependencies
-- The matching `VRCForge.unitypackage`, containing its VRCForge-owned MCP 2.0 Core (`2026-07-28`)
+- The matching `VRCForge.unitypackage` from the same release as the App
 - An LLM provider account for AI-assisted features
 - Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -377,7 +336,7 @@ Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
 - VRChat SDK3 Avatar 工程
 - Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
 - 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
-- 配套版本的 `VRCForge.unitypackage`，包含 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）
+- 与 App 来自同一 Release 的 `VRCForge.unitypackage`
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -388,21 +347,9 @@ VRCForge 设置窗口会显示安装提示。通过 VCC 或 ALCOM 安装官方 V
 
 ## Start / 启动
 
-1. Install VRCForge from the Windows x64 installer, but leave the App closed.
-2. Open the avatar project in Unity, import all of `VRCForge.unitypackage`, and
-   wait for compilation and `[VRCForge MCP] Core Ready` to finish.
-3. Start `VRCForge.exe`, select that project, and connect directly to its
-   VRCForge-owned MCP 2.0 Core (`2026-07-28`).
-4. Complete provider/model setup, then use agent messages or slash skills.
+Follow the [first-run guide](README.en.md#first-run) to install both parts, connect your Unity project, and choose built-in AI or an external MCP agent.
 
-If Unity discovery, project scanning, skill loading, or user-data `AGENTS.md` setup fails on first launch, the desktop should still open as a normal agent workspace when the backend is online. Fix the shown setup action before using Unity-writing features.
-
-1. 使用 Windows x64 安装器安装 VRCForge，但先不要启动 App。
-2. 在 Unity 中打开 Avatar 工程，完整导入 `VRCForge.unitypackage`，等待编译完成并出现
-   `[VRCForge MCP] Core Ready`。
-3. 启动 `VRCForge.exe`，选择该工程，直接连接其 VRCForge 自有 MCP 2.0 Core
-   （`2026-07-28`）。
-4. 完成模型/provider 设置，然后使用 agent 消息或斜杠 skill。
+按 [首次使用指南](README.md#第一次使用) 安装 App 和 Unity 插件，连接工程，再选择内置 AI 或外部 MCP Agent。
 
 ## Basic Workflow / 基本流程
 
