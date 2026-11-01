@@ -45,21 +45,21 @@ fn require_scoped_directory(user: &platform::UserContext, dir: &Path) -> Result<
             return Err(format!("{} is a shared Windows folder, not a VRCForge-only folder.", dir.display()));
         }
     }
-    if dir.join("Assets").is_dir() && dir.join("ProjectSettings").is_dir() {
-        return Err(format!("{} is a Unity project. Choose a separate VRCForge program folder.", dir.display()));
+    if dir.ancestors().any(|parent| parent.join("Assets").is_dir() && parent.join("ProjectSettings").is_dir()) {
+        return Err(format!("{} belongs to a Unity project. Choose a separate VRCForge program folder.", dir.display()));
     }
     Ok(())
 }
 
-pub fn validate_install_directory(user: &platform::UserContext, dir: &Path) -> Result<(), String> {
+pub fn validate_install_directory(user: &platform::UserContext, dir: &Path, registered: Option<&platform::InstalledApp>) -> Result<(), String> {
     require_scoped_directory(user, dir)?;
     let data = platform::data_dir(user)?;
     if relative_under(dir, &data).is_some() {
         return Err("Choose a program folder separate from VRCForge personal data.".into());
     }
-    if dir.exists() && !dir.join("VRCForge.exe").is_file()
+    if dir.exists()
         && fs::read_dir(dir).map_err(|e| format!("Cannot read {}: {e}", dir.display()))?.next().is_some()
-        && !platform::existing_install()?.is_some_and(|old| same_path(&old.install_dir, dir)) {
+        && !registered.is_some_and(|old| same_path(&old.install_dir, dir)) {
         return Err(format!("{} is not empty and is not a registered VRCForge installation. Choose another folder.", dir.display()));
     }
     Ok(())
@@ -122,7 +122,7 @@ fn install_inner(app: &tauri::AppHandle, user: &platform::UserContext, request: 
         }
     }
     let target = existing.as_ref().map(|old| old.install_dir.clone()).unwrap_or_else(|| PathBuf::from(&request.install_dir));
-    validate_install_directory(user, &target)?;
+    validate_install_directory(user, &target, existing.as_ref())?;
     if !platform::running_processes(&target)?.is_empty() {
         return Err("VRCForge is running. Save your work, then choose Close and continue.".into());
     }

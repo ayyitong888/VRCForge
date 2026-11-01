@@ -58,7 +58,8 @@ fn load_state(runtime: tauri::State<'_, Arc<Runtime>>) -> Result<SetupInfo, Stri
 }
 
 fn destination(path: &Path, runtime: &Runtime) -> Result<u64, String> {
-    engine::validate_install_directory(user(runtime)?, path)?;
+    let registered = platform::existing_install()?;
+    engine::validate_install_directory(user(runtime)?, path, registered.as_ref())?;
     platform::check_writable(&path)?;
     platform::disk_free(&path)
 }
@@ -121,7 +122,15 @@ fn launch_installed_app(runtime: tauri::State<'_, Arc<Runtime>>) -> Result<(), S
 
 #[tauri::command]
 fn read_setup_log(runtime: tauri::State<'_, Arc<Runtime>>) -> Result<String, String> {
-    std::fs::read_to_string(engine::setup_log_path(user(&runtime)?)).map_err(|error| format!("Could not read the setup log: {error}"))
+    let user = user(&runtime)?;
+    let mut text = std::fs::read_to_string(engine::setup_log_path(user)).map_err(|error| format!("Could not read the setup log: {error}"))?;
+    // Local diagnostics retain full paths. Only this user-requested export
+    // removes account-specific profile prefixes.
+    text = text.replace(user.profile.to_string_lossy().as_ref(), "%USERPROFILE%");
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if !profile.is_empty() { text = text.replace(&profile, "%SETUP_USERPROFILE%"); }
+    }
+    Ok(text)
 }
 
 // The installed uninstaller moves itself to a private temporary directory before
