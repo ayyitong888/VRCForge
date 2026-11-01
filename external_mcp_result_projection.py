@@ -304,14 +304,15 @@ def _summary(value: Any) -> Any:
         elif key in {"summary", "selection", "paging", "readHints", "index"} and _bytes(item) <= INLINE_RESULT_BYTES:
             summary[key] = item
         elif isinstance(item, list):
-            if key in {"errors", "warnings", "alerts", "findings"}:
+            if key in {"errors", "warnings", "alerts", "findings", "ndmfErrors"}:
                 rows = []
                 for row in item:
                     if isinstance(row, str):
                         diagnostic = {"message": row}
                     elif isinstance(row, Mapping):
                         diagnostic = {name: row[name] for name in (
-                            "id", "severity", "category", "scope", "title", "message", "target", "blocker",
+                            "id", "index", "severity", "category", "scope", "title", "message", "target", "blocker",
+                            "autoFix", "affectedObjects", "plugin", "pass", "avatar", "titleKey",
                         ) if name in row}
                         detail = row.get("detail")
                         if isinstance(detail, Mapping) and "target" in detail:

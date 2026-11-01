@@ -455,3 +455,17 @@ def test_compact_result_view_omits_empty_shell_slots():
     full = project_result(value, mode="full", resource_readable=True)
     assert full["nextAction"] is None
     assert full["resources"]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("transport", ["2026", "standard"])
+@pytest.mark.parametrize("rows_key", ["alerts", "ndmfErrors"])
+def test_compact_native_diagnostics_preserve_action_selector_and_real_references(transport, rows_key):
+    action = {"source": "sdk" if rows_key == "alerts" else "ndmf", "index": 4, "message": "Original native diagnostic"}
+    row = {"index": 4, "message": action["message"], "autoFix": {"available": True, "action": action},
+           "affectedObjects": [{"assetPath": "Assets/Textures/Texture.png"}], "unused": "x" * 15000}
+    raw = {"ok": True, "operationResource": URI, "result": {rows_key: [row]}}
+    request, calls = protocol(transport, raw)
+    compact = request()["result"]["structuredContent"]["result"][rows_key][0]
+    assert compact["index"] == 4 and compact["autoFix"] == row["autoFix"]
+    assert compact["affectedObjects"] == row["affectedObjects"]
+    assert "unused" not in compact
