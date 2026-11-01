@@ -43,6 +43,8 @@ namespace VRCForge.Editor.Generic
                 var limit = Math.Max(1, Math.Min(MaximumLimit, @params.Value<int?>("limit") ?? DefaultLimit));
                 var all = ReadProperties(material, search);
                 var page = all.Skip(offset).Take(limit).ToList();
+                var shader = material.shader;
+                var rawRenderQueue = ReadRawRenderQueue(material);
                 var payload = new JObject
                 {
                     ["schema"] = "vrcforge.material_property_inspection.v1",
@@ -51,7 +53,18 @@ namespace VRCForge.Editor.Generic
                     ["dirty"] = EditorUtility.IsDirty(material),
                     ["isVariant"] = material.isVariant || material.parent != null,
                     ["parentMaterialPath"] = material.parent == null ? string.Empty : AssetDatabase.GetAssetPath(material.parent),
-                    ["shaderName"] = material.shader == null ? string.Empty : material.shader.name,
+                    ["shaderName"] = shader == null ? string.Empty : shader.name,
+                    ["shader"] = new JObject
+                    {
+                        ["name"] = shader == null ? string.Empty : shader.name,
+                        ["assetPath"] = shader == null ? string.Empty : AssetDatabase.GetAssetPath(shader),
+                        ["defaultRenderQueue"] = shader == null ? -1 : shader.renderQueue,
+                    },
+                    ["renderQueue"] = new JObject
+                    {
+                        ["materialOverride"] = rawRenderQueue,
+                        ["effective"] = material.renderQueue,
+                    },
                     ["search"] = search,
                     ["offset"] = offset,
                     ["limit"] = limit,
@@ -106,6 +119,19 @@ namespace VRCForge.Editor.Generic
                 rows.Add(row);
             }
             return rows.OrderBy(row => (string)row["name"], StringComparer.Ordinal).ToList();
+        }
+
+        private static int ReadRawRenderQueue(Material material)
+        {
+            // Unity 2022.3 exposes the effective queue publicly; this serialized
+            // property retains -1 when the material has no override.
+            using (var serialized = new SerializedObject(material))
+            using (var queue = serialized.FindProperty("m_CustomRenderQueue"))
+            {
+                if (queue == null || queue.propertyType != SerializedPropertyType.Integer)
+                    throw new InvalidOperationException("Raw material render queue cannot be inspected.");
+                return queue.intValue;
+            }
         }
 
         private static JObject TextureIdentity(Texture texture)

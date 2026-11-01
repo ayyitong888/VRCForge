@@ -162,6 +162,14 @@ namespace VRCForge.LocalReview
                 var materialData = (JObject)materialResult.Payload;
                 Require((string)materialData["shaderName"] == shader.name && (bool)materialData["dirty"] == false,
                     "material read did not return the saved shader identity and clean state");
+                Require((string)materialData["shader"]["name"] == shader.name
+                    && (string)materialData["shader"]["assetPath"] == AssetDatabase.GetAssetPath(shader)
+                    && (int)materialData["shader"]["defaultRenderQueue"] == shader.renderQueue,
+                    "material read did not return grouped shader asset and default queue facts");
+                Require((int)materialData["renderQueue"]["materialOverride"] == -1
+                    && (int)materialData["renderQueue"]["effective"] == material.renderQueue
+                    && (int)materialData["renderQueue"]["effective"] == shader.renderQueue,
+                    "material read confused an absent raw queue override with the effective render queue");
                 Require(((JArray)materialData["properties"]).Count == shader.GetPropertyCount(),
                     "material read did not enumerate the shader's declared properties");
 
