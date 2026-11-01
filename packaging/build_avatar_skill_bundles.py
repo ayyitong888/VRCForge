@@ -19,16 +19,16 @@ from skill_packages import SkillPackageService
 
 
 SOURCES = (
-    ("artifacts/skills/vrcforge-avatar-accessory-switch", "release"),
-    ("artifacts/skills/vrcforge-avatar-animation", "release"),
-    ("artifacts/skills/vrcforge-avatar-audit", "release"),
-    ("artifacts/skills/vrcforge-avatar-breast-physics-audit", "release"),
-    ("artifacts/skills/vrcforge-avatar-expression-menu", "release"),
-    ("artifacts/skills/vrcforge-avatar-hairstyle", "release"),
-    ("artifacts/skills/vrcforge-avatar-wardrobe", "release"),
-    ("examples/skill-packages/vrcforge-avatar-head-transplant", "release"),
-    ("examples/skill-packages/vrcforge-avatar-part-transplant", "release"),
-    ("artifacts/skills/vrcforge-avatar-slime", "dev"),
+    "artifacts/skills/vrcforge-avatar-accessory-switch",
+    "artifacts/skills/vrcforge-avatar-animation",
+    "artifacts/skills/vrcforge-avatar-audit",
+    "artifacts/skills/vrcforge-avatar-breast-physics-audit",
+    "artifacts/skills/vrcforge-avatar-expression-menu",
+    "artifacts/skills/vrcforge-avatar-hairstyle",
+    "artifacts/skills/vrcforge-avatar-wardrobe",
+    "examples/skill-packages/vrcforge-avatar-head-transplant",
+    "examples/skill-packages/vrcforge-avatar-part-transplant",
+    "artifacts/skills/vrcforge-avatar-slime",
 )
 
 
@@ -39,14 +39,11 @@ def build(output: Path, signing_key: Path, app_version: str) -> dict:
     packages = []
     with tempfile.TemporaryDirectory(prefix="vrcforge-bundled-skill-export-") as temporary:
         service = SkillPackageService(Path(temporary) / "store", vrcforge_version=app_version)
-        for relative, mode in SOURCES:
+        for relative in SOURCES:
             source = ROOT / relative
             manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
             filename = source.name + "-" + manifest["version"] + ".vsk"
-            if mode == "release":
-                result = service.export_release(source, output / filename, signing_key)
-            else:
-                result = service.export_dev(source, output / filename)
+            result = service.export_release(source, output / filename, signing_key)
             packages.append({"id": result.manifest["id"], "version": result.manifest["version"], "file": result.package_path.name})
     index = {"packages": packages}
     (output / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

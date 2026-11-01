@@ -79,8 +79,8 @@ def test_final_signed_release_packages_activate_in_fresh_profile(profile):
         shutil.copyfile(source / row["file"], resources / row["file"])
     assert_ten_package_activation(app, gateway, service, rows)
     registry = service.load_registry()
-    assert sum(item["signature_status"] == "signed" for item in registry["skills"].values()) == 9
-    assert registry["skills"]["community.vrcforge-avatar-slime"]["signature_status"] == "dev"
+    assert sum(item["signature_status"] == "signed" for item in registry["skills"].values()) == 10
+    assert registry["skills"]["community.vrcforge-avatar-slime"]["signature_status"] == "signed"
     assert not registry["governance"]["trusted_signers"]
     assert not registry["governance"]["official_signers"]
 
