@@ -46,6 +46,8 @@ def test_association_changes_notify_shell_and_smoke_build_is_guarded():
 
     for path in INSTALLERS:
         source = path.read_text(encoding="utf-8")
+        # Both installers invoke the same checked post-install macro.
+        source += (ROOT / "installer" / "VRCForge_InstallFinalization.nsh").read_text(encoding="utf-8-sig")
         assert '!include "VRCForge_VskAssociation.nsh"' in source
         assert source.index("SetCompressor /SOLID lzma") < source.index('!include "VRCForge_VskAssociation.nsh"')
         assert re.search(r"!ifndef VRCFORGE_SMOKE_BUILD\s+Call VrcForgeRegisterVskAssociation\s+!endif", source)

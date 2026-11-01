@@ -148,10 +148,10 @@ LangString ClosingRunningAppText ${LANG_SIMPCHINESE} "正在正常退出已安�
 LangString ClosingRunningAppText ${LANG_TRADCHINESE} "正在正常結束已安裝的 VRCForge，以便安全更新..."
 LangString ClosingRunningAppText ${LANG_JAPANESE} "安全に更新するため、インストール済みの VRCForge を正常終了しています..."
 LangString ClosingRunningAppText ${LANG_ENGLISH} "Closing the installed VRCForge normally for a safe update..."
-LangString ActivationFailedText ${LANG_SIMPCHINESE} "无法正常退出正在运行的 VRCForge，或无法安全激活新版本。原安装保持不变；请手动退出 VRCForge 后重试。"
-LangString ActivationFailedText ${LANG_TRADCHINESE} "無法正常結束正在執行的 VRCForge，或無法安全啟用新版本。原安裝保持不變；請手動結束 VRCForge 後重試。"
-LangString ActivationFailedText ${LANG_JAPANESE} "実行中の VRCForge を正常終了できないか、新しいバージョンを安全に有効化できませんでした。以前のインストールは保持されています。VRCForge を手動で終了して再試行してください。"
-LangString ActivationFailedText ${LANG_ENGLISH} "The running VRCForge could not close normally, or the new version could not be activated safely. The prior installation was preserved; close VRCForge manually and retry."
+LangString ActivationFailedText ${LANG_SIMPCHINESE} "无法完成新版切换。具体原因和旧版恢复结果见下方详情；若提示保留了备份，请勿删除。"
+LangString ActivationFailedText ${LANG_TRADCHINESE} "無法完成新版切換。具體原因與舊版還原結果請見下方詳情；若有保留備份，請勿刪除。"
+LangString ActivationFailedText ${LANG_JAPANESE} "新しいバージョンに切り替えられませんでした。原因と復元結果は詳細をご確認ください。残されたバックアップは削除しないでください。"
+LangString ActivationFailedText ${LANG_ENGLISH} "The new version could not be activated. See the details for the cause and the result of restoring prior files. Do not delete any retained backup."
 LangString DataDirPageTitle ${LANG_SIMPCHINESE} "数据目录"
 LangString DataDirPageTitle ${LANG_TRADCHINESE} "資料目錄"
 LangString DataDirPageTitle ${LANG_JAPANESE} "データ ディレクトリ"
@@ -317,6 +317,7 @@ FunctionEnd
 !macroend
 !insertmacro DefineProtectedHelperFunctions ""
 !insertmacro DefineProtectedHelperFunctions "un."
+!include "VRCForge_InstallFinalization.nsh"
 
 Function DataDirPage
   StrCpy $R1 ""
@@ -446,67 +447,21 @@ Section "Install"
   DetailPrint "$(ClosingRunningAppText)"
   Call PrepareProtectedHelper
   ${If} $0 == 0
-    nsExec::ExecToLog '"$TrustedPowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$HelperPayloadPath\VRCForge_WebPayload.ps1" -Action Extract -Version "${VERSION}" -PayloadUrl "https://github.com/ayyitong888/VRCForge/releases/download/v${VERSION}/VRCForge_Windows_x64_${VERSION}.zip" -ExpectedSha256 "${PAYLOAD_SHA256}" -ExpectedLength "${PAYLOAD_LENGTH}" -ProgramFilesRoot "$PROGRAMFILES64" -PayloadPath "$PLUGINSDIR\payload.zip" -DestinationRoot "$INSTDIR" -ExpectedInstallLeaf "${INSTALL_LEAF}" -StateTag "${STATE_TAG}"'
+    nsExec::ExecToStack '"$TrustedPowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$HelperPayloadPath\VRCForge_WebPayload.ps1" -Action Extract -Version "${VERSION}" -PayloadUrl "https://github.com/ayyitong888/VRCForge/releases/download/v${VERSION}/VRCForge_Windows_x64_${VERSION}.zip" -ExpectedSha256 "${PAYLOAD_SHA256}" -ExpectedLength "${PAYLOAD_LENGTH}" -ProgramFilesRoot "$PROGRAMFILES64" -PayloadPath "$PLUGINSDIR\payload.zip" -DestinationRoot "$INSTDIR" -ExpectedInstallLeaf "${INSTALL_LEAF}" -StateTag "${STATE_TAG}"'
     Pop $0
-    Push $0
-    Call CleanupProtectedHelper
-    Pop $0
+    Pop $InstallErrorDetail
+    DetailPrint "$InstallErrorDetail"
   ${EndIf}
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_RETRYCANCEL "$(ActivationFailedText)" /SD IDCANCEL IDRETRY install_retry
+    SetDetailsView show
+    Call CleanupProtectedHelper
+    MessageBox MB_ICONSTOP|MB_RETRYCANCEL "$(ActivationFailedText)$\r$\n$InstallErrorDetail" /SD IDCANCEL IDRETRY install_retry
     SetErrorLevel 2
     Abort
   ${EndIf}
 
-  ; Data root: reuse the recorded pointer when its directory still exists,
-  ; otherwise create the structure under the chosen/default root.
-  StrCpy $R0 ""
-  !ifndef VRCFORGE_SMOKE_BUILD
-    ReadRegStr $R0 HKCU "Software\VRCForge" "DataDir"
-  !endif
-  ${If} $R0 != ""
-    ${If} ${FileExists} "$R0\*.*"
-      StrCpy $DataDir $R0
-      Goto data_dir_resolved
-    ${EndIf}
-  ${EndIf}
-  ${If} $DataDir == ""
-    Call ComputeDefaultDataDir
-  ${EndIf}
-  CreateDirectory "$DataDir\config"
-  CreateDirectory "$DataDir\logs"
-  CreateDirectory "$DataDir\artifacts"
-  CreateDirectory "$DataDir\backups"
-data_dir_resolved:
-  !ifndef VRCFORGE_SMOKE_BUILD
-    WriteRegStr HKCU "Software\VRCForge" "DataDir" "$DataDir"
-  !endif
+  !insertmacro VrcForgeFinishInstallation
 
-  CreateDirectory "$SMPROGRAMS\${START_MENU_GROUP}"
-  SetOutPath "$INSTDIR"
-  CreateShortCut "$DESKTOP\${DESKTOP_SHORTCUT}" "$INSTDIR\VRCForge.exe" "" "$INSTDIR\VRCForge.ico" 0
-  CreateShortCut "$SMPROGRAMS\${START_MENU_GROUP}\VRCForge.lnk" "$INSTDIR\VRCForge.exe" "" "$INSTDIR\VRCForge.ico" 0
-  CreateShortCut "$SMPROGRAMS\${START_MENU_GROUP}\$(UninstallShortcutName)" "$INSTDIR\Uninstall.exe"
-
-  !ifndef VRCFORGE_SMOKE_BUILD
-    WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "DisplayName" "VRCForge"
-    WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "IconBackgroundColor" "0"
-    WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "IconUri" "$INSTDIR\VRCForge.png"
-  !endif
-
-  WriteUninstaller "$INSTDIR\Uninstall.exe"
-  !ifndef VRCFORGE_SMOKE_BUILD
-    Call VrcForgeRegisterVskAssociation
-  !endif
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayName" "VRCForge"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "Publisher" "VRCForge"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\VRCForge.exe"
-  ; Repair = close the running app and re-run this atomic offline installer.
-  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "NoModify" 1
-  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "NoRepair" 1
 SectionEnd
 
 Section "Uninstall"

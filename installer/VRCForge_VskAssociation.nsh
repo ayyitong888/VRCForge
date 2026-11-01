@@ -15,10 +15,12 @@ Function VrcForgeRegisterVskAssociation
     StrCmp $0 "${VRCFORGE_VSK_OPEN_COMMAND}" vsk_register_command vsk_register_done
 
     vsk_register_command:
+      ClearErrors
       WriteRegStr HKLM "Software\Classes\${VRCFORGE_VSK_PROGID}" "" "VRCForge Skill Package"
       WriteRegStr HKLM "Software\Classes\${VRCFORGE_VSK_PROGID}\DefaultIcon" "" "$\"$INSTDIR\VRCForge.exe$\",0"
       WriteRegStr HKLM "Software\Classes\${VRCFORGE_VSK_PROGID}\shell\open\command" "" "${VRCFORGE_VSK_OPEN_COMMAND}"
       WriteRegStr HKLM "Software\Classes\.vsk\OpenWithProgids" "${VRCFORGE_VSK_PROGID}" ""
+      IfErrors vsk_register_failed
 
       ; Set a default only when none exists or this ProgID is already selected.
       ClearErrors
@@ -27,10 +29,18 @@ Function VrcForgeRegisterVskAssociation
       StrCmp $0 "" vsk_register_default
       StrCmp $0 "${VRCFORGE_VSK_PROGID}" vsk_register_default vsk_register_notify
     vsk_register_default:
+      ClearErrors
       WriteRegStr HKLM "Software\Classes\.vsk" "" "${VRCFORGE_VSK_PROGID}"
+      IfErrors vsk_register_failed
     vsk_register_notify:
       System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
     vsk_register_done:
+  !endif
+  ClearErrors
+  Return
+  !ifndef VRCFORGE_SMOKE_BUILD
+    vsk_register_failed:
+      SetErrors
   !endif
 FunctionEnd
 

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("ValidateDestination", "CheckNotRunning", "Prepare", "Extract")]
+    [ValidateSet("ValidateDestination", "CheckNotRunning", "Prepare", "Extract", "Complete")]
     [string]$Action,
 
     [Parameter(Mandatory = $true)]
@@ -67,7 +67,7 @@ function Assert-Inputs {
     } else {
         Fail "ExpectedInstallLeaf is not a permitted production or smoke identity."
     }
-    if ($Action -in @("ValidateDestination", "CheckNotRunning")) { return }
+    if ($Action -in @("ValidateDestination", "CheckNotRunning", "Complete")) { return }
     $expectedUrl = Get-ExpectedUrl
     if (-not [string]::Equals($PayloadUrl, $expectedUrl, [StringComparison]::Ordinal)) {
         Fail "PayloadUrl is not the exact version-bound official release URL."
@@ -668,6 +668,30 @@ function Invoke-ValidateDestination {
     [pscustomobject]@{ schema = $script:StateSchema; validatedDestination = $destination; version = $Version } | ConvertTo-Json -Compress
 }
 
+function Get-ActivationStatePath {
+    # NSIS retains this existing, admin-owned helper directory until its
+    # post-install operations finish. No caller-supplied recovery path.
+    return Join-Path $PSScriptRoot "activation-backup.txt"
+}
+
+function Invoke-Complete {
+    $destination = Assert-SafeProgramFilesDestination $DestinationRoot
+    $state = Get-ActivationStatePath
+    if (-not [IO.File]::Exists($state)) {
+        Fail "Installation completion state is missing. Prior backups have not been removed."
+    }
+    $backup = [IO.File]::ReadAllText($state, [Text.Encoding]::Unicode).Trim()
+    $retained = $false
+    if (-not [string]::IsNullOrWhiteSpace($backup)) {
+        try { Remove-InstallSibling $backup "Backup" }
+        catch {
+            $retained = $true
+            Write-Warning "Installation completed, but prior program files remain at '$backup': $($_.Exception.Message)"
+        }
+    }
+    [pscustomobject]@{ schema = $script:StateSchema; installedTo = $destination; version = $Version; backupPath = $backup; backupRetained = $retained } | ConvertTo-Json -Compress
+}
+
 function Invoke-Extract {
     if ([string]::IsNullOrWhiteSpace($DestinationRoot)) { Fail "Extract requires DestinationRoot." }
     if ([string]::IsNullOrWhiteSpace($PayloadPath) -and [string]::IsNullOrWhiteSpace($StageRoot)) { Fail "Extract requires a verified StageRoot or embedded PayloadPath." }
@@ -727,8 +751,11 @@ function Invoke-Extract {
         Request-InstalledAppExit $destination
         Assert-InstallNotRunning $destination
 
-        if ([IO.Directory]::Exists($destination)) {
-            $backup = Get-InstallSiblingPath "Backup"
+        if ([IO.Directory]::Exists($destination)) { $backup = Get-InstallSiblingPath "Backup" }
+        # Persist only this attempt's backup path before moving anything. The
+        # existing protected helper is kept across NSIS post-install steps.
+        [IO.File]::WriteAllText((Get-ActivationStatePath), [string]$backup, (New-Object Text.UnicodeEncoding($false, $false)))
+        if ($null -ne $backup) {
             Assert-SafeProgramFilesDestination $destination | Out-Null
             [IO.Directory]::Move($destination, $backup)
             $oldMoved = $true
@@ -739,11 +766,8 @@ function Invoke-Extract {
         $installStage = $null
         Assert-InstalledPayload $destination
         $activationCommitted = $true
-        if ($null -ne $backup) {
-            try { Remove-InstallSibling $backup "Backup" }
-            catch { Write-Warning "The verified prior-install backup could not be removed and was left at its exact sibling path." }
-            $backup = $null
-        }
+        # Only the later Complete action may remove this backup, after NSIS
+        # has written shortcuts, its uninstaller and registration successfully.
     } catch {
         $failure = $_
         # A failed activation must restore the pre-existing install; cleanup
@@ -761,7 +785,7 @@ function Invoke-Extract {
                     $backup = $null
                 }
             } catch {
-                Fail "Activation failed and the prior installation could not be restored: $($_.Exception.Message)"
+                Fail "Activation failed: $($failure.Exception.Message). Restoring the prior installation also failed: $($_.Exception.Message). Prior program files may remain at '$backup'. Do not delete that backup."
             }
         }
         throw $failure
@@ -772,7 +796,7 @@ function Invoke-Extract {
         }
         if ($null -ne $downloadRoot) { Remove-ValidatedStageRoot $downloadRoot }
     }
-    [pscustomobject]@{ schema = $script:StateSchema; extractedTo = $destination; version = $Version } | ConvertTo-Json -Compress
+    [pscustomobject]@{ schema = $script:StateSchema; extractedTo = $destination; version = $Version; backupPath = $backup; installationComplete = $false } | ConvertTo-Json -Compress
 }
 
 Assert-Inputs
@@ -780,4 +804,5 @@ Add-Type -AssemblyName System.IO.Compression
 if ($Action -eq "ValidateDestination") { Invoke-ValidateDestination }
 elseif ($Action -eq "CheckNotRunning") { Assert-InstallNotRunning $DestinationRoot }
 elseif ($Action -eq "Prepare") { Invoke-Prepare }
+elseif ($Action -eq "Complete") { Invoke-Complete }
 else { Invoke-Extract }
