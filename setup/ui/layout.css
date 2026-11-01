@@ -15,6 +15,7 @@
 .art-copy p{margin:0;max-width:290px}
 .action-area{min-height:116px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:12px 32px}
 .hero-button{min-width:256px;height:46px;border-radius:var(--site-button-radius);font-size:16px;font-weight:700;box-shadow:var(--site-button-shadow)}
+.hero-button:disabled{background:var(--soft);color:var(--ink);box-shadow:none;opacity:1}
 .action-note{font-size:11px;color:var(--ink);opacity:.7}
 .setup-footer{min-height:44px;padding:10px 24px;display:flex;align-items:center;justify-content:space-between;font-size:10px;color:var(--ink);gap:16px}
 .setup-footer a{color:var(--pink)}
@@ -29,7 +30,13 @@
 .data-location{font-size:10px;line-height:1.6;overflow-wrap:anywhere}
 .data-details{margin:0 32px;padding:12px 0;border-top:1px solid var(--line)}
 .detection-area{min-height:164px}
-.upgrade-card{width:100%;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;font-size:12px;background:var(--white);border-color:var(--line);border-radius:var(--site-control-radius);box-shadow:none}
+.upgrade-options{width:100%;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.upgrade-option{min-width:0;background:var(--white);border-color:var(--line);border-radius:var(--site-control-radius);box-shadow:none;overflow:hidden}
+.upgrade-option.selected{border-color:var(--pink);background:var(--soft)}
+.upgrade-choice{width:100%;height:auto;min-height:48px;padding:10px 12px;justify-content:flex-start;gap:9px;text-align:left;white-space:normal;font-size:11px;line-height:1.5;border-radius:inherit;color:var(--ink)}
+.upgrade-choice:hover{background:var(--soft)}
+.choice-indicator{width:16px;height:16px;flex-shrink:0;display:grid;place-items:center;border:1px solid var(--line);border-radius:50%;background:var(--white)}
+.selected .choice-indicator{border-color:var(--pink);background:var(--pink);color:var(--white)}
 .design-board{width:1520px;display:grid;grid-template-columns:repeat(2,720px);gap:32px;padding:24px;background:var(--soft);align-items:start}
 .design-board .preview-desk{padding:0;display:block;min-height:0}
 .board-caption{font-size:12px;font-weight:700;color:var(--ink);padding:0 0 10px 4px}
