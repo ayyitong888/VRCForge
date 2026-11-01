@@ -18,23 +18,30 @@ static THEME_BACKGROUND_LOCK: Mutex<()> = Mutex::new(());
 /// read access lasts for the picker operation and the managed copy lives until
 /// it is replaced, cleared, or the App data is removed.
 #[tauri::command]
-pub(crate) fn pick_theme_background(app: tauri::AppHandle) -> Result<Option<String>, String> {
+pub(crate) async fn pick_theme_background(app: tauri::AppHandle) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
-        let selected = rfd::FileDialog::new()
+        // RFD's Windows async picker owns its STA COM thread and dialog lifetime.
+        let selected = rfd::AsyncFileDialog::new()
             .set_title("Choose a VRCForge background image")
             .add_filter("Images", &SUPPORTED_EXTENSIONS)
-            .pick_file();
-        let _guard = theme_background_lock()?;
-        selected
-            .map(|path| {
-                persist_theme_background_file(&path).and_then(|saved| {
-                    register_theme_background_asset(&app, &saved)?;
-                    Ok(saved)
+            .pick_file()
+            .await
+            .map(|handle| handle.path().to_path_buf());
+        tauri::async_runtime::spawn_blocking(move || {
+            let _guard = theme_background_lock()?;
+            selected
+                .map(|path| {
+                    persist_theme_background_file(&path).and_then(|saved| {
+                        register_theme_background_asset(&app, &saved)?;
+                        Ok(saved)
+                    })
                 })
-            })
-            .transpose()
-            .map(|path| path.map(|value| value.display().to_string()))
+                .transpose()
+                .map(|path| path.map(|value| value.display().to_string()))
+        })
+        .await
+        .map_err(|error| format!("VRCForge theme background worker failed: {error}"))?
     }
 
     #[cfg(not(windows))]
@@ -46,21 +53,25 @@ pub(crate) fn pick_theme_background(app: tauri::AppHandle) -> Result<Option<Stri
 /// One-time compatibility path for the 1.7.1 localStorage representation.
 /// New selections never cross IPC as image bytes and never use Base64.
 #[tauri::command]
-pub(crate) fn import_legacy_theme_background(
+pub(crate) async fn import_legacy_theme_background(
     app: tauri::AppHandle,
     bytes: Vec<u8>,
     extension: String,
 ) -> Result<String, String> {
-    let _guard = theme_background_lock()?;
-    let theme_dir = theme_background_directory()?;
-    if let Some(existing) = first_managed_background(&theme_dir)? {
-        register_theme_background_asset(&app, &existing)?;
-        return Ok(existing.display().to_string());
-    }
-    persist_theme_background_bytes(&bytes, &extension).and_then(|path| {
-        register_theme_background_asset(&app, &path)?;
-        Ok(path.display().to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = theme_background_lock()?;
+        let theme_dir = theme_background_directory()?;
+        if let Some(existing) = first_managed_background(&theme_dir)? {
+            register_theme_background_asset(&app, &existing)?;
+            return Ok(existing.display().to_string());
+        }
+        persist_theme_background_bytes(&bytes, &extension).and_then(|path| {
+            register_theme_background_asset(&app, &path)?;
+            Ok(path.display().to_string())
+        })
     })
+    .await
+    .map_err(|error| format!("VRCForge theme background worker failed: {error}"))?
 }
 
 fn register_theme_background_asset(app: &tauri::AppHandle, path: &Path) -> Result<(), String> {
@@ -70,14 +81,18 @@ fn register_theme_background_asset(app: &tauri::AppHandle, path: &Path) -> Resul
 }
 
 #[tauri::command]
-pub(crate) fn authorize_theme_background(
+pub(crate) async fn authorize_theme_background(
     app: tauri::AppHandle,
     path: String,
 ) -> Result<String, String> {
-    let user_data = user_data_dir()?;
-    let path = validate_managed_background_path(Path::new(&path), &user_data)?;
-    register_theme_background_asset(&app, &path)?;
-    Ok(path.display().to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let user_data = user_data_dir()?;
+        let path = validate_managed_background_path(Path::new(&path), &user_data)?;
+        register_theme_background_asset(&app, &path)?;
+        Ok(path.display().to_string())
+    })
+    .await
+    .map_err(|error| format!("VRCForge theme background worker failed: {error}"))?
 }
 
 fn validate_managed_background_path(path: &Path, user_data: &Path) -> Result<PathBuf, String> {
@@ -98,10 +113,14 @@ fn validate_managed_background_path(path: &Path, user_data: &Path) -> Result<Pat
 /// Removes only VRCForge-owned managed backgrounds from the App data theme
 /// directory. It accepts no caller-provided path and cannot delete user files.
 #[tauri::command]
-pub(crate) fn clear_theme_background() -> Result<(), String> {
-    let _guard = theme_background_lock()?;
-    let theme_dir = theme_background_directory()?;
-    remove_managed_backgrounds(&theme_dir, None)
+pub(crate) async fn clear_theme_background() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = theme_background_lock()?;
+        let theme_dir = theme_background_directory()?;
+        remove_managed_backgrounds(&theme_dir, None)
+    })
+    .await
+    .map_err(|error| format!("VRCForge theme background worker failed: {error}"))?
 }
 
 fn theme_background_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {

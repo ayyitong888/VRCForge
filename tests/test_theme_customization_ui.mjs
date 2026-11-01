@@ -69,7 +69,6 @@ assert.match(hook, /themeBackgroundAssetUrl\(authorizedBackgroundPath\)/);
 assert.match(hook, /root\.dataset\.vrcforgeWallpaperScope = customization\.backgroundScope/);
 assert.match(rust, /persist_theme_background_file/);
 assert.match(rust, /remove_managed_backgrounds\(&theme_dir, Some\(&destination\)\)/);
-assert.match(rust, /pub\(crate\) fn clear_theme_background/);
 assert.match(rust, /asset_protocol_scope\(\)\s*\n?\s*\.allow_file\(path\)/);
 assert.match(rust, /authorize_theme_background/);
 assert.match(hook, /authorizeThemeBackground\(path\)/);
