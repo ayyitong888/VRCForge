@@ -51,6 +51,7 @@ Unicode true
 !include LogicLib.nsh
 !include nsDialogs.nsh
 !include "MUI2.nsh"
+!include "VRCForge_InstallerTheme.nsh"
 Var ClearUserDataCheckbox
 Var ClearUserData
 Var PayloadStatePath
@@ -105,6 +106,7 @@ UninstPage custom un.UserDataOptionsPage un.UserDataOptionsLeave
 !insertmacro MUI_LANGUAGE "TradChinese"
 !insertmacro MUI_LANGUAGE "Japanese"
 !insertmacro MUI_LANGUAGE "English"
+!insertmacro VRCFORGE_SET_FONTS
 
 LangString WelcomeTitle ${LANG_SIMPCHINESE} "欢迎安装 VRCForge ${VERSION}（在线安装）"
 LangString WelcomeTitle ${LANG_TRADCHINESE} "歡迎安裝 VRCForge ${VERSION}（線上安裝）"
@@ -122,14 +124,18 @@ LangString ClearUserDataTitle ${LANG_SIMPCHINESE} "卸载数据"
 LangString ClearUserDataTitle ${LANG_TRADCHINESE} "解除安裝資料"
 LangString ClearUserDataTitle ${LANG_JAPANESE} "アンインストール データ"
 LangString ClearUserDataTitle ${LANG_ENGLISH} "Uninstall Data"
-LangString ClearUserDataText ${LANG_SIMPCHINESE} "默认仅卸载程序文件，并保留个人数据（对话、审批、检查点与日志）。个人数据位于 $DataDir。勾选下方选项可同时删除个人数据。"
-LangString ClearUserDataText ${LANG_TRADCHINESE} "預設僅解除安裝程式檔案，並保留個人資料（對話、審批、檢查點與日誌）。個人資料位於 $DataDir。勾選下方選項可同時刪除個人資料。"
-LangString ClearUserDataText ${LANG_JAPANESE} "既定ではプログラムファイルのみを削除し、個人データ（チャット・承認・チェックポイント・ログ）は保持します。個人データの場所: $DataDir。下のオプションをオンにすると個人データも削除されます。"
-LangString ClearUserDataText ${LANG_ENGLISH} "By default, setup removes only program files and keeps your personal data (chats, approvals, checkpoints, and logs). Personal data location: $DataDir. Check the option below to also delete personal data."
-LangString ClearUserDataCheckboxText ${LANG_SIMPCHINESE} "同时删除个人数据"
-LangString ClearUserDataCheckboxText ${LANG_TRADCHINESE} "同時刪除個人資料"
-LangString ClearUserDataCheckboxText ${LANG_JAPANESE} "個人データも削除する"
-LangString ClearUserDataCheckboxText ${LANG_ENGLISH} "Also delete personal data"
+LangString ClearUserDataSubtitle ${LANG_SIMPCHINESE} "程序文件与个人数据分开管理。"
+LangString ClearUserDataSubtitle ${LANG_TRADCHINESE} "程式檔案與個人資料分開管理。"
+LangString ClearUserDataSubtitle ${LANG_JAPANESE} "プログラムと個人データは分けて管理されます。"
+LangString ClearUserDataSubtitle ${LANG_ENGLISH} "Program files and personal data are handled separately."
+LangString ClearUserDataText ${LANG_SIMPCHINESE} "默认只移除 VRCForge 程序文件。对话、审批记录、检查点和日志将保留在：$DataDir。"
+LangString ClearUserDataText ${LANG_TRADCHINESE} "預設只移除 VRCForge 程式檔案。對話、審批記錄、檢查點和日誌會保留在：$DataDir。"
+LangString ClearUserDataText ${LANG_JAPANESE} "既定では VRCForge のプログラムファイルのみを削除します。チャット、承認記録、チェックポイント、ログは次の場所に保持されます: $DataDir。"
+LangString ClearUserDataText ${LANG_ENGLISH} "By default, only VRCForge program files are removed. Chats, approvals, checkpoints, and logs stay here: $DataDir."
+LangString ClearUserDataCheckboxText ${LANG_SIMPCHINESE} "同时删除个人数据及已知项目中的历史对话"
+LangString ClearUserDataCheckboxText ${LANG_TRADCHINESE} "同時刪除個人資料及已知專案中的歷史對話"
+LangString ClearUserDataCheckboxText ${LANG_JAPANESE} "個人データと既知プロジェクトのチャット履歴も削除する"
+LangString ClearUserDataCheckboxText ${LANG_ENGLISH} "Also delete personal data and chat history in known projects"
 LangString UninstallKeptUserData ${LANG_SIMPCHINESE} "VRCForge 程序文件已移除。个人数据仍保留在 $DataDir，可随时重新安装继续使用。"
 LangString UninstallKeptUserData ${LANG_TRADCHINESE} "VRCForge 程式檔案已移除。個人資料仍保留在 $DataDir，可隨時重新安裝繼續使用。"
 LangString UninstallKeptUserData ${LANG_JAPANESE} "VRCForge のプログラムファイルを削除しました。個人データは $DataDir に保持されています。いつでも再インストールして使い続けられます。"
@@ -182,6 +188,18 @@ LangString DataDirBrowseTitle ${LANG_SIMPCHINESE} "选择数据目录"
 LangString DataDirBrowseTitle ${LANG_TRADCHINESE} "選擇資料目錄"
 LangString DataDirBrowseTitle ${LANG_JAPANESE} "データ ディレクトリの選択"
 LangString DataDirBrowseTitle ${LANG_ENGLISH} "Choose Data Directory"
+LangString InstallFinishTitle ${LANG_SIMPCHINESE} "VRCForge 已安装"
+LangString InstallFinishTitle ${LANG_TRADCHINESE} "VRCForge 已安裝"
+LangString InstallFinishTitle ${LANG_JAPANESE} "VRCForge のインストールが完了しました"
+LangString InstallFinishTitle ${LANG_ENGLISH} "VRCForge is ready"
+LangString InstallFinishText ${LANG_SIMPCHINESE} "程序已安装到 $INSTDIR。个人数据保存在 $DataDir；卸载时默认保留。"
+LangString InstallFinishText ${LANG_TRADCHINESE} "程式已安裝至 $INSTDIR。個人資料保存在 $DataDir；解除安裝時預設保留。"
+LangString InstallFinishText ${LANG_JAPANESE} "プログラムを $INSTDIR にインストールしました。個人データは $DataDir に保存され、アンインストール時も既定で保持されます。"
+LangString InstallFinishText ${LANG_ENGLISH} "VRCForge was installed to $INSTDIR. Personal data stays in $DataDir and is kept by default when you uninstall."
+LangString UninstallConfirmTop ${LANG_SIMPCHINESE} "下一页可选择是否删除个人数据；默认会保留。"
+LangString UninstallConfirmTop ${LANG_TRADCHINESE} "下一頁可選擇是否刪除個人資料；預設會保留。"
+LangString UninstallConfirmTop ${LANG_JAPANESE} "次のページで個人データを削除するか選べます。既定では保持されます。"
+LangString UninstallConfirmTop ${LANG_ENGLISH} "On the next page, choose whether to delete personal data. It is kept by default."
 LangString DownloadingText ${LANG_SIMPCHINESE} "正在下载 VRCForge Windows x64 组件..."
 LangString DownloadingText ${LANG_TRADCHINESE} "正在下載 VRCForge Windows x64 元件..."
 LangString DownloadingText ${LANG_JAPANESE} "VRCForge Windows x64 ペイロードをダウンロードしています..."
@@ -362,18 +380,21 @@ Function DataDirPage
   !insertmacro MUI_HEADER_TEXT "$(DataDirPageTitle)" "$(DataDirPageSubtitle)"
   nsDialogs::Create 1018
   Pop $0
-  ${NSD_CreateLabel} 0 0 100% 40u "$(DataDirPageText)"
+  ${NSD_CreateLabel} 0 0 100% 34u "$(DataDirPageText)"
   Pop $1
+  !insertmacro VRCFORGE_STYLE_BODY_LABEL $1
   ${If} $R1 == "1"
     StrCpy $2 "$(DataDirReuseNote) $DataDir"
   ${Else}
     StrCpy $2 "$(DataDirDefaultNote) $DataDir"
   ${EndIf}
-  ${NSD_CreateLabel} 0 44u 100% 12u $2
+  ${NSD_CreateLabel} 0 39u 100% 20u $2
   Pop $1
-  ${NSD_CreateDirRequest} 0 62u 200u 14u $DataDir
+  !insertmacro VRCFORGE_STYLE_NOTE_LABEL $1
+  ${NSD_CreateDirRequest} 0 63u 200u 14u $DataDir
   Pop $DataDirDialog
-  ${NSD_CreateBrowseButton} 205u 61u 50u 14u "$(DataDirBrowseButton)"
+  !insertmacro VRCFORGE_STYLE_DIRECTORY_FIELD $DataDirDialog
+  ${NSD_CreateBrowseButton} 205u 62u 50u 14u "$(DataDirBrowseButton)"
   Pop $DataDirBrowseButton
   ${NSD_OnClick} $DataDirBrowseButton DataDirBrowseClick
   nsDialogs::Show
@@ -396,11 +417,12 @@ FunctionEnd
 Function un.UserDataOptionsPage
   IfSilent 0 +2
     Abort
-  !insertmacro MUI_HEADER_TEXT "$(ClearUserDataTitle)" "$(ClearUserDataText)"
+  !insertmacro MUI_HEADER_TEXT "$(ClearUserDataTitle)" "$(ClearUserDataSubtitle)"
   nsDialogs::Create 1018
   Pop $0
   ${NSD_CreateLabel} 0 0 100% 40u "$(ClearUserDataText)"
   Pop $1
+  !insertmacro VRCFORGE_STYLE_BODY_LABEL $1
   ${NSD_CreateCheckbox} 0 48u 100% 12u "$(ClearUserDataCheckboxText)"
   Pop $ClearUserDataCheckbox
   ${NSD_SetState} $ClearUserDataCheckbox ${BST_UNCHECKED}
