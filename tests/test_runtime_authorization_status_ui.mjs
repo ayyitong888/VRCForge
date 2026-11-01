@@ -34,7 +34,7 @@ assert.deepEqual(exports.resolveRuntimeAuthorizationStatus({
   apiConfig: { configured: true, provider: "openai" },
   providerTestPassed: true,
 }), {
-  source: "both",
+  source: "external",
   status: "ok",
   externalState: "connected",
   externalConnected: true,
@@ -94,6 +94,17 @@ assert.equal(exports.resolveRuntimeAuthorizationStatus({
   apiConfig: { configured: true, provider: "openai" },
   providerTestPassed: false,
 }).status, "warning");
+assert.equal(exports.runtimeAuthorizationMessageKey(externalWithUntestedInternal, true), "workspace.externalAgentConnected", "an internal test failure cannot replace a connected MCP status");
+assert.equal(exports.runtimeAuthorizationMessageKey(testedApi, true), "workspace.internalApiConfigured", "a completed successful test must not be called failed");
+assert.equal(exports.runtimeAuthorizationMessageKey(configuredApi, true), "workspace.internalApiTestFailed");
+assert.equal(exports.runtimeAuthorizationMessageKey(configuredApi), "workspace.internalApiNeedsTest");
+const internalWithExternalError = exports.resolveRuntimeAuthorizationStatus({
+  runtimeConnected: true,
+  apiConfig: { configured: true, provider: "openai" },
+  externalAgentComponent: { status: "error", detail: { connected: false } },
+});
+assert.equal(internalWithExternalError.status, "warning", "an unrelated external connection error cannot suppress the internal test action");
+assert.equal(exports.runtimeAuthorizationLabelKey(internalWithExternalError), "workspace.internalAgent");
 assert.equal(exports.runtimeAuthorizationMessageKey(configuredOAuth), "workspace.internalOAuthNeedsTest");
 assert.equal(exports.runtimeAuthorizationLabelKey(configuredOAuth), "workspace.internalAgent");
 assert.equal(exports.resolveRuntimeAuthorizationStatus({ runtimeConnected: true, externalAgentComponent: waiting }).source, "none");
@@ -126,8 +137,8 @@ assert.match(providerHookSource, /payload\.credentialFingerprint/);
 assert.match(providerHookSource, /apiConfig\?\.credentialFingerprint !== undefined/);
 assert.match(providerHookSource, /providerTestGeneration\.current \+= 1/);
 assert.match(appSource, /authorizationStatus=\{authorizationStatus\}/);
-assert.match(sidebarSource, /runtimeAuthorizationMessageKey\(authorizationStatus\)/);
-assert.match(sectionsSource, /runtimeAuthorizationMessageKey\(authorizationStatus\)/);
+assert.match(sidebarSource, /runtimeAuthorizationMessageKey\(authorizationStatus, providerTestAttempted\)/);
+assert.match(sectionsSource, /runtimeAuthorizationMessageKey\(authorizationStatus, providerTestAttempted\)/);
 assert.match(oauthSource, /onTestProvider\("text"\)/, "OAuth card exposes the existing provider test action");
 assert.match(oauthSource, /chatgptOAuth\.testConnection/);
 for (const locale of ["en-US", "zh-CN", "zh-TW", "ja-JP"]) {

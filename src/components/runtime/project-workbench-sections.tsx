@@ -362,10 +362,8 @@ export function ProjectWorkbenchSections({
                   ) : (
                     <RuntimeInfoRow
                       icon={<Bot className="h-4 w-4" />}
-                      label={t(authorizationStatus.source === "external" ? "workspace.externalAgent" : runtimeAuthorizationLabelKey(authorizationStatus))}
-                      value={authorizationStatus.internalConfigured && providerTestAttempted
-                        ? t(authorizationStatus.internalKind === "oauth" ? "workspace.internalOAuthTestFailed" : "workspace.internalApiTestFailed")
-                        : t(runtimeAuthorizationMessageKey(authorizationStatus))}
+                      label={t(runtimeAuthorizationLabelKey(authorizationStatus))}
+                      value={t(runtimeAuthorizationMessageKey(authorizationStatus, providerTestAttempted))}
                       suffix={<StatusDot status={authorizationStatus.status} />}
                     />
                   )}

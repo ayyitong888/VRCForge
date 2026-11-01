@@ -1,7 +1,7 @@
 import type { ApiConfig } from "./api";
 
 export type RuntimeAuthorizationStatus = {
-  source: "external" | "internal" | "both" | "none";
+  source: "external" | "internal" | "none";
   status: "ok" | "warning" | "error" | "unknown";
   externalState: "connected" | "waiting" | "off" | "unavailable";
   externalConnected: boolean;
@@ -52,13 +52,11 @@ export function resolveRuntimeAuthorizationStatus({
   const internalKind: RuntimeAuthorizationStatus["internalKind"] = internalConfigured
     ? provider === "chatgpt" ? "oauth" : "api"
     : "none";
-  const source: RuntimeAuthorizationStatus["source"] = externalConnected && internalTestPassed
-    ? "both"
-    : externalConnected
-      ? "external"
-      : internalTestPassed
-        ? "internal"
-        : "none";
+  const source: RuntimeAuthorizationStatus["source"] = externalConnected
+    ? "external"
+    : internalTestPassed
+      ? "internal"
+      : "none";
 
   if (!runtimeConnected) {
     return { source, status: "error", externalState: "unavailable", externalConnected, internalConfigured, internalTestPassed, internalKind };
@@ -66,21 +64,25 @@ export function resolveRuntimeAuthorizationStatus({
   if (externalConnected || internalTestPassed) {
     return { source, status: "ok", externalState, externalConnected, internalConfigured, internalTestPassed, internalKind };
   }
-  if (externalAgentComponent?.status === "error") {
+  if (externalAgentComponent?.status === "error" && !internalConfigured) {
     return { source, status: "unknown", externalState, externalConnected, internalConfigured, internalTestPassed, internalKind };
   }
   return { source, status: "warning", externalState, externalConnected, internalConfigured, internalTestPassed, internalKind };
 }
 
-export function runtimeAuthorizationMessageKey(status: RuntimeAuthorizationStatus): string {
+export function runtimeAuthorizationMessageKey(status: RuntimeAuthorizationStatus, providerTestAttempted = false): string {
   if (status.source === "external") return "workspace.externalAgentConnected";
-  if (status.source === "both") return "workspace.authorizationBoth";
   if (status.source === "internal") {
     return status.internalKind === "oauth"
       ? "workspace.internalOAuthConnected"
       : "workspace.internalApiConfigured";
   }
   if (status.internalConfigured) {
+    if (providerTestAttempted) {
+      return status.internalKind === "oauth"
+        ? "workspace.internalOAuthTestFailed"
+        : "workspace.internalApiTestFailed";
+    }
     return status.internalKind === "oauth"
       ? "workspace.internalOAuthNeedsTest"
       : "workspace.internalApiNeedsTest";
@@ -94,7 +96,6 @@ export function runtimeAuthorizationMessageKey(status: RuntimeAuthorizationStatu
 export function runtimeAuthorizationLabelKey(status: RuntimeAuthorizationStatus): string {
   if (status.source === "external") return "workspace.externalAgent";
   if (status.source === "internal") return "workspace.internalAgent";
-  if (status.source === "both") return "workspace.authorization";
   if (status.internalConfigured) return "workspace.internalAgent";
   if (status.source === "none") return "workspace.agentConnection";
   return "workspace.externalAgent";
