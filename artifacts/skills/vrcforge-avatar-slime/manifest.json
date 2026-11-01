@@ -2,7 +2,7 @@
   "id": "community.vrcforge-avatar-slime",
   "name": "半透明 Slime Avatar 制作",
   "skill_name": "vrcforge-avatar-slime",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "VRCForge User",
   "description": "按当前模型现场制作或修复胶体 Slime 外观、低开销水波光泽和正常/半透明平滑开关，检查头发、眼镜、隐藏表情、内部物体可见性与换装组合。",
   "min_vrcforge_version": "1.10.0",
@@ -20,7 +20,8 @@
   "entrypoints": {
     "skill": "SKILL.md",
     "workflow": "workflows/slime.json",
-    "guide": "references/workflow.md"
+    "guide": "references/workflow.md",
+    "recipes": "references/surface-and-transition.md"
   },
   "targets": {
     "runtime": "VRCForge",

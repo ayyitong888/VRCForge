@@ -3,6 +3,10 @@
   "mode": "approval_required",
   "selfContained": true,
   "requiresOtherSkills": [],
+  "guidanceFiles": [
+    "references/workflow.md",
+    "references/surface-and-transition.md"
+  ],
   "scope": [
     "translucent_slime_surface",
     "lightweight_ripple_normal",
