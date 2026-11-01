@@ -88,3 +88,23 @@ def test_native_fix_transaction_preserves_checkpoint_and_unverified_outcome(disp
     else:
         assert result["status"] == "invoked" and result["outcome"]["status"] == "pending"
         assert service._ports.checkpoint.active_apply_recoveries() == []
+
+
+def test_actual_core_preview_policy_routes_native_diagnostics_without_write_permission(tmp_path):
+    import re
+    from test_curve_fx_authoring_runtime_contract import method
+    source=(ROOT / "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs").read_text(encoding="utf-8-sig")
+    declaration=re.search(r'private static readonly HashSet<string> PreviewTools = .*?\n        };',source,re.S).group(0)
+    policy=method(source,"private static bool HasAllowedPreviewRequest(string toolName, JObject arguments)")
+    explicit=method(source,"private static bool HasExplicitPreviewRequest(JObject arguments)")
+    program="using System;using System.Collections.Generic;using Newtonsoft.Json.Linq;class Probe {"+declaration+policy+explicit+r'''
+ static bool HasStrictRestoreBackupPreviewRequest(JObject p)=>false;
+ static bool HasStrictSetupOutfitPreviewRequest(JObject p)=>false;
+ static void Main(){
+  if(!HasAllowedPreviewRequest("vrc_apply_diagnostic_fix",new JObject{{"preview",true}}))throw new Exception("native diagnostic preview was not routed");
+  foreach(var p in new[]{new JObject(),new JObject{{"preview",false}},new JObject{{"preview","true"}}})
+   if(HasAllowedPreviewRequest("vrc_apply_diagnostic_fix",p))throw new Exception("non-preview gained preview authority");
+  Console.WriteLine("PASS native preview policy");
+ }
+}'''
+    assert "PASS native preview policy" in run(tmp_path,program)

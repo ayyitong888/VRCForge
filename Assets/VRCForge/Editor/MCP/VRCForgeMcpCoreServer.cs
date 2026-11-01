@@ -53,6 +53,7 @@ namespace VRCForge.Editor
             new Queue<KeyValuePair<string, long>>();
         private static readonly HashSet<string> PreviewTools = new HashSet<string>(StringComparer.Ordinal)
         {
+            "vrc_apply_diagnostic_fix",
             "vrc_set_material_shader",
             "vrc_flatten_material_variant",
             "vrc_set_material_texture",
