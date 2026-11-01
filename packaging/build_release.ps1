@@ -313,12 +313,6 @@ function Build-TauriDesktopApp {
         $env:PATH = "$cargoDir;$env:PATH"
     }
 
-    Write-Host "Installing Tauri frontend dependencies..."
-    & $npmExe ci
-    if ($LASTEXITCODE -ne 0) {
-        throw "npm ci failed."
-    }
-
     $nodeExe = Join-Path (Split-Path -Parent $npmExe) "node.exe"
     foreach ($regression in @(
         "test_chatgpt_oauth_buttons_browser.mjs",
@@ -665,6 +659,13 @@ try {
     }
     if ($PayloadDownloadUrl -cne $expectedPayloadDownloadUrl) {
         throw "PayloadDownloadUrl must exactly match the official version-bound release asset URL. expected=$expectedPayloadDownloadUrl"
+    }
+
+    $npmExe = Resolve-NpmExe
+    Write-Host "Installing Tauri frontend dependencies..."
+    & $npmExe ci
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm ci failed."
     }
 
     & .\packaging\check_third_party_licenses.ps1
