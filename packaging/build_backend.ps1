@@ -1,5 +1,6 @@
 param(
-    [string]$OutputDir = "dist\backend"
+    [string]$OutputDir = "dist\backend",
+    [string]$SkillSigningKeyPath = $env:VRCFORGE_SKILL_SIGNING_KEY_PATH
 )
 
 Set-StrictMode -Version Latest
@@ -65,6 +66,18 @@ if ($bundledRoleFiles.Count -eq 0) {
     throw "Built-in sub-agent role declarations are missing."
 }
 
+$bundledAvatarSkills = Join-Path $repoRoot "build\bundled-avatar-skills"
+if ([string]::IsNullOrWhiteSpace($SkillSigningKeyPath)) {
+    throw "The existing Avatar Skill signer is required. Set VRCFORGE_SKILL_SIGNING_KEY_PATH or pass -SkillSigningKeyPath; setup does not replace signed Skills with development packages."
+}
+& python (Join-Path $repoRoot "packaging\build_avatar_skill_bundles.py") --output $bundledAvatarSkills --signing-key $SkillSigningKeyPath
+if ($LASTEXITCODE -ne 0) { throw "Bundled Avatar Skill export failed." }
+$bundledAvatarIndex = Get-Content -LiteralPath (Join-Path $bundledAvatarSkills "index.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+$avatarSkillDataArgs = @("--add-data", "$(Join-Path $bundledAvatarSkills 'index.json');resources/skill-packages")
+foreach ($package in $bundledAvatarIndex.packages) {
+    $avatarSkillDataArgs += @("--add-data", "$(Join-Path $bundledAvatarSkills $package.file);resources/skill-packages")
+}
+
 & $pyinstaller.Source `
     --noconfirm `
     --clean `
@@ -82,6 +95,7 @@ if ($bundledRoleFiles.Count -eq 0) {
     --add-data "$bundledGuide;examples/skill-packages/vrcforge-first-run-guide" `
     --add-data "$bundledDocs;examples/skill-packages/vrcforge-docs" `
     --add-data "$bundledRoles;resources/sub-agents" `
+    @avatarSkillDataArgs `
     @excludeArgs `
     --distpath $tempDist `
     --specpath (Join-Path $repoRoot "build\pyinstaller") `
@@ -95,6 +109,12 @@ if ($LASTEXITCODE -ne 0) {
 $sourceOutputDir = Join-Path $tempDist "vrcforge_backend"
 if (-not (Test-Path -LiteralPath (Join-Path $sourceOutputDir "vrcforge_backend.exe"))) {
     throw "PyInstaller did not produce vrcforge_backend.exe."
+}
+$collectedAvatarRoot = Join-Path $sourceOutputDir "_internal\resources\skill-packages"
+foreach ($filename in @("index.json") + @($bundledAvatarIndex.packages.file)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $collectedAvatarRoot $filename) -PathType Leaf)) {
+        throw "PyInstaller did not collect the bundled Avatar Skill resource: $filename"
+    }
 }
 foreach ($relativePath in $bundledGuideFiles) {
     $collectedPath = Join-Path $sourceOutputDir "_internal\examples\skill-packages\vrcforge-first-run-guide\$relativePath"

@@ -972,26 +972,15 @@ try {
     $payloadIntegrityJson = ($payloadIntegrityManifest | ConvertTo-Json -Depth 6) + [Environment]::NewLine
     [System.IO.File]::WriteAllText($payloadIntegrityPath, $payloadIntegrityJson, [System.Text.UTF8Encoding]::new($false))
 
-    # Export the tracked community Skill as an optional import, never into a user store.
-    $avatarSkillSource = Join-Path $repoRoot "artifacts\skills\vrcforge-avatar-slime"
-    $avatarSkillBuildScript = @'
-import json, sys, tempfile
-from pathlib import Path
-from skill_packages import SkillPackageService
-source, release_root, app_version = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-manifest = json.loads((source / 'manifest.json').read_text(encoding='utf-8'))
-filename = 'VRCForge_Avatar_Slime_' + manifest['version'] + '.vsk'
-with tempfile.TemporaryDirectory(prefix='vrcforge-release-skill-') as temporary:
-    exported = SkillPackageService(Path(temporary) / 'store', vrcforge_version=app_version).export_dev(source, release_root / filename)
-print(json.dumps({'path': str(exported.package_path), 'name': filename, 'version': exported.manifest['version'], 'mode': 'dev'}))
-'@
-    $avatarSkillJson = & $pythonExe -c $avatarSkillBuildScript $avatarSkillSource $releaseRoot $Version
-    if ($LASTEXITCODE -ne 0) { throw "Slime Skill package export failed." }
-    $avatarSkillMetadata = $avatarSkillJson | ConvertFrom-Json
-    $avatarSkillArchive = [string]$avatarSkillMetadata.path
-    $optionalSkillsRoot = Join-Path $payloadRoot "skill-packages"
-    New-Item -ItemType Directory -Force -Path $optionalSkillsRoot | Out-Null
-    Copy-Item -LiteralPath $avatarSkillArchive -Destination (Join-Path $optionalSkillsRoot $avatarSkillMetadata.name) -Force
+    # Reuse the Slime archive already exported from canonical source for the backend.
+    $avatarSkillSourceManifest = Get-Content -LiteralPath (Join-Path $repoRoot "artifacts\skills\vrcforge-avatar-slime\manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+    $bundledSkillRoot = Join-Path $payloadRoot "backend\_internal\resources\skill-packages"
+    $bundledSkillIndex = Get-Content -LiteralPath (Join-Path $bundledSkillRoot "index.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+    $bundledSlime = @($bundledSkillIndex.packages | Where-Object { $_.id -ceq $avatarSkillSourceManifest.id })
+    if ($bundledSlime.Count -ne 1) { throw "The bundled Slime Skill archive is missing from the frozen backend." }
+    $avatarSkillName = "VRCForge_Avatar_Slime_" + [string]$avatarSkillSourceManifest.version + ".vsk"
+    $avatarSkillArchive = Join-Path $releaseRoot $avatarSkillName
+    Copy-Item -LiteralPath (Join-Path $bundledSkillRoot $bundledSlime[0].file) -Destination $avatarSkillArchive -Force
 
     $setupMetadataPath = Join-Path $releaseRoot "setup-payload-metadata.json"
     & .\setup\build_setup.ps1 -AppDirectory $payloadRoot -OutputDirectory $releaseRoot -Version $Version -PayloadDownloadUrl $PayloadDownloadUrl -PythonExe $pythonExe -MetadataPath $setupMetadataPath

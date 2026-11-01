@@ -32,6 +32,52 @@ DOCS_SKILL_NAME = "vrcforge-docs"
 DOCS_PACKAGE_ID = "com.vrcforge.workflows.docs"
 
 
+def bundled_packages_dir() -> Path:
+    return Path(__file__).resolve().parent / "resources" / "skill-packages"
+
+
+def deliver_bundled_packages(
+    service: SkillPackageService,
+    projection: SkillPackageProjectionService,
+) -> list[dict[str, Any]]:
+    """Import the release's optional packages under the caller's package/Skill locks.
+
+    New packages remain disabled until the user enables them. Updates retain the
+    user's switch and the existing package signer, governance and edited-projection
+    checks. The ordinary install transaction also rolls back a failed projection.
+    Only the packaged index is read; this is not a user-folder import or a scan.
+    """
+    root = bundled_packages_dir()
+    index = root / "index.json"
+    if not index.is_file():
+        return []  # Source development need not have built release resources.
+    packages = json.loads(index.read_text(encoding="utf-8"))["packages"]
+    registry = service.load_registry()["skills"]
+    results = []
+    for package in packages:
+        package_id = str(package["id"])
+        try:
+            filename = str(package["file"])
+            if Path(filename).name != filename or Path(filename).suffix != ".vsk":
+                raise SkillPackageError("Bundled package must name a .vsk file in its resource directory.")
+            existing = registry.get(package_id)
+            if existing and _compare_semver(str(existing["version"]), str(package["version"])) >= 0:
+                results.append({"id": package_id, "status": "retained", "version": existing["version"], "enabled": bool(existing.get("enabled", False))})
+                continue
+            enabled = bool(existing.get("enabled", False)) if existing else False
+            with service.install_transaction(root / filename, source="application-package") as installed:
+                # Reuse the service's verified manifest, rather than a second
+                # package reader or a new trust/identity mechanism.
+                manifest = installed.preview.manifest
+                if bool(installed.registry_entry.get("enabled")) != enabled:
+                    service.set_enabled(manifest["id"], enabled)
+                projection.project_installed(installed.installed_path, manifest, enabled=enabled)
+            results.append({"id": manifest["id"], "status": "updated" if existing else "imported", "version": manifest["version"], "enabled": enabled})
+        except Exception as exc:  # One edited/conflicting package must not hide the others.
+            results.append({"id": package_id, "status": "conflict", "error": str(exc)})
+    return results
+
+
 def bundled_source_dir() -> Path:
     # PyInstaller collects these same files at the same relative path.
     return Path(__file__).resolve().parent / "examples" / "skill-packages" / SKILL_NAME

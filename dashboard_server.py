@@ -79,7 +79,7 @@ from dashboard_foundation import (
     runtime_settings_path,
 )
 from bounded_process import BoundedProcessResult, run_bounded_process
-from bundled_skill_delivery import deliver_bundled_docs, deliver_bundled_guide
+from bundled_skill_delivery import deliver_bundled_docs, deliver_bundled_guide, deliver_bundled_packages
 from alcom_litedb_reader import read_alcom_litedb_projects
 from app_update_service import AppUpdateService
 from agent_command_safety import normalize_filesystem_path
@@ -2161,6 +2161,14 @@ async def on_startup() -> None:
             emit_log("info", "skills", "Bundled VRCForge Docs checked.", {"status": bundled_docs["status"]})
         except Exception as exc:  # noqa: BLE001 - preserve startup when documentation is unavailable.
             emit_log("warn", "skills", "Bundled VRCForge Docs is unavailable.", {"error": str(exc)})
+        try:
+            with SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+                bundled_packages = deliver_bundled_packages(skill_package_service(), SKILL_PACKAGE_PROJECTION)
+            emit_log("warn" if any(item["status"] == "conflict" for item in bundled_packages) else "info",
+                     "skills", "Bundled Avatar packages checked; new packages wait for user activation.",
+                     {"packages": bundled_packages})
+        except Exception as exc:  # noqa: BLE001 - optional packages cannot block startup.
+            emit_log("warn", "skills", "Bundled Avatar package delivery is unavailable.", {"error": str(exc)})
         try:
             SUB_AGENT_COLLABORATION.start()
             await asyncio.to_thread(
