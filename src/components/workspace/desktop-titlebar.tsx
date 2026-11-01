@@ -10,7 +10,6 @@ export function DesktopTitlebar({ theme, onToggleTheme }: {
   theme: ThemeMode;
   onToggleTheme: () => void;
 }) {
-  const { t } = useTranslation();
   const desktop = isTauri();
   const [version, setVersion] = useState("");
   const [maximized, setMaximized] = useState(false);
@@ -43,6 +42,21 @@ export function DesktopTitlebar({ theme, onToggleTheme }: {
   }
 
   const appWindow = getCurrentWindow();
+  return <DesktopTitlebarFrame version={version} theme={theme} maximized={maximized} error={error}
+    onToggleTheme={onToggleTheme}
+    onMinimize={() => void control(() => appWindow.minimize())}
+    onMaximize={() => void control(() => appWindow.toggleMaximize())}
+    onClose={() => void control(() => appWindow.close())} />;
+}
+
+
+export function DesktopTitlebarFrame({ version, theme, maximized = false, error = "", compact = false,
+  onToggleTheme, onMinimize, onMaximize, onClose,
+}: {
+  version: string; theme: ThemeMode; maximized?: boolean; error?: string; compact?: boolean;
+  onToggleTheme?: () => void; onMinimize?: () => void; onMaximize?: () => void; onClose?: () => void;
+}) {
+  const { t } = useTranslation();
   return (
     <header className="desktop-titlebar" data-desktop-titlebar data-tauri-drag-region>
       <div className="desktop-titlebar-brand" data-tauri-drag-region>
@@ -51,19 +65,17 @@ export function DesktopTitlebar({ theme, onToggleTheme }: {
       </div>
       <span className="desktop-titlebar-space" data-tauri-drag-region />
       {error ? <span className="desktop-titlebar-error" role="alert">{error}</span> : null}
-      <button type="button" className="desktop-titlebar-theme" aria-label={t("window.toggleTheme")}
+      {!compact ? <button type="button" className="desktop-titlebar-theme" aria-label={t("window.toggleTheme")}
         title={t("window.toggleTheme")} onClick={onToggleTheme}>
         {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
-      </button>
-      <button type="button" aria-label={t("window.minimize")} title={t("window.minimize")}
-        onClick={() => void control(() => appWindow.minimize())}><Minus size={16} /></button>
-      <button type="button" aria-label={t(maximized ? "window.restore" : "window.maximize")}
-        title={t(maximized ? "window.restore" : "window.maximize")}
-        onClick={() => void control(() => appWindow.toggleMaximize())}>
+      </button> : null}
+      <button type="button" aria-label={t("window.minimize")} title={t("window.minimize")} onClick={onMinimize}><Minus size={16} /></button>
+      {!compact ? <button type="button" aria-label={t(maximized ? "window.restore" : "window.maximize")}
+        title={t(maximized ? "window.restore" : "window.maximize")} onClick={onMaximize}>
         {maximized ? <Copy size={13} /> : <Square size={13} />}
-      </button>
+      </button> : null}
       <button type="button" className="desktop-titlebar-close" aria-label={t("common.close")}
-        title={t("common.close")} onClick={() => void control(() => appWindow.close())}><X size={17} /></button>
+        title={t("common.close")} onClick={onClose}><X size={17} /></button>
     </header>
   );
 }
