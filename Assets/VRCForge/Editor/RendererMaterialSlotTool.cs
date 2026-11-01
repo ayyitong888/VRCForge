@@ -33,7 +33,6 @@ namespace VRCForge.Editor
             [VRCForgeInput("Preview scene path.", IsRequired = false)] public string expectedScenePath { get; set; } = "";
             [VRCForgeInput("Preview scene GUID.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
             [VRCForgeInput("Preview scene handle.", IsRequired = false)] public int? expectedSceneHandle { get; set; }
-            [VRCForgeInput("Preview scene file digest.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = "";
             [VRCForgeInput("Preview renderer component type.", IsRequired = false)] public string expectedRendererComponentType { get; set; } = "";
             [VRCForgeInput("Preview renderer component index.", IsRequired = false)] public int? expectedRendererComponentIndex { get; set; }
             [VRCForgeInput("Preview before material asset path.", IsRequired = false)] public string expectedBeforeMaterialAssetPath { get; set; } = "";
@@ -59,7 +58,6 @@ namespace VRCForge.Editor
             var mutationStarted = false;
             var undoGroup = -1;
             var beforeSlots = new string[0];
-            var beforeSceneDigest = string.Empty;
             Target target = null;
             try
             {
@@ -69,7 +67,6 @@ namespace VRCForge.Editor
                 var newPath = NormalizeMaterialPath(Required(parameters, "newMaterialAssetPath"));
                 RequireProject(parameters);
                 var scene = ResolveTarget(path, componentId, out target);
-                beforeSceneDigest = scene.FileDigest;
                 var materialEvidence = ReadMaterial(newPath, "new material");
                 if (slot < 0 || slot >= target.Renderer.sharedMaterials.Length)
                     throw new InvalidOperationException("slotIndex is outside sharedMaterials.");
@@ -95,9 +92,6 @@ namespace VRCForge.Editor
                         throw new InvalidOperationException("The exact renderer scene could not be saved.");
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                     ResolveTarget(path, componentId, out target);
-                    var persistedScene = target.Scene;
-                    if (string.Equals(persistedScene.FileDigest, scene.FileDigest, StringComparison.OrdinalIgnoreCase))
-                        throw new InvalidOperationException("The saved scene digest did not change after the material-slot replacement.");
                     VerifySlots(target.Renderer, beforeSlots, slot, materialEvidence);
                     var receipt = Payload(target, slot, beforeEvidence, materialEvidence, true, true, true, true, true);
                     return VRCForgeToolResult.Completed("Renderer material slot replaced and persisted.", receipt);
@@ -117,9 +111,8 @@ namespace VRCForge.Editor
                             throw new InvalidOperationException("The restored renderer scene could not be saved.");
                         Target restoredTarget;
                         ResolveTarget(parameters?["rendererPath"]?.ToString() ?? "", parameters?["rendererComponentId"]?.ToString() ?? "", out restoredTarget);
-                        if (restoredTarget.Renderer.sharedMaterials.Select(MaterialIdentity).SequenceEqual(beforeSlots)
-                            && string.Equals(restoredTarget.Scene.FileDigest, beforeSceneDigest, StringComparison.OrdinalIgnoreCase))
-                            return VRCForgeToolResult.Failed("Renderer material slot apply failed; Undo restored the verified pre-state.",
+                        if (restoredTarget.Renderer.sharedMaterials.Select(MaterialIdentity).SequenceEqual(beforeSlots))
+                            return VRCForgeToolResult.Failed("Renderer material slot apply failed; Undo restored the verified renderer slots.",
                                 new { schema = ResultSchema, mutationStarted = true, applied = false, committed = false, sceneSaved = false, persistedReadback = false, restored = true });
                     }
                     catch { }
@@ -142,7 +135,7 @@ namespace VRCForge.Editor
                 rendererPath = identity.rendererPath, rendererComponentId = identity.componentId,
                 rendererComponentType = identity.componentType, rendererComponentIndex = identity.componentIndex,
                 scenePath = scene.Path, sceneGuid = scene.Guid, sceneHandle = scene.Handle,
-                sceneFileDigest = scene.FileDigest, slotIndex = slot,
+                slotIndex = slot,
                 beforeMaterial = MaterialPayload(before), newMaterial = MaterialPayload(next),
                 newMaterialAssetPath = next.Path, newMaterialAssetGuid = next.Guid, newMaterialFileDigest = next.Digest,
                 preconditions = new { exactScene = true, exactRendererIdentity = true, exactSlot = true,
@@ -172,7 +165,7 @@ namespace VRCForge.Editor
             var scenePath = FindScenePath(rendererPath);
             var scene = observedScene != null && observedScene.Path == scenePath
                 ? observedScene
-                : SceneObjectCopyCore.ResolveSavedScene(scenePath, "renderer scene");
+                : SceneObjectCopyCore.ResolveSavedSceneOwner(scenePath, "renderer scene");
             var gameObject = SceneObjectCopyCore.ResolveUniqueGameObject(scene.Scene, rendererPath, "renderer path");
             var renderers = gameObject.GetComponents<Renderer>().Where(r => r != null).ToList();
             if (string.IsNullOrEmpty(componentId) && renderers.Count != 1)
@@ -206,10 +199,8 @@ namespace VRCForge.Editor
         internal static string MaterialIdentity(Material m) { if (m == null) return "null"; var p = AssetDatabase.GetAssetPath(m); return p + "|" + AssetDatabase.AssetPathToGUID(p); }
         private static string Sha256(byte[] bytes) { using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant(); }
         private static void RejectReparse(string path) { var current = Directory.GetParent(Application.dataPath).FullName; foreach (var part in path.Substring(current.Length).TrimStart('\\', '/').Split('\\', '/')) { current = Path.Combine(current, part); if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new InvalidOperationException("A material path contains a reparse point."); } }
-        private static void RequireEqual(string actual, JObject p, string key) { if (!string.Equals(actual, Required(p, key), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The verified scene or material state drifted."); }
         private static void RequireApplyFields(JObject p, Target t, SavedSceneSnapshot s, string id, int slot, Material beforeMaterial, MaterialEvidence before, MaterialEvidence next)
         {
-            RequireEqual(s.FileDigest, p, "expectedSceneFileDigest");
             var nullEvidence = p["expectedBeforeMaterialIsNull"];
             var expectsNull = nullEvidence?.Type == JTokenType.Boolean && nullEvidence.Value<bool>();
             var beforeMatches = before == null

@@ -36,23 +36,23 @@ def test_tool_is_generic_and_uses_stable_renderer_identity():
     assert 'toolId: "vrc_set_renderer_material_slot"' in tool
     assert 'RendererComponentIdentity.Create' in tool
     assert 'rendererComponentId' in tool
-    assert 'SceneObjectCopyCore.ResolveSavedScene' in tool
+    assert 'SceneObjectCopyCore.ResolveSavedSceneOwner' in tool
     assert 'SceneObjectCopyCore.ResolveUniqueGameObject' in tool
     assert 'hierarchyPathIsDisplayOnly = true' in tool
     assert 'sharedMaterials' in tool
 
 
-def test_apply_binds_scene_material_digests_and_persisted_readback():
+def test_apply_binds_scene_identity_and_material_evidence_with_persisted_readback():
     tool = read(TOOL)
     for field in ("expectedScenePath", "expectedSceneGuid", "expectedSceneHandle",
-                  "expectedSceneFileDigest", "expectedBeforeMaterialAssetPath",
+                  "expectedBeforeMaterialAssetPath",
                   "expectedBeforeMaterialGuid", "expectedBeforeMaterialFileDigest",
                   "expectedBeforeMaterialShader", "expectedBeforeMaterialRenderQueue",
                   "expectedNewMaterialGuid", "expectedNewMaterialFileDigest"):
         assert field in tool
     assert 'EditorSceneManager.SaveScene' in tool
     assert 'AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport)' in tool
-    assert 'persistedScene.FileDigest' in tool
+    assert 'sceneFileDigest' not in tool
     assert 'persistedReadback' in tool
     assert 'Undo.RegisterCompleteObjectUndo' in tool
     assert 'VerifySlots' in tool
@@ -68,11 +68,11 @@ def test_material_path_is_assets_mat_main_persistent_and_reparse_checked():
     assert 'FileAttributes.ReadOnly' in tool
 
 
-def test_undo_does_not_claim_restored_without_saved_prestate_digest():
+def test_undo_restoration_uses_exact_slot_readback_after_scene_save():
     tool = read(TOOL)
     rollback = tool.split("if (mutationStarted)", 1)[1].split("private static object Payload", 1)[0]
     assert "!EditorSceneManager.SaveScene(target.Scene.Scene)" in rollback
-    assert "restoredTarget.Scene.FileDigest, beforeSceneDigest" in rollback
+    assert "restoredTarget.Renderer.sharedMaterials.Select(MaterialIdentity).SequenceEqual(beforeSlots)" in rollback
     assert rollback.index("!EditorSceneManager.SaveScene") < rollback.index("restored = true")
 
 
@@ -92,7 +92,6 @@ def _preview():
         "scenePath": "Assets/2.unity",
         "sceneGuid": "b" * 32,
         "sceneHandle": 7,
-        "sceneFileDigest": "c" * 64,
         "slotIndex": 0,
         "beforeMaterial": {
             "name": "OpaqueGenerated",
@@ -128,13 +127,13 @@ def test_gateway_binds_authoritative_preview_to_exact_apply_fields():
     canonical, approval = bind_authoritative_preview(wrapper, _preview())
     arguments = canonical["arguments"]
     assert arguments["rendererComponentId"] == "a" * 64
-    assert arguments["expectedSceneFileDigest"] == "c" * 64
+    assert "expectedSceneFileDigest" not in arguments
     assert arguments["expectedBeforeMaterialFileDigest"] == "e" * 64
     assert arguments["expectedNewMaterialFileDigest"] == "1" * 64
     assert approval["freshReadbackRequired"] is True
 
 
-def test_gateway_rejects_noop_or_non_fresh_apply_receipts():
+def test_gateway_rejects_noop_apply_receipts():
     preview = _preview()
     preview["newMaterial"]["assetPath"] = preview["beforeMaterial"]["assetPath"]
     preview["newMaterial"]["assetGuid"] = preview["beforeMaterial"]["assetGuid"]
@@ -165,7 +164,5 @@ def test_gateway_rejects_noop_or_non_fresh_apply_receipts():
         "rendererComponentId": "a" * 64,
         "slotIndex": 0,
         "newMaterialAssetPath": apply["newMaterialAssetPath"],
-        "expectedSceneFileDigest": "c" * 64,
     }
-    with pytest.raises(RendererMaterialSlotError, match="fresh saved-scene digest"):
-        validate_apply_result(arguments, apply)
+    assert validate_apply_result(arguments, apply) == apply

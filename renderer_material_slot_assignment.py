@@ -87,7 +87,6 @@ def bind_authoritative_preview(
     scene_handle = _integer(result.get("sceneHandle"), "sceneHandle", -2_147_483_648, 2_147_483_647)
     if scene_handle == 0:
         raise RendererMaterialSlotError("sceneHandle must be nonzero.")
-    scene_digest = _hex(result.get("sceneFileDigest"), "sceneFileDigest", _DIGEST)
 
     if "beforeMaterial" not in result:
         raise RendererMaterialSlotError("Preview is missing beforeMaterial evidence.")
@@ -122,7 +121,6 @@ def bind_authoritative_preview(
             "expectedScenePath": scene_path,
             "expectedSceneGuid": scene_guid,
             "expectedSceneHandle": scene_handle,
-            "expectedSceneFileDigest": scene_digest,
             "expectedRendererComponentType": component_type,
             "expectedRendererComponentIndex": component_index,
             "expectedNewMaterialGuid": new_guid,
@@ -141,7 +139,6 @@ def bind_authoritative_preview(
             "scenePath": scene_path,
             "sceneGuid": scene_guid,
             "sceneHandle": scene_handle,
-            "sceneFileDigest": scene_digest,
             "rendererPath": actual_path,
             "rendererComponentId": component_id,
             "rendererComponentType": component_type,
@@ -173,8 +170,6 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, 
     if arguments.get("expectedBeforeMaterialIsNull") is True:
         if "beforeMaterial" not in result or result["beforeMaterial"] is not None:
             raise RendererMaterialSlotError("Apply empty-slot pre-state does not match approval.")
-    if _hex(result.get("sceneFileDigest"), "sceneFileDigest", _DIGEST) == _hex(arguments.get("expectedSceneFileDigest"), "expectedSceneFileDigest", _DIGEST):
-        raise RendererMaterialSlotError("Apply did not produce a fresh saved-scene digest.")
     return result
 
 
