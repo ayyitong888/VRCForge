@@ -992,8 +992,18 @@ try {
     $webPayloadSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $webPayloadArchive).Hash.ToLowerInvariant()
 
     $payloadZip = Join-Path $releaseRoot "VRCForge_Windows_x64_$Version.zip"
-    Remove-Item -LiteralPath $payloadZip -Force -ErrorAction SilentlyContinue
-    Compress-Archive -Path (Join-Path $payloadRoot "*") -DestinationPath $payloadZip -Force
+    # ZIP cannot represent pre-1980 timestamps. Clamp archive metadata only;
+    # keep upstream source timestamps and license files unchanged.
+    $portableZipScript = @'
+from pathlib import Path
+import sys, zipfile
+root, output = Path(sys.argv[1]), Path(sys.argv[2])
+with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as archive:
+    for path in root.rglob('*'):
+        archive.write(path, path.relative_to(root).as_posix())
+'@
+    & $pythonExe -c $portableZipScript $payloadRoot $payloadZip
+    if ($LASTEXITCODE -ne 0) { throw "Portable ZIP packaging failed." }
     $payloadSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadZip).Hash.ToLowerInvariant()
     $payloadLength = [uint64](Get-Item -LiteralPath $payloadZip -Force).Length
     if ($payloadLength -le 0) {
