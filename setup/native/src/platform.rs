@@ -1,8 +1,8 @@
 //! Windows integration for the single-window setup program.
 //!
 //! The installer's elevated identity owns machine changes. Explorer's existing
-//! token selects the interactive user's profile and launches the App unelevated.
-//! Handles, COM apartments and environment blocks are scoped to
+//! token selects the interactive user's profile; its desktop Shell launches the App.
+//! Handles and COM apartments are scoped to
 //! their operation; this module creates no service, pipe or authentication layer.
 
 use std::{
@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows::{
-    core::{Interface, GUID, PCWSTR, PWSTR},
+    core::{BSTR, Interface, GUID, PCWSTR, PWSTR},
     Win32::{
         Foundation::{CloseHandle, GetLastError, HANDLE, HLOCAL, HWND, LPARAM, LocalFree,
             SetLastError, WPARAM, ERROR_ACCESS_DENIED, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS},
@@ -23,9 +23,9 @@ use windows::{
         Security::{
             Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
                 GetNamedSecurityInfoW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT},
-            AdjustTokenPrivileges, DuplicateTokenEx, GetSecurityDescriptorControl,
+            AdjustTokenPrivileges, GetSecurityDescriptorControl,
             GetSecurityDescriptorDacl, GetTokenInformation, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES,
-            SecurityImpersonation, TokenPrimary, TokenUser, TOKEN_ASSIGN_PRIMARY,
+            TokenUser,
             TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY, TOKEN_USER,
             TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, SE_DEBUG_NAME, SE_PRIVILEGE_ENABLED,
             DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
@@ -34,18 +34,20 @@ use windows::{
         Storage::FileSystem::GetDiskFreeSpaceExW,
         System::{
             Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-                IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ},
+                IDispatch, IPersistFile, IServiceProvider, CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER,
+                COINIT_APARTMENTTHREADED, STGM_READ},
             Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
                 PROCESSENTRY32W, TH32CS_SNAPPROCESS},
-            Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock},
-            Threading::{CreateProcessWithTokenW, GetCurrentProcess, GetCurrentProcessId, OpenProcess,
+            Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess,
                 OpenProcessToken, QueryFullProcessImageNameW, TerminateProcess,
-                WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, LOGON_WITH_PROFILE,
-                PROCESS_INFORMATION, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-                PROCESS_TERMINATE, STARTUPINFOW, PROCESS_SYNCHRONIZE},
+                WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+                PROCESS_TERMINATE, PROCESS_SYNCHRONIZE},
+            Variant::VARIANT,
         },
         UI::{
-            Shell::{FileOpenDialog, IFileOpenDialog, IShellLinkW, ShellLink,
+            Shell::{FileOpenDialog, IFileOpenDialog, IShellLinkW, ShellLink, IShellWindows,
+                IShellBrowser, IShellFolderViewDual, IShellDispatch2, ShellWindows,
+                SID_STopLevelBrowser, SWC_DESKTOP, SWFO_NEEDDISPATCH, SVGIO_BACKGROUND,
                 SHChangeNotify, SHGetKnownFolderPath, FOLDERID_CommonPrograms,
                 FOLDERID_Desktop, FOLDERID_LocalAppData, FOLDERID_Profile,
                 FOLDERID_ProgramFilesX64, FOLDERID_Programs, FOLDERID_PublicDesktop,
@@ -118,7 +120,7 @@ fn explorer_token(pid: u32) -> windows::core::Result<OwnedHandle> {
     unsafe {
         let process = OwnedHandle::new(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?);
         let mut token = HANDLE::default();
-        OpenProcessToken(process.get(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_ASSIGN_PRIMARY, &mut token)?;
+        OpenProcessToken(process.get(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE, &mut token)?;
         Ok(OwnedHandle::new(token))
     }
 }
@@ -129,7 +131,6 @@ pub struct UserContext {
     pub desktop: PathBuf,
     pub start_menu: PathBuf,
     pub profile: PathBuf,
-    token: OwnedHandle,
 }
 
 pub struct InstalledApp {
@@ -179,11 +180,7 @@ pub fn resolve_user() -> Result<UserContext, String> {
             },
             Err(error) => return Err(win_error("Could not obtain the logged-in user's Explorer token", error)),
         };
-        let mut primary = HANDLE::default();
-        DuplicateTokenEx(source.get(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_ASSIGN_PRIMARY,
-            None, SecurityImpersonation, TokenPrimary, &mut primary)
-            .map_err(|error| win_error("Could not duplicate the Explorer token for App launch", error))?;
-        let token = OwnedHandle::new(primary);
+        let token = source;
         let mut bytes = 0;
         let _ = GetTokenInformation(token.get(), TokenUser, None, 0, &mut bytes);
         let mut info = vec![0usize; (bytes as usize).div_ceil(size_of::<usize>())];
@@ -200,7 +197,7 @@ pub fn resolve_user() -> Result<UserContext, String> {
         let desktop = known_folder(&FOLDERID_Desktop, Some(token.get()))?;
         let start_menu = known_folder(&FOLDERID_Programs, Some(token.get()))?;
         let profile = known_folder(&FOLDERID_Profile, Some(token.get()))?;
-        Ok(UserContext { sid, local_app_data, desktop, start_menu, profile, token })
+        Ok(UserContext { sid, local_app_data, desktop, start_menu, profile })
     }
 }
 
@@ -656,25 +653,46 @@ pub fn remove_registration(user: &UserContext, directory: &Path) -> Result<(), S
     Ok(())
 }
 
-pub fn launch_app(user: &UserContext, directory: &Path) -> Result<(), String> {
-    let executable = directory.join("VRCForge.exe");
-    let app = wide(&executable); let work = wide(directory);
-    let mut command = wide(format!("\"{}\"", executable.display()));
-    unsafe {
-        let mut environment = ptr::null_mut();
-        CreateEnvironmentBlock(&mut environment, Some(user.token.get()), false)
-            .map_err(|error| win_error("Could not create the logged-in user's App environment", error))?;
-        let startup = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..zeroed() };
-        let mut child: PROCESS_INFORMATION = zeroed();
-        let result = CreateProcessWithTokenW(user.token.get(), LOGON_WITH_PROFILE, PCWSTR(app.as_ptr()),
-            Some(PWSTR(command.as_mut_ptr())), CREATE_UNICODE_ENVIRONMENT, Some(environment),
-            PCWSTR(work.as_ptr()), &startup, &mut child);
-        let _ = DestroyEnvironmentBlock(environment);
-        result.map_err(|error| win_error("Could not start VRCForge as the logged-in user", error))?;
-        // The App is user-owned after launch; setup does not wait or terminate it.
-        let _ = CloseHandle(child.hThread); let _ = CloseHandle(child.hProcess);
-    }
-    Ok(())
+pub fn launch_app(_user: &UserContext, directory: &Path) -> Result<(), String> {
+    let directory = directory.to_owned();
+    // Microsoft ExecInExplorer: use the existing desktop Shell's automation
+    // object, not a newly created Shell.Application or the elevated token.
+    // https://learn.microsoft.com/windows/win32/shell/samples-execinexplorer
+    // A dedicated short-lived STA owns every COM interface. Explorer owns the
+    // launched App; setup holds no child process, token or environment block.
+    std::thread::spawn(move || {
+        let _com = ComScope::new()?;
+        let executable = directory.join("VRCForge.exe");
+        unsafe {
+            let windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER)
+                .map_err(|error| win_error("Could not access desktop Explorer automation", error))?;
+            let empty = VARIANT::default();
+            let mut desktop_window = 0;
+            let desktop = windows.FindWindowSW(&empty, &empty, SWC_DESKTOP,
+                &mut desktop_window, SWFO_NEEDDISPATCH)
+                .map_err(|error| win_error("Could not find the logged-in user's Explorer desktop", error))?;
+            let services: IServiceProvider = desktop.cast()
+                .map_err(|error| win_error("Could not access Explorer desktop services", error))?;
+            let browser: IShellBrowser = services.QueryService(&SID_STopLevelBrowser)
+                .map_err(|error| win_error("Could not access the Explorer desktop browser", error))?;
+            let view = browser.QueryActiveShellView()
+                .map_err(|error| win_error("Could not access the Explorer desktop view", error))?;
+            let background: IDispatch = view.GetItemObject(SVGIO_BACKGROUND)
+                .map_err(|error| win_error("Could not access Explorer desktop background automation", error))?;
+            let folder: IShellFolderViewDual = background.cast()
+                .map_err(|error| win_error("Could not access Explorer desktop folder automation", error))?;
+            let application = folder.Application()
+                .map_err(|error| win_error("Could not access the desktop Shell application", error))?;
+            let shell: IShellDispatch2 = application.cast()
+                .map_err(|error| win_error("The desktop Shell launch interface is unavailable", error))?;
+            shell.ShellExecute(&BSTR::from(executable.to_string_lossy().as_ref()),
+                &VARIANT::from(""), &VARIANT::from(directory.to_string_lossy().as_ref()),
+                &VARIANT::from("open"), &VARIANT::from(1i32))
+                .map_err(|error| win_error(&format!("Desktop Explorer could not launch '{}' from '{}'",
+                    executable.display(), directory.display()), error))?;
+        }
+        Ok(())
+    }).join().map_err(|_| "The Explorer launch thread stopped unexpectedly.".to_owned())?
 }
 
 pub fn choose_folder() -> Result<Option<PathBuf>, String> {
