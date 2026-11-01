@@ -133,3 +133,13 @@ To prove the snippet pipeline can dynamically compile and execute inside Unity, 
 ```powershell
 Unity.exe -batchmode -quit -projectPath "PATH_TO_UNITY_PROJECT" -executeMethod VRCForge.Editor.RoslynStatusTool.BatchExecutionSmoke -logFile roslyn-execution-smoke.log
 ```
+
+## Windows Setup / Windows 安装器
+
+The single-window setup and uninstaller use Tauri v2, the official opener plugin,
+Windows APIs, tar, and zstd. Both installer types use the same application archive:
+Offline embeds it; Web streams the versioned `.tar.zst` release asset. No Python
+or Rust toolchain is needed on the user's PC. WebView2 is installed when missing.
+Resolved Rust package licenses and their upstream notices are included under
+`licenses/setup/` in the application payload. Building setup requires Python 3.14
+for standard-library zstd compression.

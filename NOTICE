@@ -44,3 +44,10 @@ contract shipped in `VRCForge.unitypackage` are VRCForge-owned implementations.
 No third-party Unity MCP package or runtime is bundled.
 Notices from withdrawn development candidates are not distributed because no
 code from those retired external Unity MCP contracts remains in this release.
+
+* Tauri Windows setup and uninstaller dependencies
+  * Upstream: https://github.com/tauri-apps/tauri and https://github.com/tauri-apps/plugins-workspace
+  * Tauri and the opener plugin: MIT OR Apache-2.0
+  * zstd: BSD-3-Clause; tar and other Rust dependencies retain their declared upstream licenses.
+  * The Windows setup build collects its resolved Windows dependency license texts
+    and package/license list into licenses/setup/ in the distributed application.

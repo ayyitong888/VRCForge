@@ -78,6 +78,74 @@
         "licenses/tslib-CopyrightNotice.txt"
       ],
       "releaseDistributionNotes": ""
+    },
+    {
+      "name": "Windows setup tar",
+      "path": "third_party/setup-runtime/tar",
+      "license": "MIT OR Apache-2.0",
+      "requiredLicenseFiles": [
+        {
+          "file": "LICENSE-MIT",
+          "requiredText": [
+            "Permission is hereby granted"
+          ]
+        },
+        {
+          "file": "LICENSE-APACHE",
+          "requiredText": [
+            "Apache License"
+          ]
+        }
+      ],
+      "requiredDistributionNotes": "",
+      "releaseLicenseFiles": [
+        "licenses/setup/tar-0.4.46/LICENSE-MIT",
+        "licenses/setup/tar-0.4.46/LICENSE-APACHE"
+      ],
+      "releaseDistributionNotes": ""
+    },
+    {
+      "name": "Windows setup tauri-plugin-opener",
+      "path": "third_party/setup-runtime/tauri-plugin-opener",
+      "license": "MIT OR Apache-2.0",
+      "requiredLicenseFiles": [
+        {
+          "file": "LICENSE_MIT",
+          "requiredText": [
+            "Permission is hereby granted"
+          ]
+        },
+        {
+          "file": "LICENSE_APACHE-2.0",
+          "requiredText": [
+            "Apache License"
+          ]
+        }
+      ],
+      "requiredDistributionNotes": "",
+      "releaseLicenseFiles": [
+        "licenses/setup/tauri-plugin-opener-2.5.5/LICENSE_MIT",
+        "licenses/setup/tauri-plugin-opener-2.5.5/LICENSE_APACHE-2.0"
+      ],
+      "releaseDistributionNotes": ""
+    },
+    {
+      "name": "Windows setup zstd",
+      "path": "third_party/setup-runtime/zstd",
+      "license": "BSD-3-Clause",
+      "requiredLicenseFiles": [
+        {
+          "file": "LICENSE",
+          "requiredText": [
+            "BSD 3-Clause License"
+          ]
+        }
+      ],
+      "requiredDistributionNotes": "",
+      "releaseLicenseFiles": [
+        "licenses/setup/zstd-0.13.4/LICENSE"
+      ],
+      "releaseDistributionNotes": ""
     }
   ]
 }

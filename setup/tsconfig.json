@@ -1,0 +1,6 @@
+{
+  "extends":"../tsconfig.json",
+  "compilerOptions":{"target":"ESNext","moduleResolution":"Bundler","types":["vite/client"]},
+  "include":["ui/**/*.tsx","ui/**/*.ts"],
+  "references":[]
+}

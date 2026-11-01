@@ -1,0 +1,21 @@
+/* Extracted from https://ayyitong888.github.io/VRCForge/style.css on 2026-11-02.
+   Aliases adapt the shared App components without a second palette. */
+:root{--paper:#fff7fa;--pink:#d9487c;--ink:#53253b;--soft:#f9dce7;--line:#edb6c9;--white:#fff;--shadow:0 18px 45px rgba(83,37,59,.12);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+--background:337.5000 100.0000% 98.4314%;
+--foreground:331.3043 38.3333% 23.5294%;
+--card:0.0000 0.0000% 100.0000%;
+--card-foreground:331.3043 38.3333% 23.5294%;
+--primary:338.4828 65.6109% 56.6667%;
+--primary-foreground:0.0000 0.0000% 100.0000%;
+--secondary:337.2414 70.7317% 91.9608%;
+--secondary-foreground:331.3043 38.3333% 23.5294%;
+--muted:337.2414 70.7317% 91.9608%;
+--muted-foreground:331.3043 38.3333% 23.5294%;
+--border:339.2727 60.4396% 82.1569%;
+--input:339.2727 60.4396% 82.1569%;
+--ring:338.4828 65.6109% 56.6667%;
+--site-font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+--site-hero-radius:28px;--site-button-radius:999px;--site-control-radius:12px;
+--site-button-shadow:0 8px 18px rgba(217,72,124,.25);
+--site-art-scrim:linear-gradient(90deg,var(--paper) 0%,rgba(255,247,250,.96) 22%,transparent 67%);
+}

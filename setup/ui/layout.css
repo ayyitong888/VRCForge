@@ -1,0 +1,53 @@
+/* Layout only. All colors, fonts, radii, gradients and shadows come from the
+   site's extracted tokens or the imported shared VRCForge component styles. */
+.preview-desk{min-height:100vh;display:grid;place-items:center;padding:32px;background:var(--soft)}
+.setup-window{width:720px;min-height:440px;overflow:hidden;border-radius:var(--site-hero-radius);background:var(--paper);color:var(--ink);box-shadow:var(--shadow);font-family:var(--site-font);transition:height .3s ease-out}
+.setup-window .desktop-titlebar{color:var(--ink);height:36px}
+.setup-window .desktop-titlebar-version{color:var(--pink)}
+.brand-art{height:244px;position:relative;isolation:isolate;overflow:hidden;background:var(--soft)}
+.hero-image{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center center;z-index:-2}
+.original-hero .hero-image{object-position:center top}
+.brand-art:not(.original-hero):after{content:"";position:absolute;inset:0;z-index:-1;background:var(--site-art-scrim)}
+.art-copy{padding:36px 32px;width:51%;font-size:12px;line-height:1.65}
+.art-copy .eyebrow{font-size:10px;font-weight:900;letter-spacing:.08em;color:var(--pink);margin-bottom:12px}
+.eyebrow span{margin-left:4px}
+.art-copy h1{font-size:25px;line-height:1.23;font-weight:900;letter-spacing:-.045em;margin:0 0 12px}
+.art-copy p{margin:0;max-width:290px}
+.action-area{min-height:116px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:12px 32px}
+.hero-button{min-width:256px;height:46px;border-radius:var(--site-button-radius);font-size:16px;font-weight:700;box-shadow:var(--site-button-shadow)}
+.action-note{font-size:11px;color:var(--ink);opacity:.7}
+.setup-footer{min-height:44px;padding:10px 24px;display:flex;align-items:center;justify-content:space-between;font-size:10px;color:var(--ink);gap:16px}
+.setup-footer a{color:var(--pink)}
+.setup-footer>button{white-space:nowrap;color:var(--pink)}
+.progress-copy{width:456px;display:flex;flex-direction:column;gap:10px;font-size:12px}
+.carousel-dots{position:absolute;bottom:12px;left:32px;display:flex;gap:6px}
+.carousel-dots button{width:5px;height:5px;border-radius:var(--site-button-radius);background:var(--line)}
+.carousel-dots button.active{width:18px;background:var(--pink)}
+.custom-panel{margin:0 24px;padding:18px 8px 8px;border-top:1px solid var(--line)}
+.path-input{flex:1;min-width:0;border:1px solid var(--line);background:var(--white);border-radius:var(--site-control-radius);padding:0 12px;font-size:12px}
+.path-input.invalid{border-color:hsl(var(--destructive))}
+.data-location{font-size:10px;line-height:1.6;overflow-wrap:anywhere}
+.data-details{margin:0 32px;padding:12px 0;border-top:1px solid var(--line)}
+.detection-area{min-height:164px}
+.upgrade-card{width:100%;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;font-size:12px;background:var(--white);border-color:var(--line);border-radius:var(--site-control-radius);box-shadow:none}
+.design-board{width:1520px;display:grid;grid-template-columns:repeat(2,720px);gap:32px;padding:24px;background:var(--soft);align-items:start}
+.design-board .preview-desk{padding:0;display:block;min-height:0}
+.board-caption{font-size:12px;font-weight:700;color:var(--ink);padding:0 0 10px 4px}
+@media(prefers-reduced-motion:reduce){.setup-window{transition:none}}
+html.native-demo,html.native-demo body{background:transparent!important;overflow:hidden}
+.native-demo .preview-desk{width:720px;padding:0;min-height:0;display:block;background:transparent}
+.native-demo .setup-window{box-shadow:none}
+
+.demo-language{position:relative;display:flex;align-items:center;padding-right:12px;font-size:11px;app-region:no-drag;z-index:10}
+.language-trigger{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:84px;padding:3px 9px;color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:var(--site-control-radius);app-region:no-drag}
+.language-menu{position:absolute;top:30px;right:12px;min-width:132px;padding:5px;background:var(--paper);border:1px solid var(--line);border-radius:var(--site-control-radius);box-shadow:var(--shadow)}
+.language-menu button{display:flex;align-items:center;justify-content:space-between;width:100%;padding:7px 9px;border-radius:6px;color:var(--ink);app-region:no-drag}
+.language-menu button:hover{background:var(--soft)}
+.language-menu button[aria-checked="true"]{color:var(--pink);font-weight:700}
+
+.language-trigger:hover{background:var(--soft)}
+
+/* Keep expanded controls reachable at high display scaling. */
+.native-demo .preview-desk,.native-demo .setup-window{width:var(--setup-width,720px)}
+.native-demo .setup-window{max-height:var(--setup-max-height,none);overflow-y:auto;scrollbar-width:thin}
+.native-demo .setup-window .desktop-titlebar{position:sticky;top:0;z-index:20;background:var(--paper)}

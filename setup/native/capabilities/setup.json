@@ -1,0 +1,39 @@
+{
+  "identifier": "setup-window",
+  "description": "Setup window controls and VRCForge guide, license and privacy pages. Fixed-purpose native commands perform installation.",
+  "windows": [
+    "setup"
+  ],
+  "permissions": [
+    "core:window:allow-current-monitor",
+    "core:window:allow-outer-position",
+    "core:window:allow-set-position",
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-set-size",
+    "core:window:allow-start-dragging",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://github.com/ayyitong888/VRCForge/blob/main/README.md"
+        },
+        {
+          "url": "https://github.com/ayyitong888/VRCForge/blob/main/README.en.md"
+        },
+        {
+          "url": "https://github.com/ayyitong888/VRCForge/blob/main/README.ja.md"
+        },
+        {
+          "url": "https://github.com/ayyitong888/VRCForge/blob/main/LICENSE"
+        },
+        {
+          "url": "https://github.com/ayyitong888/VRCForge/blob/main/USER_MANUAL.md#privacy-boundary"
+        }
+      ]
+    }
+  ]
+}
