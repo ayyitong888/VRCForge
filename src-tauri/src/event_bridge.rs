@@ -276,6 +276,9 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
             .and_then(sanitize_runtime_turn_event)?;
         event["payload"] = runtime_turn;
     }
+    if event_type == "agentConnection" {
+        event["payload"] = serde_json::json!({ "component": payload["payload"]["component"] });
+    }
     if event_type == "chatStorageChanged" {
         if let Some(origin_id) = payload
             .get("payload")
@@ -722,6 +725,7 @@ pub(crate) fn desktop_backend_event_allowed(event_type: &str) -> bool {
         event_type,
         "advancedSettings"
             | "agentApprovals"
+            | "agentConnection"
             | "agentDesktopActions"
             | "agentGoalBackground"
             | "agentGoals"
@@ -747,6 +751,19 @@ pub(crate) fn desktop_backend_event_allowed(event_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{desktop_backend_event_allowed, sanitize_backend_event};
+
+    #[test]
+    fn agent_connection_forwards_the_existing_status_component() {
+        let component = serde_json::json!({
+            "status": "ok", "message": "An authenticated external Agent is connected.",
+            "detail": { "connected": true, "sessionCount": 1, "lastConnectedAt": 1234567890.0 }
+        });
+        let event = sanitize_backend_event(serde_json::json!({
+            "type": "agentConnection", "payload": { "component": component, "unrelated": "discard" }
+        })).unwrap();
+        assert_eq!(event["payload"]["component"], component);
+        assert!(event["payload"].get("unrelated").is_none());
+    }
 
     #[test]
     fn provider_config_change_forwards_only_a_refresh_signal() {
