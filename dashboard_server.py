@@ -1934,12 +1934,21 @@ def _notify_mcp_pending_approval(_approval: dict[str, Any]) -> None:
     loop.create_task(EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()}))
 
 
+def _notify_mcp_connection_changed() -> None:
+    """Push only the external connection component after session lifecycle changes."""
+    loop = asyncio.get_running_loop()
+    loop.create_task(EVENT_BUS.broadcast(
+        "agentConnection", {"component": build_external_agent_connection_component()},
+    ))
+
+
 async def initialize_agent_mcp_mount() -> None:
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
 
     try:
-        app_payload = create_agent_mcp_app(AGENT_GATEWAY, on_pending_approval=_notify_mcp_pending_approval)
+        app_payload = create_agent_mcp_app(AGENT_GATEWAY, on_pending_approval=_notify_mcp_pending_approval,
+                                           on_connection_changed=_notify_mcp_connection_changed)
         AGENT_MCP_APP = app_payload
         AGENT_MCP_CONTEXT = None
         AGENT_MCP_MOUNT.app = app_payload

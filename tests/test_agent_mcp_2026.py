@@ -630,13 +630,13 @@ def test_http_connection_projection_uses_session_idle_lifetime(router, monkeypat
     import agent_mcp_2026
 
     clock = [1000.0]
-    monkeypatch.setattr(agent_mcp_2026, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(agent_mcp_2026, "time", SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]))
 
     async def exercise():
         app = create_asgi_app(router, bearer_validator=lambda token: token == "good")
         status = app.state.mcp_connection_status
         assert status() == {"connected": False, "sessionCount": 0,
-                            "activeRequestCount": 0, "idleTimeoutSeconds": 900}
+                            "activeRequestCount": 0, "idleTimeoutSeconds": 900, "lastConnectedAt": None}
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             discovered = await client.post("/", json=_request("server/discover"), headers=_connection_headers("server/discover"))
             assert discovered.status_code == 200
@@ -680,7 +680,7 @@ def test_http_active_request_remains_connected_beyond_idle_timeout(monkeypatch):
     import agent_mcp_2026
 
     clock = [1000.0]
-    monkeypatch.setattr(agent_mcp_2026, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(agent_mcp_2026, "time", SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]))
 
     async def exercise():
         entered, release = asyncio.Event(), asyncio.Event()
@@ -699,7 +699,7 @@ def test_http_active_request_remains_connected_beyond_idle_timeout(monkeypatch):
                 await asyncio.wait_for(entered.wait(), timeout=5)
                 clock[0] += 901
                 assert app.state.mcp_connection_status() == {"connected": True, "sessionCount": 1,
-                                                          "activeRequestCount": 1, "idleTimeoutSeconds": 900}
+                                                          "activeRequestCount": 1, "idleTimeoutSeconds": 900, "lastConnectedAt": 1000000}
             finally:
                 release.set()
             assert (await pending).status_code == 200
@@ -709,3 +709,52 @@ def test_http_active_request_remains_connected_beyond_idle_timeout(monkeypatch):
             assert app.state.mcp_connection_status()["connected"] is False
 
     asyncio.run(exercise())
+
+
+def test_http_connection_events_only_follow_successful_session_lifecycle(router, monkeypatch):
+    from types import SimpleNamespace
+    import agent_mcp_2026
+
+    clock = [1000.0]
+    monkeypatch.setattr(agent_mcp_2026, "time", SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]))
+
+    async def exercise():
+        events = []
+        app = create_asgi_app(router, bearer_validator=lambda token: token == "good",
+                              on_connection_changed=lambda: events.append(app.state.mcp_connection_status()))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            bad = await client.post("/", content=b"invalid", headers=_connection_headers("server/discover"))
+            assert bad.status_code == 400 and events == []
+            first = await client.post("/", json=_request("server/discover"), headers=_connection_headers("server/discover"))
+            first_id = first.headers["Mcp-Session-Id"]
+            assert len(events) == 1 and events[-1]["lastConnectedAt"] == 1000000
+            clock[0] += 1
+            assert (await client.post("/", json=_request("tools/list"), headers=_connection_headers("tools/list", **{"Mcp-Session-Id": first_id}))).status_code == 200
+            assert len(events) == 1 and app.state.mcp_connection_status()["lastConnectedAt"] == 1000000
+            second = await client.post("/", json=_request("server/discover"), headers=_connection_headers("server/discover"))
+            assert len(events) == 2 and events[-1]["lastConnectedAt"] == 1001000
+            assert events[-1]["sessionCount"] == 2
+            assert (await client.delete("/", headers={"authorization": "Bearer good", "Mcp-Session-Id": second.headers["Mcp-Session-Id"]})).status_code == 204
+            assert len(events) == 3 and events[-1]["lastConnectedAt"] == 1000000
+            assert (await client.delete("/", headers={"authorization": "Bearer good", "Mcp-Session-Id": first_id})).status_code == 204
+            assert len(events) == 4 and events[-1]["lastConnectedAt"] is None
+            assert events[-1]["connected"] is False
+            assert (await client.delete("/", headers={"authorization": "Bearer good", "Mcp-Session-Id": first_id})).status_code == 404
+            assert len(events) == 4
+
+    asyncio.run(exercise())
+
+
+def test_http_connection_notification_failure_does_not_fail_discovery(router, caplog):
+    def broken_notification():
+        raise RuntimeError("fixture connection notification failure")
+
+    async def exercise():
+        app = create_asgi_app(router, bearer_validator=lambda token: token == "good",
+                              on_connection_changed=broken_notification)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/", json=_request("server/discover"), headers=_connection_headers("server/discover"))
+            assert response.status_code == 200
+            assert app.state.mcp_connection_status()["connected"] is True
+    asyncio.run(exercise())
+    assert "MCP connection notification failed" in caplog.text

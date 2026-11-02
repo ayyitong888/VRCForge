@@ -29,11 +29,13 @@ export function resolveRuntimeAuthorizationStatus({
   externalAgentComponent,
   apiConfig,
   providerTestPassed = false,
+  providerConnectedAt = 0,
 }: {
   runtimeConnected: boolean;
   externalAgentComponent?: ComponentStatus;
   apiConfig?: Pick<ApiConfig, "configured" | "provider" | "apiKeyPresent"> | null;
   providerTestPassed?: boolean;
+  providerConnectedAt?: number;
 }): RuntimeAuthorizationStatus {
   const detail = detailRecord(externalAgentComponent?.detail);
   const externalConnected = runtimeConnected && detail?.connected === true;
@@ -52,10 +54,12 @@ export function resolveRuntimeAuthorizationStatus({
   const internalKind: RuntimeAuthorizationStatus["internalKind"] = internalConfigured
     ? provider === "chatgpt" ? "oauth" : "api"
     : "none";
-  const source: RuntimeAuthorizationStatus["source"] = externalConnected
-    ? "external"
-    : internalTestPassed
-      ? "internal"
+  const externalConnectedAt = Number(detail?.lastConnectedAt || 0);
+  const source: RuntimeAuthorizationStatus["source"] = internalTestPassed
+    && (!externalConnected || providerConnectedAt > externalConnectedAt)
+    ? "internal"
+    : externalConnected
+      ? "external"
       : "none";
 
   if (!runtimeConnected) {

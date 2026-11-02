@@ -74,6 +74,7 @@ export function useProviderSettings({
   const [testingProvider, setTestingProvider] = useState("");
   const [providerTestMessage, setProviderTestMessage] = useState("");
   const [providerTestPassed, setProviderTestPassed] = useState(false);
+  const [providerConnectedAt, setProviderConnectedAt] = useState(0);
   const [providerTestFingerprint, setProviderTestFingerprint] = useState("");
   const [providerTestCredentialFingerprint, setProviderTestCredentialFingerprint] = useState("");
   const [providerTestEndpoint, setProviderTestEndpoint] = useState("");
@@ -434,6 +435,7 @@ export function useProviderSettings({
       setProviderTestMessage(`${payload.capability}: ${payload.status} - ${payload.message}${attempts ? ` (${attempts})` : ""}`);
       const passed = capability === "text" && Boolean(payload.ok);
       setProviderTestPassed(passed);
+      setProviderConnectedAt(passed ? Date.now() : 0);
       setProviderTestFingerprint(passed ? providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }) : "");
       setProviderTestCredentialFingerprint(passed
         ? payload.credentialFingerprint || (!apiKey.trim() ? apiConfig?.credentialFingerprint || "" : "")
@@ -477,6 +479,7 @@ export function useProviderSettings({
     modelsError,
     testingProvider,
     providerTestMessage,
+    providerConnectedAt,
     providerTestPassed: providerTestPassed && providerTestFingerprint === providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }) && providerTestEndpoint === endpoint,
     providerTestPassedForPersistedConfig: providerTestPassed
       && runtimeConnected

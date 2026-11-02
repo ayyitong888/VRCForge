@@ -70,6 +70,15 @@ const testedApi = exports.resolveRuntimeAuthorizationStatus({
 });
 assert.equal(testedApi.status, "ok", "an HTTP-200 successful provider test is green");
 assert.equal(testedApi.source, "internal");
+const bothConnected = {
+  runtimeConnected: true,
+  externalAgentComponent: { status: "ok", detail: { connected: true, gatewayEnabled: true, lastConnectedAt: 2000 } },
+  apiConfig: { configured: true, provider: "openai" },
+  providerTestPassed: true,
+};
+assert.equal(exports.resolveRuntimeAuthorizationStatus({ ...bothConnected, providerConnectedAt: 3000 }).source, "internal", "a later successful internal connection replaces the external source");
+assert.equal(exports.resolveRuntimeAuthorizationStatus({ ...bothConnected, providerConnectedAt: 1000 }).source, "external", "a later external connection replaces the internal source");
+assert.equal(exports.resolveRuntimeAuthorizationStatus({ ...bothConnected, providerConnectedAt: 3000, providerTestPassed: false }).source, "external", "an invalid internal result cannot win using an old connection time");
 assert.equal(exports.resolveRuntimeAuthorizationStatus({
   runtimeConnected: true,
   apiConfig: { configured: true, provider: "anthropic" },

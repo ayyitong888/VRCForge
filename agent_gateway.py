@@ -10143,6 +10143,7 @@ def create_agent_mcp_app(
     gateway: AgentGateway,
     *,
     on_pending_approval: Callable[[dict[str, Any]], None] | None = None,
+    on_connection_changed: Callable[[], None] | None = None,
 ):
     def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
         exposure_layer = normalize_exposure_layer(params.get("exposureLayer"))
@@ -10190,6 +10191,7 @@ def create_agent_mcp_app(
         bearer_validator=validate_bearer,
         route_path="/mcp",
         request_context=lambda context_id: gateway.resource_context(f"external:{context_id}"),
+        on_connection_changed=on_connection_changed,
     )
     gateway._external_mcp_connection_status = app.state.mcp_connection_status
     return app

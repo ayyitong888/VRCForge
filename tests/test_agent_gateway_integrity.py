@@ -3229,3 +3229,53 @@ def test_external_atomic_project_creation_handler_executes_without_fake_unity_ch
     assert result["status"] == "executed"
     assert "checkpoint" not in result
     assert calls and calls[0]["projectPath"].endswith("NewProject")
+
+
+def test_external_session_changes_broadcast_dashboard_component(tmp_path: Path, monkeypatch) -> None:
+    import dashboard_server
+
+    gateway = _external_gateway(tmp_path)
+    monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
+    events = []
+
+    async def broadcast(event_type, payload):
+        events.append((event_type, payload))
+
+    monkeypatch.setattr(dashboard_server.EVENT_BUS, "broadcast", broadcast)
+    app = create_agent_mcp_app(
+        gateway, on_connection_changed=dashboard_server._notify_mcp_connection_changed,
+    )
+
+    async def exercise():
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": PROTOCOL_VERSION,
+            "Mcp-Method": "server/discover",
+            "Authorization": f"Bearer {gateway.ensure_config().token}",
+        }
+        message = {"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": {"name": "event-test", "version": "1"},
+            },
+        }}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/mcp", headers=headers, json=message)
+            assert response.status_code == 200
+            await asyncio.sleep(0)
+            assert len(events) == 1
+            assert events[0][0] == "agentConnection"
+            component = events[0][1]["component"]
+            assert component["status"] == "ok"
+            assert component["detail"]["connected"] is True
+            assert isinstance(component["detail"]["lastConnectedAt"], int)
+            headers["Mcp-Session-Id"] = response.headers["Mcp-Session-Id"]
+            assert (await client.delete("/mcp", headers=headers)).status_code == 204
+            await asyncio.sleep(0)
+            assert len(events) == 2
+            assert events[-1][1]["component"]["detail"]["connected"] is False
+            assert events[-1][1]["component"]["detail"]["lastConnectedAt"] is None
+
+    asyncio.run(exercise())

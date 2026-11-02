@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import math
 import sys
 import secrets
@@ -865,6 +866,7 @@ def create_asgi_app(
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     route_path: str = "/",
     request_context: Callable[[str], AbstractContextManager[Any]] | None = None,
+    on_connection_changed: Callable[[], None] | None = None,
 ):
     """Create the VRCForge 2026 extension's loopback HTTP endpoint.
 
@@ -896,13 +898,22 @@ def create_asgi_app(
         """Project live HTTP sessions without extending or mutating their lifetime."""
         now = time.monotonic()
         current = [state for state in tuple(sessions.values())
-                   if state["active"] or now - state["lastUsed"] < HTTP_SESSION_IDLE_SECONDS]
+                   if state.get("connectedAt") is not None
+                   and (state["active"] or now - state["lastUsed"] < HTTP_SESSION_IDLE_SECONDS)]
         return {
             "connected": bool(current),
             "sessionCount": len(current),
             "activeRequestCount": sum(state["active"] for state in current),
             "idleTimeoutSeconds": HTTP_SESSION_IDLE_SECONDS,
+            "lastConnectedAt": max((state["connectedAt"] for state in current), default=None),
         }
+
+    def notify_connection_changed() -> None:
+        if on_connection_changed is not None:
+            try:
+                on_connection_changed()
+            except Exception:
+                logging.getLogger(__name__).warning("MCP connection notification failed", exc_info=True)
 
     async def endpoint(request: Request):
         deleting = request.method == "DELETE" and bool(request.headers.get("Mcp-Session-Id"))
@@ -948,6 +959,7 @@ def create_asgi_app(
                 return JSONResponse(_error(None, -32000, "MCP session belongs to another credential"), status_code=403)
         if deleting:
             sessions.pop(session_id, None)
+            notify_connection_changed()
             return Response(status_code=204)
         if not (_header_has_media_type(accept, "application/json") and _header_has_media_type(accept, "text/event-stream")):
             payload, status = _transport_error("Accept must include application/json and text/event-stream")
@@ -1001,7 +1013,7 @@ def create_asgi_app(
             return JSONResponse(_error(message.get("id"), -32000, "MCP session capacity reached"), status_code=503)
         context_id = session_id or secrets.token_urlsafe(32)
         if created:
-            sessions[context_id] = {"owner": owner, "lastUsed": now, "active": 0}
+            sessions[context_id] = {"owner": owner, "lastUsed": now, "active": 0, "connectedAt": None}
         state = sessions.get(context_id)
         if state is not None:
             state["active"] += 1
@@ -1018,6 +1030,9 @@ def create_asgi_app(
                 state["lastUsed"] = time.monotonic()
         if created and (status >= 400 or "error" in payload):
             sessions.pop(context_id, None)
+        elif created and context_id in sessions:
+            sessions[context_id]["connectedAt"] = int(time.time() * 1000)
+            notify_connection_changed()
         response_headers = {"Mcp-Session-Id": context_id} if context_id in sessions else {}
         return JSONResponse(payload, status_code=status, headers=response_headers)
 

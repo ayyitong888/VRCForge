@@ -513,6 +513,7 @@ export default function App() {
     providerTestMessage,
     providerTestPassed,
     providerTestPassedForPersistedConfig,
+    providerConnectedAt,
     providerReadyForOnboarding,
     visionProvider,
     visionApiKey,
@@ -1976,6 +1977,7 @@ export default function App() {
     externalAgentComponent,
     apiConfig,
     providerTestPassed: providerTestPassedForPersistedConfig,
+    providerConnectedAt,
   });
   const localizeHealthMessage = useCallback(
     (message?: string) => localizeRuntimeHealthMessage(t, message),
@@ -2359,6 +2361,17 @@ export default function App() {
     void listen<BackendEventMessage>("vrcforge-backend-event", (event) => {
       const eventType = typeof event.payload?.type === "string" ? event.payload.type : "";
       if (!eventType) {
+        return;
+      }
+      if (eventType === "agentConnection") {
+        const { component } = event.payload.payload as { component: AppBootstrap["health"]["components"][string] };
+        setBootstrap((current) => current ? {
+          ...current,
+          health: {
+            ...current.health,
+            components: { ...current.health.components, externalAgentConnection: component },
+          },
+        } : current);
         return;
       }
       if (eventType === "agentRuntimeDelta") {
