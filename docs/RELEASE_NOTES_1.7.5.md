@@ -33,7 +33,7 @@ safety. It supersedes 1.7.4; the
   remembered project/category rule does not let the executing model self-approve:
   each future match still goes through the separate provider review request.
 
-## Carried-forward release gates
+## Compatibility
 
 - The first-party Unity MCP Core remains MCP 2.0 (`2026-07-28`) with the fixed
   64-tool catalogue and zero bundled third-party MCP provenance.

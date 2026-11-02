@@ -1,13 +1,8 @@
 # VRCForge 1.7.2
 
-VRCForge 1.7.2 is the next stable patch release and supersedes the 1.7.1
-refresh. It carries the verified 1.7 Agentic closeout, the approved
-file-backed multi-colour theme extension, the Memory Dreaming convergence and
-the goal semantic verification against Claude Code and Codex CLI. It is a
-documentation-corrected package whose public identity and release evidence
-track the 1.7.2 source and assets together.
+VRCForge 1.7.2 supersedes 1.7.1 with updated Agent workflows, file-backed multi-colour themes, Memory Dreaming and Goal controls.
 
-## Corrected packaging evidence
+## Packaging corrections
 
 - Packaged README, User Manual and About metadata now report version 1.7.2
   instead of the previous release identity.
@@ -42,8 +37,7 @@ download the 1.7.2 assets below.
   defaults**. Colour fields keep raw partial text while typing and commit
   only on valid blur/non-composing Enter, so IME input cannot repeat or
   normalize early.
-- **Goal semantic verification.** The Goal surface was verified against
-  Claude Code and Codex CLI implementations: `/goal <objective>` sets,
+- **Goal controls.** `/goal <objective>` sets,
   bare `/goal` views, `/goal pause|resume|clear` controls; an active Goal is
   injected as persistent context; pause finishes the current delivery round
   rather than hard-interrupting; elapsed active time survives pause and
@@ -73,12 +67,11 @@ compete`, Session branches or Handoff Inbox, Reviewer shadow promotion,
 Workflow execution or recovery, token-price conversion, or Agent/Workflow
 monitoring.
 
-## Compatibility and verification
+## Compatibility
 
 - The bundled first-party Unity MCP Core remains MCP 2.0 (`2026-07-28`) with
   the fixed 64-tool catalogue.
-- The 1.6.2 Unity Editor-only hotfix guard remains part of the package and its
-  provenance gate.
+- The 1.6.2 Unity Editor-only hotfix guard remains part of the package.
 - General Mode retains Core + General tools; Unity Project Mode remains its
   capability superset. Generic writes cannot modify registered Unity roots.
 - The Windows installers are not code-signed. Download only official VRCForge

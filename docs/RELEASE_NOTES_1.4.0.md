@@ -2,9 +2,7 @@
 
 ## Highlights
 
-- The `v1.4.0` Unity package bundles the project Core and release integration
-  files under `Assets/VRCForge`; clean-project acceptance connected the App
-  directly after import and compilation.
+- The `v1.4.0` Unity package bundles the project Core and release integration files under `Assets/VRCForge`.
 - The bundled Core uses only MCP 2.0 (`2026-07-28`) and exposes the 64
   VRCForge product tools provided by this release.
 - Requests from clients older than protocol `2026-07-28` fail with an explicit
@@ -33,14 +31,6 @@
   versioned auto-connect preference, and requests removal of the product-owned
   asset root. If Unity cannot safely remove it, the command reports the failure
   and leaves the remaining files for manual review.
-- The `v1.4.0` provenance scan reported VRCForge-owned command, input, and
-  result contracts with no bundled third-party Unity MCP runtime, protocol
-  asset, residual GUID, or notice. Known third-party package identifiers appear
-  in conflict detection only.
-- The release build scanned its packaging inputs and four generated assets for
-  high-confidence private-key, credential, token, and local-machine-path
-  markers. No finding was reported for the published asset set; the gate is
-  designed to stop on a finding without printing the matched value.
 
 ## Before you install
 
@@ -56,15 +46,9 @@
 - Back up the Unity project before any operation that can write project data.
 - A write operation must be initiated and approved through VRCForge App; the
   Unity package does not grant unauthenticated direct writes.
-- Tool availability is not a guarantee that every avatar, asset, or project
-  can be changed successfully. Review the plan and readback for the selected
-  project.
 - The Windows installers in this release are not code-signed. Download only
   the four assets attached to this release and verify their published SHA-256
   values when your environment requires it.
-- Administrator-mode install, update, and uninstall execution was explicitly
-  deferred for this release cycle. Installer construction and non-privileged
-  package checks do not replace that UAC runtime gate.
 
 ## Included release assets
 

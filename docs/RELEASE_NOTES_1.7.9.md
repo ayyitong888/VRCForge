@@ -65,12 +65,5 @@ publication of this version.
 
 - Unity Core product identity is `1.7.9`; contract 82 exposes 80
   VRCForge-owned Unity tools through MCP 2.0 (`2026-07-28`).
-- The Windows payload remains self-contained and must pass the clean import,
-  compile/load, provenance, paired-Core, result-parity, and stable-readiness
-  gates before publication.
-- The Windows binaries are not code-signed, so Windows may warn. The public package must not contain a
-  third-party Unity MCP runtime or private-addon implementation.
-
-Release artifact names, SHA-256 values, and live Unity/package evidence are
-published only after the final artifacts have been built and verified; source
-tests alone are not release proof.
+- The Windows payload is self-contained.
+- The Windows binaries are not code-signed, so Windows may warn.

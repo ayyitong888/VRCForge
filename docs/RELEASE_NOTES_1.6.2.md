@@ -39,11 +39,5 @@ and assets remain unchanged.
 - Keeps the first-party Unity MCP Core on MCP 2.0 (`2026-07-28`) while the
   external Agent edge retains its existing compatibility boundary.
 
-## Windows binary SHA-256
-
-The authoritative `VRCForge.exe` SHA-256 is inserted into the GitHub Release
-notes from the strict manifest produced by the single clean v1.6.2 tag build.
-The tagged source file is intentionally not rewritten after that build.
-
 The Windows installers are not code-signed. Download only assets attached to
 the official VRCForge Release and verify the published hashes.

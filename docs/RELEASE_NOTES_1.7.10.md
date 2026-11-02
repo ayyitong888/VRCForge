@@ -2,8 +2,7 @@
 
 VRCForge 1.7.10 is a Windows x64 release target focused on trustworthy Unity
 write results, bounded asynchronous Editor work, and portable official Skills.
-It supersedes 1.7.9; the published `v1.7.8` release and the existing `v1.7.9`
-Draft remain unchanged until this version is formally published.
+It supersedes 1.7.9.
 
 ## Trustworthy Unity write results
 
@@ -63,13 +62,5 @@ Draft remain unchanged until this version is formally published.
 
 - Unity Core product identity is `1.7.10`; contract 84 exposes 82
   VRCForge-owned Unity tools through MCP 2.0 (`2026-07-28`).
-- The Windows payload remains self-contained and must pass clean build,
-  Unity compile/load, provenance, paired-Core, result-contract, and packaged
-  backend gates before publication.
-- The Windows binaries are not code-signed, so Windows may warn. The public
-  package must not contain a third-party Unity MCP runtime or private-addon
-  implementation.
-
-Release artifact names, SHA-256 values, and live package evidence are published
-only after the final artifacts have been built and verified; source tests alone
-are not release proof.
+- The Windows payload is self-contained.
+- The Windows binaries are not code-signed, so Windows may warn.

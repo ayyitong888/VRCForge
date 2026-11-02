@@ -35,11 +35,10 @@ compete`, Session branches or Handoff Inbox, Reviewer shadow promotion,
 Workflow execution or recovery, token-price conversion, or Agent/Workflow
 monitoring.
 
-## Compatibility and verification
+## Compatibility
 
 - The window title and package metadata report 1.7.0.
-- The 1.6.2 Unity Editor-only hotfix guard remains part of the package and its
-  provenance gate.
+- The 1.6.2 Unity Editor-only hotfix guard remains part of the package.
 - General Mode retains Core + General tools; Unity Project Mode remains its
   capability superset. Generic writes cannot modify registered Unity roots.
 - The Windows installers are not code-signed. Download only assets attached to

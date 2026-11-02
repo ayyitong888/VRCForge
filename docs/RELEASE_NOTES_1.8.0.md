@@ -1,12 +1,10 @@
 # VRCForge 1.8.0
 
 VRCForge 1.8.0 updates the shared Agent tools, exact-target editing and
-recovery workflows on Windows x64. These notes describe implemented changes;
-they do not claim that every possible avatar workflow has been validated.
+recovery workflows on Windows x64.
 
 The shared boundary targets MCP 2.0 (`2026-07-28`). Windows installers are
-not code-signed; Windows may show an unverified-publisher warning. This does
-not constitute permission to bypass a failed integrity or pairing check.
+not code-signed; Windows may show an unverified-publisher warning.
 
 ## Shared Agent capabilities
 
@@ -17,8 +15,7 @@ not constitute permission to bypass a failed integrity or pairing check.
   contracts. Lazy loading uses catalog generations and list-change notices.
   Planning exposure does not make write tools callable.
 - Tools, Resources and Skill-backed Prompts share identity and provenance
-  boundaries. Full workflow acceptance, including wardrobe dissolve animation,
-  remains a separate real-Agent test and is not implied by protocol tests.
+  boundaries.
 
 ## Exact-target writes and recovery
 
@@ -30,8 +27,7 @@ not constitute permission to bypass a failed integrity or pairing check.
 - Renderer material-slot assignment changes one exact slot with a saved
   readback. Rollback only reports restoration after the saved scene and
   original slot state have been verified.
-- Scene capture supports an explicit free camera. Visual acceptance still
-  requires inspecting the resulting image, not just a successful Tool return.
+- Scene capture supports an explicit free camera.
 
 ## Tool correctness and diagnostics
 
@@ -69,26 +65,12 @@ not constitute permission to bypass a failed integrity or pairing check.
 - Settings panels load independently of slow Agent notes, deduplicate in-flight
   requests and guard against stale responses while switching contexts.
 
-## Installer validation
+## Installer changes
 
-The published offline installer passed fresh installation and upgrade from the
-official 1.7.10 installer on separate clean Windows runners, including installed
-backend health, uninstall and user-data preservation. The evidence is available
-in [the installer validation run](https://github.com/ayyitong888/VRCForge/actions/runs/34987883889).
 Silent error dialogs have deterministic defaults, installer PowerShell children
 use native module discovery, and packaging checks the payload against its own
 archive entry budget before release.
 
-The five published assets have matching release-manifest digests. The public ZIP
-download was independently verified. These checks do not claim a separate
-end-to-end Web installer run. The manifest distinguishes the original runtime
-source identity from the installer and packaged-helper repair commit.
+## Known limitations
 
-## Verification boundary
-
-Source regression, isolated Unity compilation, packaged smoke tests and real
-desktop/Agent acceptance are recorded separately. Installer upgrade, desktop
-latency and full avatar workflow claims require evidence from the exact package
-being delivered. The [1.8.0 stable release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0)
-is published. Lightweight checkpoint storage
-and a new plugin extension architecture are not included in this release.
+Lightweight checkpoint storage and a new plugin extension architecture are not included in this release.

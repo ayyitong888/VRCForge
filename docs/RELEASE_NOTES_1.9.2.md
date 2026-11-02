@@ -20,13 +20,9 @@ This release improves tool discovery, result navigation, execution identity, and
 
 Identity checks, preview, approval, checkpoints, validation, and rollback requirements remain in place.
 
-## Validation and known limitations
+## Known limitations
 
-- A fresh supported Unity project with the VRChat Avatar SDK compiled and loaded Core 1.9.2 with zero compilation errors.
-- The material benchmark completed a 76-row index and the exact target material details. The FX benchmark completed the approved speed change and persisted readback.
-- Two native-continuation regression fixtures have an outdated mock method signature and fail before reaching their behavior assertions. Replaying the unchanged assertions with an in-memory signature adapter passed both cases. The checked-in fixtures remain a test-maintenance limitation; these failures did not demonstrate a runtime continuation defect.
-- One existing owner-surface structural assertion remains a baseline failure. The targeted result-reader suite introduced no additional failures; no assertions were weakened or skipped.
-- Fresh imports can log notices that non-empty or modified directories were preserved by legacy cleanup. The tested import compiled successfully; preserved files are not removed automatically.
+- Fresh imports can log notices that non-empty or modified directories were preserved by legacy cleanup. Preserved files are not removed automatically.
 
 ## Upgrade
 

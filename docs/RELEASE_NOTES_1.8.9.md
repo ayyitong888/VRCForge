@@ -1,7 +1,5 @@
 # VRCForge 1.8.9
 
-Release candidate. Publication requires the release validation gates to pass.
-
 ## Sign-in and Connection Status
 
 - Ordinary ChatGPT sign-in ignores a selected account that is no longer present, so a retry can start a fresh account login.

@@ -1,15 +1,10 @@
 # VRCForge 1.7.1
 
-VRCForge 1.7.1 carries the verified 1.7 Agentic closeout, corrected public
-documentation and the approved file-backed multi-colour theme extension.
+VRCForge 1.7.1 updates Agent workflows, public documentation and file-backed multi-colour themes.
 
 ## Refreshed 1.7.1 package
 
-The 2026-08-18 package refresh replaces the earlier 1.7.1 binaries while
-retaining the same product version at the release owner's explicit direction.
-The refreshed source commit, moved `v1.7.1` tag, release manifest and all
-replacement assets are rebuilt and verified together; hashes from the earlier
-1.7.1 package no longer identify the current downloads.
+The 2026-08-18 package refresh replaces the earlier 1.7.1 binaries while retaining the same product version. Hashes from the earlier package no longer identify the current downloads.
 
 - Theme customization now offers Default, Ocean, Violet, Sakura, Forest,
   Sunset and Custom palettes instead of a single accent-only control.
@@ -23,7 +18,7 @@ replacement assets are rebuilt and verified together; hashes from the earlier
   palette and removes the managed background rather than presenting an
   ambiguous reset action.
 
-## Corrected packaging evidence
+## Packaging corrections
 
 - Packaged README and User Manual identity now match version 1.7.1 instead of
   describing the older 1.6.2 release.
@@ -55,12 +50,11 @@ compete`, Session branches or Handoff Inbox, Reviewer shadow promotion,
 Workflow execution or recovery, token-price conversion, or Agent/Workflow
 monitoring.
 
-## Compatibility and verification
+## Compatibility
 
 - The bundled first-party Unity MCP Core remains MCP 2.0 (`2026-07-28`) with
   the fixed 64-tool catalogue.
-- The 1.6.2 Unity Editor-only hotfix guard remains part of the package and its
-  provenance gate.
+- The 1.6.2 Unity Editor-only hotfix guard remains part of the package.
 - General Mode retains Core + General tools; Unity Project Mode remains its
   capability superset. Generic writes cannot modify registered Unity roots.
 - The Windows installers are not code-signed. Download only official VRCForge

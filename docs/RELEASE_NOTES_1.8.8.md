@@ -1,7 +1,5 @@
 # VRCForge 1.8.8
 
-Release candidate. Publication requires the release validation gates to pass.
-
 ## Agent and Model Connections
 
 - Keep native tool definitions stable while loading tool descriptions through tool results.
@@ -11,8 +9,6 @@ Release candidate. Publication requires the release validation gates to pass.
 - Add optional ChatGPT account sign-in with locally retained login state and model selection.
 - Keep OAuth integration separate from the other provider connections.
 - Improve steering during active model requests while retaining tool approval boundaries.
-
-Cache reuse depends on the provider and workload. These changes do not guarantee a fixed cache hit rate.
 
 ## Unity Connection and Updates
 

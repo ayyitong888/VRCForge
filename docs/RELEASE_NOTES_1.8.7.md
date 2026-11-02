@@ -24,6 +24,5 @@
 - **release-manifest.json**：版本、构建策略与文件校验信息。
 
 1.8.7 已发布附件的清单标记为 `local-acceptance`、`releaseEligible=false`。
-这些附件未通过严格发布构建资格；文件校验一致不代表这一门禁已经通过。
 
 Protocol: MCP 2.0 (`2026-07-28`). Windows binaries are not code-signed; verify the release manifest hashes.

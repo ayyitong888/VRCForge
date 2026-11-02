@@ -50,7 +50,6 @@ was formally published on 2026-08-20. It supersedes `v1.7.6`; the published
 - Release: <https://github.com/ayyitong888/VRCForge/releases/tag/v1.7.7>
 - Release commit: `e9aa5a9b044c5451e70ebfff3a3647753122c090`
 - Annotated tag object: `7f27ee529b11830026c4f3c6a30bd73428b09a6a`
-- Build policy: `strict`, `releaseEligible=true`
 - `VRCForge.unitypackage`:
   `74eb5c25f8a361314d4a9a4e4a723b55ffc76c0bd7e53ece5ed1f66dc95da222`
 - `VRCForge_Windows_x64_1.7.7.zip`:

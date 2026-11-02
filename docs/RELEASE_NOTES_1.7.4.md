@@ -27,7 +27,7 @@ and Release page remain untouched.
 - Checkpoint archives distinguish **Latest retained** from **Recovery in
   progress** while keeping both protected from deletion.
 
-## Carried-forward release gates
+## Compatibility
 
 - The first-party Unity MCP Core remains MCP 2.0 (`2026-07-28`) with the fixed
   64-tool catalogue and zero bundled third-party MCP provenance.

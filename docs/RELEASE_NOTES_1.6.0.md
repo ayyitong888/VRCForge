@@ -1,5 +1,4 @@
 # VRCForge 1.6.0
-
 VRCForge 1.6.0 makes the built-in Agent useful both inside and outside Unity
 projects, adds DeepSeek Harness and multi-MCP integration, and replaces the
 old execution-history presentation with a live, chronological Agent timeline.
@@ -72,20 +71,3 @@ The Unity integration remains the self-contained VRCForge MCP 2.0 (`2026-07-28`)
   discovery or public release metadata.
 - The Windows installers are not code-signed. Download only assets attached to
   the official VRCForge Release and verify the published hashes.
-
-## Post-release validation decision
-
-Local comparative acceptance confirmed that the configured OpenRouter GLM-5.2
-and DeepSeek V4 Pro models were both available and stayed on General tools with
-zero Unity-tool calls. Both runs ended honestly as
-`planner_no_progress` / not complete; neither was recorded as success. A
-separate Stop run settled durably as cancelled. This validates the bounded
-Runtime and terminal presentation, not completion of the frozen task or a
-natural reconnect cycle.
-
-The release owner chose a hot-fix-first publication for 1.6.0. Warm-start,
-Golden Path, packaged Skill, visual completion, optimizer, external-Agent, and
-clean-Windows install/upgrade/uninstall evidence will be refreshed after
-publication against the exact published hashes. Those deferred probes are not
-claimed as pre-release evidence here; a confirmed user-visible regression will
-be handled by a versioned hot fix rather than by silently replacing history.

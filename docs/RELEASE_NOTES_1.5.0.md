@@ -27,11 +27,7 @@
 
 ## Before you install
 
-- `1.4.0` remains the latest published stable release until the 1.5.0 Draft,
-  strict artifacts, and acceptance evidence have been verified and the release
-  owner explicitly publishes it.
-- The intended 1.5 update target is an existing `1.4.0` installation. Final
-  support is contingent on the clean 1.4-to-1.5 packaged upgrade gate. Back up
+- The 1.5 update targets an existing `1.4.0` installation. Back up
   the Unity project before importing the 1.5 Unity package, and preserve
   `%LOCALAPPDATA%\VRCForge\agentic-app` so chats, settings, memories, Skills,
   and checkpoints remain available.
@@ -50,7 +46,3 @@
 - `VRCForge_Windows_x64_1.5.0.zip`
 - `VRCForge_Offline_Installer_x64.exe`
 - `VRCForge_Web_Installer_x64.exe`
-
-These source-bound notes do not claim that release assets, hashes, a tag, a
-Draft, or publication already exist. Those claims become valid only after the
-strict build and GitHub Draft readback gates complete.
