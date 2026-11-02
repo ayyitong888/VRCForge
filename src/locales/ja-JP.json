@@ -1250,6 +1250,7 @@
     "noModelsReturned": "プロバイダーがモデルリストを返しませんでした。モデル名を手動入力できます",
     "modelPlaceholder": "右の更新ボタンでモデルリストを取得、または手動入力",
     "reasoningEffort": "推論強度",
+    "reasoningNextTurnHint": "次のターンから適用されます。現在のタスクは開始時の推論強度を維持します。",
     "reasoningEffortHint": "現在のモデルが対応する選択肢だけを表示します。「デフォルト」はモデル設定に従い、「なし」は推論を無効にします。",
     "reasoning_default": "デフォルト",
     "reasoning_none": "なし",

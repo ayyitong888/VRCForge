@@ -1,5 +1,6 @@
 """Offline lifecycle/config mutation guards; no provider, app, or Unity process."""
 from dataclasses import replace
+import json
 from threading import Event, Thread
 
 import pytest
@@ -17,7 +18,7 @@ def setup_owner(tmp_path):
     return owner, gateway
 
 
-@pytest.mark.parametrize("field,value", [("model", "new-model"), ("api_key", "fixture-new-key"), ("base_url", "https://fixture.invalid"), ("thinking_level", "high"), ("provider", "other"), ("api_type", "responses")])
+@pytest.mark.parametrize("field,value", [("model", "new-model"), ("api_key", "fixture-new-key"), ("base_url", "https://fixture.invalid"), ("context_window", 2048), ("provider", "other"), ("api_type", "responses")])
 def test_active_turn_rejects_binding_changes_before_disk_write(tmp_path, field, value):
     owner, _ = setup_owner(tmp_path)
     original = owner.current_api_config()
@@ -31,6 +32,25 @@ def test_active_turn_rejects_binding_changes_before_disk_write(tmp_path, field, 
     assert getattr(owner.current_api_config(), field) == value
 
 
+def test_reasoning_save_keeps_current_production_turn_snapshot(monkeypatch, tmp_path):
+    import dashboard_server
+    from types import SimpleNamespace
+    owner, _ = setup_owner(tmp_path)
+    monkeypatch.setattr(dashboard_server, "PROVIDER_CONFIGURATION", owner)
+    monkeypatch.setattr(dashboard_server, "PROVIDER_MODEL_CATALOG", SimpleNamespace(resolve_context_limit=lambda _: 1024))
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    with binding.bind({}):
+        original = binding.current_config()
+        with owner.configuration_change(api_config=replace(original, thinking_level="high")):
+            owner.save_api_config(replace(original, thinking_level="high"))
+        assert binding.current_config() is original
+        assert original.thinking_level == ""
+        with binding.bind({}):
+            assert binding.current_config().thinking_level == "high"
+        assert binding.current_config() is original
+    assert json.loads(owner.config_path.read_text())["api"]["thinking_level"] == "high"
+
+
 @pytest.mark.parametrize("payload", [
     {"write": {"status": "approval_pending"}, "plan": {"nextStep": "approval_required"}},
     {"plan": {"nextStep": "needs_user_action", "completionGate": {"reason": "question_pending"}}},
@@ -41,10 +61,12 @@ def test_waiting_locks_until_cancel_then_allows_change(tmp_path, payload):
     state = gateway.runtime_sessions
     state.record_final_response(session_id="fixture", client_turn_id="client", status="completed", response={"turnId": "turn", **payload})
     original = owner.current_api_config()
+    owner.save_api_config(replace(original, thinking_level="high"))
+    assert owner.current_api_config().thinking_level == "high"
     disk = owner.config_path.read_bytes()
     with pytest.raises(ProviderConfigurationBusyError):
-        owner.save_api_config(replace(original, model="new-model"))
-    assert owner.config_path.read_bytes() == disk and owner.current_api_config() == original
+        owner.save_api_config(replace(owner.current_api_config(), model="new-model"))
+    assert owner.config_path.read_bytes() == disk
     state.mark_cancel_requested(session_id="fixture", turn_id="turn", client_turn_id="client")
     owner.save_api_config(replace(original, model="new-model"))
     assert owner.current_api_config().model == "new-model"
@@ -131,8 +153,9 @@ def test_actual_approval_wait_prevents_original_binding_change(tmp_path):
     owner.runtime_waiting = gateway.runtime_sessions.runtime_waiting_for_configuration
     initial = run(gateway, tmp_path, message="Write and read", maxAgenticTurns=2)
     assert owner.runtime_configuration_locked(), initial
+    owner.save_api_config(replace(owner.current_api_config(), thinking_level="high"))
     with pytest.raises(ProviderConfigurationBusyError):
-        owner.save_api_config(replace(owner.current_api_config(), thinking_level="high"))
+        owner.save_api_config(replace(owner.current_api_config(), model="changed-model"))
     approval_id = initial["approval_id"]
     approval = gateway._approvals[approval_id]
     gateway.approval_transactions.approve(approval_id)

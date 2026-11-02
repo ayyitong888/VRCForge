@@ -159,17 +159,23 @@ class ProviderConfigurationService:
         with self._lock:
             return bool(self._runtime_bindings or self.runtime_waiting())
 
-    def _assert_configuration_idle(self) -> None:
-        if self.runtime_configuration_locked() or (self._configuration_changes and not self._configuration_change_owner.get()):
+    def _assert_configuration_idle(self, api_config: ProviderApiConfig | None = None) -> None:
+        # Turns retain an immutable config snapshot; a reasoning-only save can
+        # change the next turn's default without changing the active binding.
+        reasoning_only = False
+        if api_config is not None:
+            current = self.current_api_config()
+            reasoning_only = replace(api_config, thinking_level=current.thinking_level) == current
+        if (self.runtime_configuration_locked() and not reasoning_only) or (self._configuration_changes and not self._configuration_change_owner.get()):
             raise ProviderConfigurationBusyError(
                 "Model settings are locked while a task is running or waiting for approval or an answer. Finish or stop the task before changing them."
             )
 
     @contextmanager
-    def configuration_change(self):
+    def configuration_change(self, *, api_config: ProviderApiConfig | None = None):
         """Reserve one async account/config mutation without holding a lock across awaits."""
         with self._lock:
-            self._assert_configuration_idle()
+            self._assert_configuration_idle(api_config)
             self._configuration_changes += 1
         token = self._configuration_change_owner.set(True)
         try:
@@ -608,7 +614,7 @@ class ProviderConfigurationService:
             api = api_config if api_config is not None else committed_api
             vision = vision_config if vision_config is not None else committed_vision
             if api != committed_api or _clear_chatgpt_account_id:
-                self._assert_configuration_idle()
+                self._assert_configuration_idle(api if not _clear_chatgpt_account_id else None)
             api_keys, vision_keys = self._load_provider_key_maps_locked(document)
             for target, config in (
                 (api_keys, committed_api),

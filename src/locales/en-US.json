@@ -1256,6 +1256,7 @@
     "noModelsReturned": "Provider returned no model list; you can type the model name manually",
     "modelPlaceholder": "Click refresh to fetch model list, or type manually",
     "reasoningEffort": "Reasoning effort",
+    "reasoningNextTurnHint": "Applies from the next turn. The current task keeps its bound reasoning effort.",
     "reasoningEffortHint": "Only options supported by the current model are shown. Default follows the model settings; None disables reasoning.",
     "reasoning_default": "Default",
     "reasoning_none": "None",

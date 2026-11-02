@@ -581,7 +581,7 @@ export function Composer({
                   endpoint={providerReasoningEndpoint}
                   model={model || ""}
                   thinkingLevel={providerReasoningLevel || ""}
-                  disabled={sending || editing}
+                  disabled={editing}
                   onActivated={onProviderReasoningActivated}
                 />
               ) : null}

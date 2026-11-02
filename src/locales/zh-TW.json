@@ -1250,6 +1250,7 @@
     "noModelsReturned": "該供應商未回傳模型列表，可手動填寫模型名",
     "modelPlaceholder": "點擊右側刷新拉取模型列表，或手動填寫",
     "reasoningEffort": "推理強度",
+    "reasoningNextTurnHint": "從下一輪生效，目前任務保留已綁定的推理強度。",
     "reasoningEffortHint": "只顯示目前模型支援的選項。「預設」沿用模型設定；「無」會關閉推理。",
     "reasoning_default": "預設",
     "reasoning_none": "無",

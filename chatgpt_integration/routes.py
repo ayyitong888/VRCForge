@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -16,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from provider_configuration_service import ProviderApiConfig, ProviderConfigurationBusyError
 from .service import ChatGPTAuthError
-from .reasoning import direct_reasoning_effort
+from .reasoning import DIRECT_REASONING_EFFORTS, direct_reasoning_effort
 
 
 class ChatGPTAccountRequest(BaseModel):
@@ -36,7 +37,7 @@ def build_chatgpt_oauth_router(
     service_factory: Callable[[], Any] | None = None,
     current_config: Callable[[], ProviderApiConfig] | None = None,
     deactivate: Callable[[str], Awaitable[None]] | None = None,
-    configuration_change: Callable[[], Any] = nullcontext,
+    configuration_change: Callable[..., Any] = lambda **_: nullcontext(),
 ) -> APIRouter:
     router = APIRouter(prefix="/api/chatgpt")
     service: Any = None
@@ -67,6 +68,23 @@ def build_chatgpt_oauth_router(
         except Exception as exc:
             # Provider exceptions may carry response bodies or credential URLs.
             raise HTTPException(400, "ChatGPT connection operation failed. Check connection status or sign in again.") from exc
+
+    async def direct_models(account_id: str) -> list[dict[str, Any]]:
+        catalog = []
+        for model in await call("models", account_id):
+            item = dict(model)
+            levels = item.get("supportedReasoningLevels")
+            if isinstance(levels, list):
+                item["supportedReasoningLevels"] = [
+                    entry for entry in levels
+                    if isinstance(entry, dict) and entry.get("effort") in DIRECT_REASONING_EFFORTS
+                ]
+                if item.get("defaultReasoningLevel") not in {
+                    entry["effort"] for entry in item["supportedReasoningLevels"]
+                }:
+                    item.pop("defaultReasoningLevel", None)
+            catalog.append(item)
+        return catalog
 
     @router.get("/status")
     async def status(request: Request, response: Response) -> Any:
@@ -115,12 +133,12 @@ def build_chatgpt_oauth_router(
     @router.post("/models")
     async def models(body: ChatGPTAccountRequest, request: Request, response: Response) -> Any:
         check(request, response)
-        return {"models": await call("models", body.account_id)}
+        return {"models": await direct_models(body.account_id)}
 
     @router.post("/activate")
     async def select(body: ChatGPTActivationRequest, request: Request, response: Response) -> Any:
         check(request, response)
-        catalog = await call("models", body.account_id)
+        catalog = await direct_models(body.account_id)
         selected = next((item for item in catalog if item.get("id") == body.model), None)
         if selected is None:
             raise HTTPException(400, "Select a model from this ChatGPT account's catalog.")
@@ -143,8 +161,13 @@ def build_chatgpt_oauth_router(
             base_url="https://api.openai.com/v1", model=body.model,
             api_type="responses", thinking_level=requested_level,
         )
+        current = current_config() if current_config is not None else None
+        if current and (current.provider, current.api_key, current.base_url, current.model, current.api_type) == (
+            config.provider, config.api_key, config.base_url, config.model, config.api_type,
+        ):
+            config = replace(config, context_window=current.context_window)
         try:
-            with configuration_change():
+            with configuration_change(api_config=config):
                 return await activate(config)
         except ProviderConfigurationBusyError as exc:
             raise HTTPException(409, str(exc)) from exc

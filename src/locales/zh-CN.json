@@ -1256,6 +1256,7 @@
     "noModelsReturned": "该供应商未返回模型列表，可手动填写模型名",
     "modelPlaceholder": "点击右侧刷新拉取模型列表，或手动填写",
     "reasoningEffort": "推理强度",
+    "reasoningNextTurnHint": "从下一轮生效，当前任务保留已绑定的推理强度。",
     "reasoningEffortHint": "只显示当前模型支持的选项。“默认”沿用模型设置；“无”关闭推理。",
     "reasoning_default": "默认",
     "reasoning_none": "无",

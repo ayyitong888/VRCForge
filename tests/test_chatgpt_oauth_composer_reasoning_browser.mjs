@@ -11,13 +11,14 @@ const fixtureSource = `
   import i18n from "i18next";
   import { initReactI18next } from "react-i18next";
   import en from "./src/locales/en-US.json";
-  import { ChatGptOAuthComposerReasoningControl } from "./src/features/chatgpt-oauth/composer-reasoning-control";
+  import { Composer } from "./src/components/chat/composer";
   i18n.use(initReactI18next).init({ lng: "en-US", resources: { "en-US": { translation: en } } });
   function Fixture() {
     const [level, setLevel] = useState("");
     return <><button data-set-ultra onClick={() => setLevel("ultra")}>ultra fixture</button>
-      <ChatGptOAuthComposerReasoningControl endpoint={location.origin} model="gpt-6.1-sol"
-        thinkingLevel={level} disabled={false} onActivated={async () => {
+      <Composer input="" setInput={() => {}} sending={true} queueAllowed={true}
+        onSubmit={() => {}} onSwitchMode={() => {}} providerLabel="ChatGPT" model="gpt-6.1-sol"
+        providerReasoningEndpoint={location.origin} providerReasoningLevel={level} onProviderReasoningActivated={async () => {
           const status = await fetch('/api/chatgpt/status').then(r => r.json());
           setLevel(status.activeThinkingLevel);
         }} /></>;
@@ -54,7 +55,7 @@ const server = createServer((req, res) => {
     res.end(bundle.outputFiles[0].text);
   } else if (req.url === "/") {
     res.setHeader("Content-Type", "text/html");
-    res.end("<div id=\"root\"></div><script src=\"/fixture.js\"></script>");
+    res.end('<style>#root{position:fixed;bottom:0;left:0;right:0}svg{width:16px;height:16px}.fixed{position:fixed}</style><div id="root"></div><script src="/fixture.js"></script>');
   } else {
     res.statusCode = 404;
     res.end();
@@ -76,6 +77,7 @@ try {
   const trigger = page.locator("[data-chatgpt-composer-reasoning-trigger]");
   await wait(async () => (await trigger.count()) === 1 && !(await trigger.isDisabled()), "server-supported levels loaded");
   assert.equal(await trigger.getAttribute("aria-label"), "Reasoning effort", "accessible name is retained");
+  assert.match(await trigger.getAttribute("title"), /next turn/, "running tasks retain their existing effort while the next turn can be configured");
   assert.match(await trigger.getAttribute("class"), /border-0/);
   assert.match(await trigger.getAttribute("class"), /bg-transparent/);
   assert.equal(await page.locator("select").count(), 0, "reasoning uses the application menu instead of the native select popup");

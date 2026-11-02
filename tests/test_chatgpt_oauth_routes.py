@@ -1,6 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
+from dataclasses import replace
+from contextlib import nullcontext
+
+import pytest
 
 from chatgpt_integration.routes import build_chatgpt_oauth_router
 from chatgpt_integration.service import ChatGPTAuthError
@@ -204,6 +208,56 @@ def test_models_preserve_reasoning_metadata_from_oauth_catalog():
             {"effort": "low"}, {"effort": "high"}, {"effort": "max"},
         ]
         assert model["defaultReasoningLevel"] == "low"
+
+
+def test_models_expose_only_advertised_direct_reasoning_levels():
+    auth = FakeAuth()
+    raw_model = {"id": "available-model", "supportedReasoningLevels": [
+        {"effort": "low", "description": "fast"}, {"effort": "ultra", "description": "orchestration"},
+    ], "defaultReasoningLevel": "ultra"}
+    auth.models = lambda _: [raw_model]
+    app, _, saved = setup_app(auth)
+    with TestClient(app, headers=HEADERS) as client:
+        model = client.post("/api/chatgpt/models", json={"account_id": "account"}).json()["models"][0]
+        assert model["supportedReasoningLevels"] == [{"effort": "low", "description": "fast"}]
+        assert "defaultReasoningLevel" not in model
+        for level in ("ultra", "max"):
+            assert client.post("/api/chatgpt/activate", json={
+                "account_id": "account", "model": "available-model", "thinking_level": level,
+            }).status_code == 400
+        assert saved == []
+    assert raw_model["supportedReasoningLevels"][1]["effort"] == "ultra"
+
+
+@pytest.mark.parametrize("state", ["running", "waiting"])
+def test_activate_reasoning_only_during_task_preserves_binding_and_context_cap(tmp_path, state):
+    from tests.test_provider_runtime_configuration_lock import setup_owner
+    from provider_configuration_service import ProviderApiConfig
+    owner, gateway = setup_owner(tmp_path)
+    original = ProviderApiConfig("chatgpt", "account", "https://api.openai.com/v1", "available-model", "responses", "low", 2048)
+    owner.save_api_config(original)
+    auth = FakeAuth()
+    base_models = auth.models
+    auth.models = lambda account: base_models(account) + [{**base_models(account)[0], "id": "second-model"}]
+    async def activate(config):
+        owner.save_api_config(config)
+        return {"ok": True}
+    app = FastAPI()
+    app.include_router(build_chatgpt_oauth_router(authorize=lambda _: None, activate=activate,
+        service_factory=lambda: auth, current_config=owner.current_api_config,
+        configuration_change=owner.configuration_change))
+    if state == "waiting":
+        gateway.runtime_sessions.record_final_response(session_id="s", client_turn_id="c", status="completed",
+            response={"plan": {"nextStep": "needs_user_action", "completionGate": {"reason": "question_pending"}}})
+    with TestClient(app) as client, (owner.bind_runtime_config() if state == "running" else nullcontext(original)) as bound:
+        response = client.post("/api/chatgpt/activate", json={"account_id": "account", "model": "available-model", "thinking_level": "high"})
+        assert response.status_code == 200, response.text
+        assert owner.current_api_config() == replace(original, thinking_level="high")
+        assert bound is original and bound.thinking_level == "low"
+        for changed in ({"account_id": "other-account"}, {"model": "second-model"}):
+            assert client.post("/api/chatgpt/activate", json={
+                "account_id": "account", "model": "available-model", "thinking_level": "high", **changed,
+            }).status_code == 409
 
 
 def test_provider_error_body_never_reaches_ui():
