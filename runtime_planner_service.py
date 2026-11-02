@@ -1400,8 +1400,8 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
                 item["type"] = row["type"]
             items.append(item)
         evidence.update({"source": source(result.get("path")), "items": items,
-                         "relativeTo": "path_prefix_before_Assets" if asset_segment else "exact_tool_call_path",
-                         "locatorInstructions": "Resolve item.source against relativeTo, never against the display source basename. A dot means the exact input file. Empty source means the locator was omitted; do not guess it.",
+                         "relativeTo": "exact_tool_call_path",
+                         "locatorInstructions": "Use absolute item.source paths unchanged. Resolve a relative item.source against the exact tool call path, never against the display source basename. Empty source means the locator was omitted; do not guess it.",
                          "returnedItems": len(rows), "omittedItems": len(rows) - len(items),
                          "continuation": "Follow nextRequest to continue source results. Changed results reject the old snapshotDigest; restart from offset 0. Resource-limit skips remain unverified even after the final page."})
         for field in ("offset", "nextOffset", "totalCount"):

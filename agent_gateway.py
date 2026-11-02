@@ -5289,15 +5289,20 @@ class AgentGateway:
                 now = utc_now_iso()
                 progress = ensure_dict(owned_params.get("_runtimeFailureProgress"))
                 native_turn = progress.get("_nativeTurn")
+                settlement_failure = None
                 if isinstance(native_turn, NativeRuntimeTurn):
                     try:
                         native_turn.settle({"nextStep": "interrupted"})
-                    except (ValueError, TypeError):
-                        pass  # Preserve the original error; never replay an ambiguous action.
+                    except Exception as settlement_exc:
+                        settlement_failure = {
+                            "type": type(settlement_exc).__name__,
+                            "message": str(settlement_exc)[:2000],
+                        }
                 failure = redact_sensitive({
                     "type": type(exc).__name__,
                     "message": str(exc)[:2000],
                     "statusCode": getattr(exc, "status_code", None),
+                    **({"settlementError": settlement_failure} if settlement_failure else {}),
                 })
                 recovery_failure = failure
                 failed_turn = redact_sensitive({

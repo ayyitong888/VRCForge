@@ -1,6 +1,7 @@
 from pathlib import Path
 import pytest
 from agent_gateway import AgentGateway, AgentGatewayError
+from agent_runtime_native_turn import NativeRuntimeTurn
 
 
 def test_mid_loop_409_records_failed_turn_and_terminal_without_masking(tmp_path, monkeypatch):
@@ -41,6 +42,34 @@ def test_failure_record_storage_error_does_not_replace_original(tmp_path, monkey
     monkeypatch.setattr(gateway._runtime_run_ledger.__class__,"append",lambda *a,**k: (_ for _ in ()).throw(OSError("disk unavailable")))
     with pytest.raises(AgentGatewayError) as caught:gateway._runtime_message_impl({"message":"read"})
     assert caught.value is original
+
+
+def test_native_settlement_error_preserves_original_failure_and_terminal(tmp_path, monkeypatch):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    original = NameError("name 'asset_segment' is not defined")
+    published = []
+    monkeypatch.setattr(gateway, "_runtime_turn_completed", published.append)
+    native = object.__new__(NativeRuntimeTurn)
+    monkeypatch.setattr(NativeRuntimeTurn, "settle", lambda *_a, **_k: (_ for _ in ()).throw(NameError("settlement failed")))
+
+    def body(params, **_kwargs):
+        gateway.runtime_sessions.begin_turn(session_id="s", turn_id="t", client_turn_id="c")
+        params.update(_resolvedRuntimeSessionId="s", _resolvedRuntimeTurnId="t",
+                      _resolvedRuntimeClientTurnId="c", _runtimeTurnStarted=True)
+        params["_runtimeFailureProgress"] = {"_nativeTurn": native, "steps": [], "timeline": []}
+        raise original
+
+    monkeypatch.setattr(gateway, "_runtime_message_impl_body", body)
+    with pytest.raises(NameError) as caught:
+        gateway._runtime_message_impl({"message": "list the materials directory"})
+    assert caught.value is original
+    turn = gateway.get_runtime_session("s")["session"]["turns"][-1]
+    assert turn["status"] == "failed"
+    assert turn["error"]["message"] == str(original)
+    assert turn["error"]["settlementError"]["message"] == "settlement failed"
+    terminal = gateway._runtime_run_ledger.read_events(limit=20)[-1]
+    assert terminal["event"] == "runtime_turn_completed" and terminal["status"] == "failed"
+    assert len(published) == 1 and published[0]["plan"]["nextStep"] == "failed"
 
 
 def test_admission_error_is_not_a_started_failed_turn(tmp_path, monkeypatch):
