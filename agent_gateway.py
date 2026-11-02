@@ -219,7 +219,6 @@ RUNTIME_CONTEXT_COMPACTION_SCHEMA = "vrcforge.runtime_context_compaction.v1"
 RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO = 0.85
 RUNTIME_CONTEXT_COMPACTION_HARD_RATIO = 0.95
 RUNTIME_CONTEXT_COMPACTION_TARGET_RATIO = 0.50
-EXTERNAL_MCP_CONNECTION_IDLE_SECONDS = 90
 UNITY_PROJECT_CHECKPOINT_SCOPE = ("Assets", "Packages", "ProjectSettings")
 LOCAL_STATE_CHECKPOINT_SCOPE = ("skill-packages", "skills")
 PROJECT_CHAT_CHECKPOINT_TARGET = "vrcforge_repair_project_chat_store"
@@ -699,12 +698,9 @@ class AgentGateway:
         # lifetime, protected by the gateway lock, authenticated by the MCP
         # bearer boundary, and consumed exactly once.
         self._external_mcp_write_confirmations: dict[str, dict[str, Any]] = {}
-        # MCP over HTTP has no durable socket. A successfully authenticated
-        # request marks the client connected for a bounded idle window; the
-        # desktop refreshes faster than this window, so the indicator turns on
-        # after a real client request and turns off after the client goes idle.
-        self._external_mcp_last_seen_epoch = 0.0
-        self._external_mcp_last_seen_at: str | None = None
+        # The transport owns connection lifetime; the UI reads its existing
+        # sessions instead of guessing from the age of a bearer-auth check.
+        self._external_mcp_connection_status: Callable[[], dict[str, Any]] | None = None
         # External MCP has no durable project/session binding. Remember the
         # exact project roots observed on this gateway lifetime so an omitted
         # optional projectPath can remain compatible for one project but fail
@@ -3279,35 +3275,15 @@ class AgentGateway:
             "runtimeSessions": self._runtime_session_state.session_count(),
         }
 
-    def mark_external_mcp_activity(self) -> None:
-        """Record a successful authentication at the existing MCP boundary."""
-
-        now_epoch = time.time()
-        now_iso = datetime.fromtimestamp(now_epoch, timezone.utc).isoformat()
-        with self._lock:
-            self._external_mcp_last_seen_epoch = now_epoch
-            self._external_mcp_last_seen_at = now_iso
-
     def external_mcp_activity_status(self) -> dict[str, Any]:
-        """Return a truthful bounded connection signal for the desktop UI."""
+        """Read the transport's live session facts for the desktop UI."""
 
         config = self.ensure_config()
-        now_epoch = time.time()
-        with self._lock:
-            last_seen_epoch = self._external_mcp_last_seen_epoch
-            last_seen_at = self._external_mcp_last_seen_at
-        age_seconds = max(0.0, now_epoch - last_seen_epoch) if last_seen_epoch > 0 else None
-        connected = bool(
-            config.enabled
-            and age_seconds is not None
-            and age_seconds <= EXTERNAL_MCP_CONNECTION_IDLE_SECONDS
-        )
+        activity = self._external_mcp_connection_status() if self._external_mcp_connection_status else {"connected": False}
         return {
+            **activity,
             "gatewayEnabled": config.enabled,
-            "connected": connected,
-            "lastSeenAt": last_seen_at,
-            "ageSeconds": age_seconds,
-            "idleTimeoutSeconds": EXTERNAL_MCP_CONNECTION_IDLE_SECONDS,
+            "connected": bool(config.enabled and activity["connected"]),
         }
 
     @staticmethod
@@ -10193,10 +10169,7 @@ def create_agent_mcp_app(
 
     def validate_bearer(token: str) -> bool:
         config = gateway.ensure_config()
-        authenticated = bool(config.enabled and config.token and hmac.compare_digest(token, config.token))
-        if authenticated:
-            gateway.mark_external_mcp_activity()
-        return authenticated
+        return bool(config.enabled and config.token and hmac.compare_digest(token, config.token))
 
     router = Mcp2026Router(
         list_tools,
@@ -10212,12 +10185,14 @@ def create_agent_mcp_app(
         prompt_get=gateway.get_mcp_prompt,
         prompt_list_revision=gateway.mcp_prompt_generation,
     )
-    return create_agent_mcp_2026_asgi_app(
+    app = create_agent_mcp_2026_asgi_app(
         router,
         bearer_validator=validate_bearer,
         route_path="/mcp",
         request_context=lambda context_id: gateway.resource_context(f"external:{context_id}"),
     )
+    gateway._external_mcp_connection_status = app.state.mcp_connection_status
+    return app
 
 
 

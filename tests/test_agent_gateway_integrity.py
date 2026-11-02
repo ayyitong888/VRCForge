@@ -504,24 +504,30 @@ def test_external_block_branch_children_have_public_descriptions(tmp_path: Path)
     assert all(indexed[child].strip() for child in expected)
 
 
-def test_external_mcp_activity_reports_only_authenticated_requests(tmp_path: Path) -> None:
+def test_external_mcp_activity_reports_live_transport_sessions(tmp_path: Path, monkeypatch) -> None:
     gateway = _external_gateway(tmp_path)
     app = create_agent_mcp_app(gateway)
 
     before = gateway.external_mcp_activity_status()
     assert before["connected"] is False
-    assert before["lastSeenAt"] is None
+    assert before["sessionCount"] == 0
 
     _external_mcp_call(app, "tools/list", {}, bearer="wrong-token")
     rejected = gateway.external_mcp_activity_status()
     assert rejected["connected"] is False
-    assert rejected["lastSeenAt"] is None
+    assert rejected["sessionCount"] == 0
 
     _external_mcp_call(app, "tools/list", {}, bearer=gateway.ensure_config().token)
+    assert gateway.external_mcp_activity_status()["connected"] is False
+    _external_mcp_call(app, "server/discover", {}, bearer=gateway.ensure_config().token)
     connected = gateway.external_mcp_activity_status()
     assert connected["connected"] is True
-    assert connected["lastSeenAt"]
-    assert connected["ageSeconds"] >= 0
+    assert connected["sessionCount"] == 1
+    now = time.monotonic()
+    monkeypatch.setattr("agent_mcp_2026.time.monotonic", lambda: now + 91)
+    assert gateway.external_mcp_activity_status()["connected"] is True
+    monkeypatch.setattr("agent_mcp_2026.time.monotonic", lambda: now + 901)
+    assert gateway.external_mcp_activity_status()["connected"] is False
 
 
 def test_external_read_returns_raw_result_and_same_normalized_outcome_as_internal_runtime(

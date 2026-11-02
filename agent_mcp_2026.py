@@ -892,6 +892,18 @@ def create_asgi_app(
     # cannot be reclaimed while their callback is still running.
     sessions: dict[str, dict[str, Any]] = {}
 
+    def mcp_connection_status() -> dict[str, Any]:
+        """Project live HTTP sessions without extending or mutating their lifetime."""
+        now = time.monotonic()
+        current = [state for state in tuple(sessions.values())
+                   if state["active"] or now - state["lastUsed"] < HTTP_SESSION_IDLE_SECONDS]
+        return {
+            "connected": bool(current),
+            "sessionCount": len(current),
+            "activeRequestCount": sum(state["active"] for state in current),
+            "idleTimeoutSeconds": HTTP_SESSION_IDLE_SECONDS,
+        }
+
     async def endpoint(request: Request):
         deleting = request.method == "DELETE" and bool(request.headers.get("Mcp-Session-Id"))
         if request.method != "POST" and not deleting:
@@ -1010,7 +1022,9 @@ def create_asgi_app(
         return JSONResponse(payload, status_code=status, headers=response_headers)
 
     # DELETE only closes a previously authenticated extension session.
-    return Starlette(routes=[Route(route_path, endpoint, methods=["GET", "POST", "DELETE", "HEAD", "OPTIONS"])])
+    app = Starlette(routes=[Route(route_path, endpoint, methods=["GET", "POST", "DELETE", "HEAD", "OPTIONS"])])
+    app.state.mcp_connection_status = mcp_connection_status
+    return app
 
 
 def create_agent_mcp_2026_asgi_app(
