@@ -73,7 +73,7 @@ _IDENTITY_QUERY_RE = re.compile(
 _STABLE_ALIAS_RE = re.compile(r"^(?:usr|prj|avt|path|net)_[0-9a-f]{16}$")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{4,}")
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|app[_-]?token|artifact[_-]?sig|"
+    r"(?i)((?<![?&])\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|app[_-]?token|artifact[_-]?sig|"
     r"authorization|password|passwd|secret|cookie|session[_-]?token)\b\s*[:=]\s*)([^\s,;]+)"
 )
 _SECRET_QUERY_RE = re.compile(
@@ -90,7 +90,7 @@ _AUTHORIZATION_OR_COOKIE_RE = re.compile(
 )
 _COMPOSITE_SECRET_ASSIGNMENT_RE = re.compile(
     r"(?ix)("
-    r"[\"']?(?:api[-_ ]?key|client[-_ ]?secret|oauth[-_ ]?token|access[-_ ]?token|refresh[-_ ]?token|"
+    r"(?<![\w?&-])[\"']?(?:api[-_ ]?key|client[-_ ]?secret|oauth[-_ ]?token|access[-_ ]?token|refresh[-_ ]?token|"
     r"session[-_ ]?token|app[-_ ]?token|artifact[-_ ]?sig|private[-_ ]?key|authorization|password|passwd|"
     r"credential(?:s)?|secret|cookie|token)[\"']?\s*[:=]\s*"
     r")(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\r\n,;}]+)"
@@ -154,7 +154,8 @@ def _basename(value: str) -> str:
     return parts[-1][:160] if parts else ""
 
 
-def _scrub_secret_text(value: str) -> str:
+def redact_credential_text(value: str) -> str:
+    """Remove credential values without rewriting ordinary text or locators."""
     text = str(value)
     text = _CHALLENGE_PATH_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
     text = _SECRET_QUERY_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
@@ -189,7 +190,7 @@ def redact_public_evidence(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, Path):
         value = str(value)
     if isinstance(value, str):
-        text = _scrub_secret_text(value)
+        text = redact_credential_text(value)
         text = re.sub(r"(?i)file://[^\s\"']+", "[REDACTED_PATH]", text)
         text = _PUBLIC_EVIDENCE_PRIVATE_PATH_RE.sub("[REDACTED_PATH]", text)
         if _PUBLIC_EVIDENCE_RELATIVE_PRIVATE_PATH_RE.search(text):
@@ -426,7 +427,7 @@ class DiagnosticPrivacy:
                         continue
                     normalized = _normalized_key(key)
                     if isinstance(child, (str, Path)):
-                        text = _scrub_secret_text(str(child).strip())
+                        text = redact_credential_text(str(child).strip())
                         if _STABLE_ALIAS_RE.fullmatch(text):
                             continue
                         if normalized in _PROJECT_KEYS and text:
@@ -567,7 +568,7 @@ class DiagnosticPrivacy:
 
     def _replace_identity_query(self, match: re.Match[str], context: dict[str, str]) -> str:
         prefix, key, encoded_value = match.groups()
-        value = _scrub_secret_text(unquote(encoded_value))
+        value = redact_credential_text(unquote(encoded_value))
         normalized = _normalized_key(key)
         if normalized in _PROJECT_KEYS:
             alias = self._register_project_value(value)
@@ -593,7 +594,7 @@ class DiagnosticPrivacy:
         return text
 
     def _redact_string(self, value: str, semantic_key: str, context: dict[str, str]) -> str:
-        text = _scrub_secret_text(str(value))
+        text = redact_credential_text(str(value))
         if _STABLE_ALIAS_RE.fullmatch(text):
             return text
         text = _IDENTITY_QUERY_RE.sub(lambda match: self._replace_identity_query(match, context), text)
@@ -760,5 +761,6 @@ __all__ = [
     "IDENTITY_MAX_RECORDS",
     "IDENTITY_RETENTION",
     "IDENTITY_SCHEMA",
+    "redact_credential_text",
     "redact_public_evidence",
 ]

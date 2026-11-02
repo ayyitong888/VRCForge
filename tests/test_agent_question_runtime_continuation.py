@@ -18,25 +18,26 @@ from tests.test_runtime_planner_service import service as runtime_planner_servic
 
 
 @pytest.mark.parametrize("with_secret", [False, True])
-def test_gateway_question_answer_preserves_unicode_layout_and_redacts_secrets(tmp_path, with_secret):
+def test_gateway_question_answer_keeps_local_source_and_filters_model_credentials(tmp_path, with_secret):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     question = gateway.create_runtime_question({"question": "继续？", "sessionId": "layout"})["question"]
     text = "先看衣柜\n    保留缩进\n\n不要修改任何配置。"
     expected = text
     if with_secret:
         text += "\napi_key=synthetic-question-secret\n下一行保留。"
-        expected += "\napi_key=<redacted>\n下一行保留。"
+        expected += "\napi_key=[REDACTED]\n下一行保留。"
     result = gateway.questions.answer(question["questionId"], {"sessionId": "layout", "answer": text})
-    assert result["question"]["answer"] == expected
+    assert result["question"]["answer"] == text
     restarted = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     restored = restarted.questions.list(session_id="layout", include_answered=True)["questions"][0]
-    assert restored["answer"] == expected
+    assert restored["answer"] == text
     assert expected in restarted.questions._continuation_prompt(restored)
     raw = (tmp_path / "audit" / "agent-questions.jsonl").read_text(encoding="utf-8")
-    assert "synthetic-question-secret" not in raw
+    if with_secret:
+        assert "synthetic-question-secret" in raw
 
 
-def test_gateway_question_handoff_preserves_user_locators_only_in_model_context(tmp_path: Path, monkeypatch) -> None:
+def test_gateway_question_handoff_preserves_user_locators_in_local_source_and_model_context(tmp_path: Path, monkeypatch) -> None:
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     captured: dict[str, str] = {}
     monkeypatch.setattr(
@@ -69,10 +70,10 @@ def test_gateway_question_handoff_preserves_user_locators_only_in_model_context(
     assert result["runtimeContinuation"] == {"ok": True}
     assert "https://example.invalid/author" in captured["prompt"]
     assert "E:/Packages/Creator/CityNoir" in captured["prompt"]
-    assert "<path redacted>" in result["question"]["answer"]
+    assert result["question"]["answer"] == answer
     durable = (tmp_path / "audit" / "agent-questions.jsonl").read_text(encoding="utf-8")
-    assert "https://example.invalid/author" not in durable
-    assert "E:/Packages/Creator/CityNoir" not in durable
+    assert "https://example.invalid/author" in durable
+    assert "E:/Packages/Creator/CityNoir" in durable
 
 
 def test_question_answer_locators_survive_native_ask_user_projection(tmp_path: Path, monkeypatch) -> None:
@@ -106,8 +107,9 @@ def test_question_answer_locators_survive_native_ask_user_projection(tmp_path: P
     assert "E:/Packages/Creator/CityNoir" in observation
     assert "fixture-secret" not in observation
     durable = (tmp_path / "audit" / "agent-questions.jsonl").read_text(encoding="utf-8")
-    assert "https://example.invalid/author" not in durable
-    assert "E:/Packages/Creator/CityNoir" not in durable
+    assert "https://example.invalid/author" in durable
+    assert "E:/Packages/Creator/CityNoir" in durable
+    assert "fixture-secret" in durable
 
 
 def test_runtime_question_identity_is_fail_closed(tmp_path: Path) -> None:

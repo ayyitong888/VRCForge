@@ -530,7 +530,7 @@ def test_question_answer_preserves_multiline_and_rejects_oversize(tmp_path):
     assert text in service._continuation_prompt(result['question'])
 
 
-def test_runtime_answer_keeps_user_supplied_url_and_path_for_model_but_redacts_durable_copy(tmp_path: Path) -> None:
+def test_runtime_answer_keeps_local_source_but_filters_model_credentials(tmp_path: Path) -> None:
     from runtime_planner_service import sanitize_planner_observation_text
 
     continuation_prompts: list[str] = []
@@ -575,13 +575,12 @@ def test_runtime_answer_keeps_user_supplied_url_and_path_for_model_but_redacts_d
     assert "https://example.invalid/items/example-outfit" in continuation_prompts[0]
     assert "E:/Packages/Creator/CityNoir" in continuation_prompts[0]
     assert "test-token-123" not in continuation_prompts[0]
-    assert "<redacted>" in continuation_prompts[0]
-    assert "<path redacted>" in answered["question"]["answer"]
+    assert "[REDACTED]" in continuation_prompts[0]
+    assert answered["question"]["answer"] == answer
     durable = (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
-    assert "https://example.invalid/items/example-outfit" not in durable
-    assert "E:/Packages/Creator/CityNoir" not in durable
-    assert "test-token-123" not in durable
-    assert "<path redacted>" in durable
+    assert "https://example.invalid/items/example-outfit" in durable
+    assert "E:/Packages/Creator/CityNoir" in durable
+    assert "test-token-123" in durable
 
 
 def test_queued_idempotent_retry_uses_resubmitted_answer_for_model_context(tmp_path: Path) -> None:

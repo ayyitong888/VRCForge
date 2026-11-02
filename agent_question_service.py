@@ -682,7 +682,9 @@ class AgentQuestionService:
     def _continuation_prompt(self, question: object, *, answer_text: str | None = None) -> str:
         values = question if isinstance(question, Mapping) else {}
         question_text = str(values.get("question") or "Pending question").strip()
-        answer = str(answer_text if answer_text is not None else values.get("answer") or "").strip()
+        answer = self._sanitize_answer_for_model(
+            str(answer_text if answer_text is not None else values.get("answer") or "").strip()
+        )
         selected_option_id = str(values.get("selectedOptionId") or "").strip()
         return (
             "Continue the same task after the user answered a pending question.\n"
@@ -693,13 +695,11 @@ class AgentQuestionService:
 
     @staticmethod
     def _sanitize_answer_for_model(answer: str) -> str:
-        # Reuse the planner's established credential scrubber while allowing
-        # the user-supplied URL/path locators needed to resume the task.
-        from runtime_planner_service import sanitize_planner_observation_text
+        # Question handoffs cross the model boundary; local evidence retains
+        # its source text, while ordinary URLs, paths and layout remain usable.
+        from diagnostic_privacy import redact_credential_text
 
-        return sanitize_planner_observation_text(
-            answer, None, preserve_whitespace=True, preserve_urls=True, preserve_paths=True,
-        )
+        return redact_credential_text(answer)
 
     def _scope_text(self, values: Mapping[str, object], *names: str) -> str:
         return str(next((values[name] for name in names if values.get(name)), "") or "").strip()

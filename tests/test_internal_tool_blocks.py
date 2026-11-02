@@ -569,9 +569,23 @@ def test_internal_schema_preserves_patterns_and_fx_delete_parameter_branch() -> 
     canonical = canonical_unity_write_tool_input_schema("vrcforge_manage_fx_animator")
     internal = bounded_planner_tool_schema(canonical)
     assert "executionTarget" in internal["properties"]
-    assert bounded_planner_tool_schema(canonical) == bounded_planner_tool_schema(
+    internal_without_checkpoint_choice = deepcopy(internal)
+    checkpoint_choice = internal_without_checkpoint_choice["properties"].pop("checkpointChoice")
+    preview = bounded_planner_tool_schema(
         canonical_unity_read_tool_input_schema("vrcforge_preview_manage_fx_animator")
     )
+    assert internal_without_checkpoint_choice == preview
+    assert checkpoint_choice["type"] == "object"
+    assert checkpoint_choice["required"] == ["mode", "quote"]
+    assert checkpoint_choice["properties"]["mode"]["enum"] == ["skip", "require"]
+    assert checkpoint_choice["properties"]["quote"]["minLength"] == 1
+    assert checkpoint_choice["additionalProperties"] is False
+    assert validate_planner_tool_arguments(
+        checkpoint_choice, {"mode": "skip", "quote": "User explicitly requested it"}
+    )["ok"] is True
+    assert validate_planner_tool_arguments(
+        checkpoint_choice, {"mode": "skip"}
+    )["ok"] is False
     assert validate_planner_tool_arguments(
         internal,
         {"projectPath": "P", "action": "delete_parameter"},
@@ -633,8 +647,8 @@ def test_cross_block_selection_reports_authoritative_owner_for_retry() -> None:
 def test_planning_selection_of_hidden_write_requires_execution_mode() -> None:
     result = dashboard_server.load_internal_tool_block({
         "sessionId": "planning-hidden-write-regression",
-        "block": "project_environment/assets_packages",
-        "tools": ["set_skill_package_enabled", "list_skill_packages"],
+        "block": "project_environment/files",
+        "tools": ["set_skill_package_enabled"],
         "exposureLayer": "planning",
         "projectContextActive": True,
     })
@@ -642,11 +656,23 @@ def test_planning_selection_of_hidden_write_requires_execution_mode() -> None:
     assert result["ok"] is False
     assert result["status"] == "failed"
     assert result["errorCode"] == "execution_mode_required"
-    assert result["expectedBlock"] == "project_environment/assets_packages"
+    assert result["expectedBlock"] == "project_environment/files"
     assert result["requiredExposureLayer"] == "execution"
     assert result["mutationStarted"] is False
     assert result["commitState"] == "not_started"
     assert any("enter_execution" in action for action in result["nextActions"])
+
+    inventory = dashboard_server.load_internal_tool_block({
+        "sessionId": "planning-package-inventory-regression",
+        "block": "project_environment/assets_packages",
+        "tools": ["list_skill_packages"],
+        "exposureLayer": "planning",
+        "projectContextActive": True,
+    })
+    assert inventory["ok"] is True
+    assert inventory["status"] == "loaded"
+    assert inventory["block"] == "project_environment/assets_packages"
+    assert inventory["selectedTools"] == ["list_skill_packages"]
 
 
 def test_diagnostic_description_does_not_route_to_hidden_discovery_entry():
