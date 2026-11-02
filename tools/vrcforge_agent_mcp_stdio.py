@@ -8,17 +8,21 @@ import secrets
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Any, Mapping
+from urllib.parse import urlsplit, urlunsplit
+from websockets.sync.client import connect as connect_websocket
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from agent_mcp_2026 import HTTP_SESSION_IDLE_SECONDS, PROTOCOL_VERSION, Mcp2026Router, run_stdio_loop
+from agent_mcp_2026 import HTTP_SESSION_IDLE_SECONDS, PROTOCOL_VERSION, Mcp2026Router, run_stdio_loop, _host_is_loopback
 from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
 from mcp_tool_descriptor import standardize_tool_descriptor
 from external_mcp_result_projection import project_tool
@@ -252,11 +256,12 @@ def main() -> int:
         print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    run_stdio_server(
-        bridge,
-        protocol_profile=args.protocol_profile,
-        exposure_layer=bridge.resolve_exposure_layer(args.exposure_layer),
-    )
+    with bridge.connected_host():
+        run_stdio_server(
+            bridge,
+            protocol_profile=args.protocol_profile,
+            exposure_layer=bridge.resolve_exposure_layer(args.exposure_layer),
+        )
     return 0
 
 
@@ -299,6 +304,65 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 class VRCForgeBridge:
+    @contextmanager
+    def connected_host(self):
+        """Keep this stdio host attached across desktop restarts, without tool calls.
+
+        The host process owns the worker and its single loopback socket. Only
+        the existing gateway bearer is sent; the endpoint exposes presence,
+        not dashboard events or tool execution. EOF closes and joins it.
+        """
+        address = urlsplit(self.base_url)
+        if address.scheme not in {"http", "https"} or not _host_is_loopback(address.netloc):
+            raise ValueError("The external MCP connection must use a loopback URL.")
+        url = urlunsplit(("wss" if address.scheme == "https" else "ws", address.netloc, address.path.rstrip("/") + "/mcp/connection", "", ""))
+        stop = threading.Event()
+        connection = None
+
+        def maintain_connection():
+            nonlocal connection
+            delay = 0.5
+            while not stop.is_set():
+                try:
+                    # Supply the loopback socket directly so this local bearer
+                    # never follows system proxy settings. Both contexts close
+                    # their resources on handshake failure or host shutdown.
+                    with socket.create_connection((address.hostname, address.port or (443 if address.scheme == "https" else 80)), timeout=2) as transport:
+                        with connect_websocket(
+                            url, sock=transport,
+                            additional_headers={"Authorization": f"Bearer {self.require_token()}"},
+                            open_timeout=2, close_timeout=1, max_size=4096,
+                        ) as socket_connection:
+                            connection = socket_connection
+                            delay = 0.5
+                            if stop.is_set():
+                                break
+                            # Block on the actual connection. No polling or model
+                            # request is needed while the host is idle.
+                            for _message in socket_connection:
+                                if stop.is_set():
+                                    break
+                except Exception:
+                    # Desktop can be closed or restarting independently. Tool
+                    # calls retain their existing detailed error reporting.
+                    pass
+                finally:
+                    connection = None
+                if stop.wait(delay):
+                    break
+                delay = min(delay * 2, 5)
+
+        worker = threading.Thread(target=maintain_connection, name="vrcforge-mcp-connection", daemon=True)
+        worker.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            socket_to_close = connection
+            if socket_to_close is not None:
+                socket_to_close.close()
+            worker.join(timeout=3)
+
     def __init__(
         self,
         *,

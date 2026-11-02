@@ -12,6 +12,57 @@ from agent_mcp_2026 import PROTOCOL_VERSION
 from avatar_composition_workflow_skills import AVATAR_COMPOSITION_WORKFLOW_SKILLS
 
 
+def test_idle_stdio_host_reconnects_after_backend_restart_without_tool_calls(tmp_path: Path) -> None:
+    import threading
+    import time
+    import uvicorn
+    from agent_mcp_2026 import Mcp2026Router, create_asgi_app
+    from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge
+
+    config = tmp_path / "gateway.json"
+    config.write_text(json.dumps({"enabled": True, "token": "connection-test-token"}), encoding="utf-8")
+    servers = []
+
+    def start_backend(port=0):
+        app = create_asgi_app(Mcp2026Router(lambda _: [], lambda *_: {}),
+                              bearer_validator=lambda token: token == "connection-test-token", route_path="/mcp")
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
+        server = uvicorn.Server(uvicorn.Config(app, log_level="error", ws_ping_interval=None,
+                                                timeout_graceful_shutdown=1))
+        thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+        thread.start()
+        servers.append((server, thread))
+        return app, listener.getsockname()[1], server, thread
+
+    def wait_for(predicate):
+        deadline = time.monotonic() + 8
+        while not predicate() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert predicate()
+
+    try:
+        first, port, server, thread = start_backend()
+        bridge = VRCForgeBridge(base_url=f"http://127.0.0.1:{port}", config_path=config,
+                                timeout_seconds=2, start_runtime=False)
+        with bridge.connected_host():
+            wait_for(lambda: first.state.mcp_connection_status()["bridgeConnectionCount"] == 1)
+            assert first.state.mcp_connection_status()["sessionCount"] == 0
+            server.should_exit = True
+            thread.join(timeout=4)
+            assert not thread.is_alive()
+            assert not first.state.mcp_connection_status()["connected"]
+            second, _, _, _ = start_backend(port)
+            wait_for(lambda: second.state.mcp_connection_status()["bridgeConnectionCount"] == 1)
+            assert second.state.mcp_connection_status()["sessionCount"] == 0
+        wait_for(lambda: not second.state.mcp_connection_status()["connected"])
+    finally:
+        for server, thread in servers:
+            server.should_exit = True
+            thread.join(timeout=4)
+
+
 def test_stdio_bridge_forces_utf8_over_a_legacy_windows_code_page() -> None:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "cp1252"

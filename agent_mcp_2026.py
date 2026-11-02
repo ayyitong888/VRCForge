@@ -885,7 +885,7 @@ def create_asgi_app(
     try:
         from starlette.requests import Request
         from starlette.responses import JSONResponse, Response
-        from starlette.routing import Route
+        from starlette.routing import Route, WebSocketRoute
         from starlette.applications import Starlette
     except ImportError as exc:  # pragma: no cover - package environment error
         raise RuntimeError("Starlette is required for the MCP HTTP transport") from exc
@@ -893,19 +893,21 @@ def create_asgi_app(
     # Access stays on the ASGI event loop. Active requests are not idle and
     # cannot be reclaimed while their callback is still running.
     sessions: dict[str, dict[str, Any]] = {}
+    bridge_connections: dict[Any, int] = {}
 
     def mcp_connection_status() -> dict[str, Any]:
-        """Project live HTTP sessions without extending or mutating their lifetime."""
+        """Project live HTTP sessions and bridge sockets without extending their lifetime."""
         now = time.monotonic()
         current = [state for state in tuple(sessions.values())
                    if state.get("connectedAt") is not None
                    and (state["active"] or now - state["lastUsed"] < HTTP_SESSION_IDLE_SECONDS)]
         return {
-            "connected": bool(current),
+            "connected": bool(current or bridge_connections),
+            "bridgeConnectionCount": len(bridge_connections),
             "sessionCount": len(current),
             "activeRequestCount": sum(state["active"] for state in current),
             "idleTimeoutSeconds": HTTP_SESSION_IDLE_SECONDS,
-            "lastConnectedAt": max((state["connectedAt"] for state in current), default=None),
+            "lastConnectedAt": max([state["connectedAt"] for state in current] + list(bridge_connections.values()), default=None),
         }
 
     def notify_connection_changed() -> None:
@@ -914,6 +916,38 @@ def create_asgi_app(
                 on_connection_changed()
             except Exception:
                 logging.getLogger(__name__).warning("MCP connection notification failed", exc_info=True)
+
+    async def connection_endpoint(websocket):
+        # Presence only: the gateway bearer grants no App events or tool execution.
+        try:
+            host = _single_header(websocket, "Host")
+            origin = _single_header(websocket, "Origin", required=False)
+            authorization = _single_header(websocket, "Authorization")
+        except Mcp2026Error:
+            await websocket.close(code=1008)
+            return
+        parts = authorization.split(" ")
+        token = parts[1] if len(parts) == 2 and parts[0].lower() == "bearer" else ""
+        if (not _host_is_loopback(str(host)) or (origin and not _origin_is_loopback(origin))
+                or bearer_validator is None or not token or any(c.isspace() for c in token)
+                or not await _resolve(bearer_validator(token))):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        bridge_connections[websocket] = int(time.time() * 1000)
+        notify_connection_changed()
+        try:
+            await websocket.send_json({"connected": True})
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    break
+                # This channel has no client-message protocol or tool dispatcher.
+                await websocket.close(code=1008)
+                break
+        finally:
+            bridge_connections.pop(websocket, None)
+            notify_connection_changed()
 
     async def endpoint(request: Request):
         deleting = request.method == "DELETE" and bool(request.headers.get("Mcp-Session-Id"))
@@ -1037,7 +1071,10 @@ def create_asgi_app(
         return JSONResponse(payload, status_code=status, headers=response_headers)
 
     # DELETE only closes a previously authenticated extension session.
-    app = Starlette(routes=[Route(route_path, endpoint, methods=["GET", "POST", "DELETE", "HEAD", "OPTIONS"])])
+    app = Starlette(routes=[
+        Route(route_path, endpoint, methods=["GET", "POST", "DELETE", "HEAD", "OPTIONS"]),
+        WebSocketRoute(route_path.rstrip("/") + "/connection", connection_endpoint),
+    ])
     app.state.mcp_connection_status = mcp_connection_status
     return app
 

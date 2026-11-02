@@ -636,7 +636,7 @@ def test_http_connection_projection_uses_session_idle_lifetime(router, monkeypat
         app = create_asgi_app(router, bearer_validator=lambda token: token == "good")
         status = app.state.mcp_connection_status
         assert status() == {"connected": False, "sessionCount": 0,
-                            "activeRequestCount": 0, "idleTimeoutSeconds": 900, "lastConnectedAt": None}
+                            "activeRequestCount": 0, "idleTimeoutSeconds": 900, "bridgeConnectionCount": 0, "lastConnectedAt": None}
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             discovered = await client.post("/", json=_request("server/discover"), headers=_connection_headers("server/discover"))
             assert discovered.status_code == 200
@@ -699,7 +699,7 @@ def test_http_active_request_remains_connected_beyond_idle_timeout(monkeypatch):
                 await asyncio.wait_for(entered.wait(), timeout=5)
                 clock[0] += 901
                 assert app.state.mcp_connection_status() == {"connected": True, "sessionCount": 1,
-                                                          "activeRequestCount": 1, "idleTimeoutSeconds": 900, "lastConnectedAt": 1000000}
+                                                          "activeRequestCount": 1, "idleTimeoutSeconds": 900, "bridgeConnectionCount": 0, "lastConnectedAt": 1000000}
             finally:
                 release.set()
             assert (await pending).status_code == 200
@@ -758,3 +758,60 @@ def test_http_connection_notification_failure_does_not_fail_discovery(router, ca
             assert app.state.mcp_connection_status()["connected"] is True
     asyncio.run(exercise())
     assert "MCP connection notification failed" in caplog.text
+
+
+def test_bridge_websocket_tracks_real_lifetime_without_http_session(router, monkeypatch):
+    from starlette.testclient import TestClient
+
+    events = []
+    app = create_asgi_app(router, bearer_validator=lambda token: token == "good", route_path="/mcp",
+                          on_connection_changed=lambda: events.append(app.state.mcp_connection_status()))
+    with TestClient(app) as client:
+        with client.websocket_connect("/mcp/connection", headers={"Authorization": "Bearer good"}) as ws:
+            assert ws.receive_json() == {"connected": True}
+            status = app.state.mcp_connection_status()
+            assert status["connected"] is True
+            assert status["bridgeConnectionCount"] == 1
+            assert status["sessionCount"] == 0
+            assert status["activeRequestCount"] == 0
+            assert isinstance(status["lastConnectedAt"], int)
+            assert len(events) == 1
+            now = time.monotonic()
+            monkeypatch.setattr("agent_mcp_2026.time.monotonic", lambda: now + 901)
+            assert app.state.mcp_connection_status()["connected"] is True
+    assert app.state.mcp_connection_status()["connected"] is False
+    assert app.state.mcp_connection_status()["bridgeConnectionCount"] == 0
+    assert app.state.mcp_connection_status()["lastConnectedAt"] is None
+    assert len(events) == 2
+
+
+@pytest.mark.parametrize("headers", [
+    {}, {"Authorization": "Bearer bad"},
+    {"Authorization": "Bearer good", "Host": "remote.example"},
+    {"Authorization": "Bearer good", "Origin": "https://remote.example"},
+])
+def test_bridge_websocket_rejects_unauthenticated_or_nonloopback(router, headers):
+    from starlette.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    events = []
+    app = create_asgi_app(router, bearer_validator=lambda token: token == "good",
+                          on_connection_changed=lambda: events.append(True))
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/connection", headers=headers):
+                pytest.fail("Unauthorized connection was accepted")
+    assert events == []
+    assert app.state.mcp_connection_status()["connected"] is False
+
+
+def test_bridge_websocket_has_no_tool_message_protocol(router):
+    from starlette.testclient import TestClient
+
+    app = create_asgi_app(router, bearer_validator=lambda token: token == "good")
+    with TestClient(app) as client:
+        with client.websocket_connect("/connection", headers={"Authorization": "Bearer good"}) as ws:
+            assert ws.receive_json() == {"connected": True}
+            ws.send_json(_request("tools/list"))
+            assert ws.receive() == {"type": "websocket.close", "code": 1008, "reason": ""}
+    assert app.state.mcp_connection_status()["bridgeConnectionCount"] == 0

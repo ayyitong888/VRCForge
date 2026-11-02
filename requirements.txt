@@ -5,6 +5,7 @@
 fastapi>=0.115.0
 pydantic>=2.7.0,<3.0.0
 uvicorn>=0.30.0
+websockets>=13.1
 
 # LLM providers.
 anthropic>=0.34.0
