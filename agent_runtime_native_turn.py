@@ -388,7 +388,7 @@ class NativeRuntimeTurn:
                 "running",
             }
             def is_waiting(item: Mapping[str, Any]) -> bool:
-                from agent_tool_result_contract import runtime_observation_receipt
+                from agent_tool_result_contract import pending_execution_receipt, runtime_observation_receipt
                 status = str(item.get("status") or "")
                 outcome = item.get("outcome")
                 outcome_status = (
@@ -403,10 +403,10 @@ class NativeRuntimeTurn:
                 # canonical action outcome is already terminally failed.
                 if outcome_status in {"failed", "denied", "rejected", "cancelled", "not_executed"}:
                     return False
-                if outcome_status == "pending" and runtime_observation_receipt(item):
-                    # The start/poll call has returned its job receipt. Sampling
-                    # remains unfinished, but the model must receive this result
-                    # before it can issue the next read-only poll.
+                if outcome_status == "pending" and (runtime_observation_receipt(item) or pending_execution_receipt(item)):
+                    # The dispatch/start/poll call returned its receipt. The
+                    # work remains unverified, but the model needs this result
+                    # before it can inspect or poll the existing operation.
                     return False
                 result = item.get("result")
                 if isinstance(result, Mapping) and str(result.get("status") or "") == "running":

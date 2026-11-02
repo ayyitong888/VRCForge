@@ -113,6 +113,44 @@ def test_native_delegate_running_result_remains_pending_for_terminal_callback(tm
     assert gateway.runtime_sessions._native_pending(snapshot) == {"delegate-running"}
 
 
+@pytest.mark.parametrize("tool,result", [
+    ("vrcforge_execute_unity_editor_menu", {
+        "menuItemPath": "GameObject/Fixture/Setup", "selectionGlobalObjectIds": [],
+        "triggered": True, "state": "invoked", "resultVerification": "pending",
+        "mutationMayHaveStarted": True, "checkpointRecoveryRequired": False, "selectionRestored": False,
+    }),
+    ("vrcforge_setup_outfit", {"ok": True, "status": "running", "jobId": "a" * 32}),
+])
+def test_native_pending_dispatch_returns_receipt_before_post_tool_request(tmp_path, tool, result):
+    from agent_tool_result_contract import normalize_agent_tool_result
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    class Planner:
+        @staticmethod
+        def native_result_observation(item, **_kwargs):
+            return item
+    turn = NativeRuntimeTurn(gateway.runtime_sessions, Planner(), "dispatch-session", "dispatch-turn",
+        "binding", "Set up the fixture then inspect its result", [], None, None, None)
+    turn.admit(call("setup-call", tool, {}), tool_names=[tool])
+    turn.next_receipt()
+    outcome = normalize_agent_tool_result(result, fallback_summary="Setup dispatched", write=True)
+    assert outcome["status"] == "pending"
+    turn._loop_state.append({"tool": tool, "status": "executed", "result": result, "outcome": outcome})
+
+    turn.settle()
+
+    snapshot = turn.snapshot()
+    assert not gateway.runtime_sessions._native_pending(snapshot)
+    tool_messages = [message for message in snapshot["messages"] if message.get("tool_call_id") == "setup-call"]
+    assert len(tool_messages) == 1
+    observation = json.loads(tool_messages[0]["content"])["observations"][0]
+    assert observation["outcome"]["status"] == "pending"
+    assert observation["result"] == result
+    turn.persist_runtime_state({"role": "system", "content": "Current runtime state (data): " + json.dumps({
+        "exposureLayer": "execution", "projectContextActive": True,
+        "allowedRuntimeActions": ["reply"], "availableToolNames": ["inspect_fixture"],
+    })})
+
+
 def test_native_receipt_public_content_is_emitted_once_for_queued_calls(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
 
