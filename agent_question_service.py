@@ -362,7 +362,9 @@ class AgentQuestionService:
                      if isinstance(option, Mapping) and str(option.get("id") or "") == selected_option_id),
                     None,
                 ) if selected_option_id else None
-                if selected_option_id and _as_list(existing.get("options")) and selected_option is None:
+                # The App submits custom replies and skips as answer-source IDs;
+                # only a declared choice ID must belong to the Question options.
+                if selected_option_id not in {"", "custom", "skip"} and selected_option is None:
                     raise AgentQuestionServiceError("Selected Question option does not belong to this Question.", status_code=400)
                 if kind == "visual_checkpoint":
                     if resolution and resolution not in VISUAL_RESOLUTIONS:

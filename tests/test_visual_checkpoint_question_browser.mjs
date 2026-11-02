@@ -56,7 +56,8 @@ try {
   assert.equal(await page.getByText("Recommended", { exact: true }).count(), 0, "visual checkpoints do not recommend Pass");
   const input = page.getByPlaceholder("Type another answer...");
   assert.equal(await input.count(), 1, "visual checkpoints share the compact text reply row");
-  assert.equal(await input.getAttribute("rows"), "1");
+  assert.equal(await input.evaluate((element) => element.tagName), "INPUT");
+  assert.equal(await input.getAttribute("type"), "text");
   assert.equal(await page.locator('input[type="file"]').count(), 0);
   assert.equal(await page.getByRole("button", { name: "Send", exact: true }).isDisabled(), true);
   await input.fill("Please inspect the shoe opening; I have not decided yet.");

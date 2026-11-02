@@ -232,14 +232,20 @@ export function AgentQuestionCard({
             }}
           >
             <Pencil className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-            <textarea
+            <input
+              type="text"
               value={customValue}
               onChange={(event) => setCustomValues((current) => ({ ...current, [question.questionId]: event.target.value.slice(0, 2000) }))}
               onFocus={() => setEditing(true)}
               onBlur={() => setEditing(false)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  if (!event.shiftKey) event.currentTarget.form?.requestSubmit();
+                }
+              }}
               maxLength={2000}
-              rows={1}
-              className="app-scrollbar h-6 min-w-0 flex-1 resize-none bg-transparent text-base leading-6 outline-none placeholder:text-muted-foreground"
+              className="h-6 min-w-0 flex-1 bg-transparent text-base leading-6 outline-none placeholder:text-muted-foreground"
               placeholder={t("questionCard.customPlaceholder")}
               aria-label={t("questionCard.customPlaceholder")}
               disabled={Boolean(busyChoice) || continuationActive || continuationSettled}

@@ -86,7 +86,11 @@ try {
   assert.equal(await page.getByPlaceholder("Type another answer...").count(), 0, "idle question prompt collapses after 30 seconds");
   await page.locator("[data-question-reopen='q-one']").click();
   const custom = page.getByPlaceholder("Type another answer...");
-  const answerButton = page.getByRole("button", { name: "Send", exact: true });
+  assert.equal(await custom.evaluate((element) => element.tagName), "INPUT", "custom replies use one line");
+  await custom.fill("工程里面有".repeat(200));
+  await custom.press("End");
+  const longInput = await custom.evaluate((element) => ({ scrollLeft: element.scrollLeft, clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
+  assert.ok(longInput.scrollWidth > longInput.clientWidth && longInput.scrollLeft > 0, "long replies continue horizontally within the single line");
 
   assert.equal(await page.getByText("Recommended", { exact: true }).count(), 0, "ordinary options do not imply a recommendation");
   assert.equal(await page.locator('input[type="file"]').count(), 0, "ask questions stay text-only");
@@ -102,7 +106,13 @@ try {
   assert.equal(await page.getByPlaceholder("Type another answer...").inputValue(), "draft two", "second draft survives pagination");
 
   await page.getByRole("button", { name: "Previous", exact: true }).click();
-  await answerButton.click();
+  await custom.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  assert.equal(await page.locator("[data-action]").textContent(), "", "IME confirmation must not send an answer");
+  await custom.press("Shift+Enter");
+  assert.doesNotMatch(await custom.inputValue(), /\n/, "Shift+Enter keeps the reply on one line");
+  assert.equal(await page.locator("[data-action]").textContent(), "", "Shift+Enter must not send an answer");
+  await custom.fill("draft one");
+  await custom.press("Enter");
   await page.getByRole("alert").waitFor();
   assert.equal(await custom.inputValue(), "draft one", "failed submission keeps the draft for retry");
   assert.match(await page.getByRole("alert").textContent(), /simulated send failure/);

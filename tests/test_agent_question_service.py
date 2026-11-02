@@ -124,6 +124,51 @@ def test_question_service_preserves_scope_and_answer_exactly_once(tmp_path: Path
     assert first.list(session_id="session-a", project_root="D:/ProjectA", include_answered=True)["count"] == 1
 
 
+@pytest.mark.parametrize("selection,answer", [
+    ("custom", "工程里面有"),
+    ("skip", "跳过此问题"),
+    ("", "工程里面有"),
+    ("option-1", ""),
+])
+def test_question_answer_accepts_custom_skip_and_declared_choices(tmp_path, selection, answer):
+    service = _service(tmp_path, threading.RLock(), [])
+    question = service.create({
+        "question": "要保留的面捕目前在哪里？", "sessionId": "s", "projectRoot": "D:/fixture/project",
+        "options": [{"id": "option-1", "label": "工程里面有"}, {"id": "option-2", "label": "稍后提供"}],
+    })["question"]
+    request = {"sessionId": "s", "projectRoot": "D:/fixture/project",
+               "selectedOptionId": selection, "answer": answer}
+    result = service.answer(question["questionId"], request)
+    assert result["question"]["status"] == "answered"
+    assert result["question"]["answer"] == (answer or "工程里面有")
+    assert result["question"]["selectedOptionId"] == selection
+    assert service.answer(question["questionId"], request)["idempotent"] is True
+
+
+@pytest.mark.parametrize("with_options", [True, False])
+def test_question_rejects_unknown_option_without_saving_answer(tmp_path, with_options):
+    service = _service(tmp_path, threading.RLock(), [])
+    question = service.create({"question": "Where is it?", "options": ["Here", "Elsewhere"] if with_options else []})["question"]
+    before = service.log_path.read_bytes()
+    with pytest.raises(AgentQuestionServiceError, match="does not belong"):
+        service.answer(question["questionId"], {"selectedOptionId": "another-question-option", "answer": "Here"})
+    assert service.log_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("selection", ["custom", "skip"])
+def test_visual_custom_or_skip_does_not_infer_acceptance_from_text(tmp_path, selection):
+    service = _service(tmp_path, threading.RLock(), [])
+    question = service.create({
+        "kind": "visual_checkpoint", "question": "Does this pass?",
+        "options": [{"id": "pass", "label": "Pass", "resolution": "pass"},
+                    {"id": "fail", "label": "Fail", "resolution": "fail"}],
+    })["question"]
+    result = service.answer(question["questionId"], {"selectedOptionId": selection, "answer": "Pass"})
+    assert result["feedback"] is True
+    assert result["question"]["status"] == "pending"
+    assert result["question"]["resolution"] == ""
+
+
 def test_visual_checkpoint_has_explicit_resolution_and_replays_defer(tmp_path: Path) -> None:
     resolutions: list[tuple[str, str]] = []
     service = _service(tmp_path, threading.RLock(), resolutions)
