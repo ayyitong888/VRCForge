@@ -27,6 +27,15 @@ EXECUTION_TARGET_REF_SCHEMA = "vrcforge.execution_target_ref.v1"
 EXECUTION_NAMESPACE_PREFIX = "vrcforge://"
 RESOURCE_PROVENANCE_SCHEMA = "vrcforge.resource_provenance.v1"
 PROMPT_PROVENANCE_SCHEMA = "vrcforge.prompt_skill_provenance.v1"
+_UNKNOWN_EXECUTION_TARGET_REFERENCE_MESSAGE = (
+    "ExecutionTarget reference is unknown or expired in this Gateway process; "
+    "conversation history alone does not establish a current runtime binding. This call "
+    "was rejected before Unity. Rebind the same exact current target with "
+    "vrcforge_bind_execution_target and use the new reference. If its exact identity is "
+    "unavailable or ambiguous, call vrcforge_list_execution_targets to select it first. "
+    "Do not reuse this reference, substitute a hierarchy path, or automatically replay "
+    "an earlier write."
+)
 
 
 class ExecutionTargetError(ValueError):
@@ -457,7 +466,7 @@ class ExecutionTargetBindingRegistry:
         if not prior:
             raise ExecutionTargetError(
                 "execution_target_handle_invalid",
-                "ExecutionTarget reference is unknown or expired.",
+                _UNKNOWN_EXECUTION_TARGET_REFERENCE_MESSAGE,
             )
         if prior.get("sessionContext") != normalized_session:
             raise ExecutionTargetError(
@@ -587,7 +596,10 @@ class ExecutionTargetBindingRegistry:
         with self._lock:
             prior = dict(self._bindings.get(normalized_handle) or {})
         if not prior:
-            raise ExecutionTargetError("execution_target_handle_invalid", "ExecutionTarget handle is unknown or expired.")
+            raise ExecutionTargetError(
+                "execution_target_handle_invalid",
+                _UNKNOWN_EXECUTION_TARGET_REFERENCE_MESSAGE,
+            )
         if prior.get("sessionContext") != normalized_session:
             raise ExecutionTargetError(
                 "execution_target_session_mismatch",

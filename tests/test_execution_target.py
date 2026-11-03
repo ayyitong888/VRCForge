@@ -314,6 +314,73 @@ def test_binding_refresh_allows_display_change_but_rejects_avatar_replacement(tm
     assert exc_info.value.code == "execution_target_identity_drifted"
 
 
+def test_reference_from_previous_gateway_requires_exact_current_rebind(tmp_path: Path, monkeypatch):
+    target = _live_runtime_target(tmp_path)
+    old_gateway = AgentGateway(tmp_path / "old" / "gateway.json", tmp_path / "old" / "audit")
+    restored_gateway = AgentGateway(
+        tmp_path / "restored" / "gateway.json",
+        tmp_path / "restored" / "audit",
+    )
+    monkeypatch.setattr(old_gateway, "execution_target_session_context", lambda: "runtime:restored-session")
+    monkeypatch.setattr(restored_gateway, "execution_target_session_context", lambda: "runtime:restored-session")
+    old_binding = old_gateway.bind_execution_target(target, project_root=str(tmp_path))
+
+    # Restoring the conversation does not restore the previous Gateway's
+    # process-owned handle table.
+    with pytest.raises(agent_gateway.AgentGatewayError) as exc_info:
+        restored_gateway.resolve_execution_target_reference(
+            old_binding["executionTarget"],
+            project_root=str(tmp_path),
+            required_scope="avatar",
+        )
+
+    assert exc_info.value.cause_code == "execution_target_handle_invalid"
+    message = str(exc_info.value)
+    assert "history alone does not establish a current runtime binding" in message.casefold()
+    assert "rebind the same exact current target" in message.casefold()
+    assert "vrcforge_bind_execution_target" in message
+    assert "if its exact identity is unavailable or ambiguous" in message.casefold()
+    assert "vrcforge_list_execution_targets" in message
+    assert "do not reuse" in message.casefold()
+    assert "automatically replay an earlier write" in message.casefold()
+    assert exc_info.value.external_error["error"] == message
+    assert exc_info.value.external_error["mutationStarted"] is False
+
+    current_binding = restored_gateway.bind_execution_target(target, project_root=str(tmp_path))
+    assert current_binding["executionTarget"] != old_binding["executionTarget"]
+    assert restored_gateway.resolve_execution_target_reference(
+        current_binding["executionTarget"],
+        project_root=str(tmp_path),
+        required_scope="avatar",
+    )["avatar"]["globalObjectId"] == target["avatar"]["globalObjectId"]
+
+
+def test_refresh_of_unknown_historical_reference_returns_rebind_guidance(tmp_path: Path):
+    target = _live_runtime_target(tmp_path)
+    old_binding = ExecutionTargetBindingRegistry().bind(
+        target,
+        project_root=str(tmp_path),
+        session_context="runtime:restored-session",
+    )
+    restored_gateway = ExecutionTargetBindingRegistry()
+
+    with pytest.raises(ExecutionTargetError) as exc_info:
+        restored_gateway.refresh(
+            old_binding["executionTarget"],
+            target,
+            project_root=str(tmp_path),
+            session_context="runtime:restored-session",
+        )
+
+    assert exc_info.value.code == "execution_target_handle_invalid"
+    message = str(exc_info.value).casefold()
+    assert "history alone does not establish a current runtime binding" in message
+    assert "rebind the same exact current target" in message
+    assert "vrcforge_bind_execution_target" in message
+    assert "if its exact identity is unavailable or ambiguous" in message
+    assert "vrcforge_list_execution_targets" in message
+
+
 def test_bind_and_core_refresh_reuse_the_scene_digest_without_python_full_reads(tmp_path, monkeypatch):
     target = _live_runtime_target(tmp_path)
     registry = ExecutionTargetBindingRegistry()
