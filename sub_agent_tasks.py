@@ -7,6 +7,8 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
+
+from runtime_error_schema import runtime_error_from_exception
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -72,6 +74,7 @@ class SubAgentTask:
     result_unavailable: bool = False
     summary: str = ""
     error: str = ""
+    error_code: str = ""
     cancel_requested: bool = False
     event_count: int = 0
     revision: int = 0
@@ -205,6 +208,7 @@ class SubAgentTaskRegistry:
                         "taskSeed": copy.deepcopy(seed),
                         "summary": task.summary,
                         "error": task.error,
+                        "errorCode": task.error_code,
                     }
                 )
             return events[-200:]
@@ -766,10 +770,12 @@ class SubAgentTaskRegistry:
                     return
                 next_task = copy.deepcopy(current)
                 next_task.status = "failed"
-                next_task.error = str(exc)
+                failure = runtime_error_from_exception("sub_agent_task_failed", exc, phase="run")
+                next_task.error = str(failure.get("message") or "The sub-agent task failed.")
+                next_task.error_code = str(failure.get("code") or "")
                 next_task.stopped_at = utc_now()
                 next_task.handoff_status = "handoff_pending"
-                self._commit_task_event_locked(current, next_task, "failed", {"error": str(exc)})
+                self._commit_task_event_locked(current, next_task, "failed", {"failure": failure})
             return
 
         with self._lock:
@@ -792,12 +798,14 @@ class SubAgentTaskRegistry:
                 self._recover_completion_persistence_error_locked(current, exc)
 
     def _commit_cancelled_locked(self, task: SubAgentTask, error: str) -> SubAgentTask:
+        error = error or "The sub-agent task was cancelled."
         next_task = copy.deepcopy(task)
         next_task.status = "cancelled"
         next_task.cancel_requested = True
         next_task.error = error
+        next_task.error_code = "sub_agent_task_cancelled"
         next_task.stopped_at = utc_now()
-        return self._commit_task_event_locked(task, next_task, "cancelled", {"error": error})
+        return self._commit_task_event_locked(task, next_task, "cancelled", {"error": error, "errorCode": next_task.error_code})
 
     @staticmethod
     def _completed_task(task: SubAgentTask, result: dict[str, Any], summary: str) -> SubAgentTask:
@@ -995,6 +1003,7 @@ class SubAgentTaskRegistry:
             "cancelRequested": task.cancel_requested,
             "summary": task.summary,
             "error": task.error,
+            "errorCode": task.error_code,
             "eventCount": task.event_count,
             "revision": task.revision,
             "retryOf": task.retry_of,
@@ -1045,6 +1054,7 @@ class SubAgentTaskRegistry:
             result_unavailable=bool(snapshot.get("resultUnavailable")),
             summary=str(snapshot.get("summary") or ""),
             error=str(snapshot.get("error") or ""),
+            error_code=str(snapshot.get("errorCode") or ""),
             cancel_requested=bool(snapshot.get("cancelRequested")),
             event_count=int(snapshot.get("eventCount") or 0),
             revision=int(snapshot.get("revision") or 0),

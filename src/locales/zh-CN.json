@@ -28,18 +28,53 @@
   "vskOpen": {
     "title": "是否导入技能包？",
     "description": "请核对以下技能包信息。点击确认前不会导入，也不会运行技能。",
-    "name": "名称", "version": "版本", "author": "作者", "path": "文件位置", "details": "详细信息", "notProvided": "未提供", "signature": "签名", "signerTrust": "签名者信任状态", "signerTrustUnknown": "未提供",
-    "signerFingerprint": "签名者身份指纹", "officialPublisher": "已核验发布者", "unknownPermission": "{{permission}}（未知权限标识）",
-    "signatureStatus": { "signed": "已签名", "dev": "开发版本" },
-    "signerTrustStatus": { "trusted": "可信", "untrusted": "不可信", "revoked": "已撤销", "unsigned_dev": "未签名的开发版本" },
+    "name": "名称",
+    "version": "版本",
+    "author": "作者",
+    "path": "文件位置",
+    "details": "详细信息",
+    "notProvided": "未提供",
+    "signature": "签名",
+    "signerTrust": "签名者信任状态",
+    "signerTrustUnknown": "未提供",
+    "signerFingerprint": "签名者身份指纹",
+    "officialPublisher": "已核验发布者",
+    "unknownPermission": "{{permission}}（未知权限标识）",
+    "signatureStatus": {
+      "signed": "已签名",
+      "dev": "开发版本"
+    },
+    "signerTrustStatus": {
+      "trusted": "可信",
+      "untrusted": "不可信",
+      "revoked": "已撤销",
+      "unsigned_dev": "未签名的开发版本"
+    },
     "permission": {
-      "read_project": "读取项目", "read_assets": "读取资源", "read_package": "读取软件包", "analyze_logs": "分析日志", "build_index": "建立索引",
-      "unity_scan_scene": "检查 Unity 场景", "unity_modify_materials": "修改材质", "unity_modify_prefab": "修改预制件", "unity_modify_components": "修改组件", "unity_run_validation": "运行验证",
-      "write_project_files": "写入项目文件", "delete_files": "删除文件", "execute_shell": "执行 Shell 命令", "run_editor_script": "运行编辑器脚本", "network_access": "访问网络", "read_env": "读取环境变量", "write_outside_project": "写入项目目录之外"
+      "read_project": "读取项目",
+      "read_assets": "读取资源",
+      "read_package": "读取软件包",
+      "analyze_logs": "分析日志",
+      "build_index": "建立索引",
+      "unity_scan_scene": "检查 Unity 场景",
+      "unity_modify_materials": "修改材质",
+      "unity_modify_prefab": "修改预制件",
+      "unity_modify_components": "修改组件",
+      "unity_run_validation": "运行验证",
+      "write_project_files": "写入项目文件",
+      "delete_files": "删除文件",
+      "execute_shell": "执行 Shell 命令",
+      "run_editor_script": "运行编辑器脚本",
+      "network_access": "访问网络",
+      "read_env": "读取环境变量",
+      "write_outside_project": "写入项目目录之外"
     },
     "permissions": "请求的权限",
-    "checking": "正在检查技能包…", "invalid": "技能包未通过检查。",
-    "confirm": "确认导入", "importing": "正在导入…", "imported": "技能包已导入。"
+    "checking": "正在检查技能包…",
+    "invalid": "技能包未通过检查。",
+    "confirm": "确认导入",
+    "importing": "正在导入…",
+    "imported": "技能包已导入。"
   },
   "sidebar": {
     "tempChat": "临时对话",
@@ -1372,7 +1407,11 @@
     "conversation": "子代理对话",
     "noConversation": "暂时还没有对话消息。",
     "backToList": "返回子代理列表",
-    "showMore": "再显示 {{count}} 个"
+    "showMore": "再显示 {{count}} 个",
+    "errors": {
+      "sub_agent_task_failed": "子代理任务失败,请查看任务详情或重试。",
+      "sub_agent_task_cancelled": "子代理任务已取消。"
+    }
   },
   "connector": {
     "configStatusHint": "让外部 Agent 使用 VRCForge 工具：开启连接，安装配置，再重载或重连 Agent。",
@@ -1386,7 +1425,14 @@
     "noConfigYet": "连接配置尚未就绪，请先刷新状态。",
     "agentPrompt": "请把 VRCForge MCP 接入你当前运行的本机客户端。使用下面的 STDIO 启动参数，按该客户端的配置格式合并并保留其他服务；需要时转换为对应的 TOML/YAML。重连后调用 vrcforge_bridge_preflight 并列出工具确认。只测试连接，不修改 Unity 工程。",
     "telegramRemoteAccess": "Telegram 远程访问",
-    "hosts": {"codexApp":"Codex App","codexCli":"Codex CLI","claudeCode":"Claude Code","claudeCowork":"Claude Cowork","deepseekHarness":"DeepSeek Harness","generic":"通用 MCP 客户端（JSON / STDIO）"},
+    "hosts": {
+      "codexApp": "Codex App",
+      "codexCli": "Codex CLI",
+      "claudeCode": "Claude Code",
+      "claudeCowork": "Claude Cowork",
+      "deepseekHarness": "DeepSeek Harness",
+      "generic": "通用 MCP 客户端（JSON / STDIO）"
+    },
     "diagnostics": "高级配置与诊断",
     "notChecked": "尚未检查配置",
     "title": "智能体连接器",
@@ -1849,7 +1895,12 @@
   },
   "questionCard": {
     "visualCheckpoint": {
-      "options": { "pass": "通过", "fail": "不通过", "uncertain": "不确定", "later": "稍后处理" },
+      "options": {
+        "pass": "通过",
+        "fail": "不通过",
+        "uncertain": "不确定",
+        "later": "稍后处理"
+      },
       "notePlaceholder": "可补充视觉检查说明…"
     },
     "label": "智能体提问",
@@ -1872,8 +1923,7 @@
     "continuationCompleted": "任务续接已完成",
     "continuationCancelled": "任务续接已停止",
     "continuationFailed": "任务续接失败",
-    "stopContinuation": "停止"
-,
+    "stopContinuation": "停止",
     "continuationWaiting": "等待中…",
     "continuationDelivered": "续接结果已返回，请查看对话记录"
   },

@@ -28,6 +28,7 @@ export type SubAgentTask = {
   cancelRequested?: boolean;
   summary?: string;
   error?: string;
+  errorCode?: string;
   eventCount?: number;
   revision?: number;
   retryOf?: string;

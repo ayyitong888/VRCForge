@@ -28,18 +28,53 @@
   "vskOpen": {
     "title": "是否匯入技能套件？",
     "description": "請核對以下技能套件資訊。按下確認前不會匯入，也不會執行技能。",
-    "name": "名稱", "version": "版本", "author": "作者", "path": "檔案位置", "details": "詳細資訊", "notProvided": "未提供", "signature": "簽章", "signerTrust": "簽署者信任狀態", "signerTrustUnknown": "未提供",
-    "signerFingerprint": "簽署者身分指紋", "officialPublisher": "已驗證發行者", "unknownPermission": "{{permission}}（未知權限識別碼）",
-    "signatureStatus": { "signed": "已簽章", "dev": "開發版本" },
-    "signerTrustStatus": { "trusted": "可信任", "untrusted": "不受信任", "revoked": "已撤銷", "unsigned_dev": "未簽章的開發版本" },
+    "name": "名稱",
+    "version": "版本",
+    "author": "作者",
+    "path": "檔案位置",
+    "details": "詳細資訊",
+    "notProvided": "未提供",
+    "signature": "簽章",
+    "signerTrust": "簽署者信任狀態",
+    "signerTrustUnknown": "未提供",
+    "signerFingerprint": "簽署者身分指紋",
+    "officialPublisher": "已驗證發行者",
+    "unknownPermission": "{{permission}}（未知權限識別碼）",
+    "signatureStatus": {
+      "signed": "已簽章",
+      "dev": "開發版本"
+    },
+    "signerTrustStatus": {
+      "trusted": "可信任",
+      "untrusted": "不受信任",
+      "revoked": "已撤銷",
+      "unsigned_dev": "未簽章的開發版本"
+    },
     "permission": {
-      "read_project": "讀取專案", "read_assets": "讀取資產", "read_package": "讀取套件", "analyze_logs": "分析記錄", "build_index": "建立索引",
-      "unity_scan_scene": "檢查 Unity 場景", "unity_modify_materials": "修改材質", "unity_modify_prefab": "修改預製物", "unity_modify_components": "修改元件", "unity_run_validation": "執行驗證",
-      "write_project_files": "寫入專案檔案", "delete_files": "刪除檔案", "execute_shell": "執行 Shell 命令", "run_editor_script": "執行編輯器指令碼", "network_access": "存取網路", "read_env": "讀取環境變數", "write_outside_project": "寫入專案目錄以外"
+      "read_project": "讀取專案",
+      "read_assets": "讀取資產",
+      "read_package": "讀取套件",
+      "analyze_logs": "分析記錄",
+      "build_index": "建立索引",
+      "unity_scan_scene": "檢查 Unity 場景",
+      "unity_modify_materials": "修改材質",
+      "unity_modify_prefab": "修改預製物",
+      "unity_modify_components": "修改元件",
+      "unity_run_validation": "執行驗證",
+      "write_project_files": "寫入專案檔案",
+      "delete_files": "刪除檔案",
+      "execute_shell": "執行 Shell 命令",
+      "run_editor_script": "執行編輯器指令碼",
+      "network_access": "存取網路",
+      "read_env": "讀取環境變數",
+      "write_outside_project": "寫入專案目錄以外"
     },
     "permissions": "要求的權限",
-    "checking": "正在檢查技能套件…", "invalid": "技能套件未通過檢查。",
-    "confirm": "確認匯入", "importing": "正在匯入…", "imported": "技能套件已匯入。"
+    "checking": "正在檢查技能套件…",
+    "invalid": "技能套件未通過檢查。",
+    "confirm": "確認匯入",
+    "importing": "正在匯入…",
+    "imported": "技能套件已匯入。"
   },
   "sidebar": {
     "tempChat": "臨時對話",
@@ -1365,7 +1400,11 @@
     "conversation": "子代理對話",
     "noConversation": "暫時還沒有對話訊息。",
     "backToList": "返回子代理列表",
-    "showMore": "再顯示 {{count}} 個"
+    "showMore": "再顯示 {{count}} 個",
+    "errors": {
+      "sub_agent_task_failed": "子代理任務失敗,請查看任務詳情或重試。",
+      "sub_agent_task_cancelled": "子代理任務已取消。"
+    }
   },
   "connector": {
     "configStatusHint": "讓外部 Agent 使用 VRCForge 工具：開啟連線、安裝設定，再重新載入或重新連線 Agent。",
@@ -1379,7 +1418,14 @@
     "noConfigYet": "連線設定尚未就緒，請先重新整理狀態。",
     "agentPrompt": "請將 VRCForge MCP 接入你目前執行的本機用戶端。使用下方 STDIO 啟動參數，依該用戶端的設定格式合併並保留其他服務；必要時轉換為對應的 TOML/YAML。重新連線後呼叫 vrcforge_bridge_preflight 並列出工具確認。只測試連線，不修改 Unity 專案。",
     "telegramRemoteAccess": "Telegram 遠端存取",
-    "hosts": {"codexApp":"Codex App","codexCli":"Codex CLI","claudeCode":"Claude Code","claudeCowork":"Claude Cowork","deepseekHarness":"DeepSeek Harness","generic":"通用 MCP 用戶端（JSON / STDIO）"},
+    "hosts": {
+      "codexApp": "Codex App",
+      "codexCli": "Codex CLI",
+      "claudeCode": "Claude Code",
+      "claudeCowork": "Claude Cowork",
+      "deepseekHarness": "DeepSeek Harness",
+      "generic": "通用 MCP 用戶端（JSON / STDIO）"
+    },
     "diagnostics": "進階設定與診斷",
     "notChecked": "尚未檢查設定",
     "title": "智能體連接器",
@@ -1842,7 +1888,12 @@
   },
   "questionCard": {
     "visualCheckpoint": {
-      "options": { "pass": "通過", "fail": "不通過", "uncertain": "不確定", "later": "稍後處理" },
+      "options": {
+        "pass": "通過",
+        "fail": "不通過",
+        "uncertain": "不確定",
+        "later": "稍後處理"
+      },
       "notePlaceholder": "可補充視覺檢查說明…"
     },
     "label": "智慧體提問",
@@ -1865,8 +1916,7 @@
     "continuationCompleted": "工作續接已完成",
     "continuationCancelled": "工作續接已停止",
     "continuationFailed": "工作續接失敗",
-    "stopContinuation": "停止"
-,
+    "stopContinuation": "停止",
     "continuationWaiting": "等待中…",
     "continuationDelivered": "續接結果已返回，請查看對話記錄"
   },

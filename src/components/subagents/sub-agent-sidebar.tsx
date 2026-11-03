@@ -1,4 +1,13 @@
 import { AlertCircle, CheckCircle2, Dot, Loader2, Square, X } from "lucide-react";
+
+function subAgentTaskErrorText(task: { error?: string; errorCode?: string }, t: (key: string) => string): string {
+  const code = task.errorCode?.trim() || "";
+  if (code) {
+    const localized = t(`subagent.errors.${code}`);
+    if (localized !== `subagent.errors.${code}`) return localized;
+  }
+  return task.error?.trim() ? task.error.trim().slice(0, 500) : "";
+}
 import { useMemo, useState, type ComponentProps } from "react";
 import { useTranslation } from "react-i18next";
 import { canCancelSubAgentTask } from "../../lib/subagent-merge";
@@ -72,10 +81,10 @@ function ThreadListRow({
           <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
             {task.task || subAgentRoleLabel(task.role, roles)}
           </span>
-          {task.error?.trim() ? (
-            <span className="mt-1 flex items-start gap-1 text-[11px] text-destructive" title={task.error.trim()}>
+          {task.error?.trim() || task.errorCode?.trim() ? (
+            <span className="mt-1 flex items-start gap-1 text-[11px] text-destructive" title={subAgentTaskErrorText(task, t)}>
               <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
-              <span className="line-clamp-2 break-words">{task.error.trim()}</span>
+              <span className="line-clamp-2 break-words">{subAgentTaskErrorText(task, t)}</span>
             </span>
           ) : null}
         </span>

@@ -11,9 +11,16 @@ function isTaskRunning(status: string): boolean {
   return RUNNING_STATUSES.has(status);
 }
 
-function taskErrors(thread: SubAgentThreadGroup): string[] {
-  return thread.task.error?.trim() ? [thread.task.error.trim()] : [];
+function taskErrorText(task: SubAgentTask, t: (key: string) => string): string {
+  const code = task.errorCode?.trim() || "";
+  if (code) {
+    const localized = t(`subagent.errors.${code}`);
+    if (localized !== `subagent.errors.${code}`) return localized;
+  }
+  return task.error?.trim() ? task.error.trim().slice(0, 500) : "";
 }
+
+
 
 function ThreadRow({
   thread,
@@ -26,7 +33,8 @@ function ThreadRow({
 }) {
   const { t } = useTranslation();
   const { task } = thread;
-  const errors = taskErrors(thread);
+  const errorText = taskErrorText(task, t);
+  const errors = errorText ? [errorText] : [];
   const tone = subAgentStatusTone(task.status);
   const statusClass = tone === "ok"
     ? "text-emerald-600 dark:text-emerald-400"

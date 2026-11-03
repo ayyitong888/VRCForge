@@ -258,6 +258,41 @@ def test_delivered_marker_failure_never_replays_a_dispatched_side_effect(tmp_pat
     assert replayed == []
 
 
+def test_task_crash_failure_never_leaks_raw_exception_text(tmp_path):
+    """A crashing handler must surface a controlled message plus an error code,
+    never the raw exception string (the sub-agent panel renders task.error)."""
+    def crashing_handler(_payload, _cancel):
+        raise RuntimeError("secret local path C:/Users/x/token.json exploded")
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": crashing_handler},
+    )
+    task_id = registry.create_task(
+        role="project_index_review",
+        task="scan",
+        display_name="Manuka",
+    )["task"]["id"]
+
+    failed = _wait_for_status(registry, task_id, {"failed"})["task"]
+    assert failed["status"] == "failed"
+    assert failed.get("errorCode") == "sub_agent_task_failed"
+    assert "secret local path" not in failed.get("error", "")
+    assert "token.json" not in failed.get("error", "")
+    assert failed.get("error", "").strip(), "a controlled human message must remain"
+
+    # Durable replay keeps the code: restart the registry from the same dir.
+    restarted = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={},
+    )
+    replayed = restarted.get_task(task_id)["task"]
+    assert replayed.get("errorCode") == "sub_agent_task_failed"
+    assert "token.json" not in replayed.get("error", "")
+
+
 def test_handler_ok_false_is_a_durable_failed_task(tmp_path):
     registry = SubAgentTaskRegistry(
         tmp_path,
@@ -1134,7 +1169,8 @@ def test_refresh_from_disk_observes_failed_event_written_after_registry_import(t
     assert new_owner.reconcile_startup(refresh_from_disk=True) is True
     refreshed = new_owner.get_task(task_id)["task"]
     assert refreshed["status"] == "failed"
-    assert "old owner failed" in refreshed["error"]
+    assert refreshed.get("errorCode") == "sub_agent_task_failed"
+    assert refreshed.get("error", "").strip()
     assert not [
         event
         for event in new_owner.recent_events()

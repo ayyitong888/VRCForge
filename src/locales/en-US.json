@@ -28,18 +28,53 @@
   "vskOpen": {
     "title": "Import this Skill package?",
     "description": "Review the package details below. Nothing is imported or run until you confirm.",
-    "name": "Name", "version": "Version", "author": "Author", "path": "Package location", "details": "Package details", "notProvided": "Not provided", "signature": "Signature", "signerTrust": "Signer trust", "signerTrustUnknown": "Not provided",
-    "signerFingerprint": "Signer identity fingerprint", "officialPublisher": "Verified publisher", "unknownPermission": "{{permission}} (unrecognized permission)",
-    "signatureStatus": { "signed": "Signed", "dev": "Development build" },
-    "signerTrustStatus": { "trusted": "Trusted", "untrusted": "Not trusted", "revoked": "Revoked", "unsigned_dev": "Unsigned development build" },
+    "name": "Name",
+    "version": "Version",
+    "author": "Author",
+    "path": "Package location",
+    "details": "Package details",
+    "notProvided": "Not provided",
+    "signature": "Signature",
+    "signerTrust": "Signer trust",
+    "signerTrustUnknown": "Not provided",
+    "signerFingerprint": "Signer identity fingerprint",
+    "officialPublisher": "Verified publisher",
+    "unknownPermission": "{{permission}} (unrecognized permission)",
+    "signatureStatus": {
+      "signed": "Signed",
+      "dev": "Development build"
+    },
+    "signerTrustStatus": {
+      "trusted": "Trusted",
+      "untrusted": "Not trusted",
+      "revoked": "Revoked",
+      "unsigned_dev": "Unsigned development build"
+    },
     "permission": {
-      "read_project": "Read project", "read_assets": "Read assets", "read_package": "Read package", "analyze_logs": "Analyze logs", "build_index": "Build index",
-      "unity_scan_scene": "Inspect Unity scene", "unity_modify_materials": "Modify materials", "unity_modify_prefab": "Modify prefabs", "unity_modify_components": "Modify components", "unity_run_validation": "Run validation",
-      "write_project_files": "Write project files", "delete_files": "Delete files", "execute_shell": "Run shell commands", "run_editor_script": "Run editor scripts", "network_access": "Access the network", "read_env": "Read environment variables", "write_outside_project": "Write outside the project"
+      "read_project": "Read project",
+      "read_assets": "Read assets",
+      "read_package": "Read package",
+      "analyze_logs": "Analyze logs",
+      "build_index": "Build index",
+      "unity_scan_scene": "Inspect Unity scene",
+      "unity_modify_materials": "Modify materials",
+      "unity_modify_prefab": "Modify prefabs",
+      "unity_modify_components": "Modify components",
+      "unity_run_validation": "Run validation",
+      "write_project_files": "Write project files",
+      "delete_files": "Delete files",
+      "execute_shell": "Run shell commands",
+      "run_editor_script": "Run editor scripts",
+      "network_access": "Access the network",
+      "read_env": "Read environment variables",
+      "write_outside_project": "Write outside the project"
     },
     "permissions": "Requested permissions",
-    "checking": "Checking package…", "invalid": "Package verification failed.",
-    "confirm": "Confirm import", "importing": "Importing…", "imported": "Skill package imported."
+    "checking": "Checking package…",
+    "invalid": "Package verification failed.",
+    "confirm": "Confirm import",
+    "importing": "Importing…",
+    "imported": "Skill package imported."
   },
   "sidebar": {
     "tempChat": "Quick Chat",
@@ -1372,7 +1407,11 @@
     "conversation": "Subagent conversation",
     "noConversation": "No conversation messages yet.",
     "backToList": "Back to subagents",
-    "showMore": "Show {{count}} more"
+    "showMore": "Show {{count}} more",
+    "errors": {
+      "sub_agent_task_failed": "The sub-agent task failed. Open the task details or retry.",
+      "sub_agent_task_cancelled": "The sub-agent task was cancelled."
+    }
   },
   "connector": {
     "configStatusHint": "Let an external Agent use VRCForge tools: enable the connection, install its config, then reload or reconnect the Agent.",
@@ -1386,7 +1425,14 @@
     "noConfigYet": "Connection config is not ready. Refresh status first.",
     "agentPrompt": "Connect VRCForge MCP to the local client you are currently running. Use the STDIO launch arguments below and merge them in the client's config format while preserving other servers; convert to the appropriate TOML/YAML if needed. Reconnect, call vrcforge_bridge_preflight, and list the tools to confirm. Test the connection only; do not modify the Unity project.",
     "telegramRemoteAccess": "Telegram remote access",
-    "hosts": {"codexApp":"Codex App","codexCli":"Codex CLI","claudeCode":"Claude Code","claudeCowork":"Claude Cowork","deepseekHarness":"DeepSeek Harness","generic":"Generic MCP client (JSON / STDIO)"},
+    "hosts": {
+      "codexApp": "Codex App",
+      "codexCli": "Codex CLI",
+      "claudeCode": "Claude Code",
+      "claudeCowork": "Claude Cowork",
+      "deepseekHarness": "DeepSeek Harness",
+      "generic": "Generic MCP client (JSON / STDIO)"
+    },
     "diagnostics": "Advanced config and diagnostics",
     "notChecked": "Configuration not checked",
     "title": "Agent Connectors",
@@ -1849,7 +1895,12 @@
   },
   "questionCard": {
     "visualCheckpoint": {
-      "options": { "pass": "Pass", "fail": "Fail", "uncertain": "Uncertain", "later": "Later" },
+      "options": {
+        "pass": "Pass",
+        "fail": "Fail",
+        "uncertain": "Uncertain",
+        "later": "Later"
+      },
       "notePlaceholder": "Optional visual-checkpoint note..."
     },
     "label": "Agent question",
@@ -1872,8 +1923,7 @@
     "continuationCompleted": "Continuation completed",
     "continuationCancelled": "Continuation stopped",
     "continuationFailed": "Continuation failed",
-    "stopContinuation": "Stop"
-,
+    "stopContinuation": "Stop",
     "continuationWaiting": "Waiting…",
     "continuationDelivered": "Continuation result delivered; inspect the transcript"
   },
