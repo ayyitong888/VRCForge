@@ -166,6 +166,7 @@ const RUNTIME_FAILURE_MESSAGE_KEYS: Record<string, string> = {
   provider_capacity: "chat.runtimeTerminal.providerCapacityMessage",
   provider_auth_failed: "chat.runtimeTerminal.providerAuthFailedMessage",
   provider_request_failed: "chat.runtimeTerminal.providerRequestFailedMessage",
+  checkpoint_restore_failed: "chat.runtimeTerminal.checkpointRestoreFailedMessage",
 };
 
 // Older runtime transcripts use nextStep as the terminal assistant status.
@@ -230,6 +231,7 @@ export function runtimeTerminalStatusKey(failureCode = ""): string | undefined {
   if (failureCode === "provider_capacity") return "chat.runtimeTerminal.providerCapacityStatus";
   if (failureCode === "provider_auth_failed") return "chat.runtimeTerminal.providerAuthFailedStatus";
   if (failureCode === "provider_request_failed") return "chat.runtimeTerminal.providerRequestFailedStatus";
+  if (failureCode === "checkpoint_restore_failed") return "chat.runtimeTerminal.checkpointRestoreFailedStatus";
   return undefined;
 }
 

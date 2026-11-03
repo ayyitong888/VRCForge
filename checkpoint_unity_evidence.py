@@ -520,21 +520,35 @@ def restore_failure_terminal_plan(
     ):
         return None
     result = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
+    # Only trusted, curated summaries may become model-facing reply text; raw
+    # error fields stay in the restoreFailure data record. A bare exception
+    # string must never render as the assistant's answer.
     summary = str(
         (trusted or {}).get("failureSummary")
         or payload.get("failureSummary")
         or result.get("failureSummary")
         or outcome.get("summary")
-        or result.get("error")
-        or payload.get("error")
-        or (trusted or {}).get("message")
-        or "Checkpoint restore failed; recovery remains required."
+        or "Checkpoint restore failed. The project state was not changed; recovery remains required."
     ).strip()
+    outcome_error = outcome.get("error") if isinstance(outcome.get("error"), Mapping) else {}
+    error_code = str(
+        payload.get("errorCode")
+        or outcome_error.get("code")
+        or "checkpoint_restore_failed"
+    )
     terminal = dict(plan)
     terminal.update({
         "summary": summary,
         "reply": summary,
         "failureSummary": summary,
+        "errorCode": error_code,
+        "plannerFailure": {
+            **(dict(terminal.get("plannerFailure"))
+               if isinstance(terminal.get("plannerFailure"), Mapping) else {}),
+            "code": error_code,
+            "phase": "post_tool",
+            "retryable": False,
+        },
         "continueLoop": False,
         "nextStep": "tool_failed",
         "restoreFailureTurnStop": True,

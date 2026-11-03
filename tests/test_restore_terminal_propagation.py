@@ -142,6 +142,30 @@ def test_restore_failure_cancels_every_remaining_native_call(tmp_path):
     assert json.loads(later_read_2["content"])["status"] == "not_executed"
 
 
+def test_bare_error_text_never_becomes_the_reply():
+    """Without a curated failureSummary, the reply is a controlled sentence and
+    the raw machine error stays in the data record, keyed by errorCode."""
+    plan = restore_failure_terminal_plan(
+        {"nextStep": "tool_failed"},
+        "vrcforge_restore_checkpoint",
+        {
+            "ok": False,
+            "status": "restored_unity_reload_failed",
+            "checkpointRecoveryRequired": True,
+            "error": "secret machine rejection C:/Users/x/token.json",
+            "turnControl": {"stopCurrentTurn": True, "automaticRetry": False},
+        },
+    )
+    assert plan is not None
+    assert "secret machine rejection" not in plan["reply"]
+    assert "token.json" not in plan["reply"]
+    assert plan["reply"] == "Checkpoint restore failed. The project state was not changed; recovery remains required."
+    assert plan["errorCode"] == "checkpoint_restore_failed"
+    assert plan["plannerFailure"]["code"] == "checkpoint_restore_failed"
+    assert plan["plannerFailure"]["retryable"] is False
+    assert plan["restoreFailure"]["error"] == "secret machine rejection C:/Users/x/token.json"
+
+
 def test_manual_approval_continuation_adds_plain_summary_preserves_raw_failure():
     prepared = prepare_approval_task_continuation(
         {

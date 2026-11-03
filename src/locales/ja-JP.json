@@ -854,7 +854,9 @@
       "providerRequestFailedStatus": "モデルリクエスト失敗 · 未完了",
       "providerRequestFailedMessage": "モデルリクエストに失敗したため、このターンは完了しませんでした。再試行するか接続を確認してください。",
       "providerPostToolFailureMessage": "直前のツールは実行され、結果も保持されていますが、その結果を読んだ後の次のモデル計画が失敗しました。計画の失敗後に追加のツールは実行されていません。再試行し、失敗が続く場合は Provider の接続やアカウントの状態を確認してください。",
-      "missingFinalAnswerNotice": "このターンは最終回答なしで終了しました。続けるには新しいメッセージを送信してください。"
+      "missingFinalAnswerNotice": "このターンは最終回答なしで終了しました。続けるには新しいメッセージを送信してください。",
+      "checkpointRestoreFailedMessage": "チェックポイントの復元に失敗しました。プロジェクトの状態は変更されていません。復旧が必要です。",
+      "checkpointRestoreFailedStatus": "復元失敗"
     },
     "connectProviderBeforeSend": "送信前にモデルプロバイダまたは外部 agent を接続してください。",
     "queueFull": "キューが満杯です（{{max}} 件）。現在のターンを待つか、停止してください。",

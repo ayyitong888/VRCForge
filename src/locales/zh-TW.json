@@ -854,7 +854,9 @@
       "providerRequestFailedStatus": "模型要求失敗 · 未完成",
       "providerRequestFailedMessage": "模型要求失敗，本輪未完成。請重試或檢查連線。",
       "providerPostToolFailureMessage": "上一步工具已執行，結果也已保留，但讀取結果後的下一次模型規劃失敗。規劃失敗後未再執行工具，請重試；若仍失敗，再檢查 Provider 連線或帳戶狀態。",
-      "missingFinalAnswerNotice": "本輪結束時沒有最終回答。你可以繼續發送訊息。"
+      "missingFinalAnswerNotice": "本輪結束時沒有最終回答。你可以繼續發送訊息。",
+      "checkpointRestoreFailedMessage": "檢查點還原失敗，工程狀態未被修改，復原操作仍需要處理。",
+      "checkpointRestoreFailedStatus": "還原失敗"
     },
     "connectProviderBeforeSend": "請先連接模型供應商或外部 agent，再發送訊息。",
     "queueFull": "佇列已滿（{{max}} 條）。請等待目前任務結束，或按停止。",
