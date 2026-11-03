@@ -62,19 +62,19 @@ class SessionHandoffChatPort:
         revision = chat.get("revision")
         if not isinstance(revision, int) or revision < 1:
             raise ChatPortConflict("chat revision missing; migration required")
-        runtime = dict(self._runtime(chat_id, session_id, normalized_scope) or {})
         return {
             "owner_id": owner_id,
             "chat_id": chat_id,
             "session_id": session_id,
             "scope": normalized_scope,
             "revision": revision,
-            **runtime,
         }
 
     def get_snapshot(self, *, owner_id: str, chat_id: str, session_id: str, scope: str) -> Mapping[str, Any]:
         with self._lock:
-            return self._snapshot(owner_id=owner_id, chat_id=chat_id, session_id=session_id, scope=scope)
+            snapshot = self._snapshot(owner_id=owner_id, chat_id=chat_id, session_id=session_id, scope=scope)
+        runtime = dict(self._runtime(chat_id, session_id, self._scope(scope)) or {})
+        return {**snapshot, **runtime}
 
     def append_inbox_card(self, *, card_id: str, payload_digest: str, card: Mapping[str, Any], expected_revision: int) -> Mapping[str, Any]:
         chat_id = str(card.get("targetChatId") or card.get("target_chat_id") or "")

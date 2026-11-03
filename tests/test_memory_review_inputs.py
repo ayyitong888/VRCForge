@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -8,10 +9,41 @@ import pytest
 from memory_consolidation_sources import admit_memory_sources, resolve_memory_scope
 from memory_review_inputs import (
     collect_adopted_task_records,
+    collect_project_chat_records,
     collect_user_chat_records,
     collect_validated_project_records,
     explicit_memory_signal,
 )
+
+
+def test_project_chat_memory_keeps_task_updates_and_failed_outcomes_without_runtime_payloads(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    chats = [{"id": "chat-project", "projectPath": str(project), "items": [
+        {"id": "u1", "type": "user", "text": "Create the wardrobe and preserve facial tracking."},
+        {"id": "a1", "type": "agent", "response": {
+            "plan": {"nextStep": "tool_failed", "summary": "Visual acceptance failed."},
+            "steps": [{"tool": "vision_audit_multi", "status": "executed",
+                       "result": {"captureReceipt": "private-receipt", "executionTarget": {"ref": "old-handle"}},
+                       "outcome": {"status": "failed", "summary": "Back clipping remains.", "verification": {"state": "failed"}}}],
+            "_nativeConversation": {"secret": "never-project"}}},
+        {"id": "u2", "type": "user", "text": "Keep progress; adjust only this outfit."},
+        {"id": "a2", "type": "agent", "status": "running", "text": "Not settled yet."},
+    ]}]
+    records = collect_project_chat_records(chats, project_root=str(project))
+    assert len(records) == 1
+    scope = resolve_memory_scope("project", str(project), authorized_project_roots=[str(project)])
+    sources, _ = admit_memory_sources(records, scope=scope)
+    assert len(sources) == 1
+    text = sources[0].text
+    assert "preserve facial tracking" in text and "adjust only this outfit" in text
+    assert "Back clipping remains" in text
+    assert json.loads(text)[1]["observedResults"][0]["verification"] == "failed"
+    assert "Not settled yet" not in text
+    assert not any(value in text for value in ("private-receipt", "old-handle", "never-project"))
+    assert collect_project_chat_records(chats, project_root=str(tmp_path)) == []
+    changed = [{**chats[0], "items": [*chats[0]["items"], {"id": "u3", "type": "user", "text": "New constraint"}]}]
+    assert collect_project_chat_records(changed, project_root=str(project))[0]["sourceRevision"] != records[0]["sourceRevision"]
 
 
 def test_chat_projection_only_admits_explicit_user_signals(tmp_path: Path) -> None:

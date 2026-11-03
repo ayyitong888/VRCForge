@@ -190,12 +190,12 @@ class UnityConsoleCompletionVerifier:
                 summary="The Unity process changed before completion verification finished.",
             )
         if (
-            profile == "persisted_scene_write_console"
+            profile in {"persisted_scene_write_console", "unity_refresh_console"}
             and _complete_console_snapshot(baseline)
             and _complete_console_snapshot(stable_snapshot)
         ):
             # A Console fallback is not a CompilationPipeline pass. For pure
-            # scene writes, two complete same-source reads can still provide a
+            # scene writes and refresh, complete same-source reads provide a
             # bounded Console diagnostic delta with explicit evidence kind.
             new_diagnostics = [
                 item
@@ -213,7 +213,8 @@ class UnityConsoleCompletionVerifier:
                 summary=(
                     "Unity Console diagnostics are stable with no new errors or warnings; this is Console readback evidence, not a full compilation snapshot."
                     if passed
-                    else "Unity Console reported new errors or warnings after the scene write."
+                    else "Unity Console reported new errors or warnings after the "
+                    + ("refresh." if profile == "unity_refresh_console" else "scene write.")
                 ),
                 new_errors=new_errors,
                 new_warnings=new_warnings,

@@ -52,6 +52,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 from PIL import Image
 
 from agent_memory_store import AgentMemoryStore
+from automatic_memory_pipeline import AutomaticMemoryPipeline
+from memory_consolidation_sources import MemoryScope, project_scope_key
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS, bind_memory_tool_context, safe_memory_record, requested_memory_tool
 from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, is_scan_tool, read_tool_result, result_continuation, retain_model_information
 from agent_scan_result_store import ScanResultStore
@@ -107,6 +109,7 @@ from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedge
 from agent_runtime_event_projection import project_runtime_turn_event
 from request_usage_reconciliation import reconcile_request_usage
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
+from internal_tool_blocks import CONVERSATION_TOOL_NAMES
 from agent_task_loop import (
     SUB_AGENT_TASK_TOOLS,
     AgentTaskLoop,
@@ -470,7 +473,7 @@ EXTERNAL_AGENT_INTERNAL_TOOLS = {
     "vrcforge_apply_approved",
     "vrcforge_execute_approved_shell",
     "vrcforge_vision_audit_multi",
-} | MEMORY_TOOL_NAMES
+} | MEMORY_TOOL_NAMES | CONVERSATION_TOOL_NAMES
 EXTERNAL_MCP_INTERNAL_LOOP_TOOLS = EXTERNAL_AGENT_INTERNAL_TOOLS | {
     "vrcforge_exit_skill",
     "vrcforge_ask_user",
@@ -7755,6 +7758,15 @@ class AgentGateway:
                     )
                 if step_tool == "vrcforge_agent_desktop_action":
                     step_params.setdefault("clientTurnId", client_turn_id)
+                if step_tool in CONVERSATION_TOOL_NAMES:
+                    step_params["_trustedConversationContext"] = {
+                        "chatId": chat_id,
+                        "sessionId": session_id,
+                        "clientTurnId": client_turn_id,
+                        "actionId": planned_action_id,
+                        "projectRoot": project_root,
+                        "maxAgenticTurns": task_loop.budget_policy.max_model_turns,
+                    }
                 if step_tool in {
                     "vrcforge_skill_manifest",
                     "vrcforge_skill_check",
@@ -8227,8 +8239,12 @@ class AgentGateway:
                     and recoverable_failure_refeeds == 0
                     and safe_recoverable_write_failure(step_payload, step_outcome)
                 )
+                corrective_failure = explicit_corrective_tool_failure(
+                    step_payload, step_outcome, action_kind=action_kind,
+                )
                 if (
                     safe_failure_recovery
+                    or corrective_failure
                     or (
                         not requires_direct_user_input
                         and str(plan.get("planner") or "").strip().casefold() != "llm"
@@ -8236,9 +8252,9 @@ class AgentGateway:
                 ):
                     if safe_failure_recovery:
                         recoverable_failure_refeeds += 1
-                    # Re-feed only an explicitly no-mutation, unsaved,
-                    # retry-safe failure. The tool result remains failed and
-                    # the completion gate remains unsatisfied.
+                    # Re-feed only a structured pre-mutation correction or a
+                    # retry-safe no-write result. This exposes the next action;
+                    # it does not retry the rejected write.
                     plan["continueLoop"] = True
                 else:
                     gated_plan = completion_gate_plan(plan, step_outcome)
@@ -8924,6 +8940,30 @@ class AgentGateway:
             if str(goal.get("status") or "") in {"active", "paused"}
         ]
         memory_preferences = self.memory_preferences()
+        automatic_memory = {"summary": "", "sources": []}
+        if memory_preferences["memoryEnabled"] and memory_preferences["crossSessionEnabled"]:
+            pipeline = AutomaticMemoryPipeline(
+                self.audit_dir / "memory-review" / "automatic-memory.json"
+            )
+            user_memory = pipeline.read(MemoryScope("user", "user"))
+            project_memory = pipeline.read(
+                MemoryScope("project", project_scope_key(project_root, require_existing=False), project_root)
+            ) if project_root else {}
+            summaries = []
+            if user_memory.get("summary"):
+                summaries.append("User memory:\n" + user_memory["summary"])
+            if project_memory.get("summary"):
+                summaries.append("Project memory:\n" + project_memory["summary"])
+            # Conversation reads retain their existing scope. Global user
+            # preferences apply in projects, but general-chat links do not.
+            reachable_memory = project_memory if project_root else user_memory
+            source_key = "sourceId" if project_root else "chatId"
+            automatic_memory = {
+                "summary": "\n\n".join(summaries),
+                "sources": [{"chatId": chat_id} for chat_id in dict.fromkeys(
+                    item[source_key] for item in reachable_memory.get("sources", []) if item.get(source_key)
+                )],
+            }
         memories = (
             self.list_agent_memory(
                 limit=12,
@@ -8996,6 +9036,7 @@ class AgentGateway:
                     for memory in memories[:12]
                 ],
             },
+            "automaticMemory": automatic_memory,
             "session": {
                 "id": session_id or "",
                 "turnCount": session_summary["turnCount"],

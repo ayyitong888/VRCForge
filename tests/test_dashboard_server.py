@@ -705,6 +705,29 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(read_response.status_code, 200)
                 self.assertEqual([chat["id"] for chat in read_response.json()["chats"]], ["temp-chat"])
 
+    def test_handoff_chat_save_uses_single_revision_cas_path(self) -> None:
+        updated = {"id": "chat-1", "projectPath": "ProjectA", "revision": 3}
+        saved = {**updated, "revision": 4}
+        with (
+            patch.object(dashboard_server, "_load_handoff_chat") as load_chat,
+            patch.object(dashboard_server, "_write_handoff_chat_snapshot", return_value=saved) as write_snapshot,
+        ):
+            result = dashboard_server._save_handoff_chat("chat-1", "ProjectA", updated, 3)
+
+        self.assertEqual(result, saved)
+        load_chat.assert_not_called()
+        write_snapshot.assert_called_once_with("chat-1", "ProjectA", updated, expected_revision=3)
+
+    def test_handoff_target_busy_reads_one_runtime_snapshot(self) -> None:
+        with patch.object(
+            dashboard_server,
+            "_handoff_runtime_snapshot",
+            return_value={"active_stream": False, "pending_approval": False, "pending_question": True},
+        ) as runtime_snapshot:
+            self.assertTrue(dashboard_server._handoff_target_busy("chat-1", "session-1", "ProjectA"))
+
+        runtime_snapshot.assert_called_once_with("chat-1", "session-1", "ProjectA")
+
     def test_chat_storage_write_echoes_precise_origin(self) -> None:
         origin_id = "00000000-0000-4000-8000-000000000001"
         vault = SimpleNamespace(retain=lambda _references: {})

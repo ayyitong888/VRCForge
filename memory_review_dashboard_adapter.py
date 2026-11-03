@@ -18,6 +18,7 @@ from memory_consolidation_sources import (
 from memory_review_host import MemoryReviewProviderContext, MemoryReviewSourceInventory
 from memory_review_inputs import (
     collect_adopted_task_records,
+    collect_project_chat_records,
     collect_user_chat_records,
     collect_validated_project_records,
 )
@@ -223,8 +224,10 @@ class MemoryReviewDashboardAdapter:
                             project_root=canonical_project,
                         )
                     )
+                    records.extend(collect_project_chat_records(chats, project_root=canonical_project))
                     if str(chat_source.get("status") or "") in {"ok", "missing"}:
                         complete_source_types.add("user_chat")
+                        complete_source_types.add("project_chat")
                     else:
                         count_reason("chat_inventory_unavailable")
                 else:

@@ -4,12 +4,13 @@ import ast
 import json
 import subprocess
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from agent_approval_transactions import AgentApprovalTransactionService, ApprovalGoalPorts
-from agent_gateway import AgentGateway, AgentGatewayError
+from agent_gateway import AgentGateway, AgentGatewayError, explicit_corrective_tool_failure
 
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -63,6 +64,68 @@ def test_internal_write_exception_keeps_unknown_mutation_unknown(tmp_path: Path,
     assert result["outcome"]["status"] == "failed"
     assert result["result"]["writeFailure"].get("mutationStarted") is not False
     assert result["result"]["writeFailure"].get("commitState") != "not_started"
+
+
+def test_auto_approved_write_blocked_by_recovery_keeps_no_write_facts(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    project = tmp_path / "UnityProject"
+    project.mkdir()
+    handler_calls: list[dict] = []
+    active_recovery = {
+        "id": "recovery-blocked-write",
+        "checkpointId": "checkpoint-before-write",
+        "projectRoot": str(project),
+        "targetTool": "vrcforge_fixture_prior_write",
+        "status": "needs_recovery",
+        "blockingWrites": True,
+    }
+    ports = gateway.approval_transactions._ports
+    checkpoint_port = replace(
+        ports.checkpoint,
+        active_apply_recoveries=lambda: [dict(active_recovery)],
+    )
+    gateway.approval_transactions._ports = replace(
+        ports, checkpoint=checkpoint_port,
+    )
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_fixture_blocked_write",
+        "Blocked write fixture.",
+        "low",
+        lambda arguments: handler_calls.append(arguments) or {"ok": True},
+        pre_write_checkpoint_required=False,
+    )
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    config.execution_mode = "roslyn_full_auto"
+    config.roslyn_risk_acknowledged = True
+    config.allow_roslyn_advanced = True
+    gateway.save_config(config)
+
+    result = gateway.approval_transactions._execute_write_request(
+        "vrcforge_fixture_blocked_write",
+        {"projectRoot": str(project)},
+        "fixture-native-agent",
+    )
+
+    assert result["status"] == "needs_user_action", result
+    assert result["outcome"]["status"] == "needs_user_action", result
+    blocked = result["result"]
+    assert blocked["status"] == "blocked_recovery"
+    assert blocked["errorCode"] == "blocked_by_interrupted_apply_recovery"
+    assert blocked["failureLayer"] == "transaction_start"
+    assert blocked["failurePhase"] == "before_write_handler"
+    assert blocked["mutationStarted"] is False
+    assert blocked["committed"] is False
+    assert blocked["commitState"] == "not_started"
+    assert blocked["blockingRecoveries"][0]["id"] == active_recovery["id"]
+    assert "preview" in blocked["nextAction"]
+    assert "Do not retry" in blocked["nextAction"]
+    assert explicit_corrective_tool_failure(
+        result, result["outcome"], action_kind="write",
+    )
+    assert gateway.approval_transactions._ports.checkpoint.active_apply_recoveries()
+    assert handler_calls == []
 
 
 def _class_definition(path: Path, class_name: str) -> ast.ClassDef:

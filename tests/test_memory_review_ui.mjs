@@ -38,7 +38,7 @@ assert.match(settings, /disabled=\{!ready\}/);
 assert.match(settings, /disabled=\{!ready \|\| !memoryEnabled\}/);
 assert.doesNotMatch(settings, /controller\.loading \|\| !snapshot/);
 assert.doesNotMatch(settings, /settings\.memoryPreferencesLoading/);
-assert.match(settings, /mode: "off"/);
+assert.match(settings, /mode: effectiveCrossSession \? "auto_safe" : "off"/);
 assert.match(settings, /automaticCaptureEnabled: effectiveCrossSession/);
 assert.match(settings, /settings\.memoryPreferencesTitle/);
 assert.match(settings, /settings\.memoryEnabled/);

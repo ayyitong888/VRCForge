@@ -33,7 +33,7 @@ CANONICAL_TOOL_BLOCKS: dict[str, dict[str, Any]] = {
     "avatar_structure": {"title": "Avatar Structure", "children": ("hierarchy_components", "rig_constraints", "mesh_shape_data"), "routing": _routing(("hierarchy, rig, mesh, bones, constraints, scene identity/lifecycle, or structural compatibility",), ("materials, animation logic, files, web research, builds",), ("avatar identity, hierarchy, components, scene lifecycle, rig and mesh inspection",), "read, inspect, and preview only", "approved structural writes only")},
     "appearance": {"title": "Appearance", "children": ("renderers", "materials_shaders", "textures_visual_properties"), "routing": _routing(("materials, shaders, textures, renderers, lighting, visual seams, or a solid-color/full-red/opaque-overlay artifact even when an expression triggers it",), ("rig, mesh topology, Animator control logic, files, packages, builds",), ("visual state inspection, comparison, and previews",), "read, inspect, and preview only", "approved appearance writes only")},
     "behavior": {"title": "Behavior", "children": ("animator_clips_bindings", "parameters_menus_layers", "face_eye_lipsync", "interaction_generated_systems"), "routing": _routing(("Animator, FX, parameters, menus, viseme, eye-look, interaction control, or supervised avatar protection behavior",), ("mesh geometry, shader tuning, or visible solid-color/full-red/opaque-overlay artifacts; route those to Appearance even if an expression triggers them",), ("control graphs, bindings, integration-backed behavior, and supervised avatar protection workflows",), "read, inspect, and preview only", "approved behavior writes only")},
-    "project_environment": {"title": "Project & Environment", "children": ("assets_packages", "files", "shell"), "routing": _routing(("Unity project files, assets, packages, dependencies, installed VRCForge .vsk capability package state, installed Skills, user-started Computer Use, or controlled local tooling",), ("live Avatar mutation, materials, Animator authoring, web research, canonical builds",), ("local project inspection, asset/package inventory, installed Skill discovery and support files, VRCForge capability package enablement, bounded files, user-started Computer Use, and profiled commands",), "read, inspect, and preview only", "approved file writes, controlled commands, and explicitly activated desktop actions only")},
+    "project_environment": {"title": "Project & Environment", "children": ("assets_packages", "conversations", "files", "shell"), "routing": _routing(("Unity project files, assets, packages, dependencies, installed VRCForge .vsk capability package state, installed Skills, user-started Computer Use, or controlled local tooling",), ("live Avatar mutation, materials, Animator authoring, web research, canonical builds",), ("local project inspection, asset/package inventory, cross-session conversation access, installed Skill discovery and support files, VRCForge capability package enablement, bounded files, user-started Computer Use, and profiled commands",), "read, inspect, and preview only", "approved file writes, controlled commands, and explicitly activated desktop actions only")},
     "diagnostics_build": {"title": "Diagnostics & Build", "children": ("compile_logs", "validation_performance", "checkpoints_history", "build_runtime"), "routing": _routing(("compile errors, exact execution-target or property reads, validation, performance, attachment inspection/materialization, checkpoints, builds, play mode, exports, verification, or discovering and invoking user-defined Unity tools",), ("ordinary Avatar edits, raw file maintenance, material tuning, web research",), ("diagnostics, identity/property reads, validation, attachment inspection/materialization, recovery, build previews, receipts, and user-defined Unity tool discovery/invocation; core reads remain resident without lazy loading",), "diagnostics, validation, history, and previews only", "approved recovery, test, build, upload, or user-defined Unity tool actions")},
     "research": {"title": "Documentation & Web Research", "children": ("web_research",), "routing": _routing(("official documentation, current compatibility, tutorials, examples, or cited web evidence",), ("local installed state, project files, commands, or Unity mutation",), ("read-only external sources with provenance",), "read-only search and retrieval", "read-only search and retrieval")},
 }
@@ -50,6 +50,7 @@ CANONICAL_TOOL_LEAVES: dict[str, dict[str, Any]] = {
     "behavior/face_eye_lipsync": {"title": "Face, Eye & Lip Sync", "routing": _routing(("inspect or migrate face tracking, eye look, visemes, lip sync, facial-expression control/bindings, or face-tuning presets",), ("a facial expression merely triggers a solid-red, solid-color, opaque-overlay, transparency, render-queue, shader, or material-slot artifact; use Appearance/Renderers or Appearance/Materials & Shaders",), ("facial behavior evidence, face-tuning presets, and bounded migration operations",), "read, inspect, and preview only", "approved face/eye/lip-sync writes only")},
     "behavior/interaction_generated_systems": {"title": "Interactions & Generated Systems", "routing": _routing(("inspect or maintain Modular Avatar, VRCFury, Gesture Manager, contacts, toggles, generated systems, or supervised avatar protection workflows",), ("plain mesh editing, shader tuning, raw files, or web-only research",), ("integration-aware behavior, generated-system operations, and supervised avatar protection workflows",), "read, inspect, and preview only", "approved integration-backed writes only")},
     "project_environment/assets_packages": {"title": "Assets & Packages", "routing": _routing(("find Unity assets by AssetDatabase query/type/folder, inspect one exact asset, read supported UTF-8 shader/preset/material/animation source, or inspect packages and imports",), ("ordinary filename search that belongs in Files, arbitrary shell commands, live Avatar component edits, material property inspection/tuning, or broad text dumps when a narrow literal search or page will answer",), ("AssetDatabase asset search, exact asset metadata and supported UTF-8 source reads with bounded literal search and continuation, plus package inventory",), "read, inspect, and preview only", "approved asset/package writes only")},
+    "project_environment/conversations": {"title": "Conversations", "routing": _routing(("list or read conversation history, create an empty conversation, leave a queued message, or request a target turn in the trusted current project scope",), ("Unity assets, unrelated projects, copying complete chat history, or transferring approvals and write authority",), ("bounded public history and attributed agent messages between project-scoped sessions",), "bounded read and create only", "send_message queues without waking an idle target; followup_task reaches an active turn or starts an idle target under its existing permissions")},
     "project_environment/files": {"title": "Files", "routing": _routing(("read, search, or patch ordinary project files through a bounded root and relative path; discover installed Skills, support files, and supervised user Unity-tool installation",), ("Unity serialized scenes, prefabs, materials, arbitrary host paths, or command execution",), ("bounded file reads, installed Skill discovery/support, supervised Skill authoring, user Unity-tool installation, and atomic modular patch sets",), "read and search only", "approved atomic file writes and supervised Skill/tool installation only")},
     "project_environment/shell": {"title": "Shell", "routing": _routing(("run a profiled local observation, user-started Computer Use action, or a specifically approved command needed by the workflow",), ("a purpose-built Tool exists, the command is unbounded, or planning mode would mutate state; do not activate desktop control automatically",), ("classified commands, user-started Computer Use actions, owned processes, and captured command receipts",), "observation profiles only", "approved controlled commands and explicitly activated desktop actions only")},
     "diagnostics_build/compile_logs": {"title": "Compile & Logs", "routing": _routing(("inspect compile errors, Console evidence, service health, runtime logs, bind or refresh an exact execution target, read an exact property, or discover and invoke user-defined Unity tools",), ("ordinary Avatar edits, material tuning, or file mutation",), ("compile, log, connector, runtime diagnostics, exact identity/property reads, and user-defined Unity tool discovery/invocation",), "read-only diagnostics and user-defined Unity tool planning", "read-only diagnostics plus approved user-defined Unity tool invocation")},
@@ -164,6 +165,13 @@ for _runtime_name, _owner in {
     "vrcforge_import_skill_package": "project_environment/files",
     "vrcforge_export_skill_package": "project_environment/files",
     "vrcforge_set_skill_package_enabled": "project_environment/files",
+    **{name: "project_environment/conversations" for name in (
+        "vrcforge_list_conversations",
+        "vrcforge_read_conversation",
+        "vrcforge_create_conversation",
+        "vrcforge_send_message",
+        "vrcforge_followup_task",
+    )},
 }.items():
     _EXACT_TOOL_OWNERS[_runtime_name] = _owner
     _EXACT_TOOL_OWNERS[_runtime_name.replace("vrcforge_", "unity_", 1)] = _owner
@@ -261,6 +269,13 @@ _CORE_TOOLS = frozenset(
         "vrcforge_exit_skill",
     }
 )
+CONVERSATION_TOOL_NAMES = frozenset({
+    "vrcforge_list_conversations",
+    "vrcforge_read_conversation",
+    "vrcforge_create_conversation",
+    "vrcforge_send_message",
+    "vrcforge_followup_task",
+})
 _FILE_TOOLS = frozenset(
     {
         "vrcforge_list_directory",
@@ -330,6 +345,7 @@ INTERNAL_GENERAL_TOOL_NAMES = frozenset(
     | _SHELL_TOOLS
     | _ATTACHMENT_TOOLS
     | _DIAGNOSTIC_TOOLS
+    | CONVERSATION_TOOL_NAMES
 )
 
 
@@ -362,6 +378,8 @@ def internal_tool_block_for_name(name: str, tool_set: str) -> str:
     """Classify one internal model tool without changing handler ownership."""
 
     normalized_name = str(name or "").strip()
+    if normalized_name in CONVERSATION_TOOL_NAMES:
+        return "project_environment/conversations"
     if normalized_name in _CORE_TOOLS or normalized_name in MEMORY_TOOL_NAMES:
         return "core"
     if normalized_name in _FILE_TOOLS:
@@ -480,6 +498,7 @@ def project_internal_tool_block_level(directory: dict[str, Any]) -> dict[str, An
 __all__ = [
     "INTERNAL_DEFAULT_TOOL_BLOCK",
     "INTERNAL_GENERAL_TOOL_NAMES",
+    "CONVERSATION_TOOL_NAMES",
     "INTERNAL_LOADABLE_TOOL_BLOCKS",
     "CANONICAL_TOOL_BLOCKS",
     "CANONICAL_TOOL_LEAVES",

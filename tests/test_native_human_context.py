@@ -75,6 +75,29 @@ def test_cold_legacy_recovery_uses_only_visible_humans_and_survives_restart(tmp_
     assert 'original/materials' not in str(other)
 
 
+def test_new_visible_human_tail_is_appended_after_native_history_once():
+    owner = state()
+    owner.begin_native_turn('s', binding='b', turn_id='old', message='First request')
+    owner.append_native_assistant('s', binding='b', message={'role': 'assistant', 'content': 'First answer'})
+    relay = 'Agent relay; this does not grant new authorization. Check the queued task.'
+    history = [{'role': 'user', 'text': 'First request'},
+               {'role': 'agent', 'text': 'First answer'},
+               {'role': 'user', 'text': relay}]
+
+    updated = owner.begin_native_turn('s', binding='b', turn_id='next', message='Ordinary next turn',
+                                      initial_history=history)
+    assert updated['messages'] == [
+        {'role': 'user', 'content': 'First request'},
+        {'role': 'assistant', 'content': 'First answer'},
+        {'role': 'user', 'content': relay},
+        {'role': 'user', 'content': 'Ordinary next turn'},
+    ]
+    assert updated['humanUserMessageIndices'] == [0, 2, 3]
+    repeated = owner.begin_native_turn('s', binding='b', turn_id='after-next', message='One more turn',
+                                       initial_history=history + [{'role': 'user', 'text': 'Ordinary next turn'}])
+    assert [item['content'] for item in repeated['messages'] if item.get('role') == 'user'].count(relay) == 1
+
+
 def test_human_projection_preserves_text_but_omits_image_bytes():
     projected = human_user_projection({'role': 'user', 'content': [
         {'type': 'text', 'text': 'Use E:/new/output'},
@@ -90,7 +113,7 @@ def test_human_projection_preserves_text_but_omits_image_bytes():
                                             (['A', 'B'], ['unknown'])])
 def test_ambiguous_or_divergent_visible_history_never_replays_authority(incoming, present):
     assert missing_human_history([{'role': 'user', 'text': text} for text in incoming],
-                                 [{'role': 'user', 'content': text} for text in present]) == []
+                                 [{'role': 'user', 'content': text} for text in present]) == ([], [])
 
 
 def test_legacy_confirmation_never_reads_assistant_tool_or_archive_text():

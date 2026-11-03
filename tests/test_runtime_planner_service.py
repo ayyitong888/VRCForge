@@ -1664,6 +1664,32 @@ def test_model_prompt_includes_bounded_input_contract_for_high_confusion_tool() 
     assert '"avatarPath":{"type":"string"}' in tool_line
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "required", "optional"),
+    [
+        ("vrcforge_list_conversations", set(), {"offset", "limit"}),
+        ("vrcforge_read_conversation", {"chatId"}, {"offset", "limit"}),
+        ("vrcforge_create_conversation", set(), {"title"}),
+        ("vrcforge_send_message", {"chatId", "message"}, set()),
+        ("vrcforge_followup_task", {"chatId", "message"}, set()),
+    ],
+)
+def test_cross_session_tool_schemas_match_queue_and_trigger_contracts(
+    tool_name: str, required: set[str], optional: set[str],
+) -> None:
+    schema = planner_tool_input_schema(tool_name)
+
+    assert set(schema["required"]) == required
+    assert set(schema["properties"]) == required | optional
+    assert "_trustedConversationContext" not in schema["properties"]
+    valid = {name: "target" if name in {"chatId", "message", "title"} else 0 for name in required | optional}
+    assert validate_planner_tool_arguments(schema, valid)["ok"] is True
+    if required:
+        missing_one = dict(valid)
+        missing_one.pop(next(iter(required)))
+        assert validate_planner_tool_arguments(schema, missing_one)["ok"] is False
+
+
 def test_model_prompt_shares_repeated_prompt_provenance_definition_once() -> None:
     provenance = {
         "type": "object",

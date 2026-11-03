@@ -809,6 +809,75 @@ class ApprovalTransactionPorts:
     session_checkpoint_choice: Callable[[str], dict[str, Any] | None] | None = None
 
 
+def _blocked_recovery_failure_facts(applied: Mapping[str, Any]) -> dict[str, Any]:
+    error = str(applied.get("error") or "A previous write needs recovery.")
+    recovery = applied.get("recovery")
+    recovery = recovery if isinstance(recovery, Mapping) else {}
+    recovery_id = str(recovery.get("id") or "").strip()
+    next_action = (
+        f"Inspect recovery {recovery_id} with vrcforge_preview_interrupted_apply_recovery, "
+        "then choose an approved restore or explicit resolution. Do not retry this blocked write."
+        if recovery_id
+        else "Inspect the active recovery with vrcforge_list_interrupted_apply_recoveries and preview it before choosing restore or explicit resolution. Do not retry this blocked write."
+    )
+    next_actions = [
+        "Inspect the blocking recovery and its checkpoint preview before choosing a recovery action.",
+        "Do not retry this write until the blocking recovery has been resolved.",
+    ]
+    return {
+        "errorCode": "blocked_by_interrupted_apply_recovery",
+        "failureLayer": "transaction_start",
+        "failurePhase": "before_write_handler",
+        "toolRoutingStarted": False,
+        "mutationStarted": False,
+        "committed": False,
+        "commitState": "not_started",
+        "nextAction": next_action,
+        "nextActions": next_actions,
+        "error": error,
+    }
+
+
+def _blocked_recovery_result(applied: Mapping[str, Any]) -> dict[str, Any]:
+    facts = _blocked_recovery_failure_facts(applied)
+    raw_recoveries = applied.get("recoveries")
+    if not isinstance(raw_recoveries, list):
+        one = applied.get("recovery")
+        raw_recoveries = [one] if isinstance(one, Mapping) else []
+    blocking_recoveries = [
+        {
+            key: recovery[key]
+            for key in ("id", "checkpointId", "targetTool", "status", "incidentKind", "blockingWrites")
+            if recovery.get(key) not in (None, "")
+        }
+        for recovery in raw_recoveries
+        if isinstance(recovery, Mapping)
+    ]
+    return {
+        "ok": False,
+        "status": "blocked_recovery",
+        **facts,
+        "blockingRecoveries": blocking_recoveries,
+    }
+
+
+def _blocked_recovery_outcome(applied: Mapping[str, Any]) -> dict[str, Any]:
+    facts = _blocked_recovery_failure_facts(applied)
+    summary = f"{facts['error']} {facts['nextAction']}"
+    return {
+        "status": "needs_user_action",
+        "summary": summary,
+        "error": {
+            "type": "recovery",
+            "code": facts["errorCode"],
+            "likelyCauses": [],
+            "nextActions": facts["nextActions"],
+            "retryable": False,
+        },
+        **{key: value for key, value in facts.items() if key != "error"},
+    }
+
+
 class AgentApprovalTransactionService:
     """Own supervised write requests, approvals, apply, and recovery handoff.
 
@@ -1332,8 +1401,15 @@ class AgentApprovalTransactionService:
             approval_record = ensure_dict(ensure_dict(outcome.get("result")).get("approval"))
         approval = str(approval_record.get("id") or "").strip() or extract_approval_id(outcome)
         approval_status = str(approval_record.get("status") or "").strip().casefold()
-        if approval and approval_status in {"pending", "approved", "applying"}:
+        approval_is_waiting = approval_status in {"pending", "applying"} or (
+            approval_status == "approved" and outcome.get("ok") is not False
+        )
+        if approval and approval_is_waiting:
             status = "approval_pending"
+        elif str(outcome.get("status") or "").strip().casefold() in {
+            "needs_user_action", "blocked_recovery",
+        }:
+            status = "needs_user_action"
         elif _gesture_manager_entry_is_pending(tool_name, outcome):
             status = "pending"
         elif outcome.get("ok"):
@@ -1761,11 +1837,12 @@ class AgentApprovalTransactionService:
         )
         applied = self.apply_approved({"approval_id": approval_id})
         applied_status = str(applied.get("status") or "").strip()
+        blocked_recovery = applied_status == "blocked_recovery"
         payload: dict[str, Any] = {
             "ok": bool(applied.get("ok")),
             "status": (
                 "needs_user_action"
-                if applied_status == "needs_user_action"
+                if applied_status == "needs_user_action" or blocked_recovery
                 else "executed" if applied.get("ok") else "failed"
             ),
             "autoApproved": True,
@@ -1781,6 +1858,10 @@ class AgentApprovalTransactionService:
             payload["result"] = applied.get("result")
         if applied.get("outcome") is not None:
             payload["outcome"] = applied.get("outcome")
+        if blocked_recovery:
+            payload.update(_blocked_recovery_failure_facts(applied))
+            payload["result"] = _blocked_recovery_result(applied)
+            payload["outcome"] = _blocked_recovery_outcome(applied)
         if not applied.get("ok"):
             payload["error"] = str(applied.get("error") or "Auto-approved execution failed.")
         return payload
@@ -1826,11 +1907,12 @@ class AgentApprovalTransactionService:
         )
         applied = self.apply_approved({"approval_id": approval_id})
         applied_status = str(applied.get("status") or "").strip()
+        blocked_recovery = applied_status == "blocked_recovery"
         payload: dict[str, Any] = {
             "ok": bool(applied.get("ok")),
             "status": (
                 "needs_user_action"
-                if applied_status == "needs_user_action"
+                if applied_status == "needs_user_action" or blocked_recovery
                 else "executed" if applied.get("ok") else "failed"
             ),
             "scopedRuleAutoApproved": True,
@@ -1843,6 +1925,10 @@ class AgentApprovalTransactionService:
             payload["result"] = applied.get("result")
         if applied.get("outcome") is not None:
             payload["outcome"] = applied.get("outcome")
+        if blocked_recovery:
+            payload.update(_blocked_recovery_failure_facts(applied))
+            payload["result"] = _blocked_recovery_result(applied)
+            payload["outcome"] = _blocked_recovery_outcome(applied)
         if not applied.get("ok"):
             payload["error"] = str(applied.get("error") or "Scoped-rule execution failed.")
         return payload
@@ -1981,7 +2067,7 @@ class AgentApprovalTransactionService:
                 if project_lock_acquired:
                     self._release_project_write(project_lock_key)
                     project_lock_acquired = False
-                return {
+                blocked = {
                     "ok": False,
                     "status": "blocked_recovery",
                     "approval": approval,
@@ -1989,6 +2075,8 @@ class AgentApprovalTransactionService:
                     "recovery": active_recoveries[0],
                     "error": "A previous write did not finish cleanly. Restore or resolve the interrupted apply recovery before running another write.",
                 }
+                blocked.update(_blocked_recovery_failure_facts(blocked))
+                return blocked
 
             self._ports.state.in_flight_apply_writes[approval_id] = {
                 "approvalId": approval_id,

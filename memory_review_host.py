@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from automatic_memory_pipeline import AutomaticMemoryPipeline
 from background_goal_runtime import TOTAL_PROVIDER_ATTEMPTS
 from memory_consolidation import (
     CandidateStateError,
@@ -147,6 +148,9 @@ class MemoryReviewHost:
         idle_gate: MemoryReviewIdleGate | None = None,
     ) -> None:
         self.service = service
+        self._automatic_pipeline = AutomaticMemoryPipeline(
+            service.review_store.store_path.parent / "automatic-memory.json"
+        )
         self.runtime = runtime
         self._resolve_scope = resolve_scope
         self._collect_sources = collect_sources
@@ -370,7 +374,7 @@ class MemoryReviewHost:
                     disclosed_provider = disclosed_model = ""
                     break
         paid_run = bool(raw.get("memoryEnabled", True)) and mode in {
-            "off", "suggest_only", "bounded_background",
+            "off", "suggest_only", "bounded_background", "auto_safe",
         }
         provider_matches = not paid_run or (
             disclosed_provider == provider_context.provider
@@ -502,27 +506,71 @@ class MemoryReviewHost:
                 )
             )
             cross_session_enabled = bool(memory_enabled and cross_session_enabled)
+            supplied_fields = getattr(request, "model_fields_set", None)
+            if supplied_fields is None:
+                supplied_fields = getattr(request, "__fields_set__", set())
+            mode = (
+                request.mode
+                if "mode" in supplied_fields
+                else str(current_config.get("mode") or "off")
+            )
+            if not memory_enabled or not cross_session_enabled:
+                mode = "off"
+            elif mode == "off":
+                # Enabling cross-session capture through the simple preference
+                # control opts into the existing bounded auto-safe path.
+                mode = "auto_safe"
+
+            project_root = str(request.project_root or "").strip()
+            if mode != "off" and (project_root or "scope" in supplied_fields):
+                scope, canonical_project = self._resolve_scope(request.scope, project_root)
+            elif str(current_config.get("scopeKind") or "user") == "project":
+                current_scope_key = str(current_config.get("projectScopeKey") or "")
+                canonical_project = self._available_root_for_scope_key(current_scope_key)
+                if mode == "auto_safe" and not canonical_project:
+                    raise ScopeResolutionError("Configured project Memory scope is unavailable.")
+                scope = MemoryScope("project", current_scope_key, canonical_project)
+            else:
+                scope = MemoryScope("user", "user")
+                canonical_project = ""
+
+            provider = str(current_config.get("provider") or "")
+            model = str(current_config.get("model") or "")
+            if mode in {"suggest_only", "bounded_background", "auto_safe"}:
+                provider_context = await asyncio.to_thread(self._load_provider_context)
+                provider = provider_context.provider
+                model = provider_context.model
+                if not provider or not model:
+                    raise MemoryConsolidationError(
+                        "Paid Memory Review requires an explicit provider and model."
+                    )
+                if mode in {"bounded_background", "auto_safe"} and not provider_context.credential_ready:
+                    raise MemoryConsolidationError(
+                        "Background Memory Review requires a ready provider credential."
+                    )
             await asyncio.to_thread(
                 self.service.update_config,
                 {
                     "memoryEnabled": bool(memory_enabled),
                     "crossSessionEnabled": cross_session_enabled,
                     "automaticCaptureEnabled": cross_session_enabled,
-                    # The legacy candidate-review scheduler stays disabled.
-                    # Dreaming has its own organizer-only background path.
-                    "mode": "off",
-                    "scope": str(current_config.get("scopeKind") or "user"),
-                    "projectRoot": "",
+                    "mode": mode,
+                    "provider": provider,
+                    "model": model,
+                    "scope": scope.kind,
+                    "scopeKind": scope.kind,
+                    "projectRoot": canonical_project,
+                    "projectScopeKey": scope.scope_key if scope.kind == "project" else "",
                 },
                 request.expected_revision,
             )
             await self._cancel_active_runs()
             await self._await_callback(self._on_changed)
-            return self.snapshot(requested_project_root=request.project_root or "")
+            return self.snapshot(requested_project_root=canonical_project)
         scope, canonical_project = self._resolve_scope(request.scope, request.project_root or "")
         provider = ""
         model = ""
-        if request.mode in {"suggest_only", "bounded_background"}:
+        if request.mode in {"suggest_only", "bounded_background", "auto_safe"}:
             provider_context = await asyncio.to_thread(self._load_provider_context)
             provider = provider_context.provider
             model = provider_context.model
@@ -530,7 +578,7 @@ class MemoryReviewHost:
                 raise MemoryConsolidationError(
                     "Paid Memory Review requires an explicit provider and model."
                 )
-            if request.mode == "bounded_background" and not provider_context.credential_ready:
+            if request.mode in {"bounded_background", "auto_safe"} and not provider_context.credential_ready:
                 raise MemoryConsolidationError(
                     "Background Memory Review requires a ready provider credential."
                 )
@@ -540,7 +588,7 @@ class MemoryReviewHost:
             or request.output_cost_per_million_usd > 0
         ):
             raise MemoryConsolidationError("Provider pricing applies only to paid Memory Review modes.")
-        if request.mode in {"suggest_only", "bounded_background"} and (
+        if request.mode in {"suggest_only", "bounded_background", "auto_safe"} and (
             (request.input_cost_per_million_usd > 0)
             != (request.output_cost_per_million_usd > 0)
         ):
@@ -714,7 +762,7 @@ class MemoryReviewHost:
             if isinstance(shadow_result.get("shadowSummary"), dict):
                 response["shadowSummary"] = dict(shadow_result["shadowSummary"])
             return response
-        if mode not in {"suggest_only", "bounded_background"}:
+        if mode not in {"suggest_only", "bounded_background", "auto_safe"}:
             raise MemoryConsolidationError("Memory Review mode is not available.")
         configured_provider = str(config.get("provider") or "")
         configured_model = str(config.get("model") or "")
@@ -723,6 +771,43 @@ class MemoryReviewHost:
         cost_cap = float(snapshot.get("costCapUsd") or 0.0)
         input_price = float(snapshot.get("inputCostPerMillionUsd") or 0.0)
         output_price = float(snapshot.get("outputCostPerMillionUsd") or 0.0)
+        automatic_plan: Mapping[str, Any] | None = None
+        automatic_provider_call_count = 0
+        request_cost_upper = 0.0
+
+        if mode == "auto_safe":
+            automatic_plan = await asyncio.to_thread(
+                self._automatic_pipeline.prepare,
+                scope,
+                sources,
+                inventory.complete_source_types,
+                input_cap,
+            )
+            automatic_provider_call_count = automatic_plan["providerCallCount"]
+            if not automatic_plan["changed"] or automatic_provider_call_count == 0:
+                return await self._execute_auto_safe_local(
+                    plan=automatic_plan,
+                    scope=scope,
+                    canonical_project=canonical_project,
+                    expected_revision=expected_revision,
+                    lane=lane,
+                    background_generation=background_generation,
+                    config=config,
+                    input_char_cap=input_cap,
+                    token_cap=token_cap,
+                    cost_cap_usd=cost_cap,
+                    input_cost_per_million_usd=input_price,
+                    output_cost_per_million_usd=output_price,
+                    eligible_count=eligible_for_run,
+                )
+            if input_price > 0 and output_price > 0:
+                request_cost_upper = automatic_provider_call_count * (
+                    automatic_plan["maxInputBytes"] * input_price + token_cap * output_price
+                ) / 1_000_000.0
+                if cost_cap > 0 and request_cost_upper * TOTAL_PROVIDER_ATTEMPTS > cost_cap:
+                    raise MemoryConsolidationError(
+                        "Memory Review run exceeds its monetary cap."
+                    )
 
         async def persist_preflight_deferral(
             reason: str,
@@ -805,10 +890,9 @@ class MemoryReviewHost:
             return await persist_preflight_deferral("config_changed", "schema")
         request_payload: dict[str, Any] | None = None
         request_batch_digest = ""
-        request_cost_upper = 0.0
         selected_sources: list[SourceProjection] = []
         selected_source_identity: set[tuple[str, str, str]] = set()
-        if sources:
+        if sources and mode != "auto_safe":
             request_payload, selected_sources, selection = self.service.build_provider_request_with_selection(
                 sources,
                 scope,
@@ -826,7 +910,7 @@ class MemoryReviewHost:
                 for source in selected_sources
             }
             eligible_for_run = len(selected_sources)
-            if input_price > 0 and output_price > 0:
+            if mode != "auto_safe" and input_price > 0 and output_price > 0:
                 serialized = json.dumps(
                     request_payload,
                     ensure_ascii=False,
@@ -841,7 +925,10 @@ class MemoryReviewHost:
                     raise MemoryConsolidationError(
                         "Memory Review run exceeds its monetary cap."
                     )
-        if request_payload is not None and not provider_context.credential_ready:
+        requires_provider = request_payload is not None or (
+            mode == "auto_safe" and automatic_provider_call_count > 0
+        )
+        if requires_provider and not provider_context.credential_ready:
             return await persist_preflight_deferral("auth", "auth")
 
         started, cancelled_during_begin = await self._thread_transaction(
@@ -906,7 +993,7 @@ class MemoryReviewHost:
                 raise
             working_revision = int(updated.get("revision") or working_revision)
 
-        if request_payload is None:
+        if request_payload is None and not requires_provider:
             def finish_empty_run() -> None:
                 def commit() -> None:
                     self.service.finish_provider_run(
@@ -938,6 +1025,7 @@ class MemoryReviewHost:
             return self.snapshot(requested_project_root=canonical_project)
 
         provider_attempts = 0
+        automatic_usage: dict[str, Any] = {}
         validated_usage: dict[str, Any] = {}
 
         def attempt_usage_evidence(attempts: int | None = None) -> dict[str, Any]:
@@ -946,7 +1034,9 @@ class MemoryReviewHost:
                 return {}
             usage: dict[str, Any] = {"attempts": count}
             if request_cost_upper > 0:
-                usage["costUpperBoundUsd"] = request_cost_upper * count
+                usage["costUpperBoundUsd"] = request_cost_upper * (
+                    provider_attempts if mode == "auto_safe" else count
+                )
                 usage["costAccounting"] = "bounded_retry"
             else:
                 usage["costAccounting"] = "retry_usage_unavailable"
@@ -959,10 +1049,77 @@ class MemoryReviewHost:
 
         def provider_call() -> Mapping[str, Any]:
             nonlocal provider_attempts, validated_usage
-            self.service.assert_provider_run_current(run_id, user_requested=user_requested)
-            if lane == "background" and not self._idle_gate.is_current(background_generation):
-                raise MemoryReviewCommitDeferred("Background Memory Review was revoked before provider work.")
+            if mode != "auto_safe":
+                self.service.assert_provider_run_current(run_id, user_requested=user_requested)
+                if lane == "background" and not self._idle_gate.is_current(background_generation):
+                    raise MemoryReviewCommitDeferred("Background Memory Review was revoked before provider work.")
             provider_attempts += 1
+            if mode == "auto_safe":
+                def invoke(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+                    raw = self._provider_call(
+                        provider_context.settings,
+                        payload,
+                        token_cap,
+                    )
+                    if not isinstance(raw, Mapping):
+                        raise MemoryConsolidationError("Automatic memory provider result is invalid.")
+                    usage = self._usage(raw.get("usage"))
+                    for target, aliases in (
+                        ("inputTokens", ("inputTokens", "input_tokens", "promptTokens", "prompt_tokens")),
+                        ("outputTokens", ("outputTokens", "output_tokens", "completionTokens", "completion_tokens")),
+                        ("totalTokens", ("totalTokens", "total_tokens")),
+                    ):
+                        number = next((usage.get(alias) for alias in aliases if alias in usage), None)
+                        if isinstance(number, int) and not isinstance(number, bool) and number >= 0:
+                            automatic_usage[target] = int(automatic_usage.get(target) or 0) + number
+                    for key in ("costUsd", "cost"):
+                        number = usage.get(key)
+                        if isinstance(number, (int, float)) and not isinstance(number, bool) and number >= 0:
+                            automatic_usage["costUsd"] = float(automatic_usage.get("costUsd") or 0.0) + float(number)
+                            break
+                    return raw
+
+                staged = self._automatic_pipeline.generate(
+                    automatic_plan or {},
+                    invoke,
+                    lambda: (
+                        self.service.assert_provider_run_current(run_id, user_requested=user_requested)
+                        is None
+                        and (lane != "background" or self._idle_gate.is_current(background_generation))
+                    ),
+                )
+                normalized_usage = self._usage(automatic_usage)
+                normalized_usage["attempts"] = provider_attempts
+                if request_cost_upper > 0:
+                    normalized_usage["costUpperBoundUsd"] = request_cost_upper * provider_attempts
+                    normalized_usage["costAccounting"] = "bounded_retry"
+                actual_cost = normalized_usage.get("costUsd")
+                if cost_cap > 0 and not isinstance(actual_cost, (int, float)):
+                    input_tokens = normalized_usage.get("inputTokens")
+                    output_tokens = normalized_usage.get("outputTokens")
+                    if (
+                        isinstance(input_tokens, int)
+                        and not isinstance(input_tokens, bool)
+                        and isinstance(output_tokens, int)
+                        and not isinstance(output_tokens, bool)
+                        and input_price > 0
+                        and output_price > 0
+                    ):
+                        actual_cost = (
+                            input_tokens * input_price + output_tokens * output_price
+                        ) / 1_000_000.0
+                        normalized_usage["costUsd"] = actual_cost
+                if cost_cap > 0 and (
+                    not isinstance(actual_cost, (int, float))
+                    or isinstance(actual_cost, bool)
+                    or float(actual_cost) > cost_cap
+                ):
+                    raise MemoryConsolidationError(
+                        "Automatic memory provider usage could not satisfy its monetary cap."
+                    )
+                validated_usage = normalized_usage
+                staged["usage"] = normalized_usage
+                return staged
             raw_result = self._provider_call(
                 provider_context.settings,
                 request_payload or {},
@@ -1004,10 +1161,13 @@ class MemoryReviewHost:
                 )
             return validated
 
+        automatic_memory_changed = False
+
         def commit_provider_result(validated_result: Any) -> None:
             if not isinstance(validated_result, Mapping):
                 raise MemoryConsolidationError("Memory Review provider result is invalid.")
             def commit_current_result() -> None:
+                nonlocal automatic_memory_changed
                 commit_token = f"memory-review-commit:{run_id}"
                 commit_lease = False
                 if scope.kind == "project":
@@ -1025,6 +1185,25 @@ class MemoryReviewHost:
                             self._collect_sources(scope, canonical_project)
                         )
                         fresh_sources = list(fresh_inventory.sources)
+                        if mode == "auto_safe":
+                            self.service.assert_provider_run_current(
+                                run_id,
+                                user_requested=user_requested,
+                            )
+                            commit_result = self._automatic_pipeline.commit(
+                                validated_result,
+                                fresh_sources,
+                                fresh_inventory.complete_source_types,
+                            )
+                            self.service.finish_run(
+                                run_id,
+                                status="completed",
+                                usage=validated_result.get("usage") or {},
+                                eligible_count=eligible_for_run,
+                                candidate_count=0,
+                            )
+                            automatic_memory_changed = bool(commit_result.get("changed"))
+                            return
                         fresh_identity = {
                             (source.source_type, source.source_id, source.source_digest)
                             for source in fresh_sources
@@ -1033,7 +1212,7 @@ class MemoryReviewHost:
                             raise MemoryConsolidationError(
                                 "Memory Review evidence changed while the provider run was in flight."
                             )
-                        self.service.finish_provider_run(
+                        commit_result = self.service.finish_provider_run(
                             run_id,
                             sources=fresh_sources,
                             validated_result=validated_result,
@@ -1159,6 +1338,171 @@ class MemoryReviewHost:
                 status_code = 502
             raise HTTPException(status_code=status_code, detail="Memory Review provider run did not complete.")
         await self._await_callback(self._on_changed)
+        if automatic_memory_changed:
+            await self._await_callback(self._on_memory_changed, canonical_project)
+        return self.snapshot(requested_project_root=canonical_project)
+
+    async def _execute_auto_safe_local(
+        self,
+        *,
+        plan: Mapping[str, Any],
+        scope: MemoryScope,
+        canonical_project: str,
+        expected_revision: int,
+        lane: str,
+        background_generation: int,
+        config: Mapping[str, Any],
+        input_char_cap: int,
+        token_cap: int,
+        cost_cap_usd: float,
+        input_cost_per_million_usd: float,
+        output_cost_per_million_usd: float,
+        eligible_count: int,
+    ) -> dict[str, Any]:
+        """Finish unchanged or deletion-only auto-safe work without a provider."""
+
+        provider = str(config.get("provider") or "")
+        model = str(config.get("model") or "")
+        started, cancelled_during_begin = await self._thread_transaction(
+            self.service.begin_provider_run,
+            scope=scope,
+            expected_revision=expected_revision,
+            provider=provider,
+            model=model,
+            user_requested=False,
+            budget={
+                "inputCharCap": input_char_cap,
+                "tokenCap": token_cap,
+                "costCapUsd": cost_cap_usd,
+                "inputCostPerMillionUsd": input_cost_per_million_usd,
+                "outputCostPerMillionUsd": output_cost_per_million_usd,
+            },
+        )
+        run = started.get("run") if isinstance(started, dict) else {}
+        run_id = str((run or {}).get("runId") or "")
+        if not run_id:
+            raise MemoryConsolidationError("Automatic memory run did not start.")
+        if cancelled_during_begin:
+            await self._thread_transaction(self._finish_run_safely, run_id, "cancelled", True, "interactive_activity")
+            await self._await_callback(self._on_changed)
+            raise asyncio.CancelledError
+
+        task = asyncio.current_task()
+        if task is None:
+            raise MemoryConsolidationError("Automatic memory run has no active task.")
+        self._register_active_run(run_id, task)
+        memory_changed = False
+
+        def finish_local() -> None:
+            nonlocal memory_changed
+            self.service.assert_provider_run_current(run_id)
+            if lane == "background" and not self._idle_gate.is_current(background_generation):
+                raise MemoryReviewCommitDeferred(
+                    "Background Memory Review was revoked before automatic memory commit."
+                )
+            if not plan.get("changed"):
+                self.service.finish_run(
+                    run_id,
+                    status="completed",
+                    usage={},
+                    eligible_count=eligible_count,
+                    candidate_count=0,
+                )
+                return
+
+            def never_invoke(_payload: Mapping[str, Any]) -> Mapping[str, Any]:
+                raise MemoryConsolidationError("Deletion-only automatic memory work must not call a provider.")
+
+            staged = self._automatic_pipeline.generate(
+                plan,
+                never_invoke,
+                lambda: (
+                    self.service.assert_provider_run_current(run_id) is None
+                    and (lane != "background" or self._idle_gate.is_current(background_generation))
+                ),
+            )
+            token = f"automatic-memory-commit:{run_id}"
+            lease = False
+            if scope.kind == "project":
+                try:
+                    lease = self._acquire_background_lease(token, canonical_project)
+                except TypeError:
+                    lease = self._acquire_background_lease(token)
+                if not lease:
+                    raise MemoryReviewCommitDeferred(
+                        "Project state is changing; retry the automatic memory commit."
+                    )
+            try:
+                with self._source_commit_lock:
+                    self.service.assert_provider_run_current(run_id)
+                    fresh_inventory = self._source_inventory(
+                        self._collect_sources(scope, canonical_project)
+                    )
+                    result = self._automatic_pipeline.commit(
+                        staged,
+                        list(fresh_inventory.sources),
+                        fresh_inventory.complete_source_types,
+                    )
+                    self.service.finish_run(
+                        run_id,
+                        status="completed",
+                        usage={},
+                        eligible_count=eligible_count,
+                        candidate_count=0,
+                    )
+                    memory_changed = bool(result.get("changed"))
+            finally:
+                if lease:
+                    try:
+                        released = self._release_background_lease(token, canonical_project)
+                    except TypeError:
+                        released = self._release_background_lease(token)
+                    if not released:
+                        raise MemoryConsolidationError("Automatic memory project-read lease was lost.")
+
+        def commit_if_current() -> None:
+            if lane == "background":
+                if not self._idle_gate.run_if_current(background_generation, finish_local):
+                    raise MemoryReviewCommitDeferred(
+                        "Background Memory Review was revoked before automatic memory commit."
+                    )
+            else:
+                finish_local()
+
+        try:
+            _unused, _cancelled_during_commit = await self._thread_transaction(commit_if_current)
+        except MemoryReviewCommitDeferred:
+            await asyncio.to_thread(
+                self._finish_run_safely,
+                run_id,
+                "skipped",
+                True,
+                "capacity",
+                {},
+                eligible_count,
+                0,
+            )
+            await self._await_callback(self._on_changed)
+            raise
+        except Exception:
+            await asyncio.to_thread(
+                self._finish_run_safely,
+                run_id,
+                "failed",
+                False,
+                "",
+                {},
+                eligible_count,
+                0,
+            )
+            await self._await_callback(self._on_changed)
+            raise
+        finally:
+            self._unregister_active_run(run_id, task)
+
+        await self._await_callback(self._on_changed)
+        if memory_changed:
+            await self._await_callback(self._on_memory_changed, canonical_project)
         return self.snapshot(requested_project_root=canonical_project)
 
     def _finish_run_safely(
@@ -1292,7 +1636,7 @@ class MemoryReviewHost:
     def configured_background_scope(self) -> tuple[str, str, int] | None:
         state = self.service.review_store.snapshot(include_internal=True)
         config = state.get("config") if isinstance(state.get("config"), dict) else {}
-        if str(config.get("mode") or "") != "bounded_background":
+        if str(config.get("mode") or "") not in {"bounded_background", "auto_safe"}:
             return None
         scope_kind = str(config.get("scopeKind") or config.get("scope") or "user")
         if scope_kind == "user":

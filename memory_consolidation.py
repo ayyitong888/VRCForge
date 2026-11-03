@@ -169,7 +169,7 @@ _JOURNAL_EVENTS = frozenset({
     "dreaming_failed",
     "dreaming_rolled_back",
 })
-_ALLOWED_SOURCE_TYPES = frozenset({"user_chat", "adopted_task", "validated_project_result"})
+_ALLOWED_SOURCE_TYPES = frozenset({"user_chat", "project_chat", "adopted_task", "validated_project_result"})
 _ALLOWED_CONFIDENCE_FACTORS = frozenset(
     {
         "explicit_user_intent",
@@ -734,7 +734,7 @@ def _build_provider_batch(
     next_cursor = cursor if cursor in tokens else ""
     page_selection: dict[str, Any] | None = None
     for source in rotated:
-        if _fact_is_instruction_sensitive(source.text):
+        if source.source_type != "project_chat" and _fact_is_instruction_sensitive(source.text):
             excluded_sensitive += 1
             next_cursor = _source_cursor_token(source)
             continue
@@ -1047,8 +1047,6 @@ class MemoryReviewStore:
             raise StoreCorruptionError("Memory Review config contains unsupported fields.")
         defaults = self._default_state()["config"]
         loaded_mode = _normalize_mode(raw_config.get("mode", defaults["mode"]))
-        if loaded_mode == MODE_AUTO_SAFE:
-            loaded_mode = MODE_OFF
         payload["config"] = {
             "memoryEnabled": (
                 raw_config.get("memoryEnabled")
@@ -2406,8 +2404,6 @@ class MemoryReviewStore:
             state = self._sweep_retention_locked(self._load())
             current = dict(state.get("config") or {})
             requested_mode = _normalize_mode(payload.get("mode", current.get("mode")))
-            if requested_mode == MODE_AUTO_SAFE:
-                raise MemoryConsolidationError("auto_safe is reserved for a later acceptance gate.")
             requested_scope = str(payload.get("scope") or payload.get("scopeKind") or current.get("scopeKind") or "user").strip().casefold()
             if requested_scope not in {"user", "project"}:
                 raise MemoryConsolidationError("Memory Review scope must be user or project.")
@@ -4108,8 +4104,6 @@ class MemoryConsolidator:
                 "candidates": snapshot["candidates"],
                 "shadowSummary": shadow_summary,
             }
-        if normalized_mode == MODE_AUTO_SAFE:
-            raise MemoryConsolidationError("auto_safe is reserved for a later acceptance gate.")
         if normalized_mode not in {MODE_SUGGEST_ONLY, MODE_BOUNDED_BACKGROUND}:
             raise MemoryConsolidationError("This Memory Review mode cannot propose novel candidates.")
         resolved_scope = valid_sources[0].scope if valid_sources else scope
@@ -4808,7 +4802,7 @@ class MemoryConsolidationService:
             if scope == "project" and resolved_project:
                 shadow_summary["projectRoot"] = resolved_project
         next_run_at = ""
-        if config.get("mode") == MODE_BOUNDED_BACKGROUND:
+        if config.get("mode") in {MODE_BOUNDED_BACKGROUND, MODE_AUTO_SAFE}:
             cadence = int(config.get("cadenceMinutes") or 1_440)
             base = None
             deferred_run = (
@@ -4934,7 +4928,7 @@ class MemoryConsolidationService:
             "unreadCount": int(snapshot.get("unreadCount") or 0),
             "candidates": candidates,
             "providerDisclosure": {
-                "paidRun": mode in {MODE_SUGGEST_ONLY, MODE_BOUNDED_BACKGROUND},
+                "paidRun": mode in {MODE_SUGGEST_ONLY, MODE_BOUNDED_BACKGROUND, MODE_AUTO_SAFE},
                 "provider": config.get("provider") or "",
                 "providerLabel": "",
                 "model": config.get("model") or "",
@@ -5493,7 +5487,7 @@ class MemoryConsolidationService:
         manual = user_requested and config.get("mode") == MODE_OFF
         if not bool(config.get("memoryEnabled", True)):
             raise MemoryConsolidationError("Memory is disabled.")
-        if not manual and config.get("mode") not in {MODE_SUGGEST_ONLY, MODE_BOUNDED_BACKGROUND}:
+        if not manual and config.get("mode") not in {MODE_SUGGEST_ONLY, MODE_BOUNDED_BACKGROUND, MODE_AUTO_SAFE}:
             raise MemoryConsolidationError("Paid review mode is not enabled in persisted configuration.")
         configured_scope = str(config.get("scopeKind") or "user")
         configured_key = "user" if configured_scope == "user" else str(config.get("projectScopeKey") or "")
@@ -5583,6 +5577,7 @@ class MemoryConsolidationService:
         if not bool(config.get("memoryEnabled", True)) or (not manual and mode not in {
             MODE_SUGGEST_ONLY,
             MODE_BOUNDED_BACKGROUND,
+            MODE_AUTO_SAFE,
         }) or str(run.get("configDigest") or "") != _review_config_digest(config):
             raise MemoryConsolidationError("Memory Review configuration changed during the run.")
 
@@ -5785,7 +5780,7 @@ class MemoryConsolidationService:
     ) -> dict[str, Any]:
         snapshot = self.review_store.snapshot(include_internal=True)
         config = snapshot.get("config") or {}
-        if config.get("mode") != MODE_BOUNDED_BACKGROUND:
+        if config.get("mode") not in {MODE_BOUNDED_BACKGROUND, MODE_AUTO_SAFE}:
             return {"due": False, "reason": "mode_disabled", "revision": snapshot["revision"]}
         scope_kind = str(config.get("scopeKind") or "user")
         scope_key = "user"

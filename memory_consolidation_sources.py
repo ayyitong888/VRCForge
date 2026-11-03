@@ -102,6 +102,7 @@ class SourceProjection:
     scope: MemoryScope
     observed_at: str = ""
     origin_group: str = ""
+    source_chat_id: str = ""
 
     def reference(self) -> dict[str, str]:
         return {
@@ -282,9 +283,31 @@ def _build_projection(
     # Admission defines source identity, not a display preview. Retain the full
     # safe source so downstream request pagination can reach its tail and a
     # tail-only edit cannot reuse the digest of a different source.
-    redacted_text, _report = redact_memory_text(source.get(text_field), limit=None)
+    if source_type == "project_chat":
+        # Redact field values before JSON serialization: replacing a path in
+        # escaped JSON text can otherwise leave an invalid escape sequence and
+        # destroy the role boundaries used by evidence selection.
+        try:
+            conversation = json.loads(str(source.get(text_field) or ""))
+        except (TypeError, ValueError) as exc:
+            raise SourceAdmissionError("Project conversation evidence must be structured.") from exc
+        def redact_value(value: Any) -> Any:
+            if isinstance(value, str):
+                return redact_memory_text(value, limit=None)[0]
+            if isinstance(value, list):
+                return [redact_value(item) for item in value]
+            if isinstance(value, dict):
+                return {key: redact_value(item) for key, item in value.items()}
+            return value
+        redacted_text = json.dumps(redact_value(conversation), ensure_ascii=False, separators=(",", ":"))
+    else:
+        redacted_text, _report = redact_memory_text(source.get(text_field), limit=None)
     if not redacted_text:
         raise SourceAdmissionError("Eligible source text is empty after redaction.")
+    source_chat_id = (
+        _bounded_identifier(source["chatId"], field="chatId", limit=MAX_SOURCE_ID_CHARS)
+        if source_type == "user_chat" and source.get("chatId") else ""
+    )
     source_digest = _canonical_json_digest(
         {
             "scopeKey": scope.scope_key,
@@ -293,6 +316,7 @@ def _build_projection(
             "sourceRevision": source_revision,
             "kind": kind,
             "text": redacted_text,
+            **({"chatId": source_chat_id} if source_chat_id else {}),
         }
     )
     supplied_digest = str(source.get("sourceDigest") or "").strip().casefold()
@@ -308,6 +332,7 @@ def _build_projection(
         kind=kind,
         text=redacted_text,
         scope=scope,
+        source_chat_id=source_chat_id,
         observed_at=_bounded_observed_at(source.get("observedAt") or source.get("completedAt")),
         origin_group=(
             _bounded_identifier(source.get("originGroup"), field="originGroup", limit=160)
@@ -326,6 +351,11 @@ def admit_memory_source(source: Mapping[str, Any], *, scope: MemoryScope) -> Sou
     status = str(source.get("status") or "").strip().casefold().replace("-", "_")
     if status in _UNSAFE_SOURCE_STATUSES:
         return None
+
+    if source_type == "project_chat":
+        if scope.kind != "project" or status != "completed":
+            return None
+        return _build_projection(source, scope=scope, source_type=source_type, text_field="text", kind="fact")
 
     if source_type == "user_chat":
         if str(source.get("role") or "").strip().casefold() != "user" or status != "completed":

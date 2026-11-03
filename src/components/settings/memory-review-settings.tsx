@@ -18,7 +18,7 @@ function preferenceDraft(
   return {
     memoryEnabled,
     crossSessionEnabled: effectiveCrossSession,
-    mode: "off",
+    mode: effectiveCrossSession ? "auto_safe" : "off",
     cadenceMinutes: snapshot.cadenceMinutes,
     inputCharCap: snapshot.inputCharCap,
     tokenCap: snapshot.tokenCap,

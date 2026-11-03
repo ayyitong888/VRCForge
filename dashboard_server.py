@@ -168,6 +168,10 @@ from agent_question_service import (
     QUESTION_LANGUAGE_INSTRUCTION,
     CALL_USER_USAGE_INSTRUCTION,
 )
+from cross_session_conversation_service import (
+    CrossSessionConversationError,
+    CrossSessionConversationService,
+)
 from agent_runtime_event_projection import project_runtime_turn_event
 import runtime_queue_port as runtime_queue_ports
 from agent_goal_service import AgentGoalServiceError
@@ -1566,6 +1570,9 @@ def broadcast_runtime_turn_completed(payload: dict[str, Any]) -> None:
     )
     if projected is None:
         return
+    cross_session = globals().get("_CROSS_SESSION_CONVERSATION_SERVICE")
+    if cross_session is not None:
+        cross_session.notify_runtime_available()
     EVENT_BUS.broadcast_from_sync("agentRuntimeTurn", projected)
     telegram_service = globals().get("TELEGRAM_SERVICE")
     if telegram_service is not None:
@@ -1686,6 +1693,8 @@ EXTERNAL_INSTALLED_SKILL_REGISTRY = ExternalInstalledSkillRegistryService(AGENT_
 _SESSION_HANDOFF_SERVICE: SessionHandoffService | None = None
 _SESSION_HANDOFF_SERVICE_LOCK = RLock()
 _SESSION_HANDOFF_QUEUE_LOCK = RLock()
+_CROSS_SESSION_CONVERSATION_SERVICE: CrossSessionConversationService | None = None
+_CROSS_SESSION_CONVERSATION_SERVICE_LOCK = RLock()
 
 
 def _session_handoff_principal_digest() -> str:
@@ -1731,17 +1740,33 @@ def _handoff_runtime_snapshot(chat_id: str, session_id: str, scope: str) -> Mapp
         questions = AGENT_GATEWAY.questions._project(include_answered=False).values()
     except Exception:
         return {"active_stream": True, "pending_approval": True, "pending_question": True}
-    active = any(str(run.get("status") or "").lower() in {"running", "queued", "active", "waiting_for_model", "waiting_for_approval"} and str(run.get("chatId") or "") in {"", chat_id} for run in runs)
+    active_run = next((
+        run for run in runs
+        if str(run.get("status") or "").lower() in {"running", "queued", "active", "waiting_for_model", "waiting_for_approval"}
+        and str(run.get("chatId") or "") in {"", chat_id}
+    ), {})
     pending_approval = any(str(item.get("sessionId") or "") == session_id for item in approvals)
     pending_question = any(str(item.get("sessionId") or "") == session_id and str(item.get("status") or "pending") == "pending" for item in questions if isinstance(item, Mapping))
-    return {"active_stream": active, "pending_approval": pending_approval, "pending_question": pending_question}
+    return {
+        "active_stream": bool(active_run),
+        "active_client_turn_id": str(active_run.get("clientTurnId") or ""),
+        "pending_approval": pending_approval,
+        "pending_question": pending_question,
+    }
 
 
 def _save_handoff_chat(chat_id: str, scope: str, updated: Mapping[str, Any], expected_revision: int) -> Mapping[str, Any]:
+    return _write_handoff_chat_snapshot(chat_id, scope, updated, expected_revision=expected_revision)
+
+
+def _write_handoff_chat_snapshot(
+    chat_id: str,
+    scope: str,
+    updated: Mapping[str, Any],
+    *,
+    expected_revision: int | None,
+) -> Mapping[str, Any]:
     with CHAT_TRANSCRIPTS_LOCK:
-        current = _load_handoff_chat(chat_id, scope)
-        if not isinstance(current, Mapping) or int(current.get("revision") or 0) != expected_revision:
-            raise ChatPortConflict("chat revision changed")
         # Preserve all existing chats; the established writer owns source-digest
         # CAS, atomic replacement, and rollback semantics.
         all_chats: list[dict[str, Any]] = []
@@ -1762,15 +1787,115 @@ def _save_handoff_chat(chat_id: str, scope: str, updated: Mapping[str, Any], exp
         replaced = False
         for index, item in enumerate(all_chats):
             if str(item.get("id") or "") == chat_id:
+                if expected_revision is None:
+                    raise ChatPortConflict("chat id already exists")
+                if int(item.get("revision") or 0) != expected_revision:
+                    raise ChatPortConflict("chat revision changed")
                 clean = dict(updated); clean.pop("handoffScope", None)
                 all_chats[index] = clean; replaced = True
-        if not replaced: raise ChatPortConflict("chat is not available")
+        if not replaced:
+            if expected_revision is not None:
+                raise ChatPortConflict("chat is not available")
+            clean = dict(updated); clean.pop("handoffScope", None)
+            all_chats.append(clean)
         # The shared writer owns the durable CAS transaction. Its projection
         # shape is not commit authority here; the exact chat readback below is.
         write_chat_transcripts_storage(ChatTranscriptsRequest(chats=all_chats, sourceRevisions=revisions))
         saved = _load_handoff_chat(chat_id, scope)
         if not isinstance(saved, Mapping): raise ChatPortConflict("chat save did not persist")
         return saved
+
+
+def _list_handoff_chats(scope: str) -> list[Mapping[str, Any]]:
+    normalized = normalize_chat_project_key(scope) if scope else ""
+    if scope and not normalized:
+        raise ChatPortConflict("project scope is unavailable")
+    if normalized:
+        project_path = next(
+            (path for path in load_chat_project_index_paths() if normalize_chat_project_key(path) == normalized),
+            scope,
+        )
+        target = project_chat_transcripts_path(project_path)
+        if target is None:
+            raise ChatPortConflict("project chat store is unavailable")
+        chats, _source, recovery = load_chat_transcript_file(
+            chat_store_target(target, scope="project", project_path=project_path), scope="project",
+        )
+        if recovery:
+            raise ChatPortConflict("chat store recovery required")
+        resolved = str(resolve_chat_project_root(project_path) or project_path)
+        return [{**chat, "projectPath": resolved} for chat in chats]
+    chats, _source, recovery = load_chat_transcript_file(
+        chat_store_target(chat_transcripts_path(), scope="app"), scope="app",
+    )
+    if recovery:
+        raise ChatPortConflict("chat store recovery required")
+    return [chat for chat in chats if not str(chat.get("projectPath") or "").strip()]
+
+
+def _handoff_target_busy(chat_id: str, session_id: str, scope: str) -> bool:
+    snapshot = _handoff_runtime_snapshot(chat_id, session_id, scope)
+    return any(snapshot.get(key) for key in ("active_stream", "pending_approval", "pending_question"))
+
+
+def _create_handoff_chat(chat: Mapping[str, Any], _scope: str) -> Mapping[str, Any]:
+    return _write_handoff_chat_snapshot(
+        str(chat.get("id") or ""), _scope, chat, expected_revision=None,
+    )
+
+
+def cross_session_conversation_runtime() -> CrossSessionConversationService:
+    global _CROSS_SESSION_CONVERSATION_SERVICE
+    with _CROSS_SESSION_CONVERSATION_SERVICE_LOCK:
+        if _CROSS_SESSION_CONVERSATION_SERVICE is None:
+            _CROSS_SESSION_CONVERSATION_SERVICE = CrossSessionConversationService(
+                load_chat=_load_handoff_chat,
+                list_chats=_list_handoff_chats,
+                create_chat=_create_handoff_chat,
+                save_chat=_save_handoff_chat,
+                enqueue_followup=lambda params: RUNTIME_QUEUE_PORT.enqueue_runtime_followup(dict(params)),
+                list_followups=lambda: RUNTIME_QUEUE_PORT.list_runtime_followups(include_terminal=False),
+                claim_followup=lambda **params: RUNTIME_QUEUE_PORT.claim_runtime_followups(**params),
+                release_followup=lambda queue_id, session_id, claim_token: RUNTIME_QUEUE_PORT.release_runtime_followup(
+                    queue_id, session_id, claim_token,
+                ),
+                target_busy=_handoff_target_busy,
+                active_client_turn=lambda chat_id, session_id, scope: str(
+                    _handoff_runtime_snapshot(chat_id, session_id, scope).get("active_client_turn_id") or ""
+                ),
+                submit_steer=lambda params: RUNTIME_QUEUE_PORT.submit_runtime_steer(dict(params)),
+                dispatch_runtime=_dispatch_cross_session_runtime,
+                publish_runtime=lambda _result: None,
+                notify_chat_changed=lambda: EVENT_BUS.broadcast_from_sync(
+                    "chatStorageChanged", {"source": "app", "originId": "cross-session-agent"},
+                ),
+                normalize_scope=lambda value: normalize_chat_project_key(value) or str(value or "").strip().casefold(),
+            )
+        return _CROSS_SESSION_CONVERSATION_SERVICE
+
+
+def close_cross_session_conversation_runtime() -> dict[str, Any]:
+    service = globals().get("_CROSS_SESSION_CONVERSATION_SERVICE")
+    return service.shutdown(3.0) if service is not None else {"ok": True, "workerAlive": False}
+
+
+def _invoke_cross_session_conversation(method_name: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        method = getattr(cross_session_conversation_runtime(), method_name)
+        return method(params)
+    except CrossSessionConversationError as exc:
+        return {"ok": False, "status": "failed", "error": str(exc)}
+
+
+def _dispatch_cross_session_runtime(params: dict[str, Any]) -> Mapping[str, Any]:
+    loop = EVENT_BUS._loop
+    if loop is None or loop.is_closed() or not loop.is_running():
+        raise CrossSessionConversationError("Dashboard runtime is not available to dispatch this message.")
+    request = AgentRuntimeMessageRequest.model_validate(params)
+    future = asyncio.run_coroutine_threadsafe(
+        _execute_app_agent_runtime_message(request, human_user_message=False), loop,
+    )
+    return future.result()
 
 
 def _enqueue_handoff_context(chat_id: str, context: Mapping[str, Any]) -> None:
@@ -2136,6 +2261,8 @@ async def on_startup() -> None:
         )
     _RUNTIME_PLANNER_MODEL.start()
     AGENT_GATEWAY.start_runtime_continuations()
+    if BACKEND_OWNER_LEASE.owned:
+        cross_session_conversation_runtime().start()
     # Recovery belongs to startup; ordinary status reads must not replay the
     # complete ledger or mutate interrupted-run state on every refresh.
     if BACKEND_OWNER_LEASE.owned:
@@ -2250,6 +2377,23 @@ async def on_shutdown() -> None:
         await TELEGRAM_SERVICE.stop()
     except Exception:
         emit_log("warn", "telegram", "Telegram shutdown did not finish cleanly.", {"failureClass": "shutdown"})
+
+    try:
+        cross_session_shutdown = await asyncio.to_thread(close_cross_session_conversation_runtime)
+        if not cross_session_shutdown.get("ok"):
+            emit_log(
+                "warn",
+                "agent",
+                "Cross-session conversation worker reached its bounded shutdown deadline.",
+                {"workerAlive": cross_session_shutdown.get("workerAlive") is True},
+            )
+    except Exception:  # noqa: BLE001 - remaining App owners still require shutdown.
+        emit_log(
+            "warn",
+            "agent",
+            "Cross-session conversation worker shutdown had a warning.",
+            {"failureClass": "shutdown"},
+        )
 
     with APP_UPDATE_SERVICE_LOCK:
         app_update_service = APP_UPDATE_SERVICE
@@ -2996,16 +3140,25 @@ async def app_chat_title(request: ChatTitleRequest) -> dict[str, Any]:
 
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
+    return await _execute_app_agent_runtime_message(runtime_request, human_user_message=True)
+
+
+async def _execute_app_agent_runtime_message(
+    runtime_request: AgentRuntimeMessageRequest,
+    *,
+    human_user_message: bool,
+) -> dict[str, Any]:
     runtime_params = agent_runtime_request_payload(runtime_request)
-    # This marker is host-created from the authenticated app request. It is
-    # intentionally absent from the external-agent runtime endpoint.
-    runtime_params["_humanUserMessageSource"] = {
-        "source": "app_user_message",
-        "message": runtime_request.message,
-        "sessionId": runtime_request.session_id or "",
-        "clientTurnId": runtime_request.client_turn_id or "",
-        "projectRoot": str(runtime_request.project_root or runtime_request.project_path or "").strip(),
-    }
+    if human_user_message:
+        # Only the authenticated App route creates owner authorization. Internal
+        # agent-forwarded dispatch reuses this runner without minting that marker.
+        runtime_params["_humanUserMessageSource"] = {
+            "source": "app_user_message",
+            "message": runtime_request.message,
+            "sessionId": runtime_request.session_id or "",
+            "clientTurnId": runtime_request.client_turn_id or "",
+            "projectRoot": str(runtime_request.project_root or runtime_request.project_path or "").strip(),
+        }
     followup_claim_token = ""
     runtime_returned = False
     admission_rejected = False
@@ -26360,24 +26513,12 @@ def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str
                 if isinstance(value, list):
                     error_count = len(value)
                     break
-        if error_count is None:
-            normalized.update(
-                {
-                    "ok": False,
-                    "status": "pending",
-                    "operationStatus": "pending",
-                    "readbackState": "pending",
-                    "completionKnown": False,
-                    "verification": {"state": "pending", "tool": "vrc_get_compile_errors"},
-                    "verificationWarning": "Refresh completed, but no post-refresh compile snapshot was returned.",
-                }
-            )
-            return normalized
-        compiling = compile_snapshot.get("isCompiling") is True
+        compile_snapshot = compile_snapshot or {}
+        compiling = compile_snapshot.get("isCompiling") is True or after.get("is_compiling") is True
         capture_complete = compile_snapshot.get("captureComplete")
         stale = compile_snapshot.get("isStale") is True or compile_snapshot.get("stale") is True
         staleness = str(compile_snapshot.get("staleness") or "").strip().casefold()
-        if compiling or capture_complete is not True or stale or staleness in {"stale", "unknown", "pending"}:
+        if compiling or after.get("is_updating") is True:
             normalized.update(
                 {
                     "ok": False,
@@ -26389,7 +26530,7 @@ def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str
                 }
             )
             return normalized
-        if error_count > 0:
+        if error_count is not None and error_count > 0:
             normalized.update(
                 {
                     "ok": False,
@@ -26399,6 +26540,22 @@ def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str
                     "completionKnown": True,
                     "verification": {"state": "failed", "tool": "vrc_get_compile_errors", "errorCount": error_count, "compile": compile_snapshot},
                     "error": {"code": "unity_compile_failed", "message": f"Unity refresh completed but reported {error_count} compile error(s).", "errorCount": error_count},
+                }
+            )
+            return normalized
+        if error_count is None or capture_complete is not True or stale or staleness in {"stale", "unknown", "pending"}:
+            # A completed asset refresh need not run C# compilation. The Core
+            # job is authoritative for execution; the existing Console verifier
+            # checks current diagnostics without inventing a compilation pass.
+            normalized.update(
+                {
+                    "ok": True,
+                    "status": "done",
+                    "operationStatus": "success",
+                    "readbackState": "complete",
+                    "completionKnown": True,
+                    "verification": {"state": "unknown", "tool": "vrc_get_compile_errors", "compile": compile_snapshot},
+                    "verificationWarning": "Asset refresh completed; a complete compilation snapshot is unavailable. This is not proof of compilation success.",
                 }
             )
             return normalized
@@ -27150,6 +27307,36 @@ def register_agent_gateway_tools() -> None:
         "When to use: continue an idle resumable sub-agent with an explicit new question and its exact taskId, retaining that child's history. "
         "When NOT to use: start a new task, retry the original task, resume a running child, or request writes. Negative example: do not call without a new question.",
         "plan/preview", resume_sub_agent_runtime,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_list_conversations",
+        "When to use: find conversations attached to this same project scope using a bounded page. When NOT to use: locate Unity assets or inspect another project. Negative example: do not treat a listed title as proof that its transcript was read.",
+        "read/debug",
+        lambda params: _invoke_cross_session_conversation("list_conversations", params or {}),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_read_conversation",
+        "When to use: read one bounded page of public messages from a conversation attached to this same project scope. When NOT to use: transfer its complete history, attachments, approvals, or write authority. Negative example: do not claim an unread page was inspected.",
+        "read/debug",
+        lambda params: _invoke_cross_session_conversation("read_conversation", params or {}),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_create_conversation",
+        "When to use: create an empty conversation attached to the trusted current project scope. When NOT to use: start a sub-agent or copy another conversation's history. Negative example: creating a conversation does not send it a task.",
+        "plan/preview",
+        lambda params: _invoke_cross_session_conversation("create_conversation", params or {}),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_send_message",
+        "When to use: leave an attributed message for another conversation in this same project scope; an active target can receive it during its current turn, while an idle target stays unwoken. When NOT to use: ask the target to start work now. Negative example: this acceptance is not proof the target read or completed the message.",
+        "plan/preview",
+        lambda params: _invoke_cross_session_conversation("send_message", params or {}),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_followup_task",
+        "When to use: ask another conversation in this same project scope to take up work now; an active target receives the message in its current turn and an idle target is started. When NOT to use: leave a note that should wait for later. Negative example: a queued or accepted task is not a completed result.",
+        "plan/preview",
+        lambda params: _invoke_cross_session_conversation("followup_task", params or {}),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_list_internal_tool_blocks",

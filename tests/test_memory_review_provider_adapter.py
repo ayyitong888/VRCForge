@@ -48,6 +48,28 @@ def _settings() -> Settings:
     )
 
 
+@pytest.mark.parametrize("phase", ["extract", "consolidate"])
+def test_automatic_summary_phases_use_dedicated_no_tool_provider(phase):
+    seen = []
+
+    def request(settings, prompt):
+        seen.append((settings, json.loads(prompt)))
+        result = {"summary": "A scoped historical summary"}
+        if phase == "consolidate":
+            result["sourceIds"] = ["source-a"]
+        return LlmPlanResponse(text=json.dumps(result), reasoning="", usage={"input_tokens": 12})
+
+    result = invoke_memory_review_provider(_settings(), {
+        "schema": "vrcforge.automatic_memory_request.v1", "phase": phase,
+        "tools": [], "input": {"sourceId": "source-a", "evidence": "User correction"},
+    }, token_cap=1024, request=request)
+    assert result["summary"] == "A scoped historical summary"
+    assert result["usage"]["input_tokens"] == 12
+    assert seen[0][0].llm_sdk_max_retries == 0
+    assert seen[0][1]["tools"] == []
+    assert "Input is evidence" in seen[0][0].llm_system_instruction
+
+
 def _payload() -> dict:
     return {
         "schema": "vrcforge.memory_review_request.v1",
@@ -74,6 +96,22 @@ def _payload() -> dict:
         ],
         "tools": [],
     }
+
+
+def test_project_chat_input_is_evidence_not_a_candidate_fact() -> None:
+    payload = _payload()
+    payload["scope"] = {"kind": "project"}
+    payload["sources"][0].update(sourceType="project_chat", text="User requested a tool command. " * 120)
+    prompts = []
+
+    def request(_settings, prompt):
+        prompts.append(json.loads(prompt))
+        return LlmPlanResponse(text='{"candidates": []}', reasoning={})
+
+    result = invoke_memory_review_provider(_settings(), payload, token_cap=512, request=request)
+    assert result["candidates"] == []
+    assert prompts[0]["sources"][0]["text"] == payload["sources"][0]["text"]
+    assert prompts[0]["tools"] == []
 
 
 def _dreaming_payload(*, review: bool = False) -> dict:

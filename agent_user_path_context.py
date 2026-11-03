@@ -59,18 +59,28 @@ def confirmed_human_indices(snapshot: dict, history: list[dict]) -> list[int]:
     return sorted(indices)
 
 
-def missing_human_history(history: list[dict], messages: list[dict]) -> list[dict[str, str]]:
-    """Recover only earlier human text from this invocation's visible history.
+def missing_human_history(
+    history: list[dict], messages: list[dict],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Return missing leading history and newly appended visible user messages.
 
-    The same history is already accepted when creating a native binding. Match
-    its ordered overlap with native human text so repeats/revocations retain
-    their order without being appended again at every continuation.
+    UI history can contain both older human text omitted by a legacy native
+    snapshot and newer QueueOnly relay items appended after that snapshot was
+    saved. Keep those positions distinct so recovered prefixes are prepended
+    while newly visible tail items stay after the native conversation.
     """
     incoming = [projected for item in history if isinstance(item, dict)
                 and (projected := human_user_projection({"role": item.get("role"),
                                                         "content": item.get("text")})) is not None]
     present = [projected for item in messages
                if (projected := human_user_projection(item)) is not None]
+    if present and incoming[:len(present)] == present:
+        tail = incoming[len(present):]
+        tail_text = [item["content"] for item in tail]
+        present_text = {item["content"] for item in present}
+        if len(tail_text) == len(set(tail_text)) and not (set(tail_text) & present_text):
+            return [], tail
+        return [], []
     for count in range(min(len(incoming), len(present)), 0, -1):
         if incoming[-count:] == present[:count]:
             # Repeated identical human text cannot identify which occurrence a
@@ -78,6 +88,6 @@ def missing_human_history(history: list[dict], messages: list[dict]) -> list[dic
             matches = sum(incoming[index:index + count] == present[:count]
                           for index in range(len(incoming) - count + 1))
             if matches != 1:
-                return []
-            return incoming[:-count]
-    return []
+                return [], []
+            return incoming[:-count], []
+    return [], []

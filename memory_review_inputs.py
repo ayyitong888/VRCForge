@@ -73,6 +73,8 @@ def explicit_memory_signal(item: Mapping[str, Any]) -> str:
     decision/fact phrases so ordinary chat cannot silently become Memory.
     """
 
+    if item.get("forwardedByAgent") is True or isinstance(item.get("forwardedFrom"), Mapping):
+        return ""
     marker = item.get("memorySignal")
     if isinstance(marker, Mapping) and marker.get("eligible") is True:
         kind = str(marker.get("kind") or "").strip().casefold().replace("-", "_")
@@ -164,6 +166,7 @@ def collect_user_chat_records(
             record: dict[str, Any] = {
                 "sourceType": "user_chat",
                 "sourceId": source_id,
+                "chatId": chat_id,
                 "sourceRevision": revision,
                 "role": "user",
                 "status": "completed",
@@ -179,6 +182,88 @@ def collect_user_chat_records(
             else:
                 record["projectRoot"] = project_root
             records.append(record)
+    return records
+
+
+def collect_project_chat_records(
+    chats: Iterable[Mapping[str, Any]], *, project_root: str,
+) -> list[dict[str, Any]]:
+    """Project task evidence for model extraction, never direct fact admission.
+
+    Keep authorship and failed/incomplete outcomes explicit. Runtime payloads,
+    attachments and execution references are not conversation memory sources.
+    """
+    scope_key = project_scope_key(project_root)
+    records: list[dict[str, Any]] = []
+    for chat in chats:
+        if not isinstance(chat, Mapping) or not chat.get("id"):
+            continue
+        try:
+            if project_scope_key(str(chat.get("projectPath") or chat.get("projectRoot") or "")) != scope_key:
+                continue
+        except (OSError, ValueError):
+            continue
+        entries: list[dict[str, Any]] = []
+        has_settled_reply = False
+        for item in chat.get("items", []):
+            if not isinstance(item, Mapping):
+                continue
+            role = item.get("type")
+            if role == "user" and str(item.get("text") or "").strip():
+                relay = item.get("forwardedByAgent") is True or isinstance(item.get("forwardedFrom"), Mapping)
+                entry = {"role": "agent_relay" if relay else "user", "text": str(item["text"])}
+                if relay and isinstance(item.get("forwardedFrom"), Mapping):
+                    entry["forwardedFrom"] = dict(item["forwardedFrom"])
+                entries.append(entry)
+            elif role == "question_answer" and str(item.get("text") or "").strip():
+                entries.append({"role": "user_answer", "question": str(item.get("question") or ""), "text": str(item["text"])})
+            elif role == "agent" and item.get("status") not in {"running", "streaming", "pending"}:
+                response = item.get("response")
+                response = response if isinstance(response, Mapping) else {}
+                plan = response.get("plan")
+                plan = plan if isinstance(plan, Mapping) else {}
+                text = str(item.get("text") or plan.get("reply") or plan.get("summary") or "").strip()
+                if not text and not plan:
+                    continue
+                has_settled_reply = True
+                entry: dict[str, Any] = {"role": "assistant", "text": text,
+                    "status": str(plan.get("nextStep") or item.get("status") or "completed")}
+                outcomes = []
+                for step in response.get("steps", []):
+                    if not isinstance(step, Mapping) or not isinstance(step.get("outcome"), Mapping):
+                        continue
+                    outcome = step["outcome"]
+                    verification = outcome.get("verification")
+                    outcomes.append({"tool": str(step.get("tool") or ""),
+                        "status": str(outcome.get("status") or step.get("status") or ""),
+                        "summary": str(outcome.get("summary") or ""),
+                        "verification": str(verification.get("state") or "") if isinstance(verification, Mapping) else ""})
+                if outcomes:
+                    entry["observedResults"] = outcomes
+                # Persisted UI transcripts may retain semantic timeline events
+                # after bulky step payloads were removed. They are evidence of
+                # reported outcomes, not proof of asset acceptance.
+                timeline = response.get("timeline")
+                if isinstance(timeline, list):
+                    for event in timeline:
+                        if not isinstance(event, Mapping) or not isinstance(event.get("payload"), Mapping):
+                            continue
+                        payload = event["payload"]
+                        if event.get("kind") == "tool_result":
+                            entries.append({"role": "tool", "tool": str(payload.get("tool") or ""),
+                                "status": str(payload.get("status") or ""),
+                                "text": str(payload.get("summary") or "")})
+                        elif event.get("kind") == "assistant" and payload.get("phase") == "commentary":
+                            entries.append({"role": "assistant_progress", "text": str(payload.get("summary") or "")})
+                entries.append(entry)
+        if not has_settled_reply or not any(entry["role"] in {"user", "agent_relay"} for entry in entries):
+            continue
+        text = json.dumps(entries, ensure_ascii=False, separators=(",", ": "))
+        records.append({"sourceType": "project_chat", "sourceId": str(chat["id"]),
+            "sourceRevision": _digest(entries), "projectRoot": project_root,
+            "status": "completed", "text": text,
+            "observedAt": str(chat.get("updatedAt") or chat.get("createdAt") or ""),
+            "originGroup": _stable_id("chat_group", chat["id"])})
     return records
 
 

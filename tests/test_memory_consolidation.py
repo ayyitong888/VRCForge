@@ -1110,7 +1110,7 @@ def test_dynamic_path_suppliers_and_shared_lock_do_not_cross_configured_roots(tm
     assert [item["text"] for item in accepted.list_active()] == ["First root only."]
 
 
-def test_config_contract_defaults_alias_migration_and_auto_safe_gate(tmp_path: Path) -> None:
+def test_config_contract_defaults_alias_migration_and_auto_safe_persistence(tmp_path: Path) -> None:
     service = MemoryConsolidationService(lambda: tmp_path / "runtime")
     initial = service.snapshot()
     assert initial["schema"] == "vrcforge.memory_review_snapshot.v1"
@@ -1151,10 +1151,68 @@ def test_config_contract_defaults_alias_migration_and_auto_safe_gate(tmp_path: P
     assert "maxInputTokens" not in migrated
     assert migrated["providerDisclosure"]["model"] == "configured-model"
 
-    with pytest.raises(MemoryConsolidationError, match="later acceptance gate"):
-        service.update_config({"mode": "auto_safe"}, expected_revision=migrated["revision"])
+    automatic = service.update_config(
+        {"mode": "auto_safe", "provider": "configured-provider", "model": "configured-model"},
+        expected_revision=migrated["revision"],
+    )
+    reopened = MemoryConsolidationService(lambda: tmp_path / "runtime")
+    assert automatic["mode"] == "auto_safe"
+    assert reopened.review_store.snapshot(include_internal=True)["config"]["mode"] == "auto_safe"
     with pytest.raises(MemoryConsolidationError):
-        service.update_config({"cadenceMinutes": 29}, expected_revision=migrated["revision"])
+        service.update_config({"cadenceMinutes": 29}, expected_revision=automatic["revision"])
+
+
+def test_long_project_chat_evidence_is_quoted_but_candidate_output_limit_remains(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    project.mkdir()
+    scope = resolve_memory_scope(
+        "project",
+        str(project),
+        authorized_project_roots=[str(project)],
+    )
+    evidence_text = json.dumps([{"role": "user", "text": "Continue from the current checkpoint. " * 70}])
+    source = admit_memory_source(
+        {
+            "sourceType": "project_chat",
+            "sourceId": "project_chat_long_evidence",
+            "sourceRevision": "rev2",
+            "status": "completed",
+            "text": evidence_text,
+            "projectRoot": str(project),
+        },
+        scope=scope,
+    )
+    assert source is not None
+    assert len(source.text) > 2_000
+
+    consolidator = MemoryConsolidator(
+        MemoryReviewStore(tmp_path / "review.json", tmp_path / "review-audit.jsonl"),
+        policy_version=POLICY_VERSION,
+    )
+    payload, selected, selection = consolidator.build_provider_request_with_selection(
+        [source],
+        scope,
+        12_000,
+    )
+    assert selected == [source]
+    assert payload["sources"][0]["text"] == source.text
+
+    oversized_candidate = {
+        "candidates": [{
+            "kind": "fact",
+            "text": "x" * 2_001,
+            "sourceIds": [source.source_id],
+            "confidenceFactors": [],
+        }],
+        "usage": {},
+    }
+    with pytest.raises(MemoryConsolidationError, match="Candidate text.*size limit"):
+        consolidator.validate_provider_result(
+            oversized_candidate,
+            sources=selected,
+            scope=scope,
+            batch_digest=str(selection["batchDigest"]),
+        )
 
 
 def test_source_edit_and_delete_invalidate_only_unaccepted_candidates(tmp_path: Path) -> None:

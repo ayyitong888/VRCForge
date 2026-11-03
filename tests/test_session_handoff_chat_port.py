@@ -28,3 +28,45 @@ def test_runtime_flags_are_server_owned():
     chats={"c":{"id":"c","sessionId":"s","projectPath":"","revision":1,"items":[]}}
     port=SessionHandoffChatPort(principal_digest="p",lock=threading.RLock(),load_chat=lambda cid,scope: chats.get(cid),save_chat=lambda *a:a[2],runtime_snapshot=lambda *a:{"active_stream":True},enqueue_context=lambda *a: None)
     assert port.get_snapshot(owner_id="p",chat_id="c",session_id="s",scope="")["active_stream"] is True
+
+def test_runtime_snapshot_does_not_invert_chat_and_gateway_lock_order():
+    chats={"c":{"id":"c","sessionId":"s","projectPath":"p","revision":1,"items":[]}}
+    chat_lock=threading.Lock()
+    gateway_lock=threading.Lock()
+    gateway_held=threading.Event()
+    runtime_waiting=threading.Event()
+    commit_may_enter_chat=threading.Event()
+    commit_acquired_chat=threading.Event()
+    snapshot_result=[]
+
+    def runtime_snapshot(*_args):
+        runtime_waiting.set()
+        with gateway_lock:
+            return {"active_stream":False}
+
+    port=SessionHandoffChatPort(principal_digest="p",lock=chat_lock,load_chat=lambda cid,scope: chats.get(cid),save_chat=lambda *a:a[2],runtime_snapshot=runtime_snapshot,enqueue_context=lambda *a: None)
+
+    def memory_review_commit():
+        with gateway_lock:
+            gateway_held.set()
+            commit_may_enter_chat.wait(3)
+            acquired=chat_lock.acquire(timeout=0.5)
+            if acquired:
+                commit_acquired_chat.set()
+                chat_lock.release()
+
+    commit=threading.Thread(target=memory_review_commit)
+    commit.start()
+    assert gateway_held.wait(3)
+    snapshot=threading.Thread(target=lambda: snapshot_result.append(
+        port.get_snapshot(owner_id="p",chat_id="c",session_id="s",scope="p")
+    ))
+    snapshot.start()
+    assert runtime_waiting.wait(3)
+    commit_may_enter_chat.set()
+    commit.join(3)
+    snapshot.join(3)
+
+    assert not commit.is_alive() and not snapshot.is_alive()
+    assert commit_acquired_chat.is_set()
+    assert snapshot_result[0]["active_stream"] is False

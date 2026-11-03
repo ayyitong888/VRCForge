@@ -512,10 +512,18 @@ class AgentRuntimeSessionState:
                 if existing["binding"] == binding:
                     candidate = copy.deepcopy(existing)
                     indices = confirmed_human_indices(candidate, initial_history or [])
-                    missing = missing_human_history(initial_history or [], [candidate["messages"][index] for index in indices])
-                    if missing:
-                        candidate["messages"][0:0] = missing
-                    candidate["humanUserMessageIndices"] = list(range(len(missing))) + [index + len(missing) for index in indices]
+                    missing_prefix, missing_tail = missing_human_history(
+                        initial_history or [], [candidate["messages"][index] for index in indices],
+                    )
+                    if missing_prefix:
+                        candidate["messages"][0:0] = missing_prefix
+                    offset = len(missing_prefix)
+                    human_indices = [index + offset for index in indices]
+                    if missing_tail:
+                        tail_start = len(candidate["messages"])
+                        candidate["messages"].extend(missing_tail)
+                        human_indices.extend(range(tail_start, tail_start + len(missing_tail)))
+                    candidate["humanUserMessageIndices"] = sorted([*range(offset), *human_indices])
                     candidate["turnId"] = turn_id
                     candidate["activeTurnStart"] = len(candidate["messages"])
                     candidate["humanUserMessageIndices"].append(len(candidate["messages"]))

@@ -100,24 +100,64 @@ def test_compile_snapshot_in_progress_is_pending_even_with_zero_errors() -> None
     assert result["completionKnown"] is False
 
 
-def test_incomplete_or_stale_compile_snapshot_is_pending() -> None:
+def test_done_refresh_keeps_unknown_compilation_separate_from_execution() -> None:
     for compile_payload in (
         {"isCompiling": False, "captureComplete": False, "errorCount": 0},
         {"isCompiling": False, "captureComplete": True, "staleness": "stale", "errorCount": 0},
     ):
         result = dashboard_server.normalize_refresh_asset_database_outcome(_result("done", compile_payload))
-        assert result["ok"] is False
-        assert result["status"] == "pending"
-        assert result["verification"]["state"] == "pending"
+        assert result["ok"] is True
+        assert result["status"] == "done"
+        assert result["verification"]["state"] == "unknown"
 
 
-def test_done_refresh_without_complete_compile_evidence_is_not_success() -> None:
+def test_done_refresh_without_compile_evidence_does_not_claim_compile_success() -> None:
     for compile_payload in (None, {"errorCount": 0}):
         raw = {"status": "done", "after": {"compile": compile_payload}}
         result = dashboard_server.normalize_refresh_asset_database_outcome(raw)
-        assert result["ok"] is False
-        assert result["operationStatus"] == "pending"
-        assert result["completionKnown"] is False
+        assert result["ok"] is True
+        assert result["operationStatus"] == "success"
+        assert result["completionKnown"] is True
+        assert result["verification"]["state"] == "unknown"
+
+
+def test_done_refresh_without_a_compilation_pass_keeps_execution_completion() -> None:
+    raw = _result("done", {
+        "isCompiling": False, "captureComplete": False, "capturedAt": "",
+        "source": "compilation_pipeline", "errorCount": 0, "errors": [],
+    })
+    raw["after"].update({"is_compiling": False, "is_updating": False})
+    result = dashboard_server.normalize_refresh_asset_database_outcome(raw)
+    assert result["ok"] is True
+    assert result["status"] == "done"
+    assert result["completionKnown"] is True
+    assert result["verification"]["state"] == "unknown"
+    assert result["after"]["compile"]["captureComplete"] is False
+
+
+@pytest.mark.parametrize("new_error", [False, True])
+def test_done_refresh_uses_current_console_without_claiming_a_compilation_pass(new_error: bool) -> None:
+    snapshot = {
+        "ok": True, "isCompiling": False, "captureComplete": True,
+        "truncated": False, "capturedAt": "", "source": "console_log",
+        "projectPathDigest": "a" * 64, "unityProcessId": 4242,
+        "unityProcessStartedAtUtc": "2026-11-03T06:05:04Z",
+        "unityExecutableDigest": "b" * 64, "errors": [], "warnings": [],
+    }
+    verifier = UnityConsoleCompletionVerifier(lambda _: snapshot, timeout_seconds=2, sleep=lambda _: None)
+    baseline = verifier.capture_baseline("unity_refresh_console", {})
+    if new_error:
+        snapshot["errors"] = [{"message": "Importer reported an error"}]
+    raw = dashboard_server.normalize_refresh_asset_database_outcome(
+        _result("done", {"captureComplete": False, "errorCount": 0})
+    )
+    result = verifier.finalize("unity_refresh_console", {}, baseline, raw)
+    assert result["status"] == "done"
+    assert result["verification"]["state"] == "unknown"
+    assert result["consoleVerification"]["status"] == ("failed" if new_error else "passed")
+    assert result["consoleVerification"]["evidenceKind"] == "console_snapshot"
+    outcome = normalize_agent_tool_result(result, fallback_summary="Refresh", write=True)
+    assert outcome["success"] is (not new_error)
 
 
 @pytest.mark.parametrize("new_warning", [False, True])

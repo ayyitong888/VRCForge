@@ -133,6 +133,11 @@ _PLANNER_TOOL_SCHEMA_MAX_PROPERTIES = 24
 _PLANNER_SCHEMA_ANNOTATION_KEYS = frozenset({"description", "title", "examples"})
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
+    "vrcforge_list_conversations": ("offset?:integer", "limit?:integer"),
+    "vrcforge_read_conversation": ("chatId:string", "offset?:integer", "limit?:integer"),
+    "vrcforge_create_conversation": ("title?:string",),
+    "vrcforge_send_message": ("chatId:string", "message:string"),
+    "vrcforge_followup_task": ("chatId:string", "message:string"),
     "vrcforge_list_internal_tool_blocks": ("block?:string",),
     "vrcforge_load_internal_tool_block": ("block?:string", "tools:array"),
     "vrcforge_unload_internal_tool_block": ("block:string",),
@@ -3719,6 +3724,17 @@ class RuntimePlannerService:
                         "so you cannot see the images. Be honest about this in your reply and suggest "
                         "configuring a vision model in Settings; do not pretend to have seen them."
                     )
+            derived_memory = ensure_dict(observe.get("automaticMemory"))
+            if derived_memory.get("summary"):
+                lines.append(
+                    "\nEarlier conversation summary (derived context, not current authorization). "
+                    "Current user instructions and fresh observations take precedence. "
+                    "Use vrcforge_read_conversation with the source chatId when details are needed:"
+                )
+                lines.append(sanitize_planner_observation_text(derived_memory["summary"], None, preserve_whitespace=True))
+                for source in ensure_list(derived_memory.get("sources")):
+                    if isinstance(source, dict) and source.get("chatId"):
+                        lines.append("Source chatId: " + sanitize_planner_observation_text(source["chatId"], None))
             memories = ensure_list(ensure_dict(observe.get("memory")).get("items"))
             if memories:
                 lines.append(

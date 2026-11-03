@@ -177,6 +177,124 @@ class AgentLoopP0Tests(unittest.TestCase):
             client_turn_id=client_turn_id,
         )
 
+    def test_idle_queue_only_relay_reaches_next_native_provider_request_once(self) -> None:
+        from cross_session_conversation_service import CrossSessionConversationService
+
+        gateway = self.gateway
+        target_session = "native-queue-only-target-session"
+        source_chat_id = "native-queue-only-source-chat"
+        target_chat_id = "native-queue-only-target-chat"
+        project_root = ""
+        first_request = "Seed the target conversation."
+        ordinary_next = "Continue with the next ordinary turn."
+        provider_requests: list[dict] = []
+        chats = {
+            source_chat_id: {
+                "id": source_chat_id, "sessionId": "native-queue-only-source-session",
+                "projectPath": project_root, "revision": 1, "items": [],
+            },
+        }
+
+        def native_response(request):
+            provider_requests.append(copy.deepcopy(request))
+            text = "Seed answer."
+            return PlannerModelResult(text=text, assistant_message={"role": "assistant", "content": text},
+                                      finish_reason="stop")
+
+        with patch.object(gateway.runtime_planner, "native_conversation_binding", return_value="fixture-native-binding"), \
+             patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "plan_native", side_effect=native_response):
+            first = gateway.runtime_message({
+                "message": first_request, "session_id": target_session,
+                "client_turn_id": "native-queue-only-seed-turn",
+                "_projectContextActive": False,
+            })
+            self.assertEqual(first["plan"]["reply"], "Seed answer.", first)
+            native_before_relay = gateway.runtime_sessions.native_conversation(
+                target_session, binding="fixture-native-binding",
+            )
+            self.assertIsNotNone(native_before_relay)
+
+            chats[target_chat_id] = {
+                "id": target_chat_id, "sessionId": target_session,
+                "projectPath": project_root, "revision": 1,
+                "items": [
+                    {"id": "seed-user", "type": "user", "text": first_request},
+                    {"id": "seed-agent", "type": "agent", "response": copy.deepcopy(first)},
+                ],
+            }
+
+            def load_chat(chat_id, _scope):
+                return copy.deepcopy(chats.get(chat_id))
+
+            def save_chat(chat_id, _scope, updated, expected_revision):
+                self.assertEqual(chats[chat_id]["revision"], expected_revision)
+                chats[chat_id] = copy.deepcopy(dict(updated))
+                return copy.deepcopy(chats[chat_id])
+
+            service = CrossSessionConversationService(
+                load_chat=load_chat,
+                list_chats=lambda _scope: list(chats.values()),
+                create_chat=lambda record, _scope: chats.setdefault(str(record["id"]), copy.deepcopy(dict(record))),
+                save_chat=save_chat,
+                enqueue_followup=lambda _params: {"accepted": False},
+                list_followups=lambda: [],
+                claim_followup=lambda **_params: [],
+                release_followup=lambda *_params: False,
+                target_busy=lambda _chat, _session, _scope: False,
+                active_client_turn=lambda _chat, _session, _scope: "",
+                submit_steer=lambda _params: {"accepted": False},
+                dispatch_runtime=lambda _params: self.fail("QueueOnly must not start an idle target"),
+                publish_runtime=lambda _result: None,
+                notify_chat_changed=lambda: None,
+                normalize_scope=lambda value: str(value or "").replace("\\", "/").casefold().rstrip("/"),
+                make_id=lambda: "unused",
+            )
+            sent = service.send_message({
+                "_trustedConversationContext": {
+                    "chatId": source_chat_id, "sessionId": "native-queue-only-source-session",
+                    "clientTurnId": "source-client-turn", "actionId": "send-message-action",
+                    "projectRoot": project_root, "maxAgenticTurns": 25,
+                },
+                "chatId": target_chat_id,
+                "message": "Please inspect the queued task.",
+            })
+            self.assertEqual(sent["status"], "queued", sent)
+            native_after_queue = gateway.runtime_sessions.native_conversation(
+                target_session, binding="fixture-native-binding",
+            )
+            self.assertEqual(native_after_queue, native_before_relay)
+
+            history = []
+            for item in chats[target_chat_id]["items"]:
+                if item.get("type") == "user" and isinstance(item.get("text"), str):
+                    history.append({"role": "user", "text": item["text"]})
+                elif item.get("type") == "agent":
+                    reply = item.get("response", {}).get("plan", {}).get("reply", "")
+                    if reply:
+                        history.append({"role": "agent", "text": reply})
+            relay = chats[target_chat_id]["items"][-1]["text"]
+            self.assertTrue(chats[target_chat_id]["items"][-1]["forwardedByAgent"])
+            second = gateway.runtime_message({
+                "message": ordinary_next, "session_id": target_session,
+                "client_turn_id": "native-queue-only-next-turn",
+                "history": history, "_projectContextActive": False,
+            })
+
+        self.assertEqual(second["plan"]["reply"], "Seed answer.", second)
+        self.assertEqual(len(provider_requests), 2)
+        provider_user_text = [
+            item.get("content") for item in provider_requests[-1]["messages"]
+            if item.get("role") == "user" and isinstance(item.get("content"), str)
+        ]
+        self.assertEqual(provider_user_text.count(relay), 1, provider_user_text)
+        native_after_turn = gateway.runtime_sessions.native_conversation(
+            target_session, binding="fixture-native-binding",
+        )
+        native_user_text = [item["content"] for item in native_after_turn["messages"]
+                            if item.get("role") == "user" and isinstance(item.get("content"), str)]
+        self.assertEqual(native_user_text.count(relay), 1)
+        self.assertEqual(native_user_text[-1], ordinary_next)
+
     def _use_deepseek_plan_config(self) -> None:
         # These cases exercise the legacy planner response seam after valid
         # provider admission; no real provider request leaves the test.
@@ -5431,6 +5549,105 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(planner_calls, 1)
         self.assertEqual(result["plan"]["nextStep"], "needs_user_action", result)
         self.assertEqual(result["task"]["actions"][0]["status"], "needs_user_action")
+
+    def test_gateway_refeeds_prewrite_recovery_block_without_replaying_write(self) -> None:
+        from agent_approval_transactions import (
+            _blocked_recovery_outcome,
+            _blocked_recovery_result,
+        )
+
+        gateway = self.gateway
+        project = self._unity_project()
+        recovery = {
+            "id": "recovery-reprompt-fixture",
+            "checkpointId": "checkpoint-reprompt-fixture",
+            "targetTool": "vrcforge_import_outfit_package",
+            "status": "needs_recovery",
+            "incidentKind": "package_or_compile_conflict",
+            "blockingWrites": True,
+        }
+        apply_result = {
+            "status": "blocked_recovery",
+            "error": "A previous write did not finish cleanly.",
+            "recovery": recovery,
+            "recoveries": [recovery],
+        }
+        blocked_result = _blocked_recovery_result(apply_result)
+        blocked_outcome = _blocked_recovery_outcome(apply_result)
+        planner_calls: list[dict] = []
+        write_calls: list[str] = []
+
+        def plan_turn(_message, _params, _observe, *_args, **kwargs):
+            if not planner_calls:
+                planner_calls.append({"phase": "first"})
+                return {
+                    "planner": "llm",
+                    "summary": "Refresh the requested project.",
+                    "writeNeeded": True,
+                    "writeTool": "vrcforge_refresh_asset_database",
+                    "writeParams": {
+                        "projectPath": str(project),
+                        "resolvePackages": False,
+                        "executionTarget": self._fixture_execution_target(project),
+                    },
+                    "continueLoop": True,
+                    "nextStep": "call_tool",
+                }
+            loop_state = list(kwargs.get("loop_state") or [])
+            self.assertTrue(loop_state)
+            previous = loop_state[-1]
+            self.assertIn(previous["status"], {"failed", "needs_user_action"}, previous)
+            self.assertEqual(
+                previous["result"]["errorCode"],
+                "blocked_by_interrupted_apply_recovery",
+            )
+            self.assertEqual(previous["result"]["commitState"], "not_started")
+            self.assertIn("preview", previous["result"]["nextAction"])
+            planner_calls.append({"phase": "recovery_prompt_seen"})
+            return {
+                "planner": "llm",
+                "summary": "The prior recovery still needs inspection.",
+                "reply": "Preview the interrupted recovery and resolve it before trying this write again.",
+                "continueLoop": False,
+                "nextStep": "needs_user_action",
+            }
+
+        def blocked_write(_service, tool_name, _arguments, _agent_name, **_kwargs):
+            write_calls.append(tool_name)
+            return {
+                "ok": False,
+                "status": "needs_user_action",
+                "tool": tool_name,
+                "result": blocked_result,
+                "outcome": blocked_outcome,
+            }
+
+        with patch.object(
+            gateway.runtime_planner,
+            "plan_agent_turn",
+            side_effect=plan_turn,
+        ), patch.object(
+            type(gateway.approval_transactions),
+            "_execute_write_request",
+            autospec=True,
+            side_effect=blocked_write,
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": "Refresh the project after inspecting any incomplete write.",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": "blocked-recovery-refeed-session",
+                    "clientTurnId": "blocked-recovery-refeed-turn",
+                }
+            )
+
+        self.assertEqual([item["phase"] for item in planner_calls], ["first", "recovery_prompt_seen"])
+        self.assertEqual(write_calls, ["vrcforge_refresh_asset_database"])
+        self.assertEqual(result["steps"][0]["result"]["blockingRecoveries"][0]["id"], recovery["id"])
+        self.assertEqual(result["plan"]["nextStep"], "needs_user_action", result)
+        self.assertIn("vrcforge_preview_interrupted_apply_recovery", result["plan"]["reply"])
+        self.assertIn("Do not retry this blocked write.", result["plan"]["reply"])
 
     def test_runtime_injected_skill_context_does_not_change_action_identity(self) -> None:
         gateway = self.gateway

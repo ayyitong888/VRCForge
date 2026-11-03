@@ -240,7 +240,7 @@ def test_project_source_inventory_never_treats_truncation_or_damage_as_deletion(
         provider_display_name=lambda value: value, provider_requires_api_key=lambda _value: False,
     )
     inventory = adapter.collect_sources(project_scope, str(project.resolve()))
-    assert inventory.complete_source_types == frozenset({"user_chat"})
+    assert inventory.complete_source_types == frozenset({"user_chat", "project_chat"})
     assert inventory.reason_counts["task_inventory_truncated"] == 1
     assert inventory.reason_counts["audit_inventory_incomplete"] == 1
 
@@ -311,7 +311,7 @@ def memory_review_dashboard(tmp_path: Path):
     def source_inventory(scope: MemoryScope, _project_root: str = "") -> MemoryReviewSourceInventory:
         complete_types = {"user_chat"}
         if scope.kind == "project":
-            complete_types.update({"adopted_task", "validated_project_result"})
+            complete_types.update({"adopted_task", "project_chat", "validated_project_result"})
         return MemoryReviewSourceInventory(
             sources=tuple(sources),
             complete_source_types=frozenset(complete_types),
@@ -509,7 +509,7 @@ def test_unauthorized_project_fails_before_provider_or_store(
     assert not (env.root / "gateway-audit" / "memory-review" / "memory-review.json").exists()
 
 
-def test_config_revision_cas_and_auto_safe_gate(
+def test_config_revision_cas_and_auto_safe_configuration(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
@@ -526,10 +526,10 @@ def test_config_revision_cas_and_auto_safe_gate(
         "/api/app/agent/memory/review/config",
         json={"mode": "auto_safe", "scope": "user", "expectedRevision": 1},
     )
-    assert planned.status_code == 400
+    assert planned.status_code == 200, planned.text
     current = env.client.get("/api/app/agent/memory/review", params={"scope": "user"}).json()
-    assert current["mode"] == "shadow"
-    assert current["revision"] == 1
+    assert current["mode"] == "auto_safe"
+    assert current["revision"] == 2
 
 
 @pytest.mark.parametrize("scope_name", ["user", "project"])
@@ -553,6 +553,146 @@ def test_explicit_review_from_default_preferences_only_proposes_candidates(memor
     assert len(env.provider_calls) == 1
     assert result["candidates"][0]["state"] == "proposed"
     assert env.host.service.accepted_store.list_active() == []
+
+
+def test_simple_cross_session_enable_selects_auto_safe_and_binds_active_provider(
+    memory_review_dashboard: DashboardMemoryReviewHarness,
+) -> None:
+    env = memory_review_dashboard
+    before = env.host.snapshot()
+    enabled = asyncio.run(env.host.update_config(MemoryReviewConfigRequest(
+        memoryEnabled=True,
+        crossSessionEnabled=True,
+        expectedRevision=before["revision"],
+    )))
+    assert enabled["mode"] == "auto_safe"
+    assert enabled["provider"] == env.settings["value"].llm_provider
+    assert enabled["model"] == env.settings["value"].llm_model
+    assert enabled["providerDisclosure"]["activeConfigMatches"] is True
+
+
+def test_simple_memory_preferences_preserve_suggest_mode_and_project_scope(
+    memory_review_dashboard: DashboardMemoryReviewHarness,
+) -> None:
+    env = memory_review_dashboard
+    configured = env.configure(
+        "suggest_only",
+        scope="project",
+        project_root=str(env.project),
+    )
+    updated = asyncio.run(env.host.update_config(MemoryReviewConfigRequest(
+        memoryEnabled=True,
+        crossSessionEnabled=True,
+        expectedRevision=configured["revision"],
+    )))
+    assert updated["mode"] == "suggest_only"
+
+    disabled = asyncio.run(env.host.update_config(MemoryReviewConfigRequest(
+        memoryEnabled=False,
+        expectedRevision=updated["revision"],
+    )))
+    persisted = env.host.service.review_store.snapshot(include_internal=True)["config"]
+    assert disabled["mode"] == "off"
+    assert persisted["scopeKind"] == "project"
+    assert persisted["projectScopeKey"] == project_scope_key(str(env.project))
+
+
+@pytest.mark.parametrize(
+    ("scope_name", "source_type"),
+    [("user", "user_chat"), ("project", "project_chat")],
+)
+def test_auto_safe_run_stores_derived_summary_without_accepting_memories(
+    memory_review_dashboard: DashboardMemoryReviewHarness,
+    scope_name: str,
+    source_type: str,
+) -> None:
+    env = memory_review_dashboard
+    project_root = str(env.project) if scope_name == "project" else ""
+    scope, project_root = env.composition.resolve_scope(scope_name, project_root)
+    source_id = "project_chat_source" if source_type == "project_chat" else "chat-1"
+    if source_type == "project_chat":
+        source = admit_memory_source(
+            {
+                "sourceType": "project_chat",
+                "sourceId": "project_chat_source",
+                "sourceRevision": "rev2",
+                "status": "completed",
+                "text": json.dumps([{"role": "user", "text": "Do not use blue accent."}]),
+                "projectRoot": project_root,
+            },
+            scope=scope,
+        )
+        assert source is not None
+        env.sources.append(source)
+    else:
+        env.sources.append(_source(scope, text="Do not use blue accent."))
+
+    phases: list[str] = []
+
+    def provider(_settings: Settings, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        phases.append(str(payload.get("phase") or ""))
+        if payload.get("phase") == "extract":
+            assert payload["input"]["sourceId"] == source_id
+            return {"summary": "User requested a calm blue-free wardrobe.",
+                    "usage": {"inputTokens": 17, "outputTokens": 5, "totalTokens": 22}}
+        return {
+            "summary": "Preserve the user's no-blue wardrobe constraint.",
+            "sourceIds": [str(source["sourceId"]) for source in payload["input"]["sources"]],
+            "usage": {"inputTokens": 13, "outputTokens": 4, "totalTokens": 17},
+        }
+
+    env.provider["call"] = provider
+    env.host.service.accepted_store.create(
+        {
+            "scope": scope_name,
+            "projectRoot": project_root,
+            "kind": "preference",
+            "text": "Keep the existing accepted memory unchanged.",
+        }
+    )
+    before_active = env.host.service.accepted_store.list_active()
+
+    configured = env.configure("auto_safe", scope=scope_name, project_root=project_root)
+    response = env.run(
+        revision=configured["revision"],
+        scope=scope_name,
+        project_root=project_root,
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["lastRun"]["status"] == "completed"
+    assert phases == ["extract", "consolidate"]
+    assert result["lastRun"]["usage"]["inputTokens"] == 30
+    assert result["lastRun"]["usage"]["outputTokens"] == 9
+    assert result["lastRun"]["usage"]["totalTokens"] == 39
+    assert env.host.service.accepted_store.list_active() == before_active
+    assert result["candidates"] == []
+    saved = env.host._automatic_pipeline.read(scope)  # noqa: SLF001 - host/pipeline integration contract.
+    assert saved["summary"] == "Preserve the user's no-blue wardrobe constraint."
+    assert saved["sources"][0]["sourceId"] == source_id
+
+    unchanged = env.run(
+        revision=result["revision"],
+        scope=scope_name,
+        project_root=project_root,
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["lastRun"]["status"] == "completed"
+    assert phases == ["extract", "consolidate"]
+    assert env.host._automatic_pipeline.read(scope)["revision"] == saved["revision"]  # noqa: SLF001
+
+    env.sources.clear()
+    deleted = env.run(
+        revision=unchanged.json()["revision"],
+        scope=scope_name,
+        project_root=project_root,
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["lastRun"]["status"] == "completed"
+    assert phases == ["extract", "consolidate"]
+    after_deletion = env.host._automatic_pipeline.read(scope)  # noqa: SLF001
+    assert after_deletion["summary"] == ""
+    assert after_deletion["sources"] == []
 
 
 def test_default_off_disclosure_tracks_active_model_without_enabling_background(memory_review_dashboard):
@@ -1858,18 +1998,21 @@ def test_missing_project_exposes_only_erase_handle_and_permanent_erase_still_wor
     assert "Project-only candidate prose" not in env.review_files_text()
 
 
+@pytest.mark.parametrize("review_mode", ["bounded_background", "auto_safe"])
 def test_background_due_scope_and_blocker_are_backend_authoritative(
     memory_review_dashboard: DashboardMemoryReviewHarness,
     monkeypatch: pytest.MonkeyPatch,
+    review_mode: str,
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
     host = env.host
     configured = env.configure(
-        "bounded_background",
+        review_mode,
         scope="project",
         project_root=str(env.project),
     )
+    assert configured["mode"] == review_mode
     due = host.service.due_background(
         authorized_project_roots=[str(env.project)]
     )

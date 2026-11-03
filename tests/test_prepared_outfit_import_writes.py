@@ -1290,6 +1290,33 @@ def test_completed_import_refresh_failure_has_explicit_partial_state(
     assert result["error"] == "refresh failed"
 
 
+def test_loose_texture_import_completed_refresh_without_compilation_is_not_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path)
+    loose = tmp_path / "textures"
+    loose.mkdir()
+    (loose / "Body.png").write_bytes(b"isolated texture fixture")
+    prepared, _ = _prepare(tmp_path, {"plan": {
+        "readyToApply": True, "kind": "loose_prefab_copy", "projectPath": str(project),
+        "targetFolder": "Assets/VRCForge/ImportedOutfits", "source": {"path": str(loose)},
+    }}, {"packagePath": str(loose), "projectPath": str(project)})
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings",
+                        lambda _: SimpleNamespace(unity_mcp_timeout_seconds=30))
+    raw = {"job_id": JOB_ID, "status": "done", "after": {
+        "is_compiling": False, "is_updating": False,
+        "compile": {"isCompiling": False, "captureComplete": False,
+                    "errorCount": 0, "source": "compilation_pipeline", "capturedAt": ""},
+    }}
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", lambda *_args, **_kwargs:
+                        dashboard_server.McpResult(0, "", "", dashboard_server.normalize_refresh_asset_database_outcome(raw)))
+    result = _approved().execute(prepared)
+    assert result["ok"] is True
+    assert result["assetDatabaseRefresh"]["verification"]["state"] == "unknown"
+    assert result.get("checkpointRecoveryRequired") is not True
+    assert (project / "Assets/VRCForge/ImportedOutfits/Body.png").read_bytes() == b"isolated texture fixture"
+
+
 def test_preparer_rejects_reserved_and_handler_is_bound() -> None:
     with pytest.raises(RuntimeError, match="reserved"):
         dashboard_server.PREPARED_OUTFIT_IMPORT_PREPARER.prepare(

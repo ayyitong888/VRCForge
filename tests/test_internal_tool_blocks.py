@@ -6,6 +6,7 @@ from agent_tool_result_contract import normalize_agent_tool_result
 
 import dashboard_server
 from agent_gateway import (
+    EXTERNAL_AGENT_INTERNAL_TOOLS,
     canonical_unity_read_tool_input_schema,
     canonical_unity_write_tool_input_schema,
 )
@@ -16,6 +17,7 @@ from tests.planner_schema_assertions import assert_internal_write_schema
 from internal_tool_blocks import (
     CANONICAL_TOOL_BLOCKS,
     CANONICAL_TOOL_LEAVES,
+    CONVERSATION_TOOL_NAMES,
     INTERNAL_LOADABLE_TOOL_BLOCKS,
     build_internal_tool_block_tree,
     canonical_tool_owner,
@@ -124,6 +126,8 @@ def test_internal_index_tree_is_independent_and_unity_is_nested() -> None:
     leaves = [
         {"name": "vrcforge_read_text_file", "block": "files", "mode": "read"},
         {"name": "vrcforge_get_compile_errors", "block": "unity/diagnostics", "mode": "read"},
+        *({"name": name, "block": "project_environment/conversations", "mode": "read"}
+          for name in sorted(CONVERSATION_TOOL_NAMES)),
     ]
     root = build_internal_tool_block_tree(loaded_blocks={"core"}, leaves=leaves)
 
@@ -140,6 +144,11 @@ def test_internal_index_tree_is_independent_and_unity_is_nested() -> None:
         "skill_tool": "load_internal_tool_block",
         "skill_params": {"block": "project_environment/files", "tools": ["vrcforge_read_text_file"]},
     }
+    conversations = next(
+        child for child in directory["project_environment"]["children"]
+        if child["name"] == "project_environment/conversations"
+    )
+    assert set(conversations["toolNames"]) == CONVERSATION_TOOL_NAMES
     assert any("vrcforge_get_compile_errors" in child["toolNames"] for child in directory["diagnostics_build"]["children"])
     assert "inputSchema" not in str(root)
 
@@ -236,6 +245,12 @@ def test_internal_blocks_classify_general_tools_without_exposing_them_externally
         == "behavior/interaction_generated_systems"
     )
     assert internal_tool_block_for_name("vrcforge_install_vpm_package", "unity") == "project_environment/assets_packages"
+    assert all(
+        internal_tool_block_for_name(name, "general") == "project_environment/conversations"
+        for name in CONVERSATION_TOOL_NAMES
+    )
+    assert CONVERSATION_TOOL_NAMES <= EXTERNAL_AGENT_INTERNAL_TOOLS
+    assert CONVERSATION_TOOL_NAMES <= set(dashboard_server.AGENT_GATEWAY._tools)
 
 
 def test_path_to_skill_creator_is_lazy_shared_and_reuses_controller_owners() -> None:
