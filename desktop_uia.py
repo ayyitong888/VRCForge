@@ -184,23 +184,25 @@ if ([string]$request.operation -eq 'read_text') {
         $textPattern = $null
         try {
             if ($node.Element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
+                # Tab titles are text patterns too; the page document is the
+                # longest reader at this offset, so keep the largest result.
+                # Chromium clones do not implement Move reliably, so read the
+                # prefix through the requested offset and slice server-side.
                 $readFromPattern = $true
-                $document = $textPattern.DocumentRange
-                $range = $document.Clone()
-                $moved = $range.MoveEndpointByUnit([System.Windows.Automation.TextPatternRangeEndpoint]::Start, [System.Windows.Automation.TextUnit]::Character, $textOffset)
-                if ($moved -lt $textOffset) {
-                    $readText = ''
-                    $readEndReached = $true
-                    break
+                $rawRead = [string]$textPattern.DocumentRange.GetText($textOffset + $readLimit + 1)
+                if ($rawRead.Length -gt $textOffset) {
+                    $candidate = $rawRead.Substring($textOffset, [Math]::Min($readLimit, $rawRead.Length - $textOffset))
+                } else {
+                    $candidate = ''
                 }
-                $range.MoveEndpointByRange([System.Windows.Automation.TextPatternRangeEndpoint]::End, $document, [System.Windows.Automation.TextPatternRangeEndpoint]::End)
-                $rawRead = [string]$range.GetText($readLimit + 1)
-                $readEndReached = ($rawRead.Length -le $readLimit)
-                $readText = $rawRead.Substring(0, [Math]::Min($rawRead.Length, $readLimit))
-                break
+                if ($candidate.Length -gt $readText.Length) {
+                    $readEndReached = ($rawRead.Length -le ($textOffset + $readLimit))
+                    $readText = $candidate
+                }
             }
         } catch { }
     }
+    if ($readFromPattern -and -not $readText) { $readEndReached = $true }
     if (-not $readText -and -not $readFromPattern) {
         # Edit-style controls expose their whole content as the element name;
         # page it by offset. The name length cannot prove the document end, so
@@ -243,11 +245,12 @@ if ([string]$request.operation -eq 'read_text') {
         $textPattern = $null
         try {
             if ($node.Element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
-                if (-not $documentText) {
-                    # Fetch one character beyond the cap so equality with the cap
-                    # cannot masquerade as end-of-document; large pages must be
-                    # honestly flagged as having more text.
-                    $rawDocumentText = [string]$textPattern.DocumentRange.GetText($textLimit + 1)
+                # Browser chrome exposes text patterns too (tab titles); the page
+                # document is the longest one, so probe each and keep the winner.
+                # Fetch one character beyond the cap so equality with the cap
+                # cannot masquerade as end-of-document.
+                $rawDocumentText = [string]$textPattern.DocumentRange.GetText($textLimit + 1)
+                if ($rawDocumentText.Length -gt $documentText.Length) {
                     $documentTextEndReached = ($rawDocumentText.Length -le $textLimit)
                     $documentText = $rawDocumentText.Substring(0, [Math]::Min($rawDocumentText.Length, $textLimit))
                 }
@@ -260,7 +263,6 @@ if ([string]$request.operation -eq 'read_text') {
                     }
                     $selectedText = $fragments -join ''
                 }
-                if ($documentText -and $selectedText) { break }
             }
         } catch { }
     }

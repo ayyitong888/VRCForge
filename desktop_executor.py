@@ -1143,7 +1143,14 @@ class WindowsDesktopController:
             "documentTextLength": len(document),
             "documentText": shown_text,
             "documentTextEndReached": computed_end,
-            "nextTextOffset": text_offset + text_limit if text_offset + text_limit < len(document) else None,
+            # When the capture is not provably finished, a page that reaches the
+            # capture frontier still points at the frontier so the next page
+            # triggers live continuation instead of silently ending the read.
+            "nextTextOffset": (
+                text_offset + text_limit
+                if text_offset + text_limit < len(document)
+                else (len(document) if computed_end is not True else None)
+            ),
             "summary": (
                 f"Snapshot page: elements {offset}–{offset + len(shown_elements)} of {len(elements)}, "
                 f"text chars {text_offset}–{text_offset + len(shown_text)} of {len(document)}."

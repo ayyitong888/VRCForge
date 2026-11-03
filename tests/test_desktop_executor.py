@@ -711,7 +711,8 @@ class DesktopExecutorTests(unittest.TestCase):
         tail = controller._read_snapshot(  # noqa: SLF001
             {"snapshotId": incomplete_id, "textOffset": 250}, {}, lambda: False
         )
-        self.assertIsNone(tail["nextTextOffset"])
+        self.assertEqual(tail["nextTextOffset"], 300,
+                         "an unfinished capture points the next page at the frontier to continue reading")
         self.assertIs(tail["documentTextEndReached"], False, "an incomplete capture is never reported as finished")
 
         finished = controller._read_snapshot(  # noqa: SLF001
