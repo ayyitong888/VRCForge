@@ -30,9 +30,18 @@ export async function actOnSessionHandoff(endpoint: string, handoffId: string, a
   return requestJson<{ ok: boolean; handoff: SessionHandoffSummary }>(`${endpoint}/api/app/session-handoff/${encodeURIComponent(handoffId)}/${action}`, { method: "POST" });
 }
 
-export async function consumeSessionHandoffContext(endpoint: string, chatId: string, clientTurnId: string): Promise<{ ok: boolean; context: { contextId: string; payloadDigest: string; payload: Record<string, unknown>; clientTurnId: string } | null }> {
+export type SessionHandoffContext = {
+  contextId: string;
+  payloadDigest: string;
+  payload: Record<string, unknown>;
+  /** Harness-authored framing for the model prompt; empty when no payload. */
+  promptPrefix: string;
+  clientTurnId: string;
+};
+
+export async function consumeSessionHandoffContext(endpoint: string, chatId: string, clientTurnId: string): Promise<{ ok: boolean; context: SessionHandoffContext | null }> {
   if (hasTauriInternals()) {
-    return invokeTauriWithAbort<{ ok: boolean; context: { contextId: string; payloadDigest: string; payload: Record<string, unknown>; clientTurnId: string } | null }>("consume_session_handoff_context", {
+    return invokeTauriWithAbort<{ ok: boolean; context: SessionHandoffContext | null }>("consume_session_handoff_context", {
       request: { chatId, clientTurnId, timeoutMs: 60000 },
     });
   }

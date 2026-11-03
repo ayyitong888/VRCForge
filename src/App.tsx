@@ -3541,17 +3541,11 @@ export default function App() {
     const nextClientTurnId = `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     try {
       const handoff = await sessionHandoff.consume(nextClientTurnId);
-      const payload = handoff.context?.payload;
-      if (payload && typeof payload === "object") {
-        const bounded = JSON.stringify({
-          goal: payload.goal,
-          decisions: payload.decisions,
-          blockers: payload.blockers,
-          nextAction: payload.nextAction,
-          question: payload.question,
-        }).slice(0, 3000);
-        if (bounded !== "{}") message = `[Session handoff context]\n${bounded}\n\n${message}`;
-      }
+      // The backend owns the framing: a harness-authored header marks the
+      // transferred payload as data with no authority, and neutralizes
+      // channel imitation inside it.
+      const promptPrefix = handoff.context?.promptPrefix;
+      if (promptPrefix) message = `${promptPrefix}\n\n${message}`;
     } catch {
       // A failed consume leaves the durable queue untouched for a later turn.
     }
