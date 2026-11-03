@@ -166,6 +166,50 @@ def test_no_progress_loop_lands_terminal(tmp_path: Path) -> None:
     )
 
 
+def test_identical_successful_calls_trip_the_general_no_progress_guard(tmp_path: Path) -> None:
+    """Any tool, not only directory reads: three identical successful calls stop."""
+    from unittest.mock import patch
+
+    from tests.test_native_permission_modes import _write_gateway_for_mode
+
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
+    gateway, _model, _invoked = _write_gateway_for_mode(project, [])
+    planner_calls = 0
+
+    def plan_next(*_args, **_kwargs):
+        nonlocal planner_calls
+        planner_calls += 1
+        return {
+            "planner": "llm", "summary": "Fetch the page again.", "skillNeeded": True,
+            "skillTool": "vrcforge_web_fetch", "skillParams": {"url": "https://example.com/instructions"},
+            "continueLoop": True, "nextStep": "call_skill",
+        }
+
+    def execute_skill(_owner, tool_name, _params, _agent_name=None, **_kwargs):
+        return {
+            "ok": True, "tool": tool_name, "status": "executed",
+            "result": {"text": "same page body"},
+            "outcome": {"status": "ok", "summary": "Fetched the page.",
+                        "verification": {"state": "not_required", "checks": []}},
+        }
+
+    with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_next), patch.object(
+        type(gateway.runtime_skills), "execute", autospec=True, side_effect=execute_skill
+    ):
+        result = gateway.runtime_message({
+            "message": "Fetch repeatedly.", "projectRoot": str(project),
+            "session_id": "fault-identical-call-session", "client_turn_id": "fault-identical-call-turn",
+            "_projectContextActive": True,
+        })
+
+    failure = (result.get("plan") or {}).get("plannerFailure") or {}
+    assert failure.get("code") == "planner_no_progress", (
+        "identical successful tool calls across any tool must trip the guard"
+    )
+
+
 def test_crashed_native_pending_normalizes_for_next_request(tmp_path: Path) -> None:
     """Backend crash mid-tool: the next turn's provider request is well-formed."""
     from agent_runtime_session_state import (

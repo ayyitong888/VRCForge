@@ -57,6 +57,34 @@ def make_ledger(tmp_path: Path) -> tuple[AgentRuntimeRunLedger, threading.RLock]
     return ledger, lock
 
 
+def test_startup_recovery_preserves_waiting_user_boundaries(tmp_path: Path) -> None:
+    """Crash recovery must interrupt dead runs but keep live decision waits."""
+    ledger, _lock = make_ledger(tmp_path)
+    ledger.append({"event": "runtime_turn_started", "sessionId": "s-wait", "turnId": "t-wait",
+                   "clientTurnId": "c-wait", "createdAt": "2026-01-01T00:00:00+00:00"})
+    ledger.append_timeline_event(
+        session_id="s-wait", turn_id="t-wait", client_turn_id="c-wait",
+        event={"index": 0, "kind": "skill", "tool": "vrcforge_ask_user", "status": "needs_user_action",
+               "outcome": {"status": "needs_user_action", "summary": "Waiting for the user's choice."}},
+    )
+    ledger.append({"event": "runtime_turn_started", "sessionId": "s-dead", "turnId": "t-dead",
+                   "clientTurnId": "c-dead", "createdAt": "2026-01-01T00:00:01+00:00"})
+    # Append stamps this instance's nonce; rewrite it to a dead owner so
+    # recovery treats both runs as crashed leftovers.
+    raw = ledger.log_path.read_text(encoding="utf-8").replace(ledger._instance_nonce, "old-owner")  # noqa: SLF001
+    ledger.log_path.write_text(raw, encoding="utf-8")
+
+    created = ledger.recover_interrupted_runs()
+    assert created == 2
+    continuations = {row["clientTurnId"]: row for row in ledger.list_runtime_continuations()}
+    waiting = continuations["c-wait"]["plan"]
+    assert waiting["taskCompletion"]["status"] == "waiting_user"
+    assert waiting["reason"] == "question_pending"
+    dead = continuations["c-dead"]["plan"]
+    assert dead["taskCompletion"]["status"] == "interrupted"
+    assert dead["reason"] == "runtime_interrupted"
+
+
 def test_gateway_wires_one_dynamic_ledger_with_the_gateway_lock(tmp_path: Path) -> None:
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit-a")
 

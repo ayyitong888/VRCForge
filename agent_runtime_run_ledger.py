@@ -217,6 +217,28 @@ class AgentRuntimeRunLedger:
             **({"timing": copy.deepcopy(timing)} if timing is not None else {}),
         })
 
+    @staticmethod
+    def _recovered_waiting_reason(timeline: list[dict[str, Any]]) -> str:
+        """Classify durable wait boundaries that survive a process restart."""
+        for item in reversed(timeline):
+            if not isinstance(item, dict):
+                continue
+            tool = str(item.get("tool") or "")
+            status = str(item.get("status") or "").strip().lower().replace("-", "_")
+            outcome = _ensure_dict(item.get("outcome"))
+            outcome_status = str(outcome.get("status") or "").strip().lower().replace("-", "_")
+            if tool in {"vrcforge_ask_user", "vrcforge_call_user"} and (
+                status == "needs_user_action" or outcome_status == "needs_user_action"
+            ):
+                return "question_pending"
+            if status == "approval_pending" or outcome_status == "approval_pending":
+                return "approval_pending"
+            if status in {"failed", "completed", "cancelled", "denied"} or outcome_status in {
+                "failed", "ok", "completed", "cancelled", "denied",
+            }:
+                break
+        return ""
+
     def recover_interrupted_runs(self) -> int:
         """Materialize old, non-terminal runs as durable foreground continuations."""
         with self.shared_state_lock:
@@ -284,7 +306,26 @@ class AgentRuntimeRunLedger:
                 # Each event is already bounded by the live projector. Keep
                 # the full visible order rather than dropping early messages.
                 timeline = timelines.get(key, [])
-                continuation = {
+                # Startup recovery must not flatten durable decision points:
+                # a run parked on a live user question or approval is waiting,
+                # not interrupted — its continuation resumes on the answer.
+                waiting_reason = self._recovered_waiting_reason(timeline)
+                if waiting_reason:
+                    continuation = {
+                        "schema": "vrcforge.runtime_turn_event.v1",
+                        "continuationSource": "foreground_interrupted",
+                        "sessionId": str(started.get("sessionId") or ""),
+                        "turnId": str(started.get("turnId") or ""),
+                        "clientTurnId": str(started.get("clientTurnId") or ""),
+                        "provider": str(started.get("provider") or ""),
+                        "providerLabel": str(started.get("providerLabel") or ""),
+                        "model": str(started.get("model") or ""),
+                        "projectRoot": str(started.get("projectRoot") or ""),
+                        "plan": {"nextStep": "needs_user_action", "reason": waiting_reason,
+                                 "taskCompletion": {"status": "waiting_user"}},
+                    }
+                else:
+                    continuation = {
                     "schema": "vrcforge.runtime_turn_event.v1",
                     "continuationSource": "foreground_interrupted",
                     "sessionId": str(started.get("sessionId") or ""),
