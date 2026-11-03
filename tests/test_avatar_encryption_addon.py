@@ -13,7 +13,7 @@ import vrcforge_runtime_paths as runtime_paths
 
 
 @pytest.fixture(autouse=True)
-def force_gateway_approval_mode():
+def force_gateway_approval_mode(tmp_path):
     config = agent_gateway.AgentGatewayConfig(
         token="avatar-encryption-test-token",
         approval_token="avatar-encryption-test-approval-token",
@@ -26,6 +26,14 @@ def force_gateway_approval_mode():
         patch.object(gateway, "ensure_config", return_value=config),
         patch.object(gateway, "save_config") as save_config_mock,
         patch.object(gateway, "append_audit") as append_audit_mock,
+        # The module-level gateway binds to the real user-data audit dir; the
+        # pending-approval snapshot must never persist test approvals there
+        # (a leaked unit-test approval was restored into the real app queue).
+        patch.object(
+            type(approval_owner),
+            "_pending_approval_snapshot_path",
+            lambda self: tmp_path / "pending-approvals.json",
+        ),
     ):
         approval_ports = replace(
             approval_owner._ports,
@@ -540,6 +548,31 @@ def test_avatar_encryption_liltoon_apply_request_creates_explicit_connector_appr
     assert "layers" not in stored_approval["arguments"]
     assert "keyChannel" not in stored_approval["arguments"]
     assert "checkpoint" in str(approval["preview"]["rollback"]).lower()
+
+
+def test_pending_approvals_created_by_tests_never_reach_the_real_user_snapshot(monkeypatch) -> None:
+    monkeypatch.setenv(dashboard_server.AVATAR_ENCRYPTION_ADDON_URL_ENV, "http://127.0.0.1:9876")
+    dashboard_server.AGENT_GATEWAY._approvals.clear()
+    approval_owner = dashboard_server.AGENT_GATEWAY.approval_transactions
+    real_snapshot = approval_owner._ports.audit_log_path().with_name("pending-approvals.json")
+    snapshot_before = real_snapshot.read_bytes() if real_snapshot.exists() else None
+    payload = dashboard_server.request_avatar_encryption_apply_sync(
+        {
+            "avatarPath": "Scene/HeroAvatar",
+            "projectPath": "E:/unity/Hero",
+            "inventory": make_encryption_inventory(),
+            "confirmCreatorOwnedAssets": True,
+        },
+        target_family="liltoon",
+        agent_name="unit-test",
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "pending"
+    snapshot_after = real_snapshot.read_bytes() if real_snapshot.exists() else None
+    assert snapshot_after == snapshot_before, (
+        "test approvals must stay out of the real user pending-approvals snapshot"
+    )
 
 
 def test_avatar_encryption_apply_request_blocks_output_folder_escape(monkeypatch) -> None:
