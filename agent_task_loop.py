@@ -2167,9 +2167,12 @@ class AgentTaskLoop:
             return gated
 
         claim = gated.get("completionClaim")
+        # The model's own text stays the reply for honest incompletes and for
+        # claimless natural finals; only a satisfied=true claim's prose is
+        # withheld (it asserted completion this gate could not confirm).
         honest_incomplete_reply = (
             str(gated.get("reply") or "").strip()
-            if isinstance(claim, Mapping) and claim.get("satisfied") is False else ""
+            if not (isinstance(claim, Mapping) and claim.get("satisfied") is True) else ""
         )
         completed_ids = self.completed_action_ids()
         missing_requirements: list[str] = []
@@ -2213,9 +2216,19 @@ class AgentTaskLoop:
             return gated
 
         if not completed_ids:
+            # An explicit model-authored claim that marks the task done with
+            # no completed action at all is a blind completion claim.
+            explicit_done_claim = (
+                next_step == "done"
+                and isinstance(claim, Mapping)
+                and claim.get("satisfied") is True
+            )
             if (
                 next_step == "done"
-                and any(item.get("_nativeReadObservation") is True for item in self._actions.values())
+                and (
+                    explicit_done_claim
+                    or any(item.get("_nativeReadObservation") is True for item in self._actions.values())
+                )
             ):
                 gated["nextStep"] = "completion_unverified"
                 gated["task"] = self.snapshot("completion_unverified")
@@ -2228,15 +2241,53 @@ class AgentTaskLoop:
             return gated
 
         planner = _status(gated.get("planner"))
+        model_claim = (
+            planner == "llm"
+            and isinstance(claim, Mapping)
+            and claim.get("satisfied") in {True, False}
+        )
+        if planner == "llm" and not model_claim:
+            # Natural final / explicit reply without a completion claim: the
+            # ledger gates (requirements, failures, running actions) have run.
+            # Prose must not mint a verified completion receipt, so the turn
+            # ends without taskCompletion.
+            gated["nextStep"] = "done"
+            gated["task"] = self.snapshot("completed")
+            return gated
         if planner == "llm":
-            claim = gated.get("completionClaim")
             evidence_ids = []
-            satisfied = False
-            if isinstance(claim, Mapping):
-                satisfied = claim.get("satisfied") is True
-                raw_ids = claim.get("evidenceActionIds") or claim.get("evidence_action_ids")
-                if isinstance(raw_ids, list):
-                    evidence_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
+            satisfied = claim.get("satisfied") is True
+            raw_ids = claim.get("evidenceActionIds") or claim.get("evidence_action_ids")
+            if isinstance(raw_ids, list):
+                evidence_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
+            # An explicit satisfied claim must be grounded: either it cites
+            # executed actions as evidence, or a write/shell action completed
+            # this turn. Read-only observations alone cannot ground a
+            # completion claim.
+            mutating_completed = any(
+                _bounded_text((self._actions.get(action_id) or {}).get("kind"), 32) in {"write", "shell"}
+                for action_id in completed_ids
+            )
+            ungrounded_claim = satisfied and not evidence_ids and not mutating_completed
+            if ungrounded_claim:
+                gated.update(
+                    {
+                        "summary": "The completion claim was not grounded in executed action evidence.",
+                        "reply": honest_incomplete_reply or (
+                            "The tool actions returned, but I cannot honestly mark the task complete "
+                            "because the claim cited no executed action evidence and no write or shell "
+                            "action completed this turn."
+                        ),
+                        "continueLoop": False,
+                        "nextStep": "completion_unverified",
+                        "completionGate": {
+                            "status": "failed",
+                            "reason": "completion_evidence_missing",
+                        },
+                    }
+                )
+                gated["task"] = self.snapshot("completion_unverified")
+                return gated
             if not satisfied or not set(evidence_ids).issubset(completed_ids):
                 gated.update(
                     {

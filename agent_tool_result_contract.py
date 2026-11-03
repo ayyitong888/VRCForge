@@ -711,6 +711,9 @@ def completion_gate_plan(
     completion_claim = gated.get("completionClaim")
     if not isinstance(completion_claim, Mapping):
         completion_claim = gated.get("completion_claim")
+    # Only an explicit honest-incomplete claim (satisfied=false) preserves
+    # the model's own words. Claimless prose after a failed action is
+    # replaced: it cannot be distinguished from a false "done" narrative.
     honest_failure_reply = (
         gated["reply"].strip()
         if outcome_status == "failed"

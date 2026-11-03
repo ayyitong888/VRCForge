@@ -497,18 +497,21 @@ def test_native_read_observation_notfound_create_verified_then_targeted_read_fin
 
 
 def test_native_gateway_host_binds_completion_without_model_copying_ids(tmp_path):
+    """An uncited satisfied claim gets one correction round; citing the
+    evidence actionIds visible in the tool results completes the turn."""
     gateway, model, invoked = setup_gateway(tmp_path, [
         call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}),
-        call("final", "vrcforge_runtime_action", {"action": "reply", "reply": "Checked",
+        call("final-uncited", "vrcforge_runtime_action", {"action": "reply", "reply": "Checked",
              "completion_claim": {"satisfied": True}}),
+        finish,
     ])
-    result = run(gateway, tmp_path)
+    result = run(gateway, tmp_path, maxAgenticTurns=6)
     assert len(invoked) == 1
-    assert len(model.requests) == 2
+    assert len(model.requests) == 3
     assert result["plan"]["nextStep"] == "done"
-    assert result["plan"]["completionClaim"] == {"satisfied": True}
+    cited = result["plan"]["completionClaim"]["evidence_action_ids"]
     expected = [a["actionId"] for a in result["plan"]["task"]["actions"] if a["status"] == "completed"]
-    assert expected
+    assert cited == expected
     assert result["plan"]["taskCompletion"]["evidenceActionIds"] == expected
 
 
@@ -527,20 +530,42 @@ def test_native_plain_final_stops_without_reasking_completion_and_keeps_reply(tm
     assert plan["summary"] == reply
     assert plan["nextStep"] == "done"
     assert plan["task"]["status"] == "completed"
-    assert plan["completionClaim"] == {"satisfied": True}
-    assert plan["taskCompletion"]["evidenceActionIds"] == [plan["task"]["actions"][0]["actionId"]]
+    # Natural finals carry no claim and mint no verified completion receipt.
+    assert plan["completionClaim"] == {}
+    assert "taskCompletion" not in plan
     assert not plan.get("stepLimitReached")
     assert not plan.get("plannerFailed")
     assert all("reply_completion_claim" not in json.dumps(r["messages"]) for r in model.requests)
 
 
 def test_native_plain_final_without_tools_completes(tmp_path):
+    """Normal chat: zero tools, text reply, turn completes with no receipt."""
     gateway, model, invoked = setup_gateway(tmp_path, [{"role": "assistant", "content": "Hello."}])
     result = run(gateway, tmp_path, message="Hello")
     assert result["plan"]["nextStep"] == "done"
     assert result["plan"]["reply"] == "Hello."
-    assert result["plan"]["completionClaim"] == {"satisfied": True}
+    assert result["plan"]["completionClaim"] == {}
+    assert "taskCompletion" not in result["plan"]
     assert len(model.requests) == 1 and not invoked
+
+
+def test_native_prose_done_on_modification_goal_mints_no_verified_completion(tmp_path):
+    """A modification task where the model calls zero tools and just says
+    "改好了" must not display as verified completion; chat stays unaffected."""
+    gateway, model, invoked = setup_gateway(tmp_path, [{"role": "assistant", "content": "改好了"}])
+    result = run(gateway, tmp_path, message="替换身体贴图")
+    plan = result["plan"]
+    assert not invoked, "the model executed no tools"
+    assert plan["nextStep"] == "done"
+    assert plan["reply"] == "改好了"
+    assert "taskCompletion" not in plan, "prose must not mint a verified completion receipt"
+    assert plan.get("completionClaim") in (None, {}, {"satisfied": False})
+    # The conversation continues: a follow-up message still reaches the provider.
+    model.replies = iter([{"role": "assistant", "content": "还没改,现在开始。"}])
+    model.requests.clear()
+    followup = run(gateway, tmp_path, clientTurnId="native-turn-2", message="你还没动手,继续")
+    assert len(model.requests) == 1
+    assert followup["plan"]["reply"] == "还没改,现在开始。"
 
 
 @pytest.mark.parametrize("blocked", ["failed", "pending", "unverified", "missing_requirement"])
@@ -561,8 +586,9 @@ def test_natural_final_cannot_override_unfinished_action(blocked):
     payload, rejection = RuntimePlannerService._native_action_payload(
         {"role": "assistant", "content": "Finished."}, [])
     assert rejection is None
-    gated = loop.gate_terminal({"planner": "llm", "nextStep": "done", "reply": payload["reply"],
-                                "completionClaim": payload["completion_claim"]})
+    # Natural finals fabricate no completion claim.
+    assert "completion_claim" not in payload
+    gated = loop.gate_terminal({"planner": "llm", "nextStep": "done", "reply": payload["reply"]})
     assert gated["nextStep"] != "done"
     assert "taskCompletion" not in gated
 

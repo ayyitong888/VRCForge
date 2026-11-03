@@ -7050,12 +7050,6 @@ class AgentGateway:
                 unresolved_planner_argument_failure = None
                 planner_argument_failures = 0
 
-            if native_binding and not plan.get("nativeCallIds") and plan.get("nextStep") == "done":
-                # Natural finals need no completion tool. Bind their completion
-                # to the same action ledger that governs explicit final claims.
-                plan["completionClaim"] = {
-                    "satisfied": task_loop.gate_terminal(plan).get("nextStep") == "done",
-                }
             planner_reply = str(plan.get("reply") or "").strip()
             public_messages = plan.get("publicMessages") or []
             command = str(plan.get("shellCommand") or "").strip()
@@ -7071,7 +7065,11 @@ class AgentGateway:
                 and task_loop.completed_action_ids()
                 and ensure_dict(
                     task_loop.gate_terminal(plan).get("completionGate")
-                ).get("reason") in {"completion_claim_unbound", "required_action_missing"}
+                ).get("reason") in {
+                    "completion_claim_unbound",
+                    "required_action_missing",
+                    "completion_evidence_missing",
+                }
             )
             honest_failed_final = (
                 ensure_dict(plan.get("completionClaim")).get("satisfied") is False
@@ -7180,8 +7178,9 @@ class AgentGateway:
                 correction_summary = (
                     "The completion gate has unresolved obligations. Inspect the task requirements; "
                     "perform any remaining authorized actions or explain the specific blocker honestly. "
-                    "If complete: action=reply, completion_claim.satisfied=true; omit optional "
-                    "evidence_action_ids. Otherwise inspect/report incomplete. "
+                    "If complete: action=reply, completion_claim.satisfied=true and cite "
+                    "evidence_action_ids from the executed actions, or rely on a completed write or "
+                    "shell action as grounding. Otherwise inspect/report incomplete. "
                     "action=correct retries failed tools only. Host binds IDs."
                 )
                 loop_state.append(

@@ -170,7 +170,9 @@ def test_native_approved_prewrite_failure_resumes_planner_without_replaying_writ
 
     assert len(model.requests) == 3
     assert invoked == [{"projectRoot": str(tmp_path / "UnityProject"), "value": "retry"}]
-    assert resumed["plan"]["reply"].startswith("The write was rejected before mutation")
+    # No claim is fabricated for the natural final, so the failed write's
+    # canonical receipt stays the reply; prose cannot retell a failed write.
+    assert resumed["plan"]["reply"] == "fixture preflight failure"
     assert resumed["plan"].get("completionClaim", {}).get("satisfied") is not True
 
 

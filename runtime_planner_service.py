@@ -4827,10 +4827,11 @@ class RuntimePlannerService:
             final = next((item["text"] for item in reversed(messages) if item.get("phase") == "final_answer"), None)
             if final is None:
                 final = next((item["text"] for item in reversed(messages) if item.get("phase") is None), "")
-            return {"action": "reply", "reply": final if messages else receipt.get("content") or "",
-                    # A natural final ends the model turn; the task loop still
-                    # checks actual failures, pending actions and required evidence.
-                    "completion_claim": {"satisfied": True}}, None
+            # A natural final ends the model turn; the task loop still checks
+            # actual failures and pending actions. No completion claim is
+            # fabricated here: prose must never mint a verified completion
+            # receipt, so the payload carries the reply text only.
+            return {"action": "reply", "reply": final if messages else receipt.get("content") or ""}, None
         call = calls[0]
         function = ensure_dict(call.get("function"))
         name = str(function.get("name") or "")

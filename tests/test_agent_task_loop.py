@@ -544,6 +544,11 @@ def test_llm_completion_binds_full_ledger_without_rewriting_model_claim(referenc
     if reference != 'omitted':
         claim['evidenceActionIds'] = ids if reference == 'all' else ids[:1] if reference == 'subset' else []
     result = loop.gate_terminal({'planner': 'llm', 'nextStep': 'done', 'completionClaim': claim})
+    if reference in {'omitted', 'empty'}:
+        # A read-only ledger cannot ground an uncited completion claim.
+        assert result['nextStep'] == 'completion_unverified'
+        assert result['completionGate']['reason'] == 'completion_evidence_missing'
+        return
     assert result['nextStep'] == 'done'
     assert result['taskCompletion']['evidenceActionIds'] == ids
     assert result['completionClaim'] == claim
@@ -554,10 +559,15 @@ def test_llm_completion_rejects_other_task_evidence_and_false_claim() -> None:
     ids = [loop.record_action(kind='skill', tool='read', arguments={'path': str(n)},
         raw_result={'ok': True}, outcome=ok_outcome())['actionId'] for n, loop in enumerate(loops)]
     assert ids[0] != ids[1]
-    for claim in ({'satisfied': True, 'evidenceActionIds': [ids[1]]}, {'satisfied': False}, {}):
+    for claim in ({'satisfied': True, 'evidenceActionIds': [ids[1]]}, {'satisfied': False}):
         result = loops[0].gate_terminal({'planner': 'llm', 'nextStep': 'done', 'completionClaim': claim})
         assert result['nextStep'] == 'completion_unverified'
         assert 'taskCompletion' not in result
+    # An empty claim is not a completion claim: the turn ends, but prose
+    # mints no verified completion receipt.
+    unclaimed = loops[0].gate_terminal({'planner': 'llm', 'nextStep': 'done', 'completionClaim': {}})
+    assert unclaimed['nextStep'] == 'done'
+    assert 'taskCompletion' not in unclaimed
 
 
 @pytest.mark.parametrize('state', ['running', 'unverified'])
@@ -609,7 +619,9 @@ def test_llm_completion_requires_satisfied_and_valid_references() -> None:
         }
     )
 
-    assert missing["nextStep"] == "completion_unverified"
+    # A claimless final is a natural final: done, but no verified receipt.
+    assert missing["nextStep"] == "done"
+    assert "taskCompletion" not in missing
     assert unknown["nextStep"] == "completion_unverified"
     assert accepted["nextStep"] == "done"
     assert accepted["taskCompletion"]["evidenceActionIds"] == [action["actionId"]]
