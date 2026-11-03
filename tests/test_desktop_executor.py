@@ -428,6 +428,115 @@ class DesktopExecutorTests(unittest.TestCase):
         self.assertNotIn(secret_text, tool_audit_log)
         self.assertIn(f'"textLength": {len(secret_text)}', tool_audit_log)
 
+    def test_inspect_observation_keeps_document_text_first_and_announces_truncation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gateway = AgentGateway(Path(temp_dir) / "config.json", Path(temp_dir) / "audit")
+            document = "テクスチャ PNGファイルのみです。" + "本文" * 5000 + "レイヤーをコピーペーストして使ってください。"
+            controls = [
+                {"index": i, "name": f"element-{i}", "controlType": "Text", "enabled": True}
+                for i in range(120)
+            ]
+            result = {
+                "operation": "inspect_window",
+                "count": 120,
+                "controls": controls,
+                "documentText": document,
+                "truncated": True,
+                "snapshotId": "snap-1114496-123456",
+                "summary": "Inspected 120 UI Automation elements.",
+            }
+            observation = gateway.desktop.desktop_action_observation(result)
+
+        self.assertLess(observation.index("documentText="), observation.index("elements="))
+        self.assertIn("テクスチャ PNGファイルのみです。", observation)
+        self.assertIn("snapshotId=snap-1114496-123456", observation)
+        self.assertIn("truncationNotice=", observation)
+        self.assertIn("documentText truncated to", observation)
+        self.assertIn("read_snapshot snapshotId=snap-1114496-123456 textOffset=", observation)
+        self.assertIn("elements truncated: shown 80 of 120 enumerated", observation)
+        self.assertIn("UIA walk hit its limit", observation)
+        self.assertIn("reads the same stable snapshot", observation)
+        self.assertLessEqual(len(observation), gateway.desktop.OBSERVATION_TOTAL_BUDGET + 2000)
+
+    def test_inspect_observation_returns_full_text_without_notice_when_it_fits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gateway = AgentGateway(Path(temp_dir) / "config.json", Path(temp_dir) / "audit")
+            result = {
+                "operation": "inspect_window",
+                "count": 2,
+                "controls": [
+                    {"index": 0, "name": "OK", "controlType": "Button"},
+                    {"index": 1, "name": "Cancel", "controlType": "Button"},
+                ],
+                "documentText": "短い本文",
+                "truncated": False,
+                "summary": "Inspected 2 UI Automation elements.",
+            }
+            observation = gateway.desktop.desktop_action_observation(result)
+
+        self.assertIn("documentText=短い本文", observation)
+        self.assertIn('"name":"OK"', observation)
+        self.assertNotIn("truncationNotice=", observation)
+
+    def test_read_snapshot_pages_elements_and_text_from_cached_snapshot(self) -> None:
+        controller = object.__new__(WindowsDesktopController)
+        controller._uia_snapshots = {}
+        elements = [{"index": i, "name": f"element-{i}"} for i in range(200)]
+        snapshot_id = controller._cache_uia_snapshot(  # noqa: SLF001
+            {"windowHandle": 123, "processId": 42, "title": "BOOTH"},
+            elements,
+            document_text="ご説明" * 4000,
+            selected_text="",
+        )
+
+        page_one = controller._read_snapshot({"snapshotId": snapshot_id}, {}, lambda: False)  # noqa: SLF001
+        self.assertEqual(page_one["elementCount"], 200)
+        self.assertEqual(len(page_one["elements"]), 80)
+        self.assertEqual(page_one["nextElementOffset"], 80)
+        self.assertEqual(page_one["documentTextLength"], 12000)
+        self.assertEqual(page_one["nextTextOffset"], 9000)
+
+        page_two = controller._read_snapshot(  # noqa: SLF001
+            {"snapshotId": snapshot_id, "offset": 80, "textOffset": 9000}, {}, lambda: False
+        )
+        self.assertEqual(page_two["elements"][0]["index"], 80)
+        self.assertEqual(page_two["documentText"], "ご説明" * 1000)
+        self.assertIsNone(page_two["nextTextOffset"])
+
+        # Snapshot paging is read-only against the cached copy: the same slice is
+        # returned even though nothing live was touched in between.
+        repeat = controller._read_snapshot({"snapshotId": snapshot_id, "offset": 80}, {}, lambda: False)  # noqa: SLF001
+        self.assertEqual(repeat["elements"], page_two["elements"])
+
+        with self.assertRaisesRegex(DesktopExecutorError, r"^snapshot_expired:"):
+            controller._read_snapshot({"snapshotId": "snap-123-1"}, {}, lambda: False)  # noqa: SLF001
+
+        # LRU eviction must surface the same explicit snapshot_expired code instead
+        # of an empty completed page.
+        controller._uia_snapshots.clear()
+        with self.assertRaisesRegex(DesktopExecutorError, r"^snapshot_expired:"):
+            controller._read_snapshot({"snapshotId": snapshot_id}, {}, lambda: False)  # noqa: SLF001
+
+    def test_failed_desktop_action_envelope_surfaces_error_to_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gateway = AgentGateway(Path(temp_dir) / "config.json", Path(temp_dir) / "audit")
+            envelope = {
+                "ok": False,
+                "schema": "vrcforge.desktop_action.v1",
+                "status": "failed",
+                "actionId": "act-1",
+                "result": {},
+                "error": (
+                    "snapshot_expired: Snapshot snap-1-1 is no longer cached (evicted or replaced); "
+                    "call inspect_window again to capture a fresh snapshot and restart paging from offset 0."
+                ),
+            }
+            observation = gateway.desktop.desktop_action_observation(envelope)
+
+        self.assertIn("status=failed", observation)
+        self.assertIn("snapshot_expired", observation)
+        self.assertIn("call inspect_window again", observation)
+
 
 if __name__ == "__main__":
     unittest.main()

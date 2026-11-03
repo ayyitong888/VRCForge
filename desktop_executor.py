@@ -417,6 +417,7 @@ class WindowsDesktopController:
             "get_window": self._get_window,
             "window_state": self._window_state,
             "inspect_window": self._inspect_window,
+            "read_snapshot": self._read_snapshot,
             "cursor_position": self._cursor_position,
             "screenshot": self._screenshot,
             "focus_window": self._focus_window,
@@ -448,6 +449,9 @@ class WindowsDesktopController:
                 raise DesktopExecutorError("The app selector is invalid.")
         elif operation in {"get_window", "window_state", "inspect_window", "focus_window"}:
             self._resolve_window(params)
+        elif operation == "read_snapshot":
+            if not str(params.get("snapshotId") or "").strip():
+                raise DesktopExecutorError("read_snapshot requires a snapshotId from a prior inspect_window result.")
         elif operation == "screenshot":
             if params.get("windowHandle") not in (None, "") or str(params.get("titleContains") or "").strip():
                 self._resolve_window(params)
@@ -889,7 +893,7 @@ class WindowsDesktopController:
     def _inspect_window(self, params: dict[str, Any], _action: dict[str, Any], cancel_check: CancelCheck) -> dict[str, Any]:
         self._raise_if_cancelled(cancel_check)
         window = self._resolve_input_window(params)
-        limit = max(1, min(int(params.get("limit") or 120), 300))
+        limit = max(1, min(int(params.get("limit") or 120), 500))
         controls: list[dict[str, Any]] = []
         @_ENUMWINDOWSPROC
         def collect(hwnd: int, _lparam: int) -> bool:
@@ -942,7 +946,16 @@ class WindowsDesktopController:
                     "summary": f"Inspected {len(elements)} UI Automation elements.",
                 }
             )
-            self._cache_uia_snapshot(window, elements)
+            snapshot_id = self._cache_uia_snapshot(
+                window,
+                elements,
+                document_text=str(result.get("documentText") or ""),
+                selected_text=str(result.get("selectedText") or ""),
+            )
+            result["snapshotId"] = snapshot_id
+            snapshot_row = getattr(self, "_uia_snapshots", {}).get(int(window["windowHandle"]))
+            if isinstance(snapshot_row, dict):
+                result["snapshotObservedWallClock"] = snapshot_row.get("observedWallClock")
         except DesktopUiaCancelled as exc:
             raise DesktopActionCancelled(str(exc)) from exc
         except DesktopUiaError as exc:
@@ -950,21 +963,85 @@ class WindowsDesktopController:
             result["accessibilityError"] = str(exc)[-500:]
         return result
 
-    def _cache_uia_snapshot(self, window: dict[str, Any], elements: list[dict[str, Any]]) -> None:
+    def _cache_uia_snapshot(
+        self,
+        window: dict[str, Any],
+        elements: list[dict[str, Any]],
+        *,
+        document_text: str = "",
+        selected_text: str = "",
+    ) -> str:
         hwnd = int(window["windowHandle"])
+        observed_at = time.monotonic()
+        snapshot_id = f"snap-{hwnd}-{int(observed_at * 1000)}"
         snapshots = getattr(self, "_uia_snapshots", None)
         if not isinstance(snapshots, dict):
             snapshots = {}
             self._uia_snapshots = snapshots
         snapshots[hwnd] = {
-            "observedAt": time.monotonic(),
+            "snapshotId": snapshot_id,
+            "observedAt": observed_at,
+            "observedWallClock": datetime.now().astimezone().isoformat(timespec="seconds"),
             "processId": int(window.get("processId") or 0),
             "processPath": str(window.get("processPath") or ""),
+            "windowTitle": str(window.get("title") or ""),
             "elements": [dict(item) for item in elements[:500] if isinstance(item, dict)],
+            "documentText": str(document_text or ""),
+            "selectedText": str(selected_text or ""),
         }
         if len(snapshots) > 20:
             oldest = min(snapshots, key=lambda key: float(snapshots[key].get("observedAt") or 0))
             snapshots.pop(oldest, None)
+        return snapshot_id
+
+    def _read_snapshot(self, params: dict[str, Any], _action: dict[str, Any], cancel_check: CancelCheck) -> dict[str, Any]:
+        self._raise_if_cancelled(cancel_check)
+        snapshot_id = str(params.get("snapshotId") or "").strip()
+        if not snapshot_id:
+            raise DesktopExecutorError("read_snapshot requires a snapshotId from a prior inspect_window result.")
+        snapshot = next(
+            (
+                item
+                for item in getattr(self, "_uia_snapshots", {}).values()
+                if isinstance(item, dict) and item.get("snapshotId") == snapshot_id
+            ),
+            None,
+        )
+        if not isinstance(snapshot, dict):
+            raise DesktopExecutorError(
+                "snapshot_expired: "
+                f"Snapshot {snapshot_id[:120]} is no longer cached (evicted or replaced); "
+                "call inspect_window again to capture a fresh snapshot and restart paging from offset 0."
+            )
+        try:
+            offset = max(0, int(params.get("offset") or 0))
+            limit = max(1, min(int(params.get("limit") or 80), 500))
+            text_offset = max(0, int(params.get("textOffset") or 0))
+            text_limit = max(1, min(int(params.get("textLimit") or 9000), 16000))
+        except (TypeError, ValueError) as exc:
+            raise DesktopExecutorError("read_snapshot offset/limit/textOffset/textLimit must be integers.") from exc
+        elements = [item for item in snapshot.get("elements") if isinstance(item, dict)]
+        document = str(snapshot.get("documentText") or "")
+        shown_elements = elements[offset : offset + limit]
+        shown_text = document[text_offset : text_offset + text_limit]
+        return {
+            "operation": "read_snapshot",
+            "snapshotId": snapshot_id,
+            "observedWallClock": snapshot.get("observedWallClock"),
+            "windowTitle": snapshot.get("windowTitle"),
+            "elementOffset": offset,
+            "elementCount": len(elements),
+            "elements": shown_elements,
+            "nextElementOffset": offset + limit if offset + limit < len(elements) else None,
+            "textOffset": text_offset,
+            "documentTextLength": len(document),
+            "documentText": shown_text,
+            "nextTextOffset": text_offset + text_limit if text_offset + text_limit < len(document) else None,
+            "summary": (
+                f"Snapshot page: elements {offset}–{offset + len(shown_elements)} of {len(elements)}, "
+                f"text chars {text_offset}–{text_offset + len(shown_text)} of {len(document)}."
+            ),
+        }
 
     def _observed_element_expectations(self, window: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
         if params.get("elementIndex") in (None, ""):
@@ -972,8 +1049,14 @@ class WindowsDesktopController:
         hwnd = int(window["windowHandle"])
         snapshot = getattr(self, "_uia_snapshots", {}).get(hwnd)
         if not isinstance(snapshot, dict) or time.monotonic() - float(snapshot.get("observedAt") or 0) > 120:
+            age = (
+                f"the cached observation is {int(time.monotonic() - float(snapshot.get('observedAt') or 0))}s old (max 120)"
+                if isinstance(snapshot, dict)
+                else "no snapshot is cached for this window"
+            )
             raise DesktopExecutorError(
-                "The element index has no fresh accessibility observation; call window_state or inspect_window with text first."
+                "The element index has no fresh accessibility observation "
+                f"({age}); call window_state or inspect_window with text first, then retry with the new elementIndex."
             )
         if int(snapshot.get("processId") or 0) != int(window.get("processId") or 0):
             raise DesktopExecutorError("The element index belongs to a stale window process.")

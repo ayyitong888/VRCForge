@@ -330,18 +330,58 @@ class DesktopComputerUseService:
             [attachment],
         )
 
+    # Content-first budgets for the model-facing observation. The document or
+    # selection text is what the agent usually needs; structural element lists
+    # must never crowd it out, and any drop must be announced with a recovery
+    # path instead of silently clamping (general-agent positioning).
+    OBSERVATION_TEXT_BUDGET = 9000
+    OBSERVATION_TOTAL_BUDGET = 24000
+
     def desktop_action_observation(self, value: Any) -> str:
+        envelope = _ensure_dict(value)
         result = self.desktop_action_result_payload(value)
+        envelope_error = str(envelope.get("error") or "").strip()
+        envelope_status = str(envelope.get("status") or "").strip()
         if not result:
+            # Failed/cancelled envelopes carry the reason on the outer row while
+            # .result is empty; without this branch the model never sees why the
+            # action settled (the "blocked silently" failure class).
+            if envelope_error or envelope_status:
+                return self._text(
+                    f"status={envelope_status or 'unknown'}; error={envelope_error or '(no error detail)'}",
+                    1200,
+                )
             return ""
         parts: list[str] = []
+        if envelope_error and envelope_status != "completed":
+            parts.append(f"error={self._text(envelope_error, 1200)}")
+        notices: list[str] = []
         for key in (
-            "operation", "summary", "count", "stepCount", "width", "height",
-            "windowHandle", "x", "y", "durationMs",
+            "operation", "status", "summary", "count", "stepCount", "width", "height",
+            "windowHandle", "x", "y", "durationMs", "snapshotId",
+            "elementOffset", "elementCount", "nextElementOffset",
+            "textOffset", "documentTextLength", "nextTextOffset",
         ):
             item = result.get(key)
             if item not in (None, ""):
                 parts.append(f"{key}={self._text(item, 240)}")
+        snapshot_id = str(result.get("snapshotId") or "")
+        page_hint = (
+            f"page it with agent_desktop_action read_snapshot snapshotId={snapshot_id}"
+            if snapshot_id
+            else "re-call agent_desktop_action inspect_window to capture a snapshot first"
+        )
+        for key in ("documentText", "selectedText"):
+            raw = str(result.get(key) or "")
+            if not raw:
+                continue
+            compact = " ".join(raw.split())
+            shown = compact[: self.OBSERVATION_TEXT_BUDGET]
+            parts.append(f"{key}={shown}")
+            if len(shown) < len(compact):
+                notices.append(
+                    f"{key} truncated to {len(shown)} of {len(compact)} chars ({page_hint} textOffset={len(shown)})"
+                )
         apps = [item for item in _ensure_list(result.get("apps")) if isinstance(item, dict)][:30]
         if apps:
             parts.append(
@@ -387,15 +427,16 @@ class DesktopComputerUseService:
                     separators=(",", ":"),
                 )
             )
-        controls = [item for item in _ensure_list(result.get("controls")) if isinstance(item, dict)][:80]
-        if controls:
+        controls = [item for item in _ensure_list(result.get("controls")) if isinstance(item, dict)]
+        shown_controls = controls[:80]
+        if shown_controls:
             parts.append(
                 "elements="
                 + json.dumps(
                     [
                         {
                             "index": item.get("index"),
-                            "name": self._text(item.get("name") or item.get("title"), 120),
+                            "name": self._text(item.get("name") or item.get("title"), 240),
                             "automationId": self._text(item.get("automationId"), 100),
                             "controlType": self._text(item.get("controlType") or item.get("className"), 80),
                             "enabled": item.get("enabled"),
@@ -403,11 +444,21 @@ class DesktopComputerUseService:
                             "focused": item.get("focused"),
                             "rect": item.get("rect"),
                         }
-                        for item in controls
+                        for item in shown_controls
                     ],
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
+            )
+        if len(controls) > len(shown_controls) or result.get("truncated"):
+            walk_note = (
+                "; UIA walk hit its limit, re-call inspect_window with a higher limit (up to 500) for a fresh snapshot"
+                if result.get("truncated")
+                else ""
+            )
+            notices.append(
+                f"elements truncated: shown {len(shown_controls)} of {len(controls)} enumerated{walk_note}"
+                f" ({page_hint} offset={len(shown_controls)} reads the same stable snapshot)"
             )
         steps = [item for item in _ensure_list(result.get("steps")) if isinstance(item, dict)][:32]
         if steps:
@@ -422,10 +473,13 @@ class DesktopComputerUseService:
             nested = _ensure_dict(result.get(nested_key))
             if nested:
                 parts.append(f"{nested_key}=({self.desktop_action_observation(nested)})")
-        for key in ("selectedText", "documentText"):
-            if result.get(key):
-                parts.append(f"{key}={self._text(result.get(key), 1200)}")
-        return self._text("; ".join(parts), 6000)
+        observation = "; ".join(parts)
+        if len(observation) > self.OBSERVATION_TOTAL_BUDGET:
+            observation = observation[: self.OBSERVATION_TOTAL_BUDGET]
+            notices.insert(0, f"observation truncated at {self.OBSERVATION_TOTAL_BUDGET} chars")
+        if notices:
+            observation += "; truncationNotice=" + " | ".join(notices)
+        return observation
 
     def _append_desktop_action_event(self, event: dict[str, Any]) -> dict[str, Any]:
         with self._desktop_action_condition:

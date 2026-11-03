@@ -154,20 +154,22 @@ function Select-Target {
             (-not $request.controlType -or $_.ControlType -eq [string]$request.controlType -or $_.ControlType -eq ('ControlType.' + [string]$request.controlType))
         })
     }
-    if ($matches.Count -eq 0) { throw 'UI Automation element was not found.' }
+    if ($matches.Count -eq 0) {
+        throw ("UI Automation element was not found. selector elementIndex={0} automationId='{1}' name='{2}' controlType='{3}'" -f $request.elementIndex, [string]$request.automationId, [string]$request.name, [string]$request.controlType)
+    }
     if ($matches.Count -gt 1) { throw 'UI Automation element target is ambiguous; include elementIndex or more exact selectors.' }
     $match = $matches[0]
     if (($request.PSObject.Properties.Name -contains 'expectedName') -and $match.Name -ne [string]$request.expectedName) {
-        throw 'The observed UI Automation element is stale; its name changed.'
+        throw ("The observed UI Automation element is stale; its name changed. expected='{0}' actual='{1}'" -f [string]$request.expectedName, $match.Name)
     }
     if (($request.PSObject.Properties.Name -contains 'expectedAutomationId') -and $match.AutomationId -ne [string]$request.expectedAutomationId) {
-        throw 'The observed UI Automation element is stale; its automation id changed.'
+        throw ("The observed UI Automation element is stale; its automation id changed. expected='{0}' actual='{1}'" -f [string]$request.expectedAutomationId, $match.AutomationId)
     }
     if (($request.PSObject.Properties.Name -contains 'expectedControlType') -and $match.ControlType -ne [string]$request.expectedControlType) {
-        throw 'The observed UI Automation element is stale; its control type changed.'
+        throw ("The observed UI Automation element is stale; its control type changed. expected='{0}' actual='{1}'" -f [string]$request.expectedControlType, $match.ControlType)
     }
     if (($request.PSObject.Properties.Name -contains 'expectedClassName') -and $match.ClassName -ne [string]$request.expectedClassName) {
-        throw 'The observed UI Automation element is stale; its class changed.'
+        throw ("The observed UI Automation element is stale; its class changed. expected='{0}' actual='{1}'" -f [string]$request.expectedClassName, $match.ClassName)
     }
     return $match
 }
