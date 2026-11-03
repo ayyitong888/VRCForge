@@ -2361,7 +2361,7 @@ class DashboardServerTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 403)
-        self.assertIn("Computer Use is disabled", response.json()["detail"])
+        self.assertIn("Computer Use is disabled", response.json()["detail"]["message"])
 
     def test_desktop_capture_root_is_the_gateway_trusted_vision_root(self) -> None:
         self.assertEqual(
@@ -3489,7 +3489,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(cleared.json()["goal"]["wakeAt"], "")
         self.assertEqual(cleared.json()["goal"]["wakeEveryMinutes"], 0)
         self.assertEqual(overflow.status_code, 400)
-        self.assertIn("ISO-8601", overflow.json()["detail"])
+        self.assertIn("ISO-8601", overflow.json()["detail"]["message"])
 
     def test_agent_goal_delivery_runtime_is_cached_until_chat_ack(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -3898,7 +3898,7 @@ class DashboardServerTests(unittest.TestCase):
             )
 
         self.assertEqual(created.status_code, 400)
-        self.assertIn("at least two options", created.json()["detail"])
+        self.assertIn("at least two options", created.json()["detail"]["message"])
 
     def test_agent_questions_keep_more_than_three_options(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -4075,7 +4075,7 @@ class DashboardServerTests(unittest.TestCase):
             )
 
         self.assertEqual(missing_project.status_code, 400)
-        self.assertIn("projectRoot", missing_project.json()["detail"])
+        self.assertIn("projectRoot", missing_project.json()["detail"]["message"])
         self.assertEqual(user_memory.status_code, 200)
         self.assertEqual(user_memory.json()["memory"]["scope"], "user")
 
@@ -4088,7 +4088,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(missing_scope.status_code, 422)
         self.assertEqual(invalid_scope.status_code, 422)
         self.assertEqual(missing_project.status_code, 400)
-        self.assertIn("projectRoot", missing_project.json()["detail"])
+        self.assertIn("projectRoot", missing_project.json()["detail"]["message"])
 
     def test_agent_project_memory_clear_is_exactly_project_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -9824,7 +9824,7 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(preview.manifest[field], captured.manifest[field])
             self.assertEqual(preview.manifest["entrypoints"], captured.manifest["entrypoints"])
             self.assertEqual(imported.status_code, 409, imported.text)
-            self.assertIn("not owned by this package", imported.json()["detail"])
+            self.assertIn("not owned by this package", imported.json()["detail"]["message"])
             self.assertEqual(imported_without_projection.status_code, 200, imported_without_projection.text)
             self.assertIsNone(imported_without_projection.json()["projectedSkill"])
             self.assertEqual(
@@ -10181,7 +10181,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertFalse(imported.json()["projectedSkill"]["enabled"])
             self.assertTrue(any(skill["name"] == "risky-review" and not skill["enabled"] for skill in skills))
             self.assertEqual(enable_blocked.status_code, 400)
-            self.assertIn("safe mode", enable_blocked.json()["detail"])
+            self.assertIn("safe mode", enable_blocked.json()["detail"]["message"])
 
     def test_skill_package_revoked_signer_preflight_explains_and_import_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -10223,7 +10223,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(blocked_preflight.json()["preview"]["governance"]["signerTrustStatus"], "revoked")
             self.assertFalse(blocked_preflight.json()["preview"]["governance"]["importAllowed"])
             self.assertEqual(blocked_import.status_code, 400)
-            self.assertIn("revoked", blocked_import.json()["detail"])
+            self.assertIn("revoked", blocked_import.json()["detail"]["message"])
 
     def test_path_to_skill_preview_write_and_export_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -10355,7 +10355,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue((source_dir / "workflows" / "captured-path.json").is_file())
 
             self.assertEqual(existing_output.status_code, 400, existing_output.text)
-            self.assertIn("already exists", existing_output.json()["detail"])
+            self.assertIn("already exists", existing_output.json()["detail"]["message"])
             self.assertEqual(occupied_marker.read_text(encoding="utf-8"), "keep")
             self.assertEqual({item.name for item in occupied_source_dir.iterdir()}, {"keep.txt"})
 
@@ -10367,7 +10367,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(Path(temp_export_payload["exported"]["package_path"]).parent, temp_output_root)
 
             self.assertEqual(existing_package_output.status_code, 400, existing_package_output.text)
-            self.assertIn("already exists", existing_package_output.json()["detail"])
+            self.assertIn("already exists", existing_package_output.json()["detail"]["message"])
             self.assertEqual(occupied_package_path.read_bytes(), b"original-package-bytes")
             self.assertFalse(blocked_export_source.exists())
 
@@ -10394,7 +10394,7 @@ class DashboardServerTests(unittest.TestCase):
                 )
 
             self.assertEqual(response.status_code, 400)
-            self.assertIn("confirmExport=true", response.json()["detail"])
+            self.assertIn("confirmExport=true", response.json()["detail"]["message"])
             self.assertFalse(package_path.exists())
 
     def test_path_to_skill_endpoint_rejects_secrets_and_embedded_private_paths(self) -> None:
@@ -10418,9 +10418,9 @@ class DashboardServerTests(unittest.TestCase):
             )
 
         self.assertEqual(secret.status_code, 400)
-        self.assertIn("secret", secret.json()["detail"].lower())
+        self.assertIn("secret", secret.json()["detail"]["message"].lower())
         self.assertEqual(private_path.status_code, 400)
-        self.assertIn("absolute path", private_path.json()["detail"].lower())
+        self.assertIn("absolute path", private_path.json()["detail"]["message"].lower())
 
     def test_roslyn_advanced_skill_requires_full_auto_mode_and_confirmation(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()

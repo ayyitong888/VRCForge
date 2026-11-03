@@ -64,6 +64,7 @@ AGENT_MCP_STDIO_MODE = "--agent-mcp-stdio" in sys.argv
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from runtime_error_schema import runtime_error, runtime_error_from_exception
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -1884,7 +1885,8 @@ def _invoke_cross_session_conversation(method_name: str, params: Mapping[str, An
         method = getattr(cross_session_conversation_runtime(), method_name)
         return method(params)
     except CrossSessionConversationError as exc:
-        return {"ok": False, "status": "failed", "error": str(exc)}
+        return {"ok": False, "status": "failed",
+                "error": runtime_error_from_exception("cross_session_conversation_failed", exc)}
 
 
 def _dispatch_cross_session_runtime(params: dict[str, Any]) -> Mapping[str, Any]:
@@ -2117,7 +2119,7 @@ async def authorize_local_requests(request: Request, call_next):
                 },
                 component=transport_component,
             )
-            return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
+            return JSONResponse({"ok": False, "error": http_error_detail(exc)}, status_code=exc.status_code)
     if not is_preflight and artifact_route_requires_auth(request):
         try:
             authenticate_artifact_request(request)
@@ -2136,7 +2138,7 @@ async def authorize_local_requests(request: Request, call_next):
                 },
                 component=transport_component,
             )
-            return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
+            return JSONResponse({"ok": False, "error": http_error_detail(exc)}, status_code=exc.status_code)
     if not is_preflight and app_route_requires_auth(request):
         try:
             authenticate_app_request(request)
@@ -2155,7 +2157,7 @@ async def authorize_local_requests(request: Request, call_next):
                 },
                 component=transport_component,
             )
-            return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
+            return JSONResponse({"ok": False, "error": http_error_detail(exc)}, status_code=exc.status_code)
     try:
         response = await call_next(request)
         status_code = response.status_code
@@ -2208,7 +2210,7 @@ async def replay_sub_agent_parent_continuations() -> int:
             "warn",
             "subagent",
             "Interrupted sub-agent continuation projection had a warning.",
-            {"error": str(exc)},
+            {},
         )
     try:
         shell_result = await asyncio.to_thread(
@@ -2220,7 +2222,7 @@ async def replay_sub_agent_parent_continuations() -> int:
             "warn",
             "agent",
             "Shell task continuation reconciliation had a warning.",
-            {"error": str(exc)},
+            {},
         )
     try:
         await asyncio.to_thread(AGENT_GATEWAY.questions.reconcile_runtime_continuations)
@@ -2235,7 +2237,7 @@ async def replay_sub_agent_parent_continuations() -> int:
             "warn",
             "subagent",
             "Sub-agent parent continuation replay had a warning.",
-            {"error": str(exc)},
+            {},
         )
     return recovered
 
@@ -2257,7 +2259,7 @@ async def on_startup() -> None:
             "warn",
             "provider",
             "OpenAI SDK resources could not be initialized during startup.",
-            {"error": str(exc)},
+            {},
         )
     _RUNTIME_PLANNER_MODEL.start()
     AGENT_GATEWAY.start_runtime_continuations()
@@ -2429,7 +2431,7 @@ async def on_shutdown() -> None:
             "warn",
             "agent",
             "Runtime Provider planning shutdown had a warning.",
-            {"error": str(exc)},
+            {},
         )
 
     try:
@@ -2453,7 +2455,7 @@ async def on_shutdown() -> None:
             "warn",
             "agent",
             "Runtime continuation shutdown had a warning.",
-            {"error": str(exc)},
+            {},
         )
 
     try:
@@ -2479,7 +2481,7 @@ async def on_shutdown() -> None:
             "warn",
             "subagent",
             "Sub-agent shutdown had a warning.",
-            {"error": str(exc)},
+            {},
         )
 
     if SUB_AGENT_CONTINUATION_REPLAY_TASK is not None:
@@ -2511,7 +2513,7 @@ async def on_shutdown() -> None:
             "warn",
             "agent",
             "Shell process shutdown had a warning.",
-            {"error": str(exc)},
+            {},
         )
 
     live_session = PRIMITIVE_BASIS_LIVE_SESSION
@@ -2557,7 +2559,7 @@ async def on_shutdown() -> None:
             "warn",
             "agent",
             "Background goal drain shutdown had a warning.",
-            {"error": str(exc)},
+            {},
         )
     if BACKGROUND_GOAL_MONITOR_TASK is not None:
         BACKGROUND_GOAL_MONITOR_TASK.cancel()
@@ -2870,7 +2872,7 @@ async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict
             acknowledge_roslyn_risk=request.acknowledge_roslyn_risk,
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("approval_request_failed", exc.status_code, exc) from exc
     after = permission_security_state(payload.get("permission"))
     changed_flags = changed_safety_flags(before, after)
     if changed_flags:
@@ -2937,7 +2939,7 @@ def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsReques
             try:
                 DEVELOPER_OPTIONS_GUARD.consume(request.developer_challenge_id or "")
             except DeveloperOptionsChallengeError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
+                raise runtime_http_error("internal_error", 409, exc) from exc
             strong_confirmation_completed = True
         previous_log_level = DIAGNOSTIC_LOGGER.log_level
         trace_downgraded = not request.developer_options_enabled and previous_log_level == "trace"
@@ -3205,7 +3207,7 @@ async def _execute_app_agent_runtime_message(
         runtime_returned = True
         payload = attach_agent_harness_journey_receipt(payload)
     except BackgroundGoalDeliveryError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        raise HTTPException(status_code=exc.status_code, detail=http_error_detail(exc)) from exc
     except AgentGatewayError as exc:
         admission_rejected = getattr(exc, "runtime_admitted", None) is False
         detail = {"code": "followup_admission_rejected", "message": str(exc)} if admission_rejected and followup_claim_token else str(exc)
@@ -3361,7 +3363,7 @@ def app_issue_computer_use_turn_grant(request: ComputerUseTurnGrantRequest) -> d
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("desktop_request_failed", exc.status_code, exc) from exc
 
 
 @app.post("/api/app/agent/compact")
@@ -3406,7 +3408,7 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
         )
         return result
     except ContextCompactionInputError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("agent_runtime_request_failed", 400, exc) from exc
 
 
 @app.get("/api/app/agent/session/{session_id}")
@@ -3414,7 +3416,7 @@ def app_agent_runtime_session(session_id: str, clientTurnId: str = "") -> dict[s
     try:
         return AGENT_GATEWAY.get_runtime_session(session_id, client_turn_id=clientTurnId)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_runtime_request_failed", exc.status_code, exc) from exc
 
 
 @app.post("/api/app/agent/resource-image")
@@ -3487,7 +3489,7 @@ def app_agent_runtime_timeline(
             after_sequence=afterSequence, limit=limit,
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_runtime_request_failed", exc.status_code, exc) from exc
 
 
 @app.post("/api/app/agent/runs/cancel")
@@ -3502,7 +3504,7 @@ async def app_agent_runtime_cancel(cancel_request: AgentRuntimeCancelRequest) ->
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_runtime_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentRuntimeCancel", payload)
     await EVENT_BUS.broadcast(
         "agentRuntimeRuns",
@@ -3591,7 +3593,7 @@ def app_agent_desktop_action_result(action_id: str) -> dict[str, Any]:
     try:
         return AGENT_GATEWAY.desktop.get_desktop_action_result(action_id)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("desktop_request_failed", exc.status_code, exc) from exc
 
 
 @app.post("/api/app/agent/desktop-actions")
@@ -3612,7 +3614,7 @@ async def app_agent_desktop_action(request: AgentDesktopActionRequest) -> dict[s
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("desktop_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30, session_id=request.session_id or ""))
     return payload
 
@@ -3638,7 +3640,7 @@ async def app_agent_desktop_bridge_register(request: DesktopBridgeRegisterReques
             },
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("desktop_request_failed", exc.status_code, exc) from exc
     return payload
 
 
@@ -3650,7 +3652,7 @@ async def app_agent_desktop_bridge_heartbeat(request: DesktopBridgeHeartbeatRequ
             {"bridgeId": request.bridge_id, "bridgeCredential": request.bridge_credential},
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("desktop_request_failed", exc.status_code, exc) from exc
     return payload
 
 
@@ -3667,7 +3669,7 @@ async def app_agent_desktop_action_claim(request: DesktopActionClaimRequest) -> 
             },
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("desktop_request_failed", exc.status_code, exc) from exc
     if payload.get("action"):
         await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30))
     return payload
@@ -3688,7 +3690,7 @@ async def app_agent_desktop_action_complete(request: DesktopActionCompleteReques
             },
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("desktop_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30))
     return payload
 
@@ -3702,7 +3704,7 @@ async def app_agent_desktop_action_cancel(action_id: str, request: DesktopAction
             {"reason": request.reason},
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("desktop_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30))
     return payload
 
@@ -3736,7 +3738,7 @@ async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, An
     try:
         payload = AGENT_GATEWAY.goal.create_agent_goal(params)
     except AgentGoalServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.goal.list_agent_goals(limit=30, session_id=request.session_id or ""))
     return payload
 
@@ -3766,7 +3768,7 @@ async def app_wake_agent_goal(goal_id: str, request: AgentGoalWakeRequest) -> di
         track_timed_out_goal_wake(worker)
         raise
     except AgentGoalServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.goal.list_agent_goals(limit=30, session_id=request.session_id or ""))
     return payload
 
@@ -3783,7 +3785,7 @@ async def app_bind_agent_goal_owner(goal_id: str, request: AgentGoalOwnerBindReq
             },
         )
     except AgentGoalServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.goal.list_agent_goals(limit=30, session_id=request.session_id or ""))
     return payload
 
@@ -3816,7 +3818,7 @@ async def app_acknowledge_agent_goal_background_state(
             kind=request.kind,
         )
     except AgentGoalServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentGoalBackground", payload)
     return payload
 
@@ -3832,7 +3834,7 @@ async def app_materialize_agent_goal_delivery(
             {"chatId": request.chat_id, "expectedRevision": request.expected_revision},
         )
     except AgentGoalServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     return payload
 
 
@@ -3847,7 +3849,7 @@ async def app_defer_agent_goal_delivery(
             expected_revision=request.expected_revision,
         )
     except AgentGoalServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await broadcast_background_goal_state({})
     return payload
 
@@ -3869,7 +3871,7 @@ async def app_update_agent_goal(goal_id: str, request: AgentGoalUpdateRequest) -
     try:
         payload = AGENT_GATEWAY.goal.update_agent_goal(goal_id, params)
     except AgentGoalServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.goal.list_agent_goals(limit=30, session_id=request.session_id or ""))
     return payload
 
@@ -3893,7 +3895,7 @@ async def app_replace_agent_progress(request: AgentProgressReplaceRequest) -> di
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
     return payload
 
@@ -3918,7 +3920,7 @@ async def app_create_agent_progress(request: AgentProgressItemRequest) -> dict[s
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
     return payload
 
@@ -3943,7 +3945,7 @@ async def app_update_agent_progress(progress_id: str, request: AgentProgressItem
             },
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
     return payload
 
@@ -3953,7 +3955,7 @@ async def app_delete_agent_progress(progress_id: str, sessionId: str = "", proje
     try:
         payload = AGENT_GATEWAY.delete_agent_progress(progress_id, {"sessionId": sessionId, "projectRoot": projectRoot})
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=sessionId or "", project_root=projectRoot or ""))
     return payload
 
@@ -3983,7 +3985,7 @@ async def app_create_agent_question(request: AgentQuestionCreateRequest) -> dict
             }
         )
     except AgentQuestionServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.questions.list(limit=30, session_id=request.session_id or "", project_root=request.project_root or "", include_answered=True))
     return payload
 
@@ -4006,7 +4008,7 @@ async def app_answer_agent_question(question_id: str, request: AgentQuestionAnsw
             },
         )
     except AgentQuestionServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.questions.list(limit=30, session_id=request.session_id or "", project_root=request.project_root or "", include_answered=True))
     if payload.get("goalDelivery") is not None:
         await broadcast_background_goal_state({})
@@ -4106,7 +4108,7 @@ async def app_create_agent_memory(request: AgentMemoryCreateRequest) -> dict[str
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("internal_error", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentMemory", AGENT_GATEWAY.list_agent_memory(limit=30, project_root=request.project_root or ""))
     return payload
 
@@ -4116,7 +4118,7 @@ async def app_delete_agent_memory(memory_id: str, request: AgentMemoryDeleteRequ
     try:
         payload = AGENT_GATEWAY.delete_agent_memory(memory_id, {"reason": request.reason if request else ""})
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("internal_error", exc.status_code, exc) from exc
     await asyncio.to_thread(MEMORY_REVIEW.service.reconcile_external_memory_deletions, [memory_id])
     await EVENT_BUS.broadcast("agentMemory", AGENT_GATEWAY.list_agent_memory(limit=30))
     await MEMORY_REVIEW.notify_review_changed()
@@ -4141,7 +4143,7 @@ async def app_clear_agent_memory(request: AgentMemoryClearRequest) -> dict[str, 
     try:
         payload = AGENT_GATEWAY.clear_agent_memory({"scope": request.scope, "reason": request.reason, "projectRoot": request.project_root})
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("internal_error", exc.status_code, exc) from exc
     await asyncio.to_thread(MEMORY_REVIEW.service.reconcile_external_memory_deletions)
     await EVENT_BUS.broadcast("agentMemory", AGENT_GATEWAY.list_agent_memory(limit=30, project_root=request.project_root or ""))
     await MEMORY_REVIEW.notify_review_changed()
@@ -4186,7 +4188,7 @@ async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("checkpoint_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
@@ -4205,7 +4207,7 @@ async def app_start_primitive_basis_model_part_live(
     try:
         return await asyncio.to_thread(runtime.start, request.project_path)
     except PrimitiveBasisLiveRuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 409, exc) from exc
 
 
 @app.get("/api/app/primitive-basis/live/model-part/status")
@@ -4219,7 +4221,7 @@ async def app_readback_primitive_basis_model_part_live() -> dict[str, Any]:
     try:
         payload = await asyncio.to_thread(runtime.readback_and_request_restore)
     except PrimitiveBasisLiveRuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 409, exc) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
@@ -4230,7 +4232,7 @@ async def app_prepare_primitive_basis_model_part_cleanup() -> dict[str, Any]:
     try:
         return await asyncio.to_thread(runtime.prepare_cleanup)
     except PrimitiveBasisLiveRuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 409, exc) from exc
 
 
 @app.post("/api/app/primitive-basis/live/model-part/finalize")
@@ -4239,7 +4241,7 @@ async def app_finalize_primitive_basis_model_part_live() -> dict[str, Any]:
     try:
         return await asyncio.to_thread(runtime.finalize_after_cleanup)
     except PrimitiveBasisLiveRuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 409, exc) from exc
 
 
 @app.get("/api/app/recoveries")
@@ -4285,7 +4287,7 @@ async def app_request_restore_interrupted_apply_recovery(recovery_id: str) -> di
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("checkpoint_request_failed", exc.status_code, exc) from exc
     denied_goal = payload.get("goalDelivery")
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     if denied_goal is not None:
@@ -4313,7 +4315,7 @@ async def app_request_resolve_interrupted_apply_recovery(
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("checkpoint_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
@@ -4355,7 +4357,7 @@ def app_create_adjustment_checkpoint(request: AdjustmentCheckpointCreateRequest)
     try:
         payload = AGENT_GATEWAY.checkpoint_recovery.create_adjustment_checkpoint(request.model_dump(by_alias=True, exclude_none=True))
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("checkpoint_request_failed", exc.status_code, exc) from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=payload.get("error") or "Adjustment checkpoint could not be created.")
     return payload
@@ -4382,7 +4384,7 @@ def app_update_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpoin
             request.model_dump(by_alias=True, exclude_none=True),
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("checkpoint_request_failed", exc.status_code, exc) from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Adjustment checkpoint was not found.")
     return payload
@@ -4404,7 +4406,7 @@ def app_select_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpoin
             request.model_dump(by_alias=True, exclude_none=True),
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("checkpoint_request_failed", exc.status_code, exc) from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Adjustment checkpoint was not found.")
     return payload
@@ -4418,7 +4420,7 @@ def app_overwrite_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckp
             request.model_dump(by_alias=True, exclude_none=True),
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("checkpoint_request_failed", exc.status_code, exc) from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=payload.get("error") or "Adjustment checkpoint could not be overwritten.")
     return payload
@@ -4445,7 +4447,7 @@ async def app_apply_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("checkpoint_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
@@ -4479,7 +4481,7 @@ async def app_request_restore_adjustment_checkpoint(entry_id: str) -> dict[str, 
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("checkpoint_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
@@ -4532,9 +4534,9 @@ async def app_agent_approve_and_execute(
                 execute_operation=execute_approved,
             )
         except BackgroundGoalDeliveryError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+            raise HTTPException(status_code=exc.status_code, detail=http_error_detail(exc)) from exc
         except (AgentGatewayError, AgentGoalServiceError) as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            raise runtime_http_error("approval_request_failed", exc.status_code, exc) from exc
         payload = {
             "ok": bool(approved.get("ok")),
             "approval": approved.get("approval"),
@@ -4578,7 +4580,7 @@ async def app_agent_approve_and_execute(
         try:
             payload = await asyncio.to_thread(approve_and_execute)
         except AgentGatewayError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            raise runtime_http_error("approval_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     continuation = ensure_dict(payload.get("continuation"))
     if continuation:
@@ -4643,7 +4645,7 @@ async def app_agent_reject(
     try:
         payload = await asyncio.to_thread(reject_and_resume)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("internal_error", exc.status_code, exc) from exc
     denied_goal = payload.get("goalDelivery")
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     continuation = ensure_dict(payload.get("continuation"))
@@ -4714,7 +4716,7 @@ async def app_agent_request_approval_revision(approval_id: str, request: AgentAp
     try:
         payload = await asyncio.to_thread(request_revision_and_resume)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", exc.status_code, exc) from exc
     denied_goal = payload.get("goalDelivery")
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     continuation = ensure_dict(payload.get("continuation"))
@@ -6094,7 +6096,7 @@ def app_finish_chat_attachment_upload(request: ChatAttachmentUploadFinishRequest
         )
     except ChatAttachmentVaultError as exc:
         path.unlink(missing_ok=True)
-        return JSONResponse({"ok": False, "reason": exc.reason, "error": str(exc)}, status_code=exc.status_code)
+        return JSONResponse({"ok": False, "reason": exc.reason, "error": runtime_error_from_exception("attachment_upload_failed", exc)}, status_code=exc.status_code)
     except Exception:
         path.unlink(missing_ok=True)
         raise
@@ -6439,7 +6441,7 @@ def app_create_agent_skill(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         return AGENT_GATEWAY.skills.create_user_skill(payload)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
 
 
 @app.put("/api/app/skills/{skill_id}")
@@ -6447,7 +6449,7 @@ def app_update_agent_skill(skill_id: str, payload: dict[str, Any]) -> dict[str, 
     try:
         return AGENT_GATEWAY.skills.update_user_skill(skill_id, payload)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
 
 
 @app.delete("/api/app/skills/{skill_id}")
@@ -6455,7 +6457,7 @@ def app_delete_agent_skill(skill_id: str) -> dict[str, Any]:
     try:
         return AGENT_GATEWAY.skills.delete_user_skill(skill_id)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
 
 
 def request_model_to_dict(request: Any) -> dict[str, Any]:
@@ -6543,7 +6545,7 @@ def request_supervised_unity_write(
             }
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("internal_error", exc.status_code, exc) from exc
     approval = ensure_dict(created.get("approval"))
     if created.get("autoApproved"):
         execution_result = created.get("result")
@@ -6621,7 +6623,7 @@ def skill_package_error_response(exc: Exception) -> HTTPException:
         status = exc.status_code
     else:
         status = 400 if isinstance(exc, SkillPackageError) else 500
-    return HTTPException(status_code=status, detail=str(exc))
+    return runtime_http_error("skill_request_failed", status, exc)
 
 
 def list_skill_packages_sync(_params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -7350,9 +7352,9 @@ def app_external_agent_connectors_custom(request: ExternalAgentConnectorRequest)
         payload = connector_bundle_sync(request.model_dump(by_alias=True))
         return {**external_agent_status_sync(), **payload}
     except ConnectorInstallError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("internal_error", 400, exc) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("internal_error", 400, exc) from exc
 
 
 @app.post("/api/app/external-agent/gateway")
@@ -7487,7 +7489,7 @@ def app_export_skill_package(request: SkillPackageExportRequest) -> dict[str, An
     try:
         return export_skill_package_sync(request.model_dump(by_alias=True))
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -7497,11 +7499,11 @@ def app_preview_path_to_skill(request: PathToSkillCaptureRequest) -> dict[str, A
     try:
         return PATH_TO_SKILL_PREVIEW.preview(request.model_dump(by_alias=True))
     except PathToSkillControllerError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
     except PathToSkillError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", 400, exc) from exc
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -7511,11 +7513,11 @@ def app_write_path_to_skill(request: PathToSkillCaptureRequest) -> dict[str, Any
     try:
         return PATH_TO_SKILL_WRITE.write(request.model_dump(by_alias=True))
     except PathToSkillControllerError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
     except PathToSkillError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", 400, exc) from exc
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -7528,7 +7530,7 @@ def app_set_skill_package_enabled(skill_package_id: str, request: SkillPackageSt
                 {"skillPackageId": skill_package_id, **request.model_dump(by_alias=True)}
             )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -7542,7 +7544,7 @@ def app_uninstall_skill_package(skill_package_id: str, request: SkillPackageUnin
                 {"skillPackageId": skill_package_id, **payload}
             )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("skill_request_failed", exc.status_code, exc) from exc
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -7585,7 +7587,7 @@ async def app_optimization_apply_request(request: OptimizationApplyRequest) -> d
         )
     except (AgentGatewayError, ValueError) as exc:
         status_code = exc.status_code if isinstance(exc, AgentGatewayError) else 400
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        raise runtime_http_error("workflow_request_failed", status_code, exc) from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=payload)
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
@@ -7611,7 +7613,7 @@ def app_optimization_proof_detail(run_id: str) -> dict[str, Any]:
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Optimizer proof was not found.") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("workflow_request_failed", 400, exc) from exc
 
 
 @app.get("/api/app/optimization/proofs/{run_id}/screenshots/{stage}")
@@ -7623,7 +7625,7 @@ def app_optimization_proof_screenshot(run_id: str, stage: str) -> FileResponse:
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail="Optimizer proof screenshot is outside the artifacts directory.") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("workflow_request_failed", 400, exc) from exc
     return FileResponse(path, media_type=mimetypes.guess_type(str(path))[0] or "application/octet-stream")
 
 
@@ -7639,7 +7641,7 @@ def app_outfit_package_inspect(request: OutfitPackageInspectRequest) -> dict[str
             request.model_dump(by_alias=True)
         )
     except WardrobeOutfitWorkflowError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("workflow_request_failed", exc.status_code, exc) from exc
 
 
 @app.post("/api/app/outfit-imports/plan")
@@ -7649,7 +7651,7 @@ def app_outfit_import_plan(request: OutfitImportPlanRequest) -> dict[str, Any]:
             request.model_dump(by_alias=True)
         )
     except WardrobeOutfitWorkflowError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("workflow_request_failed", exc.status_code, exc) from exc
 
 
 @app.post("/api/app/outfit-imports/request")
@@ -7661,7 +7663,7 @@ async def app_request_outfit_import(request: OutfitImportPlanRequest) -> dict[st
             agent_name="desktop-agent",
         )
     except (AgentGatewayError, WardrobeOutfitWorkflowError) as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("workflow_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
@@ -7710,7 +7712,7 @@ async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]
                 by_alias=True, exclude_unset=True)},
         )
     except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("sub_agent_request_failed", 400, exc) from exc
     await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_COLLABORATION.list_tasks())
     return payload
 
@@ -7748,7 +7750,7 @@ async def app_resume_sub_agent(task_id: str, request: SubAgentResumeRequest) -> 
             task_id, task=request.task, display_name=request.display_name,
         )
     except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("sub_agent_request_failed", 400, exc) from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=409, detail=payload.get("error") or "Sub-agent could not be resumed.")
     await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_COLLABORATION.list_tasks())
@@ -8367,15 +8369,15 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
     try:
         bootstrap = build_agentic_app_bootstrap_payload(refresh_projects=False)
     except Exception as exc:  # noqa: BLE001
-        bootstrap = {"ok": False, "error": str(exc)}
+        bootstrap = {"ok": False, "error": runtime_error_from_exception("support_bundle_section_failed", exc)}
     try:
         doctor = read_agentic_app_doctor()
     except Exception as exc:  # noqa: BLE001
-        doctor = {"ok": False, "error": str(exc)}
+        doctor = {"ok": False, "error": runtime_error_from_exception("support_bundle_section_failed", exc)}
     try:
         checkpoints = AGENT_GATEWAY.checkpoint_recovery.list_checkpoints({"limit": 50})
     except Exception as exc:  # noqa: BLE001
-        checkpoints = {"ok": False, "error": str(exc)}
+        checkpoints = {"ok": False, "error": runtime_error_from_exception("support_bundle_section_failed", exc)}
     diagnostics = diagnostics_state()
     diagnostics.pop("identities", None)
     safety_posture = diagnostics.get("safetyPosture") or safety_posture_state()
@@ -9654,7 +9656,7 @@ def read_agentic_app_doctor() -> dict[str, Any]:
                 f"Doctor diagnostics failed: {exc}",
                 "Doctor should explain optional subsystem failures without blocking normal chat.",
                 "Open logs, copy the diagnostic summary, and continue in manual/read-only mode.",
-                {"error": str(exc)},
+                {},
             ),
         ]
         return {
@@ -9732,7 +9734,7 @@ async def fix_agentic_app_doctor_check(check_id: str, request: DoctorFixRequest)
             "Doctor repair was not applied.",
             {"checkId": check_id, "mode": request.mode, "statusCode": exc.status_code},
         )
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        raise HTTPException(status_code=exc.status_code, detail=http_error_detail(exc)) from exc
     result_status = str(result.get("status") or "failed")
     audit_level = (
         "success"
@@ -9867,7 +9869,7 @@ def agent_runtime_message(request: Request, runtime_request: AgentRuntimeMessage
             agent_name=runtime_request.agent_name,
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_runtime_request_failed", exc.status_code, exc) from exc
 
 
 @app.get("/api/agent/runtime/session/{session_id}")
@@ -9876,7 +9878,7 @@ def agent_runtime_session(session_id: str, request: Request) -> dict[str, Any]:
     try:
         return AGENT_GATEWAY.get_runtime_session(session_id)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("agent_runtime_request_failed", exc.status_code, exc) from exc
 
 
 @app.post("/api/agent/tool/{tool_name}")
@@ -9890,7 +9892,7 @@ async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentT
             tool_request.agent_name,
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("internal_error", exc.status_code, exc) from exc
     params = ensure_dict(tool_request.params or {})
     session_id = str(params.get("sessionId") or params.get("session_id") or "")
     project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "")
@@ -9920,7 +9922,7 @@ async def approve_agent_approval(approval_id: str, request: Request) -> dict[str
     try:
         payload = AGENT_GATEWAY.approval_transactions.approve(approval_id)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("approval_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
@@ -9931,7 +9933,7 @@ async def reject_agent_approval(approval_id: str, request: Request) -> dict[str,
     try:
         payload = AGENT_GATEWAY.approval_transactions.reject(approval_id)
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("approval_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     if payload.get("goalDelivery") is not None:
         await broadcast_background_goal_state({})
@@ -10000,7 +10002,7 @@ async def update_state(request: DashboardStateRequest) -> dict[str, Any]:
                 request.project_path,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise runtime_http_error("config_request_failed", 400, exc) from exc
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Unable to persist the selected Unity project: {exc}") from exc
         DASHBOARD_STATE.selected_project_path = selected_project_path
@@ -10049,11 +10051,11 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
     try:
         config = PROVIDER_CONFIGURATION.resolve_api_request(request)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 400, exc) from exc
     try:
         PROVIDER_CONFIGURATION.save_api_config(config)
     except ProviderConfigurationBusyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 409, exc) from exc
     payload = {
         "configPath": str(CONFIG_PATH),
         "apiConfig": PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
@@ -10215,7 +10217,7 @@ async def update_vision_config(request: VisionConfigRequest) -> dict[str, Any]:
     try:
         config = PROVIDER_CONFIGURATION.resolve_vision_request(request)
     except ProviderCredentialError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 400, exc) from exc
     PROVIDER_CONFIGURATION.save_vision_config(config)
     payload = {
         "configPath": str(CONFIG_PATH),
@@ -10242,7 +10244,7 @@ async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
     try:
         config = PROVIDER_CONFIGURATION.resolve_api_request(request, catalog_only=True)
     except (ProviderCredentialError, ProviderApiTypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 400, exc) from exc
     provider_label = provider_display_name(config.provider)
 
     try:
@@ -10258,7 +10260,7 @@ async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
                 "error": str(exc),
             },
         )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 400, exc) from exc
 
     payload = {
         "provider": config.provider,
@@ -10292,7 +10294,7 @@ def read_reasoning_variants(request: ReasoningVariantsRequest) -> dict[str, Any]
     try:
         return reasoning_variants_descriptor(request.provider, request.model, request.api_type)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise runtime_http_error("config_request_failed", 400, exc) from exc
 
 
 @app.post("/api/app/provider/mcp-selection")
@@ -11030,7 +11032,7 @@ async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
             install_result["launchedUnity"] = True
     except Exception as exc:  # noqa: BLE001
         await emit_log_async("error", "project", "Project installation failed.", {"projectPath": project_path, "error": str(exc)})
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise runtime_http_error("workflow_request_failed", 500, exc) from exc
 
     payload = {
         "ok": True,
@@ -11169,7 +11171,7 @@ async def _run_avatar_tuning_local_store_write(
     try:
         return await asyncio.to_thread(handler, *args)
     except AvatarTuningError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("internal_error", exc.status_code, exc) from exc
     except RuntimeError as exc:
         if map_all_runtime_errors:
             raise to_http_exception(exc) from exc
@@ -15261,7 +15263,7 @@ def audit_managed_avatar_multi_screenshot_sync(
             "error",
             "vision",
             "Managed multi-image analysis was rejected.",
-            {"error": str(exc)},
+            {},
         )
         raise to_http_exception(exc) from exc
 
@@ -19358,7 +19360,7 @@ def build_external_agent_connection_component() -> dict[str, Any]:
         return health_component(
             "unknown",
             "External Agent connection status is unavailable.",
-            {"error": str(exc)},
+            runtime_error_from_exception("external_agent_status_unavailable", exc),
         )
     if not activity.get("gatewayEnabled"):
         return health_component(
@@ -19607,7 +19609,7 @@ def build_project_snapshot_payload() -> dict[str, Any]:
             "status": "error",
             "projectCount": 0,
             "sources": {},
-            "errors": [{"error": str(exc)}],
+            "errors": [runtime_error_from_exception("project_catalog_scan_failed", exc)],
         }
     projects = discover_projects(
         DASHBOARD_STATE.project_roots,
@@ -19926,7 +19928,7 @@ def authenticate_agent_request(request: Request, allow_disabled: bool = False):
             allow_disabled=allow_disabled,
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("authentication_failed", exc.status_code, exc) from exc
 
 
 def authenticate_agent_approval_request(request: Request):
@@ -19937,7 +19939,39 @@ def authenticate_agent_approval_request(request: Request):
             client_host=request.client.host if request.client else "",
         )
     except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise runtime_http_error("approval_request_failed", exc.status_code, exc) from exc
+
+
+def http_error_detail(exc: HTTPException) -> Any:
+    """Normalize middleware error responses onto the unified schema."""
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict) and detail.get("schema") == "vrcforge.runtime_error.v1":
+        return detail
+    return runtime_error("request_rejected", message=str(detail)[:400])
+
+
+def runtime_http_error(
+    code: str,
+    status_code: int,
+    exc: BaseException | None = None,
+    *,
+    message: str = "",
+) -> HTTPException:
+    """HTTPException carrying the unified error schema.
+
+    Endpoint exception text here is endpoint-authored domain copy (these
+    raises previously returned str(exc) verbatim); the schema keeps that
+    message bounded at 500 chars while adding the stable code, and the
+    frontend renders by code first. Raw str(exc) never bypasses the schema.
+    """
+    if exc is not None and not message:
+        message = str(exc)
+    error = (
+        runtime_error_from_exception(code, exc, message=message)
+        if exc is not None
+        else runtime_error(code, message=message)
+    )
+    return HTTPException(status_code=status_code, detail=error)
 
 
 APP_AUTH_PREFIXES = ("/api",)
