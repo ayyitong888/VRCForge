@@ -919,7 +919,13 @@ class WindowsDesktopController:
             "summary": f"Inspected {len(controls)} native child controls.",
         }
         try:
-            accessibility = self.uia.inspect(int(window["windowHandle"]), limit=limit, cancel_check=cancel_check)
+            text_limit = max(256, min(int(params.get("textLimit") or 16_000), 65_536))
+            accessibility = self.uia.inspect(
+                int(window["windowHandle"]),
+                limit=limit,
+                text_limit=text_limit,
+                cancel_check=cancel_check,
+            )
             elements = accessibility.get("elements") if isinstance(accessibility.get("elements"), list) else []
             result.update(
                 {
@@ -940,6 +946,9 @@ class WindowsDesktopController:
                         if isinstance(item, dict)
                     ],
                     "documentText": str(accessibility.get("documentText") or ""),
+                    # True only when the source probe proved end-of-document; the
+                    # model relies on this flag to know whether reading is done.
+                    "documentTextEndReached": bool(accessibility.get("documentTextEndReached")),
                     "selectedText": str(accessibility.get("selectedText") or ""),
                     "accessibilityTree": True,
                     "truncated": bool(accessibility.get("truncated")),
@@ -951,6 +960,7 @@ class WindowsDesktopController:
                 elements,
                 document_text=str(result.get("documentText") or ""),
                 selected_text=str(result.get("selectedText") or ""),
+                document_text_end_reached=bool(result.get("documentTextEndReached")),
             )
             result["snapshotId"] = snapshot_id
             snapshot_row = getattr(self, "_uia_snapshots", {}).get(int(window["windowHandle"]))
@@ -970,6 +980,7 @@ class WindowsDesktopController:
         *,
         document_text: str = "",
         selected_text: str = "",
+        document_text_end_reached: bool = False,
     ) -> str:
         hwnd = int(window["windowHandle"])
         observed_at = time.monotonic()
@@ -987,6 +998,7 @@ class WindowsDesktopController:
             "windowTitle": str(window.get("title") or ""),
             "elements": [dict(item) for item in elements[:500] if isinstance(item, dict)],
             "documentText": str(document_text or ""),
+            "documentTextEndReached": bool(document_text_end_reached),
             "selectedText": str(selected_text or ""),
         }
         if len(snapshots) > 20:
@@ -1036,6 +1048,7 @@ class WindowsDesktopController:
             "textOffset": text_offset,
             "documentTextLength": len(document),
             "documentText": shown_text,
+            "documentTextEndReached": bool(snapshot.get("documentTextEndReached")) and text_offset + text_limit >= len(document),
             "nextTextOffset": text_offset + text_limit if text_offset + text_limit < len(document) else None,
             "summary": (
                 f"Snapshot page: elements {offset}–{offset + len(shown_elements)} of {len(elements)}, "

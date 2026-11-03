@@ -360,7 +360,7 @@ class DesktopComputerUseService:
             "operation", "status", "summary", "count", "stepCount", "width", "height",
             "windowHandle", "x", "y", "durationMs", "snapshotId",
             "elementOffset", "elementCount", "nextElementOffset",
-            "textOffset", "documentTextLength", "nextTextOffset",
+            "textOffset", "documentTextLength", "nextTextOffset", "documentTextEndReached",
         ):
             item = result.get(key)
             if item not in (None, ""):
@@ -381,6 +381,17 @@ class DesktopComputerUseService:
             if len(shown) < len(compact):
                 notices.append(
                     f"{key} truncated to {len(shown)} of {len(compact)} chars ({page_hint} textOffset={len(shown)})"
+                )
+        if str(result.get("documentText") or ""):
+            # The model must know whether reading is finished; a cap hit must
+            # never masquerade as end-of-document.
+            next_text_offset = result.get("nextTextOffset")
+            if next_text_offset not in (None, ""):
+                notices.append(f"more text remains in this snapshot ({page_hint} textOffset={next_text_offset})")
+            elif result.get("documentTextEndReached") is False:
+                notices.append(
+                    "documentTextEndReached=false: more text exists beyond this snapshot; "
+                    "re-call agent_desktop_action inspect_window with a higher textLimit (up to 65536), then page"
                 )
         apps = [item for item in _ensure_list(result.get("apps")) if isinstance(item, dict)][:30]
         if apps:

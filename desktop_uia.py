@@ -25,7 +25,7 @@ $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]
 if ($null -eq $root) { throw 'UI Automation could not resolve the target window.' }
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $limit = [Math]::Max(1, [Math]::Min([int]$request.limit, 500))
-$textLimit = [Math]::Max(256, [Math]::Min([int]$request.textLimit, 16000))
+$textLimit = [Math]::Max(256, [Math]::Min([int]$request.textLimit, 65536))
 $nativeTimeoutMs = [Math]::Max(1000, [Math]::Min([int]$request.nativeTimeoutMs, 25000))
 $deadline = [DateTime]::UtcNow.AddMilliseconds($nativeTimeoutMs)
 $visitLimit = [Math]::Max(100, $limit * 4)
@@ -181,12 +181,20 @@ if ([string]$request.operation -eq 'inspect') {
     if ($focusedNode.Count -gt 0) { $focusedElement = Format-Node $focusedNode[0] }
     $selectedElements = @($nodes | Where-Object { $_.Selected } | ForEach-Object { Format-Node $_ })
     $documentText = ''
+    $documentTextEndReached = $null
     $selectedText = ''
     foreach ($node in $nodes) {
         $textPattern = $null
         try {
             if ($node.Element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
-                if (-not $documentText) { $documentText = [string]$textPattern.DocumentRange.GetText($textLimit) }
+                if (-not $documentText) {
+                    # Fetch one character beyond the cap so equality with the cap
+                    # cannot masquerade as end-of-document; large pages must be
+                    # honestly flagged as having more text.
+                    $rawDocumentText = [string]$textPattern.DocumentRange.GetText($textLimit + 1)
+                    $documentTextEndReached = ($rawDocumentText.Length -le $textLimit)
+                    $documentText = $rawDocumentText.Substring(0, [Math]::Min($rawDocumentText.Length, $textLimit))
+                }
                 if (-not $selectedText) {
                     $fragments = New-Object 'System.Collections.Generic.List[string]'
                     foreach ($range in @($textPattern.GetSelection())) {
@@ -211,6 +219,7 @@ if ([string]$request.operation -eq 'inspect') {
         focusedElement = $focusedElement
         selectedElements = $selectedElements
         documentText = $documentText
+        documentTextEndReached = $documentTextEndReached
         selectedText = $selectedText
     } | ConvertTo-Json -Compress -Depth 10
     exit 0

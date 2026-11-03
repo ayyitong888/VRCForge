@@ -517,6 +517,97 @@ class DesktopExecutorTests(unittest.TestCase):
         with self.assertRaisesRegex(DesktopExecutorError, r"^snapshot_expired:"):
             controller._read_snapshot({"snapshotId": snapshot_id}, {}, lambda: False)  # noqa: SLF001
 
+    def test_inspect_window_passes_text_limit_and_carries_end_of_document_flag(self) -> None:
+        controller = object.__new__(WindowsDesktopController)
+        controller.user32 = SimpleNamespace(EnumChildWindows=lambda *_args: True)
+        controller._uia_snapshots = {}
+        captured: dict[str, Any] = {}
+
+        class FakeUia:
+            def inspect(self, window_handle: int, *, limit: int, text_limit: int, cancel_check=None) -> dict[str, Any]:
+                captured["limit"] = limit
+                captured["text_limit"] = text_limit
+                return {
+                    "elements": [{"index": 0, "name": "body"}],
+                    "documentText": "ご説明" * 3000,
+                    "documentTextEndReached": False,
+                    "truncated": False,
+                }
+
+        controller.uia = FakeUia()
+        controller._resolve_input_window = lambda _params: {"windowHandle": 12, "processId": 3, "title": "BOOTH"}  # type: ignore[method-assign]
+        result = controller._inspect_window({"textLimit": 5000}, {}, lambda: False)  # noqa: SLF001
+
+        self.assertEqual(captured["text_limit"], 5000, "caller textLimit must reach the UIA helper")
+        self.assertIs(result["documentTextEndReached"], False, "end-of-document flag must reach the model result")
+        snapshot = controller._uia_snapshots[12]  # noqa: SLF001
+        self.assertIs(snapshot["documentTextEndReached"], False)
+
+    def test_read_snapshot_reports_whether_document_reading_is_finished(self) -> None:
+        controller = object.__new__(WindowsDesktopController)
+        controller._uia_snapshots = {}
+        incomplete_id = controller._cache_uia_snapshot(  # noqa: SLF001
+            {"windowHandle": 1, "processId": 1, "title": "large"},
+            [],
+            document_text="ご説明" * 100,
+            document_text_end_reached=False,
+        )
+        complete_id = controller._cache_uia_snapshot(  # noqa: SLF001
+            {"windowHandle": 2, "processId": 1, "title": "small"},
+            [],
+            document_text="ご説明" * 100,
+            document_text_end_reached=True,
+        )
+
+        tail = controller._read_snapshot(  # noqa: SLF001
+            {"snapshotId": incomplete_id, "textOffset": 250}, {}, lambda: False
+        )
+        self.assertIsNone(tail["nextTextOffset"])
+        self.assertIs(tail["documentTextEndReached"], False, "an incomplete capture is never reported as finished")
+
+        finished = controller._read_snapshot(  # noqa: SLF001
+            {"snapshotId": complete_id, "textOffset": 250}, {}, lambda: False
+        )
+        self.assertIs(finished["documentTextEndReached"], True, "a proved-complete document at its tail reports finished")
+
+    def test_observation_distinguishes_snapshot_paging_from_unfinished_document(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gateway = AgentGateway(Path(temp_dir) / "config.json", Path(temp_dir) / "audit")
+            unfinished = gateway.desktop.desktop_action_observation({
+                "operation": "inspect_window",
+                "count": 1,
+                "controls": [{"index": 0, "name": "body", "controlType": "Text"}],
+                "documentText": "短いが続きがある本文",
+                "documentTextEndReached": False,
+                "snapshotId": "snap-1-1",
+                "summary": "Inspected 1 UI Automation elements.",
+            })
+            finished = gateway.desktop.desktop_action_observation({
+                "operation": "inspect_window",
+                "count": 1,
+                "controls": [{"index": 0, "name": "body", "controlType": "Text"}],
+                "documentText": "短くて完結な本文",
+                "documentTextEndReached": True,
+                "snapshotId": "snap-1-1",
+                "summary": "Inspected 1 UI Automation elements.",
+            })
+            paged = gateway.desktop.desktop_action_observation({
+                "operation": "read_snapshot",
+                "snapshotId": "snap-1-1",
+                "documentText": "続きの本文",
+                "documentTextLength": 20000,
+                "nextTextOffset": 9000,
+                "documentTextEndReached": False,
+                "summary": "Snapshot page.",
+            })
+
+        self.assertIn("documentTextEndReached=false: more text exists beyond this snapshot", unfinished)
+        self.assertIn("higher textLimit", unfinished)
+        self.assertNotIn("more text exists beyond this snapshot", finished)
+        self.assertIn("more text remains in this snapshot", paged)
+        self.assertIn("textOffset=9000", paged)
+        self.assertNotIn("beyond this snapshot", paged)
+
     def test_failed_desktop_action_envelope_surfaces_error_to_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             gateway = AgentGateway(Path(temp_dir) / "config.json", Path(temp_dir) / "audit")
