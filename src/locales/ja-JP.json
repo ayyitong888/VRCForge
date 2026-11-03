@@ -1405,7 +1405,8 @@
     "showMore": "さらに {{count}} 件表示",
     "errors": {
       "sub_agent_task_failed": "サブエージェントのタスクが失敗しました。詳細を確認するか再試行してください。",
-      "sub_agent_task_cancelled": "サブエージェントのタスクはキャンセルされました。"
+      "sub_agent_task_cancelled": "サブエージェントのタスクはキャンセルされました。",
+      "sub_agent_task_timeout": "サブエージェントのタスクがタイムアウトしました。確認またはタイムアウト調整後に再試行してください。"
     }
   },
   "connector": {

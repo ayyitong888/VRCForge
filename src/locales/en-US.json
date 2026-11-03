@@ -1412,7 +1412,8 @@
     "showMore": "Show {{count}} more",
     "errors": {
       "sub_agent_task_failed": "The sub-agent task failed. Open the task details or retry.",
-      "sub_agent_task_cancelled": "The sub-agent task was cancelled."
+      "sub_agent_task_cancelled": "The sub-agent task was cancelled.",
+      "sub_agent_task_timeout": "The sub-agent task timed out and was stopped. Check the task or adjust the timeout, then retry."
     }
   },
   "connector": {

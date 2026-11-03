@@ -1405,7 +1405,8 @@
     "showMore": "再顯示 {{count}} 個",
     "errors": {
       "sub_agent_task_failed": "子代理任務失敗,請查看任務詳情或重試。",
-      "sub_agent_task_cancelled": "子代理任務已取消。"
+      "sub_agent_task_cancelled": "子代理任務已取消。",
+      "sub_agent_task_timeout": "子代理任務逾時,已終止。請檢查任務或調整逾時後重試。"
     }
   },
   "connector": {
