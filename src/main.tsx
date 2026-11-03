@@ -9,18 +9,20 @@ async function main() {
     return module;
   });
   const appModule = import("./App");
+  const boundaryModule = import("./error-boundary");
   const appStyles = import.meta.glob("./styles.css", { eager: false });
-  const [{ default: React }, { createRoot }, , , { default: App }] = await Promise.all([
+  const [{ default: React }, { createRoot }, , , { default: App }, { RootErrorBoundary }] = await Promise.all([
     reactModule,
     reactDomModule,
     i18nModule,
     appStyles["./styles.css"](),
     appModule,
+    boundaryModule,
   ]);
   metrics.appDependenciesReadyMs ??= Math.round(performance.now());
 
   const root = createRoot(document.getElementById("root") as HTMLElement);
-  root.render(React.createElement(React.StrictMode, null, React.createElement(App)));
+  root.render(React.createElement(React.StrictMode, null, React.createElement(RootErrorBoundary, null, React.createElement(App))));
   metrics.appRenderRequestedMs ??= Math.round(performance.now());
 }
 
