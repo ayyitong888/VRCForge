@@ -649,6 +649,34 @@ def test_background_shell_running_cannot_be_claimed_complete() -> None:
     }
 
 
+@pytest.mark.parametrize("tool", ["vrcforge_delegate_subagent", "vrcforge_resume_subagent", "shell"])
+def test_running_action_takes_precedence_over_prior_visual_failure_without_erasing_it(tool) -> None:
+    loop = AgentTaskLoop("correct clipping and verify again")
+    audit = loop.record_action(
+        kind="skill", tool="vrcforge_vision_audit_multi", arguments={"captureReceipt": "capture"},
+        raw_result={"ok": True, "visualVerified": False, "coverageComplete": True, "captureEvidenceVerified": True},
+        outcome=ok_outcome("clipping found"),
+    )
+    running = loop.record_action(
+        kind="shell" if tool == "shell" else "skill", tool=tool, arguments={"task": "inspect correction"},
+        raw_result={"ok": True, "status": "running", "taskId": "child"},
+        outcome=ok_outcome("running"),
+    )
+    plan = {"nextStep": "done", "completionClaim": {"satisfied": True}, "reply": "done"}
+    gated = loop.gate_terminal(plan)
+    assert gated["nextStep"] == "waiting_for_tool"
+    assert gated["task"]["status"] == "running"
+    assert audit["status"] == "failed"
+    assert audit["outcome"]["verification"]["state"] == "failed"
+
+    loop.record_action(
+        kind=running["kind"], tool=tool, arguments={"task": "inspect correction"},
+        raw_result={"ok": True, "status": "completed"}, outcome=ok_outcome("inspection complete"),
+    )
+    assert loop.gate_terminal(plan)["nextStep"] == "tool_failed"
+    assert loop.gate_terminal(plan)["completionGate"]["reason"] == "verification_failed"
+
+
 def test_same_background_action_can_finish_before_the_completion_claim() -> None:
     loop = AgentTaskLoop("run the worker", session_id="session-shell")
     arguments = {"command": "python worker.py"}

@@ -8539,7 +8539,7 @@ class AgentGateway:
                     "reason": "approval_pending",
                 }
                 top_plan = gated_pending
-        elif blocking_completion_outcomes and not terminal_planner_failure and not pending_question_boundary and not top_plan.get("scopeDenied") and terminal_status not in {
+        elif blocking_completion_outcomes and not task_loop.has_running_actions() and not terminal_planner_failure and not pending_question_boundary and not top_plan.get("scopeDenied") and terminal_status not in {
             "cancelled",
             "context_compaction_required",
             "loop_suppressed",

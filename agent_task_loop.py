@@ -2031,21 +2031,14 @@ class AgentTaskLoop:
             for item in self._actions.values()
             if _status(item.get("status")) != "superseded"
         }
-        question_wait = any(
-            _status(item.get("status")) == "needs_user_action"
-            and str(item.get("tool") or "") in {"vrcforge_ask_user", "vrcforge_call_user"}
-            for item in self._actions.values()
-        )
         if "cancelled" in statuses:
             status = "cancelled"
-        elif question_wait:
-            status = "needs_user_action"
-        elif "failed" in statuses:
-            status = "failed"
         elif "needs_user_action" in statuses:
             status = "needs_user_action"
         elif "running" in statuses:
             status = "running"
+        elif "failed" in statuses:
+            status = "failed"
         elif self._actions and statuses == {"completed"}:
             status = "completed"
         else:
@@ -2054,6 +2047,9 @@ class AgentTaskLoop:
             **self.planner_projection(),
             "status": _bounded_text(status_override, 40) or status,
         }
+
+    def has_running_actions(self) -> bool:
+        return any(_status(action.get("status")) == "running" for action in self._actions.values())
 
     def action_blocks_completion(self, action_id: str) -> bool:
         """Keep obligations authoritative while retaining failed native observations."""
@@ -2109,6 +2105,7 @@ class AgentTaskLoop:
         # receipts remain in the snapshot, but must not replace the prompt the
         # user can actually answer now.
         actions = list(self._actions.values())
+        running = [action for action in actions if _status(action.get("status")) == "running"]
         question_wait = any(
             _status(item.get("status")) == "needs_user_action"
             and str(item.get("tool") or "") in {"vrcforge_ask_user", "vrcforge_call_user"}
@@ -2126,6 +2123,10 @@ class AgentTaskLoop:
         for action in actions:
             status = _status(action.get("status"))
             if status == "superseded":
+                continue
+            # Historical failure remains a completion obligation. It cannot
+            # terminate a turn whose corrective work is still running.
+            if status == "failed" and running:
                 continue
             if status == "failed" and not self.action_blocks_completion(str(action.get("actionId") or "")):
                 continue
@@ -2145,9 +2146,6 @@ class AgentTaskLoop:
                     replacement["task"] = self.snapshot()
                     return replacement
 
-        running = [
-            action for action in self._actions.values() if _status(action.get("status")) == "running"
-        ]
         if running:
             label = _bounded_text(running[0].get("tool"), 160) or "background action"
             gated.update(

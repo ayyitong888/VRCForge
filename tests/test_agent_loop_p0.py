@@ -4143,6 +4143,52 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
 
 
+    def test_visual_failure_does_not_terminate_running_child_correction(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        for child_tool in ("vrcforge_delegate_subagent", "vrcforge_resume_subagent"):
+            with self.subTest(child_tool=child_tool):
+                session_id = f"visual-correction-{child_tool}"
+                gateway.runtime_sessions.load_internal_tool_block(session_id, "attachments")
+                child_arguments = ({"role": "project_index_review", "task": "Inspect clipping"}
+                                   if child_tool == "vrcforge_delegate_subagent" else
+                                   {"taskId": "child", "task": "Inspect remaining clipping"})
+                plans = iter([
+                    {"planner": "llm", "skillNeeded": True,
+                     "skillTool": "vrcforge_vision_audit_multi", "skillParams": {"captureReceipt": "capture"},
+                     "continueLoop": True, "nextStep": "call_skill"},
+                    {"planner": "llm", "skillNeeded": True,
+                     "skillTool": child_tool, "skillParams": child_arguments,
+                     "continueLoop": True, "nextStep": "call_skill"},
+                    {"planner": "llm", "reply": "Waiting for correction.",
+                     "completionClaim": {"satisfied": False}, "continueLoop": False, "nextStep": "done"},
+                ])
+
+                def execute(_owner, tool_name, _params, agent_name=None, owner_id=""):
+                    raw = ({"ok": True, "overallStatus": "clipping", "visualVerified": False,
+                            "coverageComplete": True, "captureEvidenceVerified": True,
+                            "results": [{"angle": "back", "status": "clipping"}], "captureReceipt": "capture"}
+                           if tool_name == "vrcforge_vision_audit_multi" else
+                           {"ok": True, "status": "running", "taskId": "child"})
+                    return {"tool": tool_name, "status": "executed", "result": raw,
+                            "outcome": {"status": "ok", "summary": "observed"}}
+
+                with patch.object(dashboard_server.PROVIDER_MODEL_CATALOG, "resolve_context_limit", return_value=65536), patch.object(
+                    gateway.runtime_planner, "plan_agent_turn", side_effect=lambda *_a, **_k: next(plans),
+                ), patch.object(
+                    type(gateway.runtime_skills), "execute", autospec=True, side_effect=execute,
+                ) as execute_skill:
+                    result = gateway.runtime_message({"message": "Inspect and correct clipping.",
+                        "projectPath": str(project), "projectRoot": str(project),
+                        "session_id": session_id, "client_turn_id": session_id})
+
+                self.assertEqual(execute_skill.call_count, 2, [(s.get("tool"), s.get("status"), s.get("issues")) for s in result["steps"]])
+                self.assertEqual(result["plan"]["nextStep"], "waiting_for_tool", result["plan"])
+                self.assertEqual(result["plan"]["task"]["status"], "running")
+                audit = next(a for a in result["plan"]["task"]["actions"] if a["tool"] == "vrcforge_vision_audit_multi")
+                self.assertEqual(audit["status"], "failed")
+                self.assertEqual(audit["outcome"]["verification"]["state"], "failed")
+
     def test_visual_correction_is_bounded_even_when_receipt_ids_change(self) -> None:
         gateway = self.gateway
         session_id = "visual-progress-correction-session"
