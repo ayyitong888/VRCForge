@@ -178,7 +178,7 @@ if ([string]$request.operation -eq 'read_text') {
     $textOffset = [Math]::Max(0, [int]$request.textOffset)
     $readLimit = [Math]::Max(256, [Math]::Min([int]$request.textLimit, 65536))
     $readText = ''
-    $readEndReached = $true
+    $readEndReached = 'unknown'
     $readFromPattern = $false
     foreach ($node in $nodes) {
         $textPattern = $null
@@ -203,7 +203,8 @@ if ([string]$request.operation -eq 'read_text') {
     }
     if (-not $readText -and -not $readFromPattern) {
         # Edit-style controls expose their whole content as the element name;
-        # page it by offset with an exact end signal from its known length.
+        # page it by offset. The name length cannot prove the document end, so
+        # the flag stays unknown instead of claiming the read finished.
         $nameNode = $null
         foreach ($node in $nodes) {
             try {
@@ -218,7 +219,7 @@ if ([string]$request.operation -eq 'read_text') {
             } else {
                 $readText = ''
             }
-            $readEndReached = ($textOffset + $readLimit) -ge $fullName.Length
+            $readEndReached = 'unknown'
         }
     }
     [ordered]@{
@@ -236,7 +237,7 @@ if ([string]$request.operation -eq 'read_text') {
     if ($focusedNode.Count -gt 0) { $focusedElement = Format-Node $focusedNode[0] }
     $selectedElements = @($nodes | Where-Object { $_.Selected } | ForEach-Object { Format-Node $_ })
     $documentText = ''
-    $documentTextEndReached = $true
+    $documentTextEndReached = 'unknown'
     $selectedText = ''
     foreach ($node in $nodes) {
         $textPattern = $null
@@ -264,9 +265,10 @@ if ([string]$request.operation -eq 'read_text') {
         } catch { }
     }
     if (-not $documentText) {
-        # No TextPattern document: edit-style controls carry the full content in
-        # the element name, so the longest name becomes the bounded capture and
-        # the cap still cannot masquerade as end-of-document.
+        # No TextPattern document: edit-style controls carry their content in
+        # the element name, so the longest name becomes the bounded capture.
+        # A name length can never prove the document end, so the flag stays
+        # unknown and the model is told the body source is unverifiable.
         $nameNode = $null
         foreach ($node in $nodes) {
             try {
@@ -281,7 +283,7 @@ if ([string]$request.operation -eq 'read_text') {
                 $documentTextEndReached = $false
             } else {
                 $documentText = $fullName
-                $documentTextEndReached = $true
+                $documentTextEndReached = 'unknown'
             }
         }
     }

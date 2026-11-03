@@ -387,19 +387,31 @@ class DesktopComputerUseService:
             # The model must know whether reading is finished; a cap hit must
             # never masquerade as end-of-document.
             next_text_offset = result.get("nextTextOffset")
+            end_flag = result.get("documentTextEndReached")
+            end_flag_unknown = "documentTextEndReached" in result and end_flag is None
             if next_text_offset not in (None, ""):
                 notices.append(f"more text remains in this snapshot ({page_hint} textOffset={next_text_offset})")
-            elif result.get("documentTextEndReached") is False:
+            elif end_flag is False:
                 notices.append(
                     "documentTextEndReached=false: more text exists beyond this snapshot; "
                     "continue with read_snapshot (it reads further from the live document into the same snapshot)"
                 )
+            if end_flag_unknown:
+                notices.append(
+                    "documentTextEndReached=unknown: the body text came from an element-name fallback "
+                    "(this window exposes no TextPattern document); the true document end cannot be proven"
+                )
             artifact_path = str(result.get("documentArtifactPath") or "")
-            reading_unfinished = result.get("documentTextEndReached") is not True or next_text_offset not in (None, "")
+            reading_unfinished = end_flag is not True or next_text_offset not in (None, "")
             if artifact_path and reading_unfinished:
                 notices.append(
                     f"full captured text saved at {artifact_path}; page it with vrcforge_read_text_file if readable there"
                 )
+        elif "documentTextEndReached" in result and result["documentTextEndReached"] is None:
+            notices.append(
+                "documentTextEndReached=unknown: no readable body text was found in this window "
+                "(no TextPattern document); treat the body as unreadable rather than finished"
+            )
         apps = [item for item in _ensure_list(result.get("apps")) if isinstance(item, dict)][:30]
         if apps:
             parts.append(

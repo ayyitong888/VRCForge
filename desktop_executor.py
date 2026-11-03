@@ -946,9 +946,11 @@ class WindowsDesktopController:
                         if isinstance(item, dict)
                     ],
                     "documentText": str(accessibility.get("documentText") or ""),
-                    # True only when the source probe proved end-of-document; the
-                    # model relies on this flag to know whether reading is done.
-                    "documentTextEndReached": bool(accessibility.get("documentTextEndReached")),
+                    # True/False only when the source probe proved it; None means
+                    # the body source (element-name fallback) cannot prove the end.
+                    "documentTextEndReached": self._map_document_end_flag(
+                        accessibility.get("documentTextEndReached")
+                    ),
                     "selectedText": str(accessibility.get("selectedText") or ""),
                     "accessibilityTree": True,
                     "truncated": bool(accessibility.get("truncated")),
@@ -960,7 +962,7 @@ class WindowsDesktopController:
                 elements,
                 document_text=str(result.get("documentText") or ""),
                 selected_text=str(result.get("selectedText") or ""),
-                document_text_end_reached=bool(result.get("documentTextEndReached")),
+                document_text_end_reached=result.get("documentTextEndReached"),
             )
             result["snapshotId"] = snapshot_id
             if str(result.get("documentText") or ""):
@@ -978,6 +980,18 @@ class WindowsDesktopController:
     # Upper bound for the in-memory text capture of one snapshot; the durable
     # full capture always lives in the artifact file next to the screenshots.
     SNAPSHOT_TEXT_MAX_CHARS = 1_000_000
+    # Live continuation re-reads this much of the already-captured tail and
+    # requires a byte match before appending; a mismatch means the document
+    # changed under the snapshot and the append is refused.
+    SEAM_OVERLAP_CHARS = 64
+
+    @staticmethod
+    def _map_document_end_flag(raw: Any) -> bool | None:
+        if raw is True:
+            return True
+        if raw is False:
+            return False
+        return None  # 'unknown': the body source cannot prove the document end
 
     def _document_artifact_path(self, snapshot_id: str) -> Path:
         return self.capture_dir / "documents" / f"{snapshot_id}.txt"
@@ -1000,7 +1014,7 @@ class WindowsDesktopController:
         *,
         document_text: str = "",
         selected_text: str = "",
-        document_text_end_reached: bool = False,
+        document_text_end_reached: bool | None = False,
     ) -> str:
         hwnd = int(window["windowHandle"])
         observed_at = time.monotonic()
@@ -1019,7 +1033,7 @@ class WindowsDesktopController:
             "windowTitle": str(window.get("title") or ""),
             "elements": [dict(item) for item in elements[:500] if isinstance(item, dict)],
             "documentText": str(document_text or ""),
-            "documentTextEndReached": bool(document_text_end_reached),
+            "documentTextEndReached": document_text_end_reached,
             "selectedText": str(selected_text or ""),
         }
         if len(snapshots) > 20:
@@ -1057,16 +1071,18 @@ class WindowsDesktopController:
         document = str(snapshot.get("documentText") or "")
         continuation_note = ""
         # Pages beyond the captured text continue reading the live document and
-        # append to this same snapshot, so earlier pages stay byte-stable while
-        # reading has no fixed wall. Failures keep serving the captured text and
-        # say so instead of pretending completion.
+        # append to this same snapshot. The live read overlaps the captured tail
+        # and requires a byte-identical seam before appending, so a document
+        # that changed under the snapshot is never spliced. Failures keep
+        # serving the captured text and say so instead of pretending completion.
         window_handle = int(snapshot.get("windowHandle") or 0)
         if (
             window_handle
-            and not snapshot.get("documentTextEndReached")
+            and snapshot.get("documentTextEndReached") is not True
             and text_offset + text_limit > len(document)
         ):
-            fetch_from = len(document)
+            overlap = min(self.SEAM_OVERLAP_CHARS, len(document))
+            fetch_from = len(document) - overlap
             fetch_limit = max(256, text_offset + text_limit - fetch_from)
             try:
                 live = self.uia.read_text(
@@ -1076,18 +1092,28 @@ class WindowsDesktopController:
                     cancel_check=cancel_check,
                 )
                 fetched = str(live.get("text") or "")
-                if fetched and len(document) + len(fetched) <= self.SNAPSHOT_TEXT_MAX_CHARS:
-                    document = document + fetched
-                    snapshot["documentText"] = document
-                    snapshot["documentTextEndReached"] = bool(live.get("endReached"))
-                    self._write_document_artifact(snapshot_id, document)
-                elif fetched:
-                    continuation_note = (
-                        "liveTextContinuation=cache_exhausted: the snapshot text cache is full; "
-                        "the artifact file holds the durable capture"
-                    )
                 if not fetched:
                     continuation_note = "liveTextContinuation=unavailable: the live document had no more readable text"
+                elif fetched[:overlap] != document[fetch_from:]:
+                    continuation_note = (
+                        "liveTextContinuation=stale: the live document changed under this snapshot "
+                        "(the paging seam does not match); the snapshot is no longer valid — "
+                        "re-run inspect_window for a fresh snapshot"
+                    )
+                else:
+                    appended = fetched[overlap:]
+                    if appended and len(document) + len(appended) <= self.SNAPSHOT_TEXT_MAX_CHARS:
+                        document = document + appended
+                        snapshot["documentText"] = document
+                        snapshot["documentTextEndReached"] = self._map_document_end_flag(live.get("endReached"))
+                        self._write_document_artifact(snapshot_id, document)
+                    elif appended:
+                        continuation_note = (
+                            "liveTextContinuation=cache_exhausted: the snapshot text cache is full; "
+                            "the artifact file holds the durable capture"
+                        )
+                    if not appended and not continuation_note:
+                        continuation_note = "liveTextContinuation=unavailable: the live document had no more readable text"
             except DesktopUiaCancelled as exc:
                 raise DesktopActionCancelled(str(exc)) from exc
             except DesktopUiaError as exc:
@@ -1097,6 +1123,13 @@ class WindowsDesktopController:
                 )
         shown_elements = elements[offset : offset + limit]
         shown_text = document[text_offset : text_offset + text_limit]
+        snapshot_end = snapshot.get("documentTextEndReached")
+        if snapshot_end is True:
+            computed_end: bool | None = text_offset + text_limit >= len(document)
+        elif snapshot_end is False:
+            computed_end = False
+        else:
+            computed_end = None  # the body source cannot prove the document end
         result = {
             "operation": "read_snapshot",
             "snapshotId": snapshot_id,
@@ -1109,7 +1142,7 @@ class WindowsDesktopController:
             "textOffset": text_offset,
             "documentTextLength": len(document),
             "documentText": shown_text,
-            "documentTextEndReached": bool(snapshot.get("documentTextEndReached")) and text_offset + text_limit >= len(document),
+            "documentTextEndReached": computed_end,
             "nextTextOffset": text_offset + text_limit if text_offset + text_limit < len(document) else None,
             "summary": (
                 f"Snapshot page: elements {offset}–{offset + len(shown_elements)} of {len(elements)}, "
