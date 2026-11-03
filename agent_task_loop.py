@@ -1471,6 +1471,9 @@ class AgentTaskLoop:
     history: list[dict[str, Any]] = field(default_factory=list)
     _actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     _requirements: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Requirements seeded from the previous turn's pending obligations, mapped
+    # to their carryover generation so abandoned work self-expires.
+    _inherited_obligations: dict[str, int] = field(default_factory=dict)
     _skill_policy: dict[str, Any] = field(default_factory=dict)
     _skill_context: dict[str, Any] = field(default_factory=dict)
     _managed_visual_capture_action_ids: list[str] = field(default_factory=list)
@@ -1900,6 +1903,8 @@ class AgentTaskLoop:
         tool: str,
         arguments: Any | None = None,
         verification_profile: str = "",
+        inherited: bool = False,
+        generation: int = 0,
     ) -> dict[str, Any]:
         effective_profile = _bounded_text(verification_profile, 80) or _TOOL_DEFAULT_VERIFICATION_PROFILE.get(
             str(tool or "").strip(),
@@ -1920,6 +1925,10 @@ class AgentTaskLoop:
         if requirement is None:
             raise ValueError("task requirement requires kind and tool")
         self._requirements[requirement["requirementId"]] = requirement
+        if inherited:
+            self._inherited_obligations[requirement["requirementId"]] = max(
+                0, min(int(generation), 1000)
+            )
         return dict(requirement)
 
     def activate_skill_policy(
@@ -1998,6 +2007,75 @@ class AgentTaskLoop:
             for action in self._actions.values()
             if _status(action.get("status")) == "completed"
         ]
+
+    def _requirement_matched(self, requirement: Mapping[str, Any]) -> bool:
+        required_action_id = str(requirement.get("actionId") or "")
+        return any(
+            _status(action.get("status")) == "completed"
+            and (
+                (
+                    str(requirement.get("kind") or "") == "action"
+                    and str(requirement.get("tool") or "") == "*"
+                )
+                or (
+                    str(action.get("kind") or "") == str(requirement.get("kind") or "")
+                    and str(action.get("tool") or "") == str(requirement.get("tool") or "")
+                )
+            )
+            and (
+                not required_action_id
+                or str(action.get("actionId") or "") == required_action_id
+            )
+            for action in self._actions.values()
+        )
+
+    def pending_obligations(self, *, max_obligations: int = 3) -> list[dict[str, Any]]:
+        """Unmet task obligations to constrain the next turn's completion gate.
+
+        Exports this turn's own unmet requirements and completion-blocking
+        failed actions, plus still-unmet inherited obligations with their
+        generation bumped so abandoned work self-expires. The actionId is
+        dropped so a later retry of the same kind/tool satisfies the
+        obligation.
+        """
+        obligations: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def emit(kind: str, tool: str, profile: str, generation: int) -> None:
+            kind = _bounded_text(kind, 32)
+            tool = _bounded_text(tool, 160)
+            if not kind or not tool or (kind, tool) in seen or len(obligations) >= max_obligations:
+                return
+            seen.add((kind, tool))
+            obligations.append(
+                {
+                    "kind": kind,
+                    "tool": tool,
+                    "verificationProfile": _bounded_text(profile, 80),
+                    "generation": generation,
+                }
+            )
+
+        for requirement in self._requirements.values():
+            if self._requirement_matched(requirement):
+                continue
+            inherited_generation = self._inherited_obligations.get(
+                str(requirement.get("requirementId") or "")
+            )
+            generation = 0 if inherited_generation is None else inherited_generation + 1
+            emit(
+                str(requirement.get("kind") or ""),
+                str(requirement.get("tool") or ""),
+                str(requirement.get("verificationProfile") or ""),
+                generation,
+            )
+        for action_id, action in self._actions.items():
+            if (
+                _status(action.get("status")) == "failed"
+                and self.action_blocks_completion(action_id)
+            ):
+                emit(str(action.get("kind") or ""), str(action.get("tool") or ""), "", 0)
+        return obligations
 
     def historical_steps(self) -> list[dict[str, Any]]:
         """Project only bounded action identity for a resumed Runtime turn."""
@@ -2175,26 +2253,11 @@ class AgentTaskLoop:
             if not (isinstance(claim, Mapping) and claim.get("satisfied") is True) else ""
         )
         completed_ids = self.completed_action_ids()
-        missing_requirements: list[str] = []
-        for requirement in self._requirements.values():
-            required_action_id = str(requirement.get("actionId") or "")
-            matched = any(
-                _status(action.get("status")) == "completed"
-                and (
-                    (
-                        str(requirement.get("kind") or "") == "action"
-                        and str(requirement.get("tool") or "") == "*"
-                    )
-                    or (
-                        str(action.get("kind") or "") == str(requirement.get("kind") or "")
-                        and str(action.get("tool") or "") == str(requirement.get("tool") or "")
-                    )
-                )
-                and (not required_action_id or str(action.get("actionId") or "") == required_action_id)
-                for action in self._actions.values()
-            )
-            if not matched:
-                missing_requirements.append(str(requirement.get("requirementId") or ""))
+        missing_requirements: list[str] = [
+            str(requirement.get("requirementId") or "")
+            for requirement in self._requirements.values()
+            if not self._requirement_matched(requirement)
+        ]
         if missing_requirements:
             gated.update(
                 {

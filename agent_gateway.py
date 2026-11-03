@@ -5686,6 +5686,20 @@ class AgentGateway:
                     or getattr(self.ensure_config(), "advanced_settings", None)
                 ),
             )
+            # Seed the previous turn's unmet obligations so a fresh loop cannot
+            # mark the task done while the owed work is still missing. Seeded
+            # obligations expire after a bounded number of carryover turns;
+            # every turn's terminal write overwrites the stored set.
+            for obligation in self._runtime_session_state.pending_obligations(session_id):
+                if int(obligation.get("generation") or 0) >= 3:
+                    continue
+                task_loop.require_action(
+                    kind=str(obligation.get("kind") or ""),
+                    tool=str(obligation.get("tool") or ""),
+                    verification_profile=str(obligation.get("verificationProfile") or ""),
+                    inherited=True,
+                    generation=int(obligation.get("generation") or 0),
+                )
         # Persist the host-resolved bound in every continuation seed, including
         # questions restored before the frontend had discovered model capacity.
         bound_context_limit = params.get("_contextCompactionLimit")
@@ -8738,6 +8752,16 @@ class AgentGateway:
             turn=turn,
         )
         params["_runtimeTurnRecorded"] = True
+
+        # Carry this turn's unmet obligations into the next turn's completion
+        # gate; a completed turn clears them. Bounded and self-expiring on the
+        # loop side (inherited obligations bump their generation).
+        self._runtime_session_state.set_pending_obligations(
+            session_id,
+            []
+            if str(top_plan.get("nextStep") or "") == "done"
+            else task_loop.pending_obligations(),
+        )
 
         self.append_audit(
             {

@@ -158,6 +158,44 @@ class AgentRuntimeSessionState:
             session = self._sessions.setdefault(key, {"id": key, "turns": []})
             session["checkpointChoice"] = copy.deepcopy(choice)
 
+    def pending_obligations(self, session_id: str) -> list[dict[str, Any]]:
+        """Unmet task obligations carried from the previous turn, if any."""
+        with self._ports.shared_state_lock:
+            session = self._sessions.get(str(session_id or "").strip())
+            obligations = session.get("pendingObligations") if session else None
+            return copy.deepcopy(obligations) if isinstance(obligations, list) else []
+
+    def set_pending_obligations(self, session_id: str, obligations: list[dict[str, Any]]) -> None:
+        """Store the next turn's seeded obligations (empty list clears)."""
+        key = str(session_id or "").strip()
+        bounded: list[dict[str, Any]] = []
+        if isinstance(obligations, list):
+            for item in obligations[:3]:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind") or "").strip()[:32]
+                tool = str(item.get("tool") or "").strip()[:160]
+                if not kind or not tool:
+                    continue
+                try:
+                    generation = max(0, min(int(item.get("generation") or 0), 1000))
+                except (TypeError, ValueError):
+                    generation = 0
+                bounded.append({
+                    "kind": kind,
+                    "tool": tool,
+                    "verificationProfile": str(item.get("verificationProfile") or "").strip()[:80],
+                    "generation": generation,
+                })
+        if not key:
+            return
+        with self._ports.shared_state_lock:
+            session = self._sessions.setdefault(key, {"id": key, "turns": []})
+            if bounded:
+                session["pendingObligations"] = copy.deepcopy(bounded)
+            else:
+                session.pop("pendingObligations", None)
+
     def session_count(self) -> int:
         with self._ports.shared_state_lock:
             return len(self._sessions)
