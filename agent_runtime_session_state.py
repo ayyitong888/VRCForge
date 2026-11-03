@@ -349,8 +349,10 @@ class AgentRuntimeSessionState:
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
         required = {"binding", "turnId", "messages", "activeTurnStart"}
-        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition", "humanUserMessageIndices"}:
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition", "humanUserMessageIndices", "activeDispatchCallId"}:
             raise ValueError("native snapshot fields are invalid")
+        if "activeDispatchCallId" in snapshot and not isinstance(snapshot["activeDispatchCallId"], str):
+            raise ValueError("native dispatch marker must be a string")
         if "bindingToolDefinition" in snapshot:
             definition = snapshot["bindingToolDefinition"]
             if definition is not None and (not isinstance(definition, dict)
@@ -488,25 +490,12 @@ class AgentRuntimeSessionState:
             if existing is not None:
                 pending = self._native_pending(existing)
                 if pending:
-                    recovered = (
-                        self._ports.recover_native_results(session_id, existing, pending)
-                        if self._ports.recover_native_results is not None else {}
-                    )
-                    # Restore durable applied results before marking remaining
-                    # orphan proposals interrupted. Neither path executes tools.
-                    orphan = copy.deepcopy(existing)
-                    for call_id in sorted(pending):
-                        orphan["messages"].append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": recovered.get(call_id) or json.dumps(
-                                {"status": "not_executed", "reason": "runtime_interrupted", "observations": []},
-                                ensure_ascii=False,
-                            ),
-                        })
-                    self._native_size_ok(orphan)
-                    self._save_native(session_id, orphan)
-                    existing = orphan
+                    # One shared implementation with request-time normalization:
+                    # restore durable applied results, then settle orphans with
+                    # the honest tri-state (unknown / not_executed). Reentrant
+                    # shared_state_lock makes this safe inside this helper.
+                    self.normalize_native_pending(session_id, binding=binding)
+                    existing = self._native_conversations.get(session_id) or existing
                 if existing["binding"] == binding and existing["turnId"] == turn_id:
                     return copy.deepcopy(existing)
                 if existing["binding"] == binding:
@@ -821,8 +810,91 @@ class AgentRuntimeSessionState:
                 raise ValueError("native call is unknown")
             candidate = copy.deepcopy(snapshot)
             candidate["messages"].append({"role": "tool", "tool_call_id": call_id, "content": content})
+            if candidate.get("activeDispatchCallId") == call_id:
+                candidate["activeDispatchCallId"] = ""
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
+
+    def mark_native_dispatch(self, session_id: str, *, binding: str, call_id: str) -> None:
+        """Persist which queued call is being dispatched right now.
+
+        An empty ``call_id`` resets the marker. The marker survives crashes so
+        recovery can tell a call that may have started executing from calls
+        that provably never launched.
+        """
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            candidate = copy.deepcopy(snapshot)
+            candidate["activeDispatchCallId"] = str(call_id or "")
+            self._save_native(session_id, candidate)
+
+    def normalize_native_pending(self, session_id: str, *, binding: str) -> int:
+        """Idempotently settle orphaned tool calls before a provider request.
+
+        Runs at every native request assembly. Recovery of durable applied
+        results comes first; the remaining orphans settle with an honest
+        tri-state so the model never replays a write that may have run:
+
+        - snapshots without the dispatch marker (legacy) are treated as
+          unknown because nothing proves the call never launched;
+        - the marked call (or nothing marked in a marked snapshot) settles as
+          not_executed only when the marker proves it never launched;
+        - a marked call settles as execution_unknown with ``isError`` and
+          guidance to inspect current state before retrying.
+        """
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                return 0
+            pending = self._native_pending(snapshot)
+            if not pending:
+                if "activeDispatchCallId" in snapshot and snapshot["activeDispatchCallId"]:
+                    candidate = copy.deepcopy(snapshot)
+                    candidate["activeDispatchCallId"] = ""
+                    self._save_native(session_id, candidate)
+                return 0
+            recovered = (
+                self._ports.recover_native_results(session_id, snapshot, pending)
+                if self._ports.recover_native_results is not None else {}
+            )
+            legacy = "activeDispatchCallId" not in snapshot
+            dispatched = str(snapshot.get("activeDispatchCallId") or "")
+            candidate = copy.deepcopy(snapshot)
+            settled = 0
+            for call_id in sorted(pending):
+                if call_id in recovered:
+                    content = recovered[call_id]
+                elif legacy or call_id == dispatched:
+                    content = json.dumps(
+                        {
+                            "status": "execution_unknown",
+                            "reason": "runtime_interrupted",
+                            "isError": True,
+                            "guidance": (
+                                "This call may have started executing before the interruption. "
+                                "Inspect the current state before retrying."
+                            ),
+                            "observations": [],
+                        },
+                        ensure_ascii=False,
+                    )
+                else:
+                    content = json.dumps(
+                        {"status": "not_executed", "reason": "runtime_interrupted", "observations": []},
+                        ensure_ascii=False,
+                    )
+                candidate["messages"].append({"role": "tool", "tool_call_id": call_id, "content": content})
+                settled += 1
+            candidate["activeDispatchCallId"] = ""
+            self._native_size_ok(candidate)
+            self._save_native(session_id, candidate)
+            return settled
 
     def freeze_native_tool_block_ids(self, session_id: str, *, binding: str, block_ids: list[str]) -> list[str]:
         """Keep the first discovery enum for this stored session/binding."""

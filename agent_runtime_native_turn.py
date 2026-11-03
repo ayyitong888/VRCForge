@@ -328,6 +328,10 @@ class NativeRuntimeTurn:
             return
         self._state.append_native_assistant(self._session_id, binding=self._binding, message=receipt)
         self._argument_failure_counted = False
+        # New receipt: nothing is dispatched yet; the marker proves queued
+        # calls never launched until mark_native_dispatch fires.
+        if receipt.get("tool_calls"):
+            self._state.mark_native_dispatch(self._session_id, binding=self._binding, call_id="")
         self._queued_calls = copy.deepcopy(receipt.get("tool_calls") or [])
         public_content = receipt.get("content")
         self._queued_public_content = public_content if isinstance(public_content, str) else None
@@ -352,6 +356,9 @@ class NativeRuntimeTurn:
         if self._native_decision is not None or not self._queued_calls:
             raise ValueError("Native call cannot dispatch before its predecessor settles.")
         call = self._queued_calls.pop(0)
+        # Persist the dispatch marker before the call runs so a crash while the
+        # tool executes settles as execution_unknown, never not_executed.
+        self._state.mark_native_dispatch(self._session_id, binding=self._binding, call_id=str(call["id"]))
         self._native_decision = {"ids": [call["id"]], "cursor": len(self._loop_state)}
         public_content = self._queued_public_content
         self._queued_public_content = None
@@ -544,9 +551,15 @@ class NativeRuntimeTurn:
         return seed
 
     def messages(self) -> list[dict[str, Any]]:
-        """Return a copy suitable for the next native provider request."""
+        """Return a copy suitable for the next native provider request.
+
+        Assembly-time normalization runs first: any orphaned tool call (crash,
+        legacy session, other interruption) settles idempotently so the
+        outgoing request always carries paired tool results.
+        """
         if not self._binding:
             return []
+        self._state.normalize_native_pending(self._session_id, binding=self._binding)
         snapshot = self._state.native_conversation(
             self._session_id,
             binding=self._binding,
