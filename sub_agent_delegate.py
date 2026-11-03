@@ -430,8 +430,6 @@ def build_sub_agent_input_schema(roles: list[SubAgentRole] | None = None) -> dic
             "prompt": {"type": "string", "description": "Alias for task."},
             "displayName": {"type": "string"},
             "display_name": {"type": "string"},
-            "parentChatId": {"type": "string"},
-            "parent_chat_id": {"type": "string"},
             "parentSessionId": {"type": "string"},
             "parent_session_id": {"type": "string"},
             "projectPath": {"type": "string"},

@@ -844,7 +844,7 @@ mod backend_start_result_tests {
         let state = BackendState::new();
         *state.child.lock().expect("child lock") = Some(child);
         let started = Instant::now();
-        let outcome = wait_for_backend_or_child_exit(&state, Duration::from_secs(2))
+        let outcome = wait_for_backend_or_child_exit(&state, Duration::from_secs(2), || {})
             .expect("child observation should succeed");
         assert_eq!(outcome, BackendStartupWait::ChildExited(Some(23)));
         assert!(started.elapsed() < Duration::from_millis(500));
@@ -902,24 +902,50 @@ pub(crate) fn managed_backend_exit_code(
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum BackendStartupWait {
     Ready,
-    TimedOut,
+    Stopped,
     ChildExited(Option<i32>),
 }
 
 pub(crate) fn wait_for_backend_or_child_exit(
     state: &BackendState,
     timeout: Duration,
+    on_timeout: impl FnOnce(),
 ) -> Result<BackendStartupWait, String> {
     let start = Instant::now();
+    let child_id = state
+        .child
+        .lock()
+        .map_err(|_| "backend state lock poisoned".to_string())?
+        .as_ref()
+        .map(Child::id);
+    let mut on_timeout = Some(on_timeout);
     loop {
-        if let Some(exit_code) = managed_backend_exit_code(state)? {
-            return Ok(BackendStartupWait::ChildExited(exit_code));
+        if state.shutdown_started.load(Ordering::Acquire) {
+            return Ok(BackendStartupWait::Stopped);
+        }
+        {
+            let mut guard = state
+                .child
+                .lock()
+                .map_err(|_| "backend state lock poisoned".to_string())?;
+            let Some(child) = guard.as_mut().filter(|child| Some(child.id()) == child_id) else {
+                return Ok(BackendStartupWait::Stopped);
+            };
+            if let Some(exit) = child.try_wait().map_err(|error| {
+                format!("unable to inspect managed runtime process: {error}")
+            })? {
+                return Ok(BackendStartupWait::ChildExited(exit.code()));
+            }
         }
         if backend_port_open() {
             return Ok(BackendStartupWait::Ready);
         }
         if start.elapsed() >= timeout {
-            return Ok(BackendStartupWait::TimedOut);
+            // A slow child still belongs to this startup worker. Report the
+            // delay once, then retain ownership until readiness, exit or Stop.
+            if let Some(notify) = on_timeout.take() {
+                notify();
+            }
         }
         thread::sleep(Duration::from_millis(250));
     }
@@ -1102,6 +1128,17 @@ pub(crate) fn start_backend_in_background(
     let startup_wait = wait_for_backend_or_child_exit(
         &state,
         Duration::from_secs(BACKEND_START_BACKGROUND_WAIT_SECONDS),
+        || {
+            let _ = app_handle.emit(
+                "vrcforge-backend-start-status",
+                backend_start_failure_payload(
+                    &log_dir,
+                    false,
+                    BackendSessionProbe::Unavailable,
+                    None,
+                ),
+            );
+        },
     )?;
     match startup_wait {
         BackendStartupWait::ChildExited(exit_code) => {
@@ -1112,19 +1149,26 @@ pub(crate) fn start_backend_in_background(
                 Some(exit_code),
             ));
         }
-        BackendStartupWait::TimedOut => {
-            return Ok(backend_start_failure_payload(
-                &log_dir,
-                false,
-                BackendSessionProbe::Unavailable,
-                None,
-            ));
+        BackendStartupWait::Stopped => {
+            return Ok(serde_json::json!({"ok": false, "status": "stopped"}));
         }
         BackendStartupWait::Ready => {}
     }
 
     let session_probe =
         wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT);
+    if state.shutdown_started.load(Ordering::Acquire) {
+        return Ok(serde_json::json!({"ok": false, "status": "stopped"}));
+    }
+    let child_exit_code = managed_backend_exit_code(&state)?;
+    if child_exit_code.is_some() {
+        return Ok(backend_start_failure_payload(
+            &log_dir,
+            true,
+            session_probe,
+            child_exit_code,
+        ));
+    }
     if session_probe == BackendSessionProbe::Accepted {
         mark_backend_session_verified();
         return Ok(serde_json::json!({
@@ -1133,7 +1177,6 @@ pub(crate) fn start_backend_in_background(
             "mode": "managed"
         }));
     }
-    let child_exit_code = managed_backend_exit_code(&state)?;
     Ok(backend_start_failure_payload(
         &log_dir,
         true,

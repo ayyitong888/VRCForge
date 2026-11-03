@@ -76,7 +76,7 @@ class ParentChildFixtureModel:
                 receipt = call("parent-delegate", "vrcforge_delegate_subagent", {
                     "role": "llm_readonly",
                     "task": "Inspect both scan fixture files and summarize their shared finding.",
-                    "parentChatId": "parent-chat-fixture",
+                    "parentChatId": "model-supplied-chat-must-not-own-task",
                     "projectPath": "",
                     "model": "fixture-child-model",
                     "systemPrompt": "Child-only instructions: compare both scan results.",
@@ -127,6 +127,15 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
     ))
     monkeypatch.setattr(server, "AGENT_GATEWAY", gateway)
     monkeypatch.setattr(server, "SUB_AGENT_COLLABORATION", service)
+    continuation_runtime_params = []
+    original_runtime_message_impl = gateway._runtime_message_impl
+
+    def capture_continuation_runtime_params(params, *args, **kwargs):
+        if kwargs.get("task_continuation"):
+            continuation_runtime_params.append(deepcopy(params))
+        return original_runtime_message_impl(params, *args, **kwargs)
+
+    monkeypatch.setattr(gateway, "_runtime_message_impl", capture_continuation_runtime_params)
     gateway.register_tool(
         "vrcforge_delegate_subagent",
         "When to use: delegate one bounded read-only review. When NOT to use: delegate writes.",
@@ -139,6 +148,7 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
             "message": "Please use the read-only specialist and return its finding.",
             "sessionId": "fixture-parent-session",
             "clientTurnId": "fixture-parent-turn",
+            "chatId": "parent-chat-fixture",
             "projectRoot": str(tmp_path),
             "model": "fixture-parent-model",
             "maxAgenticTurns": 5,
@@ -155,6 +165,7 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
         task = service.get_task(task_id, include_events=True)["task"]
         assert task["status"] == "completed", task.get("error")
         assert task["parentContinuationStatus"] == "delivered"
+        assert task["parentChatId"] == "parent-chat-fixture"
         assert task["childSessionId"] != "fixture-parent-session"
         assert [item["path"] for item in invoked] == ["scan-a.txt", "scan-b.txt"], (task, model.requests)
 
@@ -182,6 +193,8 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
         assert "Child-only instructions" not in parent_instructions
         assert "Child-only instructions" in child_instructions
         assert continuation_results and continuation_results[0]
+        assert continuation_runtime_params
+        assert continuation_runtime_params[0]["chatId"] == "parent-chat-fixture"
         assert "Parent final: SPECIALIST_REPORT confirms the two scans agree." in json.dumps(
             continuation_results[0], ensure_ascii=False
         )

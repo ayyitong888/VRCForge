@@ -221,6 +221,35 @@ def test_failed_sub_agent_terminal_result_returns_to_exact_required_action() -> 
     assert gated["task"]["actions"][0]["actionId"] == requirement["actionId"]
 
 
+def test_sub_agent_terminal_continuation_keeps_host_owned_parent_chat() -> None:
+    arguments = {"role": "project_index_review", "task": "inspect the project"}
+    loop = AgentTaskLoop(
+        "delegate the project review",
+        session_id="owner-session",
+        client_turn_id="owner-turn",
+    )
+    seed = loop.approval_seed(
+        requested_kind="skill",
+        requested_tool="vrcforge_delegate_subagent",
+        requested_arguments=arguments,
+    )
+    seed["parentChatId"] = "host-owned-chat"
+
+    prepared = prepare_sub_agent_task_continuation(
+        seed,
+        {
+            "subAgentTaskId": "sub-task-owner",
+            "status": "completed",
+            "parentSessionId": "owner-session",
+            "result": {"ok": True},
+        },
+    )
+
+    assert prepared is not None
+    assert prepared["params"]["chatId"] == "host-owned-chat"
+    assert prepared["taskContinuation"]["context"]["parentChatId"] == "host-owned-chat"
+
+
 def test_cancelled_sub_agent_is_an_honest_terminal_not_a_tool_failure() -> None:
     arguments = {"role": "validation_triage", "task": "inspect the avatar"}
     loop = AgentTaskLoop("delegate validation", session_id="session", client_turn_id="turn")

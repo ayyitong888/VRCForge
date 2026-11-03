@@ -1242,8 +1242,7 @@ def _is_valid_chat_attachment(value: Any) -> bool:
 
 
 def _is_valid_question_answer_item(value: Any) -> bool:
-    allowed = {"id", "type", "questionId", "header", "text", "revision", "updatedAt", "attachments"}
-    if not isinstance(value, dict) or not set(value).issubset(allowed):
+    if not isinstance(value, dict):
         return False
     if value.get("type") != "question_answer":
         return False
@@ -1251,7 +1250,7 @@ def _is_valid_question_answer_item(value: Any) -> bool:
         return False
     if not isinstance(value.get("text"), str):
         return False
-    if any(field in value and not isinstance(value.get(field), str) for field in ("header", "updatedAt")):
+    if any(field in value and not isinstance(value.get(field), str) for field in ("header", "question", "updatedAt")):
         return False
     if "revision" in value and not _is_safe_nonnegative_integer(value.get("revision")):
         return False

@@ -49,9 +49,11 @@ def test_question_answer_item_survives_actual_chat_storage_write(tmp_path, monke
             "type": "question_answer",
             "questionId": "q1",
             "header": "Choose a color",
+            "question": "Which color should be used?",
             "text": "blue",
             "revision": 1,
             "updatedAt": "2026-10-23T00:00:00Z",
+            "displayMetadata": {"source": "question-card", "revision": 1},
             "attachments": [{
                 "id": "answer-attachment",
                 "name": "Selected text",

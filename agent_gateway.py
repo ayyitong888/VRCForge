@@ -5895,6 +5895,8 @@ class AgentGateway:
             kwargs.setdefault("usage_parent_turn_id", turn_id)
             seed = native_turn.approval_seed(task_loop.approval_seed(**kwargs))
             seed["clientTurnId"] = client_turn_id
+            if chat_id:
+                seed["parentChatId"] = chat_id
             seed["followupLaneId"] = str(params.get("followupLaneId") or chat_id or continuation_context.get("followupLaneId") or session_id)
             if checkpoint_user_policy:
                 seed["checkpointUserPolicy"] = dict(checkpoint_user_policy)

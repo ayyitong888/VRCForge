@@ -264,6 +264,37 @@ def test_repeated_async_question_continuation_retains_chat_followup_lane(tmp_pat
     assert saved["originClientTurnId"].endswith(":question:" + first["questionId"])
 
 
+def test_async_question_continuation_preserves_chat_owner_for_later_delegate(tmp_path):
+    gateway, _model = _write_gateway(tmp_path, [
+        call("ask-before-delegate", "vrcforge_ask_user", {"question": "Which outfit next?", "blocking": False}),
+        {"role": "assistant", "content": "Waiting for the outfit choice."},
+        call("delegate-after-answer", "vrcforge_delegate_subagent", {
+            "role": "project_index_review", "task": "Inspect the selected outfit files.",
+        }),
+        {"role": "assistant", "content": "The selected outfit review is underway."},
+    ], [])
+    gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", gateway.create_runtime_question)
+    delegated = []
+    gateway.register_tool(
+        "vrcforge_delegate_subagent",
+        "When to use: delegate one bounded read-only review. When NOT to use: delegate writes.",
+        "plan/preview",
+        lambda params: delegated.append(dict(params)) or {"ok": True, "status": "running", "taskId": "child-after-answer"},
+    )
+    _run(gateway, tmp_path, chatId="chat-owner")
+    question = gateway.questions.list(session_id="native-continuation-session")["questions"][0]
+    saved = gateway.questions._project(include_answered=True)[question["questionId"]]
+    assert saved["runtimeTaskSeed"]["parentChatId"] == "chat-owner"
+
+    done = threading.Event()
+    gateway._runtime_turn_completed = lambda _payload: done.set()
+    gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
+    assert done.wait(5)
+    assert gateway.shutdown_runtime_continuations(5)["ok"]
+    assert delegated
+    assert delegated[0]["_taskSeed"]["parentChatId"] == "chat-owner"
+
+
 def test_queue_backpressure_keeps_async_answer_queued_and_does_not_dispatch(tmp_path, monkeypatch):
     from agent_runtime_followup_queue import AgentRuntimeFollowupQueue
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")

@@ -2146,6 +2146,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 {
                     "role": "project_index_review",
                     "task": "inspect",
+                    "parentChatId": "forged-parent-chat",
                     "_runtimeSessionId": "victim-session",
                     "_runtimeClientTurnId": "victim-turn",
                     "_taskSeed": {
@@ -2158,6 +2159,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(captured[0]["parent_session_id"], "")
+        self.assertEqual(captured[0]["parent_chat_id"], "")
         self.assertNotIn("_taskSeed", captured[0]["params"])
 
     @provider_plan_fixture

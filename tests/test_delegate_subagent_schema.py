@@ -27,6 +27,8 @@ def test_delegate_subagent_registry_schema_discovers_and_validates_catalog_roles
 
     assert "role" not in schema.get("required", [])
     assert schema["properties"]["role"]["enum"] == expected_role_ids
+    assert "parentChatId" not in schema["properties"]
+    assert "parent_chat_id" not in schema["properties"]
     assert "researcher" not in expected_role_ids
     jsonschema.validate({}, schema)
     jsonschema.validate(

@@ -849,6 +849,7 @@ def approval_task_context(
         "objective": objective,
         "sessionId": _bounded_text(seed.get("sessionId"), 180),
         "turnId": _bounded_text(seed.get("turnId"), 180),
+        "parentChatId": _bounded_text(seed.get("parentChatId"), 180),
         "usageParentTurnId": _bounded_text(seed.get("usageParentTurnId"), 180),
         "clientTurnId": _bounded_text(seed.get("clientTurnId"), 180),
         "projectRoot": _bounded_text(seed.get("projectRoot"), 600),
@@ -1076,6 +1077,9 @@ def prepare_approval_task_continuation(
         "_requestedContextLimit": context.get("contextLimit"),
         "history": _approval_history(context.get("history")),
     }
+    parent_chat_id = _bounded_text(context.get("parentChatId"), 180)
+    if parent_chat_id:
+        params["chatId"] = parent_chat_id
     task_status = _status(completion.get("status"))
     terminal_plan: dict[str, Any] | None = None
     outcome = completion.get("outcome")

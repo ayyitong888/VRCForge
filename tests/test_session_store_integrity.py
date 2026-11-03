@@ -12,6 +12,7 @@ import pytest
 from session_store_integrity import (
     SESSION_STORE_INTEGRITY_SCHEMA,
     SessionStoreTarget,
+    _is_valid_question_answer_item,
     is_valid_chat_record,
     repair_session_store,
     scan_session_store,
@@ -336,7 +337,7 @@ def test_attachment_vault_and_compacted_references_require_ui_safe_shapes() -> N
         assert not is_valid_chat_record(malformed), label
 
 
-def test_frontend_conversation_union_variants_are_admitted_with_strict_fields(tmp_path: Path) -> None:
+def test_frontend_conversation_union_variants_validate_consumed_fields_and_admit_extensions(tmp_path: Path) -> None:
     valid = {
         "id": "chat-question-answer",
         "items": [
@@ -345,9 +346,11 @@ def test_frontend_conversation_union_variants_are_admitted_with_strict_fields(tm
                 "type": "question_answer",
                 "questionId": "q1",
                 "header": "Choose a color",
+                "question": "Which color should be used?",
                 "text": "blue",
                 "revision": 2,
                 "updatedAt": "2026-10-23T00:00:00Z",
+                "displayMetadata": {"source": "question-card", "revision": 1},
                 "attachments": [{
                     "id": "answer-attachment",
                     "name": "Selected text",
@@ -397,8 +400,12 @@ def test_frontend_conversation_union_variants_are_admitted_with_strict_fields(tm
     malformed["items"][2]["summary"] = []
     assert not is_valid_chat_record(malformed)
     malformed = deepcopy(valid)
-    malformed["items"][0]["unexpected"] = True
+    malformed["items"][0]["question"] = 1
     assert not is_valid_chat_record(malformed)
+
+    malformed_question_answer = deepcopy(valid["items"][0])
+    malformed_question_answer["type"] = "user"
+    assert not _is_valid_question_answer_item(malformed_question_answer)
 
     path = tmp_path / "question-answer-chat.json"
     path.write_text(json.dumps({"version": 1, "chats": [valid]}), encoding="utf-8")

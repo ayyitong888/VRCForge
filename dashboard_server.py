@@ -26593,7 +26593,7 @@ def delegate_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str
         role=str(arguments.get("role") or "project_index_review"),
         task=str(arguments.get("task") or arguments.get("prompt") or "Review the selected scope."),
         display_name=str(arguments.get("displayName") or arguments.get("display_name") or "Manuka"),
-        parent_chat_id=str(arguments.get("parentChatId") or arguments.get("parent_chat_id") or ""),
+        parent_chat_id=str((task_seed or {}).get("parentChatId") or ""),
         parent_session_id=(
             runtime_session_id
             or str(arguments.get("parentSessionId") or arguments.get("parent_session_id") or "")
