@@ -69,6 +69,36 @@ def test_modification_turn_completes_with_clean_reply_and_continues(tmp_path: Pa
     assert "脸部" in str((second.get("plan") or {}).get("reply") or "")
 
 
+def test_write_without_prior_target_read_is_flagged_not_silent(tmp_path: Path) -> None:
+    """Codex guardian: a write on an unread target carries targetReadBeforeWrite=false."""
+    receipts = {
+        "default": {
+            "ok": True, "status": "completed", "committed": True, "commitState": "complete",
+            "checkpointRecoveryRequired": False,
+            "result": {"materialPath": "Assets/Milltina/Body"},
+        }
+    }
+    gateway, model, _invoked = _write_gateway_for_mode(tmp_path, [])
+    _install_write_tool(gateway, receipts)
+    _set_mode(gateway, "full_auto")
+
+    model.replies = iter([
+        call("enter", "vrcforge_runtime_action", {"action": "enter_execution"}),
+        call("write", "vrcforge_swap_body_texture",
+             {"phase": "default", "target": "_MainTex", "materialPath": "Assets/Milltina/Body"}),
+        call("final", "vrcforge_runtime_action", {
+            "action": "reply", "reply": "替换完成。",
+            "completion_claim": {"satisfied": True},
+        }),
+    ])
+    result = run(gateway, tmp_path, message="直接替换贴图")
+    write_steps = [s for s in (result.get("steps") or []) if s.get("kind") == "write"]
+    assert write_steps, "the write step must be recorded"
+    assert write_steps[0].get("targetReadBeforeWrite") is False, (
+        "a write on an unread target must carry the evidence flag"
+    )
+
+
 def test_crash_mid_modification_recovers_and_next_turn_continues(tmp_path: Path) -> None:
     """A process crash after the write dispatched settles honestly and the
     next message runs a well-formed provider request."""

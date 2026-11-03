@@ -527,10 +527,9 @@ class NativeRuntimeTurn:
     def _append_terminal_runtime_notice(self, terminal: Mapping[str, Any]) -> None:
         """Tell the next turn why this one stopped (turn-level runtime notice).
 
-        Matches the audited designs: interruption, context overflow and budget
-        pauses get a model-visible note (Codex annotates user interrupts and
-        budgets; content-filter stops get guidance). Transient provider errors
-        stay user-facing only — the next turn starts clean, like Codex.
+        Matches established agent designs: interruption, context overflow
+        and budget pauses get a model-visible note. Transient provider errors
+        stay user-facing only — the next turn starts clean.
         """
         if not self._binding:
             return

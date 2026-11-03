@@ -1,10 +1,10 @@
 """Unified runtime error and turn-status schema for every exit surface.
 
 Modeled on the proven designs this repository was audited against:
-- Codex protocol: ``TurnCompleteEvent{last_agent_message, error}`` keeps model
-  text and failure detail in separate fields; ``ErrorEvent`` carries a
-  human-bounded message plus a machine classification enum with an
-  unknown-fallback, and sensitive explanations never enter stored history.
+- Established CLI agent protocols keep model text and failure detail in
+  separate terminal-event fields, carry a human-bounded message plus a
+  machine classification enum with an unknown-fallback, and keep sensitive
+  explanations out of stored history.
 - Anthropic tool results: raw stdout/stderr stays in the model-facing result
   with an ``is_error`` flag; presentation cleanup happens only on user-facing
   surfaces.
@@ -147,9 +147,9 @@ def runtime_turn_status(
 ) -> dict[str, Any]:
     """Turn status envelope; ``reply`` carries model-authored text only.
 
-    Failure detail goes to ``error`` (a runtime_error object), mirroring Codex
-    TurnComplete{last_agent_message, error}: the two never mix, and a failed
-    turn may still retain the model text it already produced.
+    Failure detail goes to ``error`` (a runtime_error object): the two
+    never mix, and a failed turn may still retain the model text it already
+    produced.
     """
     cleaned = _safe_code(status) if status in RUNTIME_TURN_ACTIVE | RUNTIME_TURN_TERMINAL else ""
     if not cleaned:

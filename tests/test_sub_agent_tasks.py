@@ -258,6 +258,36 @@ def test_delivered_marker_failure_never_replays_a_dispatched_side_effect(tmp_pat
     assert replayed == []
 
 
+def test_hung_handler_times_out_and_produces_terminal_event(tmp_path):
+    """A hung sub-agent must eventually fail so the parent turn is never parked
+    in waiting_for_tool forever (Codex bounds wait_agent at 1h hard max)."""
+    import threading as _threading
+
+    release = _threading.Event()
+
+    def hung_handler(_payload, cancel_event):
+        # Simulate a hung model turn: never returns until cancelled.
+        while not cancel_event.is_set():
+            cancel_event.wait(0.05)
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": hung_handler},
+    )
+    task_id = registry.create_task(
+        role="project_index_review",
+        task="scan",
+        display_name="Manuka",
+        params={"timeoutSeconds": 1},
+    )["task"]["id"]
+
+    failed = _wait_for_status(registry, task_id, {"failed"}, timeout=6.0)["task"]
+    assert failed["status"] == "failed", failed
+    assert failed.get("errorCode") == "sub_agent_task_timeout", failed.get("errorCode")
+    assert "watchdog" in failed.get("error", "").lower() or "exceeded" in failed.get("error", "").lower()
+
+
 def test_task_crash_failure_never_leaks_raw_exception_text(tmp_path):
     """A crashing handler must surface a controlled message plus an error code,
     never the raw exception string (the sub-agent panel renders task.error)."""

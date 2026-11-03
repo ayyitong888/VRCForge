@@ -7950,6 +7950,26 @@ class AgentGateway:
                     "actionId": task_action["actionId"],
                 }
             )
+            if action_kind == "write":
+                # Evidence-based write guard (established agent design):
+                # inspect the target before approving a write. Surface (not
+                # block) whether this turn read the target before writing it,
+                # so an unread-state write is never silent.
+                target_path = str(
+                    action_arguments.get("path")
+                    or action_arguments.get("assetPath")
+                    or action_arguments.get("avatarPath")
+                    or action_arguments.get("materialPath")
+                    or ""
+                ).strip().lower()
+                if target_path:
+                    read_evidence = any(
+                        str(item.get("kind") or "") in {"skill", "read", "shell"}
+                        and str(item.get("status") or "") in {"executed", "ok", "completed"}
+                        and target_path in str(item.get("result") or item.get("executedInput") or "").lower()
+                        for item in loop_state[:-1]
+                    ) if loop_state else False
+                    steps[-1]["targetReadBeforeWrite"] = read_evidence
             retained_result: dict[str, Any] = {}
             if step_payload.get("result") is not None:
                 steps[-1]["result"] = step_payload.get("result")
@@ -9700,8 +9720,8 @@ class AgentGateway:
     def _terminal_turn_status(cls, plan: Mapping[str, Any], *, turn_error: BaseException | None = None) -> dict[str, Any]:
         """Terminal turn status for every exit: model text in reply, failure in error.
 
-        Mirrors Codex TurnComplete{last_agent_message, error}: the plan reply
-        stays model-authored text and the failure detail rides in a structured
+        Established terminal-event design: the plan reply stays
+        model-authored text and the failure detail rides in a structured
         error keyed by the planner failure code or the raised exception.
         """
         plan = ensure_dict(plan)

@@ -26,6 +26,12 @@ SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT = 5
 _RUNNING_STATUSES = {"queued", "running", "cancelling"}
 _RETRYABLE_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 _PARENT_CONTINUATION_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+# Handler watchdog: a hung sub-agent must eventually produce a terminal event
+# so the parent's waiting_for_tool turn is never parked forever.
+# Established CLI agents bound sub-agent waits at a hard 1h max; VRCForge
+# sub-agent turns are multi-step so the default matches the shell supervisor.
+DEFAULT_SUB_AGENT_TIMEOUT_SECONDS = 1800.0
+MAX_SUB_AGENT_TIMEOUT_SECONDS = 3600.0
 _MERGE_DECISIONS = {"adopted", "dismissed"}
 
 SubAgentHandler = Callable[[dict[str, Any], threading.Event], dict[str, Any]]
@@ -61,6 +67,7 @@ class SubAgentTask:
     tools: tuple[str, ...] | None = None
     handler: str = "skill"
     provider: str = ""
+    timeout_seconds: float = DEFAULT_SUB_AGENT_TIMEOUT_SECONDS
     resumable: bool = False
     child_session_id: str = ""
     status: str = "queued"
@@ -209,6 +216,7 @@ class SubAgentTaskRegistry:
                         "summary": task.summary,
                         "error": task.error,
                         "errorCode": task.error_code,
+            "timeoutSeconds": task.timeout_seconds,
                     }
                 )
             return events[-200:]
@@ -357,6 +365,13 @@ class SubAgentTaskRegistry:
         if max_steps_value is None:
             max_steps_value = role_spec.max_steps or 4
         max_steps = max(1, min(int(max_steps_value), 12))
+        raw_timeout = task_params.get("timeoutSeconds", task_params.get("timeout_seconds"))
+        timeout_seconds = DEFAULT_SUB_AGENT_TIMEOUT_SECONDS
+        if raw_timeout is not None:
+            try:
+                timeout_seconds = max(1.0, min(float(raw_timeout), MAX_SUB_AGENT_TIMEOUT_SECONDS))
+            except (TypeError, ValueError):
+                timeout_seconds = DEFAULT_SUB_AGENT_TIMEOUT_SECONDS
 
         role_tools = self._normalize_tool_allowlist(role_spec.tools)
         requested_tools = self._normalize_tool_allowlist(task_params.get("tools")) \
@@ -408,6 +423,7 @@ class SubAgentTaskRegistry:
                     or (f"sub-session-{task_id}" if role_spec.handler == "llm_readonly" else "")
                 ),
                 params=task_params,
+                timeout_seconds=timeout_seconds,
                 retry_of=str(retry_of or "").strip(),
                 resume_of=str(_resume_of or "").strip(),
             )
@@ -747,12 +763,34 @@ class SubAgentTaskRegistry:
                     if child_session_id in self._active_child_sessions:
                         raise RuntimeError("Child session already has an active runtime owner.")
                     self._active_child_sessions.add(child_session_id)
-            try:
-                result = handler(self._task_payload(task), cancel_event)
-            finally:
-                if child_session_id:
-                    with self._lock:
-                        self._active_child_sessions.discard(child_session_id)
+
+            timeout_seconds = max(1.0, min(float(task.timeout_seconds or DEFAULT_SUB_AGENT_TIMEOUT_SECONDS), MAX_SUB_AGENT_TIMEOUT_SECONDS))
+            result_box: list[dict[str, Any]] = []
+            handler_error: list[BaseException] = []
+            handler_done = threading.Event()
+
+            def _run_handler() -> None:
+                try:
+                    result_box.append(handler(self._task_payload(task), cancel_event))
+                except BaseException as exc:  # noqa: BLE001 - the watchdog needs the error.
+                    handler_error.append(exc)
+                finally:
+                    handler_done.set()
+
+            worker = threading.Thread(target=_run_handler, daemon=True, name=f"subagent-{task_id[:12]}")
+            worker.start()
+            timed_out = not handler_done.wait(timeout=timeout_seconds)
+            if timed_out:
+                cancel_event.set()
+                raise TimeoutError(
+                    f"Sub-agent handler exceeded its {int(timeout_seconds)}s watchdog and was signalled to cancel."
+                )
+            if handler_error:
+                raise handler_error[0]
+            result = result_box[0] if result_box else {}
+            if child_session_id:
+                with self._lock:
+                    self._active_child_sessions.discard(child_session_id)
             summary = summarize_worker_result(result)
         except CancelledError as exc:
             with self._lock:
@@ -765,12 +803,20 @@ class SubAgentTaskRegistry:
                 current = self._tasks.get(task_id)
                 if not current or current.status not in _RUNNING_STATUSES:
                     return
-                if current.cancel_requested or cancel_event.is_set() or current.status == "cancelling":
+                is_watchdog_timeout = isinstance(exc, TimeoutError)
+                if not is_watchdog_timeout and (
+                    current.cancel_requested or cancel_event.is_set() or current.status == "cancelling"
+                ):
                     self._commit_cancelled_locked(current, "Sub-agent task was cancelled.")
                     return
                 next_task = copy.deepcopy(current)
                 next_task.status = "failed"
-                failure = runtime_error_from_exception("sub_agent_task_failed", exc, phase="run")
+                is_timeout = isinstance(exc, TimeoutError)
+                failure = runtime_error_from_exception(
+                    "sub_agent_task_timeout" if is_timeout else "sub_agent_task_failed",
+                    exc, phase="run",
+                    message=str(exc) if is_timeout else "",  # watchdog text is our own, safe to surface
+                )
                 next_task.error = str(failure.get("message") or "The sub-agent task failed.")
                 next_task.error_code = str(failure.get("code") or "")
                 next_task.stopped_at = utc_now()
@@ -1004,6 +1050,7 @@ class SubAgentTaskRegistry:
             "summary": task.summary,
             "error": task.error,
             "errorCode": task.error_code,
+            "timeoutSeconds": task.timeout_seconds,
             "eventCount": task.event_count,
             "revision": task.revision,
             "retryOf": task.retry_of,
@@ -1055,6 +1102,7 @@ class SubAgentTaskRegistry:
             summary=str(snapshot.get("summary") or ""),
             error=str(snapshot.get("error") or ""),
             error_code=str(snapshot.get("errorCode") or ""),
+            timeout_seconds=max(1.0, min(float(snapshot.get("timeoutSeconds") or DEFAULT_SUB_AGENT_TIMEOUT_SECONDS), MAX_SUB_AGENT_TIMEOUT_SECONDS)),
             cancel_requested=bool(snapshot.get("cancelRequested")),
             event_count=int(snapshot.get("eventCount") or 0),
             revision=int(snapshot.get("revision") or 0),
