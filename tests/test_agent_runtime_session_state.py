@@ -200,10 +200,16 @@ def test_gateway_final_response_cache_preserves_normal_response_shape(
 
     monkeypatch.setattr(gateway, "_runtime_message_impl_body", body)
     result = gateway._runtime_message_impl({})
-    assert result == expected
+    # The turn-status envelope is additive terminal metadata on the funnel.
+    assert result["turnStatus"]["schema"] == "vrcforge.runtime_error.v1"
+    assert result["turnStatus"]["status"] in {"waiting_user", "failed"}
+    funnelled = {key: value for key, value in result.items() if key != "turnStatus"}
+    assert funnelled == expected
     recovered = gateway.get_runtime_session("sess-normal", client_turn_id="client-normal")
     assert recovered["status"] == "completed"
-    assert recovered["response"] == expected
+    recovered_response = {k: v for k, v in recovered["response"].items() if k != "turnStatus"}
+    assert recovered_response == expected
+    assert recovered["response"]["turnStatus"]["status"] in {"waiting_user", "failed"}
 
 
 def test_gateway_early_exception_converges_and_duplicate_owner_cannot_overwrite(

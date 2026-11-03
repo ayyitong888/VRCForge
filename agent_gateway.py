@@ -33,6 +33,7 @@ import json
 import math
 import os
 from atomic_file_replace import replace_with_retry, rotate_jsonl_if_large
+from runtime_error_schema import runtime_error, runtime_error_from_exception, runtime_turn_status
 import re
 import secrets
 import shutil
@@ -5273,6 +5274,7 @@ class AgentGateway:
         owned_params.pop("_runtimeTurnRecorded", None)
         response_payload: dict[str, Any] | None = None
         turn_raised = False
+        raised_error: BaseException | None = None
         recovery_failure: dict[str, Any] | None = None
         resource_token = self._mcp_resource_context.set(self._mcp_resource_context.get())
         try:
@@ -5313,7 +5315,8 @@ class AgentGateway:
                     "clientTurnId": str(owned_params.get("_resolvedRuntimeClientTurnId") or ""),
                     "createdAt": now, "status": "failed", "error": failure,
                     "message": str(owned_params.get("message") or ""),
-                    "plan": {"reply": failure["message"], "nextStep": "failed", "continueLoop": False},
+                    "plan": {"reply": "", "nextStep": "failed", "continueLoop": False,
+                             "plannerFailure": {"code": "turn_failed", "phase": "turn", "retryable": False}},
                     "steps": list(progress.get("steps") or []),
                     "timeline": list(progress.get("timeline") or []),
                     **({"contextUsage": progress["contextUsage"]} if progress.get("contextUsage") else {}),
@@ -5457,6 +5460,10 @@ class AgentGateway:
             if response_payload is not None and resolved_session_id and resolved_client_turn_id:
                 response_status = "failed" if turn_raised else "completed"
                 try:
+                    response_payload["turnStatus"] = self._terminal_turn_status(
+                        ensure_dict(response_payload.get("plan")),
+                        turn_error=raised_error if turn_raised else None,
+                    )
                     safe_response = planner_policy.public_runtime_payload(response_payload)
                     self._runtime_session_state.record_final_response(
                         session_id=resolved_session_id,
@@ -5488,9 +5495,16 @@ class AgentGateway:
                     "clientTurnId": resolved_client_turn_id,
                     "status": "failed",
                     "observe": {},
-                    "plan": {"reply": str(failure.get("message") or "Runtime turn failed."), "nextStep": "failed"},
+                    "plan": {"reply": "", "nextStep": "failed"},
                     "error": failure,
+                    "turnStatus": self._terminal_turn_status(
+                        {"nextStep": "failed"}, turn_error=None if isinstance(failure, Mapping) and failure.get("message") is None else None,
+                    ),
                 }
+                failed_response["turnStatus"]["error"] = runtime_error(
+                    str(failure.get("code") or "turn_failed") if isinstance(failure, Mapping) else "turn_failed",
+                    message=str(failure.get("message") or "")[:400] if isinstance(failure, Mapping) else "",
+                )
                 try:
                     self._runtime_session_state.record_final_response(
                         session_id=resolved_session_id,
@@ -9674,6 +9688,37 @@ class AgentGateway:
 
     def roslyn_available(self, config: AgentGatewayConfig | None = None) -> bool:
         return False
+
+    _TURN_TERMINAL_STEP_MAP = {
+        "done": "completed", "completed": "completed", "final": "completed",
+        "cancelled": "cancelled", "canceled": "cancelled",
+        "interrupted": "interrupted",
+        "needs_user_action": "waiting_user", "paused": "waiting_user",
+    }
+
+    @classmethod
+    def _terminal_turn_status(cls, plan: Mapping[str, Any], *, turn_error: BaseException | None = None) -> dict[str, Any]:
+        """Terminal turn status for every exit: model text in reply, failure in error.
+
+        Mirrors Codex TurnComplete{last_agent_message, error}: the plan reply
+        stays model-authored text and the failure detail rides in a structured
+        error keyed by the planner failure code or the raised exception.
+        """
+        plan = ensure_dict(plan)
+        next_step = str(plan.get("nextStep") or "").strip().lower()
+        failure = ensure_dict(plan.get("plannerFailure"))
+        code = str(failure.get("code") or "").strip()
+        retryable = failure.get("retryable") if isinstance(failure.get("retryable"), bool) else None
+        if turn_error is not None:
+            error = runtime_error_from_exception(code or "turn_failed", turn_error)
+        elif code:
+            error = runtime_error(code, retryable=retryable)
+        elif next_step in {"failed", "planner_failed", "tool_failed", "loop_suppressed", "context_compaction_required"}:
+            error = runtime_error("turn_failed", retryable=None)
+        else:
+            error = None
+        status = cls._TURN_TERMINAL_STEP_MAP.get(next_step, "failed")
+        return runtime_turn_status(status, error=error)
 
     def append_audit(self, entry: dict[str, Any]) -> None:
         safe_entry = ({

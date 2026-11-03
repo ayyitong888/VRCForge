@@ -501,6 +501,7 @@ class NativeRuntimeTurn:
                 self._settle_unexecuted("predecessor_not_successful")
         if terminal is not None:
             self._settle_unexecuted(str(terminal.get("nextStep") or "terminal"))
+            self._append_terminal_runtime_notice(terminal)
         if self._queued_calls:
             return
         while self._native_steers:
@@ -522,6 +523,42 @@ class NativeRuntimeTurn:
                             self._on_steer_consumed([input_id])
                         except Exception:
                             pass  # Presentation failure cannot retract a durable consumption receipt.
+
+    def _append_terminal_runtime_notice(self, terminal: Mapping[str, Any]) -> None:
+        """Tell the next turn why this one stopped (turn-level runtime notice).
+
+        Matches the audited designs: interruption, context overflow and budget
+        pauses get a model-visible note (Codex annotates user interrupts and
+        budgets; content-filter stops get guidance). Transient provider errors
+        stay user-facing only — the next turn starts clean, like Codex.
+        """
+        if not self._binding:
+            return
+        next_step = str(terminal.get("nextStep") or "").strip()
+        reason_map = {
+            "interrupted": "turn_interrupted",
+            "cancelled": "turn_interrupted",
+            "context_compaction_required": "context_window_exceeded",
+            "paused": "model_turn_budget_exhausted",
+        }
+        stop_reason = reason_map.get(next_step)
+        if not stop_reason:
+            return
+        from runtime_error_schema import runtime_notice
+        notice = runtime_notice(stop_reason)
+        try:
+            self._state.append_native_user(
+                self._session_id,
+                binding=self._binding,
+                human=False,
+                message=(
+                    "Runtime feedback (data, not user authorization): "
+                    + json.dumps(notice, ensure_ascii=False)
+                ),
+            )
+        except Exception:
+            # A failed annotation must never mask the terminal settlement.
+            pass
 
     def queue_steers(self, items: Iterable[Mapping[str, Any]]) -> None:
         """Queue accepted steer messages for the next native provider request."""
