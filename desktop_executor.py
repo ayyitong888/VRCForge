@@ -963,6 +963,8 @@ class WindowsDesktopController:
                 document_text_end_reached=bool(result.get("documentTextEndReached")),
             )
             result["snapshotId"] = snapshot_id
+            if str(result.get("documentText") or ""):
+                result.update(self._write_document_artifact(snapshot_id, str(result["documentText"])))
             snapshot_row = getattr(self, "_uia_snapshots", {}).get(int(window["windowHandle"]))
             if isinstance(snapshot_row, dict):
                 result["snapshotObservedWallClock"] = snapshot_row.get("observedWallClock")
@@ -972,6 +974,24 @@ class WindowsDesktopController:
             result["controls"] = controls
             result["accessibilityError"] = str(exc)[-500:]
         return result
+
+    # Upper bound for the in-memory text capture of one snapshot; the durable
+    # full capture always lives in the artifact file next to the screenshots.
+    SNAPSHOT_TEXT_MAX_CHARS = 1_000_000
+
+    def _document_artifact_path(self, snapshot_id: str) -> Path:
+        return self.capture_dir / "documents" / f"{snapshot_id}.txt"
+
+    def _write_document_artifact(self, snapshot_id: str, text: str) -> dict[str, Any]:
+        try:
+            path = self._document_artifact_path(snapshot_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Byte-faithful capture: no newline translation on the durable copy.
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                handle.write(text)
+            return {"documentArtifactPath": str(path), "documentArtifactChars": len(text)}
+        except OSError:
+            return {}
 
     def _cache_uia_snapshot(
         self,
@@ -991,6 +1011,7 @@ class WindowsDesktopController:
             self._uia_snapshots = snapshots
         snapshots[hwnd] = {
             "snapshotId": snapshot_id,
+            "windowHandle": hwnd,
             "observedAt": observed_at,
             "observedWallClock": datetime.now().astimezone().isoformat(timespec="seconds"),
             "processId": int(window.get("processId") or 0),
@@ -1034,9 +1055,49 @@ class WindowsDesktopController:
             raise DesktopExecutorError("read_snapshot offset/limit/textOffset/textLimit must be integers.") from exc
         elements = [item for item in snapshot.get("elements") if isinstance(item, dict)]
         document = str(snapshot.get("documentText") or "")
+        continuation_note = ""
+        # Pages beyond the captured text continue reading the live document and
+        # append to this same snapshot, so earlier pages stay byte-stable while
+        # reading has no fixed wall. Failures keep serving the captured text and
+        # say so instead of pretending completion.
+        window_handle = int(snapshot.get("windowHandle") or 0)
+        if (
+            window_handle
+            and not snapshot.get("documentTextEndReached")
+            and text_offset + text_limit > len(document)
+        ):
+            fetch_from = len(document)
+            fetch_limit = max(256, text_offset + text_limit - fetch_from)
+            try:
+                live = self.uia.read_text(
+                    window_handle,
+                    text_offset=fetch_from,
+                    text_limit=fetch_limit,
+                    cancel_check=cancel_check,
+                )
+                fetched = str(live.get("text") or "")
+                if fetched and len(document) + len(fetched) <= self.SNAPSHOT_TEXT_MAX_CHARS:
+                    document = document + fetched
+                    snapshot["documentText"] = document
+                    snapshot["documentTextEndReached"] = bool(live.get("endReached"))
+                    self._write_document_artifact(snapshot_id, document)
+                elif fetched:
+                    continuation_note = (
+                        "liveTextContinuation=cache_exhausted: the snapshot text cache is full; "
+                        "the artifact file holds the durable capture"
+                    )
+                if not fetched:
+                    continuation_note = "liveTextContinuation=unavailable: the live document had no more readable text"
+            except DesktopUiaCancelled as exc:
+                raise DesktopActionCancelled(str(exc)) from exc
+            except DesktopUiaError as exc:
+                continuation_note = (
+                    "liveTextContinuation=unavailable: "
+                    f"the live document could not be read ({str(exc)[-200:]}); serve captured text only"
+                )
         shown_elements = elements[offset : offset + limit]
         shown_text = document[text_offset : text_offset + text_limit]
-        return {
+        result = {
             "operation": "read_snapshot",
             "snapshotId": snapshot_id,
             "observedWallClock": snapshot.get("observedWallClock"),
@@ -1055,6 +1116,19 @@ class WindowsDesktopController:
                 f"text chars {text_offset}–{text_offset + len(shown_text)} of {len(document)}."
             ),
         }
+        if continuation_note:
+            result["liveTextContinuation"] = continuation_note.split(": ", 1)[0].split("=", 1)[1]
+            result["liveTextContinuationDetail"] = continuation_note
+        try:
+            artifact_path = self._document_artifact_path(snapshot_id)
+            if artifact_path.exists():
+                result["documentArtifactPath"] = str(artifact_path)
+                result["documentArtifactChars"] = len(document)
+        except (AttributeError, OSError):
+            # The artifact pointer is optional page metadata; paging itself
+            # must never depend on the artifact store.
+            pass
+        return result
 
     def _observed_element_expectations(self, window: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
         if params.get("elementIndex") in (None, ""):

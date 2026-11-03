@@ -361,6 +361,7 @@ class DesktopComputerUseService:
             "windowHandle", "x", "y", "durationMs", "snapshotId",
             "elementOffset", "elementCount", "nextElementOffset",
             "textOffset", "documentTextLength", "nextTextOffset", "documentTextEndReached",
+            "documentArtifactPath", "documentArtifactChars",
         ):
             item = result.get(key)
             if item not in (None, ""):
@@ -391,7 +392,13 @@ class DesktopComputerUseService:
             elif result.get("documentTextEndReached") is False:
                 notices.append(
                     "documentTextEndReached=false: more text exists beyond this snapshot; "
-                    "re-call agent_desktop_action inspect_window with a higher textLimit (up to 65536), then page"
+                    "continue with read_snapshot (it reads further from the live document into the same snapshot)"
+                )
+            artifact_path = str(result.get("documentArtifactPath") or "")
+            reading_unfinished = result.get("documentTextEndReached") is not True or next_text_offset not in (None, "")
+            if artifact_path and reading_unfinished:
+                notices.append(
+                    f"full captured text saved at {artifact_path}; page it with vrcforge_read_text_file if readable there"
                 )
         apps = [item for item in _ensure_list(result.get("apps")) if isinstance(item, dict)][:30]
         if apps:

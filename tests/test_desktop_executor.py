@@ -487,6 +487,7 @@ class DesktopExecutorTests(unittest.TestCase):
             elements,
             document_text="ご説明" * 4000,
             selected_text="",
+            document_text_end_reached=True,
         )
 
         page_one = controller._read_snapshot({"snapshotId": snapshot_id}, {}, lambda: False)  # noqa: SLF001
@@ -517,6 +518,70 @@ class DesktopExecutorTests(unittest.TestCase):
         with self.assertRaisesRegex(DesktopExecutorError, r"^snapshot_expired:"):
             controller._read_snapshot({"snapshotId": snapshot_id}, {}, lambda: False)  # noqa: SLF001
 
+    def test_read_snapshot_continues_live_text_into_the_same_snapshot(self) -> None:
+        controller = object.__new__(WindowsDesktopController)
+        controller._uia_snapshots = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            controller.capture_dir = Path(temp_dir)
+            snapshot_id = controller._cache_uia_snapshot(  # noqa: SLF001
+                {"windowHandle": 7, "processId": 9, "title": "large page"},
+                [],
+                document_text="先頭" * 4000,  # 8000 chars captured, more exists
+                document_text_end_reached=False,
+            )
+            read_calls: list[dict[str, Any]] = []
+
+            class ContinuingUia:
+                def read_text(self, window_handle, *, text_offset, text_limit, cancel_check=None):
+                    read_calls.append({"window_handle": window_handle, "text_offset": text_offset})
+                    return {
+                        "text": "続報" * 1000 + "[END]",  # 2003 more chars, then end
+                        "endReached": True,
+                    }
+
+            controller.uia = ContinuingUia()
+
+            page = controller._read_snapshot(  # noqa: SLF001
+                {"snapshotId": snapshot_id, "textOffset": 9000, "textLimit": 1200}, {}, lambda: False
+            )
+            with Path(page["documentArtifactPath"]).open(encoding="utf-8", newline="") as handle:
+                artifact = handle.read()
+
+        self.assertEqual(artifact, controller._uia_snapshots[7]["documentText"], "the artifact is extended byte-faithfully")  # noqa: SLF001
+        self.assertEqual(read_calls, [{"window_handle": 7, "text_offset": 8000}],
+                         "continuation reads the live document from the capture tail")
+        self.assertEqual(page["documentTextLength"], 8000 + 2005)
+        self.assertTrue(page["documentText"].endswith("[END]"))
+        self.assertIs(page["documentTextEndReached"], True, "live continuation reaches and reports the true end")
+        snapshot = controller._uia_snapshots[7]  # noqa: SLF001
+        self.assertEqual(len(snapshot["documentText"]), 8000 + 2005)
+        self.assertIs(snapshot["documentTextEndReached"], True)
+
+    def test_read_snapshot_live_continuation_failure_keeps_capture_and_says_so(self) -> None:
+        from desktop_uia import DesktopUiaError
+
+        controller = object.__new__(WindowsDesktopController)
+        controller._uia_snapshots = {}
+
+        class FailingUia:
+            def read_text(self, *_args, **_kwargs):
+                raise DesktopUiaError("window is gone")
+
+        controller.uia = FailingUia()
+        snapshot_id = controller._cache_uia_snapshot(  # noqa: SLF001
+            {"windowHandle": 7, "processId": 9, "title": "closed"},
+            [],
+            document_text="既存" * 10,
+            document_text_end_reached=False,
+        )
+        page = controller._read_snapshot(  # noqa: SLF001
+            {"snapshotId": snapshot_id, "textOffset": 0, "textLimit": 500}, {}, lambda: False
+        )
+        self.assertEqual(page["documentText"], "既存" * 10, "captured text is still served")
+        self.assertIs(page["documentTextEndReached"], False, "a failed continuation is never reported as finished")
+        self.assertEqual(page["liveTextContinuation"], "unavailable")
+        self.assertIn("could not be read", page["liveTextContinuationDetail"])
+
     def test_inspect_window_passes_text_limit_and_carries_end_of_document_flag(self) -> None:
         controller = object.__new__(WindowsDesktopController)
         controller.user32 = SimpleNamespace(EnumChildWindows=lambda *_args: True)
@@ -536,29 +601,41 @@ class DesktopExecutorTests(unittest.TestCase):
 
         controller.uia = FakeUia()
         controller._resolve_input_window = lambda _params: {"windowHandle": 12, "processId": 3, "title": "BOOTH"}  # type: ignore[method-assign]
-        result = controller._inspect_window({"textLimit": 5000}, {}, lambda: False)  # noqa: SLF001
-
-        self.assertEqual(captured["text_limit"], 5000, "caller textLimit must reach the UIA helper")
-        self.assertIs(result["documentTextEndReached"], False, "end-of-document flag must reach the model result")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            controller.capture_dir = Path(temp_dir)
+            result = controller._inspect_window({"textLimit": 5000}, {}, lambda: False)  # noqa: SLF001
+            self.assertEqual(captured["text_limit"], 5000, "caller textLimit must reach the UIA helper")
+            self.assertIs(result["documentTextEndReached"], False, "end-of-document flag must reach the model result")
+            self.assertEqual(result["documentArtifactChars"], 9000, "the full capture lands in the durable artifact")
+            with Path(result["documentArtifactPath"]).open(encoding="utf-8", newline="") as handle:
+                self.assertEqual(handle.read(), "ご説明" * 3000)
         snapshot = controller._uia_snapshots[12]  # noqa: SLF001
         self.assertIs(snapshot["documentTextEndReached"], False)
 
     def test_read_snapshot_reports_whether_document_reading_is_finished(self) -> None:
         controller = object.__new__(WindowsDesktopController)
         controller._uia_snapshots = {}
+
+        class EmptyUia:
+            def read_text(self, *_args, **_kwargs):
+                return {"text": "", "endReached": False}
+
+        controller.uia = EmptyUia()
         incomplete_id = controller._cache_uia_snapshot(  # noqa: SLF001
-            {"windowHandle": 1, "processId": 1, "title": "large"},
+            {"windowHandle": 11, "processId": 1, "title": "large"},
             [],
             document_text="ご説明" * 100,
             document_text_end_reached=False,
         )
         complete_id = controller._cache_uia_snapshot(  # noqa: SLF001
-            {"windowHandle": 2, "processId": 1, "title": "small"},
+            {"windowHandle": 12, "processId": 1, "title": "small"},
             [],
             document_text="ご説明" * 100,
             document_text_end_reached=True,
         )
 
+        # Nothing more is readable: the incomplete capture still must not
+        # pretend the document ended.
         tail = controller._read_snapshot(  # noqa: SLF001
             {"snapshotId": incomplete_id, "textOffset": 250}, {}, lambda: False
         )
@@ -580,6 +657,8 @@ class DesktopExecutorTests(unittest.TestCase):
                 "documentText": "短いが続きがある本文",
                 "documentTextEndReached": False,
                 "snapshotId": "snap-1-1",
+                "documentArtifactPath": r"E:\audit\desktop-captures\documents\snap-1-1.txt",
+                "documentArtifactChars": 9000,
                 "summary": "Inspected 1 UI Automation elements.",
             })
             finished = gateway.desktop.desktop_action_observation({
@@ -589,6 +668,8 @@ class DesktopExecutorTests(unittest.TestCase):
                 "documentText": "短くて完結な本文",
                 "documentTextEndReached": True,
                 "snapshotId": "snap-1-1",
+                "documentArtifactPath": r"E:\audit\desktop-captures\documents\snap-1-1.txt",
+                "documentArtifactChars": 8,
                 "summary": "Inspected 1 UI Automation elements.",
             })
             paged = gateway.desktop.desktop_action_observation({
@@ -602,8 +683,11 @@ class DesktopExecutorTests(unittest.TestCase):
             })
 
         self.assertIn("documentTextEndReached=false: more text exists beyond this snapshot", unfinished)
-        self.assertIn("higher textLimit", unfinished)
+        self.assertIn("continue with read_snapshot", unfinished)
+        self.assertIn("full captured text saved at", unfinished)
+        self.assertIn("vrcforge_read_text_file", unfinished)
         self.assertNotIn("more text exists beyond this snapshot", finished)
+        self.assertNotIn("full captured text saved at", finished, "a finished read carries no artifact detour")
         self.assertIn("more text remains in this snapshot", paged)
         self.assertIn("textOffset=9000", paged)
         self.assertNotIn("beyond this snapshot", paged)

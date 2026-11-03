@@ -174,14 +174,69 @@ function Select-Target {
     return $match
 }
 
-if ([string]$request.operation -eq 'inspect') {
+if ([string]$request.operation -eq 'read_text') {
+    $textOffset = [Math]::Max(0, [int]$request.textOffset)
+    $readLimit = [Math]::Max(256, [Math]::Min([int]$request.textLimit, 65536))
+    $readText = ''
+    $readEndReached = $true
+    $readFromPattern = $false
+    foreach ($node in $nodes) {
+        $textPattern = $null
+        try {
+            if ($node.Element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
+                $readFromPattern = $true
+                $document = $textPattern.DocumentRange
+                $range = $document.Clone()
+                $moved = $range.MoveEndpointByUnit([System.Windows.Automation.TextPatternRangeEndpoint]::Start, [System.Windows.Automation.TextUnit]::Character, $textOffset)
+                if ($moved -lt $textOffset) {
+                    $readText = ''
+                    $readEndReached = $true
+                    break
+                }
+                $range.MoveEndpointByRange([System.Windows.Automation.TextPatternRangeEndpoint]::End, $document, [System.Windows.Automation.TextPatternRangeEndpoint]::End)
+                $rawRead = [string]$range.GetText($readLimit + 1)
+                $readEndReached = ($rawRead.Length -le $readLimit)
+                $readText = $rawRead.Substring(0, [Math]::Min($rawRead.Length, $readLimit))
+                break
+            }
+        } catch { }
+    }
+    if (-not $readText -and -not $readFromPattern) {
+        # Edit-style controls expose their whole content as the element name;
+        # page it by offset with an exact end signal from its known length.
+        $nameNode = $null
+        foreach ($node in $nodes) {
+            try {
+                $name = [string]$node.Element.Current.Name
+                if ($name -and ($null -eq $nameNode -or $name.Length -gt [string]$nameNode.Element.Current.Name.Length)) { $nameNode = $node }
+            } catch { }
+        }
+        if ($null -ne $nameNode) {
+            $fullName = [string]$nameNode.Element.Current.Name
+            if ($textOffset -lt $fullName.Length) {
+                $readText = $fullName.Substring($textOffset, [Math]::Min($readLimit, $fullName.Length - $textOffset))
+            } else {
+                $readText = ''
+            }
+            $readEndReached = ($textOffset + $readLimit) -ge $fullName.Length
+        }
+    }
+    [ordered]@{
+        ok = $true
+        operation = 'read_text'
+        text = $readText
+        endReached = $readEndReached
+        textOffset = $textOffset
+    } | ConvertTo-Json -Compress
+    exit 0
+} elseif ([string]$request.operation -eq 'inspect') {
     $items = @($nodes | ForEach-Object { Format-Node $_ })
     $focusedElement = $null
     $focusedNode = @($nodes | Where-Object { $_.Focused } | Select-Object -First 1)
     if ($focusedNode.Count -gt 0) { $focusedElement = Format-Node $focusedNode[0] }
     $selectedElements = @($nodes | Where-Object { $_.Selected } | ForEach-Object { Format-Node $_ })
     $documentText = ''
-    $documentTextEndReached = $null
+    $documentTextEndReached = $true
     $selectedText = ''
     foreach ($node in $nodes) {
         $textPattern = $null
@@ -207,6 +262,28 @@ if ([string]$request.operation -eq 'inspect') {
                 if ($documentText -and $selectedText) { break }
             }
         } catch { }
+    }
+    if (-not $documentText) {
+        # No TextPattern document: edit-style controls carry the full content in
+        # the element name, so the longest name becomes the bounded capture and
+        # the cap still cannot masquerade as end-of-document.
+        $nameNode = $null
+        foreach ($node in $nodes) {
+            try {
+                $name = [string]$node.Element.Current.Name
+                if ($name -and ($null -eq $nameNode -or $name.Length -gt [string]$nameNode.Element.Current.Name.Length)) { $nameNode = $node }
+            } catch { }
+        }
+        if ($null -ne $nameNode) {
+            $fullName = [string]$nameNode.Element.Current.Name
+            if ($fullName.Length -gt $textLimit) {
+                $documentText = $fullName.Substring(0, $textLimit)
+                $documentTextEndReached = $false
+            } else {
+                $documentText = $fullName
+                $documentTextEndReached = $true
+            }
+        }
     }
     [ordered]@{
         ok = $true
@@ -388,6 +465,25 @@ class WindowsUiaAdapter:
                 "operation": "inspect",
                 "windowHandle": int(window_handle),
                 "limit": int(limit),
+                "textLimit": int(text_limit),
+            },
+            cancel_check,
+        )
+
+    def read_text(
+        self,
+        window_handle: int,
+        *,
+        text_offset: int = 0,
+        text_limit: int = 16000,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        return self.execute(
+            {
+                "operation": "read_text",
+                "windowHandle": int(window_handle),
+                "limit": 300,
+                "textOffset": max(0, int(text_offset)),
                 "textLimit": int(text_limit),
             },
             cancel_check,
