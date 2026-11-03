@@ -2200,5 +2200,12 @@
     "failedBody": "VRCForge could not reach GitHub Releases. Check your network connection and try again.",
     "disableAutomaticCheck": "Do not automatically check for updates again",
     "openReleaseFailed": "GitHub Releases could not be opened. Try again."
+  },
+  "errors": {
+    "runtime": {
+      "agent_runtime_request_failed": "The runtime request failed. Retry or check the runtime logs.",
+      "internal_error": "An internal error occurred. Retry; if it persists, check the logs.",
+      "authentication_failed": "The request was not authorized. Reconnect the app."
+    }
   }
 }

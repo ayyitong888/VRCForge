@@ -1753,7 +1753,8 @@ export function useChatRunController({
           items: current.items.filter((item) => item.id !== userItemId),
         }));
       }
-      appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text });
+      appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text,
+              ...(cause instanceof ApiError && cause.code ? { code: cause.code } : {}) });
       updateChat(chatId, (current) => ({
         ...touchChat(current),
         items: stripTransientConversationItems(current.items),

@@ -2200,5 +2200,12 @@
     "failedBody": "无法连接 GitHub Releases，请检查网络连接后重试。",
     "disableAutomaticCheck": "以后不自动检测更新",
     "openReleaseFailed": "无法打开 GitHub Releases，请重试。"
+  },
+  "errors": {
+    "runtime": {
+      "agent_runtime_request_failed": "运行时请求失败，请重试或查看运行日志。",
+      "internal_error": "发生内部错误，请重试；若持续出现请查看日志。",
+      "authentication_failed": "请求未被授权，请重新连接应用。"
+    }
   }
 }

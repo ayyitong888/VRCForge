@@ -2,13 +2,36 @@ import { invoke } from "@tauri-apps/api/core";
 import { isDesktopLoopbackApiUrl } from "../desktop-routing";
 
 export class ApiError extends Error {
+  public readonly code?: string;
+  public readonly status: number;
+  public readonly detail?: unknown;
+
   constructor(
     message: string,
-    public readonly status: number,
-    public readonly detail?: unknown,
+    status: number,
+    detail?: unknown,
   ) {
-    super(message);
+    const schema = runtimeErrorSchema(detail);
+    super(schema ? schema.message || `HTTP ${status}` : message);
+    this.status = status;
+    this.detail = detail;
+    if (schema?.code) this.code = schema.code;
   }
+}
+
+type RuntimeErrorSchema = { schema: string; code: string; message: string };
+
+/** Detect the unified runtime error schema in an HTTP error detail. */
+function runtimeErrorSchema(detail: unknown): RuntimeErrorSchema | undefined {
+  if (!detail || typeof detail !== "object") return undefined;
+  const candidate = detail as Partial<RuntimeErrorSchema>;
+  if (candidate.schema !== "vrcforge.runtime_error.v1") return undefined;
+  if (typeof candidate.code !== "string" || !candidate.code) return undefined;
+  return {
+    schema: candidate.schema,
+    code: candidate.code,
+    message: typeof candidate.message === "string" ? candidate.message : "",
+  };
 }
 
 let appSessionToken = "";

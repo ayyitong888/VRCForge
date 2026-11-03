@@ -177,7 +177,7 @@ export type ConversationItem =
       status: "retrying";
       createdAt?: string;
     }
-  | { id: string; type: "error"; text: string; createdAt?: string }
+  | { id: string; type: "error"; text: string; code?: string; createdAt?: string }
   | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; compactionRecovery?: CompactionRecoveryEntry[]; summarizedItemIds?: string[]; contextUsageBoundaryItemId?: string; entryCount?: number; beforeTokens?: number; afterTokens?: number; contextLimit?: number; createdAt?: string }
   | { id: string; type: "subagent"; task: SubAgentTask }
   | { id: string; type: "handoff_card"; cardId: string; handoffId: string; kind: string; payloadDigest: string; sourceChatId?: string; targetChatId?: string; sourceRevision?: number; targetRevision?: number; summary?: Record<string, unknown>; status?: string };

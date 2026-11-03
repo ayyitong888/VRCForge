@@ -2193,5 +2193,12 @@
     "failedBody": "GitHub Releases に接続できません。ネットワーク接続を確認して、もう一度お試しください。",
     "disableAutomaticCheck": "今後、更新を自動確認しない",
     "openReleaseFailed": "GitHub Releases を開けませんでした。もう一度お試しください。"
+  },
+  "errors": {
+    "runtime": {
+      "agent_runtime_request_failed": "ランタイムリクエストが失敗しました。再試行するかログを確認してください。",
+      "internal_error": "内部エラーが発生しました。続く場合はログを確認してください。",
+      "authentication_failed": "リクエストが承認されませんでした。アプリを再接続してください。"
+    }
   }
 }

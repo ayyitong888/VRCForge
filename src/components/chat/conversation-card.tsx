@@ -255,9 +255,13 @@ export function ConversationCard({
   }
 
   if (item.type === "error") {
+    // Render by stable code first (localized copy); the bounded schema message
+    // is the fallback and legacy backends only ever supplied that text.
+    const codeKey = item.code ? `errors.runtime.${item.code}` : "";
+    const codeText = codeKey && t(codeKey) !== codeKey ? t(codeKey) : item.text;
     return (
       <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive/80">
-        <div className="break-words">{item.text}</div>
+        <div className="break-words">{codeText}</div>
         <div className="mt-2 flex flex-wrap gap-2">
           <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onOpenDoctor?.()}>
             <Wrench className="h-3.5 w-3.5" />
