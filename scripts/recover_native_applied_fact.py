@@ -20,12 +20,16 @@ def sha256(raw: bytes) -> str:
 
 
 def matching_events(path: Path, approval_id: str):
-    with path.open(encoding="utf-8") as stream:
-        for number, line in enumerate(stream, 1):
-            event = json.loads(line)
-            approval = event.get("approval", {})
-            if event.get("approvalId") == approval_id or approval.get("id") == approval_id:
-                yield number, event
+    from atomic_file_replace import iter_jsonl_generations
+    for candidate in iter_jsonl_generations(path):
+        if not candidate.exists():
+            continue
+        with candidate.open(encoding="utf-8") as stream:
+            for number, line in enumerate(stream, 1):
+                event = json.loads(line)
+                approval = event.get("approval", {})
+                if event.get("approvalId") == approval_id or approval.get("id") == approval_id:
+                    yield number, event
 
 
 def candidate(history: Path, audit_root: Path, approval_id: str) -> tuple[dict, dict]:

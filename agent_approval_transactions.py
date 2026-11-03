@@ -2815,14 +2815,32 @@ class AgentApprovalTransactionService:
         )
 
     def recent_audit_logs(self, limit: int = 100) -> list[dict[str, Any]]:
-        if not self._ports.audit_log_path().exists():
-            return []
+        # Approval records run ~1MB each and the ledger rotates at 64MB, so a
+        # bounded newest-first window beats reading the whole file for a page
+        # of history; generations keep older entries reachable.
+        from atomic_file_replace import iter_jsonl_generations
+
+        bounded = max(1, min(limit, 500))
+        window_bytes = 4 * 1024 * 1024
         entries: list[dict[str, Any]] = []
-        for line in self._ports.audit_log_path().read_text(encoding="utf-8").splitlines()[-max(1, min(limit, 500)):]:
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
+        for path in iter_jsonl_generations(self._ports.audit_log_path()):
+            if len(entries) >= bounded or not path.exists():
                 continue
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                handle.seek(max(0, size - window_bytes))
+                chunk = handle.read().decode("utf-8", "replace")
+            lines = chunk.splitlines()
+            if size > window_bytes and lines:
+                lines = lines[1:]  # drop a possibly truncated head line
+            for line in reversed(lines):
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+                if len(entries) >= bounded:
+                    break
+        entries.reverse()
         return entries
 
     def _call_write_handler(
@@ -5479,25 +5497,29 @@ class AgentApprovalTransactionService:
 
     def recover_native_results(self, session_id: str, snapshot: dict[str, Any], pending: set[str]) -> dict[str, str]:
         """Read result evidence only; never recreate executable approvals."""
-        path = self._ports.audit_log_path()
-        if not pending or not path.exists():
+        from atomic_file_replace import iter_jsonl_generations
+
+        if not pending:
             return {}
         recovered: dict[str, str] = {}
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    event = json.loads(line)
-                except (ValueError, UnicodeError):
-                    continue
-                result = event.get("nativeResult")
-                if event.get("event") != "approval_applied" or not isinstance(result, dict):
-                    continue
-                call_id = result.get("callId")
-                if (call_id in pending and result.get("sessionId") == session_id
-                        and result.get("binding") == snapshot["binding"]
-                        and result.get("turnId") == snapshot["turnId"]
-                        and isinstance(result.get("content"), dict)):
-                    recovered[call_id] = json.dumps(result["content"], ensure_ascii=False)
+        for path in iter_jsonl_generations(self._ports.audit_log_path()):
+            if not path.exists():
+                continue
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        continue
+                    result = event.get("nativeResult")
+                    if event.get("event") != "approval_applied" or not isinstance(result, dict):
+                        continue
+                    call_id = result.get("callId")
+                    if (call_id in pending and result.get("sessionId") == session_id
+                            and result.get("binding") == snapshot["binding"]
+                            and result.get("turnId") == snapshot["turnId"]
+                            and isinstance(result.get("content"), dict)):
+                        recovered[call_id] = json.dumps(result["content"], ensure_ascii=False)
         return recovered
 
     def _reconcile_unrecoverable_linked_approval(self, approval_id: str) -> bool:

@@ -153,10 +153,14 @@ def _same_path(left: Any, right: Any) -> bool:
 
 
 def _host_entries(path: Path, contains: str):
-    with path.open(encoding="utf-8") as source:
-        for line in source:
-            if contains in line:
-                yield json.loads(line)
+    from atomic_file_replace import iter_jsonl_generations
+    for candidate in iter_jsonl_generations(path):
+        if not candidate.exists():
+            continue
+        with candidate.open(encoding="utf-8") as source:
+            for line in source:
+                if contains in line:
+                    yield json.loads(line)
 
 
 def _time(value: Any) -> datetime:

@@ -32,7 +32,7 @@ import hmac
 import json
 import math
 import os
-from atomic_file_replace import replace_with_retry
+from atomic_file_replace import replace_with_retry, rotate_jsonl_if_large
 import re
 import secrets
 import shutil
@@ -9684,6 +9684,7 @@ class AgentGateway:
         # 加锁保证每行 JSONL 原子落盘，不互相穿插。
         with self._audit_append_lock:
             self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+            rotate_jsonl_if_large(self.audit_log_path)
             with self.audit_log_path.open("a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
                 if "nativeResult" in safe_entry:
@@ -9701,6 +9702,7 @@ class AgentGateway:
         )
         with self._lock:
             path.parent.mkdir(parents=True, exist_ok=True)
+            rotate_jsonl_if_large(path)
             self._ensure_jsonl_append_boundary_locked(path)
             with path.open("a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")

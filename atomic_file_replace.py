@@ -34,4 +34,51 @@ def replace_with_retry(source: str | os.PathLike[str], target: str | os.PathLike
     raise last_error
 
 
-__all__ = ["replace_with_retry"]
+# Append-only JSONL audit ledgers grow without bound (approvals reached 2GB
+# because single records run ~1MB), so every full-file scan turns into a cold
+# multi-gigabyte read. Rotation keeps the active file bounded; readers that
+# need history fall back to the numbered generations, newest first.
+JSONL_ROTATE_MAX_BYTES = 64 * 1024 * 1024
+JSONL_ROTATE_GENERATIONS = 2
+
+
+def iter_jsonl_generations(
+    path: os.PathLike[str] | Path,
+    *,
+    generations: int = JSONL_ROTATE_GENERATIONS,
+) -> list[Path]:
+    """Return the active ledger plus its rotated generations, newest first."""
+    active = Path(path)
+    return [active] + [active.with_name(f"{active.name}.{gen}") for gen in range(1, generations + 1)]
+
+
+def rotate_jsonl_if_large(
+    path: os.PathLike[str] | Path,
+    *,
+    max_bytes: int | None = None,
+    generations: int = JSONL_ROTATE_GENERATIONS,
+) -> bool:
+    """Rotate an append-only JSONL ledger once it exceeds max_bytes.
+
+    Best-effort: auditing must never fail because housekeeping did. The caller
+    is expected to hold the ledger's append lock so rotation cannot race a
+    concurrent append.
+    """
+    active = Path(path)
+    try:
+        if max_bytes is None:
+            max_bytes = JSONL_ROTATE_MAX_BYTES
+        if not active.exists() or active.stat().st_size < max_bytes:
+            return False
+        active.with_name(f"{active.name}.{generations}").unlink(missing_ok=True)
+        for gen in range(generations - 1, 0, -1):
+            source = active.with_name(f"{active.name}.{gen}")
+            if source.exists():
+                replace_with_retry(source, active.with_name(f"{active.name}.{gen + 1}"))
+        replace_with_retry(active, active.with_name(f"{active.name}.1"))
+        return True
+    except OSError:
+        return False
+
+
+__all__ = ["replace_with_retry", "iter_jsonl_generations", "rotate_jsonl_if_large"]
