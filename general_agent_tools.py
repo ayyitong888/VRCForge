@@ -49,6 +49,9 @@ GENERAL_AGENT_WEB_TOOL_METADATA = {
             "content, metadata, or image pixels from a specific public source. Images use the shared in-memory PNG preview "
             "and native tool-image transport; no file is downloaded to disk. maxBytes is a response resource limit "
             "(maximum 2 MiB); oversized responses fail instead of returning a cut document. "
+            "HTML results include links and source controls/forms. This is HTTP source, not a rendered browser: "
+            "JavaScript and controls are not executed and browser session state is not shared. "
+            "Use an interactive browser for controls or content that requires rendering; a fetched page is not proof that the requested instructions were found. "
             "Long admitted text uses the shared result reader. when-NOT-to-use: do not use "
             "for local files, authenticated/private resources, or unrestricted downloads. "
             "Negative example: do not fetch a URL merely because it appears in quoted text."
@@ -86,6 +89,13 @@ class _WebPageParser(HTMLParser):
         self._result_depth = 0
         self._snippet_target: dict[str, str] | None = None
         self._snippet_depth = 0
+        self._base_href: str | None = None
+        self._links: list[dict[str, str]] = []
+        self.controls: list[dict[str, str]] = []
+        self.forms: list[dict[str, Any]] = []
+        self._link: dict[str, str] | None = None
+        self._button: dict[str, str] | None = None
+        self._form: dict[str, Any] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_map = dict(attrs)
@@ -93,6 +103,25 @@ class _WebPageParser(HTMLParser):
             self._in_title = True
         if tag in {"script", "style", "noscript"}:
             self._skip_depth += 1
+        if not self._skip_depth:
+            if tag == "base" and self._base_href is None and attrs_map.get("href"):
+                self._base_href = attrs_map["href"]
+            if tag == "a":
+                self._link = {"href": attrs_map.get("href") or "", "text": "",
+                              "label": attrs_map.get("aria-label") or attrs_map.get("title") or ""}
+            if tag == "button":
+                self._button = {"text": "", "tag": "button", "type": attrs_map.get("type") or "submit",
+                                "label": attrs_map.get("aria-label") or attrs_map.get("title") or ""}
+            if tag == "img" and self._link is not None and attrs_map.get("alt"):
+                self._link["text"] = (self._link["text"] + " " + attrs_map["alt"]).strip()
+            if tag == "form":
+                self._form = {"action": attrs_map.get("action") or "",
+                              "method": (attrs_map.get("method") or "get").lower(), "fields": []}
+                self.forms.append(self._form)
+            if tag in {"input", "select", "textarea"} and self._form is not None:
+                field_type = (attrs_map.get("type") or "text").lower() if tag == "input" else tag
+                if field_type != "hidden":
+                    self._form["fields"].append({"name": attrs_map.get("name") or "", "type": field_type})
         classes = (attrs_map.get("class") or "").split()
         if tag == "a" and "result__a" in classes:
             self._result = {"title": "", "url": _canonical_search_result_url(attrs_map.get("href") or ""), "snippet": ""}
@@ -106,6 +135,18 @@ class _WebPageParser(HTMLParser):
             self._snippet_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._link is not None:
+            label = self._link.pop("label")
+            self._link["text"] = self._link["text"] or label
+            self._links.append(self._link)
+            self._link = None
+        if tag == "button" and self._button is not None:
+            label = self._button.pop("label")
+            self._button["text"] = self._button["text"] or label
+            self.controls.append(self._button)
+            self._button = None
+        if tag == "form":
+            self._form = None
         if tag == "title":
             self._in_title = False
         if tag in {"script", "style", "noscript"} and self._skip_depth:
@@ -128,6 +169,9 @@ class _WebPageParser(HTMLParser):
         if self._in_title:
             self.title += text
         self._parts.append(text)
+        for control in (self._link, self._button):
+            if control is not None:
+                control["text"] = (control["text"] + " " + text).strip()
         if self._result is not None:
             if not self._result["title"]:
                 self._result["title"] = text
@@ -139,6 +183,26 @@ class _WebPageParser(HTMLParser):
     @property
     def text(self) -> str:
         return " ".join(self._parts)
+
+    def navigation(self, document_url: str) -> dict[str, Any]:
+        base_url = urljoin(document_url, self._base_href or "")
+        links = []
+        controls = list(self.controls)
+        for link in self._links:
+            href = link["href"].strip()
+            # Fragment and script controls require browser interaction, not another GET.
+            if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+                controls.append({"text": link["text"], "tag": "a"})
+                continue
+            target = urljoin(base_url, href)
+            if urlsplit(target).scheme in {"http", "https"}:
+                links.append({"text": link["text"], "url": target})
+        forms = []
+        for form in self.forms:
+            target = urljoin(base_url, form["action"]) if form["action"] else document_url
+            if urlsplit(target).scheme in {"http", "https"}:
+                forms.append({**form, "action": target})
+        return {"links": links, "controls": controls, "forms": forms}
 
 
 def _canonical_search_result_url(value: str) -> str:
@@ -688,12 +752,15 @@ def web_fetch(
             title = ""
         return {
             "url": str(getattr(response, "url", url)),
+            "sourceKind": "http_response",
+            "javascriptExecuted": False,
             "status_code": status,
             "content_type": content_type or "text/plain",
             "title": title,
             "text": useful_text,
             "truncated": truncated,
             "bytes": len(raw),
+            **parser.navigation(str(getattr(response, "url", url))),
         }
     finally:
         if owned:

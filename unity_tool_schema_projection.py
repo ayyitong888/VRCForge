@@ -23,7 +23,7 @@ _DESKTOP_ACTION_SCHEMA = {
         "action": {
             "type": "string",
             "enum": ["computer_use", "screenshot", "annotation", "browser", "desktop_rescue"],
-            "description": "Desktop bridge action. Use computer_use for params.operation calls.",
+            "description": "Desktop bridge action. Use computer_use for params.operation calls, including real browser interaction. The browser action has no executor and returns an explicit failure.",
         },
         "params": {
             "type": "object",

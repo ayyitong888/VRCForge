@@ -649,6 +649,12 @@ class DesktopComputerUseService:
                     "Desktop control bridge is not connected. Launch this action from a configured "
                     "desktop skill/provider."
                 )
+        elif action == "browser":
+            status = "failed"
+            error = (
+                "No browser executor is available for action=browser; no page was opened or read. "
+                "Use action=computer_use with a connected desktop bridge to interact with an existing browser."
+            )
         else:
             status = "recorded"
         event = {

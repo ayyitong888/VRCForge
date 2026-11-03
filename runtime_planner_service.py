@@ -1335,6 +1335,12 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
         evidence.update({"url": web_url(result.get("url")), "title": content(result.get("title"), 240),
                          "text": content(result["text"]),
                          "continuation": "The page evidence is truncated; web_fetch has no offset parameter. Use web_search with the page URL/domain and a specific question to locate a narrower source, or state that the missing section remains unverified. Repeating the same fetch will not reveal the omitted tail."})
+        for field in ("links", "controls", "forms"):
+            if isinstance(result.get(field), list):
+                evidence[field] = json.loads(content(json.dumps(result[field], ensure_ascii=False)))
+        for field in ("sourceKind", "javascriptExecuted"):
+            if field in result:
+                evidence[field] = result[field]
     elif tool == "vrcforge_web_search" and isinstance(result.get("results"), list):
         rows = result["results"]
         items = []
@@ -5057,6 +5063,12 @@ class RuntimePlannerService:
                 runtime_scope_instruction += (
                     f"\nPrefer {web_fetch_name} for reading a supplied public URL when its text/HTML/JSON capability fits the task; "
                     "it returns page text and source evidence without shell quoting or HTML extraction commands. "
+                    "It reads HTTP source only: it does not execute JavaScript, click controls, or retain a browser session. "
+                    "Follow returned links for instructions. If the source is a confirmation/login page or requires interaction, "
+                    "use the available Computer Use tool with action=computer_use to inspect and operate a real browser, "
+                    "then read its current page; repeated HTTP fetches are not browser interaction. "
+                    "Do not treat a successful fetch of a gate page as having read the requested instructions. "
+                    "Keep unresolved usage requirements from earlier conversation evidence until actual instructions resolve them. "
                     "Use Shell for an actual command/script requirement or a demonstrated limitation of the available reader, "
                     "rather than starting with curl or Invoke-WebRequest for an ordinary page read."
                 )

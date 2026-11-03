@@ -55,6 +55,43 @@ def test_web_fetch_extracts_bounded_html_text_and_metadata() -> None:
     assert client.calls[0][1]["timeout"] == 10.0
 
 
+def test_web_fetch_preserves_navigation_without_claiming_browser_execution():
+    source = b"""<html><head><base href='/docs/'></head><body>
+    <a href='setup.html'><span>Setup</span> guide</a>
+    <a href='//cdn.example.test/manual.pdf' aria-label='PDF manual'></a>
+    <a href='#'>Continue</a><a href='javascript:confirmAge()'>Confirm</a>
+    <button type='button'><span>Open</span> details</button>
+    <form action='../search' method='post'>
+      <input name='q' type='text' value='private search'>
+      <input name='csrf' type='hidden' value='secret'>
+      <input name='password' type='password' value='secret password'>
+      <button type='submit'>Search</button>
+    </form><script>hidden instructions</script></body></html>"""
+    result = web_fetch("https://example.test/start", client=FakeClient(
+        FakeResponse(source, headers={"content-type": "text/html"}, url="https://example.test/page")))
+    assert result["sourceKind"] == "http_response"
+    assert result["javascriptExecuted"] is False
+    assert {"text": "Setup guide", "url": "https://example.test/docs/setup.html"} in result["links"]
+    assert {"text": "PDF manual", "url": "https://cdn.example.test/manual.pdf"} in result["links"]
+    assert all(link["url"].startswith(("http://", "https://")) for link in result["links"])
+    assert {"text": "Continue", "tag": "a"} in result["controls"]
+    assert {"text": "Confirm", "tag": "a"} in result["controls"]
+    assert {"text": "Open details", "tag": "button", "type": "button"} in result["controls"]
+    assert result["forms"] == [{"action": "https://example.test/search", "method": "post",
+                                "fields": [{"name": "q", "type": "text"},
+                                           {"name": "password", "type": "password"}]}]
+    serialized = str(result)
+    assert "secret" not in serialized and "private search" not in serialized and "csrf" not in serialized
+    assert "hidden instructions" not in result["text"]
+
+
+def test_web_fetch_plain_text_remains_exact_and_has_no_html_controls():
+    result = web_fetch("https://example.test/notes", client=FakeClient(FakeResponse(
+        b"read <a href='/x'> literally", headers={"content-type": "text/plain"})))
+    assert result["text"] == "read <a href='/x'> literally"
+    assert result["links"] == [] and result["controls"] == [] and result["forms"] == []
+
+
 def test_web_fetch_rejects_http_failure_and_unsupported_type() -> None:
     with pytest.raises(RuntimeError, match="HTTP 404"):
         web_fetch("https://example.test/missing", client=FakeClient(FakeResponse(b"", 404, {})))
