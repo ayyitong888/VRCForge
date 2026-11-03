@@ -342,6 +342,7 @@ export default function App() {
   const [backgroundGoalNotificationsEnabled, setBackgroundGoalNotificationsEnabled] = useState(true);
   const [backgroundGoalRefreshSignal, setBackgroundGoalRefreshSignal] = useState(0);
   const [memoryReviewRefreshSignal, setMemoryReviewRefreshSignal] = useState(0);
+  const [runtimeQueueVersion, setRuntimeQueueVersion] = useState(0);
   const initialGlobalQuestionFetchRef = useRef(false);
   const [savingAdvancedSettings, setSavingAdvancedSettings] = useState(false);
   const [handoffSendOpen, setHandoffSendOpen] = useState(false);
@@ -1093,6 +1094,7 @@ export default function App() {
       : undefined,
     chats,
     chatStorageReady,
+    runtimeQueueVersion,
   });
   const sending = chatRunSending || compacting;
   const visibleQueued = useMemo(
@@ -2401,6 +2403,9 @@ export default function App() {
       }
       if (eventType === "agentGoalBackground") {
         setBackgroundGoalRefreshSignal((current) => current + 1);
+      }
+      if (eventType === "agentRuntimeQueue") {
+        setRuntimeQueueVersion((current) => current + 1);
       }
       if (eventType === "agentMemoryReview") {
         setMemoryReviewRefreshSignal((current) => current + 1);

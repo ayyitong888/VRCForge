@@ -194,6 +194,7 @@ type UseChatRunControllerParams = {
   traceSteerDelivery?: (event: SteerDeliveryTraceEvent) => void;
   chats?: ChatThread[];
   chatStorageReady?: boolean;
+  runtimeQueueVersion?: number;
 };
 
 export function useChatRunController({
@@ -218,6 +219,7 @@ export function useChatRunController({
   traceSteerDelivery,
   chats,
   chatStorageReady = true,
+  runtimeQueueVersion = 0,
 }: UseChatRunControllerParams) {
   const { t } = useTranslation();
   const [sending, setSending] = useState(false);
@@ -255,11 +257,13 @@ export function useChatRunController({
   }, [chats]);
 
   useEffect(() => {
-    if (rehydratedRef.current || !chatStorageReady || !chats) return;
-    rehydratedRef.current = true;
+    if (!chatStorageReady || !chats) return;
     let cancelled = false;
     const restored: QueuedTurn[] = [];
     let interruptedSteerRecovered = false;
+    const initialRestore = !rehydratedRef.current;
+    if (initialRestore) {
+      rehydratedRef.current = true;
     for (const chat of chats) for (const item of chat.items) {
       if (item.type !== "user" || !item.clientTurnId || !item.queueEnvelope) continue;
       if (item.queueStatus === "steering") {
@@ -280,12 +284,16 @@ export function useChatRunController({
     queueRef.current = restored;
     setQueued(restored);
     if (interruptedSteerRecovered) void persistChatsNow?.().catch(() => undefined);
+    }
 
     void listAgentRunFollowups(endpoint, { includeTerminal: false }).then(({ items }) => {
       if (cancelled) return;
       const next = [...queueRef.current];
       for (const entry of items || []) {
         if (!entry.queueId || !entry.clientTurnId || !entry.sessionId) continue;
+        // A live claim belongs to an in-flight dispatch whose turn stream
+        // already owns the UI; re-syncing it would resurrect a ghost copy.
+        if (!initialRestore && entry.status === "claimed") continue;
         const existingTurn = next.find((candidate) => candidate.id === entry.clientTurnId);
         const laneId = entry.sessionId;
         const owner = resolveFollowupRestoreOwner(entry, chats || [], existingTurn?.chatId);
@@ -377,10 +385,13 @@ export function useChatRunController({
         if (next[0]?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
       }
     }).catch(() => {
-      if (!cancelled && restored[0]?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
+      if (!cancelled && queueRef.current[0]?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
     });
     return () => { cancelled = true; };
-  }, [chatStorageReady]);
+    // runtimeQueueVersion bumps on backend agentRuntimeQueue events so entries
+    // enqueued after mount (e.g. externally queued followups) reach the pending
+    // queue instead of silently waiting for the next app restart.
+  }, [chatStorageReady, runtimeQueueVersion]);
 
   function isRunning() {
     return sendingRef.current;
