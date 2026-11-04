@@ -112,6 +112,7 @@ class SubAgentTaskRegistry:
         reconcile_on_init: bool = True,
         lane_budget: RuntimeLaneBudget | None = None,
         task_finished: Callable[[dict[str, Any]], None] | None = None,
+        wait_parent_idle: Callable[..., bool] | None = None,
     ) -> None:
         self.artifact_dir = Path(artifact_dir)
         self.roles = {role.id: role for role in roles}
@@ -119,6 +120,7 @@ class SubAgentTaskRegistry:
         self.max_concurrent = max(1, min(int(max_concurrent), SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT))
         self._lane_budget = lane_budget
         self._task_finished = task_finished or (lambda _event: None)
+        self._wait_parent_idle = wait_parent_idle
         self._tasks: dict[str, SubAgentTask] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
@@ -472,6 +474,13 @@ class SubAgentTaskRegistry:
             if not task:
                 return {"ok": False, "error": "sub-agent task was not found."}
             if task.status not in _RUNNING_STATUSES:
+                if task.parent_continuation_status == "pending":
+                    next_task = copy.deepcopy(task)
+                    next_task.parent_continuation_status = "interrupted"
+                    task = self._commit_task_event_locked(task, next_task, "parent_continuation_interrupted", {"reason": "user_stop"})
+                    event = self._cancel_events.get(task_id)
+                    if event:
+                        event.set()
                 return {"ok": True, "task": self._serialize_task(task), "message": "task already stopped"}
             next_task = copy.deepcopy(task)
             next_task.cancel_requested = True
@@ -654,6 +663,15 @@ class SubAgentTaskRegistry:
     def _notify_task_finished(self, task_id: str) -> None:
         """Notify the app after terminal state is durable and its lane is free."""
 
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.parent_continuation_status != "pending":
+                return
+            session_id = task.parent_session_id
+            cancel_event = self._cancel_events.get(task_id)
+        if self._wait_parent_idle is not None and session_id:
+            if not self._wait_parent_idle(session_id, cancelled=lambda: self._shutdown or bool(cancel_event and cancel_event.is_set())):
+                return
         with self._lock:
             task = self._tasks.get(task_id)
             if (

@@ -277,6 +277,59 @@ def decode_chats_with_reuse(
     return hydrated, _ValidatedArchiveReuse(reusable_refs)
 
 
+def prune_unreferenced_blobs(
+    store_path: str | Path,
+    previous_chats: Sequence[Mapping[str, Any]],
+    current_chats: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    """Delete only validated old archive blobs no longer referenced by the committed snapshot.
+
+    Call after the owning transcript document commits. Unknown files and blobs
+    whose existing content no longer validates are preserved.
+    """
+    previous: dict[str, dict[str, Any]] = {}
+    current: set[str] = set()
+    for chats, target in ((previous_chats, previous), (current_chats, None)):
+        for chat in chats:
+            if not isinstance(chat, Mapping):
+                continue
+            items = chat.get("items")
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not is_archived_item(item):
+                    continue
+                # is_archived_item already validated the exact ref shape.
+                ref = dict(item[REF_FIELD])
+                if target is None:
+                    current.add(ref["digest"])
+                else:
+                    target.setdefault(ref["digest"], ref)
+
+    deleted_count = left_behind_count = 0
+    for digest, ref in previous.items():
+        if digest in current:
+            continue
+        try:
+            path = blob_path(store_path, digest)
+            if not path.exists():
+                continue
+            if not path.is_file() or _link_like(path):
+                left_behind_count += 1
+                continue
+            # Reuse the archive reader's existing binding, size, and digest
+            # validation before deleting bytes that may have been replaced.
+            _read_blob(store_path, ref)
+            path.unlink()
+            deleted_count += 1
+        except FileNotFoundError:
+            continue
+        except (OSError, ChatTranscriptArchiveError):
+            left_behind_count += 1
+            continue
+    return {"deletedCount": deleted_count, "leftBehindCount": left_behind_count}
+
+
 def decode_chats(chats: Sequence[Mapping[str, Any]], store_path: str | Path) -> list[dict[str, Any]]:
     """Hydrate packed chats, validating every referenced blob and scope."""
     hydrated, _reuse = decode_chats_with_reuse(chats, store_path)

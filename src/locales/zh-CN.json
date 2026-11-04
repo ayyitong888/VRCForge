@@ -947,6 +947,7 @@
     "latestMessageActionOnly": "只能修改最新一条消息。",
     "contextUsageCached": "缓存上下文：{{value}}",
     "deletePermanentlyFailed": "删除聊天失败，已恢复聊天。",
+    "deletePermanentlyPartialSuccess": "聊天记录已删除，但运行历史清理未完成：{{error}}",
     "forwardedByAgent": "来自其他对话的代理转发",
     "openSourceConversation": "打开来源对话",
     "openConversation": "打开对话"

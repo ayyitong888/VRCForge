@@ -49,10 +49,40 @@ def test_core_product_version_gate_accepts_requested_release_version(tmp_path: P
     }
 
 
+def test_core_product_version_gate_defaults_to_python_core_version(tmp_path: Path) -> None:
+    gate = _load_gate()
+    _write_fixture(tmp_path, python_version="1.10.4", csharp_version="1.10.4")
+
+    result = gate.validate_core_product_version(tmp_path)
+
+    assert result == {
+        "requestedVersion": "1.10.4",
+        "pythonProductVersion": "1.10.4",
+        "csharpProductVersion": "1.10.4",
+    }
+
+
 def test_release_build_invokes_core_product_version_gate_before_payload_build() -> None:
     source = (REPO_ROOT / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
 
-    invocation = "check_core_product_version.py --repo-root $repoRoot --version $Version"
+    invocation = "check_core_product_version.py --repo-root $repoRoot"
     assert invocation in source
+    assert "check_core_product_version.py --repo-root $repoRoot --version $Version" not in source
     assert 'throw "Core product version consistency gate failed. No release payload was built."' in source
     assert source.index(invocation) < source.index("Build-TauriDesktopApp -DestinationExe")
+
+
+def test_release_build_reuses_an_explicit_unity_package_and_keeps_default_build_path() -> None:
+    source = (REPO_ROOT / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
+
+    reuse = source.index("$reuseUnityPackage = -not [string]::IsNullOrWhiteSpace($UnityPackagePath)")
+    core_build_branch = source.index("if (-not $reuseUnityPackage) {", reuse)
+    syntax_gate = source.index("VRCForge.CSharpSyntaxGate", core_build_branch)
+    python_tests = source.index("& $pythonExe -m pytest", syntax_gate)
+    default_build = source.index("if (-not $reuseUnityPackage) {", python_tests)
+    build_unitypackage = source.index("& .\\packaging\\build_unitypackage.ps1")
+    reuse_copy = source.index('Copy-Item -LiteralPath $UnityPackagePath -Destination (Join-Path $unityPluginRoot "VRCForge.unitypackage") -Force')
+
+    assert reuse < core_build_branch < syntax_gate < python_tests < default_build < build_unitypackage < reuse_copy
+    assert 'throw "The supplied UnityPackagePath does not exist: $UnityPackagePath"' in source
+    assert "$portableCoreRootMeta = Join-Path $unityPluginRoot \"Assets\\VRCForge.meta\"" in source

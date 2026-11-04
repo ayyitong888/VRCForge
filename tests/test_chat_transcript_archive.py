@@ -88,6 +88,54 @@ def test_transaction_reuse_does_not_reuse_changed_item(tmp_path, monkeypatch):
     assert len(new_blobs) == 1
 
 
+def test_prune_removes_only_previously_validated_blobs_unreferenced_by_committed_snapshot(tmp_path):
+    store = tmp_path / "chat-transcripts.json"
+    prior, pending = encode_chats([*large_chat("chat-delete"), *large_chat("chat-keep")])
+    write_pending(store, pending)
+    _hydrated, reuse = archive.decode_chats_with_reuse(prior, store)
+    retained = [prior[1]]
+    rewritten, new_blobs = encode_chats(decode_chats(retained, store), reuse=reuse)
+    assert new_blobs == {}
+    keep_digest = rewritten[0]["items"][0][ARCHIVE_REF_KEY]["digest"]
+    delete_digest = prior[0]["items"][0][ARCHIVE_REF_KEY]["digest"]
+    unknown = blob_path(store, "f" * 64)
+    unknown.parent.mkdir(parents=True, exist_ok=True)
+    unknown.write_bytes(b"unknown user file")
+
+    removed = archive.prune_unreferenced_blobs(store, prior, rewritten)
+
+    assert removed == {"deletedCount": 1, "leftBehindCount": 0}
+    assert not blob_path(store, delete_digest).exists()
+    assert blob_path(store, keep_digest).exists()
+    assert unknown.read_bytes() == b"unknown user file"
+
+
+def test_prune_keeps_all_prior_blobs_when_snapshot_encoding_does_not_reference_reuse(tmp_path):
+    store = tmp_path / "chat-transcripts.json"
+    prior, pending = encode_chats(large_chat())
+    write_pending(store, pending)
+    _hydrated, reuse = archive.decode_chats_with_reuse(prior, store)
+
+    removed = archive.prune_unreferenced_blobs(store, prior, prior)
+
+    assert removed == {"deletedCount": 0, "leftBehindCount": 0}
+    assert blob_path(store, next(iter(pending))).exists()
+
+
+def test_prune_preserves_changed_blob_even_when_its_old_reference_was_removed(tmp_path):
+    store = tmp_path / "chat-transcripts.json"
+    prior, pending = encode_chats(large_chat())
+    write_pending(store, pending)
+    digest = next(iter(pending))
+    path = blob_path(store, digest)
+    path.write_bytes(path.read_bytes() + b"changed")
+
+    removed = archive.prune_unreferenced_blobs(store, prior, [])
+
+    assert removed == {"deletedCount": 0, "leftBehindCount": 1}
+    assert path.read_bytes().endswith(b"changed")
+
+
 def test_identical_item_is_content_addressed_once(tmp_path):
     store = tmp_path / "chat-transcripts.json"
     item = large_chat()[0]["items"][0]

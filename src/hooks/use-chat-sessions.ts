@@ -89,6 +89,12 @@ function projectDurableChatFingerprint(chat: ChatThread): unknown {
   return filterPersistableChats([chat])[0] ?? null;
 }
 
+function isStableChatSaveRejection(cause: unknown): cause is ApiError {
+  return cause instanceof ApiError
+    && cause.status >= 400 && cause.status < 500
+    && ![408, 425, 429].includes(cause.status);
+}
+
 type UseChatSessionsParams = {
   activeView: ActiveView;
   endpoint: string;
@@ -141,6 +147,7 @@ export function useChatSessions({
   const restoredChatRequestKeyRef = useRef("");
   const chatsDirtyRef = useRef(false);
   const chatsSaveVersionRef = useRef(0);
+  const chatAutosaveFailureVersionRef = useRef<number | null>(null);
   const chatTimestampCacheTimerRef = useRef<number | null>(null);
   const chatsRef = useRef<ChatThread[]>(initialChatState.chats);
   const chatsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -530,11 +537,13 @@ export function useChatSessions({
     initialSnapshot: ChatThread[],
     initialSaveVersion: number,
     clearDirty: boolean,
+    onAttemptVersion?: (version: number) => void,
   ): Promise<void> {
     let snapshot = initialSnapshot;
     let saveVersion = initialSaveVersion;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
+        onAttemptVersion?.(saveVersion);
         await saveChatSnapshotWithinStorageOperation(snapshot, saveVersion, clearDirty);
         return;
       } catch (cause) {
@@ -792,7 +801,8 @@ export function useChatSessions({
     if (!runtimeConnected) return;
     // A stream of renders must not postpone saving until the chat becomes idle.
     const timer = window.setInterval(() => {
-      if (!chatsLoadedRef.current || !chatsDirtyRef.current || chatPersistenceBlockedRef.current) return;
+      if (!chatsLoadedRef.current || !chatsDirtyRef.current || chatPersistenceBlockedRef.current
+        || chatAutosaveFailureVersionRef.current === chatsSaveVersionRef.current) return;
       enqueueDebouncedChatSave();
     }, 800);
     return () => window.clearInterval(timer);
@@ -813,14 +823,19 @@ export function useChatSessions({
     // A queued snapshot must never be paired with source revisions refreshed by
     // an earlier operation. Re-sample both the chat state and its generation
     // only when this operation reaches the head of the storage queue.
-    const pending = enqueueChatStorageOperation(() => (
-      saveWithOneReconcileRetryWithinStorageOperation(
-        filterPersistableChats(chatsRef.current),
-        chatsSaveVersionRef.current,
-        clearDirty,
-      )
+    let attemptedSaveVersion: number | undefined;
+    const pending = enqueueChatStorageOperation(() => saveWithOneReconcileRetryWithinStorageOperation(
+      filterPersistableChats(chatsRef.current),
+      chatsSaveVersionRef.current,
+      clearDirty,
+      (version) => { attemptedSaveVersion = version; },
     ), "save");
-    return pending.catch((cause) => {
+    return pending.then(() => {
+      chatAutosaveFailureVersionRef.current = null;
+    }, (cause) => {
+      if (isStableChatSaveRejection(cause) && attemptedSaveVersion === chatsSaveVersionRef.current) {
+        chatAutosaveFailureVersionRef.current = attemptedSaveVersion;
+      }
       chatsDirtyRef.current = true;
       throw cause;
     });
@@ -983,15 +998,19 @@ export function useChatSessions({
     // the agent run (chat.sessionId), not by the client chat id. A chat that
     // never ran has no runtime session and no native history to discard.
     const runtimeSessionId = String(removedSnapshot?.sessionId || "").trim();
+    const deleteSaveVersion = chatsSaveVersionRef.current;
+    let durableDeletionCommitted = false;
     try {
+      await persistChatsNow();
+      durableDeletionCommitted = true;
+      await removeChatTranscriptCache(endpoint, chatId, removedSnapshot.projectPath);
       if (runtimeSessionId) {
         const result = await deleteChatPermanentlyApi(endpoint, runtimeSessionId);
-        if (result.ok !== true) throw new ApiError(t("chat.deletePermanentlyFailed"), 0);
+        if (result.ok !== true) throw new ApiError("Runtime cleanup did not return success.", 0);
       }
-      await persistChatsNow();
-      await removeChatTranscriptCache(endpoint, chatId, removedSnapshot.projectPath);
     } catch (cause: unknown) {
-      if (removedSnapshot && removedIndex >= 0 && !chatsRef.current.some((chat) => chat.id === chatId)) {
+      const rollbackUnchangedSave = chatsSaveVersionRef.current === deleteSaveVersion;
+      if (!durableDeletionCommitted && removedSnapshot && removedIndex >= 0 && !chatsRef.current.some((chat) => chat.id === chatId)) {
         chatDeletedIdsRef.current.delete(chatId);
         const restored = [...chatsRef.current];
         restored.splice(Math.min(removedIndex, restored.length), 0, removedSnapshot);
@@ -1002,8 +1021,16 @@ export function useChatSessions({
           id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt,
         })));
         markChatsDirty();
+        if (rollbackUnchangedSave && chatAutosaveFailureVersionRef.current === deleteSaveVersion) {
+          chatAutosaveFailureVersionRef.current = chatsSaveVersionRef.current;
+        }
       }
-      setError(chatSaveErrorMessage(cause, t("chat.deletePermanentlyFailed")));
+      if (durableDeletionCommitted) {
+        const detail = cause instanceof Error ? cause.message : String(cause ?? "Runtime cleanup did not complete.");
+        setError(t("chat.deletePermanentlyPartialSuccess", { error: detail }));
+      } else {
+        setError(chatSaveErrorMessage(cause, t("chat.deletePermanentlyFailed")));
+      }
     }
   }
 

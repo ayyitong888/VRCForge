@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from copy import deepcopy
+
+import pytest
 
 import dashboard_server as server
 from background_goal_runtime import RuntimeLaneBudget
@@ -97,7 +100,8 @@ def _serialized_message_bytes(request) -> int:
     return len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
-def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(tmp_path, monkeypatch):
+@pytest.mark.parametrize("early_child", [False, True])
+def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(tmp_path, monkeypatch, early_child):
     gateway, _original_model, invoked = setup_gateway(tmp_path, [])
     large_scan = "RAW_CHILD_SCAN_SENTINEL_" + ("detailed scan row; " * 12000)
     gateway.register_tool(
@@ -108,6 +112,8 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
     )
 
     parent_returned = threading.Event()
+    if early_child:
+        parent_returned.set()
     model = ParentChildFixtureModel(parent_returned)
     gateway.runtime_planner._model = model
     continuation_results = []
@@ -136,11 +142,24 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
         return original_runtime_message_impl(params, *args, **kwargs)
 
     monkeypatch.setattr(gateway, "_runtime_message_impl", capture_continuation_runtime_params)
+    def delegate(params):
+        result = server.delegate_sub_agent_runtime(params)
+        if early_child:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                task = service.list_tasks()["tasks"][0]
+                if task["status"] == "completed":
+                    break
+                time.sleep(0.01)
+            assert task["status"] == "completed", task
+            assert task["parentContinuationStatus"] == "pending", task
+        return result
+
     gateway.register_tool(
         "vrcforge_delegate_subagent",
         "When to use: delegate one bounded read-only review. When NOT to use: delegate writes.",
         "plan/preview",
-        server.delegate_sub_agent_runtime,
+        delegate,
     )
 
     try:

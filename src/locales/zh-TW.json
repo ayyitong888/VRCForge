@@ -941,6 +941,7 @@
     "latestMessageActionOnly": "只能修改最新一則訊息。",
     "contextUsageCached": "快取上下文：{{value}}",
     "deletePermanentlyFailed": "刪除聊天失敗，已恢復聊天。",
+    "deletePermanentlyPartialSuccess": "聊天記錄已刪除，但執行歷史清理未完成：{{error}}",
     "forwardedByAgent": "來自其他對話的代理轉發",
     "openSourceConversation": "開啟來源對話",
     "openConversation": "開啟對話"

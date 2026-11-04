@@ -22,13 +22,13 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from dashboard_foundation import read_vrcforge_version
 from agent_mcp_2026 import HTTP_SESSION_IDLE_SECONDS, PROTOCOL_VERSION, Mcp2026Router, run_stdio_loop, _host_is_loopback
 from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
 from mcp_tool_descriptor import standardize_tool_descriptor
 from external_mcp_result_projection import project_tool
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
-from unity_mcp_tool_contract import PRODUCT_VERSION
 from internal_tool_blocks import (
     CANONICAL_TOOL_BLOCKS,
     CANONICAL_TOOL_BLOCK_ALIASES,
@@ -772,7 +772,7 @@ class VRCForgeBridge:
             "io.modelcontextprotocol/clientCapabilities": {},
             "io.modelcontextprotocol/clientInfo": {
                 "name": "vrcforge-agent-stdio-bridge",
-                "version": PRODUCT_VERSION,
+                "version": read_vrcforge_version(),
             },
         }
         if method in {"tools/call", "tools/list", "prompts/get"}:
@@ -1824,7 +1824,7 @@ def run_stdio_server(
         lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version=PRODUCT_VERSION,
+        server_version=read_vrcforge_version(),
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         tool_call_catalogue_for_call=lambda name, params: list_tools({
@@ -1847,7 +1847,7 @@ def run_stdio_server(
         list_tools,
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version=PRODUCT_VERSION,
+        server_version=read_vrcforge_version(),
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda params: list_tools({"exposureLayer": requested_layer["value"], "_lookupToolNames": [str(params.get("name") or "")]}) if isinstance(params, Mapping) and params.get("name") else list_tools({"exposureLayer": requested_layer["value"]}),
         resource_list=list_resources,

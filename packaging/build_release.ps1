@@ -578,6 +578,7 @@ try {
     if ($sourceVersion -ne $Version) {
         throw "Package version must match the source VERSION file. requested=$Version source=$sourceVersion"
     }
+    $reuseUnityPackage = -not [string]::IsNullOrWhiteSpace($UnityPackagePath)
     if ($UvDownloadSha256 -notmatch "^[0-9a-fA-F]{64}$") {
         if ($strictSourceBuild) {
             throw "Strict release build requires a pinned 64-hex UvDownloadSha256."
@@ -622,17 +623,19 @@ try {
 
     $dotnetExe = Resolve-DotNetExe
     $pythonExe = Resolve-PythonExe
-    & $pythonExe .\packaging\check_core_product_version.py --repo-root $repoRoot --version $Version
+    & $pythonExe .\packaging\check_core_product_version.py --repo-root $repoRoot
     if ($LASTEXITCODE -ne 0) {
         throw "Core product version consistency gate failed. No release payload was built."
     }
-    & $dotnetExe run `
-        --project .\packaging\VRCForge.CSharpSyntaxGate\VRCForge.CSharpSyntaxGate.csproj `
-        --configuration Release `
-        -- `
-        .\Assets\VRCForge
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unity C# syntax gate failed. No release payload was built."
+    if (-not $reuseUnityPackage) {
+        & $dotnetExe run `
+            --project .\packaging\VRCForge.CSharpSyntaxGate\VRCForge.CSharpSyntaxGate.csproj `
+            --configuration Release `
+            -- `
+            .\Assets\VRCForge
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unity C# syntax gate failed. No release payload was built."
+        }
     }
     & $pythonExe -m pytest -q `
         .\tests\test_unity_optional_sdk_assemblies.py `
@@ -871,6 +874,8 @@ try {
     Copy-Item -LiteralPath .\internal_tool_blocks.py -Destination (Join-Path $payloadRoot "internal_tool_blocks.py") -Force
     Copy-Item -LiteralPath .\agent_memory_tool_contract.py -Destination (Join-Path $payloadRoot "agent_memory_tool_contract.py") -Force
     Copy-Item -LiteralPath .\avatar_composition_workflow_skills.py -Destination (Join-Path $payloadRoot "avatar_composition_workflow_skills.py") -Force
+    Copy-Item -LiteralPath .\dashboard_foundation.py -Destination (Join-Path $payloadRoot "dashboard_foundation.py") -Force
+    Copy-Item -LiteralPath .\vrcforge_runtime_paths.py -Destination (Join-Path $payloadRoot "vrcforge_runtime_paths.py") -Force
     & $pythonExe (Join-Path $payloadRoot "tools\vrcforge_agent_mcp_stdio.py") --help | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Packaged external stdio bridge import smoke failed."
@@ -895,24 +900,30 @@ try {
     if ($trustedDesktopSha256 -notmatch '^[0-9a-f]{64}$' -or $trustedBackendSha256 -notmatch '^[0-9a-f]{64}$') {
         throw "The paired VRCForge desktop/backend SHA-256 values are invalid."
     }
-    $trustedReleaseDataPath = Join-Path $vrcforgeCorePayloadRoot "Editor\MCP\VRCForgeMcpTrustedRelease.json"
-    $trustedReleaseData = [ordered]@{
-        schema = "vrcforge.trusted-release.v1"
-        desktopSha256 = $trustedDesktopSha256
-        backendSha256 = $trustedBackendSha256
-    } | ConvertTo-Json -Depth 2
-    [System.IO.File]::WriteAllText(
-        $trustedReleaseDataPath,
-        $trustedReleaseData + [Environment]::NewLine,
-        [System.Text.UTF8Encoding]::new($false))
-
-    if ([string]::IsNullOrWhiteSpace($UnityPackagePath)) {
-        $UnityPackagePath = Join-Path $releaseRoot "VRCForge.unitypackage"
-    }
     $portableCoreRootMeta = Join-Path $unityPluginRoot "Assets\VRCForge.meta"
-    & .\packaging\build_unitypackage.ps1 -SourceAssetsPath $vrcforgeCorePayloadRoot -OutputPath $UnityPackagePath -RootMetaOutputPath $portableCoreRootMeta
-    if (-not (Test-Path -LiteralPath $UnityPackagePath)) {
-        throw "The paired VRCForge.unitypackage build did not produce an artifact."
+    if (-not $reuseUnityPackage) {
+        $UnityPackagePath = Join-Path $releaseRoot "VRCForge.unitypackage"
+        & .\packaging\build_unitypackage.ps1 -SourceAssetsPath $vrcforgeCorePayloadRoot -OutputPath $UnityPackagePath -RootMetaOutputPath $portableCoreRootMeta
+        if (-not (Test-Path -LiteralPath $UnityPackagePath -PathType Leaf)) {
+            throw "The paired VRCForge.unitypackage build did not produce an artifact."
+        }
+    } else {
+        if (-not (Test-Path -LiteralPath $UnityPackagePath -PathType Leaf)) {
+            throw "The supplied UnityPackagePath does not exist: $UnityPackagePath"
+        }
+        $guidManifest = Get-Content -LiteralPath .\packaging\unitypackage_guid_manifest.json -Raw -Encoding utf8 | ConvertFrom-Json
+        $rootGuidEntry = @($guidManifest.entries | Where-Object { $_.path -ceq "Assets/VRCForge" })[0]
+        $portableRootMeta = @"
+fileFormatVersion: 2
+guid: $($rootGuidEntry.guid)
+folderAsset: yes
+DefaultImporter:
+  externalObjects: {}
+  userData:
+  assetBundleName:
+  assetBundleVariant:
+"@
+        [System.IO.File]::WriteAllText($portableCoreRootMeta, $portableRootMeta + "`n", [System.Text.UTF8Encoding]::new($false))
     }
     if (-not (Test-Path -LiteralPath $portableCoreRootMeta -PathType Leaf)) {
         throw "The paired portable Unity Core root meta was not produced."

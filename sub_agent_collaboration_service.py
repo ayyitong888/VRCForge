@@ -66,6 +66,7 @@ class SubAgentCollaborationService:
             reconcile_on_init=False,
             lane_budget=ports.lane_budget,
             task_finished=ports.task_finished,
+            wait_parent_idle=getattr(ports.gateway, "wait_runtime_session_idle", None),
         )
 
     @classmethod

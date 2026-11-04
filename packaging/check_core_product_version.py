@@ -38,12 +38,12 @@ def _csharp_product_version(path: Path) -> str:
     return match.group(1)
 
 
-def validate_core_product_version(repo_root: Path, requested_version: str) -> dict[str, str]:
-    requested = str(requested_version).strip()
-    if not requested:
-        raise VersionConsistencyError("Requested release VERSION is empty.")
-
+def validate_core_product_version(repo_root: Path, requested_version: str | None = None) -> dict[str, str]:
     python_version = _python_product_version(repo_root / PYTHON_CONTRACT)
+    requested = python_version if requested_version is None else str(requested_version).strip()
+    if not requested:
+        raise VersionConsistencyError("Requested Core product version is empty.")
+
     csharp_version = _csharp_product_version(repo_root / CSHARP_CONTRACT)
     mismatches = []
     if python_version != requested:
@@ -66,10 +66,10 @@ def validate_core_product_version(repo_root: Path, requested_version: str) -> di
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Require Python and Unity Core product versions to match a release VERSION."
+        description="Require Python and Unity Core product versions to match."
     )
     parser.add_argument("--repo-root", default=".")
-    parser.add_argument("--version", required=True)
+    parser.add_argument("--version", help="Optional expected Core version; defaults to Python PRODUCT_VERSION.")
     args = parser.parse_args(argv)
     try:
         result = validate_core_product_version(Path(args.repo_root).resolve(), args.version)

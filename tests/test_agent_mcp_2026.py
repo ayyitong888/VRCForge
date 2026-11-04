@@ -11,6 +11,7 @@ import pytest
 
 from agent_mcp_2026 import PROTOCOL_VERSION, Mcp2026Router, create_asgi_app, run_stdio_loop
 from agent_gateway import AgentGateway, AgentGatewayError
+from dashboard_foundation import read_vrcforge_version
 
 
 def _meta(**extra):
@@ -98,6 +99,15 @@ def test_discover_list_and_call_are_strict_2026(router):
     assert structured["outcome"]["status"] == "ok"
     assert json.loads(called["result"]["content"][0]["text"]) == called["result"]["structuredContent"]
     assert called["result"]["isError"] is False
+
+
+def test_default_router_server_info_uses_app_version() -> None:
+    router = Mcp2026Router(lambda _params: [], lambda _name, _arguments: {"ok": True})
+
+    response, status = router.handle(_request("server/discover"))
+
+    assert status == 200
+    assert response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["version"] == read_vrcforge_version()
 
 
 def test_nested_mcp_catalogue_preserves_write_permission_annotation() -> None:

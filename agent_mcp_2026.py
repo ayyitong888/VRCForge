@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Sequence, TextIO
 from urllib.parse import urlsplit
 
+from dashboard_foundation import read_vrcforge_version
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
 from operation_context import ensure_operation_result
@@ -484,7 +485,7 @@ class Mcp2026Router:
         tool_call: ToolCallCallback,
         *,
         server_name: str = "VRCForge",
-        server_version: str = "1.9.1",
+        server_version: str = read_vrcforge_version(),
         tool_list_revision: ToolListRevisionCallback | None = None,
         tool_name_resolver: ToolNameResolver | None = None,
         tool_call_catalogue: ToolCallCatalogueCallback | None = None,

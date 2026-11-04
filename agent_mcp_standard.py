@@ -24,6 +24,7 @@ from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
 from operation_context import ensure_operation_result
 from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, resource_uri_without_selection, result_mode, result_resource_links, select_tools, tool_names
+from dashboard_foundation import read_vrcforge_version
 
 
 LATEST_PROTOCOL_VERSION = "2025-11-25"
@@ -116,7 +117,7 @@ class McpStandardRouter:
         tool_call: ToolCallCallback,
         *,
         server_name: str = "VRCForge",
-        server_version: str = "1.8.4",
+        server_version: str = read_vrcforge_version(),
         tool_list_revision: ToolListRevisionCallback | None = None,
         tool_name_resolver: ToolNameResolver | None = None,
         tool_call_catalogue: ToolCallCatalogueCallback | None = None,

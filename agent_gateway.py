@@ -1985,7 +1985,8 @@ class AgentGateway:
         for task in items:
             if not isinstance(task, dict):
                 continue
-            if str(task.get("status") or "").strip().casefold() not in {"queued", "running"}:
+            if (str(task.get("status") or "").strip().casefold() not in {"queued", "running"}
+                    and task.get("parentContinuationStatus") != "pending"):
                 continue
             task_session = str(task.get("sessionId") or task.get("parentSessionId") or "").strip()
             task_turn = str(task.get("parentTurnId") or "").strip()
@@ -2110,6 +2111,7 @@ class AgentGateway:
         deadline = time.monotonic() + min(timeout, 30.0)
         with self._lock:
             self._runtime_continuation_accepting = False
+            self._runtime_continuation_condition.notify_all()
             while self._runtime_continuations_inflight or self._question_continuations_inflight:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -5179,7 +5181,18 @@ class AgentGateway:
     def _dispatch_runtime_shell_continuation_owned(self, shell_session_id: str) -> bool:
         """Dispatch one continuation after its app-lifecycle ownership is reserved."""
 
-        claimed = self._runtime_run_ledger.claim_shell_continuation(shell_session_id)
+        with self._runtime_continuation_condition:
+            pending = self._runtime_run_ledger._latest_shell_continuation_locked(shell_session_id)
+            if pending is None or pending.get("shellContinuationState") != "pending":
+                return False
+            session_id = str(pending.get("sessionId") or "")
+            while self._runtime_session_state.session_busy(session_id):
+                if not self._runtime_continuation_accepting:
+                    return False
+                self._runtime_continuation_condition.wait()
+            if not self._runtime_continuation_accepting:
+                return False
+            claimed = self._runtime_run_ledger.claim_shell_continuation(shell_session_id)
         if claimed is None:
             return False
         event = {
@@ -5311,6 +5324,7 @@ class AgentGateway:
         turn_raised = False
         raised_error: BaseException | None = None
         recovery_failure: dict[str, Any] | None = None
+        previous_stream_context = self._runtime_session_state.stream_context()
         resource_token = self._mcp_resource_context.set(self._mcp_resource_context.get())
         try:
             response_payload = self._runtime_message_impl_body(
@@ -5430,6 +5444,7 @@ class AgentGateway:
                     pass
             raise
         finally:
+            self._runtime_session_state.set_stream_context(previous_stream_context)
             self._mcp_resource_context.reset(resource_token)
             owned_params.pop("_runtimeFailureProgress", None)
             owned_params.pop("_runtimeTurnStarted", None)
@@ -5554,6 +5569,53 @@ class AgentGateway:
                         client_turn_id=resolved_client_turn_id,
                     )
 
+            with self._lock:
+                self._runtime_continuation_condition.notify_all()
+
+    @contextmanager
+    def runtime_session_idle_guard(self, session_id: str, timeout_seconds: float | None = None):
+        """Wait without holding the shared lock, then reserve idle state for local cleanup."""
+        deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
+        with self._runtime_continuation_condition:
+            while self._runtime_session_state.session_busy(session_id):
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise AgentGatewayError("The runtime session is still stopping.", status_code=409)
+                self._runtime_continuation_condition.wait(remaining)
+            yield
+
+    def wait_runtime_session_idle(self, session_id: str, *, cancelled: Callable[[], bool] | None = None) -> bool:
+        """Existing continuation workers wait before claiming durable parent delivery."""
+        with self._runtime_continuation_condition:
+            while self._runtime_session_state.session_busy(session_id):
+                if not self._runtime_continuation_accepting or (cancelled and cancelled()):
+                    return False
+                self._runtime_continuation_condition.wait(0.1 if cancelled else None)
+            return self._runtime_continuation_accepting and not (cancelled and cancelled())
+
+    def _admit_runtime_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> None:
+        """Serialize native conversation owners while keeping each caller's response."""
+        with self._runtime_continuation_condition:
+            waiting_cancelled = self._runtime_session_state.queue_turn(
+                session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+            )
+            if waiting_cancelled is None:
+                raise AgentGatewayError("A runtime turn with this sessionId and clientTurnId is already active.", status_code=409)
+            try:
+                while True:
+                    if waiting_cancelled.is_set() or not self._runtime_continuation_accepting:
+                        raise AgentGatewayError("The runtime turn was stopped before execution.", status_code=409)
+                    if self._runtime_session_state.begin_turn(
+                        session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id, exclusive=True,
+                    ):
+                        return
+                    self._runtime_continuation_condition.wait()
+            finally:
+                self._runtime_session_state.discard_waiting_turn(
+                    session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+                )
+                self._runtime_continuation_condition.notify_all()
+
     @staticmethod
     def _user_adjustment_wait_plan(reason: str = "") -> dict[str, Any]:
         reply = reason or "The adjustment proxy is ready. Finish the manual adjustment, then send a new message."
@@ -5621,20 +5683,11 @@ class AgentGateway:
         if not session_id:
             session_id = f"sess_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         turn_id = f"turn_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
-        client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
+        client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip() or turn_id
         params["_resolvedRuntimeSessionId"] = session_id
         params["_resolvedRuntimeTurnId"] = turn_id
         params["_resolvedRuntimeClientTurnId"] = client_turn_id
-        if not self._runtime_session_state.begin_turn(
-            session_id=session_id,
-            turn_id=turn_id,
-            client_turn_id=client_turn_id,
-            exclusive=params.get("_questionAnswerRequireIdle") is True,
-        ):
-            raise AgentGatewayError(
-                "A runtime turn with this sessionId and clientTurnId is already active.",
-                status_code=409,
-            )
+        self._admit_runtime_turn(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id)
         params["_runtimeAdmitted"] = True
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
         self._mcp_resource_context.set(f"runtime:{session_id}")
@@ -8922,7 +8975,6 @@ class AgentGateway:
             payload["result"] = write_payload["result"]
         elif shell_payload is not None and shell_payload.get("result"):
             payload["result"] = shell_payload["result"]
-        self._runtime_session_state.clear_stream_context()
         return payload
 
     def submit_runtime_steer(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -9179,6 +9231,8 @@ class AgentGateway:
             turn_id=turn_id,
             client_turn_id=client_turn_id,
         )
+        with self._runtime_continuation_condition:
+            self._runtime_continuation_condition.notify_all()
         if not accepted:
             raise AgentGatewayError(
                 "The runtime cancellation identity does not match one active turn.",
@@ -9207,6 +9261,17 @@ class AgentGateway:
     ) -> dict[str, Any]:
         # Internal task cleanup also owns resources after its runtime turn ended.
         # Public Stop must first validate the active identity in request_runtime_cancel.
+        with self._lock:
+            for continuation in self._runtime_run_ledger.shell_continuation_states(limit=0):
+                if continuation.get("shellContinuationState") != "pending":
+                    continue
+                if (session_id and continuation.get("sessionId") != session_id
+                        or turn_id and continuation.get("turnId") != turn_id
+                        or client_turn_id and continuation.get("clientTurnId") != client_turn_id):
+                    continue
+                self._runtime_run_ledger._append_shell_continuation_state_locked(
+                    continuation, "interrupted", reason="user_stop",
+                )
         cancelled_question_seeds = self.questions.cancel_runtime_questions(
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id
         )

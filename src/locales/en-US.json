@@ -947,6 +947,7 @@
     "latestMessageActionOnly": "Only the latest message can be changed.",
     "contextUsageCached": "Cached context: {{value}}",
     "deletePermanentlyFailed": "Failed to delete the chat. It has been restored.",
+    "deletePermanentlyPartialSuccess": "Chat record deleted, but runtime history cleanup is incomplete: {{error}}",
     "forwardedByAgent": "Forwarded by an agent from another conversation",
     "openSourceConversation": "Open source conversation",
     "openConversation": "Open conversation"

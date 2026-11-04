@@ -229,6 +229,7 @@ from chat_transcript_archive import (
     decode_chats_with_reuse as decode_archived_chats_with_reuse,
     encode_chats as encode_archived_chats,
     is_archived_item as is_archived_transcript_item,
+    prune_unreferenced_blobs as prune_chat_archive_blobs,
 )
 from chat_attachment_vault import (
     ARCHIVE_MAX_BYTES,
@@ -3214,7 +3215,8 @@ async def _execute_app_agent_runtime_message(
         followup_lane_id = runtime_request.followup_lane_id or runtime_request.session_id
         if not followup_lane_id or not runtime_request.client_turn_id:
             raise HTTPException(status_code=409, detail={"code": "followup_queue_not_ready"})
-        claimed = RUNTIME_QUEUE_PORT.claim_runtime_followups(
+        claimed = await asyncio.to_thread(
+            RUNTIME_QUEUE_PORT.claim_runtime_followups,
             session_id=followup_lane_id,
             owner_id=f"app:{runtime_request.client_turn_id}",
             queue_id=runtime_request.followup_queue_id,
@@ -3268,9 +3270,9 @@ async def _execute_app_agent_runtime_message(
         if runtime_request.followup_queue_id and followup_lane_id and followup_claim_token:
             try:
                 if runtime_returned:
-                    RUNTIME_QUEUE_PORT.ack_runtime_followup(runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
+                    await asyncio.to_thread(RUNTIME_QUEUE_PORT.ack_runtime_followup, runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
                 elif admission_rejected:
-                    RUNTIME_QUEUE_PORT.release_runtime_followup(runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
+                    await asyncio.to_thread(RUNTIME_QUEUE_PORT.release_runtime_followup, runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
                 else:
                     recovery = await asyncio.to_thread(
                         AGENT_GATEWAY.get_runtime_session,
@@ -3278,7 +3280,7 @@ async def _execute_app_agent_runtime_message(
                         client_turn_id=runtime_request.client_turn_id or "",
                     )
                     if recovery.get("status") in {"completed", "failed"}:
-                        RUNTIME_QUEUE_PORT.ack_runtime_followup(runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
+                        await asyncio.to_thread(RUNTIME_QUEUE_PORT.ack_runtime_followup, runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
             except (OSError, AgentGatewayError):
                 pass
     try:
@@ -3546,7 +3548,8 @@ def app_agent_runtime_timeline(
 @app.post("/api/app/agent/runs/cancel")
 async def app_agent_runtime_cancel(cancel_request: AgentRuntimeCancelRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.request_runtime_cancel(
+        payload = await asyncio.to_thread(
+            AGENT_GATEWAY.request_runtime_cancel,
             {
                 "session_id": cancel_request.session_id,
                 "turnId": cancel_request.turn_id,
@@ -3577,7 +3580,8 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
     # deterministic. Same-turn steer is text-only and never drops attachments;
     # the request falls through to the durable follow-up lane instead.
     if queue_request.target_client_turn_id and not queue_request.attachments:
-        steer_result = RUNTIME_QUEUE_PORT.submit_runtime_steer(
+        steer_result = await asyncio.to_thread(
+            RUNTIME_QUEUE_PORT.submit_runtime_steer,
             {
                 "sessionId": queue_request.session_id,
                 "targetClientTurnId": queue_request.target_client_turn_id,
@@ -3594,7 +3598,7 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
             return steer_result
     followup_lane_id = queue_request.lane_id or queue_request.session_id
     if steer_result is None or steer_result.get("accepted") is not True:
-        payload = RUNTIME_QUEUE_PORT.enqueue_runtime_followup({
+        payload = await asyncio.to_thread(RUNTIME_QUEUE_PORT.enqueue_runtime_followup, {
             "sessionId": followup_lane_id, "clientTurnId": queue_request.client_turn_id,
             "runtimeSessionId": queue_request.session_id,
             "targetClientTurnId": queue_request.target_client_turn_id,
@@ -4189,7 +4193,21 @@ async def app_delete_agent_chat(chat_id: str) -> dict[str, Any]:
     """
     sessions = getattr(AGENT_GATEWAY, "runtime_sessions", None)
     if sessions is not None:
-        sessions.discard_session(chat_id)
+        def stop_and_discard_runtime_session() -> None:
+            try:
+                AGENT_GATEWAY.request_runtime_cancel({
+                    "sessionId": chat_id,
+                    "reason": "chat_deleted",
+                })
+                # The guard waits for active/finalizing owners, then retains
+                # the gateway's admission lock through discard so a new turn
+                # cannot enter in the gap between quiescence and deletion.
+                with AGENT_GATEWAY.runtime_session_idle_guard(chat_id, timeout_seconds=15.0):
+                    sessions.discard_session(chat_id)
+            except AgentGatewayError as exc:
+                raise runtime_http_error("agent_runtime_request_failed", exc.status_code, exc) from exc
+
+        await asyncio.to_thread(stop_and_discard_runtime_session)
     return {"ok": True, "removed": True}
 
 
@@ -5751,6 +5769,7 @@ def write_chat_transcripts_storage(
             app_chats.append(chat)
     app_path = chat_transcripts_path()
     archive_writes: dict[Path, bytes] = {}
+    archive_chats_by_store: dict[Path, list[dict[str, Any]]] = {}
     stored_chats_for_digest: list[dict[str, Any]] = []
 
     def archive_document(records: list[dict[str, Any]], path: Path, **fields: Any) -> str:
@@ -5760,6 +5779,7 @@ def write_chat_transcripts_storage(
         packed, blobs = encode_archived_chats(records, reuse=reuse)
         for digest, blob in blobs.items():
             archive_writes[chat_archive_blob_path(path, digest)] = blob["data"]
+        archive_chats_by_store[path] = packed
         has_archived_items = any(
             isinstance(item, dict) and is_archived_transcript_item(item)
             for chat in packed if isinstance(chat, dict)
@@ -5905,6 +5925,33 @@ def write_chat_transcripts_storage(
                 else "Unable to write chat storage and exact rollback could not be verified; run Doctor before retrying."
             )
             raise HTTPException(status_code=500, detail=detail) from exc
+        # Only after every transcript reference and project index has
+        # committed, remove previously referenced blobs absent from the new
+        # snapshot. Invalid documents or changed/unknown blobs are preserved.
+        archive_cleanup = {"deletedCount": 0, "leftBehindCount": 0}
+        transcript_paths = {
+            app_path,
+            *[path for path, _payload, _count in project_serialized],
+            *[path for _project_path, path in stale_project_files],
+        }
+        for path in transcript_paths:
+            original = storage_snapshot.get(path)
+            if original is None:
+                continue
+            try:
+                previous_document = load_strict_json(original.decode("utf-8-sig"))
+                previous_chats = previous_document.get("chats") if isinstance(previous_document, dict) else None
+                if not isinstance(previous_chats, list):
+                    continue
+                pruned = prune_chat_archive_blobs(
+                    path,
+                    previous_chats,
+                    archive_chats_by_store.get(path, []),
+                )
+                for key in archive_cleanup:
+                    archive_cleanup[key] += int(pruned.get(key) or 0)
+            except (UnicodeDecodeError, ValueError, TypeError, OSError):
+                continue
         for _project_path, path in stale_project_files:
             parent = path.parent
             try:
@@ -5952,6 +5999,7 @@ def write_chat_transcripts_storage(
             "sourceRevisions": source_revisions,
             "chatDigests": _chat_digests(stored_chats_for_digest),
             "chatMetadataShapes": _chat_metadata_shapes(stored_chats_for_digest),
+            "archiveCleanup": archive_cleanup,
         },
         chats,
         automatic_groups,

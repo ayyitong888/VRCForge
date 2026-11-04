@@ -40,17 +40,18 @@ def test_runtime_and_localized_about_versions_follow_release_version() -> None:
 
     runtime_sources = (
         REPO_ROOT / "agent_mcp_2026.py",
+        REPO_ROOT / "agent_mcp_standard.py",
         REPO_ROOT / "agent_gateway.py",
         REPO_ROOT / "tools" / "vrcforge_agent_mcp_stdio.py",
     )
     for path in runtime_sources:
         source = path.read_text(encoding="utf-8")
-        if path.name == "agent_gateway.py":
-            assert 'server_version=read_vrcforge_version()' in source
-            from dashboard_foundation import read_vrcforge_version
-            assert read_vrcforge_version() == version
-        else:
-            assert f'server_version="{version}"' in source or f'server_version: str = "{version}"' in source
+        assert (
+            "server_version=read_vrcforge_version()" in source
+            or "server_version: str = read_vrcforge_version()" in source
+        )
+    from dashboard_foundation import read_vrcforge_version
+    assert read_vrcforge_version() == version
 
     for locale_name in ("en-US", "ja-JP", "zh-CN", "zh-TW"):
         locale = json.loads(
@@ -109,6 +110,14 @@ def test_release_payload_keeps_external_stdio_protocol_dependencies_and_smokes_i
         '(Join-Path $payloadRoot "avatar_composition_workflow_skills.py") -Force'
     ) in source
     assert (
+        'Copy-Item -LiteralPath .\\dashboard_foundation.py -Destination '
+        '(Join-Path $payloadRoot "dashboard_foundation.py") -Force'
+    ) in source
+    assert (
+        'Copy-Item -LiteralPath .\\vrcforge_runtime_paths.py -Destination '
+        '(Join-Path $payloadRoot "vrcforge_runtime_paths.py") -Force'
+    ) in source
+    assert (
         '& $pythonExe (Join-Path $payloadRoot '
         '"tools\\vrcforge_agent_mcp_stdio.py") --help | Out-Null'
     ) in source
@@ -128,6 +137,7 @@ def test_external_stdio_import_closure_survives_packaging(tmp_path: Path) -> Non
     bridge = payload / "tools" / "vrcforge_agent_mcp_stdio.py"
     bridge.parent.mkdir(parents=True)
     shutil.copyfile(REPO_ROOT / "tools" / bridge.name, bridge)
+    shutil.copyfile(REPO_ROOT / "VERSION", payload / "VERSION")
     for source, destination in re.findall(
         r'Copy-Item -LiteralPath \.\\([a-z_0-9]+\.py) -Destination '
         r'\(Join-Path \$payloadRoot "([a-z_0-9]+\.py)"\)',
@@ -135,9 +145,10 @@ def test_external_stdio_import_closure_survives_packaging(tmp_path: Path) -> Non
     ):
         shutil.copyfile(REPO_ROOT / source, payload / destination)
     environment = {key: value for key, value in os.environ.items() if key.upper() != "PYTHONPATH"}
-    # --help exits before config lookup, backend startup, or external requests.
+    # Isolated mode and a clean environment ensure source-root imports cannot mask
+    # a missing file in the staged package.
     result = subprocess.run(
-        [sys.executable, str(bridge), "--help"],
+        [sys.executable, "-I", str(bridge), "--help"],
         cwd=payload, env=environment, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
@@ -145,13 +156,42 @@ def test_external_stdio_import_closure_survives_packaging(tmp_path: Path) -> Non
     # Loading the bridge catalogue must not pull in the memory runtime merely
     # to classify three tool names. -I also excludes environment import paths.
     import_probe = subprocess.run(
-        [sys.executable, "-I", "-c",
-         f"import runpy, sys; runpy.run_path({str(bridge)!r}, run_name='_packaged_import_probe'); "
-         "assert 'agent_memory_tool_contract' in sys.modules; "
-         "assert not {'agent_memory_tools', 'memory_consolidation_sources', 'memory_safety'} & sys.modules.keys()"],
+        [
+            sys.executable, "-I", "-c",
+            f"import runpy, sys; runpy.run_path({str(bridge)!r}, run_name='_packaged_import_probe'); "
+            "assert 'agent_memory_tool_contract' in sys.modules; "
+            "assert not {'agent_memory_tools', 'memory_consolidation_sources', 'memory_safety'} & sys.modules.keys()",
+        ],
         cwd=payload, env=environment, capture_output=True, text=True, timeout=30,
     )
     assert import_probe.returncode == 0, import_probe.stderr
+    initialize_request = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "packaged-smoke", "version": "1"},
+        },
+    }) + "\n"
+    initialize_env = {
+        key: value for key, value in environment.items()
+        if not key.upper().startswith("VRCFORGE_")
+    }
+    initialize_env["LOCALAPPDATA"] = str(tmp_path / "local-app-data")
+    initialize_env["APPDATA"] = str(tmp_path / "app-data")
+    initialize_env["USERPROFILE"] = str(tmp_path / "user-profile")
+    initialized = subprocess.run(
+        [
+            sys.executable, "-I", str(bridge),
+            "--base-url", "http://127.0.0.1:1",
+            "--config", str(payload / "missing-config.json"),
+            "--protocol-profile", "mcp-1x", "--exposure-layer", "planning",
+        ],
+        cwd=payload, env=initialize_env, input=initialize_request,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    response = json.loads(initialized.stdout.splitlines()[0])
+    assert response["result"]["serverInfo"]["version"] == (payload / "VERSION").read_text(encoding="utf-8").strip()
 
 
 def test_desktop_project_selection_is_confirmed_before_unity_readiness() -> None:
@@ -912,18 +952,15 @@ def test_release_pairs_unity_core_with_exact_desktop_and_backend_payloads() -> N
 
     desktop_hash = source.index("$trustedDesktopSha256 =")
     backend_hash = source.index("$trustedBackendSha256 =")
-    generated_core = source.index("$trustedReleaseDataPath =")
     package_build = source.index(
         "-SourceAssetsPath $vrcforgeCorePayloadRoot -OutputPath $UnityPackagePath"
     )
     manifest = source.index('$payloadIntegrityManifest = [ordered]@{')
 
-    assert desktop_hash < generated_core < package_build < manifest
-    assert backend_hash < generated_core
-    assert 'schema = "vrcforge.trusted-release.v1"' in source
-    assert "desktopSha256 = $trustedDesktopSha256" in source
-    assert "backendSha256 = $trustedBackendSha256" in source
-    assert "VRCForgeMcpTrustedRelease.json" in source
+    assert desktop_hash < package_build < manifest
+    assert backend_hash < package_build
+    assert "$trustedReleaseDataPath" not in source
+    assert 'schema = "vrcforge.payload-integrity.v1"' in source
     assert "$trustedReleaseSourcePath" not in source
     assert "sha256 = $trustedDesktopSha256" in source
     assert "sha256 = $trustedBackendSha256" in source
@@ -936,6 +973,7 @@ def test_release_pairs_portable_core_root_meta_with_the_unitypackage() -> None:
     assert '$portableCoreRootMeta = Join-Path $unityPluginRoot "Assets\\VRCForge.meta"' in source
     assert "-RootMetaOutputPath $portableCoreRootMeta" in source
     assert source.index("$portableCoreRootMeta =") < source.index("-RootMetaOutputPath $portableCoreRootMeta")
+    assert '$rootGuidEntry = @($guidManifest.entries | Where-Object { $_.path -ceq "Assets/VRCForge" })[0]' in source
 
 
 def test_strict_evidence_outputs_reject_reparse_and_overwrite_paths() -> None:

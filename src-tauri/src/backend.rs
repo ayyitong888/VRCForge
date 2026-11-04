@@ -756,8 +756,8 @@ pub fn start_backend(
 #[cfg(test)]
 mod backend_start_result_tests {
     use super::{
-        backend_start_failure_payload, ready_backend_start_result, wait_for_backend_or_child_exit,
-        BackendSessionProbe, BackendStartupWait, BackendState,
+        backend_start_failure_payload, existing_backend_start_error, ready_backend_start_result,
+        wait_for_backend_or_child_exit, BackendSessionProbe, BackendStartupWait, BackendState,
     };
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
@@ -807,6 +807,19 @@ mod backend_start_result_tests {
             .as_str()
             .unwrap()
             .contains("session verification failed"));
+    }
+
+    #[test]
+    fn existing_backend_probe_distinguishes_busy_from_another_profile() {
+        let error = existing_backend_start_error(BackendSessionProbe::Unavailable)
+            .expect("an unavailable session probe must report a busy runtime");
+        assert_eq!(error, super::runtime_session_busy_error());
+        assert!(!error.contains("Another VRCForge installation"));
+
+        let error = existing_backend_start_error(BackendSessionProbe::Rejected)
+            .expect("a rejected session probe must report another profile");
+        assert!(error.contains("Another VRCForge installation or profile"));
+        assert!(existing_backend_start_error(BackendSessionProbe::Accepted).is_none());
     }
 
     #[test]
@@ -1006,10 +1019,9 @@ pub(crate) fn start_backend_in_background(
                 "Primitive live verification requires an unused managed runtime port.".to_string(),
             );
         }
-        if !existing_backend_accepts_session(&app_session_token) {
-            return Err(
-                "Another VRCForge installation or profile is already using port 8757. Close the other VRCForge window before starting this one. Its MCP binding is separate: switching windows does not switch the external client's saved configuration.".to_string()
-            );
+        if let Some(error) = existing_backend_start_error(probe_backend_session(&app_session_token))
+        {
+            return Err(error);
         }
         mark_backend_session_verified();
         start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token)?;
@@ -1747,16 +1759,23 @@ pub(crate) fn probe_backend_session(token: &str) -> BackendSessionProbe {
     }
 }
 
-pub(crate) fn existing_backend_accepts_session(token: &str) -> bool {
-    probe_backend_session(token) == BackendSessionProbe::Accepted
-}
-
 pub(crate) fn runtime_session_probe_error(probe: BackendSessionProbe) -> String {
     match probe {
         BackendSessionProbe::Unavailable => runtime_session_busy_error(),
         BackendSessionProbe::Accepted | BackendSessionProbe::Rejected => {
             runtime_session_verification_error()
         }
+    }
+}
+
+fn existing_backend_start_error(probe: BackendSessionProbe) -> Option<String> {
+    match probe {
+        BackendSessionProbe::Accepted => None,
+        BackendSessionProbe::Rejected => Some(
+            "Another VRCForge installation or profile is already using port 8757. Close the other VRCForge window before starting this one. Its MCP binding is separate: switching windows does not switch the external client's saved configuration."
+                .to_string(),
+        ),
+        BackendSessionProbe::Unavailable => Some(runtime_session_busy_error()),
     }
 }
 

@@ -45,6 +45,7 @@ class AgentRuntimeSessionState:
         "_sessions",
         "_cancelled_targets",
         "_active_turns",
+        "_waiting_turns",
         "_finalizing_turns",
         "_exclusive_turns",
         "_final_responses",
@@ -64,6 +65,7 @@ class AgentRuntimeSessionState:
         # the supported "stop every turn in this session" behavior.
         self._cancelled_targets: set[tuple[str, str, str]] = set()
         self._active_turns: dict[tuple[str, str], str] = {}
+        self._waiting_turns: dict[tuple[str, str], tuple[str, threading.Event]] = {}
         self._finalizing_turns: set[tuple[str, str]] = set()
         self._exclusive_turns: set[tuple[str, str]] = set()
         self._final_responses: dict[str, list[dict[str, Any]]] = {}
@@ -125,6 +127,9 @@ class AgentRuntimeSessionState:
             self._sessions.clear()
             self._cancelled_targets.clear()
             self._active_turns.clear()
+            for _turn, cancelled in self._waiting_turns.values():
+                cancelled.set()
+            self._waiting_turns.clear()
             self._finalizing_turns.clear()
             self._exclusive_turns.clear()
             self._final_responses.clear()
@@ -211,6 +216,8 @@ class AgentRuntimeSessionState:
             self._native_loaded.discard(session_id)
             self._sessions.pop(session_id, None)
             self._native_conversations.pop(session_id, None)
+            for key in [key for key in self._waiting_turns if key[0] == session_id]:
+                self._waiting_turns.pop(key)[1].set()
             for key in [key for key in self._user_adjustments if key[0] == session_id]:
                 self._user_adjustments.pop(key, None)
             for key in {key for key in (*self._active_turns.keys(), *self._finalizing_turns) if key[0] == session_id}:
@@ -1124,10 +1131,11 @@ class AgentRuntimeSessionState:
         turn_id = str(turn_id or "").strip()
         client_turn_id = str(client_turn_id or "").strip()
         with self._ports.shared_state_lock:
+            admitted = {**self._active_turns, **{key: value[0] for key, value in self._waiting_turns.items()}}
             if session_id and not (turn_id or client_turn_id):
                 active = [
                     (key, active_turn_id)
-                    for key, active_turn_id in self._active_turns.items()
+                    for key, active_turn_id in admitted.items()
                     if key[0] == session_id
                 ]
                 if active:
@@ -1135,6 +1143,9 @@ class AgentRuntimeSessionState:
                         self._cancelled_targets.add(
                             (session_id, active_turn_id, active_client_turn_id)
                         )
+                        waiting = self._waiting_turns.get((session_id, active_client_turn_id))
+                        if waiting:
+                            waiting[1].set()
                 else:
                     # Preserve the supported "stop before the turn starts"
                     # behavior; the next turn consumes this session marker.
@@ -1148,7 +1159,7 @@ class AgentRuntimeSessionState:
             # to begin.
             active_targets = [
                 (active_session_id, active_turn_id, active_client_id)
-                for (active_session_id, active_client_id), active_turn_id in self._active_turns.items()
+                for (active_session_id, active_client_id), active_turn_id in admitted.items()
                 if active_turn_id and active_client_id
             ]
             matching = [
@@ -1167,11 +1178,33 @@ class AgentRuntimeSessionState:
                 return False
             if matching:
                 self._cancelled_targets.add(matching[0])
+                waiting = self._waiting_turns.get((matching[0][0], matching[0][2]))
+                if waiting:
+                    waiting[1].set()
             else:
                 self._cancelled_targets.add((session_id, turn_id, client_turn_id))
             if session_id and client_turn_id:
                 self._steer_mailboxes.pop((session_id, client_turn_id), None)
             return True
+
+    def queue_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> threading.Event | None:
+        """Track an admitted request waiting for this session's current owner."""
+        with self._ports.shared_state_lock:
+            key = (session_id, client_turn_id)
+            if key in self._active_turns or key in self._waiting_turns or key in self._finalizing_turns:
+                return None
+            cancelled = threading.Event()
+            if self.consume_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
+                cancelled.set()
+            self._waiting_turns[key] = (turn_id, cancelled)
+            return cancelled
+
+    def discard_waiting_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> None:
+        with self._ports.shared_state_lock:
+            key = (session_id, client_turn_id)
+            waiting = self._waiting_turns.get(key)
+            if waiting and waiting[0] == turn_id:
+                self._waiting_turns.pop(key)
 
     def begin_turn(
         self,
@@ -1179,7 +1212,7 @@ class AgentRuntimeSessionState:
         session_id: str,
         turn_id: str,
         client_turn_id: str,
-        exclusive: bool = False,
+        exclusive: bool = True,
     ) -> bool:
         if not session_id or not client_turn_id:
             return True
@@ -1189,6 +1222,10 @@ class AgentRuntimeSessionState:
                 return False
             if exclusive and any(owner[0] == session_id for owner in (*self._active_turns, *self._finalizing_turns)):
                 return False
+            waiting = next((owner for owner in self._waiting_turns if owner[0] == session_id), None)
+            if waiting is not None and waiting != key:
+                return False
+            self._waiting_turns.pop(key, None)
             self._active_turns[key] = turn_id
             if exclusive:
                 self._exclusive_turns.add(key)
@@ -1229,7 +1266,7 @@ class AgentRuntimeSessionState:
 
     def session_busy(self, session_id: str) -> bool:
         with self._ports.shared_state_lock:
-            return any(key[0] == session_id for key in (*self._active_turns, *self._finalizing_turns))
+            return any(key[0] == session_id for key in (*self._active_turns, *self._finalizing_turns, *self._waiting_turns))
 
     def owns_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> bool:
         with self._ports.shared_state_lock:
@@ -1285,7 +1322,7 @@ class AgentRuntimeSessionState:
         client_turn_id = str(client_turn_id or "").strip()
         key = (session_id, client_turn_id)
         with self._ports.shared_state_lock:
-            if key in self._active_turns or key in self._finalizing_turns:
+            if key in self._active_turns or key in self._finalizing_turns or key in self._waiting_turns:
                 return {"ok": True, "sessionId": session_id, "clientTurnId": client_turn_id, "status": "running"}
             for item in reversed(self._final_responses.get(session_id, [])):
                 if item.get("clientTurnId") != client_turn_id:

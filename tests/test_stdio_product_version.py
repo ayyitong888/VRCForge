@@ -1,12 +1,13 @@
 import pytest
 
 from agent_mcp_2026 import PROTOCOL_VERSION
+from agent_mcp_standard import LATEST_PROTOCOL_VERSION, McpStandardRouter
+from dashboard_foundation import read_vrcforge_version
 from tools import vrcforge_agent_mcp_stdio as stdio
-from unity_mcp_tool_contract import PRODUCT_VERSION
 
 
 @pytest.mark.parametrize("profile", ["mcp-1x", "vrcforge-2026"])
-def test_stdio_handshake_reports_product_version(monkeypatch, profile):
+def test_stdio_handshake_reports_app_version(monkeypatch, profile):
     captured = {}
     loop = "run_standard_stdio_loop" if profile == "mcp-1x" else "run_stdio_loop"
     monkeypatch.setattr(stdio, loop, lambda router: captured.setdefault("router", router))
@@ -25,10 +26,10 @@ def test_stdio_handshake_reports_product_version(monkeypatch, profile):
             "io.modelcontextprotocol/clientInfo": {"name": "version-test", "version": "1"},
         }}})
         info = response[0]["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]
-    assert info["version"] == PRODUCT_VERSION
+    assert info["version"] == read_vrcforge_version()
 
 
-def test_backend_discovery_client_identity_uses_product_version(monkeypatch, tmp_path):
+def test_backend_discovery_client_identity_uses_app_version(monkeypatch, tmp_path):
     bridge = stdio.VRCForgeBridge(base_url="http://127.0.0.1:8757", config_path=tmp_path / "unused.json",
                                  timeout_seconds=0.01, start_runtime=False)
     requests = []
@@ -40,4 +41,18 @@ def test_backend_discovery_client_identity_uses_product_version(monkeypatch, tmp
 
     monkeypatch.setattr(bridge, "request_json", request)
     bridge._mcp_request("server/discover", {}, token="fixture-token")
-    assert requests[0]["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["version"] == PRODUCT_VERSION
+    assert requests[0]["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["version"] == read_vrcforge_version()
+
+
+def test_default_standard_router_initialize_uses_app_version():
+    router = McpStandardRouter(lambda: [], lambda _name, _arguments: {})
+    response = router.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": LATEST_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "version-test", "version": "1"},
+        },
+    })
+
+    assert response["result"]["serverInfo"]["version"] == read_vrcforge_version()

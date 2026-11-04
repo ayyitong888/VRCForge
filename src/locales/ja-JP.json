@@ -941,6 +941,7 @@
     "latestMessageActionOnly": "変更できるのは最新のメッセージだけです。",
     "contextUsageCached": "キャッシュ済みコンテキスト: {{value}}",
     "deletePermanentlyFailed": "チャットの削除に失敗しました。チャットは復元されました。",
+    "deletePermanentlyPartialSuccess": "チャット記録は削除されましたが、ランタイム履歴のクリーンアップが未完了です：{{error}}",
     "forwardedByAgent": "他の会話のエージェントから転送",
     "openSourceConversation": "送信元の会話を開く",
     "openConversation": "会話を開く"

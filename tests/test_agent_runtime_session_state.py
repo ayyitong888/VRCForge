@@ -438,9 +438,10 @@ def test_session_only_cancel_binds_active_turn_and_does_not_leak_to_next_turn() 
 def test_session_only_cancel_binds_all_active_turns() -> None:
     state, _lock = make_state()
     state.begin_turn(session_id="session-many", turn_id="turn-a", client_turn_id="client-a")
-    state.begin_turn(session_id="session-many", turn_id="turn-b", client_turn_id="client-b")
+    waiting = state.queue_turn(session_id="session-many", turn_id="turn-b", client_turn_id="client-b")
 
     state.mark_cancel_requested(session_id="session-many")
+    assert waiting is not None and waiting.is_set()
     assert state.consume_cancel_request(
         session_id="session-many", turn_id="turn-a", client_turn_id="client-a"
     ) is True
@@ -449,13 +450,16 @@ def test_session_only_cancel_binds_all_active_turns() -> None:
     ) is True
 
 
-def test_runtime_active_turns_are_exact_pairs_for_concurrent_session_turns() -> None:
+def test_runtime_active_turns_keep_exact_mailboxes_across_serial_session_turns() -> None:
     state, _lock = make_state()
     state.begin_turn(session_id="shared", turn_id="a", client_turn_id="client-a")
-    state.begin_turn(session_id="shared", turn_id="b", client_turn_id="client-b")
+    state.queue_turn(session_id="shared", turn_id="b", client_turn_id="client-b")
+    assert not state.begin_turn(session_id="shared", turn_id="b", client_turn_id="client-b")
     assert state.submit_steer(session_id="shared", target_client_turn_id="client-a", input_id="a1", message="a")['accepted']
-    assert state.submit_steer(session_id="shared", target_client_turn_id="client-b", input_id="b1", message="b")['accepted']
+    assert not state.submit_steer(session_id="shared", target_client_turn_id="client-b", input_id="b1", message="b")['accepted']
     state.finish_turn(session_id="shared", client_turn_id="client-a")
+    state.record_final_response(session_id="shared", client_turn_id="client-a", status="completed", response={})
+    assert state.begin_turn(session_id="shared", turn_id="b", client_turn_id="client-b")
     assert state.submit_steer(session_id="shared", target_client_turn_id="client-b", input_id="b2", message="b2")['accepted']
     state.mark_cancel_requested(session_id="shared", client_turn_id="client-a")
     assert state.drain_steer(session_id="shared", client_turn_id="client-b")
