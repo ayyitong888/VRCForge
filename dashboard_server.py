@@ -18673,7 +18673,7 @@ def _process_cmdline_text(
             ) from exc
         return ""
     if isinstance(cmdline, (list, tuple)):
-        value = " ".join(str(part) for part in cmdline if part is not None)
+        value = subprocess.list2cmdline([str(part) for part in cmdline if part is not None])
     else:
         value = str(cmdline or "")
     if require_discovery_evidence and not value.strip():

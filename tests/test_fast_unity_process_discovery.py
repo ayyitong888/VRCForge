@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -6,6 +7,19 @@ import dashboard_server
 
 
 class FastUnityProcessDiscoveryTests(unittest.TestCase):
+    def test_project_argument_boundaries_survive_process_command_line_projection(self) -> None:
+        for project in (r"E:\unity\zcode test", r"C:\Projects\Avatar", "C:\\Projects\\改模 测试",
+                        "C:\\Projects\\Avatar test\\"):
+            with self.subTest(project=project):
+                process = SimpleNamespace(info={"cmdline": [
+                    r"E:\unity\Unity 2022.3.22f1\Editor\Unity.exe", "-projectPath", project,
+                    "-logFile", r"C:\Logs\Unity output.log",
+                ]})
+                command_line = dashboard_server._process_cmdline_text(process, require_discovery_evidence=True)
+                observed = {"commandLine": command_line}
+                self.assertTrue(dashboard_server.unity_process_exactly_matches_project(observed, Path(project)))
+                self.assertFalse(dashboard_server.unity_process_exactly_matches_project(observed, Path(r"E:\unity\zcode")))
+
     def test_windows_path_filters_names_before_expensive_process_metadata(self) -> None:
         class FakeProcess:
             def __init__(self, pid: int) -> None:
