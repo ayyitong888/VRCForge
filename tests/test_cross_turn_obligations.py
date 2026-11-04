@@ -34,6 +34,7 @@ def test_failed_write_exports_next_turn_obligation() -> None:
         "tool": "vrcforge_swap_body_texture",
         "verificationProfile": "",
         "generation": 0,
+        "target": {"target": "fixture"},
     }]
 
 

@@ -590,9 +590,8 @@ def _bound_summary(summary: str, max_chars: int) -> str:
     text = str(summary or "").strip()
     if len(text) <= max_chars:
         return text
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return ("[Complete historical summary retained in recovery.summary; "
-            f"characters={len(text)}; sha256={digest}. The caller retains the full text without truncation.]")
+    notice = f"\n[Summary continues: {len(text)} characters total; full text is in recovery.summary.]"
+    return text[:max(0, max_chars - len(notice))] + notice
 
 
 def _provider_error_kind(exc: Exception) -> tuple[str, bool]:
@@ -846,7 +845,18 @@ def compact_context(
         if not complete:
             fallback_reason = fallback_reason or "provider_call_budget"
             complete_summary = f"[Incomplete historical summary: {completed_pages}/{len(pages)} pages validated; {fallback_reason}]\n" + complete_summary
+        coverage_notice = (
+            f"[Historical source: {len(entries)} entries, about {sum(len(entry['text']) for entry in entries)} characters; "
+            f"summarizerInputComplete=false; omittedEntries={selected_start}. "
+            "The earliest entries were not read. If needed, read the relevant source via the recovery reader; "
+            "hasMore/nextRequest provides the next page.]\n"
+            if selected_start else ""
+        )
+        complete_summary = coverage_notice + complete_summary
         summary = _bound_summary(complete_summary, summary_max_chars)
+        if coverage_notice and not summary.startswith(coverage_notice):
+            # The full-summary pointer must not hide omitted source coverage.
+            summary = coverage_notice + summary
         summary_source = "provider"
         fidelity = "selected" if complete and selected_start else "full" if complete and len(pages) == 1 else "paged" if complete else "fallback"
     else:

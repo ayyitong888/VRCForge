@@ -1,4 +1,5 @@
 import { projectDiscoveryState } from "./lib/project-discovery-state";
+import { useChatDeepLinks } from "./hooks/use-chat-deep-links";
 import { conversationQuoteFromSelection } from "./lib/chat-selection-quote";
 import { hasRecentConnectorSelfTest } from "./lib/connector-verification";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -898,6 +899,13 @@ export default function App() {
     initialChatState,
   });
   persistChatsNowRef.current = persistChatsNow;
+  const openChatById = (chatId: string) => {
+    const chat = getChatById(chatId);
+    if (!chat) return;
+    openChat(chat);
+    setActiveView("chat");
+  };
+  useChatDeepLinks(chatStorageReady, openChatById);
   const sessionHandoff = useSessionHandoff(endpoint, activeChatId);
   const handoffTargetChats = useMemo(() => {
     const sourceScope = normalizeProjectPathKey(activeChat?.projectPath || "");
@@ -4623,12 +4631,7 @@ export default function App() {
               onRemoveQueuedTurn={(turnId) => void removeQueuedTurn(turnId)}
               onSteerQueuedTurn={(turnId) => void steerQueuedTurn(turnId)}
               onSwitchMode={switchMode}
-              onOpenChatById={(chatId) => {
-                const chat = getChatById(chatId);
-                if (!chat) return;
-                openChat(chat);
-                setActiveView("chat");
-              }}
+              onOpenChatById={openChatById}
               commands={slashCommands}
               planMode={activeChat?.planMode === true}
               onPlanModeChange={(planMode) => {

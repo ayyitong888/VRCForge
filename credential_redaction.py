@@ -1,20 +1,19 @@
 """Credential-pattern scrubbing for export and persistence boundaries.
 
-The model face passes execution data through (a454051); this module is the
-shared scrubber for the layers that must redact: dashboard text exports and
-background-goal durable persistence. Patterns are recovered from the
-pre-a454051 sanitizer where noted; the assignment pattern additionally
-tolerates quoted and JSON-escaped assignments ("apiKey": "v",
-$api_key='v') so serialized observations are covered.
+Execution data remains intact for the model; exports and background-goal
+persistence use the existing diagnostic credential policy. JSON-escaped
+observations are decoded before that same policy is applied.
 """
 from __future__ import annotations
 
+import json
 import re
 
-_CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?i)(secret|token|password|credential|api[_-]?key)[\s\"'\\]*[:=][\s\"'\\]*[^\s,\"';]+"
-)
-_CREDENTIAL_WORD = re.compile(r"(?i)\b(secret|token|password|credential)\b")
+from diagnostic_privacy import redact_credential_text as redact_diagnostic_credentials
+
+# Valid JSON string-content spans, including escaped quote delimiters. Matching
+# spans rather than whole lines also handles encoded objects embedded in prose.
+_JSON_STRING_CONTENT = re.compile(r'(?:\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})|[^"\\\x00-\x1f])+')
 # Token-shaped credentials recovered from the pre-a454051 sanitizer: bare
 # provider keys have no key= prefix, so the assignment pattern misses them.
 _BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/-]+")
@@ -34,8 +33,16 @@ _UNIX_PATH = re.compile(r"(?<![\w:])/(?:[^\s,;]+)")
 
 
 def redact_credential_text(value: str) -> str:
-    scrubbed = _CREDENTIAL_ASSIGNMENT.sub(r"\1=[REDACTED]", value)
-    scrubbed = _CREDENTIAL_WORD.sub("[REDACTED]", scrubbed)
+    def redact_encoded(match: re.Match[str]) -> str:
+        original = match.group(0)
+        if "\\" not in original:
+            return original
+        decoded = json.loads('"' + original + '"')
+        scrubbed = redact_diagnostic_credentials(decoded)
+        return json.dumps(scrubbed, ensure_ascii=False)[1:-1] if scrubbed != decoded else original
+
+    scrubbed = _JSON_STRING_CONTENT.sub(redact_encoded, value)
+    scrubbed = redact_diagnostic_credentials(scrubbed)
     scrubbed = _BEARER_TOKEN.sub("Bearer <redacted>", scrubbed)
     scrubbed = _KNOWN_TOKEN.sub("<redacted>", scrubbed)
     return _JWT.sub("<redacted>", scrubbed)

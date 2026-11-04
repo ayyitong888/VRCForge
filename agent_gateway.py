@@ -62,6 +62,7 @@ from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
 from credential_redaction import redact_persistence_text
+from diagnostic_privacy import _is_secret_key
 from tool_usage_contract import tool_usage_description
 from agent_shell_service import (
     SHELL_RUNNER_NATIVE as SHELL_OWNER_RUNNER_NATIVE,
@@ -5689,17 +5690,16 @@ class AgentGateway:
             )
             # Seed the previous turn's unmet obligations so a fresh loop cannot
             # mark the task done while the owed work is still missing. Seeded
-            # obligations expire after a bounded number of carryover turns;
-            # every turn's terminal write overwrites the stored set.
+            # obligations persist until satisfied; more turns do not prove
+            # that the user abandoned the task.
             for obligation in self._runtime_session_state.pending_obligations(session_id):
-                if int(obligation.get("generation") or 0) >= 3:
-                    continue
                 task_loop.require_action(
                     kind=str(obligation.get("kind") or ""),
                     tool=str(obligation.get("tool") or ""),
                     verification_profile=str(obligation.get("verificationProfile") or ""),
                     inherited=True,
                     generation=int(obligation.get("generation") or 0),
+                    target=obligation.get("target"),
                 )
         # Persist the host-resolved bound in every continuation seed, including
         # questions restored before the frontend had discovered model capacity.
@@ -8685,7 +8685,7 @@ class AgentGateway:
             # "image not analyzed" messaging in the user-facing chat flow.
             top_plan["visionStatus"] = vision_payload.get("status")
 
-        final_reply = str(top_plan.get("reply") or top_plan.get("summary") or "").strip()
+        final_reply = str(top_plan.get("reply") or "").strip()
         final_reply_status = (
             "failed"
             if ensure_dict(top_plan.get("completionClaim")).get("satisfied") is False
@@ -8755,8 +8755,7 @@ class AgentGateway:
         params["_runtimeTurnRecorded"] = True
 
         # Carry this turn's unmet obligations into the next turn's completion
-        # gate; a completed turn clears them. Bounded and self-expiring on the
-        # loop side (inherited obligations bump their generation).
+        # gate; a completed turn clears them. Generations are observational.
         self._runtime_session_state.set_pending_obligations(
             session_id,
             []
@@ -11370,7 +11369,7 @@ def redact_background_goal_persistence(value: Any, *, depth: int = 0) -> Any:
         for key, item in list(value.items())[:64]:
             key_text = str(key)
             lowered = key_text.lower()
-            if lowered in _BACKGROUND_GOAL_SECRET_FIELDS:
+            if _is_secret_key(key_text) or lowered in _BACKGROUND_GOAL_SECRET_FIELDS:
                 result[key_text] = "<redacted>"
             elif lowered in _BACKGROUND_GOAL_PATH_FIELDS and isinstance(item, str) and item:
                 result[key_text] = "<path redacted>"

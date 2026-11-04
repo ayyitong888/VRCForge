@@ -298,7 +298,9 @@ def test_pending_current_call_defers_compaction_before_compactor_and_preserves_h
 @pytest.mark.parametrize("failure", ["empty", "no_reduction", "exception", "cancel", "ui_cancel", "race"])
 def test_failed_native_compaction_never_replaces_transcript_or_sends_oversized_request(failure):
     compactor = Compactor()
-    state, planner, model, turn = fixture(compactor, prior_policy=True)
+    # The race case tests changed-history retry, independently of scan-policy
+    # retention (covered above). Keep the actual 8k limit and all user messages.
+    state, planner, model, turn = fixture(compactor, prior_policy=failure != "race")
     before = state.native_conversation("s", binding="b")
     if failure == "empty":
         compactor.summary = ""
@@ -349,6 +351,11 @@ def test_native_cas_race_rebuilds_history_before_send_without_replay():
     # Leave room for the added runtime-snapshot instruction and racing message;
     # still exceed the compaction trigger, without hitting the hard send limit.
     state, planner, model, turn = fixture(compactor, limit=18_100)
+    # Keep this fixture between trigger and hard limit as the real prompt grows;
+    # only historical filler changes, never the runtime's context limit.
+    snapshot = turn.snapshot()
+    snapshot["messages"][1]["content"] = "old context " * 4400
+    state._native_conversations["s"] = snapshot
 
     def race_update() -> None:
         state.append_native_user("s", binding="b", message="concurrent update")
@@ -362,6 +369,7 @@ def test_native_cas_race_rebuilds_history_before_send_without_replay():
     assert result["nextStep"] == "done"
     assert turn.compaction is not None
     assert turn.compaction["applied"] is False
+    assert turn.compaction["triggerTokens"] <= turn.compaction["beforeTokens"] < turn.compaction["hardLimitTokens"]
     assert model.requests
     request_messages = model.requests[0]["messages"]
     assert sum(

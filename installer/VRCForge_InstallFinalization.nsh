@@ -124,6 +124,10 @@ data_dir_resolved:
     Call VrcForgeRegisterVskAssociation
   !endif
   !insertmacro VrcForgeRequireInstallStep "$(InstallRegistrationStep)"
+  !ifndef VRCFORGE_SMOKE_BUILD
+    Call VrcForgeRegisterDeepLink
+  !endif
+  !insertmacro VrcForgeRequireInstallStep "$(InstallRegistrationStep)"
   ClearErrors
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayName" "VRCForge"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"

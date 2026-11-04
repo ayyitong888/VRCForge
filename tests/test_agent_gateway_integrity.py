@@ -1451,7 +1451,7 @@ def test_external_unity_write_creates_checkpoint_before_handler(monkeypatch, tmp
     monkeypatch.setattr(
         type(service),
         "_call_external_mcp_write_handler",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "ok": True, "status": "applied", "schema": "vrcforge.test_write.v1",
             "mutationStarted": True, "mutationApplied": True, "committed": True,
             "verified": True, "readback": {"verified": True},
@@ -1892,6 +1892,9 @@ def test_external_unity_write_uses_exact_external_lane_without_internal_transact
 ) -> None:
     gateway = _external_gateway(tmp_path, execution_mode="auto")
     project = tmp_path / "UnityProject"
+    project.mkdir()
+    from tests.test_execution_target import _live_runtime_target
+    execution_target = _live_runtime_target(project)
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
     observed_contexts: list[dict] = []
@@ -1930,7 +1933,6 @@ def test_external_unity_write_uses_exact_external_lane_without_internal_transact
         "avatar",
     )
 
-    execution_target = {"schema": "vrcforge.execution_target.v1", "fixture": "exact"}
     result = _external_mcp_call(
         create_agent_mcp_app(gateway),
         "tools/call",
@@ -1963,6 +1965,9 @@ def test_external_authoritative_preview_returns_preview_without_apply_or_interna
 ) -> None:
     gateway = _external_gateway(tmp_path)
     project = tmp_path / "UnityProject"
+    project.mkdir()
+    from tests.test_execution_target import _live_runtime_target
+    execution_target = _live_runtime_target(project)
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
     executed: list[dict] = []
@@ -1973,6 +1978,7 @@ def test_external_authoritative_preview_returns_preview_without_apply_or_interna
             {
                 "projectPath": str(project),
                 "preview": True,
+                "executionTarget": arguments["executionTarget"],
                 "toolName": "vrc_duplicate_scene_object",
                 "arguments": {"preview": False, "saveScene": True},
             },
@@ -2008,7 +2014,8 @@ def test_external_authoritative_preview_returns_preview_without_apply_or_interna
         "tools/call",
         {
             "name": "vrcforge_external_authoritative_preview",
-            "arguments": {"projectPath": str(project), "preview": True},
+            "arguments": {"projectPath": str(project), "preview": True,
+                          "executionTarget": execution_target},
         },
         bearer=gateway.ensure_config().token,
     )["result"]["structuredContent"]
@@ -2293,6 +2300,7 @@ def test_external_write_preparation_and_handler_failures_return_structured_facts
             "arguments": {"projectRoot": str(project)},
         },
         bearer=gateway.ensure_config().token,
+        result_mode="full",
     )["result"]["structuredContent"]
     assert preparation["ok"] is False
     assert preparation["result"] is None
@@ -2312,6 +2320,7 @@ def test_external_write_preparation_and_handler_failures_return_structured_facts
             "arguments": {"projectRoot": str(project)},
         },
         bearer=gateway.ensure_config().token,
+        result_mode="full",
         request_id=11,
     )["result"]["structuredContent"]
     assert unexpected_preparation["ok"] is False
@@ -2343,6 +2352,7 @@ def test_external_write_preparation_and_handler_failures_return_structured_facts
             "arguments": {"projectRoot": str(project)},
         },
         bearer=gateway.ensure_config().token,
+        result_mode="full",
         request_id=2,
     )["result"]["structuredContent"]
     assert handler_failure["ok"] is False
@@ -2362,6 +2372,7 @@ def test_external_write_preparation_and_handler_failures_return_structured_facts
             "arguments": {"projectRoot": str(project)},
         },
         bearer=gateway.ensure_config().token,
+        result_mode="full",
         request_id=3,
     )["result"]["structuredContent"]
     assert uncertain_failure["ok"] is False
@@ -2383,6 +2394,7 @@ def test_external_write_preparation_and_handler_failures_return_structured_facts
             "arguments": {"projectRoot": str(project)},
         },
         bearer=gateway.ensure_config().token,
+        result_mode="full",
         request_id=31,
     )["result"]["structuredContent"]
     assert invalid_descriptor["ok"] is False
@@ -2405,6 +2417,7 @@ def test_external_write_preparation_and_handler_failures_return_structured_facts
             "arguments": {"projectRoot": str(project)},
         },
         bearer=gateway.ensure_config().token,
+        result_mode="full",
         request_id=4,
     )["result"]["structuredContent"]
     assert context_rejection["ok"] is False

@@ -35,7 +35,8 @@ def test_native_context_window_drops_oldest_entry_and_marks_subset() -> None:
     assert [entry["text"] for entry in prompts[1]] == [
         "tool transaction", "latest answer"
     ]
-    assert result["summary"] == "native summary"
+    assert result["summary"].endswith("native summary")
+    assert "summarizerInputComplete=false; omittedEntries=1" in result["summary"]
     assert result["coverage"]["selectedInputComplete"] is True
     assert result["coverage"]["omittedEntries"] == 1
     assert result["completeness"]["sourceRecoveryComplete"] is True
@@ -65,7 +66,8 @@ def test_native_transient_retries_reset_after_context_trim() -> None:
 
     assert len(prompts) == 4
     assert all(len(prompt) == 1 for prompt in prompts[1:])
-    assert result["summary"] == "recovered"
+    assert result["summary"].endswith("recovered")
+    assert "summarizerInputComplete=false; omittedEntries=1" in result["summary"]
     assert result["providerAttempts"] == 4
 
 

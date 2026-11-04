@@ -170,7 +170,7 @@ class AgentRuntimeSessionState:
         key = str(session_id or "").strip()
         bounded: list[dict[str, Any]] = []
         if isinstance(obligations, list):
-            for item in obligations[:3]:
+            for item in obligations:
                 if not isinstance(item, dict):
                     continue
                 kind = str(item.get("kind") or "").strip()[:32]
@@ -186,6 +186,8 @@ class AgentRuntimeSessionState:
                     "tool": tool,
                     "verificationProfile": str(item.get("verificationProfile") or "").strip()[:80],
                     "generation": generation,
+                    **({"target": copy.deepcopy(item["target"])}
+                       if isinstance(item.get("target"), dict) and item["target"] else {}),
                 })
         if not key:
             return

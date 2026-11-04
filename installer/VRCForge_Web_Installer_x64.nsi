@@ -70,6 +70,7 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 !include "VRCForge_InstallerTheme.nsh"
 !include "VRCForge_VskAssociation.nsh"
+!include "VRCForge_DeepLink.nsh"
 BrandingText "VRCForge ${VERSION}"
 
 ; ---------- Modern UI ----------
@@ -575,6 +576,9 @@ Section "Uninstall"
   Call un.ClearUserDataIfRequested
   !ifndef VRCFORGE_SMOKE_BUILD
     Call un.VrcForgeRemoveVskAssociation
+  !endif
+  !ifndef VRCFORGE_SMOKE_BUILD
+    Call un.VrcForgeRemoveDeepLink
   !endif
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}"

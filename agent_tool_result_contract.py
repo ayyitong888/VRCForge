@@ -711,14 +711,14 @@ def completion_gate_plan(
     completion_claim = gated.get("completionClaim")
     if not isinstance(completion_claim, Mapping):
         completion_claim = gated.get("completion_claim")
-    # Only an explicit honest-incomplete claim (satisfied=false) preserves
-    # the model's own words. Claimless prose after a failed action is
-    # replaced: it cannot be distinguished from a false "done" narrative.
+    # The deterministic gate owns completion status, not assistant prose.
+    # Keep a natural final or an honest incomplete reply; withhold only a
+    # model claim explicitly contradicted by this outcome. The failure stays
+    # in summary/error and must never masquerade as model-authored text.
     honest_failure_reply = (
         gated["reply"].strip()
-        if outcome_status == "failed"
-        and isinstance(completion_claim, Mapping)
-        and completion_claim.get("satisfied") is False
+        if not (isinstance(completion_claim, Mapping)
+                and completion_claim.get("satisfied") is True)
         and isinstance(gated.get("reply"), str)
         and gated["reply"].strip()
         else ""
@@ -726,7 +726,7 @@ def completion_gate_plan(
     gated.update(
         {
             "summary": summary,
-            "reply": honest_failure_reply or summary,
+            "reply": honest_failure_reply,
             "continueLoop": False,
             "nextStep": next_step,
             "completionGate": {
@@ -741,6 +741,8 @@ def completion_gate_plan(
             },
         }
     )
+    if isinstance(outcome.get("error"), Mapping):
+        gated["error"] = dict(outcome["error"])
     if honest_failure_reply:
         gated["completionGate"]["modelFailureReplyPreserved"] = True
     return gated

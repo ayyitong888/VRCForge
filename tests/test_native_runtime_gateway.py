@@ -318,7 +318,11 @@ def test_native_control_recovery_does_not_clear_real_tool_failure(tmp_path):
     result = run(gateway, tmp_path)
     assert len(invoked) == 1
     assert result["plan"]["nextStep"] != "done"
-    assert result["plan"]["completionGate"]["status"] == "needs_user_action"
+    assert result["plan"]["completionGate"]["status"] == "failed"
+    failed_read = next(action for action in result["plan"]["task"]["actions"]
+                       if action["tool"] == "vrcforge_read_text_file")
+    assert failed_read["status"] == "failed"
+    assert failed_read["outcome"]["summary"] == "fixture-read-failed"
 
 
 @pytest.mark.parametrize("control", ["cancel", "steer"])
@@ -698,15 +702,18 @@ def test_native_dispatch_exception_does_not_leave_orphan_call(tmp_path, monkeypa
         run(gateway, tmp_path)
     snapshot = next(iter(gateway._runtime_session_state._native_conversations.values()))
     assert not gateway._runtime_session_state._native_pending(snapshot)
-    assert snapshot["messages"][-1]["tool_call_id"] == "interrupted"
-    assert "interrupted" in snapshot["messages"][-1]["content"]
+    settled = [message for message in snapshot["messages"]
+               if message.get("tool_call_id") == "interrupted"]
+    assert len(settled) == 1
+    assert "interrupted" in settled[0]["content"]
 
 
 def test_native_scope_denial_does_not_block_a_new_user_turn(tmp_path):
     gateway, model, _ = setup_gateway(tmp_path, [call("denied", "vrcforge_read_text_file", {"path": "a.txt"}),
                                                {"role": "assistant", "content": "New request accepted"}])
     gateway.register_tool("vrcforge_read_text_file", "When to use: read. When NOT to use: write.", "plan/preview",
-                          lambda args: {"ok": False, "status": "needs_user_action", "error": "Scope denied"})
+                          lambda args: {"ok": False, "status": "needs_user_action", "error": "Scope denied",
+                                        "errorCode": "authorization_scope_denied"})
     first = run(gateway, tmp_path)
     assert first["plan"]["nextStep"] == "needs_user_action"
     second = run(gateway, tmp_path, clientTurnId="second-turn", message="Just reply")
@@ -738,6 +745,7 @@ def test_native_llm_reconsiders_explicit_no_write_failure_once_without_replaying
     assert tool_result["tool_call_id"] == "recoverable-read"
     assert "preflight unavailable" in tool_result["content"]
     assert result["plan"]["reply"].startswith("The read failed before changing anything")
+    assert result["plan"]["nextStep"] != "done"
     assert result["plan"].get("completionClaim", {}).get("satisfied") is not True
 
 

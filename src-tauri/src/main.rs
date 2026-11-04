@@ -147,6 +147,7 @@ fn main() {
         let _ = app.emit(vsk_open::EVENT_NAME, ());
     }));
     builder
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .manage(backend_state)
         .manage(vsk_paths)

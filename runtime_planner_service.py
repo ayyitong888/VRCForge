@@ -4670,7 +4670,7 @@ class RuntimePlannerService:
                     "type": "object", "additionalProperties": False,
                     "properties": {"satisfied": {"type": "boolean"},
                                    "evidence_action_ids": {"type": "array", "items": {"type": "string"},
-                                       "description": "Optional references to completed actions; the host binds the full completed-action evidence."}},
+                                       "description": "Cite completed actionIds for read-only success; optional after write/shell. The host verifies outstanding requirements."}},
                 },
                 "checkpoint_choice": {"type": "object", "additionalProperties": False,
                     "required": ["mode", "quote"], "properties": {
@@ -4772,7 +4772,7 @@ class RuntimePlannerService:
             "Use its supervised Unity tools instead. Reading a Skill guide does not grant authority. "
             "For correctable failures use action=correct with tool, arguments and the exact correction_for_action_id. "
             "For a successful final answer after tool use, use action=reply with completion_claim.satisfied=true"
-            ". The host binds completed-action evidence; optional evidence_action_ids must refer to completed actions. "
+            ". Cite completed actionIds in evidence_action_ids for read-only success; optional after write/shell. "
             "Only verified outcomes support success; unrelated successes "
             "do not resolve failures. Otherwise answer honestly without claiming completion. "
             f"{RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION}"
@@ -5213,7 +5213,7 @@ class RuntimePlannerService:
                 "可选动作：\n"
                 '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
                 '2. 执行普通 Shell 命令（用户明确要求的主机命令、工程外脚本或 git）：{"action": "shell", "shell_command": "<命令>", "shell_params": {"cwd": "<可选目录>"}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}。普通 Shell 不得把已注册 Unity 工程作为 cwd，也不得直接引用其路径；Unity Project Mode 中需要操作当前工程时，改用 write 动作调用 unity_shell。background/pty/yieldMs/timeout/env 只在确实需要主机后台或交互进程时按需添加。\n'
-                '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：未执行工具时用 {"action": "reply", "reply": "<回答>"}；只有所有相关步骤都成功完成并有精确证据时，执行过工具后才用 {"action": "reply", "reply": "<回答>", "completion_claim":{"satisfied":true}}；宿主绑定完整完成证据，可选 evidence_action_ids 只能引用已完成动作；如果确实无法完成，改用如实失败 reply，失败收尾不得使用 satisfied=true。\n'
+                '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：未执行工具时用 {"action": "reply", "reply": "<回答>"}；只有所有相关步骤都成功完成并有精确证据时，执行过工具后才用 {"action": "reply", "reply": "<回答>", "completion_claim":{"satisfied":true}}；如果只完成了读取动作，必须在 completion_claim.evidence_action_ids 引用工具观察里已完成动作的 actionId；完成过 write 或 shell 动作时引用可选。宿主仍核查全部未完成要求和失败；如果确实无法完成，改用如实失败 reply，失败收尾不得使用 satisfied=true。\n'
                 '4. 进入执行模式（仅当用户明确要求项目写入或控制已启动的主机进程）：{"action": "enter_execution", "summary": "<为什么需要执行>"}\n'
                 '5. 在 execution 层发起受监督项目写入：{"action": "write", "write_tool": "<工具名>", "write_params": {…}}；planning 层不能直接使用 write，先进入 execution。\n'
                 "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；action 只能是 skill、shell、reply、enter_execution 或 write；planning 层禁止 write，execution 层才允许 write；绝不能把工具名写进 action；工具名必须严格来自下面的列表并写进 skill_tool 或 write_tool；"

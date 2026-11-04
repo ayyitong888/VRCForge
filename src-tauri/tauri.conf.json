@@ -36,6 +36,11 @@
       }
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["vrcforge"] }
+    }
+  },
   "bundle": {
     "active": false,
     "targets": "all"

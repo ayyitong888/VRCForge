@@ -311,13 +311,15 @@ def test_unverified_write_requires_user_action_and_blocks_completion_claim() -> 
             "reply": "完成了。",
             "nextStep": "done",
             "continueLoop": True,
+            "completionClaim": {"satisfied": True},
         },
         outcome,
     )
     assert gated is not None
     assert gated["nextStep"] == "needs_user_action"
     assert gated["continueLoop"] is False
-    assert "verification" in str(gated["reply"]).lower()
+    assert "verification" in str(gated["summary"]).lower()
+    assert gated["reply"] == ""
     assert "完成了" not in str(gated["reply"])
 
 
@@ -337,13 +339,14 @@ def test_completion_gate_preserves_explicit_honest_failure_reply() -> None:
     assert gated["completionGate"]["modelFailureReplyPreserved"] is True
 
 
-def test_completion_gate_does_not_preserve_reply_without_explicit_false_claim() -> None:
+def test_completion_gate_withholds_an_explicit_false_completion_claim() -> None:
     gated = completion_gate_plan(
         {"reply": "看起来完成了。", "completionClaim": {"satisfied": True}},
         {"status": "failed", "summary": "读取失败。"},
     )
     assert gated is not None
-    assert gated["reply"] == "读取失败。"
+    assert gated["reply"] == ""
+    assert gated["summary"] == "读取失败。"
     assert "modelFailureReplyPreserved" not in gated["completionGate"]
 
 
@@ -429,7 +432,8 @@ def test_failed_outcome_replaces_model_completion_and_data_is_bounded() -> None:
     )
 
     gated = completion_gate_plan(
-        {"reply": "完成了。", "summary": "done", "nextStep": "done"},
+        {"reply": "完成了。", "summary": "done", "nextStep": "done",
+         "completionClaim": {"satisfied": True}},
         outcome,
     )
 
@@ -437,7 +441,8 @@ def test_failed_outcome_replaces_model_completion_and_data_is_bounded() -> None:
     assert "not copied" not in str(outcome["data"])
     assert gated is not None
     assert gated["nextStep"] == "tool_failed"
-    assert gated["reply"] == "read failed"
+    assert gated["reply"] == ""
+    assert gated["summary"] == "read failed"
 
 
 def test_top_level_pending_approval_requires_action_without_misreading_nested_progress() -> None:
@@ -654,14 +659,15 @@ def test_internal_planner_observation_keeps_domain_cause_and_commit_facts() -> N
     assert len(observation) <= RUNTIME_PLANNER_CAUSAL_OBSERVATION_MAX_CHARS
 
 
-def test_real_human_request_is_not_replaced_by_model_negative_reply():
+def test_real_human_request_stays_in_waiting_status_and_summary():
     gate = completion_gate_plan(
         {"reply": "Cannot finish the whole task.", "nextStep": "done", "completionClaim": {"satisfied": False}},
         {"status": "needs_user_action", "summary": "Which outfit should I use?"},
     )
-    assert gate["reply"] == "Which outfit should I use?"
+    assert gate["summary"] == "Which outfit should I use?"
+    assert gate["reply"] == "Cannot finish the whole task."
     assert gate["nextStep"] == "needs_user_action"
-    assert "modelFailureReplyPreserved" not in gate["completionGate"]
+    assert gate["completionGate"]["modelFailureReplyPreserved"] is True
 
 
 def test_root_correction_actions_are_available_in_standard_error_projection() -> None:

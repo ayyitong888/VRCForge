@@ -24,6 +24,7 @@ from agent_tool_result_contract import (
     runtime_observation_receipt,
 )
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
+from agent_action_targets import action_target
 from checkpoint_user_policy import (
     checkpoint_skip_authority_for_context,
     checkpoint_skip_authority_from_policy,
@@ -572,6 +573,8 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         "attempts": max(1, min(int(value.get("attempts") or 1), 3)),
         "outcome": _bounded_outcome(outcome if isinstance(outcome, Mapping) else {}),
     }
+    if isinstance(value.get("target"), Mapping) and value["target"]:
+        result["target"] = copy.deepcopy(dict(value["target"]))
     superseded_by = _bounded_text(value.get("supersededBy"), 80)
     if status == "superseded" and superseded_by:
         result["supersededBy"] = superseded_by
@@ -668,7 +671,7 @@ def _bounded_requirement(value: Mapping[str, Any]) -> dict[str, Any] | None:
     requirement_id = _bounded_text(value.get("requirementId"), 80)
     if not requirement_id:
         digest = hashlib.sha256(
-            _canonical_json([kind, tool, action_id, profile]).encode("utf-8")
+            _canonical_json([kind, tool, action_id, profile, value.get("target") or {}]).encode("utf-8")
         ).hexdigest()
         requirement_id = f"requirement_{digest[:24]}"
     return {
@@ -677,6 +680,8 @@ def _bounded_requirement(value: Mapping[str, Any]) -> dict[str, Any] | None:
         "tool": tool,
         "actionId": action_id,
         "verificationProfile": profile,
+        **({"target": copy.deepcopy(dict(value["target"]))}
+           if isinstance(value.get("target"), Mapping) and value["target"] else {}),
     }
 
 
@@ -1472,7 +1477,7 @@ class AgentTaskLoop:
     _actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     _requirements: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Requirements seeded from the previous turn's pending obligations, mapped
-    # to their carryover generation so abandoned work self-expires.
+    # to their carryover generation for observation, never automatic dismissal.
     _inherited_obligations: dict[str, int] = field(default_factory=dict)
     _skill_policy: dict[str, Any] = field(default_factory=dict)
     _skill_context: dict[str, Any] = field(default_factory=dict)
@@ -1765,6 +1770,8 @@ class AgentTaskLoop:
                 for requirement in self._requirements.values():
                     if requirement.get("actionId") == correction_id:
                         requirement["actionId"] = action_id
+                        if requirement.get("target"):
+                            requirement["target"] = action_target(arguments)
         requirement_profile = next(
             (
                 _bounded_text(requirement.get("verificationProfile"), 80)
@@ -1811,6 +1818,9 @@ class AgentTaskLoop:
             "attempts": attempts,
             "outcome": effective,
         }
+        target = action_target(arguments)
+        if target:
+            record["target"] = target
         transaction = _write_transaction_from_execution(
             raw_result,
             task_id=self.task_id,
@@ -1905,6 +1915,7 @@ class AgentTaskLoop:
         verification_profile: str = "",
         inherited: bool = False,
         generation: int = 0,
+        target: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         effective_profile = _bounded_text(verification_profile, 80) or _TOOL_DEFAULT_VERIFICATION_PROFILE.get(
             str(tool or "").strip(),
@@ -1920,6 +1931,7 @@ class AgentTaskLoop:
                     else ""
                 ),
                 "verificationProfile": effective_profile,
+                "target": target if target is not None else action_target(arguments),
             }
         )
         if requirement is None:
@@ -2022,6 +2034,7 @@ class AgentTaskLoop:
                     and str(action.get("tool") or "") == str(requirement.get("tool") or "")
                 )
             )
+            and (not requirement.get("target") or action.get("target") == requirement["target"])
             and (
                 not required_action_id
                 or str(action.get("actionId") or "") == required_action_id
@@ -2029,30 +2042,32 @@ class AgentTaskLoop:
             for action in self._actions.values()
         )
 
-    def pending_obligations(self, *, max_obligations: int = 3) -> list[dict[str, Any]]:
+    def pending_obligations(self) -> list[dict[str, Any]]:
         """Unmet task obligations to constrain the next turn's completion gate.
 
         Exports this turn's own unmet requirements and completion-blocking
         failed actions, plus still-unmet inherited obligations with their
-        generation bumped so abandoned work self-expires. The actionId is
-        dropped so a later retry of the same kind/tool satisfies the
-        obligation.
+        generation bumped for observation. Keep the structured
+        target while dropping the exact actionId so corrected values may satisfy
+        the obligation, but a write to a different target cannot.
         """
         obligations: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
 
-        def emit(kind: str, tool: str, profile: str, generation: int) -> None:
+        def emit(kind: str, tool: str, profile: str, generation: int, target: Any) -> None:
             kind = _bounded_text(kind, 32)
             tool = _bounded_text(tool, 160)
-            if not kind or not tool or (kind, tool) in seen or len(obligations) >= max_obligations:
+            identity = (kind, tool, _canonical_json(target or {}))
+            if not kind or not tool or identity in seen:
                 return
-            seen.add((kind, tool))
+            seen.add(identity)
             obligations.append(
                 {
                     "kind": kind,
                     "tool": tool,
                     "verificationProfile": _bounded_text(profile, 80),
                     "generation": generation,
+                    **({"target": copy.deepcopy(target)} if target else {}),
                 }
             )
 
@@ -2068,13 +2083,15 @@ class AgentTaskLoop:
                 str(requirement.get("tool") or ""),
                 str(requirement.get("verificationProfile") or ""),
                 generation,
+                requirement.get("target"),
             )
         for action_id, action in self._actions.items():
             if (
-                _status(action.get("status")) == "failed"
+                (_status(action.get("status")) == "failed"
+                 or (_status(action.get("status")) == "needs_user_action" and action.get("kind") == "write"))
                 and self.action_blocks_completion(action_id)
             ):
-                emit(str(action.get("kind") or ""), str(action.get("tool") or ""), "", 0)
+                emit(str(action.get("kind") or ""), str(action.get("tool") or ""), "", 0, action.get("target"))
         return obligations
 
     def historical_steps(self) -> list[dict[str, Any]]:

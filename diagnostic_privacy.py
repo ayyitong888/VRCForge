@@ -72,29 +72,18 @@ _IDENTITY_QUERY_RE = re.compile(
 )
 _STABLE_ALIAS_RE = re.compile(r"^(?:usr|prj|avt|path|net)_[0-9a-f]{16}$")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{4,}")
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)((?<![?&])\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|app[_-]?token|artifact[_-]?sig|"
-    r"authorization|password|passwd|secret|cookie|session[_-]?token)\b\s*[:=]\s*)([^\s,;]+)"
-)
 _SECRET_QUERY_RE = re.compile(
-    r"(?i)([?&](?:api[_-]?key|client[_-]?secret|oauth[_-]?token|access[_-]?token|refresh[_-]?token|"
-    r"session[_-]?token|app[_-]?token|artifact[_-]?sig|private[_-]?key|authorization|password|passwd|"
-    r"credential(?:s)?|secret|cookie|token)=)([^&#\s]+)"
+    r"(?i)([?&]([a-z_][\w.-]*)=)([^&#\s]+)"
 )
-_KNOWN_KEY_RE = re.compile(r"\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,})\b")
+_KNOWN_KEY_RE = re.compile(r"(?<![\w-])(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,})\b")
 _CHALLENGE_PATH_RE = re.compile(
     r"(?i)(/api/app/advanced-settings/developer-challenge/)[A-Za-z0-9_-]{24,128}"
 )
 _AUTHORIZATION_OR_COOKIE_RE = re.compile(
     r"(?im)((?:[\"']?)(?:proxy[-_ ]?authorization|authorization|set[-_ ]?cookie|cookie)(?:[\"']?)\s*[:=]\s*)[^\r\n]*"
 )
-_COMPOSITE_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?ix)("
-    r"(?<![\w?&-])[\"']?(?:api[-_ ]?key|client[-_ ]?secret|oauth[-_ ]?token|access[-_ ]?token|refresh[-_ ]?token|"
-    r"session[-_ ]?token|app[-_ ]?token|artifact[-_ ]?sig|private[-_ ]?key|authorization|password|passwd|"
-    r"credential(?:s)?|secret|cookie|token)[\"']?\s*[:=]\s*"
-    r")(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\r\n,;}]+)"
-)
+_ASSIGNMENT_KEY_RE = re.compile(r'''(?i)(?<![\w?&.-])(?:"(?P<double>[^"\r\n]+)"|'(?P<single>[^'\r\n]+)'|(?P<bare>[a-z_][\w.-]*))\s*[:=]\s*''')
+_ASSIGNMENT_VALUE_RE = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n,;}\]"']+''')
 _SAFE_SECRET_METRIC_SUFFIXES = ("count", "counts", "length", "limit", "limits", "usage", "budget", "index")
 _PUBLIC_EVIDENCE_PRIVATE_PATH_RE = re.compile(
     r"(?i)(?<![a-z0-9])(?:[a-z]:[\\/]|\\\\|/(?:Users|home|root|tmp)/|/var/folders/)[^\r\n\"'<>|,;]*"
@@ -158,10 +147,39 @@ def redact_credential_text(value: str) -> str:
     """Remove credential values without rewriting ordinary text or locators."""
     text = str(value)
     text = _CHALLENGE_PATH_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
-    text = _SECRET_QUERY_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
+    text = _SECRET_QUERY_RE.sub(
+        lambda match: f"{match.group(1)}[REDACTED]" if _is_secret_key(match.group(2)) else match.group(0), text
+    )
     text = _AUTHORIZATION_OR_COOKIE_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
-    text = _COMPOSITE_SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
-    text = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
+    # Discover keys independently of values: a normal foo=... field must not
+    # swallow a later password=... or a nested JSON credential field.
+    assignments = list(_ASSIGNMENT_KEY_RE.finditer(text))
+    parts: list[str] = []
+    cursor = 0
+    for index, match in enumerate(assignments):
+        key = next(value for value in match.groupdict().values() if value is not None)
+        if match.group("bare") and not _is_secret_key(key):
+            preceding = re.search(r"([\w-]+) +$", text[:match.start()])
+            if preceding:
+                key = preceding.group(1) + " " + key
+        if match.start() < cursor or not _is_secret_key(key):
+            continue
+        value_match = _ASSIGNMENT_VALUE_RE.match(text, match.end())
+        if value_match is None:
+            continue
+        end = value_match.end()
+        if text[match.end()] in "{[":
+            try:
+                _, end = json.JSONDecoder().raw_decode(text, match.end())
+            except ValueError:
+                pass
+        elif text[match.end()] not in "\"'":
+            if index + 1 < len(assignments):
+                end = min(end, assignments[index + 1].start())
+        parts.extend((text[cursor:match.end()], "[REDACTED]"))
+        cursor = end
+    parts.append(text[cursor:])
+    text = "".join(parts)
     text = _BEARER_RE.sub("Bearer [REDACTED]", text)
     return _KNOWN_KEY_RE.sub("[REDACTED]", text)
 

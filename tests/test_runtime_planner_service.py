@@ -504,22 +504,27 @@ def test_native_action_payload_rejects_ambiguous_exact_catalog_names() -> None:
 
 
 def test_native_multiple_calls_are_retained_and_selected_one_at_a_time():
-    message = native_call("read_file")
-    message["tool_calls"].extend(native_call("read_file", call_id="call-two")["tool_calls"])
+    read = PlannerTool("read_file", "Read a file.", "read", block="files")
+    catalog = FakeCatalog(planning=PlannerCatalogSnapshot(visible_tools=(read,), routable_tools=(read,)))
+    params = {"_internalToolBlocks": ["files"], "_internalToolSelections": {"files": ["read_file"]}}
+    message = native_tool_call("read_file", {})
+    message["tool_calls"].extend(native_tool_call("read_file", {}, call_id="call-two")["tool_calls"])
     model = NativeModel(message)
     native = NativePlannerFixture([{"role": "user", "content": "inspect"}])
-    planner = service(model=model)
+    planner = service(model=model, catalog=catalog)
     plan = planner.plan_agent_turn(
-        "inspect", {}, {}, native_turn=native,
+        "inspect", params, {}, native_turn=native,
     )
     assert plan["nativeCallIds"] == ["call-read"]
     assert native.has_queued_calls
-    second = planner.plan_agent_turn("inspect", {}, {}, native_turn=native)
+    second = planner.plan_agent_turn("inspect", params, {}, native_turn=native)
     assert second["nativeCallIds"] == ["call-two"]
     assert len(model.requests) == 1
     assert not native.has_queued_calls
     assert native.messages()[-1] == message
-    assert not plan.get("skillNeeded") and not plan.get("writeNeeded")
+    assert plan["skillNeeded"] is True and plan["skillTool"] == "read_file"
+    assert second["skillNeeded"] is True and second["skillTool"] == "read_file"
+    assert not plan.get("writeNeeded") and not second.get("writeNeeded")
 
 
 @pytest.mark.parametrize("arguments", [
@@ -3215,7 +3220,9 @@ def test_compaction_projects_pre_and_post_prompts_with_current_exposure_layer() 
     assert replacement == [{"role": "agent", "text": "bounded summary"}]
     assert metadata is not None and metadata["applied"] is True
     assert blocked is False
-    assert catalog.reads == [EXPOSURE_LAYER_EXECUTION, EXPOSURE_LAYER_EXECUTION]
+    # Measure the original prompt, fixed overhead, and replacement prompt in
+    # the same exposure layer; the fixed-overhead read reserves summary space.
+    assert catalog.reads == [EXPOSURE_LAYER_EXECUTION] * 3
 
 
 def test_compaction_blocks_empty_history_when_loop_evidence_exceeds_context() -> None:

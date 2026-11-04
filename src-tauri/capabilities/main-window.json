@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "notification:default",
+    "deep-link:allow-get-current",
     "core:window:allow-close",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",

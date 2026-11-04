@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from agent_command_safety import is_path_within, looks_like_absolute_path, normalize_filesystem_path
 from agent_task_loop import TASK_APPROVAL_CONTEXT_SCHEMA, approval_completion, approval_task_context
+from agent_action_targets import action_target
 from agent_tool_result_contract import normalize_agent_tool_result, pending_execution_receipt
 from external_tool_result_contract import (
     build_external_tool_error,
@@ -4031,6 +4032,36 @@ class AgentApprovalTransactionService:
                         return "Write requests that reference paths outside the selected project require manual approval in Auto Approve mode."
         return ""
 
+    def _prior_target_write_history(
+        self, arguments: Mapping[str, Any], task_context: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        context = task_context or {}
+        session_id = str(context.get("sessionId") or "")
+        target = action_target(arguments)
+        if not session_id or not target:
+            return {}
+        matches = []
+        with self._ports.state.shared_state_lock:
+            for prior in self._ports.state.approvals.values():
+                if (ensure_dict(prior.get("taskContext")).get("sessionId") == session_id
+                        and prior.get("status") in {"rejected", "failed"}
+                        and action_target(prior.get("arguments")) == target):
+                    matches.append({
+                        "approvalId": prior.get("id"), "tool": prior.get("targetTool"),
+                        "status": prior.get("status"),
+                        "error": prior.get("error") or "",
+                    })
+        for prior in context.get("priorActions") or []:
+            if (isinstance(prior, Mapping) and prior.get("kind") == "write"
+                    and prior.get("status") in {"failed", "needs_user_action"}
+                    and prior.get("target") == target):
+                matches.append({
+                    "actionId": prior.get("actionId"), "tool": prior.get("tool"),
+                    "status": prior.get("status"),
+                    "outcome": copy.deepcopy(prior.get("outcome") or {}),
+                })
+        return {"target": target, "totalMatches": len(matches), "entries": matches} if matches else {}
+
     def _new_approval(
         self,
         agent_name: str,
@@ -4059,6 +4090,13 @@ class AgentApprovalTransactionService:
         )
         now = datetime.now(timezone.utc)
         permission_context = self.permission_audit_context()
+        prior_history = self._prior_target_write_history(arguments, task_context)
+        if isinstance(preview, dict):
+            preview = dict(preview)
+            preview.pop("priorTargetWrites", None)
+        if prior_history:
+            preview = {**(preview if isinstance(preview, dict) else {"requestedPreview": preview}),
+                       "priorTargetWrites": prior_history}
         approval = {
             "id": f"appr_{now.strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}",
             "createdAt": now.isoformat(),
