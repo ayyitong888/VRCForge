@@ -110,6 +110,10 @@ $sourceOutputDir = Join-Path $tempDist "vrcforge_backend"
 if (-not (Test-Path -LiteralPath (Join-Path $sourceOutputDir "vrcforge_backend.exe"))) {
     throw "PyInstaller did not produce vrcforge_backend.exe."
 }
+# STOPGAP: PyInstaller's bundled CPython 3.14.3 predates gh-93821. Remove this
+# build-time backport for 1.10.5 once its builder adopts a release containing c99e750.
+& python (Join-Path $repoRoot "packaging\apply_cpython_gh93821.py") --backend $sourceOutputDir
+if ($LASTEXITCODE -ne 0) { throw "CPython Windows asyncio accept fix failed." }
 $collectedAvatarRoot = Join-Path $sourceOutputDir "_internal\resources\skill-packages"
 foreach ($filename in @("index.json") + @($bundledAvatarIndex.packages.file)) {
     if (-not (Test-Path -LiteralPath (Join-Path $collectedAvatarRoot $filename) -PathType Leaf)) {

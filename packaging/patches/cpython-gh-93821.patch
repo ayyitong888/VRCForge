@@ -1,0 +1,56 @@
+From c99e750c6171b49091c807435681fa58f1c4d04b Mon Sep 17 00:00:00 2001
+Subject: [PATCH] CPython 3.14 backport gh-93821 (c99e750c6171b49091c807435681fa58f1c4d04b)
+
+Backported from CPython commit f88565bcd00ac258379c4b0d381d5580a40ac8a7.
+PSF-2.0 licensed upstream source: https://github.com/python/cpython/commit/c99e750c6171b49091c807435681fa58f1c4d04b
+
+diff --git a/Lib/asyncio/proactor_events.py b/Lib/asyncio/proactor_events.py
+index 2e4b9f06566c24b..c42d320341fc83a 100644
+--- a/Lib/asyncio/proactor_events.py
++++ b/Lib/asyncio/proactor_events.py
+@@ -892,6 +892,13 @@ def loop(f=None):
+                 if self.is_closed():
+                     return
+                 f = self._proactor.accept(sock)
++            except (ConnectionResetError, ConnectionAbortedError):
++                # The peer closed the connection before it was accepted.
++                # The listening socket is still usable: keep accepting.
++                if self._debug:
++                    logger.debug("Accept failed on socket %r",
++                                 sock, exc_info=True)
++                self.call_soon(loop)
+             except OSError as exc:
+                 if sock.fileno() != -1:
+                     self.call_exception_handler({
+diff --git a/Lib/asyncio/windows_events.py b/Lib/asyncio/windows_events.py
+index c905db1016807f9..9f26fcb00cd25c6 100644
+--- a/Lib/asyncio/windows_events.py
++++ b/Lib/asyncio/windows_events.py
+@@ -553,7 +553,14 @@ def accept(self, listener):
+         ov.AcceptEx(listener.fileno(), conn.fileno())
+ 
+         def finish_accept(trans, key, ov):
+-            ov.getresult()
++            try:
++                ov.getresult()
++            except OSError as exc:
++                conn.close()
++                # The peer reset the connection before it was accepted.
++                if exc.winerror == _overlapped.ERROR_NETNAME_DELETED:
++                    raise ConnectionResetError(*exc.args)
++                raise
+             # Use SO_UPDATE_ACCEPT_CONTEXT so getsockname() etc work.
+             buf = struct.pack('@P', listener.fileno())
+             conn.setsockopt(socket.SOL_SOCKET,
+@@ -568,6 +575,9 @@ async def accept_coro(future, conn):
+             except exceptions.CancelledError:
+                 conn.close()
+                 raise
++            except ConnectionResetError:
++                # Reported to the caller through the future.
++                pass
+ 
+         future = self._register(ov, listener, finish_accept)
+         coro = accept_coro(future, conn)
+         tasks.ensure_future(coro, loop=self._loop)
+         return future
