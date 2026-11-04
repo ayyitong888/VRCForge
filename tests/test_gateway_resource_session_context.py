@@ -76,6 +76,23 @@ def test_runtime_sessions_and_exception_restore_resource_owner(tmp_path, monkeyp
         assert gateway._mcp_resource_context.get() == "outer"
 
 
+def test_approved_resource_context_restores_only_internal_session_when_context_is_missing(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    internal = {"approvalChannel": "internal", "taskContext": {"sessionId": "approval-session"}}
+    external = {"approvalChannel": "external_mcp", "taskContext": {"sessionId": "external-session"}}
+
+    with gateway._approved_resource_context(internal):
+        assert gateway._mcp_resource_context.get() == "runtime:approval-session"
+    assert gateway._mcp_resource_context.get() is None
+
+    with gateway._approved_resource_context(external):
+        assert gateway._mcp_resource_context.get() is None
+
+    with gateway.resource_context("external:existing"):
+        with gateway._approved_resource_context(internal):
+            assert gateway._mcp_resource_context.get() == "external:existing"
+
+
 def test_http_gateway_interleaved_sessions_keep_current_state_and_share_history(tmp_path):
     import httpx
     from agent_gateway import create_agent_mcp_app

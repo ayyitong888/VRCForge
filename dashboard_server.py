@@ -14779,7 +14779,14 @@ def capture_avatar_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[s
         return payload
     capture = payload["captures"][0]
     emit_log("success", "vision", "Screenshot captured through approval.", {"imagePath": capture["imagePath"]})
-    return {"ok": True, **capture}
+    return {
+        "ok": True,
+        "mutationStarted": True,
+        "committed": True,
+        "commitState": "complete",
+        "commitStateKnown": True,
+        **capture,
+    }
 
 
 def capture_avatar_multi_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -14816,6 +14823,10 @@ def capture_avatar_multi_screenshot_approved_sync(arguments: dict[str, Any]) -> 
     )
     emit_log("success", "vision", "Multi-angle screenshots captured through approval.", {"angles": angles, "count": len(payload["captures"])})
     return {
+        "mutationStarted": True,
+        "committed": True,
+        "commitState": "complete",
+        "commitStateKnown": True,
         **payload,
         **capability,
         "data": (

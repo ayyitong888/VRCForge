@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import io
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -10,6 +12,7 @@ import dashboard_server as server
 from mcp_resource_registry import McpResourceRegistry
 from native_tool_images import collect_tool_images
 from scene_capture_preview import publish_scene_capture_preview, read_scene_capture_preview
+from agent_tool_result_contract import normalize_agent_tool_result
 
 
 @pytest.fixture
@@ -147,4 +150,59 @@ def test_multi_capture_preview_transport_does_not_consume_capture_receipt(
 
     assert len(content) == 2
     assert preview["resourceUri"] in content[0]["text"]
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_approved_capture_restores_runtime_resource_scope_and_projects_complete_image(tmp_path, monkeypatch):
+    project = tmp_path / "UnityProject"
+    project.mkdir()
+    artifacts = tmp_path / "dashboard"
+    registry = McpResourceRegistry(tmp_path / "registry")
+    gateway = server.AGENT_GATEWAY
+    context_id = "runtime:approved-capture-fixture"
+    approval = {
+        "approvalChannel": "internal",
+        "taskContext": {"sessionId": "approved-capture-fixture"},
+    }
+    execution = SimpleNamespace(diagnostic_context=lambda: {
+        "sessionId": "approved-capture-fixture",
+        "approvalId": "capture-approval-fixture",
+    })
+    monkeypatch.setattr(gateway, "_mcp_resources", registry)
+    monkeypatch.setattr(server, "DASHBOARD_ARTIFACTS_DIR", artifacts)
+    monkeypatch.setattr(server, "current_approved_unity_execution", lambda: execution)
+    monkeypatch.setattr(server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_project_path=str(project)))
+    monkeypatch.setattr(server.TELEGRAM_SERVICE, "record_capture", lambda **_kwargs: None)
+    prepared, _ = server.prepare_capture_screenshot_request({"projectPath": str(project)}, None)
+
+    def capture(_settings, _tool, arguments, preserve_tool_error=False):
+        output = Path(arguments["outputPath"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGBA", (48, 32), (240, 80, 20, 255)).save(output, format="PNG")
+        return server.McpResult(
+            exit_code=0, stdout="ok", stderr="", payload={"data": {"imagePath": str(output)}}
+        )
+
+    monkeypatch.setattr(server, "invoke_unity_mcp", capture)
+    assert gateway._mcp_resource_context.get() is None
+    with gateway._approved_resource_context(approval):
+        assert gateway._mcp_resource_context.get() == context_id
+        result = server.capture_avatar_screenshot_approved_sync(prepared)
+
+    assert result["ok"] is True
+    assert result["preview"]["schema"] == "vrcforge.scene_capture_preview.v1"
+    outcome = normalize_agent_tool_result(result, fallback_summary="capture", write=True)
+    assert outcome["status"] == "ok"
+    assert outcome["commitState"] == "complete"
+    assert outcome["commitStateKnown"] is True
+    assert "recovery" not in outcome
+
+    with gateway.resource_context(context_id):
+        content = collect_tool_images(
+            [_step({**result, "status": "applied"})],
+            server._read_native_tool_image_resource,
+            str(project),
+        )
+    assert len(content) == 2
+    assert result["preview"]["resourceUri"] in content[0]["text"]
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")

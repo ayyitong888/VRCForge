@@ -808,6 +808,7 @@ class ApprovalTransactionPorts:
     freeze_native_history: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None
     native_result_observation: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     session_checkpoint_choice: Callable[[str], dict[str, Any] | None] | None = None
+    resource_context_for_approval: Callable[[Mapping[str, Any]], AbstractContextManager[object]] = lambda _approval: nullcontext()
 
 
 def _blocked_recovery_failure_facts(applied: Mapping[str, Any]) -> dict[str, Any]:
@@ -2242,6 +2243,7 @@ class AgentApprovalTransactionService:
                                 verification_baseline,
                                 ensure_dict(approval.get("taskContext")),
                                 recovery=recovery,
+                                approval=approval,
                             )
             elif requires_checkpoint and target_tool in LOCAL_STATE_CHECKPOINT_TARGETS:
                 if not self._ports.state.skill_package_write_lock_bound:
@@ -2308,6 +2310,7 @@ class AgentApprovalTransactionService:
                                     verification_baseline,
                                     ensure_dict(approval.get("taskContext")),
                                     recovery=recovery,
+                                    approval=approval,
                                 )
             else:
                 if requires_checkpoint:
@@ -2348,6 +2351,7 @@ class AgentApprovalTransactionService:
                         verification_baseline,
                         ensure_dict(approval.get("taskContext")),
                         recovery=recovery,
+                        approval=approval,
                     )
             if core_call_audits:
                 request_trace = {
@@ -2856,6 +2860,7 @@ class AgentApprovalTransactionService:
         verification_baseline: dict[str, Any],
         task_context: dict[str, Any],
         recovery: dict[str, Any] | None = None,
+        approval: Mapping[str, Any] | None = None,
     ) -> Any:
         handler_arguments = dict(arguments)
         handler_arguments.pop("_vrcforge_approved_execution", None)
@@ -2951,12 +2956,13 @@ class AgentApprovalTransactionService:
                            "taskContext": task_context, "approvedUnityExecutionPlan": frozen_execution_plan},
                 handler_arguments,
             )
-            with bind_approved_unity_execution(execution_plan), bind_import_operation_journal(journal_writer):
-                with self._scan_mutation(project_root, target_tool, recovery) as mutation:
-                    result = write_handler.handler(handler_arguments)
-                    if journal_writer is not None and isinstance(result, dict) and result.get("ok") is False:
-                        journal_writer({"handlerResult": result, "handlerFinishedAt": utc_now_iso()})
-                    mutation["outcome"] = _domain_write_receipt(result)
+            with self._ports.resource_context_for_approval(approval or {}):
+                with bind_approved_unity_execution(execution_plan), bind_import_operation_journal(journal_writer):
+                    with self._scan_mutation(project_root, target_tool, recovery) as mutation:
+                        result = write_handler.handler(handler_arguments)
+                        if journal_writer is not None and isinstance(result, dict) and result.get("ok") is False:
+                            journal_writer({"handlerResult": result, "handlerFinishedAt": utc_now_iso()})
+                        mutation["outcome"] = _domain_write_receipt(result)
         finally:
             if not execution_plan.consumed:
                 execution_plan.burn()

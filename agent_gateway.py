@@ -1016,6 +1016,7 @@ class AgentGateway:
                 roslyn_available=self.roslyn_available,
                 save_config=self.save_config,
                 resolve_execution_target_reference=self.resolve_execution_target_reference,
+                resource_context_for_approval=self._approved_resource_context,
                 invalidate_scan_results=self._invalidate_scan_results,
                 complete_scan_mutation=self._scan_results.end_mutation,
                 freeze_native_history=lambda approval_id, session_id, snapshot: self._runtime_session_state.freeze_native_conversation(
@@ -2537,6 +2538,20 @@ class AgentGateway:
             yield
         finally:
             self._mcp_resource_context.reset(token)
+
+    @contextmanager
+    def _approved_resource_context(self, approval: Mapping[str, Any]):
+        """Restore the owning internal runtime scope while an approval executes."""
+        if self._mcp_resource_context.get() is not None or approval.get("approvalChannel") == "external_mcp":
+            yield
+            return
+        task_context = ensure_dict(approval.get("taskContext"))
+        session_id = str(task_context.get("sessionId") or "").strip()
+        if not session_id:
+            yield
+            return
+        with self.resource_context(f"runtime:{session_id}"):
+            yield
 
     def _sync_mcp_resource_catalogue(self) -> None:
         """Publish shared registry metadata without touching Unity state."""
