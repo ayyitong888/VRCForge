@@ -161,7 +161,7 @@ def test_done_refresh_uses_current_console_without_claiming_a_compilation_pass(n
 
 
 @pytest.mark.parametrize("new_warning", [False, True])
-def test_clean_refresh_passes_actual_external_write_completion_guard(monkeypatch, tmp_path: Path, new_warning: bool) -> None:
+def test_package_resolution_refresh_passes_actual_external_write_completion_guard(monkeypatch, tmp_path: Path, new_warning: bool) -> None:
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
@@ -197,9 +197,11 @@ def test_clean_refresh_passes_actual_external_write_completion_guard(monkeypatch
     monkeypatch.setattr(type(service), "_create_pre_write_checkpoint", lambda *_: {
         "ok": True, "status": "ready", "id": "ckpt_refresh", "projectRoot": str(project),
     })
-    monkeypatch.setattr(type(service), "_call_external_mcp_write_handler", lambda *_:
+    monkeypatch.setattr(type(service), "_call_external_mcp_write_handler", lambda *_, recovery=None:
         dashboard_server.normalize_refresh_asset_database_outcome(_result("done", {"errorCount": 0, "errors": []})))
-    prepared = service.prepare_external_mcp_write(name, {"projectPath": str(project)})
+    # This case asserts checkpoint recovery; plain non-saving refresh no longer
+    # creates one. Package resolution selects the checkpointed transaction.
+    prepared = service.prepare_external_mcp_write(name, {"projectPath": str(project), "resolvePackages": True})
     result = service.execute_prepared_external_mcp_write(prepared)
     if new_warning:
         assert result["ok"] is False, result

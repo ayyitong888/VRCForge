@@ -125,3 +125,42 @@ def test_refresh_missing_commit_facts_remain_unknown_even_with_normal_status():
     assert normalized["committed"] is None
     assert normalized["commitState"] == "unknown"
     assert normalized["commitStateKnown"] is False
+
+
+def test_completed_refresh_does_not_invent_recovery_from_unknown_persistence():
+    # The live approved Refresh returned a done job and a clean Console receipt,
+    # but no save/commit facts. Completion must not become a recovery request.
+    raw = normalize_refresh_asset_database_outcome(deepcopy(REFRESH_520_RESULT))
+    receipt = {"ok": True, "status": "executed", "result": raw,
+               "consoleVerification": {"status": "passed", "newErrorCount": 0, "newWarningCount": 0}}
+    outcome = normalize_agent_tool_result(receipt, fallback_summary="Refresh", write=True)
+    assert outcome["success"] is True
+    assert outcome["commitState"] == "unknown"
+    assert outcome["commitStateKnown"] is False
+    assert outcome["mutationStarted"] is None
+    assert outcome["committed"] is None
+    assert outcome["persistenceState"] == "unknown"
+    assert outcome["safeToRetry"] is False
+    assert "recovery" not in outcome
+    assert "nextAction" not in outcome
+
+
+@pytest.mark.parametrize("extra", [
+    {}, {"completionKnown": False, "operationStatus": "success"},
+    {"completionKnown": True, "operationStatus": "unknown"},
+    {"completionKnown": True, "operationStatus": "pending"},
+])
+def test_success_without_terminal_completion_still_requires_unknown_commit_recovery(extra):
+    outcome = normalize_agent_tool_result(
+        {"ok": True, "status": "executed", "commitState": "unknown", **extra},
+        fallback_summary="Write", write=True,
+    )
+    assert outcome["recovery"]["required"] is True
+    assert outcome["safeToRetry"] is False
+
+
+def test_completed_refresh_preserves_explicit_recovery():
+    raw = normalize_refresh_asset_database_outcome(deepcopy(REFRESH_520_RESULT))
+    raw["recovery"] = {"required": True, "reason": "An earlier project operation requires recovery."}
+    outcome = normalize_agent_tool_result(raw, fallback_summary="Refresh", write=True)
+    assert outcome["recovery"] == raw["recovery"]

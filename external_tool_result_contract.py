@@ -344,20 +344,28 @@ def canonical_result_facts(
     if commit_state == "unknown":
         facts["commitStateKnown"] = False
         facts["safeToRetry"] = False
-        facts.setdefault(
-            "nextAction",
-            "Read back the exact target state before retrying the write.",
+        # A completed job (for example a non-saving AssetDatabase refresh)
+        # need not establish asset persistence. Do not invent recovery work
+        # from that missing fact; explicit recovery instructions stay intact.
+        execution_complete = (
+            success is True and first("completionKnown") is True
+            and first("operationStatus") == "success"
         )
-        facts.setdefault(
-            "recovery",
-            {
-                "required": True,
-                "reason": (
-                    "Commit state is unknown; preserve the current state and read back "
-                    "the exact target before any retry."
-                ),
-            },
-        )
+        if not execution_complete:
+            facts.setdefault(
+                "nextAction",
+                "Read back the exact target state before retrying the write.",
+            )
+            facts.setdefault(
+                "recovery",
+                {
+                    "required": True,
+                    "reason": (
+                        "Commit state is unknown; preserve the current state and read back "
+                        "the exact target before any retry."
+                    ),
+                },
+            )
 
     if write:
         persistence_state = str(raw_persistence).strip().casefold() if isinstance(raw_persistence, str) else ""
