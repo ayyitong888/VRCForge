@@ -329,7 +329,7 @@ def build_native_request_composition(
 
     generated = _safe_origin_digests(origin)
     positions = _safe_origin_positions(origin)
-    generated_messages: dict[str, list[Mapping[str, Any]]] = {kind: [] for kind in ("runtimeContext", "runtimeState")}
+    generated_messages: dict[str, list[Mapping[str, Any]]] = {kind: [] for kind in ("runtimeContext", "runtimeContextTurn", "runtimeState")}
     ordinary_messages: list[Mapping[str, Any]] = []
     for index, message in enumerate(messages):
         if not isinstance(message, Mapping):
@@ -353,7 +353,11 @@ def build_native_request_composition(
 
     message_array = _metrics(messages)
     message_children = _aggregate([dict(message) for message in ordinary_messages])
-    context_children = _aggregate([dict(message) for message in generated_messages["runtimeContext"]])
+    context_children = _aggregate([
+        dict(message)
+        for kind in ("runtimeContext", "runtimeContextTurn")
+        for message in generated_messages[kind]
+    ])
     state_children = _aggregate([dict(message) for message in generated_messages["runtimeState"]])
     message_overhead = {
         "chars": message_array["chars"] - message_children["chars"] - context_children["chars"] - state_children["chars"],
