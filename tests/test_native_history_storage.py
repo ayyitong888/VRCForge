@@ -48,13 +48,18 @@ def test_corrupt_history_fails_without_flattening_or_overwriting(tmp_path):
     assert path.read_text() == "broken"
 
 
-def test_pending_call_is_preserved_not_reexecuted(tmp_path):
+def test_pending_call_is_settled_on_next_turn_not_reexecuted(tmp_path):
+    """Pending calls at a new user turn are crash-window orphans (7110908):
+    the next turn settles them honestly instead of raising or re-executing."""
     state = owner(tmp_path)
     state.begin_native_turn("s", binding="b", turn_id="t", message="u")
     state.append_native_assistant("s", binding="b", message={"role": "assistant", "tool_calls": [
         {"id": "c", "type": "function", "function": {"name": "write", "arguments": "{}"}}]})
-    with pytest.raises(ValueError, match="pending tool calls"):
-        owner(tmp_path).begin_native_turn("s", binding="b", turn_id="next", message="continue")
+    fresh = state.begin_native_turn("s", binding="b", turn_id="next", message="continue")
+    settled = [json.loads(message["content"]) for message in fresh["messages"]
+               if message.get("role") == "tool" and message.get("tool_call_id") == "c"]
+    assert settled and settled[0]["status"] == "execution_unknown"
+    assert settled[0]["isError"] is True
 
 
 def test_scoping_delete_and_memory_clear(tmp_path):
@@ -74,7 +79,9 @@ def test_atomic_write_failure_keeps_previous_disk_and_memory(tmp_path, monkeypat
     def fail(*args):
         raise OSError("disk unavailable")
     monkeypatch.setattr("agent_native_history_store.os.replace", fail)
-    with pytest.raises(OSError, match="disk unavailable"):
+    # Persistence failures surface as the bounded wrapper with the raw cause
+    # chained; the private temp file is cleaned either way.
+    with pytest.raises(OSError, match="Could not persist local native history."):
         state.append_native_user("s", binding="project|provider", message="new")
     assert state.native_conversation("s", binding="project|provider") == before
     assert owner(tmp_path).native_conversation("s", binding="project|provider") == before

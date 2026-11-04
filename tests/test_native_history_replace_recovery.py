@@ -52,7 +52,8 @@ def test_persistent_denial_is_bounded_and_classified_as_local(tmp_path, monkeypa
     monkeypatch.setattr(history.os, "replace", blocked)
     with pytest.raises(OSError) as caught:
         history.NativeHistoryStore(tmp_path).save("s", {"binding": "b"}, {})
-    assert len(attempts) == 3
+    from atomic_file_replace import _RETRY_DELAYS_SECONDS
+    assert len(attempts) == len(_RETRY_DELAYS_SECONDS) + 1
     assert RuntimePlannerService._planner_failure_code(caught.value) == "native_history_save_failed"
     assert not list(tmp_path.glob(".native-*"))
 

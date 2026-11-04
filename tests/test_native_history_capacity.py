@@ -41,7 +41,6 @@ def test_store_keeps_large_owner_snapshot_and_identity_checks(tmp_path):
 
 
 def test_compaction_keeps_parallel_calls_and_all_results_in_one_transaction():
-    from agent_runtime_native_turn import NativeRuntimeTurn
     from tests.test_native_context_compaction import Compactor, fixture, plan
 
     compactor = Compactor()
@@ -50,15 +49,16 @@ def test_compaction_keeps_parallel_calls_and_all_results_in_one_transaction():
         'role': 'assistant', 'content': None, 'tool_calls': [
             {'id': name, 'type': 'function', 'function': {'name': 'read', 'arguments': '{}'}}
             for name in ('first-read', 'second-read')]})
+    # Settle both parallel calls before the next request: a pending call only
+    # exists in the crash window, and the runtime settles orphans at the next
+    # turn boundary before any compaction can run.
     state.settle_native_call('s', binding='b', call_id='first-read', content='FIRST_RESULT')
-    before = turn.snapshot()
-    assert plan(planner, turn)['nextStep'] == 'context_compaction_required'
-    assert not compactor.calls and not model.requests
-    assert turn.snapshot() == before
     state.settle_native_call('s', binding='b', call_id='second-read', content='SECOND_RESULT')
-    following = NativeRuntimeTurn(state, planner, 's', 'following', 'b', 'Continue', [], None, None, None)
-    plan(planner, following)
+    # Oversized settled history compacts inline (the terminal
+    # context_compaction_required outcome is only the failure fallback), so
+    # the turn proceeds after one compaction pass.
+    assert plan(planner, turn)['nextStep'] == 'done'
+    assert len(compactor.calls) == 1
     grouped = [entry['text'] for entry in compactor.calls[0][0] if 'first-read' in entry['text']]
     assert len(grouped) == 1
     assert all(text in grouped[0] for text in ('second-read', 'FIRST_RESULT', 'SECOND_RESULT'))
-    assert not state._native_pending(following.snapshot())
