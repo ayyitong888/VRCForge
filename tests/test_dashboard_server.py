@@ -12809,6 +12809,9 @@ class DashboardServerTests(unittest.TestCase):
                 "dashboard_server.invoke_unity_mcp",
                 side_effect=connection_closed,
             ) as invoke,
+            patch("dashboard_server.list_running_unity_processes", return_value=[{
+                "processId": 77, "commandLine": f'Unity.exe -projectPath "{project}"',
+            }]),
             patch("dashboard_server._wait_for_reloaded_unity_core", return_value=not_ready),
         ):
             result = dashboard_server.reload_unity_checkpoint_sync(project)
@@ -12832,6 +12835,9 @@ class DashboardServerTests(unittest.TestCase):
             patch("dashboard_server.load_dashboard_settings", return_value=settings),
             patch("dashboard_server.load_unity_mcp_core_connection", return_value=previous),
             patch("dashboard_server.invoke_unity_mcp", side_effect=protocol_failure) as invoke,
+            patch("dashboard_server.list_running_unity_processes", return_value=[{
+                "processId": 77, "commandLine": f'Unity.exe -projectPath "{project}"',
+            }]),
             patch("dashboard_server._wait_for_reloaded_unity_core") as wait_ready,
         ):
             result = dashboard_server.reload_unity_checkpoint_sync(project)

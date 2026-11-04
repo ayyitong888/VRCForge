@@ -3333,6 +3333,15 @@ class AgentCheckpointRecoveryService:
         if phase == "restore":
             if not self._checkpoint_restore_handler:
                 reload_status = "missing"
+            elif reload_result.get("editorReloaded") is False:
+                reload_status = "todo"
+                todos.append({
+                    "id": "reopen_unity_after_restore",
+                    "status": "todo",
+                    "required": True,
+                    "reason": "Project files were restored while the Unity Editor was closed; reopen the project to reimport and verify the restored state.",
+                    "projectPath": str(checkpoint.get("projectRoot") or ""),
+                })
             elif reload_result.get("ok"):
                 reload_status = "passed"
             else:
@@ -3346,6 +3355,11 @@ class AgentCheckpointRecoveryService:
             {
                 "tool": "vrc_reload_after_checkpoint_restore",
                 "reason": "Restored scenes/assets must be reloaded before MA/VRCF/NDMF scanners or validation can be trusted.",
+                **({
+                    "editorReopenRequired": True,
+                    "readbackVerified": False,
+                    "nextAction": "Reopen Unity to reimport and verify the restored project files.",
+                } if reload_result.get("editorReloaded") is False else {}),
             },
         )
 

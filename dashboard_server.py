@@ -20831,6 +20831,19 @@ CHECKPOINT_RELOAD_READY_POLL_SECONDS = 0.5
 CHECKPOINT_RELOAD_CONNECTION_CLOSED_ERROR = "Unity MCP Core connection closed unexpectedly."
 
 
+def _checkpoint_restore_editor_is_definitely_closed(project_root: Path) -> bool:
+    """Return true only when strict process discovery proves the target Editor is gone."""
+    try:
+        processes = list_running_unity_processes(require_discovery_evidence=True)
+    except Exception:  # noqa: BLE001 - uncertain process state must preserve the original Core failure.
+        return False
+    unknown = [process for process in processes
+               if not extract_unity_project_path_from_command_line(str(process.get("commandLine") or ""))]
+    if unknown:
+        return False
+    return not any(unity_process_exactly_matches_project(process, project_root) for process in processes)
+
+
 def prepare_unity_checkpoint_restore_sync(project_root: Path, *, checkpoint_files: list[str] | None = None, **recovery_options: Any) -> dict[str, Any]:
     capture_evidence_only = recovery_options.pop("capture_evidence_only", False)
     if recovery_options or type(capture_evidence_only) is not bool:
@@ -20851,27 +20864,53 @@ def prepare_unity_checkpoint_restore_sync(project_root: Path, *, checkpoint_file
             preserve_tool_error=True,
         )
         return normalize_unity_checkpoint_result(result, project_root)
+
+    def disk_only_result() -> dict[str, Any]:
+        return {"ok": True, "projectPath": str(project_root),
+                "status": "editor_closed_disk_only", "restoreMode": "disk_only",
+                "scenes": [], "activeScenePath": "", "editorReloaded": False,
+                "readbackVerified": False, "editorReopenRequired": True,
+                "message": "No Unity Editor process is using this project; restore can proceed on disk. Reopen Unity afterward to reimport and verify."}
+
     live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
     if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
-        return live_connection.prepare_restore_checkpoint(project_root, checkpoint_files=checkpoint_files)
+        try:
+            result = live_connection.prepare_restore_checkpoint(project_root, checkpoint_files=checkpoint_files)
+        except Exception:
+            if _checkpoint_restore_editor_is_definitely_closed(project_root):
+                return disk_only_result()
+            raise
+        if result.get("ok") is True:
+            return result
+        if _checkpoint_restore_editor_is_definitely_closed(project_root):
+            return disk_only_result()
+        return result
     settings = load_dashboard_settings(build_agent_connection_request({}))
     settings.unity_mcp_timeout_seconds = min(
         max(int(settings.unity_mcp_timeout_seconds or 30), 1),
         CHECKPOINT_RELOAD_CALL_TIMEOUT_SECONDS,
     )
     settings.unity_mcp_retries = 1
-    result = invoke_unity_mcp(
-        settings,
-        "vrc_reload_after_checkpoint_restore",
-        {
-            "projectPath": str(project_root),
-            "phase": "prepare_restore",
-            **({"checkpointFiles": checkpoint_files} if checkpoint_files is not None else {}),
-        },
-        execution_context={"lane": "app_safety_control"},
-        preserve_tool_error=True,
-    )
-    return normalize_unity_checkpoint_result(result, project_root)
+    try:
+        result = invoke_unity_mcp(
+            settings,
+            "vrc_reload_after_checkpoint_restore",
+            {
+                "projectPath": str(project_root),
+                "phase": "prepare_restore",
+                **({"checkpointFiles": checkpoint_files} if checkpoint_files is not None else {}),
+            },
+            execution_context={"lane": "app_safety_control"},
+            preserve_tool_error=True,
+        )
+    except Exception:
+        if _checkpoint_restore_editor_is_definitely_closed(project_root):
+            return disk_only_result()
+        raise
+    normalized = normalize_unity_checkpoint_result(result, project_root)
+    if normalized.get("ok") is True or not _checkpoint_restore_editor_is_definitely_closed(project_root):
+        return normalized
+    return disk_only_result()
 
 
 def _checkpoint_reload_connection_closed(error: BaseException) -> bool:
@@ -20959,9 +20998,23 @@ def reload_unity_checkpoint_sync(
     project_root: Path,
     restore_prepare: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    def disk_only_result() -> dict[str, Any]:
+        return {"ok": True, "projectPath": str(project_root),
+                "status": "editor_closed_disk_only", "editorReloaded": False,
+                "readbackVerified": False, "editorReopenRequired": True,
+                "message": "The Unity Editor remains closed; no Core reload or readback was attempted. Reopen this project to reimport and verify the restored files."}
+
     live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
     if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
-        return live_connection.reload_checkpoint(project_root, restore_prepare)
+        try:
+            result = live_connection.reload_checkpoint(project_root, restore_prepare)
+        except Exception:
+            if _checkpoint_restore_editor_is_definitely_closed(project_root):
+                return disk_only_result()
+            raise
+        if result.get("ok") is True or not _checkpoint_restore_editor_is_definitely_closed(project_root):
+            return result
+        return disk_only_result()
     try:
         previous_connection = load_unity_mcp_core_connection(project_root)
     except UnityMcpCoreError:
@@ -21002,24 +21055,33 @@ def reload_unity_checkpoint_sync(
             preserve_tool_error=True,
         )
     except UnityMcpError as exc:
-        if previous_connection is None or not _checkpoint_reload_connection_closed(exc):
-            return {
-                "ok": False,
-                "error": "Unity did not confirm the checkpoint reload command.",
-                "failureCause": _bounded_dashboard_cause("checkpoint_reload_transport", exc),
-                "commitState": "unknown",
-                "checkpointRecoveryRequired": True,
-            }
-        return _wait_for_reloaded_unity_core(project_root, previous_connection)
+        if previous_connection is not None and _checkpoint_reload_connection_closed(exc):
+            readiness = _wait_for_reloaded_unity_core(project_root, previous_connection)
+            if readiness.get("ok") is True:
+                return readiness
+            if _checkpoint_restore_editor_is_definitely_closed(project_root):
+                return disk_only_result()
+            return readiness
+        if _checkpoint_restore_editor_is_definitely_closed(project_root):
+            return disk_only_result()
+        return {
+            "ok": False,
+            "error": "Unity did not confirm the checkpoint reload command.",
+            "failureCause": _bounded_dashboard_cause("checkpoint_reload_transport", exc),
+            "commitState": "unknown",
+            "checkpointRecoveryRequired": True,
+        }
     normalized = normalize_unity_checkpoint_result(result, project_root)
     if normalized.get("ok") is not True:
-        return normalized
+        return normalized if not _checkpoint_restore_editor_is_definitely_closed(project_root) else disk_only_result()
     readiness = _wait_for_checkpoint_reload_ready(
         project_root,
         previous_connection,
         require_new_instance=False,
     )
     if readiness.get("ok") is not True:
+        if _checkpoint_restore_editor_is_definitely_closed(project_root):
+            return disk_only_result()
         return {
             **normalized,
             **readiness,
