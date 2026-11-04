@@ -689,6 +689,7 @@ try {
         New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
     }
     Build-TauriDesktopApp -DestinationExe (Join-Path $payloadRoot "VRCForge.exe")
+    New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
     $evidenceAttestor = $null
     if ($strictEvidenceBuild) {
         Write-Host "Building external evidence attestor..."

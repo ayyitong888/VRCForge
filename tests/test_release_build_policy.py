@@ -976,6 +976,67 @@ def test_release_pairs_portable_core_root_meta_with_the_unitypackage() -> None:
     assert '$rootGuidEntry = @($guidManifest.entries | Where-Object { $_.path -ceq "Assets/VRCForge" })[0]' in source
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the release directory reset uses Windows paths")
+def test_release_package_reuse_recovers_output_directory_after_tauri_clears_dist(
+    tmp_path: Path,
+) -> None:
+    source = _build_script()
+    build_start = source.index(
+        "    Build-TauriDesktopApp -DestinationExe (Join-Path $payloadRoot \"VRCForge.exe\")"
+    )
+    build_end_marker = "    $evidenceAttestor = $null"
+    build_end = source.index(build_end_marker, build_start) + len(build_end_marker)
+    build_block = source[build_start:build_end]
+
+    copy_start_marker = '    $releaseUnityPackage = Join-Path $releaseRoot "VRCForge.unitypackage"'
+    copy_start = source.index(copy_start_marker, build_end)
+    copy_end_marker = (
+        '    Copy-Item -LiteralPath $UnityPackagePath -Destination '
+        '(Join-Path $unityPluginRoot "VRCForge.unitypackage") -Force'
+    )
+    copy_end = source.index(copy_end_marker, copy_start) + len(copy_end_marker)
+    package_copy_block = source[copy_start:copy_end]
+
+    probe = tmp_path / "recreate-release-root.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "$repoRoot = $env:VRCFORGE_RELEASE_TEST_ROOT\n"
+        "$payloadRoot = Join-Path $repoRoot 'dist\\VRCForge_Windows_x64'\n"
+        "$releaseRoot = Join-Path $repoRoot 'dist\\release'\n"
+        "$unityPluginRoot = Join-Path $payloadRoot 'unity_plugin'\n"
+        "$sourceRoot = Join-Path $repoRoot 'source'\n"
+        "$UnityPackagePath = Join-Path $sourceRoot 'VRCForge.unitypackage'\n"
+        "New-Item -ItemType Directory -Force -Path $payloadRoot,$releaseRoot,$unityPluginRoot,$sourceRoot | Out-Null\n"
+        "[System.IO.File]::WriteAllText($UnityPackagePath, 'existing Core package')\n"
+        "function Build-TauriDesktopApp {\n"
+        "    param([string]$DestinationExe)\n"
+        "    Remove-Item -LiteralPath (Join-Path $repoRoot 'dist') -Recurse -Force\n"
+        "    New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null\n"
+        "    [System.IO.File]::WriteAllText($DestinationExe, 'built desktop')\n"
+        "}\n"
+        f"{build_block}\n"
+        "New-Item -ItemType Directory -Force -Path $unityPluginRoot | Out-Null\n"
+        "$reuseUnityPackage = $true\n"
+        f"{package_copy_block}\n"
+        "if (-not (Test-Path -LiteralPath (Join-Path $releaseRoot 'VRCForge.unitypackage'))) { throw 'release package was not copied' }\n"
+        "if (-not (Test-Path -LiteralPath (Join-Path $unityPluginRoot 'VRCForge.unitypackage'))) { throw 'payload package was not copied' }\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["VRCFORGE_RELEASE_TEST_ROOT"] = str(tmp_path)
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(probe)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_strict_evidence_outputs_reject_reparse_and_overwrite_paths() -> None:
     source = _build_script()
 
