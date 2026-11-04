@@ -16,9 +16,9 @@ from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
 
 
 def test_single_asset_save_has_matching_inner_and_external_tool_surface() -> None:
-    assert TOOL_CONTRACT_VERSION == "194"
-    assert PREVIOUS_CORE_TOOL_CONTRACT_VERSION == "193"
-    assert EXPECTED_TOOL_COUNT == 104
+    assert TOOL_CONTRACT_VERSION == "195"
+    assert PREVIOUS_CORE_TOOL_CONTRACT_VERSION == "194"
+    assert EXPECTED_TOOL_COUNT == 105
     assert "vrc_save_asset" in EXPECTED_TOOL_NAMES
     assert "vrc_save_asset" in dashboard_server.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST
     assert "vrcforge_save_asset" in dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS

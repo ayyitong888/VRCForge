@@ -208,6 +208,13 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "writes artifact JSON only",
         "tags": ["menu", "scan"],
     },
+    "vrcforge_scan_avatar_reference_diagnostics": {
+        "title": "Avatar Reference Diagnostics",
+        "inputs": ["Exact avatar hierarchy path."],
+        "outputs": ["Missing script components, serialized missing-reference signals, and menu parameter declaration facts."],
+        "sideEffects": "read-only; scans one loaded scene hierarchy",
+        "tags": ["avatar", "references", "diagnostics", "read"],
+    },
     "vrcforge_scan_wardrobe": {
         "title": "Wardrobe Scan",
         "inputs": ["Optional avatar path."],

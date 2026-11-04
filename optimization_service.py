@@ -1438,24 +1438,69 @@ def build_parameter_inventory(validation: dict[str, Any], *, complete_evidence: 
 
 def build_parameter_menu_map(validation: dict[str, Any], *, complete_evidence: bool = False) -> dict[str, Any]:
     menu = _source_payload(_validation_sources(validation), "menu")
+    source_items = _dict_list(menu, ("items", "controls", "menuItems"))
     controls = []
-    for item in _dict_list(menu, ("items", "controls", "menuItems")):
+    scene_candidates = []
+    parameter_candidates = []
+    other_candidates = []
+
+    def normalize_item(item: dict[str, Any], *, default_source: str) -> dict[str, Any]:
         parameter_name = _direct_text(item, ("parameterName", "parameter", "param"))
         display_name = _direct_text(item, ("displayName", "name", "controlName")) or parameter_name
         menu_path = _direct_text(item, ("menuPath", "path", "controlPath")) or ""
-        if not display_name and not parameter_name:
+        source = _direct_text(item, ("source",)) or default_source
+        object_path = _direct_text(item, ("objectPath",)) or ""
+        if not display_name and not parameter_name and not object_path:
+            return {}
+        return {
+            "displayName": str(display_name or "")[:120],
+            "menuPath": _safe_asset_label(str(menu_path)),
+            "objectPath": _safe_asset_label(str(object_path)),
+            "parameterName": str(parameter_name or "")[:120],
+            "controlType": _direct_text(item, ("controlType", "type")) or "unknown",
+            "valueType": _normalize_parameter_type(_direct_text(item, ("valueType", "parameterType", "type"))),
+            "networkSynced": _direct_bool(item, ("networkSynced", "synced")),
+            "canToggleSceneObject": _direct_bool(item, ("canToggleSceneObject",)),
+            "source": source,
+        }
+
+    for item in source_items:
+        source = _direct_text(item, ("source",))
+        if source == "scene_object":
+            candidate = normalize_item(item, default_source="scene_object")
+            if candidate:
+                scene_candidates.append(candidate)
             continue
-        controls.append(
-            {
-                "displayName": str(display_name or "")[:120],
-                "menuPath": _safe_asset_label(str(menu_path)),
-                "parameterName": str(parameter_name or "")[:120],
-                "controlType": _direct_text(item, ("controlType", "type")) or "unknown",
-                "valueType": _normalize_parameter_type(_direct_text(item, ("valueType", "parameterType", "type"))),
-                "networkSynced": _direct_bool(item, ("networkSynced", "synced")),
-                "source": _direct_text(item, ("source",)) or "menu",
-            }
-        )
+        if source == "parameter":
+            candidate = normalize_item(item, default_source="parameter")
+            if candidate:
+                parameter_candidates.append(candidate)
+            continue
+        # Preserve legacy source-less menu payloads. Explicitly classified non-menu
+        # and unknown sources are not evidence of expression-menu controls.
+        if source and source not in {"menu_control", "menu"}:
+            candidate = normalize_item(item, default_source=source)
+            if candidate:
+                other_candidates.append(candidate)
+            continue
+        control = normalize_item(item, default_source="menu")
+        if control:
+            controls.append(control)
+
+    descriptor_configuration = menu.get("descriptorConfiguration")
+    if not isinstance(descriptor_configuration, dict):
+        descriptor_configuration = {}
+    descriptor_present = descriptor_configuration.get("descriptorPresent")
+    expressions_menu_assigned = descriptor_configuration.get("expressionsMenuAssigned")
+    expression_parameters_assigned = descriptor_configuration.get("expressionParametersAssigned")
+    if descriptor_present is False:
+        configuration_state = "descriptor_missing"
+    elif expressions_menu_assigned is False:
+        configuration_state = "menu_unassigned"
+    elif expressions_menu_assigned is True:
+        configuration_state = "menu_assigned"
+    else:
+        configuration_state = "unknown"
     mapped = {}
     for control in controls:
         name = str(control.get("parameterName") or "")
@@ -1480,9 +1525,19 @@ def build_parameter_menu_map(validation: dict[str, Any], *, complete_evidence: b
         "summary": {
             "knownControlCount": len(controls),
             "mappedParameterCount": len(parameter_map),
+            "sceneCandidateCount": len(scene_candidates),
+            "parameterCandidateCount": len(parameter_candidates),
+            "otherCandidateCount": len(other_candidates),
             "scannerCoverage": "metadata" if controls else "unknown",
+            "descriptorConfiguration": configuration_state,
+            "descriptorPresent": descriptor_present if isinstance(descriptor_present, bool) else None,
+            "expressionsMenuAssigned": expressions_menu_assigned if isinstance(expressions_menu_assigned, bool) else None,
+            "expressionParametersAssigned": expression_parameters_assigned if isinstance(expression_parameters_assigned, bool) else None,
         },
         "controls": controls if complete_evidence else controls[:500],
+        "sceneCandidates": scene_candidates if complete_evidence else scene_candidates[:500],
+        "parameterCandidates": parameter_candidates if complete_evidence else parameter_candidates[:500],
+        "otherCandidates": other_candidates if complete_evidence else other_candidates[:500],
         "parameterMap": sorted(parameter_map, key=lambda item: item["parameterName"].lower())[:None if complete_evidence else 300],
     }
 

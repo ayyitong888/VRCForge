@@ -21,7 +21,7 @@ class RuntimeAnimatorController {}
 class VRCAvatarDescriptor {public object transform;public string name="Avatar";public enum AnimLayerType{Base,Additive,Gesture,Action,FX,Sitting,TPose,IKPose};public struct CustomAnimLayer{public AnimLayerType type;public bool isDefault;public RuntimeAnimatorController animatorController;}}
 class AvatarPrimitiveCrudCore{public static string GetTransformPath(object t)=>"Avatar";public static VRCAvatarDescriptor ResolveAvatarDescriptor(string p)=>new VRCAvatarDescriptor();}
 class Probe {BODIES
-class DescriptorPlan{public string avatarPath,avatarName,eyeLookSettingsSourceAvatarPath;public List<string> changedFields;}
+class DescriptorPlan{public string avatarPath,avatarName,sourceDescriptorAvatarPath,eyeLookSettingsSourceAvatarPath;public List<string> changedFields;}
 static int loads;static T LoadAssetOrNull<T>(string p) where T:class{loads++;return null;}
 static JObject Layer(string type)=>new JObject{data=new Dictionary<string,Token>{{"type",new Token{value=type}},{"isDefault",new Token{value=true}},{"controllerPath",new Token{value=""}}}};
 static void Check(bool ok,string m){if(!ok)throw new Exception(m);}

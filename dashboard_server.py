@@ -23154,6 +23154,7 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "baseAnimationLayers",
         "specialAnimationLayers",
         "eyeLookSettingsSourceAvatarPath",
+        "sourceDescriptorAvatarPath",
         "eyeLookEnabled",
     ):
         _copy_if_present(params, request, key)
@@ -23209,6 +23210,7 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "baseAnimationLayers": ("base_animation_layers",),
         "specialAnimationLayers": ("special_animation_layers",),
         "eyeLookSettingsSourceAvatarPath": ("eye_look_settings_source_avatar_path",),
+        "sourceDescriptorAvatarPath": ("source_descriptor_avatar_path",),
         "eyeLookEnabled": ("eye_look_enabled",),
     }
     for canonical, alias_keys in aliases.items():
@@ -23219,6 +23221,17 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
     elif "preview" in params:
         request["preview"] = bool(params.get("preview"))
     return request
+
+
+def scan_avatar_reference_diagnostics_sync(params: dict[str, Any]) -> dict[str, Any]:
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    return ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(
+            settings, "vrc_scan_avatar_reference_diagnostics",
+            {"avatarPath": str(params.get("avatarPath") or "")},
+        )),
+        "scan avatar reference diagnostics",
+    )
 
 
 def read_avatar_descriptor_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -27545,6 +27558,11 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_fx_animator", "Scan FX animator layers, states, and parameters for an avatar.", "read/debug", scan_fx_animator_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_animation_bindings", "When to use: inspect exact bindings and keys in named AnimationClips, or discover bindings on an avatar/controller; prefer clipPaths plus case-sensitive bindingSelectors for a narrow read, then bindingView=index/details and follow paging.nextRequest or each binding's nextKeyRequest. When NOT to use: mesh geometry, shader/material properties, or paging through unrelated clips to answer a few known bindings. Negative example: for one named clip's m_IsActive curve, do not enumerate the whole project; select that exact clip and binding.", "read/debug", scan_animation_bindings_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_avatar_controls)
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_scan_avatar_reference_diagnostics",
+        "When to use: inspect one avatar hierarchy for Unity-reported missing scripts and broken serialized references, including inactive objects, and read menu parameter declaration facts. When NOT to use: do not treat ordinary unassigned fields or implicit SDK parameters as errors, scan project assets, or use this optional diagnostic as a prerequisite for normal editing. Negative example: a null optional field does not mean the avatar is broken.",
+        "read/debug", scan_avatar_reference_diagnostics_sync,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "When to use: Inspect Int wardrobe patterns across menu values, FX AnyState and ordinary-state Equals transitions, clip object toggles, and Write Defaults. Multiple or unresolved destinations remain ambiguous and require further FX/clip reads. When NOT to use: Do not infer complete topology or live switching effects from this scan alone. Negative example: an ambiguous candidate is not a verified safe switching sequence.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_wardrobe)
     AGENT_GATEWAY.register_tool(
         "vrcforge_scan_parameters",
@@ -27740,6 +27758,10 @@ def register_agent_gateway_tools() -> None:
         "read/debug",
         audit_managed_avatar_multi_screenshot_for_agent,
     )
+    from unity_host_diagnostics import register_host_diagnostic_tools
+    register_host_diagnostic_tools(AGENT_GATEWAY)
+    from unity_yaml_inspection import register_yaml_inspection
+    register_yaml_inspection(AGENT_GATEWAY, resolve_target_project)
     AGENT_GATEWAY.register_tool("vrcforge_scan_thry_avatar_performance", "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for an avatar.", "read/debug", scan_thry_avatar_performance_sync)
     AGENT_GATEWAY.register_tool(
         "vrcforge_read_recent_logs",
@@ -28693,6 +28715,13 @@ def register_agent_gateway_tools() -> None:
         "Restore files from a safe backup snapshot through VRCForge.",
         "high",
         restore_safe_backup_sync,
+    )
+    register_write_handler(
+        "vrcforge_create_project_checkpoint",
+        "When to use: after the user explicitly requests a project backup, create an existing-format checkpoint of Assets, Packages and ProjectSettings before work performed outside the bridge. Preserve the user's instruction and quote in the existing approval request. When NOT to use: do not create automatic backups, claim later external edits are monitored, or restore files with this tool. Negative example: inspecting a project does not authorize creating a checkpoint.",
+        "medium",
+        AGENT_GATEWAY.approval_transactions.create_manual_project_checkpoint,
+        pre_write_checkpoint_required=False,
     )
     register_write_handler(
         "vrcforge_restore_checkpoint",

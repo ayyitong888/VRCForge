@@ -1559,6 +1559,7 @@ class AgentTaskLoop:
             context.get("skillPolicy") or loop._skill_context
         )
         completion_outcome = completion.get("outcome")
+        current_target = action_target(context.get("requestedArguments"))
         current_seed = {
             "actionId": completion.get("actionId") or context.get("actionId"),
             "kind": _bounded_text(context.get("kind"), 32) or "write",
@@ -1568,6 +1569,7 @@ class AgentTaskLoop:
             "outcome": (
                 completion_outcome if isinstance(completion_outcome, Mapping) else {}
             ),
+            **({"target": current_target} if current_target else {}),
         }
         transaction = _write_transaction_from_execution(
             execution,

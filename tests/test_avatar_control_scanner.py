@@ -74,3 +74,17 @@ def test_avatar_control_scan_does_not_truncate_deduplicated_menu_items() -> None
     assert ".GroupBy(item =>" in handle
     assert ".Select(group => group.First())" in handle
     assert ".Take(120)" not in handle
+
+
+def test_avatar_control_scan_reports_descriptor_and_asset_assignment_facts() -> None:
+    source = SOURCE_PATH.read_text(encoding="utf-8-sig")
+    handle = _method_source(
+        source,
+        "public static object HandleCommand",
+        "private static Component ResolveAvatarDescriptor",
+    )
+
+    assert "descriptorConfiguration" in handle
+    assert 'expressionParameterNames = parameterMap.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray()' in handle
+    assert 'expressionsMenuAssigned = GetMemberValue(descriptor, "expressionsMenu") != null' in handle
+    assert 'expressionParametersAssigned = GetMemberValue(descriptor, "expressionParameters") != null' in handle

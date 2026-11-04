@@ -934,6 +934,70 @@ def test_tool_transport_timeout_is_structured_and_never_safe_to_blind_retry(
     assert result["errorDetails"]["commitStateKnown"] is False
 
 
+def test_session_mismatch_surfaces_rebind_discovery_to_external_agent(tmp_path: Path, monkeypatch) -> None:
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+    config = tmp_path / "agent_gateway.json"
+    config.write_text(json.dumps({"token": "test-token"}), encoding="utf-8")
+    bridge = module.VRCForgeBridge(
+        base_url="http://127.0.0.1:8757",
+        config_path=config,
+        timeout_seconds=0.1,
+        start_runtime=False,
+    )
+    body = {
+        "jsonrpc": "2.0",
+        "id": "request-1",
+        "error": {
+            "code": -32602,
+            "message": "ExecutionTarget reference belongs to another session.",
+            "data": {
+                "errorCode": "execution_target_session_mismatch",
+                "failureLayer": "execution_target",
+                "failurePhase": "before_unity_core_call",
+                "operationKind": "write",
+                "toolRoutingStarted": False,
+                "mutationStarted": False,
+                "committed": False,
+                "commitState": "not_started",
+                "recoverable": True,
+                "nextAction": "List exact targets in the same project, then bind the exact candidate.",
+                "recoveryToolCall": {
+                    "name": "vrcforge_list_execution_targets",
+                    "arguments": {"projectPath": "D:/Unity/Avatar", "scope": "component"},
+                },
+                "recoveryBindingTool": "vrcforge_bind_execution_target",
+            },
+        },
+    }
+
+    monkeypatch.setattr(
+        bridge,
+        "request_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            module.ExternalHttpBridgeError(status_code=409, path="/mcp", body=json.dumps(body))
+        ),
+    )
+
+    result = bridge.call_tool("vrcforge_set_property", {"projectPath": "D:/Unity/Avatar"})
+
+    assert result["status"] == "recovery_required"
+    assert result["errorCode"] == "execution_target_session_mismatch"
+    assert result["safeToRetry"] is False
+    assert result["recoveryToolCall"] == body["error"]["data"]["recoveryToolCall"]
+    assert result["recoveryBindingTool"] == "vrcforge_bind_execution_target"
+
+    error_data = body["error"]["data"]
+    error_data.pop("recoveryToolCall")
+    error_data["recoveryTool"] = "vrcforge_list_execution_targets"
+    error_data["requiredInput"] = "arguments.projectPath"
+    error_data["nextAction"] = "Provide arguments.projectPath, then list and bind the exact candidate."
+    missing_project_result = bridge.call_tool("vrcforge_set_property", {})
+
+    assert missing_project_result["status"] == "recovery_required"
+    assert "recoveryToolCall" not in missing_project_result
+    assert missing_project_result["requiredInput"] == "arguments.projectPath"
+
+
 def test_load_notifies_and_activation_fallback_survives_host_without_relist(monkeypatch) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
 

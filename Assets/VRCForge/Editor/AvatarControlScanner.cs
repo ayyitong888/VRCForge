@@ -41,6 +41,12 @@ namespace VRCForge.Editor
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
                 var resolvedAvatarPath = GetTransformPath(descriptor.transform);
+                var descriptorConfiguration = new
+                {
+                    descriptorPresent = true,
+                    expressionsMenuAssigned = GetMemberValue(descriptor, "expressionsMenu") != null,
+                    expressionParametersAssigned = GetMemberValue(descriptor, "expressionParameters") != null
+                };
                 var parameterMap = ReadExpressionParameters(descriptor);
                 var menuTraversalWarnings = new List<string>();
                 var menuItems = ReadExpressionMenuItems(descriptor, parameterMap, menuTraversalWarnings);
@@ -60,6 +66,8 @@ namespace VRCForge.Editor
                 {
                     avatarPath = resolvedAvatarPath,
                     avatarName = descriptor.name,
+                    descriptorConfiguration,
+                    expressionParameterNames = parameterMap.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray(),
                     menuTraversalComplete = menuTraversalWarnings.Count == 0,
                     menuTraversalWarnings,
                     itemCount = items.Count,

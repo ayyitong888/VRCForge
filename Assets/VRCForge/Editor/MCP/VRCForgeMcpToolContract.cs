@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.10.3";
-        internal const string ToolContractVersion = "194";
-        internal const int ToolCount = 106;
+        internal const string ToolContractVersion = "195";
+        internal const int ToolCount = 107;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -101,6 +101,7 @@ namespace VRCForge.Editor
                 { "vrc_select_scene_object", "VRCForge.Editor.SelectSceneObjectTool" },
                 { "vrc_scan_animation_bindings", "VRCForge.Editor.AssetTools" },
                 { "vrc_scan_avatar_controls", "VRCForge.Editor.AvatarControlScanner" },
+                { "vrc_scan_avatar_reference_diagnostics", "VRCForge.Editor.UnityAvatarReferenceDiagnostics" },
                 { "vrc_scan_avatar_items", "VRCForge.Editor.GameObjectTools" },
                 { "vrc_scan_avatar_materials", "VRCForge.Editor.ShaderMaterialScanner" },
                 { "vrc_scan_avatar_parameters", "VRCForge.Editor.AvatarParameterScanner" },
@@ -152,6 +153,7 @@ namespace VRCForge.Editor
                 "vrc_read_avatar_descriptor",
                 "vrc_read_vrchat_sdk_builder_alerts",
                 "vrc_avatar_upload_readiness",
+                "vrc_scan_avatar_reference_diagnostics",
                 "vrc_scan_inbound_reference_closure",
                 "vrc_list_user_tools",
             };
@@ -165,6 +167,7 @@ namespace VRCForge.Editor
                 "vrc_export_blendshapes",
                 "vrc_scan_animation_bindings",
                 "vrc_scan_avatar_controls",
+                "vrc_scan_avatar_reference_diagnostics",
                 "vrc_scan_avatar_items",
                 "vrc_scan_avatar_materials",
                 "vrc_scan_avatar_parameters",

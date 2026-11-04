@@ -116,10 +116,17 @@ def test_native_recovery_uses_one_bounded_catalog_for_many_archives():
 def test_recovery_page_is_measured_before_compaction_commits():
     compactor = RecoveringCompactor()
     _, planner, model, turn = fixture(compactor)
+    # Catalog metadata is initialized independently of request admission.
+    # Start the compaction transaction comparison after that normal setup;
+    # still require the entire snapshot to survive a rejected recovery page.
+    from internal_tool_blocks import canonical_tool_tree
+    turn.freeze_tool_block_ids(["core", *(row["id"] for row in canonical_tool_tree()["roots"])])
+    turn.freeze_binding_tool_definition(planner._binding_tool_definition(True))
     before = turn.snapshot()
     turn.retain_recovery = lambda _: "page exceeds context " * 10000
     result = plan(planner, turn)
     assert result["nextStep"] == "context_compaction_required"
+    assert compactor.result["recovery"], "the recovery candidate must actually reach compaction"
     assert not model.requests and turn.snapshot() == before
     assert "recovery" not in turn.compaction
 

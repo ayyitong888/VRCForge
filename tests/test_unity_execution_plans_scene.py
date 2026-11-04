@@ -139,6 +139,21 @@ def test_avatar_descriptor_projection_preserves_eye_look_source_avatar():
     }
 
 
+@pytest.mark.parametrize("source_key", ["source_descriptor_avatar_path", "sourceDescriptorAvatarPath"])
+def test_avatar_descriptor_projection_preserves_full_copy_source(source_key):
+    result_tool, args = build_scene_execution_plan(
+        "vrcforge_write_avatar_descriptor",
+        {"avatar_path": "TargetAvatar", source_key: "SourceAvatar"},
+    )[0]
+
+    assert result_tool == "vrc_write_avatar_descriptor"
+    assert args == {
+        "avatarPath": "TargetAvatar",
+        "sourceDescriptorAvatarPath": "SourceAvatar",
+        "preview": False,
+    }
+
+
 def test_avatar_descriptor_eye_look_copy_is_reference_preserving_and_enable_flag_is_real():
     source = Path("Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs").read_text(encoding="utf-8")
     start = source.index("public static class WriteAvatarDescriptorTool")
@@ -146,8 +161,10 @@ def test_avatar_descriptor_eye_look_copy_is_reference_preserving_and_enable_flag
     descriptor_source = source[start:end]
 
     assert "eyeLookSettingsSourceAvatarPath" in source
-    assert "descriptor.customEyeLookSettings = sourceDescriptor.customEyeLookSettings;" in source
-    assert "descriptor.enableEyeLook = sourceDescriptor.enableEyeLook;" in source
+    assert "descriptor.customEyeLookSettings = eyeLookSourceDescriptor.customEyeLookSettings;" in source
+    assert "descriptor.enableEyeLook = eyeLookSourceDescriptor.enableEyeLook;" in source
+    assert '"customEyeLookSettings"' in descriptor_source
+    assert "ApplyDescriptorReferenceRemap(descriptor, eyeLookReferenceRemap)" in descriptor_source
     assert 'descriptor.enableEyeLook = @params["eyeLookEnabled"].Value<bool>();' in source
     assert 'SetMemberIfExists(boxedEyeSettings, "enableEyeLook"' not in source
     assert "ComponentCrudCore.ResolveSavedSceneFor" in descriptor_source

@@ -476,6 +476,33 @@ def project_prompt(value: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
 def project_tool(tool: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
     result = dict(tool)
     meta = dict(result.get("_meta") or {})
+    if str(meta.get("permission") or "").strip().casefold() == "write":
+        input_schema = result.get("inputSchema")
+        if isinstance(input_schema, Mapping):
+            input_schema = dict(input_schema)
+            properties = dict(input_schema.get("properties") or {})
+            properties["confirmation"] = {
+                "type": "object",
+                "description": (
+                    "The exact confirmation object returned by the first external write call, "
+                    "plus decision set to approve or reject. Preserve the returned fields unchanged."
+                ),
+                "properties": {
+                    "schema": {"type": "string"},
+                    "operationId": {"type": "string"},
+                    "targetTool": {"type": "string"},
+                    "argumentsDigest": {"type": "string"},
+                    "executionTargetDigest": {"type": "string"},
+                    "planDigest": {"type": "string"},
+                    "toolDefinitionDigest": {"type": "string"},
+                    "expiresAt": {"type": "string"},
+                    "requiredDecision": {"type": "array", "items": {"type": "string"}},
+                    "decisionPlacement": {"type": "string"},
+                    "decision": {"type": "string"},
+                },
+            }
+            input_schema["properties"] = properties
+            result["inputSchema"] = input_schema
     if mode != "full":
         # Standard schemas remain authoritative; only their prose is bounded.
         # Exact duplicate metadata is removable.

@@ -580,6 +580,137 @@ def test_routed_gateway_error_keeps_unknown_commit_state():
     assert data["commitStateKnown"] is False
 
 
+def test_execution_target_session_mismatch_returns_same_project_recovery_call() -> None:
+    calls = []
+
+    def fail(tool, arguments):
+        calls.append((tool, arguments))
+        raise AgentGatewayError(
+            "ExecutionTarget reference belongs to another session.",
+            status_code=409,
+            cause_code="execution_target_session_mismatch",
+            failure_layer="execution_target",
+            failure_phase="before_unity_core_call",
+            operation_kind="write",
+            tool=tool,
+            tool_routing_started=False,
+            mutation_started=False,
+            committed=False,
+            commit_state="not_started",
+        )
+
+    router = Mcp2026Router(
+        lambda _params: [{"name": "vrcforge_set_property", "_meta": {"permission": "Write"}}],
+        fail,
+    )
+    response, status = router.handle(_request("tools/call", {
+        "name": "vrcforge_set_property",
+        "arguments": {
+            "projectPath": "D:/Unity/Avatar",
+            "executionTarget": {"schema": "vrcforge.execution_target_ref.v1", "ref": "vrcforge-target-stale"},
+        },
+    }))
+
+    assert status == 409
+    assert response["error"]["code"] == -32602
+    data = response["error"]["data"]
+    assert data["errorCode"] == "execution_target_session_mismatch"
+    assert data["recoverable"] is True
+    assert data["toolRoutingStarted"] is False
+    assert data["mutationStarted"] is False
+    assert data["committed"] is False
+    assert data["recoveryToolCall"] == {
+        "name": "vrcforge_list_execution_targets",
+        "arguments": {"projectPath": "D:/Unity/Avatar", "scope": "component"},
+    }
+    assert data["recoveryBindingTool"] == "vrcforge_bind_execution_target"
+    assert calls
+
+
+@pytest.mark.parametrize("include_project_path", [True, False])
+def test_execution_target_session_mismatch_http_replay_returns_recoverable_409(
+    tmp_path, monkeypatch, include_project_path: bool,
+) -> None:
+    from fastapi.testclient import TestClient
+    import execution_target
+
+    project = tmp_path.resolve()
+    target = {
+        "schema": execution_target.EXECUTION_TARGET_SCHEMA,
+        "scope": "component",
+        "project": {"root": str(project), "projectId": "fixture-project"},
+        "editor": {"unityPid": 1234, "processStartTime": "start", "coreInstanceId": "core"},
+        "scene": {"absolutePath": str(project / "Assets" / "Main.unity"), "guid": "scene-guid", "revision": "1", "digest": "a" * 64},
+        "avatar": {"globalObjectId": "avatar-id"},
+        "object": {"globalObjectId": "object-id"},
+        "component": {"globalObjectId": "component-id", "type": "SkinnedMeshRenderer"},
+    }
+    target["namespace"] = execution_target.canonical_namespace(target)
+    monkeypatch.setattr(execution_target, "validate_runtime_execution_target", lambda value, **_kwargs: dict(value))
+    gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
+    binding = gateway._execution_target_bindings.bind(
+        target, project_root=str(project), session_context="previous-session",
+    )
+    reference = binding["executionTarget"]
+    name = "vrcforge_set_property"
+
+    def call(tool, arguments):
+        assert tool == name
+        if not include_project_path:
+            return gateway.resolve_execution_target_reference(arguments["executionTarget"])
+        return gateway.resolve_execution_target_reference(
+            arguments["executionTarget"],
+            project_root=arguments["projectPath"],
+            required_scope="component",
+        )
+
+    router = Mcp2026Router(
+        lambda _params: [{"name": name, "_meta": {"permission": "Write"}}],
+        call,
+    )
+    app = create_asgi_app(
+        router,
+        bearer_validator=lambda token: token == "fixture-token",
+        route_path="/mcp",
+        request_context=gateway.resource_context,
+    )
+    with TestClient(app) as client:
+        discovery = client.post(
+            "/mcp",
+            headers={"Authorization": "Bearer fixture-token", "Accept": "application/json, text/event-stream",
+                     "Mcp-Method": "server/discover", "MCP-Protocol-Version": PROTOCOL_VERSION},
+            json=_request("server/discover"),
+        )
+        session_id = discovery.headers["Mcp-Session-Id"]
+        response = client.post(
+            "/mcp",
+            headers={"Authorization": "Bearer fixture-token", "Accept": "application/json, text/event-stream",
+                     "Mcp-Method": "tools/call", "Mcp-Name": name,
+                     "Mcp-Session-Id": session_id, "MCP-Protocol-Version": PROTOCOL_VERSION},
+            json=_request("tools/call", {"name": name, "arguments": {
+                **({"projectPath": str(project)} if include_project_path else {}),
+                "executionTarget": reference,
+            }}),
+        )
+
+    assert response.status_code == 409, response.text
+    data = response.json()["error"]["data"]
+    assert data["errorCode"] == "execution_target_session_mismatch"
+    if include_project_path:
+        assert data["recoveryToolCall"] == {
+            "name": "vrcforge_list_execution_targets",
+            "arguments": {"projectPath": str(project), "scope": "component"},
+        }
+    else:
+        assert "recoveryToolCall" not in data
+        assert data["recoveryTool"] == "vrcforge_list_execution_targets"
+        assert data["requiredInput"] == "arguments.projectPath"
+        assert "Provide arguments.projectPath" in data["nextAction"]
+    assert data["toolRoutingStarted"] is False
+    assert data["mutationStarted"] is False
+    assert data["committed"] is False
+
+
 def test_tool_result_cycle_is_shaped_and_stdio_survives():
     cyclic: dict[str, object] = {}
     cyclic["self"] = cyclic

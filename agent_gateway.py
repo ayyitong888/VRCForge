@@ -7964,26 +7964,6 @@ class AgentGateway:
                     "actionId": task_action["actionId"],
                 }
             )
-            if action_kind == "write":
-                # Evidence-based write guard (established agent design):
-                # inspect the target before approving a write. Surface (not
-                # block) whether this turn read the target before writing it,
-                # so an unread-state write is never silent.
-                target_path = str(
-                    action_arguments.get("path")
-                    or action_arguments.get("assetPath")
-                    or action_arguments.get("avatarPath")
-                    or action_arguments.get("materialPath")
-                    or ""
-                ).strip().lower()
-                if target_path:
-                    read_evidence = any(
-                        str(item.get("kind") or "") in {"skill", "read", "shell"}
-                        and str(item.get("status") or "") in {"executed", "ok", "completed"}
-                        and target_path in str(item.get("result") or item.get("executedInput") or "").lower()
-                        for item in loop_state[:-1]
-                    ) if loop_state else False
-                    steps[-1]["targetReadBeforeWrite"] = read_evidence
             retained_result: dict[str, Any] = {}
             if step_payload.get("result") is not None:
                 steps[-1]["result"] = step_payload.get("result")
@@ -8305,6 +8285,12 @@ class AgentGateway:
                     # it does not retry the rejected write.
                     plan["continueLoop"] = True
                 else:
+                    if requires_direct_user_input:
+                        # A pending user answer is the continuation boundary.
+                        # Do not make another model request until that input
+                        # arrives, even when the generic tool plan requested a
+                        # replan after execution.
+                        plan["continueLoop"] = False
                     gated_plan = completion_gate_plan(plan, step_outcome)
                     if gated_plan is not None:
                         last_plan = gated_plan
@@ -8427,6 +8413,15 @@ class AgentGateway:
                 # frozen task seed and could replay them when the process
                 # later resumes the task.
                 break
+            if (
+                step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}
+                and find_current_pending_question(steps, self.questions) is not None
+            ):
+                # The created question is the wait boundary even when its
+                # transport receipt says "executed" rather than
+                # needs_user_action. Leave the answer continuation to resume
+                # the task after the user responds.
+                plan["continueLoop"] = False
             if action_kind == "write" and not plan.get("continueLoop"):
                 break
             if not plan.get("continueLoop"):

@@ -337,7 +337,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_write_avatar_descriptor",
-        Summary = "Write selected VRCAvatarDescriptor fields: viewpoint, lip sync, viseme mesh/blendshapes, expression assets, playable-layer controllers, and eye-look enable flag. Supports preview."
+        Summary = "when-to-use: preview or apply explicitly approved descriptor edits, including copying settings from another scene avatar with internal-reference remapping. when-NOT-to-use: do not use for inspection or assume matching hierarchy paths imply user approval. Negative example: reading a descriptor does not authorize overwriting it."
     )]
     public static class WriteAvatarDescriptorTool
     {
@@ -345,6 +345,7 @@ namespace VRCForge.Editor
         {
             [VRCForgeInput("Optional avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
             [VRCForgeInput("Return the descriptor change plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Optional source avatar hierarchy path whose complete serialized descriptor settings will be copied first; source-avatar scene references are remapped by relative hierarchy path.", IsRequired = false)] public string sourceDescriptorAvatarPath { get; set; } = "";
             [VRCForgeInput("Optional viewpoint vector object with x, y, and z.", IsRequired = false)] public object viewPosition { get; set; }
             [VRCForgeInput("Optional avatar lip-sync mode.", IsRequired = false)] public string lipSync { get; set; } = "";
             [VRCForgeInput("Optional scene path to the viseme SkinnedMeshRenderer.", IsRequired = false)] public string visemeSkinnedMeshPath { get; set; } = "";
@@ -377,6 +378,23 @@ namespace VRCForge.Editor
                 descriptorGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(descriptor).ToString();
                 beforeJson = EditorJsonUtility.ToJson(descriptor);
                 var plan = BuildPlan(descriptor, @params);
+                var sourceDescriptor = string.IsNullOrWhiteSpace(plan.sourceDescriptorAvatarPath)
+                    ? null
+                    : AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(plan.sourceDescriptorAvatarPath);
+                var referenceRemap = sourceDescriptor == null
+                    ? null
+                    : BuildDescriptorReferenceRemap(sourceDescriptor, descriptor);
+                var eyeLookSourceDescriptor = string.IsNullOrWhiteSpace(plan.eyeLookSettingsSourceAvatarPath)
+                    ? null
+                    : AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(plan.eyeLookSettingsSourceAvatarPath);
+                var eyeLookReferenceRemap = eyeLookSourceDescriptor == null
+                    ? null
+                    : ReferenceEquals(eyeLookSourceDescriptor, sourceDescriptor)
+                        ? referenceRemap
+                        : BuildDescriptorReferenceRemap(
+                            eyeLookSourceDescriptor,
+                            descriptor,
+                            "customEyeLookSettings");
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed("Preview: would write avatar descriptor fields.", new { ok = true, preview = true, plan });
@@ -388,7 +406,7 @@ namespace VRCForge.Editor
                 Undo.RegisterCompleteObjectUndo(descriptor, "Write avatar descriptor");
                 mutationStarted = true;
                 failureStage = "unity_mutation";
-                Apply(descriptor, @params);
+                Apply(descriptor, @params, sourceDescriptor, referenceRemap, eyeLookSourceDescriptor, eyeLookReferenceRemap);
                 mutationApplied = true;
                 var expectedJson = EditorJsonUtility.ToJson(descriptor);
 
@@ -535,7 +553,7 @@ namespace VRCForge.Editor
             ValidateLayerTypes(@params["baseAnimationLayers"] as JArray);
             ValidateLayerTypes(@params["specialAnimationLayers"] as JArray);
             var changed = new List<string>();
-            foreach (var key in new[] { "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookSettingsSourceAvatarPath", "eyeLookEnabled" })
+            foreach (var key in new[] { "sourceDescriptorAvatarPath", "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookSettingsSourceAvatarPath", "eyeLookEnabled" })
             {
                 if (@params[key] != null)
                 {
@@ -543,6 +561,18 @@ namespace VRCForge.Editor
                 }
             }
             var eyeLookSourcePath = string.Empty;
+            var descriptorSourcePath = string.Empty;
+            if (@params["sourceDescriptorAvatarPath"] != null
+                && !string.IsNullOrWhiteSpace(@params["sourceDescriptorAvatarPath"].ToString()))
+            {
+                var sourceDescriptor = AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(
+                    @params["sourceDescriptorAvatarPath"].ToString());
+                if (ReferenceEquals(sourceDescriptor, descriptor))
+                {
+                    throw new InvalidOperationException("The descriptor source and target must be different avatars.");
+                }
+                descriptorSourcePath = AvatarPrimitiveCrudCore.GetTransformPath(sourceDescriptor.transform);
+            }
             if (@params["eyeLookSettingsSourceAvatarPath"] != null)
             {
                 var sourceDescriptor = AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(
@@ -554,12 +584,24 @@ namespace VRCForge.Editor
                 avatarPath = AvatarPrimitiveCrudCore.GetTransformPath(descriptor.transform),
                 avatarName = descriptor.name,
                 changedFields = changed,
+                sourceDescriptorAvatarPath = descriptorSourcePath,
                 eyeLookSettingsSourceAvatarPath = eyeLookSourcePath
             };
         }
 
-        private static void Apply(VRCAvatarDescriptor descriptor, JObject @params)
+        private static void Apply(
+            VRCAvatarDescriptor descriptor,
+            JObject @params,
+            VRCAvatarDescriptor descriptorSource,
+            Dictionary<string, UnityEngine.Object> referenceRemap,
+            VRCAvatarDescriptor eyeLookSourceDescriptor,
+            Dictionary<string, UnityEngine.Object> eyeLookReferenceRemap)
         {
+            if (descriptorSource != null)
+            {
+                EditorUtility.CopySerialized(descriptorSource, descriptor);
+                ApplyDescriptorReferenceRemap(descriptor, referenceRemap);
+            }
             if (@params["viewPosition"] != null)
             {
                 descriptor.ViewPosition = AvatarPrimitiveCrudCore.ReadVector3(@params["viewPosition"], descriptor.ViewPosition);
@@ -594,15 +636,129 @@ namespace VRCForge.Editor
             }
             if (@params["eyeLookSettingsSourceAvatarPath"] != null)
             {
-                var sourceDescriptor = AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(
-                    @params["eyeLookSettingsSourceAvatarPath"]?.ToString() ?? string.Empty);
-                descriptor.customEyeLookSettings = sourceDescriptor.customEyeLookSettings;
-                descriptor.enableEyeLook = sourceDescriptor.enableEyeLook;
+                descriptor.customEyeLookSettings = eyeLookSourceDescriptor.customEyeLookSettings;
+                descriptor.enableEyeLook = eyeLookSourceDescriptor.enableEyeLook;
+                ApplyDescriptorReferenceRemap(descriptor, eyeLookReferenceRemap);
             }
             if (@params["eyeLookEnabled"] != null)
             {
                 descriptor.enableEyeLook = @params["eyeLookEnabled"].Value<bool>();
             }
+        }
+
+        private static Dictionary<string, UnityEngine.Object> BuildDescriptorReferenceRemap(
+            VRCAvatarDescriptor source,
+            VRCAvatarDescriptor target,
+            string propertyPrefix = null)
+        {
+            var remap = new Dictionary<string, UnityEngine.Object>(StringComparer.Ordinal);
+            var sourceSerialized = new SerializedObject(source);
+            var property = sourceSerialized.GetIterator();
+            while (property.Next(true))
+            {
+                if (property.propertyType != SerializedPropertyType.ObjectReference
+                    || property.propertyPath == "m_GameObject"
+                    || property.propertyPath == "m_Script"
+                    || (!string.IsNullOrEmpty(propertyPrefix)
+                        && property.propertyPath != propertyPrefix
+                        && !property.propertyPath.StartsWith(propertyPrefix + ".", StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                var reference = property.objectReferenceValue;
+                if (reference == null)
+                {
+                    continue;
+                }
+                var mapped = RemapDescriptorReference(source, target, reference, property.propertyPath);
+                if (!ReferenceEquals(mapped, reference))
+                {
+                    remap[property.propertyPath] = mapped;
+                }
+            }
+            return remap;
+        }
+
+        private static UnityEngine.Object RemapDescriptorReference(
+            VRCAvatarDescriptor source,
+            VRCAvatarDescriptor target,
+            UnityEngine.Object reference,
+            string propertyPath)
+        {
+            Transform referencedTransform = null;
+            if (reference is Component component)
+            {
+                referencedTransform = component.transform;
+            }
+            else if (reference is GameObject gameObject)
+            {
+                referencedTransform = gameObject.transform;
+            }
+            if (referencedTransform == null
+                || (referencedTransform != source.transform && !referencedTransform.IsChildOf(source.transform)))
+            {
+                return reference;
+            }
+
+            var relativePath = AnimationUtility.CalculateTransformPath(referencedTransform, source.transform);
+            var targetPath = string.IsNullOrEmpty(relativePath)
+                ? AvatarPrimitiveCrudCore.GetTransformPath(target.transform)
+                : AvatarPrimitiveCrudCore.GetTransformPath(target.transform) + "/" + relativePath;
+            GameObject targetObject;
+            try
+            {
+                targetObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+                    target.gameObject.scene,
+                    targetPath,
+                    "descriptor reference " + propertyPath);
+            }
+            catch (Exception exception)
+            {
+                throw new InvalidOperationException(
+                    $"Descriptor reference '{propertyPath}' could not map source path '{relativePath}' to the target avatar: {exception.Message}",
+                    exception);
+            }
+
+            if (reference is GameObject)
+            {
+                return targetObject;
+            }
+            if (reference is Component sourceComponent)
+            {
+                var sourceComponents = sourceComponent.gameObject.GetComponents(sourceComponent.GetType());
+                var componentIndex = Array.IndexOf(sourceComponents, sourceComponent);
+                var targetComponents = targetObject.GetComponents(sourceComponent.GetType());
+                if (componentIndex < 0 || componentIndex >= targetComponents.Length || targetComponents[componentIndex] == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Descriptor reference '{propertyPath}' maps to '{relativePath}', but target component '{sourceComponent.GetType().FullName}' at index {componentIndex} is missing.");
+                }
+                return targetComponents[componentIndex];
+            }
+            return reference;
+        }
+
+        private static void ApplyDescriptorReferenceRemap(
+            VRCAvatarDescriptor descriptor,
+            Dictionary<string, UnityEngine.Object> referenceRemap)
+        {
+            if (referenceRemap == null || referenceRemap.Count == 0)
+            {
+                return;
+            }
+            var serialized = new SerializedObject(descriptor);
+            serialized.Update();
+            var property = serialized.GetIterator();
+            while (property.Next(true))
+            {
+                if (property.propertyType == SerializedPropertyType.ObjectReference
+                    && referenceRemap.TryGetValue(property.propertyPath, out var mapped))
+                {
+                    property.objectReferenceValue = mapped;
+                }
+            }
+            serialized.ApplyModifiedProperties();
         }
 
         private static VRCAvatarDescriptor.CustomAnimLayer[] ApplyLayers(VRCAvatarDescriptor.CustomAnimLayer[] existing, JArray updates)
@@ -707,6 +863,7 @@ namespace VRCForge.Editor
             public string avatarPath;
             public string avatarName;
             public List<string> changedFields;
+            public string sourceDescriptorAvatarPath;
             public string eyeLookSettingsSourceAvatarPath;
         }
     }

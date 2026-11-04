@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from runtime_planner_service import redact_sensitive
 from context_compaction import redact_context_text
+from diagnostic_privacy import _is_secret_key
 
 
 _AUTO_REVIEW_PROMPT_MAX_CHARS = 7_000
@@ -14,7 +15,7 @@ _AUTO_REVIEW_PAYLOAD_MAX_CHARS = 7_000
 def _review_value(value: Any) -> Any:
     """Retain mutation content after the existing complete-text privacy filter."""
     if isinstance(value, dict):
-        return {key: (redact_context_text(item)[0]
+        return {key: ("[REDACTED]" if _is_secret_key(key) else redact_context_text(item)[0]
                       if key.casefold() in {"body", "content", "data", "patch", "payload", "script"}
                       and isinstance(item, str) else _review_value(item))
                 for key, item in value.items()}

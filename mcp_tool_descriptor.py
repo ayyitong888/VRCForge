@@ -126,6 +126,7 @@ _APPLICATION_OWNED_WRITE_TOOLS = frozenset({
     "vrcforge_install_unity_core",
     "vrcforge_rollback_project_catalog_registration",
     "vrcforge_rollback_project_lifecycle", "vrcforge_select_project",
+    "vrcforge_create_project_checkpoint",
     "vrcforge_restore_checkpoint", "vrcforge_confirm_unity_reload_dialog",
     "vrcforge_handle_unity_editor_dialog",
 })

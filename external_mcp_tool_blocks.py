@@ -93,6 +93,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_preview_write_avatar_descriptor",
             "vrcforge_read_avatar_descriptor",
             "vrcforge_scan_avatar_controls",
+            "vrcforge_scan_avatar_reference_diagnostics",
             "vrcforge_scan_avatar_items",
             "vrcforge_scan_avatar_performance",
             "vrcforge_scan_blendshapes",
@@ -239,6 +240,10 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_inspect_primitive_basis_fixture",
             "vrcforge_read_vrchat_sdk_builder_alerts",
             "vrcforge_read_recent_logs",
+            "vrcforge_read_unity_log",
+            "vrcforge_get_last_unity_crash",
+            "vrcforge_check_vrchat_connectivity",
+            "vrcforge_inspect_unity_yaml",
             "vrcforge_run_validation_report",
             "vrcforge_preview_diagnostic_fix",
             "vrcforge_vision_audit",
@@ -381,6 +386,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
     ),
     "checkpoint": frozenset(
         {
+            "vrcforge_create_project_checkpoint",
             "vrcforge_create_safe_backup",
             "vrcforge_restore_checkpoint",
             "vrcforge_restore_safe_backup",

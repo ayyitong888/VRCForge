@@ -11651,6 +11651,7 @@ class DashboardServerTests(unittest.TestCase):
                 {
                     "avatar_path": "Avatar",
                     "view_position": {"x": 0, "y": 1.5, "z": 0},
+                    "source_descriptor_avatar_path": "SourceAvatar",
                     "eye_look_settings_source_avatar_path": "SapphyAttachment",
                 },
                 "vrc_write_avatar_descriptor",
@@ -11678,6 +11679,7 @@ class DashboardServerTests(unittest.TestCase):
                     forwarded["eyeLookSettingsSourceAvatarPath"],
                     "SapphyAttachment",
                 )
+                self.assertEqual(forwarded["sourceDescriptorAvatarPath"], "SourceAvatar")
             if expected_tool == "vrc_write_animation_curve":
                 self.assertEqual(forwarded["animatorRootPath"], "Avatar")
                 self.assertEqual(forwarded["action"], "retarget_curve")

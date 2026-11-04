@@ -605,6 +605,34 @@ class VRCForgeBridge:
                     else {}
                 )
                 if (
+                    exc.status_code == 409
+                    and upstream_data.get("errorCode") == "execution_target_session_mismatch"
+                ):
+                    recovery_fields = {
+                        key: upstream_data[key]
+                        for key in (
+                            "recoverable", "nextAction", "recoveryToolCall", "recoveryTool",
+                            "recoveryBindingTool", "recoveryBindingNote", "requiredInput",
+                        )
+                        if key in upstream_data
+                    }
+                    return external_rejection(
+                        status="recovery_required",
+                        error=str(upstream_data.get("error") or exc),
+                        error_code="execution_target_session_mismatch",
+                        failure_layer=str(upstream_data.get("failureLayer") or "execution_target"),
+                        failure_phase=str(upstream_data.get("failurePhase") or "before_unity_core_call"),
+                        operation_kind=str(upstream_data.get("operationKind") or "tool"),
+                        tool=tool_name,
+                        tool_routing_started=upstream_data.get("toolRoutingStarted"),
+                        mutation_started=upstream_data.get("mutationStarted"),
+                        committed=upstream_data.get("committed"),
+                        retryable=False,
+                        details={"httpStatus": exc.status_code, "path": "/mcp"},
+                        **recovery_fields,
+                        safeToRetry=False,
+                    )
+                if (
                     upstream_data.get("errorCode") == "prompt_skill_provenance_mismatch"
                     and upstream_data.get("toolRoutingStarted") is False
                     and upstream_data.get("mutationStarted") is False

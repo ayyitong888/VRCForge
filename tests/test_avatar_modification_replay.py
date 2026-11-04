@@ -69,8 +69,12 @@ def test_modification_turn_completes_with_clean_reply_and_continues(tmp_path: Pa
     assert "脸部" in str((second.get("plan") or {}).get("reply") or "")
 
 
-def test_write_without_prior_target_read_is_flagged_not_silent(tmp_path: Path) -> None:
-    """Codex guardian: a write on an unread target carries targetReadBeforeWrite=false."""
+def test_simple_write_does_not_fabricate_author_document_read_evidence(tmp_path: Path) -> None:
+    """A successful write proves its receipt, not that author instructions were read.
+
+    Author-document guidance belongs to the existing workflow and actual read
+    observations. A path substring in a prior result cannot certify that work.
+    """
     receipts = {
         "default": {
             "ok": True, "status": "completed", "committed": True, "commitState": "complete",
@@ -94,9 +98,9 @@ def test_write_without_prior_target_read_is_flagged_not_silent(tmp_path: Path) -
     result = run(gateway, tmp_path, message="直接替换贴图")
     write_steps = [s for s in (result.get("steps") or []) if s.get("kind") == "write"]
     assert write_steps, "the write step must be recorded"
-    assert write_steps[0].get("targetReadBeforeWrite") is False, (
-        "a write on an unread target must carry the evidence flag"
-    )
+    assert write_steps[0]["status"] == "executed"
+    assert write_steps[0]["result"]["committed"] is True
+    assert "targetReadBeforeWrite" not in write_steps[0]
 
 
 def test_crash_mid_modification_recovers_and_next_turn_continues(tmp_path: Path) -> None:

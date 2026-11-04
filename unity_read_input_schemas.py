@@ -875,6 +875,12 @@ UNITY_READ_TOOL_INPUT_SCHEMAS.update({
             "gateBuild": {"type": "boolean", "default": True, "description": "Evaluate build-gate findings; does not start a build. Alias: gate_build."},
         },
     },
+    "vrcforge_scan_avatar_reference_diagnostics": {
+        "type": "object", "additionalProperties": False, "required": ["avatarPath"],
+        "properties": {
+            "avatarPath": {"type": "string", "minLength": 1, "description": "Exact scene hierarchy path to the avatar root."},
+        },
+    },
     "vrcforge_inspect_primitive_basis_fixture": {
         "type": "object", "additionalProperties": True, "required": [],
         "anyOf": [{"required": ["expectedRunIdDigest"]}, {"required": ["expected_run_id_digest"]}],
@@ -1174,3 +1180,9 @@ UNITY_READ_TOOL_INPUT_SCHEMAS.update({
 
 from unity_editor_extension_tools import DIAGNOSTIC_FIX_SCHEMA
 UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_diagnostic_fix"] = DIAGNOSTIC_FIX_SCHEMA
+
+from unity_host_diagnostics import INPUT_SCHEMAS as HOST_DIAGNOSTIC_INPUT_SCHEMAS
+UNITY_READ_TOOL_INPUT_SCHEMAS.update(HOST_DIAGNOSTIC_INPUT_SCHEMAS)
+
+from unity_yaml_inspection import TOOL_NAME as UNITY_YAML_TOOL_NAME, INPUT_SCHEMA as UNITY_YAML_INPUT_SCHEMA
+UNITY_READ_TOOL_INPUT_SCHEMAS[UNITY_YAML_TOOL_NAME] = UNITY_YAML_INPUT_SCHEMA

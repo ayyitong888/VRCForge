@@ -3000,6 +3000,44 @@ class AgentApprovalTransactionService:
         with self._ports.state.checkpoint_storage_lock:
             return self._create_pre_write_checkpoint_locked(approval, arguments)
 
+    def create_manual_project_checkpoint(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Create an explicitly requested full project archive through the existing store."""
+
+        values = arguments if isinstance(arguments, dict) else {}
+        raw_root = str(values.get("projectPath") or values.get("projectRoot") or "").strip()
+        if not raw_root:
+            return {"ok": False, "status": "failed", "error": "projectPath is required to create a project checkpoint."}
+        try:
+            project_root = Path(raw_root).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            return {"ok": False, "status": "failed", "error": f"Project path could not be resolved: {exc}"}
+
+        target_tool = "vrcforge_create_project_checkpoint"
+        record = {
+            "schema": CHECKPOINT_RECORD_SCHEMA,
+            "id": f"ckpt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}",
+            "createdAt": utc_now_iso(),
+            "targetTool": target_tool,
+            "status": "unavailable",
+            "projectRoot": str(project_root),
+            "manual": True,
+        }
+        with self._ports.state.checkpoint_storage_lock:
+            if not self._ports.is_unity_project_root(project_root):
+                record.update(
+                    ok=False,
+                    blocking=True,
+                    status="failed",
+                    error="Resolved checkpoint root is not a Unity project.",
+                )
+                self._ports.checkpoint.append_checkpoint(record)
+                return record
+            # An explicit backup request always creates a checkpoint, independent
+            # of the session's automatic pre-write checkpoint choice. It uses
+            # the existing disk archive/restore implementation and needs no
+            # synthetic approval, live Editor binding, or second checkpoint.
+            return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
+
     def _create_pre_write_checkpoint_locked(
         self,
         approval: dict[str, Any],

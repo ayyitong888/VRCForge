@@ -163,6 +163,11 @@ def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
             "additionalProperties": True,
         }
 
+    if name == "vrcforge_create_project_checkpoint":
+        # This call is itself the explicit checkpoint action; automatic
+        # checkpointChoice and Unity execution identity do not apply.
+        return with_execution_target_scope_guidance(schema, name=name, write=True)
+
     properties = dict(schema.get("properties") or {})
     properties["checkpointChoice"] = {
         "type": "object",

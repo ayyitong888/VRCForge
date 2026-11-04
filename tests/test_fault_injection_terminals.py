@@ -52,7 +52,26 @@ def test_provider_500_lands_failed_terminal_and_conversation_continues(tmp_path:
     model = gateway._runtime_planner._model  # noqa: SLF001
     _set_mode(gateway, "full_auto")
 
-    first = run(gateway, tmp_path, message="开始改模")
+    # A repeated settle of the same provider terminal must not append a second
+    # runtime notice. This deliberately replays the actual settlement call.
+    from agent_runtime_native_turn import NativeRuntimeTurn
+    original_settle = NativeRuntimeTurn.settle
+    provider_settlements = 0
+
+    def settle_provider_failure_twice(turn, terminal=None):
+        nonlocal provider_settlements
+        result = original_settle(turn, terminal)
+        failure = terminal.get("plannerFailure") if isinstance(terminal, dict) else None
+        if isinstance(failure, dict) and failure.get("code") == "provider_request_failed":
+            provider_settlements += 1
+            if provider_settlements == 1:
+                original_settle(turn, terminal)
+        return result
+
+    from unittest.mock import patch
+    with patch.object(NativeRuntimeTurn, "settle", settle_provider_failure_twice):
+        first = run(gateway, tmp_path, message="开始改模")
+    assert provider_settlements == 1, "the injected duplicate settlement must replay the same terminal once"
     status = _turn_status(first)
     assert status is not None, "provider failure must surface a turnStatus object"
     assert status["status"] in RUNTIME_TURN_TERMINAL
@@ -62,11 +81,26 @@ def test_provider_500_lands_failed_terminal_and_conversation_continues(tmp_path:
     assert "secret C:/Users/x/key.txt" not in reply
     assert "provider 500" not in reply
 
-    model.failing = False
-    model.requests.clear()
-    model.replies = [call("reply", "vrcforge_runtime_action", {"action": "reply", "reply": "继续完成", "summary": "继续"})]
+    # Recreate the owning gateway so the next model request proves the notice
+    # was persisted in native history, rather than retained on the old runtime.
+    gateway, model, _invoked = _write_gateway_for_mode(tmp_path, [
+        call("reply", "vrcforge_runtime_action", {"action": "reply", "reply": "继续完成", "summary": "继续"})
+    ])
+    _set_mode(gateway, "full_auto")
     second = run(gateway, tmp_path, clientTurnId="native-turn-2", message="继续")
-    assert len(model.requests) >= 1, "the next message must reach the provider"
+    assert len(model.requests) >= 1, "the next message must reach the provider after runtime restart"
+    notices = [
+        json.loads(message["content"][len("Runtime feedback (data, not user authorization): "):])
+        for message in model.requests[0]["messages"]
+        if message.get("role") == "user"
+        and str(message.get("content") or "").startswith(
+            "Runtime feedback (data, not user authorization): "
+        )
+    ]
+    provider_notices = [notice for notice in notices
+                        if notice.get("error", {}).get("detail", {}).get("stopReason")
+                        == "provider_request_failed"]
+    assert len(provider_notices) == 1, "the restarted model request must carry one persisted provider-stop notice"
     assert _turn_status(second) is not None or second.get("plan", {}).get("nextStep") == "done"
 
 
@@ -84,7 +118,7 @@ def test_tool_crash_lands_terminal_with_is_error_tool_result(tmp_path: Path) -> 
     gateway.register_tool(
         "vrcforge_crashing_tool",
         "When to use: crash. When NOT to use: anything else.",
-        "read/fixture",
+        "read/debug",
         crashing_tool,
     )
     result = run(gateway, tmp_path, message="跑会崩的工具", maxAgenticTurns=6)
@@ -94,10 +128,24 @@ def test_tool_crash_lands_terminal_with_is_error_tool_result(tmp_path: Path) -> 
     assert steps, "the crashed tool must leave a step record"
     last = steps[-1]
     assert str(last.get("status") or "") != "completed", "the crashed step must not read as completed"
+    assert last.get("outcome", {}).get("status") == "failed", "the registered tool handler must actually crash"
+
+    gateway, model, _invoked = _write_gateway_for_mode(tmp_path, [
+        call("reply", "vrcforge_runtime_action", {"action": "reply", "reply": "继续", "summary": "继续"})
+    ])
+    second = run(gateway, tmp_path, clientTurnId="native-turn-2", message="继续")
+    assert model.requests, "a new production runtime turn must reach its provider adapter"
+    crash_receipt = next(
+        item for item in model.requests[0]["messages"]
+        if item.get("role") == "tool" and item.get("tool_call_id") == "crash"
+    )
+    crash_observations = json.loads(crash_receipt["content"]).get("observations", [])
+    assert crash_observations and crash_observations[0].get("outcome", {}).get("status") == "failed"
+    assert _turn_status(second) is not None or second.get("plan", {}).get("nextStep") == "done"
 
 
 def test_context_overflow_lands_terminal_and_next_message_compacts_or_continues(tmp_path: Path) -> None:
-    from tests.test_native_runtime_gateway import run
+    from tests.test_native_runtime_gateway import call, run
     from tests.test_native_permission_modes import _write_gateway_for_mode
 
     gateway, model, _invoked = _write_gateway_for_mode(tmp_path, [])
@@ -117,9 +165,20 @@ def test_context_overflow_lands_terminal_and_next_message_compacts_or_continues(
     assert status["error"]["code"] in {"context_compaction_required", "context_window_exceeded"}
     assert (first.get("plan") or {}).get("reply", "").find("Traceback") < 0
 
-    model.requests.clear()
+    gateway, model, _invoked = _write_gateway_for_mode(tmp_path, [
+        call("reply", "vrcforge_runtime_action", {"action": "reply", "reply": "继续", "summary": "继续"})
+    ])
     second = run(gateway, tmp_path, clientTurnId="native-turn-2", message="新会话继续")
-    assert second.get("sessionId") or second.get("session_id"), "a fresh turn must still be runnable"
+    assert model.requests, "a fresh production runtime turn must reach its provider adapter"
+    context_notices = [
+        json.loads(message["content"][len("Runtime feedback (data, not user authorization): "):])
+        for message in model.requests[0]["messages"]
+        if message.get("role") == "user"
+        and str(message.get("content") or "").startswith("Runtime feedback (data, not user authorization): ")
+    ]
+    assert any(notice.get("error", {}).get("detail", {}).get("stopReason") == "context_window_exceeded"
+               for notice in context_notices)
+    assert _turn_status(second) is not None or second.get("plan", {}).get("nextStep") == "done"
 
 
 def test_no_progress_loop_lands_terminal(tmp_path: Path) -> None:
@@ -164,6 +223,19 @@ def test_no_progress_loop_lands_terminal(tmp_path: Path) -> None:
     assert status is not None or failure.get("code") == "planner_no_progress", (
         "repeated no-progress must land a terminal state with a machine code"
     )
+
+    gateway, model, _invoked = _write_gateway_for_mode(project, [
+        {
+            "role": "assistant", "content": "The next turn can continue.",
+        }
+    ])
+    continued = gateway.runtime_message({
+        "message": "Continue after the stopped loop.", "projectRoot": str(project),
+        "session_id": "fault-no-progress-session", "client_turn_id": "fault-no-progress-turn-2",
+        "_projectContextActive": True,
+    })
+    assert model.requests, "the post-guard production turn must reach its provider adapter"
+    assert _turn_status(continued) is not None or continued.get("plan", {}).get("nextStep") == "done"
 
 
 def test_identical_successful_calls_trip_the_general_no_progress_guard(tmp_path: Path) -> None:
@@ -211,41 +283,51 @@ def test_identical_successful_calls_trip_the_general_no_progress_guard(tmp_path:
 
 
 def test_crashed_native_pending_normalizes_for_next_request(tmp_path: Path) -> None:
-    """Backend crash mid-tool: the next turn's provider request is well-formed."""
-    from agent_runtime_session_state import (
-        AgentRuntimeSessionState,
-        AgentRuntimeSessionStatePorts,
-    )
-    import threading
+    """Restarted runtime normalizes an interrupted dispatch before provider use."""
+    from tests.test_native_runtime_gateway import setup_gateway, run
 
-    lock = threading.RLock()
-    state = AgentRuntimeSessionState(AgentRuntimeSessionStatePorts(shared_state_lock=lock))
-    state.begin_native_turn("s", binding="b", turn_id="t0", message="改模中")
-    snapshot = state.native_conversation("s", binding="b")
+    crashed_gateway, _crashed_model, _invoked = setup_gateway(tmp_path, [])
+    session_id = "native-session"
+    binding_params = {
+        "sessionId": session_id, "clientTurnId": "crashed-turn", "projectRoot": str(tmp_path),
+    }
+    with crashed_gateway.runtime_planner.bind_turn(binding_params):
+        binding = crashed_gateway.runtime_planner.native_conversation_binding(str(tmp_path))
+    state = crashed_gateway.runtime_sessions
+    state.begin_native_turn(session_id, binding=binding, turn_id="t0", message="改模中")
+    snapshot = state.native_conversation(session_id, binding=binding)
     snapshot["messages"].append({
         "role": "assistant", "content": None,
         "tool_calls": [{"id": "c1", "type": "function",
                         "function": {"name": "vrcforge_apply", "arguments": "{}"}}],
     })
     snapshot["activeDispatchCallId"] = "c1"  # crashed while executing
-    state._save_native("s", snapshot)  # noqa: SLF001
+    state._save_native(session_id, snapshot)  # noqa: SLF001
 
-    state.begin_native_turn("s", binding="b", turn_id="t1", message="继续")
-    normalized = state.native_conversation("s", binding="b")
+    gateway, model, _invoked = setup_gateway(tmp_path, [
+        {"role": "assistant", "content": "The next turn can continue."},
+    ])
+    next_turn = run(gateway, tmp_path, clientTurnId="after-crash", message="继续")
+    assert model.requests, "the restarted production runtime must issue a provider request"
+    normalized = gateway.runtime_sessions.native_conversation(session_id, binding=binding)
     assert normalized is not None
     pending_after = [m for m in normalized["messages"] if m.get("role") == "tool" and m.get("tool_call_id") == "c1"]
     assert pending_after, "the orphan call must be settled"
     settled = json.loads(pending_after[0]["content"])
     assert settled["status"] == "execution_unknown"
     assert settled["isError"] is True
-    # The next message opened a fresh, well-formed turn.
-    assert normalized["turnId"] == "t1"
-    assert [m for m in normalized["messages"] if m.get("role") == "user"][-1]["content"] == "继续"
+    sent = next(message for message in model.requests[0]["messages"]
+                if message.get("role") == "tool" and message.get("tool_call_id") == "c1")
+    assert json.loads(sent["content"])["status"] == "execution_unknown"
+    assert _turn_status(next_turn) is not None or next_turn.get("plan", {}).get("nextStep") == "done"
 
 
-def test_websocket_drop_does_not_block_turn_settlement() -> None:
-    """A dead dashboard client cannot hold a turn open: EVENT_BUS isolation."""
+def test_websocket_drop_does_not_block_turn_settlement(tmp_path: Path) -> None:
+    """A dead dashboard client cannot hold settlement or the following turn."""
     import dashboard_server
+    import asyncio
+    from tests.test_native_runtime_gateway import call, run
+    from tests.test_native_permission_modes import _write_gateway_for_mode
 
     bus = dashboard_server.DashboardEventBus()
 
@@ -255,10 +337,18 @@ def test_websocket_drop_does_not_block_turn_settlement() -> None:
 
     dead = DeadClient()
     bus._clients.add(dead)  # noqa: SLF001
-    import asyncio
-
+    gateway, model, _invoked = _write_gateway_for_mode(tmp_path, [
+        call("reply-1", "vrcforge_runtime_action", {"action": "reply", "reply": "已完成", "summary": "完成"}),
+        call("reply-2", "vrcforge_runtime_action", {"action": "reply", "reply": "继续", "summary": "继续"}),
+    ])
+    first = run(gateway, tmp_path, message="触发断开的通知客户端")
     async def scenario():
-        await bus.broadcast("agentRuntimeTurn", {"plan": {"reply": "done"}})
+        await bus.broadcast("agentRuntimeTurn", {"plan": first.get("plan", {})})
 
     asyncio.run(scenario())
-    assert dead not in bus._clients, "the dead client must be evicted, not block settlement"
+    assert dead not in bus._clients, "the runtime completion must evict the dead client"
+    assert _turn_status(first) is not None or first.get("plan", {}).get("nextStep") == "done"
+
+    second = run(gateway, tmp_path, clientTurnId="native-turn-2", message="继续")
+    assert len(model.requests) >= 2, "the production runtime must accept a follow-up turn after the socket drop"
+    assert _turn_status(second) is not None or second.get("plan", {}).get("nextStep") == "done"

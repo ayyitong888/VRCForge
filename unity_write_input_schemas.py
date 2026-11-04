@@ -4,7 +4,10 @@ from __future__ import annotations
 from typing import Any
 
 from path_to_skill_controller import PATH_TO_SKILL_WRITE_INPUT_SCHEMA
-from checkpoint_recovery_input_schemas import INTERRUPTED_APPLY_RESOLVE_INPUT_SCHEMA
+from checkpoint_recovery_input_schemas import (
+    INTERRUPTED_APPLY_RESOLVE_INPUT_SCHEMA,
+    MANUAL_PROJECT_CHECKPOINT_INPUT_SCHEMA,
+)
 from unity_read_input_schemas import FACE_TUNING_PUBLIC_INPUT_SCHEMA, UNITY_READ_TOOL_INPUT_SCHEMAS
 from unity_shared_input_schemas import (
     ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
@@ -37,6 +40,7 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["properties"]["sourceStateName"] = {
 
 
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_create_project_checkpoint": MANUAL_PROJECT_CHECKPOINT_INPUT_SCHEMA,
     # Preserve existing handler aliases while publishing canonical arguments.
     # Required argument checks remain in the handlers for both naming styles.
     "vrcforge_add_component": {

@@ -4,6 +4,20 @@ from __future__ import annotations
 from typing import Any
 
 
+MANUAL_PROJECT_CHECKPOINT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath"],
+    "properties": {
+        "projectPath": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact existing Unity project root to snapshot across Assets, Packages, and ProjectSettings.",
+        },
+    },
+}
+
+
 INTERRUPTED_APPLY_LIST_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,

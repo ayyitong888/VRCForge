@@ -120,6 +120,7 @@ class NativeRuntimeTurn:
         self._consumed_steer_input_ids: list[str] = []
         self._on_steer_consumed = on_steer_consumed
         self._queued_calls: list[dict[str, Any]] = []
+        self._terminal_runtime_notice_written = False
         self._queued_public_content: str | None = None
         self._queued_public_messages: list[dict[str, str]] = []
         self._argument_failure_counted = False
@@ -527,20 +528,27 @@ class NativeRuntimeTurn:
     def _append_terminal_runtime_notice(self, terminal: Mapping[str, Any]) -> None:
         """Tell the next turn why this one stopped (turn-level runtime notice).
 
-        Matches established agent designs: interruption, context overflow
-        and budget pauses get a model-visible note. Transient provider errors
-        stay user-facing only — the next turn starts clean.
+        Keep non-tool stop causes in durable native history as runtime feedback,
+        separate from assistant-authored text and tool results.
         """
-        if not self._binding:
+        if not self._binding or self._terminal_runtime_notice_written:
             return
         next_step = str(terminal.get("nextStep") or "").strip()
+        planner_failure = terminal.get("plannerFailure")
+        planner_failure_code = (
+            str(planner_failure.get("code") or "").strip()
+            if isinstance(planner_failure, Mapping) else ""
+        )
         reason_map = {
             "interrupted": "turn_interrupted",
             "cancelled": "turn_interrupted",
             "context_compaction_required": "context_window_exceeded",
             "paused": "model_turn_budget_exhausted",
         }
-        stop_reason = reason_map.get(next_step)
+        stop_reason = (
+            "provider_request_failed" if planner_failure_code == "provider_request_failed"
+            else reason_map.get(next_step)
+        )
         if not stop_reason:
             return
         from runtime_error_schema import runtime_notice
@@ -555,6 +563,7 @@ class NativeRuntimeTurn:
                     + json.dumps(notice, ensure_ascii=False)
                 ),
             )
+            self._terminal_runtime_notice_written = True
         except Exception:
             # A failed annotation must never mask the terminal settlement.
             pass

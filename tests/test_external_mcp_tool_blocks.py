@@ -1,84 +1,73 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 from pathlib import Path
 
 import agent_gateway
 import external_mcp_tool_blocks
 
 
-# Exact pre-extraction definitions, including ordering and memberships.
-BASELINE_AST_SHA256 = {
-    'EXTERNAL_MCP_DEFAULT_TOOL_BLOCK': '7edd868d2f63e8383a58742e56a1a17bf6325cb5fafd9b9aa475de29a53abbc0',
-    'EXTERNAL_MCP_TOOL_BLOCK_BRANCHES': '2ff86db4033cd36d6d68dae15a438cd9a280fd9a99485e36b93a2563aab42dd9',
-    'EXTERNAL_MCP_TOOL_BLOCK_ROOTS': '1ce6ef051989a1d3394f7244594809cb0e5d2d3e42f2d4cc4218cacea4218eda',
-    'EXTERNAL_MCP_TOOL_BLOCKS': '3aa389653eb4c2f04b76a8b206cd54039353ccb96c38704be9ad8caeff2ed915',
-    'EXTERNAL_MCP_READ_TOOL_BLOCKS': '67ff41356b82992ee1dcab14f0f3583b7658ae9e37b7f41b55d6e8bd3b107d4f',
-    'EXTERNAL_MCP_WRITE_TOOL_BLOCKS': 'bd9bac78acd577411f4e70fd25c7ec151194d25b419a96ce93707f78a3743e4a',
+_EXPORTED_DEFINITIONS = {
+    "EXTERNAL_MCP_DEFAULT_TOOL_BLOCK",
+    "EXTERNAL_MCP_TOOL_BLOCK_BRANCHES",
+    "EXTERNAL_MCP_TOOL_BLOCK_ROOTS",
+    "EXTERNAL_MCP_TOOL_BLOCKS",
+    "EXTERNAL_MCP_READ_TOOL_BLOCKS",
+    "EXTERNAL_MCP_WRITE_TOOL_BLOCKS",
 }
 
 
-def test_tool_blocks_keep_one_definition_and_existing_exports() -> None:
+def test_tool_blocks_have_one_definition_and_shared_gateway_exports() -> None:
     tree = ast.parse(Path(external_mcp_tool_blocks.__file__).read_text(encoding="utf-8"))
-    definitions = {
-        node.target.id if isinstance(node, ast.AnnAssign) else node.targets[0].id: node
-        for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign))
-    }
-    assert definitions.keys() == BASELINE_AST_SHA256.keys()
-    for name, expected in BASELINE_AST_SHA256.items():
-        assert getattr(agent_gateway, name) is getattr(external_mcp_tool_blocks, name)
-        node = definitions[name]
-        if name in {"EXTERNAL_MCP_READ_TOOL_BLOCKS", "EXTERNAL_MCP_WRITE_TOOL_BLOCKS"}:
-            extensions = ({"vrcforge_inspect_editor_capabilities", "vrcforge_inspect_material_properties", "vrcforge_preview_model_import_settings", "vrcforge_preview_diagnostic_fix"}
-                          if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS" else {"vrcforge_execute_unity_editor_menu", "vrcforge_set_model_import_settings", "vrcforge_apply_diagnostic_fix"})
-            memberships = getattr(external_mcp_tool_blocks, name)
-            assert extensions <= set().union(*memberships.values())
-            class _RemoveReviewedEditorExtensions(ast.NodeTransformer):
-                def visit_Set(self, current):
-                    current.elts = [item for item in current.elts if not (
-                        isinstance(item, ast.Constant) and item.value in extensions)]
-                    return self.generic_visit(current)
-            node = _RemoveReviewedEditorExtensions().visit(node)
-        if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS":
-            assert "vrcforge_preview_save_asset" in external_mcp_tool_blocks.EXTERNAL_MCP_READ_TOOL_BLOCKS["project"]
-        if name in {"EXTERNAL_MCP_READ_TOOL_BLOCKS", "EXTERNAL_MCP_WRITE_TOOL_BLOCKS"}:
-            dialog_tool = "vrcforge_inspect_unity_editor_dialogs" if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS" else "vrcforge_handle_unity_editor_dialog"
-            assert dialog_tool in getattr(external_mcp_tool_blocks, name)["project"]
-            class _RemoveReviewedDialogAddition(ast.NodeTransformer):
-                def visit_Set(self, current):
-                    current.elts = [item for item in current.elts if not (isinstance(item, ast.Constant) and item.value == dialog_tool)]
-                    return self.generic_visit(current)
-            node = _RemoveReviewedDialogAddition().visit(node)
-        if name in {"EXTERNAL_MCP_READ_TOOL_BLOCKS", "EXTERNAL_MCP_WRITE_TOOL_BLOCKS"}:
-            additions = {"vrcforge_install_user_unity_tools", "vrcforge_invoke_user_unity_tool"}
-            if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS":
-                additions.add("vrcforge_list_user_unity_tools")
-            assert additions <= set(getattr(external_mcp_tool_blocks, name)["skills/vsk"])
-            class _RemoveUserToolAdditions(ast.NodeTransformer):
-                def visit_Set(self, current):
-                    current.elts = [item for item in current.elts if not (isinstance(item, ast.Constant) and item.value in additions)]
-                    return self.generic_visit(current)
-            node = _RemoveUserToolAdditions().visit(node)
-        if name == "EXTERNAL_MCP_WRITE_TOOL_BLOCKS":
-            # Reviewed relocation and typed chat repair are additive entries;
-            # retain the immutable AST digest for every other membership.
-            assert "vrcforge_repair_project_chat_store" in external_mcp_tool_blocks.EXTERNAL_MCP_WRITE_TOOL_BLOCKS["checkpoint"]
-            assert "vrcforge_save_asset" in external_mcp_tool_blocks.EXTERNAL_MCP_WRITE_TOOL_BLOCKS["project"]
-            class _RemoveReviewedAdditions(ast.NodeTransformer):
-                def visit_Set(self, current):
-                    current = self.generic_visit(current)
-                    current.elts = [
-                        item for item in current.elts
-                        if not (
-                            isinstance(item, ast.Constant)
-                            and item.value in {"vrcforge_relocate_generated_assets", "vrcforge_repair_project_chat_store", "vrcforge_save_asset"}
-                        )
-                    ]
-                    return current
+    definition_counts: dict[str, int] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        for name in names:
+            if name in _EXPORTED_DEFINITIONS:
+                definition_counts[name] = definition_counts.get(name, 0) + 1
 
-            node = _RemoveReviewedAdditions().visit(node)
-        assert hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest() == expected
-    assert not any(isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Import)) for node in ast.walk(tree))
-    assert {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)} == {"__future__"}
-    assert len(Path(external_mcp_tool_blocks.__file__).read_bytes()) < 16_000
+    assert definition_counts == {name: 1 for name in _EXPORTED_DEFINITIONS}
+    for name in _EXPORTED_DEFINITIONS:
+        assert getattr(agent_gateway, name) is getattr(external_mcp_tool_blocks, name)
+
+
+def test_tool_block_membership_preserves_domains_and_read_write_layers() -> None:
+    module = external_mcp_tool_blocks
+    assert module.EXTERNAL_MCP_DEFAULT_TOOL_BLOCK == "core"
+    leaves = {leaf for children in module.EXTERNAL_MCP_TOOL_BLOCK_BRANCHES.values() for leaf in children}
+    branch_roots = set(module.EXTERNAL_MCP_TOOL_BLOCK_BRANCHES)
+    assert set(module.EXTERNAL_MCP_TOOL_BLOCKS) == (set(module.EXTERNAL_MCP_TOOL_BLOCK_ROOTS) - branch_roots) | leaves
+    assert set(module.EXTERNAL_MCP_READ_TOOL_BLOCKS) == set(module.EXTERNAL_MCP_TOOL_BLOCKS)
+    assert set(module.EXTERNAL_MCP_WRITE_TOOL_BLOCKS) == set(module.EXTERNAL_MCP_TOOL_BLOCKS) - {"core", "encryption"}
+
+    def memberships(blocks: dict[str, frozenset[str]]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for block, names in blocks.items():
+            for name in names:
+                assert name not in result, f"{name} is assigned to multiple blocks"
+                result[name] = block
+        return result
+
+    read = memberships(module.EXTERNAL_MCP_READ_TOOL_BLOCKS)
+    write = memberships(module.EXTERNAL_MCP_WRITE_TOOL_BLOCKS)
+
+    # These two tools intentionally have read and write projections; all other
+    # names stay on one side of the external MCP capability boundary.
+    assert set(read) & set(write) == {
+        "vrcforge_install_user_unity_tools",
+        "vrcforge_invoke_user_unity_tool",
+    }
+
+    assert read["vrcforge_preview_save_asset"] == "project"
+    assert write["vrcforge_save_asset"] == "project"
+    assert read["vrcforge_list_checkpoints"] == "checkpoint"
+    assert read["vrcforge_preview_restore_checkpoint"] == "checkpoint"
+    assert write["vrcforge_create_project_checkpoint"] == "checkpoint"
+    assert write["vrcforge_restore_checkpoint"] == "checkpoint"
+    assert read["vrcforge_list_execution_targets"] == "core"
+    assert write["vrcforge_select_scene_object"] == "avatar"

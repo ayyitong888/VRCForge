@@ -52,6 +52,100 @@ def test_entire_external_catalogue_accepts_projected_results(catalogue, mode, st
         assert raw == original
 
 
+@pytest.mark.parametrize("mode", ["compact", "full"])
+def test_external_write_schema_accepts_returned_confirmation(mode: str) -> None:
+    source_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"value": {"type": "number"}},
+    }
+    tool = project_tool(
+        {
+            "name": "vrcforge_set_property",
+            "inputSchema": source_schema,
+            "_meta": {"permission": "Write"},
+        },
+        mode=mode,
+    )
+    confirmation = {
+        "schema": "vrcforge.external_write_confirmation.v1",
+        "operationId": "external_mcp_write_fixture",
+        "targetTool": "vrcforge_set_property",
+        "argumentsDigest": "a" * 64,
+        "executionTargetDigest": "b" * 64,
+        "planDigest": "c" * 64,
+        "toolDefinitionDigest": "d" * 64,
+        "expiresAt": "2026-11-04T10:00:00+00:00",
+        "requiredDecision": ["approve", "reject"],
+        "decisionPlacement": "arguments.confirmation.decision",
+        "decision": "approve",
+    }
+
+    Draft202012Validator(tool["inputSchema"]).validate({"value": 1, "confirmation": confirmation})
+    assert "confirmation" not in source_schema["properties"]
+
+
+@pytest.mark.parametrize("name", [
+    "vrcforge_refresh_asset_database",
+    "vrcforge_install_unity_core",
+    "vrcforge_restore_unity_core",
+    "vrcforge_install_vpm_package",
+])
+def test_reported_write_workflows_accept_confirmation_in_external_manifest(catalogue, name: str) -> None:
+    descriptor = next(item for item in catalogue if item["name"] == name)
+    router = Mcp2026Router(lambda _params: [descriptor], lambda _name, _arguments: {})
+    listing, status = router.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+        "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+                               "io.modelcontextprotocol/clientCapabilities": {}}},
+    })
+    assert status == 200
+    tool = listing["result"]["tools"][0]
+    schema = tool["inputSchema"]
+    arguments = {}
+    for key in schema.get("required", []):
+        property_schema = schema.get("properties", {}).get(key, {})
+        if key == "executionTarget":
+            arguments[key] = {
+                "schema": "vrcforge.execution_target_ref.v1",
+                "ref": "vrcforge-target-abcdefghijklmnop",
+            }
+        elif key in {"backupSha256", "installedSha256"}:
+            arguments[key] = "a" * 64
+        elif property_schema.get("const") is not None:
+            arguments[key] = property_schema["const"]
+        elif isinstance(property_schema.get("enum"), list):
+            arguments[key] = property_schema["enum"][0]
+        elif property_schema.get("type") == "string":
+            arguments[key] = "D:/Unity/Avatar" if key == "projectPath" else "fixture"
+        elif property_schema.get("type") == "integer":
+            arguments[key] = property_schema.get("minimum", 0)
+        elif property_schema.get("type") == "boolean":
+            arguments[key] = False
+        elif property_schema.get("type") == "object":
+            arguments[key] = {}
+        else:
+            pytest.fail(f"No fixture value for required field {name}.{key}")
+    if name == "vrcforge_install_vpm_package":
+        arguments.update(packageId="jp.lilxyzw.liltoon", packageVersion="1.8.5")
+    arguments["confirmation"] = {
+        "schema": "vrcforge.external_write_confirmation.v1",
+        "operationId": "external_mcp_write_fixture",
+        "targetTool": name,
+        "argumentsDigest": "a" * 64,
+        "executionTargetDigest": "b" * 64,
+        "planDigest": "c" * 64,
+        "toolDefinitionDigest": "d" * 64,
+        "expiresAt": "2026-11-04T10:00:00+00:00",
+        "requiredDecision": ["approve", "reject"],
+        "decisionPlacement": "arguments.confirmation.decision",
+        "decision": "approve",
+    }
+
+    assert descriptor["_meta"]["permission"] == "Write"
+    Draft202012Validator(schema).validate(arguments)
+
+
 @pytest.mark.parametrize("transport", ["standard", "2026"])
 @pytest.mark.parametrize("name", ["vrcforge_bind_execution_target", "vrcforge_list_execution_targets"])
 def test_strict_protocol_client_keeps_target_refs(catalogue, transport, name):

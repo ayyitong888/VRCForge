@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
 from operation_context import ensure_operation_result
+from mcp_tool_descriptor import identity_scope
 from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, resource_uri_without_selection, result_mode, result_resource_links, select_tools, tool_names
 
 
@@ -106,6 +107,8 @@ def _pre_routing_gateway_rejection(
     exception: BaseException,
     *,
     tool: str,
+    arguments: Mapping[str, Any] | None = None,
+    write: bool = False,
 ) -> dict[str, Any] | None:
     """Project exact gateway validation refusals that never entered routing.
 
@@ -118,6 +121,48 @@ def _pre_routing_gateway_rejection(
 
     cause_code = getattr(exception, "cause_code", "")
     source = getattr(exception, "external_error", None)
+    if cause_code == "execution_target_session_mismatch":
+        source = dict(source) if isinstance(source, Mapping) else {}
+        supplied_arguments = arguments if isinstance(arguments, Mapping) else {}
+        source_details = source.get("details") if isinstance(source.get("details"), Mapping) else {}
+        project_path = str(
+            supplied_arguments.get("projectPath")
+            or supplied_arguments.get("projectRoot")
+            or source_details.get("projectPath")
+            or source_details.get("projectRoot")
+            or ""
+        ).strip()
+        scope = identity_scope(tool, write=write, arguments=supplied_arguments)
+        recovery = {
+            **source,
+            "failureLayer": source.get("failureLayer") or "execution_target",
+            "failurePhase": source.get("failurePhase") or "before_unity_core_call",
+            "errorCode": source.get("errorCode") or cause_code,
+            "tool": tool,
+            "recoverable": True,
+            "recoveryTool": "vrcforge_list_execution_targets",
+            "recoveryBindingTool": "vrcforge_bind_execution_target",
+            "recoveryBindingNote": (
+                "Bind only the exact candidate selected from the list result; do not reuse the stale "
+                "reference or infer identity from a hierarchy path."
+            ),
+        }
+        if project_path:
+            recovery["nextAction"] = (
+                "This call did not start. In this MCP session, list exact targets in the same project, "
+                "then bind the exact candidate before retrying the original operation."
+            )
+            recovery["recoveryToolCall"] = {
+                "name": "vrcforge_list_execution_targets",
+                "arguments": {"projectPath": project_path, "scope": scope},
+            }
+        else:
+            recovery["nextAction"] = (
+                "This call did not start. Provide arguments.projectPath for the intended Unity project, "
+                "then use vrcforge_list_execution_targets and bind the exact candidate in this MCP session."
+            )
+            recovery["requiredInput"] = "arguments.projectPath"
+        return recovery
     if cause_code == "external_mcp_project_scope_ambiguous":
         # The project guard runs before Tool dispatch. Require its explicit
         # evidence; a status code or exception message alone proves no such thing.
@@ -477,6 +522,8 @@ class Mcp2026Router:
     async def handle_async(self, message: Any) -> tuple[JsonObject, int]:
         """Return a JSON-RPC response and its transport-appropriate status."""
         request_id = message.get("id") if isinstance(message, Mapping) else None
+        params: Mapping[str, Any] = {}
+        is_write = False
         try:
             request_id, method, params = _validate_request(message)
             try:
@@ -648,7 +695,12 @@ class Mcp2026Router:
                 except Mcp2026Error:
                     raise
                 except Exception as exc:
-                    validation_error = _pre_routing_gateway_rejection(exc, tool=str(tool_name))
+                    supplied_arguments = params.get("arguments")
+                    validation_error = _pre_routing_gateway_rejection(
+                        exc,
+                        tool=str(tool_name),
+                        arguments=supplied_arguments if isinstance(supplied_arguments, Mapping) else None,
+                    )
                     if validation_error is not None:
                         return (
                             _error(
@@ -770,7 +822,12 @@ class Mcp2026Router:
             tool_name = ""
             if isinstance(params, Mapping):
                 tool_name = str(params.get("name") or "").strip()
-            validation_error = _pre_routing_gateway_rejection(exc, tool=tool_name)
+            supplied_arguments = params.get("arguments") if isinstance(params, Mapping) else None
+            validation_error = _pre_routing_gateway_rejection(
+                exc, tool=tool_name,
+                arguments=supplied_arguments if isinstance(supplied_arguments, Mapping) else None,
+                write=is_write,
+            )
             if validation_error is not None:
                 return (
                     _error(
