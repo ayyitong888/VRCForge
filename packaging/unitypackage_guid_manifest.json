@@ -250,6 +250,10 @@
       "guid": "43c1a4b531504acd9961e50e46ae3472"
     },
     {
+      "path": "Assets/VRCForge/Editor/Generic/UnityAvatarReferenceDiagnostics.cs",
+      "guid": "7ccb6623ad03d3046afb3dd250d35abb"
+    },
+    {
       "path": "Assets/VRCForge/Editor/Generic/UnityAnimationCurveBatch.cs",
       "guid": "c650e8c90d2e47378857a3c4816d71d6"
     },
