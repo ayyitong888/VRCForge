@@ -61,6 +61,7 @@ from agent_scan_result_store import ScanResultStore
 from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
+from credential_redaction import redact_persistence_text
 from tool_usage_contract import tool_usage_description
 from agent_shell_service import (
     SHELL_RUNNER_NATIVE as SHELL_OWNER_RUNNER_NATIVE,
@@ -11320,6 +11321,45 @@ def _redact_tool_value(value: Any, *, filter_host_fields: bool) -> Any:
     return value
 
 
+# Persistence-side field sets for background-goal durable state: a454051
+# removed these definitions but left redact_background_goal_persistence
+# consuming them, so every call crashed with NameError. Restored here; the
+# model face keeps its passthrough contract.
+_BACKGROUND_GOAL_SECRET_FIELDS = {
+    "token",
+    "app_token",
+    "artifact_sig",
+    "artifact_signature",
+    "artifact_token",
+    "authorization",
+    "api_key",
+    "apikey",
+    "access_token",
+    "approval_token",
+    "control_token",
+    "controltoken",
+    "refresh_token",
+    "secret",
+    "user_constraints",
+    "userconstraints",
+    "_vrcforge_user_constraints",
+}
+_BACKGROUND_GOAL_PATH_FIELDS = {
+    "cwd",
+    "directory",
+    "file",
+    "path",
+    "project_path",
+    "project_root",
+    "projectpath",
+    "projectroot",
+    "workspace_path",
+    "workspace_root",
+    "workspacepath",
+    "workspaceroot",
+}
+
+
 def redact_background_goal_persistence(value: Any, *, depth: int = 0) -> Any:
     """Redact blocked background output before it enters durable run state."""
 
@@ -11340,7 +11380,9 @@ def redact_background_goal_persistence(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [redact_background_goal_persistence(item, depth=depth + 1) for item in value[:32]]
     if isinstance(value, str):
-        return planner_policy.sanitize_planner_observation_text(value, 2_000)
+        return redact_persistence_text(
+            planner_policy.sanitize_planner_observation_text(value, 2_000)
+        )
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return planner_policy.sanitize_planner_observation_text(value, 240)

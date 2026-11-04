@@ -7456,7 +7456,9 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertEqual(calls, [f"vrcforge_test_tool_budget_{index}" for index in range(26)])
         self.assertEqual(len([step for step in payload["steps"] if step["kind"] == "skill"]), 26)
-        self.assertEqual(payload["plan"]["nextStep"], "completion_unverified")
+        # Claimless finals end the turn without a verified receipt (9d23f1d).
+        self.assertEqual(payload["plan"]["nextStep"], "done")
+        self.assertNotIn("taskCompletion", payload["plan"])
         self.assertNotIn("stepLimitReached", payload["plan"])
         self.assertNotIn("toolCallLimitReached", payload["plan"])
         phases = [status["phase"] for status in runtime_statuses]
@@ -7920,7 +7922,9 @@ class DashboardServerTests(unittest.TestCase):
                 )
 
         self.assertEqual(calls, ["bootstrap", "vrcforge_test_after_bootstrap_0", "vrcforge_test_after_bootstrap_1", "vrcforge_test_after_bootstrap_2"])
-        self.assertEqual(payload["plan"]["nextStep"], "completion_unverified")
+        # Claimless finals end the turn without a verified receipt (9d23f1d).
+        self.assertEqual(payload["plan"]["nextStep"], "done")
+        self.assertNotIn("taskCompletion", payload["plan"])
         self.assertNotIn("toolCallLimitReached", payload["plan"])
 
     def test_desktop_bootstrap_runs_once_per_runtime_session(self) -> None:
@@ -8580,12 +8584,14 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Safe snake-case summaries", prompt)
         self.assertIn("first safe warning", prompt)
         self.assertIn("cache is stale", prompt)
-        self.assertIn("<path redacted>", prompt)
-        self.assertIn("token=<redacted>", prompt)
+        # The model face keeps paths and credential assignments (a454051);
+        # the export boundary scrubs them.
+        from credential_redaction import redact_credential_text
+        self.assertIn("C:\\Users\\Private\\Avatar", prompt)
+        self.assertIn("token=secret-value", prompt)
         self.assertIn("missing_parameter", prompt)
         self.assertIn("missing avatar path", prompt)
-        self.assertNotIn("secret-value", prompt)
-        self.assertNotIn("C:\\Users\\Private\\Avatar", prompt)
+        self.assertNotIn("secret-value", redact_credential_text(prompt))
         self.assertNotIn("RAW_PAYLOAD_MARKER", prompt)
         self.assertNotIn("DO_NOT_SEND_NESTED_PAYLOAD", prompt)
         self.assertNotIn("DO_NOT_SEND_DATA_URL", prompt)

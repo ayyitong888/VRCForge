@@ -169,6 +169,7 @@ from agent_question_service import (
     QUESTION_LANGUAGE_INSTRUCTION,
     CALL_USER_USAGE_INSTRUCTION,
 )
+from credential_redaction import redact_credential_text
 from cross_session_conversation_service import (
     CrossSessionConversationError,
     CrossSessionConversationService,
@@ -21057,15 +21058,8 @@ def _bounded_dashboard_value(value: Any) -> Any:
 
 def _redact_dashboard_text(value: str) -> str:
     # Credential assignments pass through to the model face (a454051); this
-    # export boundary scrubs them. The value pattern tolerates quoted and
-    # JSON-escaped assignments ("apiKey": "v", \$api_key='v') so serialized
-    # observations are covered, not only plain key=value text.
-    value = re.sub(
-        r"(?i)(secret|token|password|credential|api[_-]?key)[\s\"'\\]*[:=][\s\"'\\]*[^\s,\"';]+",
-        r"\1=[REDACTED]",
-        value,
-    )
-    return re.sub(r"(?i)\b(secret|token|password|credential)\b", "[REDACTED]", value)
+    # export boundary scrubs them through the shared pattern module.
+    return redact_credential_text(value)
 
 
 def _checkpoint_result_cause(result: McpResult, code: str, message: str) -> dict[str, Any]:
