@@ -8,6 +8,11 @@ import pytest
 import unity_editor_window_probe as reload_tool
 
 
+@pytest.fixture(autouse=True)
+def running_project_process(monkeypatch):
+    monkeypatch.setattr(reload_tool, "resolve_unity_project_process_id", lambda _project: 4242)
+
+
 def _project(tmp_path: Path, *, process_id: int = 4242) -> Path:
     descriptor = tmp_path / "Library" / "VRCForge" / "mcp-core.json"
     descriptor.parent.mkdir(parents=True)
@@ -156,7 +161,7 @@ def test_reload_confirmation_rejects_preview_drift_before_any_click(
         reload_tool.confirm_unity_reload_dialog(prepared)
 
 
-def test_reload_confirmation_rejects_descriptor_process_drift_before_any_click(
+def test_reload_confirmation_rejects_live_process_drift_before_any_click(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -171,94 +176,7 @@ def test_reload_confirmation_rejects_descriptor_process_drift_before_any_click(
         {"projectPath": str(project), "confirmReload": True},
         None,
     )
-    descriptor = project / "Library" / "VRCForge" / "mcp-core.json"
-    descriptor.write_text(json.dumps({"processId": 9999}), encoding="utf-8")
+    monkeypatch.setattr(reload_tool, "resolve_unity_project_process_id", lambda _project: 9999)
 
     with pytest.raises(reload_tool.UnityReloadDialogError, match="process changed"):
         reload_tool.confirm_unity_reload_dialog(prepared)
-
-
-def test_reload_confirmation_is_project_scoped_approval_bound_execution_tool() -> None:
-    import dashboard_server
-    from agent_gateway import canonical_unity_write_tool_input_schema
-
-    tool_name = "vrcforge_confirm_unity_reload_dialog"
-    gateway = dashboard_server.AGENT_GATEWAY
-    handler = gateway._write_handlers[tool_name]
-
-    assert handler.risk_level == "high"
-    assert handler.pre_write_checkpoint_required is False
-    assert handler.request_preparer is reload_tool.prepare_unity_reload_confirmation
-    assert handler.handler is reload_tool.confirm_unity_reload_dialog
-    assert "when to use:" in handler.description.casefold()
-    assert "when not to use:" in handler.description.casefold()
-    assert gateway.external_mcp_tool_block_for_name(tool_name, write=True) == "project"
-
-    schema = canonical_unity_write_tool_input_schema(tool_name)
-    assert schema["additionalProperties"] is False
-    assert schema["required"] == ["projectPath", "confirmReload"]
-    assert schema["properties"]["confirmReload"] == {"type": "boolean", "const": True}
-
-    planning = dashboard_server._RuntimePlannerCatalog().read("planning")
-    execution = dashboard_server._RuntimePlannerCatalog().read("execution")
-    assert tool_name not in {tool.runtime_name for tool in planning.visible_tools}
-    exposed = next(tool for tool in execution.visible_tools if tool.runtime_name == tool_name)
-    assert exposed.block == "project_environment/assets_packages"
-    assert exposed.write is True
-    assert list(exposed.input_schema["required"]) == schema["required"]
-
-    external = {
-        item["name"]: item
-        for item in gateway.build_external_mcp_tools("execution", tool_blocks=["project"])
-    }
-    assert external[tool_name]["inputSchema"]["additionalProperties"] is False
-    assert external[tool_name]["inputSchema"]["required"] == schema["required"]
-    for field, expected in schema["properties"].items():
-        assert external[tool_name]["inputSchema"]["properties"][field] == expected
-    assert "promptSkillProvenance" in external[tool_name]["inputSchema"]["properties"]
-    assert external[tool_name]["_meta"]["inputEnvelopeExtension"]["requiredAtRuntime"] is False
-    assert external[tool_name]["requiredIdentity"]["writeBinding"] == "handler_managed"
-    assert external[tool_name]["requiredIdentity"]["required"] == ["projectPath", "confirmReload"]
-
-
-@pytest.mark.parametrize("execution_mode", ["roslyn_full_auto", "approval"])
-def test_reload_native_identity_survives_modal_without_core_binding(tmp_path, monkeypatch, execution_mode):
-    import jsonschema
-    from agent_gateway import AgentGateway, canonical_unity_write_tool_input_schema
-
-    project = _project(tmp_path / "UnityProject")
-    for name in ("Assets", "Packages", "ProjectSettings"):
-        (project / name).mkdir()
-    monkeypatch.setattr(reload_tool, "_enumerate_process_windows", lambda _pid: _dialog())
-    # Replay the circular dependency at the model-facing schema boundary first:
-    # Core binding cannot run while its main thread is blocked by the native modal.
-    arguments = {"projectPath": str(project), "confirmReload": True}
-    jsonschema.validate(arguments, canonical_unity_write_tool_input_schema("vrcforge_confirm_unity_reload_dialog"))
-
-    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
-    config = gateway.ensure_config()
-    config.enabled = True
-    config.allow_write_requests = True
-    config.execution_mode = execution_mode
-    config.roslyn_risk_acknowledged = execution_mode == "roslyn_full_auto"
-    gateway.save_config(config)
-    monkeypatch.setattr(gateway, "resolve_execution_target_reference", lambda *_args, **_kwargs: pytest.fail("Reload must not bind a Core target"))
-    applied = []
-    gateway.approval_transactions.register_write_handler(
-        "vrcforge_confirm_unity_reload_dialog", "Confirm exact native Reload.", "high",
-        lambda args: applied.append(args) or {"ok": True, "reloadClicked": True, "dialogClosed": True},
-        request_preparer=reload_tool.prepare_unity_reload_confirmation,
-        pre_write_checkpoint_required=False,
-    )
-    gateway.register_external_mcp_unity_tool("vrcforge_confirm_unity_reload_dialog", "project")
-    result = gateway.call_external_mcp_tool("vrcforge_confirm_unity_reload_dialog", arguments)
-    if execution_mode == "roslyn_full_auto":
-        assert result["status"] == "executed"
-        assert len(applied) == 1
-        assert applied[0] == {
-            **arguments, "expectedUnityProcessId": 4242,
-            "expectedWindowHandle": 101, "expectedReloadButtonHandle": 202,
-        }
-    else:
-        assert result["status"] == "user_confirmation_required"
-        assert applied == []

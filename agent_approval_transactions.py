@@ -3807,28 +3807,11 @@ class AgentApprovalTransactionService:
         if handler.name == "vrcforge_handle_unity_editor_dialog":
             return {
                 "schema": ROLLBACK_POLICY_SCHEMA, "required": False,
-                "kind": "native_dialog_continues_approved_operation", "approvalRequired": True,
-                "preWriteCheckpointRequired": False, "checkpointScope": ["original-approved-operation"],
-                "restoreTool": "vrcforge_restore_checkpoint", "postRestoreValidationRequired": True,
+                "kind": "native_dialog_optional_operation_continuation", "approvalRequired": True,
+                "preWriteCheckpointRequired": False, "checkpointScope": [],
+                "restoreTool": "", "postRestoreValidationRequired": False,
                 "coverageAudit": "vrcforge.unity_editor_dialog_action.v1",
-                "note": "Dismiss requests native close/cancel without a checkpoint or confirmation click. Press continues an active approved operation under its existing lock and checkpoint. Dialog closure does not verify asset success or enlarge the original write scope.",
-            }
-        if handler.name == "vrcforge_confirm_unity_reload_dialog":
-            return {
-                "schema": ROLLBACK_POLICY_SCHEMA,
-                "required": False,
-                "kind": "irreversible_ephemeral_editor_reload",
-                "approvalRequired": True,
-                "preWriteCheckpointRequired": False,
-                "checkpointScope": [],
-                "restoreTool": "",
-                "coverageAudit": "vrcforge.unity_reload_confirmation.v1",
-                "postRestoreValidationRequired": False,
-                "note": (
-                    "This project-, process-, dialog-, and button-bound action confirms only the exact "
-                    "Unity Editor Reload dialog. It does not claim an asset checkpoint or rollback; "
-                    "unsaved in-memory scene or Editor changes may be discarded and cannot be restored."
-                ),
+                "note": "Dismiss requests native close/cancel without a confirmation click. Press may continue only the supplied active approved operation under its existing lock and checkpoint; without one, the UI click itself has no checkpoint or rollback. Actual asset writes remain subject to their existing authorization and checkpoint rules. Reload may discard unsaved in-memory scene or Editor changes, which cannot be restored; dialog closure does not verify asset success.",
             }
         if handler.name in {
             "vrcforge_capture_screenshot",

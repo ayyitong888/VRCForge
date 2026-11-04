@@ -796,26 +796,14 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object", "additionalProperties": False,
         "required": ["projectPath", "dialogId"],
         "allOf": [{"if": {"properties": {"action": {"const": "dismiss"}}, "required": ["action"]},
-                   "else": {"required": ["buttonHandle", "buttonText", "sourceApprovalId"]}}],
+                   "else": {"required": ["buttonHandle", "buttonText"]}}],
         "properties": {
             "action": {"type": "string", "enum": ["press", "dismiss"], "default": "press", "description": "dismiss requests native close/cancel without clicking a button; press continues an approved source operation."},
             "projectPath": {"type": "string"},
             "dialogId": {"type": "string", "description": "Exact current ID returned by inspect_unity_editor_dialogs."},
             "buttonHandle": {"type": "integer", "minimum": 1},
             "buttonText": {"type": "string", "minLength": 1, "description": "Exact observed button text, including any accelerator marker."},
-            "sourceApprovalId": {"type": "string", "description": "The active original operation whose approved write and ready checkpoint this confirmation continues."},
-        },
-    },
-    "vrcforge_confirm_unity_reload_dialog": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["projectPath", "confirmReload"],
-        "properties": {
-            "projectPath": {
-                "type": "string",
-                "description": "Exact existing Unity project whose bound Editor displays the Reload dialog.",
-            },
-            "confirmReload": {"type": "boolean", "const": True},
+            "sourceApprovalId": {"type": "string", "description": "Optional ID of the active approved operation to continue; its approved asset write and ready checkpoint remain the only write scope. Omit for an independent native UI action handled through the existing approval flow; this UI click itself has no checkpoint or rollback. The preview does not claim an asset backup."},
         },
     },
 }

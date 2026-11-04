@@ -22,6 +22,7 @@ def context(tmp_path, monkeypatch):
     descriptor = tmp_path / "Library/VRCForge/mcp-core.json"
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(json.dumps({"processId": 4242}), encoding="utf-8")
+    monkeypatch.setattr(tools.native, "resolve_unity_project_process_id", lambda _project: 4242)
     windows = _windows()
     monkeypatch.setattr(tools.native, "_enumerate_process_windows", lambda _pid: windows)
     click = Mock()
@@ -105,11 +106,76 @@ def test_source_checkpoint_identity_is_rechecked_before_click(context):
     click.assert_not_called()
 
 
-def test_missing_source_approval_explicitly_reports_unsupported_write_scope(context):
+def test_supplied_source_approval_requires_trusted_lookup(context):
     project, _windows_, click, _source, _lookup = context
     with pytest.raises(tools.UnityEditorDialogError, match="unsupported-write-scope"):
         tools.prepare_unity_editor_dialog_action(_params(project), None)
     click.assert_not_called()
+
+
+def test_standalone_press_reports_actual_button_without_claiming_checkpoint(context):
+    project, windows, click, _source, lookup = context
+    windows[0]["controls"][1]["text"] = "&Show Me What's Missing"
+    params = _params(project)
+    params.pop("sourceApprovalId")
+    prepared, preview = tools.prepare_unity_editor_dialog_action(params, None, source_approval_lookup=lookup)
+    assert preview["buttonText"] == "&Show Me What's Missing"
+    assert preview["dialogText"] == "Unity\nImport selected assets?"
+    assert preview["checkpointAvailable"] is False
+    assert preview["checkpointScope"] == "none"
+    assert preview["dialogClickRollbackAvailable"] is False
+    assert "sourceApprovalId" not in prepared
+    assert "read-only" not in preview["note"]
+    click.side_effect = lambda *_args: windows.clear()
+    result = tools.handle_unity_editor_dialog(prepared, source_approval_lookup=lookup)
+    click.assert_called_once_with(4242, 101, 103, "&Show Me What's Missing")
+    lookup.assert_not_called()
+    assert result["ok"] and result["dialogClosed"]
+    assert result["assetOperationVerified"] is False
+
+
+@pytest.mark.parametrize("execution_mode", ["roslyn_full_auto", "approval"])
+def test_standalone_reload_uses_generic_approval_without_core_binding(context, monkeypatch, tmp_path, execution_mode):
+    from agent_gateway import AgentGateway
+
+    project, windows, click, _source, lookup = context
+    windows[0]["controls"][1]["text"] = "Reload"
+    for folder in ("Assets", "Packages", "ProjectSettings"):
+        (project / folder).mkdir(exist_ok=True)
+    arguments = _params(project)
+    arguments.pop("sourceApprovalId")
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    config.execution_mode = execution_mode
+    config.roslyn_risk_acknowledged = execution_mode == "roslyn_full_auto"
+    gateway.save_config(config)
+    monkeypatch.setattr(
+        gateway, "resolve_execution_target_reference",
+        lambda *_args, **_kwargs: pytest.fail("A native Reload modal must not bind a Core target"),
+    )
+    click.side_effect = lambda *_args: windows.clear()
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_handle_unity_editor_dialog", "Press one exact native dialog button.", "high",
+        lambda params: tools.handle_unity_editor_dialog(params, source_approval_lookup=lookup),
+        request_preparer=lambda params, preview: tools.prepare_unity_editor_dialog_action(
+            params, preview, source_approval_lookup=lookup),
+        pre_write_checkpoint_required=False,
+    )
+    gateway.register_external_mcp_unity_tool("vrcforge_handle_unity_editor_dialog", "project")
+
+    result = gateway.call_external_mcp_tool("vrcforge_handle_unity_editor_dialog", arguments)
+
+    if execution_mode == "roslyn_full_auto":
+        assert result["status"] == "executed"
+        assert result["result"]["dialogClosed"] is True
+        click.assert_called_once_with(4242, 101, 103, "Reload")
+    else:
+        assert result["status"] == "user_confirmation_required"
+        click.assert_not_called()
+    lookup.assert_not_called()
 
 
 def test_custom_drawn_controls_are_visible_but_not_claimed_supported(context):
@@ -163,10 +229,10 @@ def test_next_dialog_same_window_is_reported_changed_not_closed(context):
     assert result["assetOperationVerified"] is False
 
 
-def test_process_change_is_rejected_even_if_same_handles_reused(context):
+def test_process_change_is_rejected_even_if_same_handles_reused(context, monkeypatch):
     project, _windows_, click, _source, lookup = context
     prepared, _ = tools.prepare_unity_editor_dialog_action(_params(project), None, source_approval_lookup=lookup)
-    (project / "Library/VRCForge/mcp-core.json").write_text(json.dumps({"processId": 999}), encoding="utf-8")
+    monkeypatch.setattr(tools.native, "resolve_unity_project_process_id", lambda _project: 999)
     with pytest.raises(tools.UnityEditorDialogError):
         tools.handle_unity_editor_dialog(prepared, source_approval_lookup=lookup)
     click.assert_not_called()

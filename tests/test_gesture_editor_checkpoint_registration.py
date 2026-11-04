@@ -8,7 +8,6 @@ RUNTIME_NO_CHECKPOINT_TOOLS = (
     "vrcforge_gesture_manager_enter_play_mode",
     "vrcforge_gesture_manager_set_parameter",
     "vrcforge_set_play_mode",
-    "vrcforge_confirm_unity_reload_dialog",
 )
 
 def test_editor_state_handlers_use_bound_checkpoint_policy() -> None:
@@ -21,10 +20,9 @@ def test_editor_state_handlers_use_bound_checkpoint_policy() -> None:
         assert handler.checkpoint_prepare_handler is not None
     for name in RUNTIME_NO_CHECKPOINT_TOOLS:
         handler = handlers[name]
-        if name != "vrcforge_confirm_unity_reload_dialog":
-            assert handler.requires_approved_execution_context is True
+        assert handler.requires_approved_execution_context is True
         assert handler.pre_write_checkpoint_required is False or callable(handler.pre_write_checkpoint_required)
-        assert handler.checkpoint_prepare_handler is not None or name == "vrcforge_confirm_unity_reload_dialog"
+        assert handler.checkpoint_prepare_handler is not None
 
 
 def test_play_transitions_do_not_claim_checkpoint_rollback() -> None:

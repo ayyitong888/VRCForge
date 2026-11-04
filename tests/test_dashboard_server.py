@@ -12953,16 +12953,13 @@ class DashboardServerTests(unittest.TestCase):
             "vrcforge_capture_screenshot",
             "vrcforge_capture_multi_screenshot",
         }
-        irreversible_ephemeral_tools = {
-            "vrcforge_confirm_unity_reload_dialog",
-        }
         general_host_file_tools = {
             "vrcforge_edit_file", "vrcforge_write_file", "vrcforge_delete_path",
             "vrcforge_move_path", "vrcforge_apply_patch",
         }
         independently_managed_tools = {
             "vrcforge_create_safe_backup": "create_new_backup_artifact",
-            "vrcforge_handle_unity_editor_dialog": "native_dialog_continues_approved_operation",
+            "vrcforge_handle_unity_editor_dialog": "native_dialog_optional_operation_continuation",
         }
         observed_no_rollback_tools = {
             name
@@ -12971,7 +12968,7 @@ class DashboardServerTests(unittest.TestCase):
         }
         self.assertEqual(
             observed_no_rollback_tools,
-            explicit_rollback_tools | managed_artifact_tools | irreversible_ephemeral_tools | general_host_file_tools | set(independently_managed_tools),
+            explicit_rollback_tools | managed_artifact_tools | general_host_file_tools | set(independently_managed_tools),
         )
         for name, target in targets.items():
             policy = target.get("rollbackPolicy")
@@ -12981,7 +12978,6 @@ class DashboardServerTests(unittest.TestCase):
             if (
                 name in explicit_rollback_tools
                 or name in managed_artifact_tools
-                or name in irreversible_ephemeral_tools
                 or name in general_host_file_tools
                 or name in independently_managed_tools
             ):
@@ -13015,11 +13011,6 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(policy["kind"], "local_artifact_overwrite")
             self.assertFalse(policy["preWriteCheckpointRequired"])
             self.assertEqual(policy["artifactRoots"], ["dashboard/latest"])
-
-        reload_policy = targets["vrcforge_confirm_unity_reload_dialog"]["rollbackPolicy"]
-        self.assertEqual(reload_policy["kind"], "irreversible_ephemeral_editor_reload")
-        self.assertFalse(reload_policy["preWriteCheckpointRequired"])
-        self.assertEqual(reload_policy["restoreTool"], "")
 
         unity_policy = targets["vrcforge_add_modular_avatar_component"]["rollbackPolicy"]
         self.assertEqual(unity_policy["kind"], "unity_project_checkpoint")

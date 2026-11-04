@@ -276,7 +276,6 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_rollback_project_lifecycle",
             "vrcforge_select_project",
             "vrcforge_set_play_mode",
-            "vrcforge_confirm_unity_reload_dialog",
             "vrcforge_handle_unity_editor_dialog",
             "vrcforge_scene_transition",
             "vrcforge_save_asset",

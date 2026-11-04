@@ -247,23 +247,3 @@ def test_full_permission_keeps_all_rollback_tools_manual(
 
     assert result["status"] == "user_confirmation_required"
     assert executed == []
-
-
-def test_reload_confirmation_policy_does_not_claim_asset_or_editor_state_rollback() -> None:
-    import dashboard_server
-
-    gateway = dashboard_server.AGENT_GATEWAY
-    handler = gateway._write_handlers["vrcforge_confirm_unity_reload_dialog"]
-
-    policy = gateway.approval_transactions._write_handler_rollback_policy(handler)
-
-    assert handler.pre_write_checkpoint_required is False
-    assert policy["kind"] == "irreversible_ephemeral_editor_reload"
-    assert policy["required"] is False
-    assert policy["approvalRequired"] is True
-    assert policy["preWriteCheckpointRequired"] is False
-    assert policy["checkpointScope"] == []
-    assert policy["restoreTool"] == ""
-    assert policy["postRestoreValidationRequired"] is False
-    assert "unsaved" in policy["note"].casefold()
-    assert "cannot be restored" in policy["note"].casefold()

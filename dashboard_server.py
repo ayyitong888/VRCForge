@@ -293,10 +293,6 @@ from model_import_settings import (
     TOOL_NAME as MODEL_IMPORT_SETTINGS_TOOL,
     build_wrapper_arguments as build_model_import_settings_wrapper_arguments,
 )
-from unity_editor_window_probe import (
-    confirm_unity_reload_dialog,
-    prepare_unity_reload_confirmation,
-)
 from unity_editor_dialog_tools import (
     inspect_unity_editor_dialogs,
     prepare_unity_editor_dialog_action,
@@ -28217,18 +28213,10 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_handle_unity_editor_dialog",
-        "When to use: dismiss an exact observed native Unity dialog with action=dismiss (close/cancel only, no source approval or button needed), or press one exact observed native Unity dialog button with action=press to continue its active approved operation, using that operation's sourceApprovalId and existing checkpoint. Inspect the dialog first. In full-permission mode, handle ordinary confirmations yourself within the approved task. When NOT to use: do not use an old approval, enlarge asset write scope, guess a button, or claim dialog closure proves asset success. Negative example: never confirm an unrelated overwrite using another operation's checkpoint; use the dedicated Reload tool for a standalone Reload prompt.",
+        "When to use: dismiss an exact observed native Unity dialog with action=dismiss (close/cancel only, no source approval or button needed), or press one exact observed native Unity dialog button with action=press. Optionally provide sourceApprovalId to continue an active approved operation using its existing checkpoint; without it, the UI click follows the existing approval flow and claims no checkpoint or rollback. Actual asset writes remain subject to their existing approval and checkpoint rules. Inspect the dialog first. A Reload button can discard unsaved in-memory scene or Editor changes, which cannot be restored. In full-permission mode, handle ordinary confirmations yourself within the approved task. When NOT to use: do not use an old approval, enlarge asset write scope, guess a button, or claim dialog closure proves asset success. Negative example: never press an unrelated overwrite button without the needed approval.",
         "high",
         lambda params: handle_unity_editor_dialog(params, source_approval_lookup=AGENT_GATEWAY.approval_transactions.get_native_dialog_source_approval),
         request_preparer=lambda params, preview: prepare_unity_editor_dialog_action(params, preview, source_approval_lookup=AGENT_GATEWAY.approval_transactions.get_native_dialog_source_approval),
-        pre_write_checkpoint_required=False,
-    )
-    register_write_handler(
-        "vrcforge_confirm_unity_reload_dialog",
-        "When to use: resolve the selected Unity project's verified external-modification dialog after confirming the intended scene edits were saved and no newer edits need preserving. In full-permission mode, call this tool yourself with confirmReload=true; other permission modes use the normal approval flow. Do not ask the user to click Reload manually when this tool can handle it. When NOT to use: do not dismiss another dialog, click Ignore, target a different Unity Editor, or reload while unsaved scene changes still need preserving. Negative example: never accept an unbound Reload dialog while multiple Unity projects are open.",
-        "high",
-        confirm_unity_reload_dialog,
-        request_preparer=prepare_unity_reload_confirmation,
         pre_write_checkpoint_required=False,
     )
     register_write_handler(

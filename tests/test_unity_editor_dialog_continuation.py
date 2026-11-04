@@ -40,6 +40,8 @@ def pending_writer(tmp_path: Path, monkeypatch, request):
     if native_caption and os.name != "nt":
         pytest.skip("The native dialog integration requires Windows.")
     project = _project(tmp_path / "Project")
+    monkeypatch.setattr(dialogs.native, "resolve_unity_project_process_id",
+                        lambda _project: os.getpid() if native_caption else 4242)
     if native_caption:
         (project / "Library/VRCForge/mcp-core.json").write_text(json.dumps({"processId": os.getpid()}), encoding="utf-8")
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
@@ -232,13 +234,13 @@ def test_source_requires_current_applying_parent_and_ready_checkpoint(pending_wr
     click.assert_not_called()
 
 
-@pytest.mark.parametrize("pending_writer", ["Save", "Import", "Overwrite"], indirect=True)
+@pytest.mark.parametrize("pending_writer", ["Save", "Import", "Overwrite", "Reload"], indirect=True)
 def test_real_windows_confirmation_continues_approved_parent(pending_writer):
     gateway, service, project, parent_id, release, thread, click, parent_results = pending_writer
     assert click is None, "This integration must use the actual native click primitive."
     snapshot = dialogs.inspect_unity_editor_dialogs({"projectPath": str(project)})
     observed = next(d for d in snapshot["dialogs"] if d["title"].startswith("VRCForge native modal fixture "))
-    button = next(b for b in observed["buttons"] if b["text"] in {"Save", "Import", "Overwrite"})
+    button = next(b for b in observed["buttons"] if b["text"] in {"Save", "Import", "Overwrite", "Reload"})
     assert button["nativeClickable"] is True
     parent = gateway._approvals[parent_id]
     checkpoint_id = parent["checkpoint"]["id"]

@@ -1,8 +1,8 @@
-"""Project-bound native Unity dialog inspection, dismissal and write continuation.
+"""Project-bound native Unity dialog inspection and supervised interaction.
 
 Uses the existing Win32 enumerator and button primitive. It never identifies an
-operation's write footprint from button captions: the hosting gateway must supply
-the original approved operation and its ready checkpoint through a trusted lookup.
+operation's write footprint from button captions. Continuations retain the original
+approved operation and checkpoint; standalone UI actions use the gateway's approval.
 """
 
 from __future__ import annotations
@@ -53,10 +53,11 @@ def inspect_unity_editor_dialogs(params: dict[str, Any] | str | Path) -> dict[st
         "available": False, "unityProcessId": None, "dialogs": [], "probeError": None,
     }
     try:
-        descriptor = json.loads((project / "Library/VRCForge/mcp-core.json").read_text(encoding="utf-8"))
-        pid = _positive(descriptor.get("processId"), "Unity process identity")
-        result["unityProcessId"] = pid
         if os.name != "nt":
+            return result
+        pid = native.resolve_unity_project_process_id(project)
+        result["unityProcessId"] = pid
+        if pid is None:
             return result
         windows = native._enumerate_process_windows(pid)
     except Exception as exc:  # This bounded read-only boundary reports failures explicitly.
@@ -153,25 +154,28 @@ def prepare_unity_editor_dialog_action(
     params: dict[str, Any], _preview: dict[str, Any] | None,
     *, source_approval_lookup: SourceApprovalLookup | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Freeze the observed dialog; confirmation presses retain their source write."""
+    """Freeze the observed dialog; an optional source retains its approved write."""
     snapshot = inspect_unity_editor_dialogs(params)
     dialog, button = _selected(snapshot, params)
     dismiss = params.get("action") == "dismiss"
-    source = {} if dismiss else _source(params, snapshot["projectPath"], source_approval_lookup)
+    source = (_source(params, snapshot["projectPath"], source_approval_lookup)
+              if not dismiss and params.get("sourceApprovalId") else {})
     prepared = {
         "projectPath": snapshot["projectPath"], "dialogId": dialog["dialogId"],
         "action": "dismiss" if dismiss else "press",
-        **({} if dismiss else {"buttonHandle": button["buttonHandle"], "buttonText": button["text"],
-                              "sourceApprovalId": source["sourceApprovalId"], "expectedSource": source}),
+        **({} if dismiss else {"buttonHandle": button["buttonHandle"], "buttonText": button["text"]}),
+        **({"sourceApprovalId": source["sourceApprovalId"], "expectedSource": source} if source else {}),
         "expectedUnityProcessId": snapshot["unityProcessId"],
         "expectedWindowHandle": dialog["windowHandle"],
     }
     return prepared, {
         "schema": "vrcforge.unity_editor_dialog_action.v1", **prepared,
         "dialogText": dialog["text"], "dialogTitle": dialog["title"],
-        "checkpointAvailable": not dismiss, "checkpointScope": "none" if dismiss else "original-approved-operation-only",
+        "checkpointAvailable": bool(source), "checkpointScope": "original-approved-operation-only" if source else "none",
         "dialogClickRollbackAvailable": False,
-        "note": "Dismiss sends only a native close/cancel request and never presses a confirmation button." if dismiss else "The button click itself has no inverse. Asset recovery uses only the original operation's checkpoint; closure does not prove asset success.",
+        "note": ("Dismiss sends only a native close/cancel request and never presses a confirmation button." if dismiss else
+                 "The button click itself has no inverse. Asset recovery uses only the original operation's checkpoint; closure does not prove asset success." if source else
+                 "The button click itself has no inverse or asset checkpoint. Asset-changing actions still require explicit authorization and an applicable checkpoint; dialog closure does not prove asset success."),
     }
 
 
@@ -186,11 +190,12 @@ def handle_unity_editor_dialog(
     if dialog["windowHandle"] != params.get("expectedWindowHandle"):
         raise UnityEditorDialogError("The selected dialog window changed after approval.")
     dismiss = params.get("action") == "dismiss"
-    source = {} if dismiss else _source(params, snapshot["projectPath"], source_approval_lookup)
+    source = (_source(params, snapshot["projectPath"], source_approval_lookup)
+              if not dismiss and params.get("sourceApprovalId") else {})
     if dismiss:
         native.post_native_dialog_close(snapshot["unityProcessId"], dialog["windowHandle"])
     else:
-        if source != params.get("expectedSource"):
+        if source != params.get("expectedSource", {}):
             raise UnityEditorDialogError("The source approval or checkpoint changed after preparation.")
         native.post_native_dialog_button_click(snapshot["unityProcessId"], dialog["windowHandle"],
                                               button["buttonHandle"], button["text"])

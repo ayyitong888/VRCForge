@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import json
 import os
 import time
 from ctypes import wintypes
@@ -26,34 +25,43 @@ def _normalize_control_label(value: Any) -> str:
     return str(value or "").replace("&", "").strip().casefold()
 
 
+def resolve_unity_project_process_id(project_root: Path) -> int | None:
+    """Use the running Editor's project argument, independent of Core startup."""
+    # The host owns process discovery. Import only when called, after its tool
+    # registration has loaded this module.
+    from dashboard_server import list_running_unity_processes, unity_process_exactly_matches_project
+
+    matches = [process for process in list_running_unity_processes(require_discovery_evidence=True)
+               if unity_process_exactly_matches_project(process, project_root)]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("Multiple running Unity Editors matched the selected project.")
+    return int(matches[0]["processId"])
+
+
 def probe_unity_reload_dialog(project_root: str | Path) -> dict[str, Any]:
     """Return a bounded, non-interactive snapshot of a project's Reload dialog."""
 
     root = Path(project_root).expanduser().resolve()
-    descriptor = root / "Library" / "VRCForge" / "mcp-core.json"
-    process_id = 0
-    try:
-        payload = json.loads(descriptor.read_text(encoding="utf-8"))
-        raw_process_id = payload.get("processId") if isinstance(payload, dict) else None
-        if isinstance(raw_process_id, int) and not isinstance(raw_process_id, bool):
-            process_id = raw_process_id
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        pass
-
     result: dict[str, Any] = {
         "schema": "vrcforge.unity_editor_window_blocker.v1",
-        "available": os.name == "nt" and process_id > 0,
+        "available": False,
         "projectPath": str(root),
-        "unityProcessId": process_id or None,
+        "unityProcessId": None,
         "blocked": False,
         "blockerCode": "",
         "dialog": None,
         "probeError": None,
     }
-    if not result["available"]:
+    if os.name != "nt":
         return result
 
     try:
+        process_id = resolve_unity_project_process_id(root)
+        result["unityProcessId"] = process_id
+        if process_id is None:
+            return result
         windows = _enumerate_process_windows(process_id)
     except Exception as exc:  # noqa: BLE001 - this read-only boundary must fail explicitly.
         result.update(
@@ -66,6 +74,7 @@ def probe_unity_reload_dialog(project_root: str | Path) -> dict[str, Any]:
             }
         )
         return result
+    result["available"] = True
     dialog = classify_reload_dialog(windows)
     if dialog is not None:
         result.update(
