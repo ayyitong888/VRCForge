@@ -5629,6 +5629,7 @@ def write_chat_transcripts_storage(
                     detail={"code": "chat_store_recovery_required", "recovery": app_recovery},
                 )
             current_chats: list[dict[str, Any]] = [*app_chats]
+            delta_project_targets: list[SessionStoreTarget] = []
             index_source, index_recovery = inspect_chat_project_index(self_heal_app_owned=False)
             if index_recovery:
                 raise HTTPException(
@@ -5654,6 +5655,7 @@ def write_chat_transcripts_storage(
                 if project_file is None:
                     raise HTTPException(status_code=409, detail={"code": "chat_store_project_unsafe"})
                 project_target = chat_store_target(project_file, scope="project", project_path=str(project_root))
+                delta_project_targets.append(project_target)
                 project_chats, _project_source, project_recovery = load_chat_transcript_file(
                     project_target,
                     scope="project",
@@ -5674,6 +5676,34 @@ def write_chat_transcripts_storage(
                 }
                 materialized = materialize_chat_patches(current_chats, request.chats, patch_payload)
             except ChatStoragePatchError as exc:
+                if exc.status_code == 422:
+                    # Resolve stale source membership before calling the
+                    # otherwise-valid delta envelope malformed. A chat may
+                    # have been created or deleted after this client's read;
+                    # the exact-coverage check cannot distinguish that from
+                    # a bad patch until its existing source CAS is evaluated.
+                    # Keep this failure-only so successful delta saves still
+                    # pass through the existing CAS exactly once below.
+                    revisions = _chat_source_revision_map(request)
+                    _assert_chat_source_writable(
+                        app_target,
+                        scope="app",
+                        revisions=revisions,
+                        _transaction=transaction,
+                    )
+                    _assert_chat_source_writable(
+                        chat_project_index_target(),
+                        scope="app-index",
+                        revisions=revisions,
+                        _transaction=transaction,
+                    )
+                    for project_target in delta_project_targets:
+                        _assert_chat_source_writable(
+                            project_target,
+                            scope="project",
+                            revisions=revisions,
+                            _transaction=transaction,
+                        )
                 raise HTTPException(
                     status_code=exc.status_code,
                     detail={

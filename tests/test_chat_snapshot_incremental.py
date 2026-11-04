@@ -199,3 +199,91 @@ def test_delta_archive_reuse_write_failure_restores_exact_storage_snapshot(tmp_p
     assert failure.value.status_code == 500
     assert transcript.read_bytes() == original_transcript
     assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob('*.gz')} == archives
+
+
+@pytest.mark.parametrize('concurrent_change', ['delete', 'create'])
+def test_stale_delta_membership_changes_are_cas_conflicts_before_coverage_errors(tmp_path, monkeypatch, concurrent_change):
+    """A concurrent create/delete must be reported as stale source, not malformed delta."""
+    import dashboard_server as server
+    from dashboard_api_models import ChatTranscriptsRequest
+
+    monkeypatch.setattr(server, 'chat_transcripts_path', lambda: tmp_path / 'chats.json')
+    monkeypatch.setattr(server, 'chat_project_index_path', lambda: tmp_path / 'projects.json')
+
+    original = [
+        {'id': f'chat-{index:02d}', 'items': [{'id': f'user-{index:02d}', 'type': 'user', 'text': 'fixture'}]}
+        for index in range(30)
+    ]
+    initial, _, _ = server.write_chat_transcripts_storage(ChatTranscriptsRequest(chats=original))
+    stale_revisions = initial['sourceRevisions']
+    stale_patches = {
+        chat['id']: {
+            'baseDigest': initial['chatDigests'][chat['id']],
+            'metadataPatch': [],
+            'itemOrder': [item['id'] for item in chat['items']],
+            'itemPatches': {},
+            'newItems': {},
+        }
+        for chat in original
+    }
+
+    if concurrent_change == 'delete':
+        changed = original[:-1]
+        stale_requested = [{'id': chat['id']} for chat in original]
+    else:
+        new_chat = {'id': 'chat-concurrent-new', 'isTestChat': True, 'items': [{'id': 'user-new', 'type': 'user', 'text': 'fixture'}]}
+        changed = [*original, new_chat]
+        # This client includes the same newly-created ID but has no acknowledged digest for it.
+        stale_requested = [{'id': chat['id']} for chat in original] + [new_chat]
+
+    server.write_chat_transcripts_storage(ChatTranscriptsRequest(chats=changed, sourceRevisions=stale_revisions))
+    storage_before_stale_retry = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob('*') if path.is_file()
+    }
+    request = ChatTranscriptsRequest(
+        chats=stale_requested,
+        sourceRevisions=stale_revisions,
+        chatPatches=stale_patches,
+    )
+    with pytest.raises(HTTPException) as stale:
+        server.write_chat_transcripts_storage(request)
+    assert stale.value.status_code == 409, concurrent_change
+    assert {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob('*') if path.is_file()
+    } == storage_before_stale_retry
+
+
+def test_fresh_delta_source_with_incomplete_patch_coverage_remains_422_without_writes(tmp_path, monkeypatch):
+    import dashboard_server as server
+    from dashboard_api_models import ChatTranscriptsRequest
+
+    monkeypatch.setattr(server, 'chat_transcripts_path', lambda: tmp_path / 'chats.json')
+    monkeypatch.setattr(server, 'chat_project_index_path', lambda: tmp_path / 'projects.json')
+    chats = [
+        {'id': f'chat-{index:02d}', 'items': [{'id': f'user-{index:02d}', 'type': 'user', 'text': 'fixture'}]}
+        for index in range(30)
+    ]
+    current, _, _ = server.write_chat_transcripts_storage(ChatTranscriptsRequest(chats=chats))
+    patches = {
+        chat['id']: {
+            'baseDigest': current['chatDigests'][chat['id']],
+            'metadataPatch': [],
+            'itemOrder': [item['id'] for item in chat['items']],
+            'itemPatches': {},
+            'newItems': {},
+        }
+        for chat in chats[:-1]
+    }
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
+
+    with pytest.raises(HTTPException) as invalid:
+        server.write_chat_transcripts_storage(ChatTranscriptsRequest(
+            chats=[{'id': chat['id']} for chat in chats],
+            sourceRevisions=current['sourceRevisions'],
+            chatPatches=patches,
+        ))
+
+    assert invalid.value.status_code == 422
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()} == before
