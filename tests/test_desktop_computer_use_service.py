@@ -20,6 +20,69 @@ def _enabled_gateway(root: Path) -> AgentGateway:
     return gateway
 
 
+@pytest.mark.parametrize("offset,end_reached", [(0, False), (16000, False), (16000, True)])
+def test_observation_pages_from_the_end_of_text_actually_shown(tmp_path, offset, end_reached):
+    owner = _enabled_gateway(tmp_path).desktop
+    body = "文" * 16000
+    result = {
+        "operation": "read_snapshot", "snapshotId": "snapshot-page",
+        "textOffset": offset, "documentText": body,
+        "documentTextLength": offset + len(body) + (0 if end_reached else 8000),
+        "nextTextOffset": None if end_reached else offset + len(body),
+        "documentTextEndReached": end_reached,
+        "summary": f"Snapshot page: text chars {offset}–{offset + len(body)}.",
+    }
+    observation = owner.desktop_action_observation(result)
+    expected_next = offset + owner.OBSERVATION_TEXT_BUDGET
+    assert f"documentText={body[:9000]}" in observation
+    assert f"nextTextOffset={expected_next}" in observation
+    assert f"read_snapshot snapshotId=snapshot-page textOffset={expected_next}" in observation
+    assert "documentTextEndReached=False" in observation
+    assert f"nextTextOffset={offset + len(body)}" not in observation
+    assert f"{offset}–{offset + len(body)}" not in observation
+    assert result["documentText"] == body  # Presentation must not alter the receipt.
+
+
+@pytest.mark.parametrize("body", ["line  \r\n\t" * 2000, " \n\t" * 5000, "😀中\n" * 6000],
+                         ids=["whitespace-lines", "whitespace-only", "unicode"])
+def test_observation_preserves_raw_text_coordinates_and_defaults_to_first_page(tmp_path, body):
+    owner = _enabled_gateway(tmp_path).desktop
+    observation = owner.desktop_action_observation({
+        "operation": "inspect_window", "snapshotId": "snapshot-first",
+        "documentText": body, "documentTextEndReached": True,
+    })
+    assert f"documentText={body[:9000]}" in observation
+    assert "nextTextOffset=9000" in observation
+    assert "documentTextEndReached=False" in observation
+
+
+@pytest.mark.parametrize("body", ["", "\nlast  line\t😀\n"], ids=["empty", "tail"])
+def test_observation_last_page_keeps_whitespace_and_finished_state(tmp_path, body):
+    owner = _enabled_gateway(tmp_path).desktop
+    observation = owner.desktop_action_observation({
+        "operation": "read_snapshot", "snapshotId": "snapshot-last",
+        "textOffset": 25000, "documentText": body,
+        "documentTextLength": 25000 + len(body),
+        "nextTextOffset": None, "documentTextEndReached": True,
+    })
+    if body:
+        assert f"documentText={body}" in observation
+    assert "documentTextEndReached=True" in observation
+    assert "more text remains" not in observation
+    assert "nextTextOffset=" not in observation
+
+
+def test_selected_text_truncation_does_not_invent_a_document_offset(tmp_path):
+    owner = _enabled_gateway(tmp_path).desktop
+    observation = owner.desktop_action_observation({
+        "operation": "inspect_window", "snapshotId": "snapshot-selection",
+        "selectedText": "选\n" * 8000,
+    })
+    assert "selectedText=" + ("选\n" * 4500) in observation
+    assert "selectedText truncated" in observation
+    assert "textOffset=" not in observation
+
+
 def test_desktop_owner_holds_all_state_and_embedded_worker(tmp_path: Path) -> None:
     gateway = _enabled_gateway(tmp_path)
     owner = gateway.desktop

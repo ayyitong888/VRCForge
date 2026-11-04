@@ -352,6 +352,23 @@ class DesktopComputerUseService:
                     1200,
                 )
             return ""
+        document_text = str(result.get("documentText") or "")
+        if len(document_text) > self.OBSERVATION_TEXT_BUDGET:
+            # read_snapshot offsets count the original Python string. The
+            # observation can show less than the returned page, so its cursor
+            # and end flag must describe that displayed prefix, not the page.
+            text_offset = int(result.get("textOffset") or 0)
+            shown_end = text_offset + self.OBSERVATION_TEXT_BUDGET
+            result = {
+                **result,
+                "textOffset": text_offset,
+                "nextTextOffset": shown_end,
+                "documentTextEndReached": False,
+                "summary": (
+                    f"Snapshot text chars {text_offset}–{shown_end} of "
+                    f"{result.get('documentTextLength', text_offset + len(document_text))} captured chars."
+                ),
+            }
         parts: list[str] = []
         if envelope_error and envelope_status != "completed":
             parts.append(f"error={self._text(envelope_error, 1200)}")
@@ -376,12 +393,16 @@ class DesktopComputerUseService:
             raw = str(result.get(key) or "")
             if not raw:
                 continue
-            compact = " ".join(raw.split())
-            shown = compact[: self.OBSERVATION_TEXT_BUDGET]
+            shown = raw[: self.OBSERVATION_TEXT_BUDGET]
             parts.append(f"{key}={shown}")
-            if len(shown) < len(compact):
+            if len(shown) < len(raw):
+                continuation = (
+                    f"{page_hint} textOffset={result['nextTextOffset']}"
+                    if key == "documentText"
+                    else "selection excerpt; document paging offsets do not apply"
+                )
                 notices.append(
-                    f"{key} truncated to {len(shown)} of {len(compact)} chars ({page_hint} textOffset={len(shown)})"
+                    f"{key} truncated to {len(shown)} of {len(raw)} chars ({continuation})"
                 )
         if str(result.get("documentText") or ""):
             # The model must know whether reading is finished; a cap hit must
