@@ -18,7 +18,7 @@ def live_export() -> dict:
                 "renderers": [
                     {
                         "rendererPath": "Scene/Avatar/Face",
-                        "blendshapes": [{"name": "Smile", "currentWeight": 0.0}],
+                        "blendshapes": [{"name": "Smile", "currentWeight": 23.0}],
                     }
                 ],
             }
@@ -90,4 +90,14 @@ def test_preview_accepts_existing_live_target_without_mutating(live_export: dict
     assert result["ok"] is True
     assert result["adjustmentCount"] == 1
     assert result["executionMode"] == "live-unity"
+    assert result["changePreview"] == [
+        {
+            "avatarPath": "Scene/Avatar",
+            "rendererPath": "Scene/Avatar/Face",
+            "blendshapeName": "Smile",
+            "previousWeight": 23.0,
+            "targetWeight": 42.0,
+            "delta": 19.0,
+        }
+    ]
     render_payload.assert_called_once()

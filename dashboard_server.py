@@ -20229,6 +20229,7 @@ def _preview_agent_blendshape_adapter(params: dict[str, Any]) -> dict[str, Any]:
         allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
 
     normalized: list[dict[str, Any]] = []
+    change_preview: list[dict[str, Any]] = []
     invalid: list[str] = []
     for index, raw_item in enumerate(adjustments):
         if not isinstance(raw_item, dict):
@@ -20261,6 +20262,18 @@ def _preview_agent_blendshape_adapter(params: dict[str, Any]) -> dict[str, Any]:
                 "targetWeight": target_weight,
             }
         )
+        if has_project_context:
+            previous_weight = allowed_targets[(renderer_path, blendshape_name)]["currentWeight"]
+            change_preview.append(
+                {
+                    "avatarPath": selected_avatar.avatar_path,
+                    "rendererPath": renderer_path,
+                    "blendshapeName": blendshape_name,
+                    "previousWeight": previous_weight,
+                    "targetWeight": target_weight,
+                    "delta": target_weight - previous_weight,
+                }
+            )
 
     if invalid:
         raise RuntimeError("Invalid blendshape preview adjustments: " + "; ".join(invalid))
@@ -20275,6 +20288,7 @@ def _preview_agent_blendshape_adapter(params: dict[str, Any]) -> dict[str, Any]:
         "exportSource": export_source,
         "executionMode": "mock" if using_mock_execute else "live-unity",
         "applyPayload": payload,
+        **({"changePreview": change_preview} if has_project_context else {}),
     }
 
 
@@ -27922,7 +27936,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_get_asset_info", "When to use: inspect one exact Unity asset by path/GUID for metadata, or read supported Assets UTF-8 shader, preset, .mat, and .anim source with includeText/textSearch; optionally read its adjacent .meta with includeMetaText. Use a literal textSearch and bounded line/byte windows, then continue from returned match/page offsets or read the immutable Resource chunks until complete. When NOT to use: find candidate paths (use find_assets), inspect imported/GPU/runtime shader state (use material/renderer inspection), or dump many unrelated files. Negative example: search a known .shader for one Stencil declaration with textSearch rather than requesting a broad full-text dump.", "read/debug", get_asset_info_sync)
     AGENT_GATEWAY.register_tool("vrcforge_plan_face_tuning", "Generate a face tuning plan without applying it.", "plan/preview", lambda params: AVATAR_TUNING_WORKFLOWS.plan_face_tuning(build_agent_dashboard_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_plan_shader_tuning", "Generate a shader/material tuning plan without applying it.", "plan/preview", lambda params: SHADER_VISION_PROTECTION.generate_shader_material_plan(build_agent_shader_request(params)))
-    AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "Preview blendshape apply payload without writing to Unity.", "plan/preview", AVATAR_TUNING_WORKFLOWS.preview_agent_blendshape_apply)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "When to use: preview exact BlendShape changes without writing; a live project preview returns each target's previous and target weights. When NOT to use: do not apply changes or treat a preview as a completed edit. Negative example: asking for a preview does not authorize modifying the avatar.", "plan/preview", AVATAR_TUNING_WORKFLOWS.preview_agent_blendshape_apply)
     AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", SHADER_VISION_PROTECTION.preview_shader_apply)
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_material_shader_assignment",
