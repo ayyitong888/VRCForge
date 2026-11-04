@@ -4623,6 +4623,12 @@ export default function App() {
               onRemoveQueuedTurn={(turnId) => void removeQueuedTurn(turnId)}
               onSteerQueuedTurn={(turnId) => void steerQueuedTurn(turnId)}
               onSwitchMode={switchMode}
+              onOpenChatById={(chatId) => {
+                const chat = getChatById(chatId);
+                if (!chat) return;
+                openChat(chat);
+                setActiveView("chat");
+              }}
               commands={slashCommands}
               planMode={activeChat?.planMode === true}
               onPlanModeChange={(planMode) => {

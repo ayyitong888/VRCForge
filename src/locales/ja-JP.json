@@ -940,7 +940,10 @@
     "slashDelegate": "範囲を限定した読み取り専用作業をサブ agent に委任",
     "latestMessageActionOnly": "変更できるのは最新のメッセージだけです。",
     "contextUsageCached": "キャッシュ済みコンテキスト: {{value}}",
-    "deletePermanentlyFailed": "チャットの削除に失敗しました。チャットは復元されました。"
+    "deletePermanentlyFailed": "チャットの削除に失敗しました。チャットは復元されました。",
+    "forwardedByAgent": "他の会話のエージェントから転送",
+    "openSourceConversation": "送信元の会話を開く",
+    "openConversation": "会話を開く"
   },
   "agent": {
     "modeLabel": {

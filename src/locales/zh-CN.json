@@ -946,7 +946,10 @@
     "slashDelegate": "把范围明确的只读工作委派给子 agent",
     "latestMessageActionOnly": "只能修改最新一条消息。",
     "contextUsageCached": "缓存上下文：{{value}}",
-    "deletePermanentlyFailed": "删除聊天失败，已恢复聊天。"
+    "deletePermanentlyFailed": "删除聊天失败，已恢复聊天。",
+    "forwardedByAgent": "来自其他对话的代理转发",
+    "openSourceConversation": "打开来源对话",
+    "openConversation": "打开对话"
   },
   "agent": {
     "modeLabel": {

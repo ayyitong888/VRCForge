@@ -2,6 +2,7 @@ import {
   Check,
   ChevronRight,
   Copy,
+  ExternalLink,
   FilePlus2,
   Loader2,
   Pencil,
@@ -59,6 +60,7 @@ export function ConversationCard({
   onSaveOperationAsSkill,
   reopenQuestionId,
   onReopenQuestion,
+  onOpenChatById,
   runtimeActive,
 }: {
   item: Exclude<ConversationItem, { type: "handoff_card" }>;
@@ -90,6 +92,8 @@ export function ConversationCard({
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
   reopenQuestionId?: string;
   onReopenQuestion?: (questionId: string) => void;
+  /** Opens another conversation in this project scope by chat id. */
+  onOpenChatById?: (chatId: string) => void;
   /** Exact session/CID activity from the current runtime ledger, when available. */
   runtimeActive?: boolean;
 }) {
@@ -202,9 +206,26 @@ export function ConversationCard({
       );
     }
 
+    const sourceChatId = item.forwardedFrom?.sourceChatId?.trim() || "";
     return (
-      <div className="group flex min-w-0 justify-end">
+      <div className="group flex min-w-0 justify-end" data-forwarded-by-agent={item.forwardedByAgent ? "true" : undefined}>
         <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
+          {item.forwardedByAgent ? (
+            <div className="flex w-full flex-wrap items-center justify-end gap-1.5 text-[11px] text-muted-foreground/80" data-forwarded-agent-attribution>
+              <span>{t("chat.forwardedByAgent")}</span>
+              {sourceChatId && onOpenChatById ? (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
+                  data-open-conversation={sourceChatId}
+                  onClick={() => onOpenChatById(sourceChatId)}
+                >
+                  <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                  {t("chat.openSourceConversation")}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} /> : null}
           {item.text ? (
             <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
@@ -299,6 +320,7 @@ export function ConversationCard({
       interleavedUsersExpanded,
       onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
       renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads),
+      onOpenChatById,
     });
     return (
       <ChatResourceImageContext.Provider value={liveImageContext}>
@@ -427,6 +449,7 @@ export function ConversationCard({
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
     renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads),
+    onOpenChatById,
     live: runtimeActive ?? false,
     t,
   });

@@ -151,6 +151,7 @@ export function ChatWorkspace({
   onBackgroundGoalCatchUpDismiss,
   onAnswerQuestion,
   onReplyInChat,
+  onOpenChatById,
   focusInput = false,
   onCancelReply,
   pendingReplyQuestionId = "",
@@ -249,6 +250,8 @@ export function ChatWorkspace({
   onBackgroundGoalCatchUpDismiss: () => void;
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   onReplyInChat?: (questionId: string) => void;
+  /** Opens another conversation in this project scope by chat id. */
+  onOpenChatById?: (chatId: string) => void;
   focusInput?: boolean;
   onCancelReply?: () => void;
   pendingReplyQuestionId?: string;
@@ -675,6 +678,7 @@ export function ChatWorkspace({
                 runtimeActive={runtimeRun ? isActiveRuntimeRunStatus(runtimeRun.status) : undefined}
                 reopenQuestionId={item.type === "question_answer" ? pendingQuestionPrompts.find((question) => question.questionId === item.questionId)?.questionId : undefined}
                 onReopenQuestion={onReplyInChat}
+                onOpenChatById={onOpenChatById}
                 interleavedUserMessages={turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined}
                 initialUserContent={initialUser ? (
                   <div data-chat-nav-anchor={conversationItemRenderKey(initialUser, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={initialUser.id} data-turn-initial-user>

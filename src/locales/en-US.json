@@ -946,7 +946,10 @@
     "slashDelegate": "Delegate scoped read-only work to a sub-agent",
     "latestMessageActionOnly": "Only the latest message can be changed.",
     "contextUsageCached": "Cached context: {{value}}",
-    "deletePermanentlyFailed": "Failed to delete the chat. It has been restored."
+    "deletePermanentlyFailed": "Failed to delete the chat. It has been restored.",
+    "forwardedByAgent": "Forwarded by an agent from another conversation",
+    "openSourceConversation": "Open source conversation",
+    "openConversation": "Open conversation"
   },
   "agent": {
     "modeLabel": {

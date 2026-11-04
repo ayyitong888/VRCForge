@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, ChevronRight, CircleStop, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, CircleStop, ExternalLink, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
@@ -63,6 +63,7 @@ export function buildAgentTimelineRows({
   interleavedUsersExpanded = false,
   onInterleavedUsersExpandedChange,
   renderInterleavedUserMessage,
+  onOpenChatById,
   live = false,
   t,
 }: {
@@ -84,6 +85,7 @@ export function buildAgentTimelineRows({
   interleavedUsersExpanded?: boolean;
   onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
   renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
+  onOpenChatById?: (chatId: string) => void;
   live?: boolean;
   t: typeof i18n.t;
 }): ReactNode[] {
@@ -146,6 +148,7 @@ export function buildAgentTimelineRows({
       interleavedUsersExpanded,
       onInterleavedUsersExpandedChange,
       renderInterleavedUserMessage,
+      onOpenChatById,
     },
   );
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
@@ -355,6 +358,7 @@ export function buildDurableTimelineRows(
     interleavedUsersExpanded?: boolean;
     onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
     renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
+    onOpenChatById?: (chatId: string) => void;
   } = {},
 ): ReactNode[] {
   // Lifecycle evidence stays durable; the right sidebar owns its presentation.
@@ -429,7 +433,7 @@ export function buildDurableTimelineRows(
           statusTone="muted"
           openByDefault={!options.live}
         >
-          {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail))}
+          {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail, options.onOpenChatById))}
         </WorkSegmentRow>
       </div>,
     );
@@ -474,7 +478,7 @@ export function buildDurableTimelineRows(
       const detail = takeFullResult(invocation);
       if (invocation.kind === "process") {
         flushToolCalls();
-        processRows.push(renderDirectTimelineInvocation(invocation, detail));
+        processRows.push(renderDirectTimelineInvocation(invocation, detail, options.onOpenChatById));
       } else {
         pendingCalls.push({ invocation, detail });
       }
@@ -553,7 +557,21 @@ function parseTimelineTime(value?: string): number {
   return Number.isFinite(timestamp) ? timestamp : Number.POSITIVE_INFINITY;
 }
 
-function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?: unknown): ReactNode {
+const CONVERSATION_JUMP_TOOLS = ["vrcforge_send_message", "vrcforge_followup_task", "vrcforge_create_conversation"];
+
+function conversationResultChatId(detail: unknown): string {
+  if (!detail || typeof detail !== "object") return "";
+  const record = detail as { chatId?: unknown; result?: { chatId?: unknown } };
+  const direct = typeof record.chatId === "string" ? record.chatId.trim() : "";
+  const nested = record.result && typeof record.result.chatId === "string" ? record.result.chatId.trim() : "";
+  return direct || nested;
+}
+
+function renderDirectTimelineInvocation(
+  invocation: TimelineInvocation,
+  detail?: unknown,
+  onOpenChatById?: (chatId: string) => void,
+): ReactNode {
   if (invocation.kind === "process") {
     const commentary = invocation.summary || invocation.label;
     return (
@@ -580,6 +598,25 @@ function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?:
       detailCard
     >
       <InvocationDetailCard invocation={invocation} detail={detail} />
+      {(() => {
+        const jumpChatId = onOpenChatById
+          && CONVERSATION_JUMP_TOOLS.some((name) => invocation.label.includes(name))
+          ? conversationResultChatId(detail) : "";
+        if (!jumpChatId) return null;
+        return (
+          <div className="px-1 pb-1 pt-0.5">
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              data-open-conversation={jumpChatId}
+              onClick={() => onOpenChatById?.(jumpChatId)}
+            >
+              <ExternalLink className="h-3 w-3" aria-hidden="true" />
+              {i18n.t("chat.openConversation")}
+            </button>
+          </div>
+        );
+      })()}
     </RunRow>
   );
 }
