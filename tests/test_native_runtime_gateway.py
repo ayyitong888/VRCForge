@@ -667,11 +667,15 @@ def test_native_gateway_completion_rejection_is_returned_to_same_call(tmp_path):
     assert result["plan"]["nextStep"] == "done"
 
 
-def test_native_observation_reuses_sensitive_output_boundary(tmp_path):
+def test_native_observation_passes_data_through_and_export_layer_scrubs(tmp_path):
+    """Model face keeps execution data (a454051); the export layer scrubs."""
+    from dashboard_server import _redact_dashboard_text
     gateway, _, _ = setup_gateway(tmp_path, [])
     step = {"tool": "fixture", "status": "executed", "actionId": "action-a",
             "outcome": {"status": "ok", "observed": {"apiKey": "SECRET_SENTINEL"}}}
-    assert "SECRET_SENTINEL" not in json.dumps(gateway.runtime_planner.native_result_observation(step))
+    observation = json.dumps(gateway.runtime_planner.native_result_observation(step))
+    assert "SECRET_SENTINEL" in observation, "model face passes execution data through"
+    assert "SECRET_SENTINEL" not in _redact_dashboard_text(observation)
 
 
 def test_native_tool_time_steer_reaches_immediate_next_request(tmp_path):

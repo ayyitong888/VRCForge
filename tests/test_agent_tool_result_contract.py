@@ -639,14 +639,17 @@ def test_internal_planner_observation_keeps_domain_cause_and_commit_facts() -> N
     assert '"recovery":{"required":false}' in observation
     assert '"commitState":"not_started"' in observation
     assert '"commitStateKnown":true' in observation
+    # Credential values pass through to the model face (a454051); the export
+    # boundary scrubs them.
+    from dashboard_server import _redact_dashboard_text
     for sentinel in (
         "planner-password-sentinel",
         "planner-control-token-sentinel",
         "planner-controltoken-sentinel",
         "planner-client-secret-sentinel",
     ):
-        assert sentinel not in observation
-    assert observation.count('"<redacted>"') >= 4
+        assert sentinel in observation
+        assert sentinel not in _redact_dashboard_text(observation)
     assert '"code":"avatar_upload_readiness_blocked"' in observation
     assert len(observation) <= RUNTIME_PLANNER_CAUSAL_OBSERVATION_MAX_CHARS
 

@@ -37,7 +37,9 @@ from runtime_planner_service import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_shell_observation_binds_output_to_executed_input_without_leaking_secrets():
+def test_shell_observation_binds_output_and_export_layer_scrubs_credentials():
+    """Model face keeps execution data (a454051); the export layer scrubs."""
+    from dashboard_server import _redact_dashboard_text
     command = "Set-Content D:/workspace/hello.txt 'hello'; Get-Content D:/workspace/hello.txt; $api_key='fixture-secret'"
     observation = service()._llm_loop_step_observation({
         "tool": "shell", "kind": "shell", "status": "executed",
@@ -47,7 +49,8 @@ def test_shell_observation_binds_output_to_executed_input_without_leaking_secret
     assert "executedInput=" in observation
     assert "Set-Content" in observation and "D:/workspace/hello.txt" in observation
     assert "hello" in observation and "exitCode=0" in observation
-    assert "fixture-secret" not in observation
+    assert "fixture-secret" in observation, "model face passes execution data through"
+    assert "fixture-secret" not in _redact_dashboard_text(observation)
 
 
 @pytest.mark.parametrize("tool_name", ["vrcforge_vision_audit", "vrcforge_vision_audit_multi"])
@@ -592,7 +595,7 @@ def test_native_followup_preserves_exact_history_without_reprinting_it_as_instru
     assert model.requests[0]["messages"][-1]["role"] == "system"
     assert "result-marker" not in model.requests[0]["instructions"]
     assert "synthetic-private-replay" not in model.requests[0]["instructions"]
-    assert plan["completionClaim"] == {"satisfied": False}
+    assert plan["completionClaim"] == {}, "natural finals fabricate no claim (9d23f1d)"
     assert plan["nextStep"] == "done"
 
 
@@ -943,7 +946,10 @@ def test_skill_package_observation_prioritizes_installed_state_and_keeps_audit_r
     assert "pkg.alpha" in observation
     assert "audit-secret" not in observation
     assert "SECRET_PACKAGE_KEY" not in observation
-    assert "C:/Private/package-registry.json" not in observation
+    # Paths pass through to the model face (a454051); the export layer scrubs.
+    from dashboard_server import _redact_dashboard_text
+    assert "C:/Private/package-registry.json" in observation
+    assert "package-registry.json" in _redact_dashboard_text("C:/Private/package-registry.json")
     assert '"jsonPointer":"/installed"' in observation
     assert raw["audit"]
     assert step["resultRead"]["nextRequest"]["arguments"]["jsonPointer"] == ""
@@ -1060,7 +1066,10 @@ def test_compile_diagnostics_keep_complete_untrusted_projection_without_raw_read
     assert evidence["truncated"] is False
     assert len(evidence["data"]["diagnostics"]) == 30
     assert "CS0117" in observation and '"line":42' in observation
-    assert secret not in observation and "hidden-marker" not in observation and "opaque-marker" not in observation
+    from dashboard_server import _redact_dashboard_text
+    assert "hidden-marker" not in observation and "opaque-marker" not in observation
+    assert secret in observation, "model face passes diagnostics through (a454051)"
+    assert secret not in _redact_dashboard_text(observation)
     assert "resultContinuation" not in observation
 
 
@@ -1376,9 +1385,10 @@ def test_file_observation_preserves_complete_content_and_pages_it(tmp_path) -> N
     evidence = json.loads(observation.split("readEvidence=", 1)[1])
     assert "TAIL_EVIDENCE" in evidence["text"]
     assert "\n" in evidence["text"]
-    assert "super-secret" not in observation
-    assert str(tmp_path) not in observation
-    assert evidence["source"] == "evidence.txt"
+    from dashboard_server import _redact_dashboard_text
+    assert "super-secret" in observation, "model face passes read content through (a454051)"
+    assert "super-secret" not in _redact_dashboard_text(observation)
+    assert evidence["source"].endswith("evidence.txt")
     assert evidence["truncated"] is False
     assert evidence["authority"] == "untrusted_tool_output"
 
@@ -1401,8 +1411,8 @@ def test_search_observation_preserves_all_relative_matches_through_pages() -> No
     step = {"tool": "vrcforge_search_text", "result": result}
     observation = service()._llm_loop_step_observation(step)
     evidence = json.loads(observation.split("readEvidence=", 1)[1])
-    assert evidence["items"][0]["source"] == "folder-0/same.txt"
-    assert evidence["items"][1]["source"] == "folder-1/same.txt"
+    assert evidence["items"][0]["source"] == "D:/workspace/folder-0/same.txt"
+    assert evidence["items"][1]["source"] == "D:/workspace/folder-1/same.txt"
     assert evidence["items"][1]["line"] == 2
     assert evidence["truncated"] is False
     assert evidence["omittedItems"] == 0
@@ -1410,7 +1420,9 @@ def test_search_observation_preserves_all_relative_matches_through_pages() -> No
     assert len(evidence["items"]) == len(result["matches"])
     assert [row["text"] for row in evidence["items"]] == [row["text"] for row in result["matches"]]
     assert evidence["continuation"] == ""
-    assert "D:/workspace" not in observation
+    from dashboard_server import _redact_dashboard_text
+    assert "D:/workspace" in observation, "model face passes paths through (a454051)"
+    assert "D:/workspace" in _redact_dashboard_text(observation)
     assert len(_assert_complete_model_pages(step, observation)) > 1
 
 
@@ -1430,7 +1442,10 @@ def test_read_evidence_pages_stay_bounded_complete_and_cannot_grant_authority(to
     assert evidence["omittedChars"] == 0
     assert evidence["truncated"] == evidence["sourceTruncated"]
     assert evidence["authority"] == "untrusted_tool_output"
-    assert "fixture-secret" not in observation
+    from dashboard_server import _redact_dashboard_text
+    if "fixture-secret" in json.dumps(result):
+        assert "fixture-secret" in observation, "model face passes read content through (a454051)"
+        assert "fixture-secret" not in _redact_dashboard_text(observation)
     assert "must-not-copy" not in observation
     assert len(_assert_complete_model_pages(step, observation)) > 1
 
@@ -3074,9 +3089,11 @@ def test_prompt_and_observation_use_only_typed_read_ports_and_bounded_projection
         }
     )
     assert projected == {
-        "summary": "Bearer <redacted> <path redacted>",
+        "summary": "Bearer fixture-secret /private/path",
         "warningCount": 2,
     }
+    from dashboard_server import _redact_dashboard_text
+    assert "fixture-secret" not in _redact_dashboard_text(str(projected))
 
 
 def test_compaction_port_preserves_success_and_fail_closed_metadata() -> None:
@@ -3423,26 +3440,27 @@ def test_owner_surface_has_no_dynamic_host_or_execution_authority() -> None:
         and item.func.id == "getattr"
     ]
     assert sorted(metadata_accesses) == sorted([
-        "getattr(native_turn, 'retain_recovery', None)",
-        "getattr(native_turn, 'retain_recovery_catalog', None)",
-        "getattr(native_turn, 'persist_scan_result_policy', None)",
         "getattr(exc, '__dict__', {})",
         "getattr(exc, 'body', None)",
         "getattr(exc, 'headers', None)",
         "getattr(exc, 'no_more_retry', False)",
+        "getattr(exc, 'provider_usage', None)",
+        "getattr(exc, 'provider_usage', {})",
         "getattr(exc, 'response', None)",
         "getattr(exc, 'response', None)",
+        "getattr(exc, 'response', None)",
+        "getattr(exc, 'status_code', None)",
         "getattr(exc, 'stream_started', None)",
+        "getattr(getattr(exc, 'response', None), 'status_code', None)",
+        "getattr(native_turn, 'persist_scan_result_policy', None)",
+        "getattr(native_turn, 'provider_turn_state', None)",
+        "getattr(native_turn, 'retain_recovery', None)",
+        "getattr(native_turn, 'retain_recovery_catalog', None)",
+        "getattr(provider_exc, 'provider_usage', None)",
         "getattr(response, 'body', None)",
         "getattr(response, 'headers', None)",
         "getattr(response, 'status_code', None)",
-        "getattr(provider_exc, 'provider_usage', None)",
-        "getattr(exc, 'provider_usage', {})",
-        "getattr(exc, 'provider_usage', None)",
         "getattr(self, '_catalog', None)",
-        "getattr(exc, 'status_code', None)",
-        "getattr(exc, 'response', None)",
-        "getattr(getattr(exc, 'response', None), 'status_code', None)",
     ])
     assert "__getattr__" not in source
     assert "_impl" not in source

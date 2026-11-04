@@ -361,11 +361,15 @@ def test_history_log_discovery_read_and_receipt_use_registered_handler(tmp_path:
     assert listing["ok"] and listing["result"]["files"] == [log.name]
     history = call({"source": "disk", "file": listing["result"]["files"][0]})
     assert history["ok"] and history["result"]["logs"][0]["message"] == "historical startup"
-    assert "fixture-secret-token" not in json.dumps(history)
+    # The log read passes content through to the model face (a454051); the
+    # export boundary scrubs credentials.
+    from dashboard_server import _redact_dashboard_text
+    assert "fixture-secret-token" in json.dumps(history)
+    assert "fixture-secret-token" not in _redact_dashboard_text(json.dumps(history))
     receipt = _external_mcp_call(app, "resources/read", {"uri": history["operationResource"]}, bearer=bearer)
     document = json.loads(receipt["result"]["contents"][0]["text"])
     assert document["data"]["result"]["result"]["logs"] == history["result"]["logs"]
-    assert "fixture-secret-token" not in json.dumps(document)
+    assert "fixture-secret-token" not in _redact_dashboard_text(json.dumps(document))
 
 
 def test_gesture_manager_and_editor_state_atoms_are_lazy_blocked_with_exact_schemas() -> None:

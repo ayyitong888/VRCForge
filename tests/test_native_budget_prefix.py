@@ -28,7 +28,7 @@ def test_runtime_budget_is_host_only_and_native_request_is_unchanged():
     for key in ('instructions', 'tools'):
         assert json.dumps(a[key], ensure_ascii=False) == json.dumps(b[key], ensure_ascii=False)
         assert a[key] == unlimited[key]
-    assert set(unlimited) == {'instructions', 'messages', 'tools'}
+    assert set(unlimited) == {'instructions', 'messages', 'tools', '_requestMetadata'}
     assert a['messages'][:-1] == b['messages'][:-1] == unlimited['messages'][:-1] == before
     assert unlimited['messages'][-1]['role'] == 'system'
     assert 'modelTurnBudget' not in json.loads(unlimited['messages'][-1]['content'].split(': ', 1)[1])
