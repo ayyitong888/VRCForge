@@ -838,8 +838,8 @@ namespace VRCForge.Editor
 
         private static T ResolveSceneComponent<T>(string path) where T : Component
         {
-            var normalized = AvatarPrimitiveCrudCore.NormalizePath(path);
-            if (string.IsNullOrWhiteSpace(normalized))
+            var normalized = ComponentCrudCore.NormalizePath(path);
+            if (string.IsNullOrEmpty(normalized))
             {
                 return null;
             }
@@ -847,7 +847,7 @@ namespace VRCForge.Editor
             foreach (var item in Resources.FindObjectsOfTypeAll<T>())
             {
                 if (item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item)
-                    && AvatarPrimitiveCrudCore.NormalizePath(AvatarPrimitiveCrudCore.GetTransformPath(item.transform)) == normalized)
+                    && ComponentCrudCore.NormalizePath(AvatarPrimitiveCrudCore.GetTransformPath(item.transform)) == normalized)
                 {
                     matches.Add(item);
                 }
@@ -1028,7 +1028,7 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed("clipPath is required.");
                 }
-                var bindingPath = AvatarPrimitiveCrudCore.NormalizePath(@params["bindingPath"]?.ToString() ?? @params["objectPath"]?.ToString() ?? "");
+                var bindingPath = ComponentCrudCore.NormalizePath(@params["bindingPath"]?.ToString() ?? @params["objectPath"]?.ToString() ?? "");
                 var componentTypeText = @params["componentType"]?.ToString() ?? "GameObject";
                 var propertyName = (@params["propertyName"]?.ToString() ?? "").Trim();
                 if (string.IsNullOrWhiteSpace(propertyName))
@@ -1062,8 +1062,8 @@ namespace VRCForge.Editor
                 if (action == "retarget_curve")
                 {
                     var sourceBindingPathText = @params["sourceBindingPath"]?.ToString();
-                    if (string.IsNullOrWhiteSpace(sourceBindingPathText)) sourceBindingPathText = bindingPath;
-                    var sourceBindingPath = AvatarPrimitiveCrudCore.NormalizePath(sourceBindingPathText);
+                    if (sourceBindingPathText == null) sourceBindingPathText = bindingPath;
+                    var sourceBindingPath = ComponentCrudCore.NormalizePath(sourceBindingPathText);
                     var sourceComponentTypeText = @params["sourceComponentType"]?.ToString();
                     if (string.IsNullOrWhiteSpace(sourceComponentTypeText)) sourceComponentTypeText = componentTypeText;
                     var sourceType = AvatarPrimitiveCrudCore.FindType(sourceComponentTypeText)
@@ -1615,7 +1615,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Return the menu-management plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Optional avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
             [VRCForgeInput("Asset directory for a newly created root or submenu.", IsRequired = false)] public string assetDir { get; set; } = "";
-            [VRCForgeInput("Optional slash-delimited submenu path.", IsRequired = false)] public string menuPath { get; set; } = "";
+            [VRCForgeInput("Submenu control-name hierarchy from the Avatar root expression menu, e.g. Clothing/Casual; empty means root. Not an Assets/... asset path. Use subMenuAssetPath to assign a submenu asset.", IsRequired = false)] public string menuPath { get; set; } = "";
             [VRCForgeInput("Existing or new control name.", IsRequired = false)] public string controlName { get; set; } = "";
             [VRCForgeInput("Optional existing control index.", IsRequired = false)] public int? controlIndex { get; set; }
             [VRCForgeInput("Optional new control name.", IsRequired = false)] public string newName { get; set; } = "";
@@ -1776,7 +1776,7 @@ namespace VRCForge.Editor
                     current = existing.subMenu;
                     continue;
                 }
-                if (action != "create") throw new InvalidOperationException($"Submenu not found: {part}");
+                if (action != "create") throw new InvalidOperationException($"Submenu control '{part}' not found in menuPath '{menuPath}'. menuPath is a control-name hierarchy from the root menu (for example Clothing/Casual), not an Assets/... asset path. Read the Avatar expression menu to select an existing submenu, or use an empty menuPath for the root.");
                 GeneratedAssetPaths.ReserveAssetPath($"{assetDir}/{AvatarPrimitiveCrudCore.Sanitize(part, "Menu")}_SubMenu.asset", reserved, GeneratedAssetPaths.UniqueAssetPath);
                 current = null;
             }
@@ -1821,7 +1821,7 @@ namespace VRCForge.Editor
                 }
                 if (!create)
                 {
-                    throw new InvalidOperationException($"Submenu not found: {part}");
+                    throw new InvalidOperationException($"Submenu control '{part}' not found in menuPath '{menuPath}'. menuPath is a control-name hierarchy from the root menu (for example Clothing/Casual), not an Assets/... asset path. Read the Avatar expression menu to select an existing submenu, or use an empty menuPath for the root.");
                 }
                 AvatarPrimitiveCrudCore.EnsureAssetFolder(assetDir);
                 var sub = ScriptableObject.CreateInstance<VRCExpressionsMenu>();

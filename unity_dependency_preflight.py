@@ -40,15 +40,26 @@ def _detect_required_packages(
     project_path: Path,
     package_ids: list[str],
     detect_package: Callable[[Path, list[str]], dict[str, Any]],
-) -> tuple[bool, dict[str, Any]]:
+) -> tuple[bool | None, dict[str, Any]]:
     """Detect every required package while preserving one representative result."""
 
     infos = [detect_package(project_path, [package_id]) for package_id in package_ids]
-    installed = bool(infos) and all(bool(info.get("installed")) for info in infos)
-    representative = next(
+    installed = (
+        True if infos and all(info.get("installed") is True for info in infos)
+        else False if any(info.get("installed") is False for info in infos)
+        else None
+    )
+    representative = dict(next(
         (info for info in infos if info.get("installed")),
         infos[0] if infos else {},
-    )
+    ))
+    read_errors = []
+    for info in infos:
+        for error in info.get("readErrors") or []:
+            if error not in read_errors:
+                read_errors.append(error)
+    if read_errors:
+        representative["readErrors"] = read_errors
     return installed, representative
 
 
@@ -79,7 +90,7 @@ def build_unity_dependency_preflight_report(
     metadata_readable = _unity_package_metadata_is_readable(project_path)
     for key, title, package_ids, _blocker_code, guidance in specs:
         installed, info = _detect_required_packages(project_path, list(package_ids), detect_package)
-        package_status = "installed" if installed else "missing" if metadata_readable else "unknown"
+        package_status = "installed" if installed else "missing" if installed is False and metadata_readable else "unknown"
         check = {
             "status": package_status,
             "title": title,
@@ -90,6 +101,8 @@ def build_unity_dependency_preflight_report(
             "source": str(info.get("source") or ""),
             "guidance": guidance,
         }
+        if info.get("readErrors"):
+            check["readErrors"] = info["readErrors"]
         if package_status == "unknown":
             check["message"] = "Package metadata is missing or unreadable; dependency absence was not asserted."
         elif package_status == "missing":

@@ -1,9 +1,41 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import pytest
 
 import dashboard_server
 from agent_approval_transactions import _gesture_manager_entry_is_pending
+
+
+def test_gesture_status_keeps_spaced_and_plain_avatar_bindings_distinct(monkeypatch):
+    paths = ["Scene/Avatar ", "Scene/Avatar"]
+    calls = []
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda *_: SimpleNamespace())
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", lambda settings, tool, arguments, **kwargs:
+        calls.append(arguments) or {"gestureManager": {"managers": [{"avatarPath": path} for path in paths]}})
+    monkeypatch.setattr(dashboard_server, "extract_tool_result_payload", lambda value: value)
+    for path in paths:
+        result = dashboard_server.gesture_manager_status_sync({"avatarPath": path})
+        assert calls[-1]["avatarPath"] == path
+        assert result["managerCount"] == 1
+        assert result["managers"][0]["avatarPath"] == path
+
+
+@pytest.mark.parametrize("manager_path", ["Scene/Avatar ", "Scene/Avatar"])
+def test_pending_recovery_requires_exact_spaced_avatar_path(manager_path):
+    from agent_approval_transactions import AgentApprovalTransactionService
+    reads = []
+    owner = SimpleNamespace(
+        _project_lock_key=lambda value: value,
+        _ports=SimpleNamespace(checkpoint=SimpleNamespace(
+            active_apply_recoveries=lambda: reads.append(True) or [])),
+    )
+    result = AgentApprovalTransactionService.reconcile_gesture_manager_pending_recovery(owner,
+        {"projectPath": "D:/Project", "avatarPath": "Scene/Avatar "},
+        {"ok": True, "isPlayMode": True, "enterPlayModePending": False,
+         "managers": [{"avatarPath": manager_path, "moduleConnected": True}]})
+    assert result == []
+    assert reads == ([True] if manager_path == "Scene/Avatar " else [])
 
 
 def test_gesture_manager_status_forwards_bounded_parameter_selection(monkeypatch) -> None:
@@ -164,7 +196,8 @@ def test_gesture_manager_pending_real_mcp_envelope_keeps_scheduled_commit_state(
     ) is True
 
 
-def test_gesture_manager_enter_play_mode_finalizer_returns_only_connection_identity(monkeypatch) -> None:
+@pytest.mark.parametrize("avatar_path", ["Scene/FinalAvatar", "Scene/FinalAvatar "])
+def test_gesture_manager_enter_play_mode_finalizer_returns_only_connection_identity(monkeypatch, avatar_path) -> None:
     monkeypatch.setattr(
         dashboard_server,
         "gesture_manager_status_sync",
@@ -177,7 +210,7 @@ def test_gesture_manager_enter_play_mode_finalizer_returns_only_connection_ident
             "managers": [
                 {
                     "managerPath": "Scene/GestureManager",
-                    "avatarPath": "Scene/FinalAvatar",
+                    "avatarPath": avatar_path,
                     "moduleConnected": True,
                     "moduleType": "BlackStartX.GestureManager.Editor.Modules.Vrc3Module",
                     "menuTree": {"name": "must-not-leak"},
@@ -188,9 +221,9 @@ def test_gesture_manager_enter_play_mode_finalizer_returns_only_connection_ident
     )
 
     result = dashboard_server.gesture_manager_enter_play_mode_finalize(
-        {"projectPath": "D:/Project", "avatarPath": "Scene/FinalAvatar"},
+        {"projectPath": "D:/Project", "avatarPath": avatar_path},
         {},
-        {"ok": True, "avatarPath": "Scene/FinalAvatar"},
+        {"ok": True, "avatarPath": avatar_path},
     )
 
     expected = {
@@ -200,7 +233,7 @@ def test_gesture_manager_enter_play_mode_finalizer_returns_only_connection_ident
         "packageVersion": "3.9.9",
         "managerCount": 1,
         "managerPath": "Scene/GestureManager",
-        "avatarPath": "Scene/FinalAvatar",
+        "avatarPath": avatar_path,
         "moduleConnected": True,
         "moduleType": "BlackStartX.GestureManager.Editor.Modules.Vrc3Module",
         "persistent": False,

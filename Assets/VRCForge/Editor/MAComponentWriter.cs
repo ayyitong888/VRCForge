@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Serialization;
 using UnityEditor;
 using UnityEngine;
 using VRCForge.Core.MCP;
@@ -39,7 +40,7 @@ namespace VRCForge.Editor
             public string avatarPath { get; set; } = "";
             [VRCForgeInput("Component reference member names mapped to scene or asset paths.", IsRequired = false)]
             public JObject references { get; set; } = new JObject();
-            [VRCForgeInput("Writable scalar or enum member names mapped to values.", IsRequired = false)]
+            [VRCForgeInput("Writable member names mapped to scalar, enum, object or array values. Inspect the component's fields schema first; nested AvatarObjectReference uses {referencePath: scene path}, and Unity object references use path strings.", IsRequired = false)]
             public JObject fields { get; set; } = new JObject();
             [VRCForgeInput("Report the add plan without modifying the scene.", IsRequired = false)]
             public bool? preview { get; set; } = false;
@@ -80,9 +81,9 @@ namespace VRCForge.Editor
             try
             {
                 @params = @params ?? new JObject();
-                var gameObjectPath = (@params["gameObjectPath"]?.ToString() ?? @params["targetPath"]?.ToString() ?? string.Empty).Trim();
+                var gameObjectPath = @params["gameObjectPath"]?.ToString() ?? @params["targetPath"]?.ToString() ?? string.Empty;
                 var componentTypeInput = (@params["componentType"]?.ToString() ?? string.Empty).Trim();
-                var avatarPath = (@params["avatarPath"]?.ToString() ?? string.Empty).Trim();
+                var avatarPath = @params["avatarPath"]?.ToString() ?? string.Empty;
                 var preview = @params["preview"] != null && @params["preview"].ToObject<bool>();
                 var allowDuplicate = @params["allowDuplicate"] != null && @params["allowDuplicate"].ToObject<bool>();
                 var action = (@params["action"]?.ToString() ?? "add").Trim().ToLowerInvariant();
@@ -408,9 +409,9 @@ namespace VRCForge.Editor
                 @params = @params ?? new JObject();
                 var gameObjectPath = (@params["gameObjectPath"]?.ToString()
                     ?? @params["targetPath"]?.ToString()
-                    ?? string.Empty).Trim();
+                    ?? string.Empty);
                 var componentTypeInput = (@params["componentType"]?.ToString() ?? string.Empty).Trim();
-                var avatarPath = (@params["avatarPath"]?.ToString() ?? string.Empty).Trim();
+                var avatarPath = @params["avatarPath"]?.ToString() ?? string.Empty;
                 PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
 
                 if (string.IsNullOrWhiteSpace(gameObjectPath))
@@ -493,7 +494,9 @@ namespace VRCForge.Editor
                         count = components.Length,
                         type = componentType.FullName,
                         sceneDirty = targetScene.IsValid() && targetScene.isDirty,
-                        references
+                        references,
+                        fields = DescribeWritableFields(componentType),
+                        nextAction = "Use fields to discover writable member names and nested input shapes. Read a current value with vrcforge_get_property using propertyPath=member name before updating it; arrays supplied to fields replace that member's whole array."
                     });
             }
             catch (Exception ex)
@@ -793,6 +796,84 @@ namespace VRCForge.Editor
                 $"AvatarObjectReference field '{fieldName}' has no usable Set method or referencePath field.");
         }
 
+        // Describe the same Json.NET conversion contract used by ConvertScalar.
+        // References use our existing path converter rather than Unity object internals.
+        private static readonly IContractResolver FieldContractResolver = new DefaultContractResolver();
+
+        private static JObject DescribeWritableFields(Type componentType)
+        {
+            var fields = new JObject();
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly;
+            for (var type = componentType; type != null && type.Namespace != null
+                && type.Namespace.StartsWith("nadena.dev.", StringComparison.Ordinal); type = type.BaseType)
+            {
+                foreach (var member in type.GetFields(flags).Cast<MemberInfo>()
+                    .Concat(type.GetProperties(flags).Where(p => p.CanWrite && p.GetIndexParameters().Length == 0)))
+                {
+                    if (member is FieldInfo field && (field.IsInitOnly || field.IsLiteral)) continue;
+                    if (fields[member.Name] == null)
+                        fields[member.Name] = DescribeFieldInput(GetMemberType(member), new HashSet<Type>());
+                }
+            }
+            return fields;
+        }
+
+        private static JObject DescribeFieldInput(Type type, HashSet<Type> visiting)
+        {
+            var schema = new JObject { ["clrType"] = type.FullName };
+            if (type.Name == "AvatarObjectReference")
+            {
+                schema["type"] = "object";
+                schema["properties"] = new JObject { ["referencePath"] = new JObject {
+                    ["type"] = "string", ["description"] = "Exact scene hierarchy path or path relative to avatarPath." } };
+                schema["required"] = new JArray("referencePath");
+                return schema;
+            }
+            if (typeof(UnityEngine.Object).IsAssignableFrom(type))
+            {
+                schema["type"] = "string";
+                schema["description"] = typeof(GameObject).IsAssignableFrom(type) || typeof(Component).IsAssignableFrom(type)
+                    ? "Exact scene hierarchy path." : "Exact project asset path, e.g. Assets/Materials/Body.mat.";
+                return schema;
+            }
+            if (type.IsEnum)
+            {
+                schema["type"] = "string";
+                schema["enum"] = new JArray(Enum.GetNames(type));
+                return schema;
+            }
+            var contract = FieldContractResolver.ResolveContract(type);
+            if (contract is JsonPrimitiveContract || contract is JsonStringContract)
+            {
+                schema["type"] = type == typeof(bool) ? "boolean" : type == typeof(string) || type == typeof(char)
+                    ? "string" : type == typeof(float) || type == typeof(double) || type == typeof(decimal) ? "number" : "integer";
+                return schema;
+            }
+            if (!visiting.Add(type))
+            {
+                schema["description"] = "Recursive value of the indicated clrType.";
+                return schema;
+            }
+            try
+            {
+                if (contract is JsonArrayContract array)
+                {
+                    schema["type"] = "array";
+                    schema["items"] = DescribeFieldInput(array.CollectionItemType, visiting);
+                }
+                else if (contract is JsonObjectContract obj)
+                {
+                    schema["type"] = "object";
+                    var properties = new JObject();
+                    foreach (var property in obj.Properties.Where(p => p.Writable && !p.Ignored))
+                        properties[property.PropertyName] = DescribeFieldInput(property.PropertyType, visiting);
+                    schema["properties"] = properties;
+                }
+                return schema;
+            }
+            finally { visiting.Remove(type); }
+        }
+
         // --- reflection helpers ------------------------------------------------------
 
         private static MemberInfo ResolveMember(Type type, string memberName)
@@ -942,7 +1023,7 @@ namespace VRCForge.Editor
 
         private static string NormalizePath(string value)
         {
-            return (value ?? string.Empty).Replace("\\", "/").Trim().Trim('/');
+            return (value ?? string.Empty).Replace("\\", "/").Trim('/');
         }
 
         private static Type FindType(string fullName)
@@ -973,7 +1054,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_inspect_modular_avatar_component",
-        Summary = "Read whether a specific Modular Avatar component is present on a scene object, its exact count/type, scene dirty state, and AvatarObjectReference stored/resolved paths without writing.",
+        Summary = "when-to-use: inspect a specific Modular Avatar component's presence, count/type, scene dirty state, references and writable nested field shapes before configuring it. when-NOT-to-use: this only reads; for example, do not use inspection to apply a Bindings or Objects change.",
         Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class MAComponentInspector

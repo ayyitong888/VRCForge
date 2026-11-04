@@ -52,6 +52,7 @@ def _program(product: str, shared: str) -> str:
     shared_resolver = _public(shared, "internal static VRCAvatarDescriptor ResolveAvatarDescriptor")
     shared_path = _public(shared, "internal static string GetTransformPath")
     shared_normalize = _public(shared, "internal static string NormalizePath")
+    component_normalize = _public((ROOT / "Assets/VRCForge/Editor/Generic/UnityComponentCrud.cs").read_text(encoding="utf-8-sig"), "internal static string NormalizePath")
     methods = []
     for key, relative in WRITERS.items():
         body = _public(product[key], "private static VRCAvatarDescriptor ResolveAvatarDescriptor")
@@ -83,6 +84,7 @@ namespace VRC.SDK3.Avatars.Components {{
     }}
 }}
 public static class AvatarAuthoringCrudCore {{ {shared_resolver} {shared_path} {shared_normalize} }}
+public static class ComponentCrudCore {{ {component_normalize} }}
 {''.join(methods)}
 public static class Probe {{
     static int failures;

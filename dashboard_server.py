@@ -22740,7 +22740,7 @@ def run_unity_artifact_scan_sync(
         or params.get("avatar_path")
         or params.get("avatarPath")
         or ""
-    ).strip()
+    )
     output_path = build_dashboard_artifact_path(prefix, avatar_path, "json")
     # Never let a previous scan for the same avatar path masquerade as the
     # current Unity response when the tool fails to refresh its output file.
@@ -22937,7 +22937,7 @@ def scan_inbound_reference_closure_sync(params: dict[str, Any]) -> dict[str, Any
             )
         selectors.append(
             {
-                "objectPath": str(raw.get("object_path") or raw.get("objectPath") or "").strip(),
+                "objectPath": str(raw.get("object_path") or raw.get("objectPath") or ""),
                 "componentType": str(raw.get("component_type") or raw.get("componentType") or "").strip(),
                 "componentIndex": component_index,
             }
@@ -22957,8 +22957,8 @@ def scan_inbound_reference_closure_sync(params: dict[str, Any]) -> dict[str, Any
             "maxResults must be between 1 and 5000.",
         )
     request = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
-        "targetPaths": [str(item).strip() for item in raw_targets if str(item).strip()],
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or ""),
+        "targetPaths": [str(item) for item in raw_targets if str(item)],
         "targetComponentSelectors": selectors,
         "includeProjectAssets": _coerce_gateway_bool(
             params.get("include_project_assets", params.get("includeProjectAssets")), True
@@ -23543,7 +23543,7 @@ def restore_safe_backup_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 def toggle_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
-    object_path = str(params.get("object_path") or params.get("objectPath") or "").strip()
+    object_path = str(params.get("object_path") or params.get("objectPath") or "")
     if not object_path:
         return {"ok": False, "error": "objectPath is required."}
     if "active" not in params:
@@ -23571,10 +23571,10 @@ def build_inspect_modular_avatar_component_request(params: dict[str, Any]) -> di
             or params.get("target_path")
             or params.get("targetPath")
             or ""
-        ).strip(),
+        ),
         "componentType": str(params.get("component_type") or params.get("componentType") or "").strip(),
     }
-    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "")
     if avatar_path:
         request["avatarPath"] = avatar_path
     return request
@@ -24856,7 +24856,7 @@ def build_component_target(params: dict[str, Any]) -> tuple[str, str]:
             or params.get("object_path")
             or params.get("objectPath")
             or ""
-        ).strip(),
+        ),
         str(params.get("component_type") or params.get("componentType") or "").strip(),
     )
 
@@ -25122,7 +25122,7 @@ def gesture_manager_status_sync(params: dict[str, Any]) -> dict[str, Any]:
                 {
                     "statusOnly": True,
                     "requirePlayMode": False,
-                    "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+                    "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or ""),
                     "includeGestureManagerParameters": include_parameters,
                     "gestureManagerParameterNames": parameter_names,
                     "gestureManagerParameterPrefix": parameter_prefix,
@@ -25147,12 +25147,12 @@ def gesture_manager_status_sync(params: dict[str, Any]) -> dict[str, Any]:
             "commitStateKnown": True,
             "captureStatus": payload,
         }
-    requested_avatar = str(params.get("avatar_path") or params.get("avatarPath") or "").strip().strip("/")
+    requested_avatar = str(params.get("avatar_path") or params.get("avatarPath") or "").strip("/")
     if requested_avatar:
         managers = [
             item for item in status.get("managers", [])
             if isinstance(item, dict)
-            and str(item.get("avatarPath") or "").strip().strip("/") == requested_avatar
+            and str(item.get("avatarPath") or "").strip("/") == requested_avatar
         ]
         status = {**status, "managerCount": len(managers), "detected": bool(managers), "managers": managers}
     result = {"ok": True, **status}
@@ -25284,7 +25284,7 @@ def gesture_manager_set_parameter_sync(params: dict[str, Any]) -> dict[str, Any]
             "commitState": "not_started",
         }
     request = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or ""),
         "parameterName": parameter_name,
         "value": params.get("value"),
     }
@@ -25338,7 +25338,7 @@ def gesture_manager_enter_play_mode_sync(params: dict[str, Any]) -> dict[str, An
 
     params = params or {}
     request = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or ""),
     }
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
@@ -25371,7 +25371,7 @@ def gesture_manager_enter_play_mode_finalize(
 
     avatar_path = str(
         arguments.get("avatar_path") or arguments.get("avatarPath") or initial.get("avatarPath") or ""
-    ).strip().strip("/")
+    ).strip("/")
     deadline = time.monotonic() + GESTURE_MANAGER_ENTER_PLAY_MODE_TIMEOUT_SECONDS
     last_status: dict[str, Any] = {}
     last_exception: UnityMcpError | None = None
@@ -25429,7 +25429,7 @@ def gesture_manager_enter_play_mode_finalize(
                 and item.get("moduleConnected") is True
                 and (
                     not avatar_path
-                    or str(item.get("avatarPath") or "").strip().strip("/") == avatar_path
+                    or str(item.get("avatarPath") or "").strip("/") == avatar_path
                 )
             ]
             if last_status.get("ok") is not False and last_status.get("isPlayMode") is True and len(connected) == 1:
@@ -25512,7 +25512,7 @@ def select_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
         or params.get("gameObjectPath")
         or params.get("objectPath")
         or ""
-    ).strip()
+    )
     if not object_path:
         return {
             "ok": False,
@@ -25729,11 +25729,11 @@ def remap_skinned_mesh_bone_sync(params: dict[str, Any]) -> dict[str, Any]:
             failure_phase="argument_validation",
         )
     request = {
-        "gameObjectPath": str(params["gameObjectPath"]).strip(),
+        "gameObjectPath": str(params["gameObjectPath"]),
         "componentIndex": component_index,
         "boneIndex": bone_index,
-        "expectedCurrentBonePath": str(params["expectedCurrentBonePath"]).strip(),
-        "targetBonePath": str(params["targetBonePath"]).strip(),
+        "expectedCurrentBonePath": str(params["expectedCurrentBonePath"]),
+        "targetBonePath": str(params["targetBonePath"]),
         "expectedMeshName": str(params["expectedMeshName"]).strip(),
         "preview": bool(params["preview"]),
     }
@@ -25867,7 +25867,7 @@ def build_gameobject_target(params: dict[str, Any]) -> str:
         or params.get("object_path")
         or params.get("objectPath")
         or ""
-    ).strip()
+    )
 
 
 def get_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -25910,7 +25910,7 @@ def get_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
 def create_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     name = str(params.get("name") or "").strip()
-    parent_path = str(params.get("parent_path") or params.get("parentPath") or "").strip()
+    parent_path = str(params.get("parent_path") or params.get("parentPath") or "")
     preview = bool(params.get("preview", False))
     request = {"name": name, "parentPath": parent_path, "preview": preview}
     settings = load_dashboard_settings(build_agent_connection_request(params))
@@ -25950,7 +25950,7 @@ def reparent_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
     go_path = build_gameobject_target(params)
     if not go_path:
         return {"ok": False, "error": "gameObjectPath is required."}
-    new_parent_path = str(params.get("new_parent_path") or params.get("newParentPath") or "").strip()
+    new_parent_path = str(params.get("new_parent_path") or params.get("newParentPath") or "")
     world_position_stays = bool(params.get("world_position_stays", params.get("worldPositionStays", True)))
     preview = bool(params.get("preview", False))
     request = {
@@ -27634,7 +27634,7 @@ def register_agent_gateway_tools() -> None:
             lambda params, reader_name=reader_name, collection=collection: page_tuning_records(globals()[reader_name], collection, params),
         )
     AGENT_GATEWAY.register_tool("vrcforge_scan_modular_avatar", "Detect the Modular Avatar package and scan avatars for Modular Avatar components.", "read/debug", lambda params: scan_addon_framework_sync("modular_avatar", params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_inspect_modular_avatar_component", "Read the exact presence, count, type, scene dirty state, and AvatarObjectReference paths for one Modular Avatar component without writing.", "read/debug", inspect_modular_avatar_component_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_inspect_modular_avatar_component", "when-to-use: read a Modular Avatar component's presence, count, type, scene dirty state, references and writable nested field shapes before configuring it. For empty or unresolved references, read the intended root with vrcforge_read_avatar_descriptor, then check the target hierarchy with vrcforge_get_gameobject and the field value with vrcforge_get_property; reuse evidence already read. VCC installing the SDK does not attach a Descriptor to arbitrary objects. when-NOT-to-use: inspection does not write; for example, do not use it to apply a Bindings or Objects change.", "read/debug", inspect_modular_avatar_component_sync)
     AGENT_GATEWAY.register_tool("vrcforge_inspect_primitive_basis_fixture", "Read the fixed primitive-basis fixture identity and active-scene binding without writing.", "read/debug", inspect_primitive_basis_fixture_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_vrcfury", "Detect the VRCFury package and scan avatars for VRCFury components.", "read/debug", lambda params: scan_addon_framework_sync("vrcfury", params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_items", "Scan avatar hierarchy items including wardrobe-related objects and component types.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_avatar_items)
@@ -29451,6 +29451,7 @@ PACKAGE_INSTALL_WORKFLOWS = PackageInstallWorkflowService(
         read_compile_errors=read_agent_compile_errors,
         redact_support=redact_sensitive,
         create_apply_request=AGENT_GATEWAY.approval_transactions.create_apply_request,
+        sdk_package_ids=VRCHAT_SDK_PACKAGE_IDS,
     )
 )
 VPM_PACKAGE_INSTALL_PREPARER = VpmPackageInstallPreparer(

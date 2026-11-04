@@ -80,7 +80,7 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.RejectedBeforeMutation("capture_angle_conflict", "Named angle is mutually exclusive with explicit pitch, yaw, and roll.", "unity_capture", "argument_validation");
                 }
-                var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
+                var avatarPath = @params?["avatarPath"]?.ToString() ?? string.Empty;
                 var captureScope = (@params?["captureScope"]?.ToString() ?? "avatar").Trim().ToLowerInvariant();
                 if (captureScope != "avatar" && captureScope != "face" && captureScope != "scene")
                 {

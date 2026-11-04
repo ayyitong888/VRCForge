@@ -695,7 +695,7 @@ def build_add_modular_avatar_component_request(
             or params.get("target_path")
             or params.get("targetPath")
             or ""
-        ).strip(),
+        ),
         "componentType": str(
             params.get("component_type") or params.get("componentType") or ""
         ).strip(),
@@ -707,7 +707,7 @@ def build_add_modular_avatar_component_request(
     }
     avatar_path = str(
         params.get("avatar_path") or params.get("avatarPath") or ""
-    ).strip()
+    )
     if avatar_path:
         request["avatarPath"] = avatar_path
     if params.get("action") is not None:
@@ -1336,6 +1336,37 @@ def finalize_add_modular_avatar_component_verification(
     component, references, scene state, and requested scalar and structured fields.
     """
     source = dict(result) if isinstance(result, dict) else {"result": result}
+    if source.get("ok") is not False and (
+        source.get("addedComponent") is True or source.get("updatedComponent") is True
+    ):
+        # The write receipt proves mutation independently of the later readback.
+        source.update(mutationStarted=True, mutationApplied=True, changed=True)
+        if source.get("sceneSaved") is True:
+            source["persistenceState"] = "persisted"
+
+    def failed(message: str, *, expected: Any = None, observed: Any = None,
+               delta: dict[str, Any] | None = None) -> dict[str, Any]:
+        failure = {**source, "ok": False, "readbackState": "failed",
+                "error": message, "retryable": False,
+                "nextAction": "Do not repeat the write. Read the reported property with vrcforge_get_property and compare the reported expected/observed values. For an empty or unresolved MA reference, use vrcforge_read_avatar_descriptor on the intended avatar root, then vrcforge_get_gameobject to check the target's ancestry. Reuse existing project/package/compile evidence; do not infer that a missing Descriptor means the SDK is missing. If the applied state is unwanted, request restoration using this operation's existing checkpoint.",
+                **({"expected": expected, "observed": observed, "delta": delta} if delta is not None else {})}
+        failure.pop("verified", None)
+        return failure
+
+    def read_field(request: dict[str, Any]) -> Any:
+        try:
+            return read_property(request)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def field_failure(message: str, path: str, expected: Any, read_result: Any) -> dict[str, Any]:
+        observed = read_result.get("propertyValue") if isinstance(read_result, dict) else None
+        incomplete = isinstance(read_result, dict) and (
+            read_result.get("valueIncomplete") is True or read_result.get("valueTruncated") is True)
+        return failed(message, expected=expected, observed=observed,
+                      delta={"path": "/" + path.replace("~", "~0").replace("/", "~1"),
+                             "reason": "readback_incomplete" if incomplete else "readback_failed",
+                             "readResult": read_result})
     fields = arguments.get("fields")
     if not isinstance(fields, dict):
         fields = {}
@@ -1347,19 +1378,15 @@ def finalize_add_modular_avatar_component_verification(
     try:
         inspected = inspect_component(request)
     except Exception as exc:  # pragma: no cover - defensive boundary for live Unity
-        return {**source, "ok": False, "error": f"Independent Modular Avatar readback failed: {exc}"}
+        return failed(f"Independent Modular Avatar readback failed: {exc}")
     if not isinstance(inspected, dict) or inspected.get("ok") is False:
         error = inspected.get("error") if isinstance(inspected, dict) else None
-        return {
-            **source,
-            "ok": False,
-            "error": str(error or "Independent Modular Avatar readback failed."),
-        }
+        return failed(str(error or "Independent Modular Avatar readback failed."))
     references = inspected.get("references")
     if not isinstance(references, list) or any(
         not isinstance(reference, dict) for reference in references
     ):
-        return {**source, "ok": False, "error": "Independent Modular Avatar readback returned malformed reference evidence."}
+        return failed("Independent Modular Avatar readback returned malformed reference evidence.")
     requested_references = arguments.get("references")
     inspected_count = int(inspected.get("count") or 0)
     after = source.get("after")
@@ -1376,13 +1403,13 @@ def finalize_add_modular_avatar_component_verification(
             or source.get("componentIndex") != expected_component_index
             or source.get("componentGlobalObjectId") != arguments.get("expectedComponentGlobalObjectId")
         ):
-            return {**source, "ok": False, "error": "Modular Avatar update did not confirm the exact existing component identity."}
+            return failed("Modular Avatar update did not confirm the exact existing component identity.")
         if not isinstance(before, dict) or before.get("count") != inspected_count:
-            return {**source, "ok": False, "error": "Modular Avatar update changed the component count."}
+            return failed("Modular Avatar update changed the component count.")
     if isinstance(after, dict) and isinstance(after.get("count"), int) and inspected_count != after["count"]:
-        return {**source, "ok": False, "error": "Independent Modular Avatar readback count differs from the write receipt."}
+        return failed("Independent Modular Avatar readback count differs from the write receipt.")
     if source.get("addedComponent") is True and isinstance(before, dict) and isinstance(before.get("count"), int) and inspected_count < before["count"] + 1:
-        return {**source, "ok": False, "error": "Independent Modular Avatar readback did not confirm the added component count."}
+        return failed("Independent Modular Avatar readback did not confirm the added component count.")
     reference_readback: dict[str, Any] = {}
     if isinstance(requested_references, dict):
         component_references = [
@@ -1400,8 +1427,8 @@ def finalize_add_modular_avatar_component_verification(
             # member is verified as a direct Unity Object through get_property.
             if not observed_items:
                 if read_property is None:
-                    return {**source, "ok": False, "error": f"Independent direct Unity Object readback cannot verify reference '{member_name}'."}
-                field_result = read_property({
+                    return field_failure(f"Independent direct Unity Object readback cannot verify reference '{member_name}'.", member_name, expected, None)
+                field_result = read_field({
                     **request,
                     "componentType": inspected.get("type") or request.get("componentType"),
                     "propertyPath": member_name,
@@ -1416,31 +1443,35 @@ def finalize_add_modular_avatar_component_verification(
                     or field_result.get("valueIncomplete") is True
                     or not _direct_unity_object_matches(observed_value, expected)
                 ):
-                    return {**source, "ok": False, "error": f"Independent direct Unity Object readback did not confirm reference '{member_name}'."}
+                    return field_failure(f"Independent direct Unity Object readback did not confirm reference '{member_name}'.", member_name, expected, field_result)
                 reference_readback[member_name] = observed_value
                 continue
             if len(observed_items) != 1:
-                return {**source, "ok": False, "error": f"Independent Modular Avatar readback did not confirm reference '{member_name}'."}
+                return failed(f"Independent Modular Avatar readback did not confirm reference '{member_name}'.",
+                              expected=expected, observed=observed_items,
+                              delta={"path": "/" + member_name, "reason": "reference_count_mismatch"})
             observed = observed_items[0]
             if observed.get("resolved") is not True or not any(
                 _normalize_reference_path(observed.get(key)) == _normalize_reference_path(expected)
                 for key in ("referencePath", "resolvedPath")
             ):
-                return {**source, "ok": False, "error": f"Independent Modular Avatar readback did not confirm reference '{member_name}'."}
+                return failed(f"Independent Modular Avatar readback did not confirm reference '{member_name}'.",
+                              expected=expected, observed=observed,
+                              delta={"path": "/" + member_name, "reason": "reference_mismatch"})
             reference_readback[member_name] = observed
     if inspected.get("present") is not True or int(inspected.get("count") or 0) < 1:
-        return {**source, "ok": False, "error": "Independent Modular Avatar readback found no added component."}
+        return failed("Independent Modular Avatar readback found no added component.")
     save_scene = arguments.get("saveScene") is True
     if save_scene and type(inspected.get("sceneDirty")) is not bool:
-        return {**source, "ok": False, "error": "Independent Modular Avatar readback could not determine the scene save state."}
+        return failed("Independent Modular Avatar readback could not determine the scene save state.")
     field_readback = {}
     field_enum_readback = {}
     if fields:
         if read_property is None:
-            return {**source, "ok": False, "error": "Independent Modular Avatar readback cannot verify fields."}
+            return failed("Independent Modular Avatar readback cannot verify fields.")
         for property_path, expected in fields.items():
             max_items = max(50, len(expected)) if isinstance(expected, list) else 50
-            field_result = read_property({
+            field_result = read_field({
                 **request,
                 "componentType": inspected.get("type") or request.get("componentType"),
                 "propertyPath": str(property_path),
@@ -1454,10 +1485,14 @@ def finalize_add_modular_avatar_component_verification(
                 or field_result.get("valueTruncated") is True
                 or field_result.get("valueIncomplete") is True
             ):
-                return {**source, "ok": False, "error": f"Independent field readback failed for field '{property_path}'."}
+                return field_failure(f"Independent field readback failed for field '{property_path}'.", str(property_path), expected, field_result)
             observed = field_result["propertyValue"]
-            if not _requested_value_matches(observed, expected, field_result.get("enumValues")):
-                return {**source, "ok": False, "error": f"Independent field readback mismatched field '{property_path}'."}
+            difference = _requested_value_difference(observed, expected, field_result.get("enumValues"))
+            if difference is not None:
+                return failed(f"Independent field readback mismatched field '{property_path}'.",
+                              expected=difference["expected"], observed=difference["observed"],
+                              delta={"path": "/" + str(property_path).replace("~", "~0").replace("/", "~1") + difference["path"],
+                                     "reason": difference["reason"]})
             field_readback[str(property_path)] = observed
             if isinstance(field_result.get("enumValues"), dict) and field_result["enumValues"]:
                 field_enum_readback[str(property_path)] = field_result["enumValues"]
@@ -1534,6 +1569,12 @@ def _direct_unity_object_matches(observed: Any, expected: Any) -> bool:
 def _requested_value_matches(
     observed: Any, expected: Any, enum_values: Any = None, pointer: str = "",
 ) -> bool:
+    return _requested_value_difference(observed, expected, enum_values, pointer) is None
+
+
+def _requested_value_difference(
+    observed: Any, expected: Any, enum_values: Any = None, pointer: str = "",
+) -> dict[str, Any] | None:
     """Compare requested field content while allowing typed default members.
 
     Component property reads describe the complete CLR value.  A write request
@@ -1541,47 +1582,54 @@ def _requested_value_matches(
     those requested members must match exactly, while Unity-filled defaults may
     remain in the observed object.
     """
+    difference = {"path": pointer, "expected": expected, "observed": observed, "reason": "value_mismatch"}
     if isinstance(expected, dict):
         if not isinstance(observed, dict):
-            return False
-        if any(observed.get(marker) is True for marker in ("__incomplete", "__truncated", "__cycle")):
-            return False
+            return {**difference, "reason": "type_mismatch"}
         # A structured member holding a Unity object reference is written by
         # referencePath/globalObjectId but read back as the object description
         # (assetPath/hierarchyPath/globalObjectId).  Match through those exact
         # identity channels instead of requiring the write vocabulary to equal
         # the read vocabulary key-for-key.
         if _object_reference_intent_matches(observed, expected):
-            return True
-        return all(
-            key in observed and _requested_value_matches(
-                observed[key], value, enum_values,
-                pointer + "/" + str(key).replace("~", "~0").replace("/", "~1"),
-            )
-            for key, value in expected.items()
-        )
+            if not any(observed.get(marker) is True for marker in ("__incomplete", "__truncated", "__cycle")):
+                return None
+        for key, value in expected.items():
+            child_path = pointer + "/" + str(key).replace("~", "~0").replace("/", "~1")
+            if key not in observed:
+                return {"path": child_path, "expected": value, "observed": None, "reason": "missing_member"}
+            child = _requested_value_difference(observed[key], value, enum_values, child_path)
+            if child is not None:
+                return child
+        if any(observed.get(marker) is True for marker in ("__incomplete", "__truncated", "__cycle")):
+            return {**difference, "reason": "readback_incomplete"}
+        return None
     if isinstance(expected, list):
-        return (
-            isinstance(observed, list)
-            and len(observed) == len(expected)
-            and all(_requested_value_matches(actual, wanted, enum_values, pointer + "/" + str(index))
-                    for index, (actual, wanted) in enumerate(zip(observed, expected)))
-        )
+        if not isinstance(observed, list):
+            return {**difference, "reason": "type_mismatch"}
+        if len(observed) != len(expected):
+            return {**difference, "reason": "array_length_mismatch"}
+        for index, (actual, wanted) in enumerate(zip(observed, expected)):
+            child = _requested_value_difference(actual, wanted, enum_values, pointer + "/" + str(index))
+            if child is not None:
+                return child
+        return None
     if isinstance(expected, str) and isinstance(observed, dict):
-        return _direct_unity_object_matches(observed, expected)
+        return None if _direct_unity_object_matches(observed, expected) else difference
     if isinstance(expected, bool):
-        return isinstance(observed, bool) and observed is expected
+        return None if isinstance(observed, bool) and observed is expected else difference
     # Enum names remain the public display value. Numeric equivalence requires
     # independent CLR metadata from this exact property read, never a name map
     # inferred from the write receipt or from a particular component package.
     if type(expected) is int and isinstance(observed, str):
         enum = enum_values.get(pointer) if isinstance(enum_values, dict) else None
-        return (isinstance(enum, dict) and isinstance(enum.get("type"), str)
+        matches = (isinstance(enum, dict) and isinstance(enum.get("type"), str)
                 and bool(enum["type"]) and enum.get("name") == observed
                 and type(enum.get("value")) is int and enum["value"] == expected)
+        return None if matches else difference
     if isinstance(expected, (int, float)) and not isinstance(expected, bool):
-        return isinstance(observed, (int, float)) and not isinstance(observed, bool) and observed == expected
-    return observed == expected
+        return None if isinstance(observed, (int, float)) and not isinstance(observed, bool) and observed == expected else difference
+    return None if observed == expected else difference
 
 
 ManageWardrobeRequestBuilder = Callable[

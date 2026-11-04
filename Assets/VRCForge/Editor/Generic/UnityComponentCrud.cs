@@ -828,6 +828,38 @@ namespace VRCForge.Editor
             {
                 return DescribeValue(value);
             }
+            if (value is Keyframe keyframe)
+            {
+                return new Dictionary<string, object>
+                {
+                    ["time"] = keyframe.time, ["value"] = keyframe.value,
+                    ["inTangent"] = keyframe.inTangent, ["outTangent"] = keyframe.outTangent,
+                    ["inWeight"] = keyframe.inWeight, ["outWeight"] = keyframe.outWeight,
+                    ["weightedMode"] = DescribeValueBounded(keyframe.weightedMode, maxItems, depth,
+                        ref nodesRemaining, activeObjects, ref truncated, ref incomplete, enumValues, pointer + "/weightedMode")
+                };
+            }
+            // Curves expose keys and wrap modes through public Unity properties, not
+            // serialized public fields. Read the same shape accepted by Json.NET writes.
+            if (value is AnimationCurve curve)
+            {
+                var keys = new List<object>();
+                var sourceKeys = curve.keys;
+                for (var index = 0; index < sourceKeys.Length && index < maxItems && nodesRemaining > 0; index++)
+                {
+                    keys.Add(DescribeValueBounded(sourceKeys[index], maxItems, depth,
+                        ref nodesRemaining, activeObjects, ref truncated, ref incomplete, enumValues, pointer + "/keys/" + index));
+                }
+                if (keys.Count < sourceKeys.Length) { truncated = true; incomplete = true; }
+                return new Dictionary<string, object>
+                {
+                    ["keys"] = keys,
+                    ["preWrapMode"] = DescribeValueBounded(curve.preWrapMode, maxItems, depth,
+                        ref nodesRemaining, activeObjects, ref truncated, ref incomplete, enumValues, pointer + "/preWrapMode"),
+                    ["postWrapMode"] = DescribeValueBounded(curve.postWrapMode, maxItems, depth,
+                        ref nodesRemaining, activeObjects, ref truncated, ref incomplete, enumValues, pointer + "/postWrapMode")
+                };
+            }
             if (depth >= 4)
             {
                 truncated = true;
@@ -956,7 +988,7 @@ namespace VRCForge.Editor
 
         internal static string NormalizePath(string value)
         {
-            return (value ?? string.Empty).Replace("\\", "/").Trim().Trim('/');
+            return (value ?? string.Empty).Replace("\\", "/").Trim('/');
         }
 
         internal static SavedSceneSnapshot ResolveSavedSceneFor(GameObject gameObject, bool includeSceneDigest = true)

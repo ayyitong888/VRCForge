@@ -459,6 +459,71 @@ def test_actual_ambiguous_project_guard_returns_http409_without_recovery(tmp_pat
     assert "arguments.projectPath" in data["nextAction"]
 
 
+def test_actual_list_avatars_ambiguity_returns_known_projects_and_selection_action(tmp_path):
+    from fastapi.testclient import TestClient
+
+    gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+    projects = [tmp_path / "project-a", tmp_path / "project-b"]
+    for project in projects:
+        gateway._register_runtime_project_scope(str(project))
+    calls = []
+    name = "vrcforge_list_avatars"
+    gateway.register_tool(name, "List avatars from the selected Unity project.", "read/debug", lambda args: calls.append(args))
+    router = Mcp2026Router(
+        lambda _params: [{"name": name}],
+        lambda tool, arguments: gateway.call_external_mcp_tool(tool, arguments),
+    )
+
+    with TestClient(create_asgi_app(router)) as client:
+        response = client.post(
+            "/",
+            headers={"Accept": "application/json, text/event-stream", "Mcp-Method": "tools/call", "Mcp-Name": name, "MCP-Protocol-Version": PROTOCOL_VERSION},
+            json=_request("tools/call", {"name": name, "arguments": {}}),
+        )
+
+    assert response.status_code == 409, response.text
+    data = response.json()["error"]["data"]
+    assert calls == []
+    assert data["errorCode"] == "external_mcp_project_scope_ambiguous"
+    assert data["details"]["knownProjectPaths"] == sorted(gateway._external_mcp_project_paths)  # noqa: SLF001
+    assert "choose the exact intended projectpath" in data["details"]["nextAction"].casefold()
+    assert "ask the user to select it in the VRCForge App project picker" in data["details"]["nextAction"]
+
+
+def test_actual_project_catalog_status_without_path_runs_with_multiple_scopes(tmp_path):
+    from fastapi.testclient import TestClient
+
+    gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+    gateway._register_runtime_project_scope(str(tmp_path / "project-a"))
+    gateway._register_runtime_project_scope(str(tmp_path / "project-b"))
+    calls = []
+    name = "vrcforge_project_catalog_registration_status"
+    gateway.register_tool(
+        name, "Read global project catalogue availability.", "read/debug",
+        lambda args: calls.append(args) or {"ok": True, "scope": "catalogue_availability", "projectPath": "", "catalogs": []},
+    )
+    router = Mcp2026Router(
+        lambda _params: [{"name": name}],
+        lambda tool, arguments: gateway.call_external_mcp_tool(tool, arguments),
+    )
+
+    with TestClient(create_asgi_app(router)) as client:
+        response = client.post(
+            "/",
+            headers={"Accept": "application/json, text/event-stream", "Mcp-Method": "tools/call", "Mcp-Name": name, "MCP-Protocol-Version": PROTOCOL_VERSION},
+            json=_request("tools/call", {"name": name, "arguments": {}}),
+        )
+
+    assert response.status_code == 200, response.text
+    assert calls == [{}]
+
+
 @pytest.mark.parametrize("started", [None, True])
 def test_project_scope_error_without_explicit_no_route_proof_stays_unknown(started):
     def fail(_tool, _arguments):

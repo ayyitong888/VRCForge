@@ -1105,7 +1105,7 @@ def test_external_mcp_write_contract_is_real_target_and_two_phase(tmp_path: Path
 
 
 def test_public_mcp_gesture_manager_pending_receipt_projects_pending_operation(tmp_path: Path) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (tmp_path / marker).mkdir(parents=True, exist_ok=True)
     fixture = Path(__file__).parent / "fixtures" / "gesture_manager_pending_receipt.json"
@@ -1371,7 +1371,7 @@ def test_external_low_medium_write_obeys_permission_mode(tmp_path: Path, executi
         },
         bearer=config.token,
     )["result"]["structuredContent"]
-    if execution_mode == "approval":
+    if execution_mode in {"approval", "auto"}:
         assert result["status"] == "user_confirmation_required"
         assert result["confirmation"]["targetTool"] == "vrcforge_external_medium_write"
         assert executed == []
@@ -1391,7 +1391,7 @@ def test_external_low_medium_write_obeys_permission_mode(tmp_path: Path, executi
 def test_external_advanced_medium_write_is_not_misclassified_as_high_risk(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -1412,6 +1412,7 @@ def test_external_advanced_medium_write_is_not_misclassified_as_high_risk(
         "vrcforge_external_advanced_medium_write",
         {"projectRoot": str(project)},
     )
+    assert prepared["riskLevel"] == "medium"
     assert prepared["requiresUserConfirmation"] is False
     result = gateway.approval_transactions.execute_prepared_external_mcp_write(
         prepared,
@@ -1640,7 +1641,7 @@ def test_external_write_checkpoint_survives_compact_presentation_without_full_re
 def test_external_write_returns_raw_handler_result_and_adjacent_console_facts(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -1695,7 +1696,7 @@ def test_external_write_returns_raw_handler_result_and_adjacent_console_facts(
 def test_external_write_exception_preserves_raw_core_result_and_exact_reason(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -1763,7 +1764,7 @@ def test_external_write_exception_preserves_raw_core_result_and_exact_reason(
 def test_external_medium_project_create_does_not_treat_read_only_template_as_out_of_project_write(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     template = tmp_path / "ManagerTemplate"
     target = tmp_path / "RepositoryProjects" / "VisibleAvatarProject"
     target.parent.mkdir()
@@ -1786,6 +1787,8 @@ def test_external_medium_project_create_does_not_treat_read_only_template_as_out
         pre_write_checkpoint_required=False,
     )
     arguments = {"projectPath": str(target), "templatePath": str(template)}
+    prepared = gateway.approval_transactions.prepare_external_mcp_write("vrcforge_create_project", arguments)
+    assert prepared["riskLevel"] == "medium"
 
     result = _external_mcp_call(
         create_agent_mcp_app(gateway),
@@ -1801,7 +1804,7 @@ def test_external_medium_project_create_does_not_treat_read_only_template_as_out
 
 
 def test_external_manual_resolver_does_not_elevate_low_or_medium_risk(tmp_path: Path) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     executed: list[dict] = []
     gateway.approval_transactions.register_write_handler(
         "vrcforge_external_manual_write",
@@ -1811,6 +1814,8 @@ def test_external_manual_resolver_does_not_elevate_low_or_medium_risk(tmp_path: 
         manual_approval_resolver=lambda _args, _preview: "Policy requires confirmation.",
     )
     gateway.register_external_mcp_unity_tool("vrcforge_external_manual_write", "avatar")
+    prepared = gateway.approval_transactions.prepare_external_mcp_write("vrcforge_external_manual_write", {"value": "x"})
+    assert prepared["riskLevel"] == "low"
     result = _external_mcp_call(
         create_agent_mcp_app(gateway),
         "tools/call",
@@ -1890,7 +1895,7 @@ def test_external_high_risk_confirmation_executes_once_and_rejects_replay(tmp_pa
 def test_external_unity_write_uses_exact_external_lane_without_internal_transaction(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     project = tmp_path / "UnityProject"
     project.mkdir()
     from tests.test_execution_target import _live_runtime_target
@@ -1960,10 +1965,11 @@ def test_external_unity_write_uses_exact_external_lane_without_internal_transact
     assert gateway.checkpoint_recovery._read_checkpoint_entries() == []
 
 
+@pytest.mark.parametrize("execution_mode", ["approval", "auto", "roslyn_full_auto"])
 def test_external_authoritative_preview_returns_preview_without_apply_or_internal_transaction(
-    tmp_path: Path,
+    tmp_path: Path, execution_mode: str,
 ) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode=execution_mode)
     project = tmp_path / "UnityProject"
     project.mkdir()
     from tests.test_execution_target import _live_runtime_target
@@ -2177,7 +2183,7 @@ def test_external_restore_requires_external_user_confirmation_then_executes(tmp_
 
 
 def test_external_write_preparation_and_handler_failures_return_structured_facts(tmp_path: Path) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -2499,7 +2505,7 @@ def test_external_unity_write_missing_project_binding_is_explicitly_no_write(
 
 
 def test_external_mcp_exposes_only_the_typed_vpm_wrapper_write(tmp_path: Path) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -3206,7 +3212,7 @@ def test_in_flight_project_write_query_covers_live_and_applying_state(tmp_path: 
 def test_external_atomic_project_creation_handler_executes_without_fake_unity_checkpoint(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path, execution_mode="auto")
+    gateway = _external_gateway(tmp_path, execution_mode="roslyn_full_auto")
     calls: list[dict] = []
     gateway.approval_transactions.register_write_handler(
         "vrcforge_create_project",

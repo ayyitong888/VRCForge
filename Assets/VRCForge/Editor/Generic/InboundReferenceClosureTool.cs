@@ -493,7 +493,7 @@ namespace VRCForge.Editor
                     }
                     else if (iterator.propertyType == SerializedPropertyType.String)
                     {
-                        var value = (iterator.stringValue ?? string.Empty).Trim();
+                        var value = iterator.stringValue ?? string.Empty;
                         if (string.IsNullOrEmpty(value))
                         {
                             continue;
@@ -527,7 +527,7 @@ namespace VRCForge.Editor
                                     iterator.propertyPath);
                             }
                         }
-                        if (state.SemanticTokens.Contains(value))
+                        if (state.SemanticTokens.Contains(value.Trim()))
                         {
                             AddReference(state, new ReferenceEdge
                             {
@@ -537,7 +537,7 @@ namespace VRCForge.Editor
                                 sourceComponentType = source.GetType().FullName,
                                 sourcePropertyPath = iterator.propertyPath,
                                 targetObjectPath = "",
-                                targetIdentity = "parameter:" + value,
+                                    targetIdentity = "parameter:" + value.Trim(),
                                 confidence = "indirect",
                                 reason = "Serialized parameter name consumes an output produced by a target PhysBone or Contact component.",
                             });
@@ -757,7 +757,7 @@ namespace VRCForge.Editor
 
         private static bool TryResolveTargetPathString(ScanState state, Transform source, string raw, out string targetPath, out string targetIdentity)
         {
-            var normalized = NormalizePath(raw);
+            var normalized = ComponentCrudCore.NormalizePath(raw);
             if (string.IsNullOrEmpty(normalized))
             {
                 targetPath = "";
@@ -832,7 +832,7 @@ namespace VRCForge.Editor
 
         private static bool BindingPathMayTargetCandidate(ScanState state, Transform root, string bindingPath)
         {
-            var normalized = NormalizePath(bindingPath);
+            var normalized = ComponentCrudCore.NormalizePath(bindingPath);
             foreach (var target in state.TargetRoots)
             {
                 if (!IsDescendantOrSelf(target.Transform, root))
@@ -868,7 +868,7 @@ namespace VRCForge.Editor
             {
                 return null;
             }
-            var normalized = NormalizePath(path);
+            var normalized = ComponentCrudCore.NormalizePath(path);
             return string.IsNullOrEmpty(normalized) ? root : root.Find(normalized);
         }
 
@@ -928,7 +928,7 @@ namespace VRCForge.Editor
 
         private static bool IsPotentialTargetPathString(ScanState state, string raw)
         {
-            var candidate = NormalizePath(raw);
+            var candidate = ComponentCrudCore.NormalizePath(raw);
             if (string.IsNullOrEmpty(candidate))
             {
                 return false;
@@ -937,10 +937,10 @@ namespace VRCForge.Editor
             var avatarRoot = state.Avatar.transform;
             foreach (var root in state.TargetRoots)
             {
-                if (PathsOverlap(candidate, NormalizePath(root.Path))
+                if (PathsOverlap(candidate, ComponentCrudCore.NormalizePath(root.Path))
                     || (IsDescendantOrSelf(root.Transform, avatarRoot)
-                        && PathsOverlap(candidate, NormalizePath(RelativePath(avatarRoot, root.Transform))))
-                    || PathsOverlap(candidate, NormalizePath(root.Transform.name)))
+                        && PathsOverlap(candidate, ComponentCrudCore.NormalizePath(RelativePath(avatarRoot, root.Transform))))
+                    || PathsOverlap(candidate, ComponentCrudCore.NormalizePath(root.Transform.name)))
                 {
                     return true;
                 }

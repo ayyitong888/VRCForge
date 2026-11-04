@@ -40,7 +40,11 @@ allowed-tools:
   - vrcforge_refresh_asset_database
   - vrcforge_package_manager_status
   - vrcforge_package_install_plan
+  - vrcforge_package_install_request
+  - vrcforge_install_vpm_package
   - vrcforge_diagnose_package_install_errors
+  - vrcforge_list_directory
+  - vrcforge_read_text_file
   - vrcforge_list_avatars
   - vrcforge_read_avatar_descriptor
   - vrcforge_exit_skill
@@ -64,7 +68,7 @@ Unrelated software or network help, generic Unity/VRChat questions, or a connect
 - **Documented usage or broad orientation:** Read the relevant section of the first-party [user manual](https://github.com/ayyitong888/VRCForge/blob/main/USER_MANUAL.md), or [README](https://github.com/ayyitong888/VRCForge/blob/main/README.md). Open/fetch the actual page, not just search snippets. Search the exact feature or error when necessary. Prefer an available matching-version local manual or release tag over main; main describes source and may differ from the installed release. Do not scan the repository to answer a narrow usage question.
 - **Current release or download:** Read [VRCForge Releases](https://github.com/ayyitong888/VRCForge/releases). Bind claims to the actual published version; manual version, source presence and a successful build do not establish publication or installed behavior.
 - **Current environment or failure:** Discover the available read Tools and Resources, load only what is needed, and inspect the failing layer. A public manual cannot establish a local connection, permission, installed Skill or successful model request. `vrcforge_know_yourself` is an optional broad readiness snapshot, not a mandatory first call. Use narrower status or log tools when those answer the question.
-- **Setup, everyday repair, or user-tool authoring:** Discover the installed `vrcforge-first-run-guide`. Prefer the existing installed-Skill reader for its instructions, then an exact file with `vrcforge_read_installed_skill(name, file)`: `references/repair-guide.md` for connection/compilation/recovery, `references/user-tool-author-guide.md` for a user-tool package. A native MCP Prompt is a whole-guide fallback that includes all declared support files; do not describe it as selective loading. If an older guide demands a broad readiness report despite sufficient current evidence, retain this guide's optional-snapshot rule. If the guide is unavailable, use the manual and discovered capabilities; state the gap without inventing tools.
+- **Setup, everyday repair, or user-tool authoring:** Discover the installed `vrcforge-first-run-guide`, then read an exact file with `vrcforge_read_installed_skill(name, file)`: `references/repair-guide.md` for ALCOM/VCC/empty-project setup, missing SDK versus missing model Descriptor, connection, compilation and recovery; `references/user-tool-author-guide.md` for a user-tool package. The repair guide gives the host-side route when Unity Core cannot answer. A native MCP Prompt includes all declared support files, not selective loading. Keep broad readiness optional when narrow evidence suffices. If the guide is unavailable, use the manual and discovered capabilities; never invent tools.
 - **Avatar operations:** Use the discovered domain Skill and its exact tool contracts. Exit any active diagnosis-only Skill scope before resuming the original editing task. Do not turn a documentation question into an avatar scan.
 
 Read zero or one detailed reference initially. Follow another source only when the first leaves a material question unresolved. In a source checkout, project rules and local status constrain engineering work; private status, roadmap and session files are not public product documentation.

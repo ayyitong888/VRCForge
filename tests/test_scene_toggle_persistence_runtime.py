@@ -132,10 +132,10 @@ class EditorUtility {public static bool IsPersistent(object o)=>false;public sta
 class Undo {public static void RecordObject(object o,string s){} public static void FlushUndoRecordObjects(){}}
 class EditorSceneManager {public static void MarkSceneDirty(Scene s){} public static bool SaveOpenScenes(){Probe.GlobalSaves++;return true;}}
 class AssetDatabase {public static void SaveAssets(){Probe.GlobalSaves++;}}
-class ComponentCrudCore {public static GameObject ResolveGameObject(string s)=>Probe.Target.gameObject;}
+class ComponentCrudCore {public static GameObject ResolveGameObject(string s){Probe.LastPath=s;return Probe.Target.gameObject;}}
 class VRCForgeToolResult { public static VRCForgeToolResult FailedWithException(string code,string message,System.Exception exception,object payload=null)=>Failed(message,payload); public static VRCForgeToolResult FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message,payload); public bool IsSuccessful;public object Payload;public static VRCForgeToolResult Completed(string s,object p=null)=>new VRCForgeToolResult{IsSuccessful=true,Payload=p};public static VRCForgeToolResult Failed(string s,object p=null)=>new VRCForgeToolResult{IsSuccessful=false,Payload=p};}
-class SetGameObjectActiveTool {public static object HandleCommand(JObject p){Probe.ScopedSaves++;if(Probe.Fail)return VRCForgeToolResult.Failed("save failed");var old=Probe.Target.gameObject.activeSelf;Probe.Target.gameObject.SetActive(p.Value<bool>("active"));return VRCForgeToolResult.Completed("saved",new{gameObjectPath="Hat",oldActive=old,newActive=Probe.Target.gameObject.activeSelf,sceneSaved=true,persistedReadback=true,scenePath="Assets/Main.unity",sceneFileDigestAfter="digest"});}}
-class Probe {public static Transform Target=new Transform();public static int GlobalSaves,ScopedSaves;public static bool Fail;
+class SetGameObjectActiveTool {public static object HandleCommand(JObject p){Probe.LastPath=p.Value<string>("gameObjectPath");Probe.ScopedSaves++;if(Probe.Fail)return VRCForgeToolResult.Failed("save failed");var old=Probe.Target.gameObject.activeSelf;Probe.Target.gameObject.SetActive(p.Value<bool>("active"));return VRCForgeToolResult.Completed("saved",new{gameObjectPath="Hat",oldActive=old,newActive=Probe.Target.gameObject.activeSelf,sceneSaved=true,persistedReadback=true,scenePath="Assets/Main.unity",sceneFileDigestAfter="digest"});}}
+class Probe {public static Transform Target=new Transform();public static int GlobalSaves,ScopedSaves;public static bool Fail;public static string LastPath;
 ''' + body + helpers + r'''
 static int Main(){var request=JObject.FromObject(new{objectPath="Hat",active=true});
 var r=(VRCForgeToolResult)HandleCommand(request);var p=JObject.FromObject(r.Payload);
@@ -143,6 +143,7 @@ if(!r.IsSuccessful||GlobalSaves!=0||ScopedSaves!=1||p.Value<bool?>("persistedRea
 Fail=true;r=(VRCForgeToolResult)HandleCommand(request);if(r.IsSuccessful)throw new Exception("save failure reported success");
 Fail=false;request["saveAssets"]=false;request["active"]=false;var prior=ScopedSaves;r=(VRCForgeToolResult)HandleCommand(request);p=JObject.FromObject(r.Payload);
 if(!r.IsSuccessful||ScopedSaves!=prior||p.Value<bool>("saved")||!p.Value<bool>("pending")||Target.gameObject.activeSelf)throw new Exception("unsaved path changed contract");
+foreach(var exact in new[]{"Avatar/Part ","Avatar/Part"}){request["objectPath"]=exact;foreach(var save in new[]{false,true}){request["saveAssets"]=save;r=(VRCForgeToolResult)HandleCommand(request);if(!r.IsSuccessful||LastPath!=exact)throw new Exception("toggle changed exact path: ["+LastPath+"]");}}
 request.Remove("active");r=(VRCForgeToolResult)HandleCommand(request);if(r.IsSuccessful)throw new Exception("missing active mutated target");
 Console.WriteLine("PASS toggle scoped failure pending required");return 0;}}
 '''

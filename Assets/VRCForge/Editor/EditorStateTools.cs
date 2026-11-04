@@ -23,7 +23,7 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
-            var requestedPath = (@params?["gameObjectPath"]?.ToString() ?? string.Empty).Trim();
+            var requestedPath = @params?["gameObjectPath"]?.ToString() ?? string.Empty;
             if (string.IsNullOrEmpty(requestedPath))
             {
                 return VRCForgeToolResult.FailedWithCode(

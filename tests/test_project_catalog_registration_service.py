@@ -93,6 +93,16 @@ def test_unity_hub_entry_uses_project_version_and_exact_path(tmp_path: Path) -> 
     assert payload["keep"] == 9
 
 
+def test_status_without_project_reports_catalogue_availability_not_membership(tmp_path: Path) -> None:
+    service, _paths = _service(tmp_path)
+
+    result = service.status({})
+
+    assert result["projectPath"] == ""
+    assert result["scope"] == "catalogue_availability"
+    assert all(item["registered"] is None for item in result["catalogs"])
+
+
 def test_prepared_registration_refuses_catalogue_drift_before_write(tmp_path: Path) -> None:
     service, paths = _service(tmp_path)
     project = _project(tmp_path / "Avatar Project")

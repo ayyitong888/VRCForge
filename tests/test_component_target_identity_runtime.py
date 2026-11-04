@@ -8,16 +8,20 @@ import pytest
 from test_curve_fx_authoring_runtime_contract import method
 ROOT = Path(__file__).resolve().parents[1]
 def test_component_target_identity(tmp_path):
-    source = (ROOT / "Assets/VRCForge/Editor/Generic/UnityComponentCrud.cs").read_text(encoding="utf-8-sig")
-    selected = method(source, "internal static GameObject ResolveGameObject(")
+    path = "Assets/VRCForge/Editor/Generic/UnityComponentCrud.cs"
+    revision = os.environ.get("VRCFORGE_HIERARCHY_GIT_REF")
+    source = subprocess.check_output(["git", "show", f"{revision}:{path}"], cwd=ROOT, text=True, encoding="utf-8") if revision else (ROOT / path).read_text(encoding="utf-8-sig")
+    selected = method(source, "internal static GameObject ResolveGameObject(") + "\n" + method(source, "internal static string NormalizePath(")
+    gesture = (ROOT / "Assets/VRCForge/Editor/GestureManagerRuntimeTool.cs").read_text(encoding="utf-8-sig")
+    gesture_normalize = method(gesture, "private static string NormalizePath(").replace("private static", "public static", 1)
     program = r'''
 using System;using System.Linq;using System.Collections.Generic;
 class Transform {internal string path;}
 class GameObject {internal string name;internal Transform transform;}
 class GameObjectNotFoundException:InvalidOperationException {internal GameObjectNotFoundException(string s):base(s){}}
+class GesturePath { GESTURE_NORMALIZE }
 class Probe {
  static GameObject[] objects;
- static string NormalizePath(string s)=>(s??"").Replace("\\","/").Trim().Trim('/');
  static string GetHierarchyPath(Transform t)=>t.path;
  static IEnumerable<GameObject> EnumerateSceneGameObjects()=>objects;
  SELECTED
@@ -34,10 +38,17 @@ class Probe {
   Check(Reject("Same/Target"),"duplicate exact paths rejected");
   objects=new[]{Go("A/Target"),Go("B/Target")};
   Check(Reject("Target"),"ambiguous leaf rejected");
+  objects=new[]{Go("Avatar/Outfit/Part "),Go("Avatar/Outfit/Part")};
+  Check(ReferenceEquals(ResolveGameObject("Avatar/Outfit/Part "),objects[0]),"trailing space selects exact object");
+  Check(ReferenceEquals(ResolveGameObject("Avatar/Outfit/Part"),objects[1]),"unspaced sibling remains distinct");
+  objects=new[]{Go(" Avatar/ Child ")};
+  Check(ReferenceEquals(ResolveGameObject(" Avatar/ Child "),objects[0]),"leading and trailing name spaces retained");
+  Check(Reject("Avatar/ Child"),"trimmed path must not alias spaced object");
+  Check(GesturePath.NormalizePath(" Avatar/ Child ")==" Avatar/ Child " && GesturePath.NormalizePath("Avatar/Child ")!=GesturePath.NormalizePath("Avatar/Child"),"Gesture Manager preserves distinct exact paths");
   return failures==0?0:1;
  }
 }
-'''.replace("SELECTED", selected)
+'''.replace("SELECTED", selected).replace("GESTURE_NORMALIZE", gesture_normalize)
     base = Path(os.environ.get("DOTNET_ROOT", str(Path.home() / "AppData/Local/Microsoft/dotnet")))
     compilers = sorted((base / "sdk").glob("8.*/Roslyn/bincore/csc.dll"))
     refs = sorted((base / "packs/Microsoft.NETCore.App.Ref").glob("8.*/ref/net8.0"))
@@ -58,4 +69,4 @@ class Probe {
     (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions": {"tfm": "net8.0", "framework": {"name": "Microsoft.NETCore.App", "version": "8.0.0"}}}), encoding="utf-8")
     result = subprocess.run([str(dotnet), str(dll)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("PASS ") == 5
+    assert result.stdout.count("PASS ") == 10

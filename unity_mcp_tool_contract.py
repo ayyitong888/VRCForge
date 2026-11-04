@@ -8,7 +8,7 @@ from typing import Any
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
 PRODUCT_VERSION = "1.10.4"
-TOOL_CONTRACT_VERSION = "195"
+TOOL_CONTRACT_VERSION = "196"
 PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "194"
 
 EXPECTED_TOOL_NAMES = frozenset(
@@ -40,7 +40,8 @@ EXPECTED_TOOL_COUNT = 105
 
 # Contract revisions describe the discovered tool surface; protocol-range
 # negotiation decides whether the App and Core can communicate. Revision 195
-# adds read-only avatar reference diagnostics to revision 194.
+# adds read-only avatar reference diagnostics to revision 194. Revision 196
+# exposes MA field shapes and complete curve property readback.
 PREVIOUS_CORE_UPGRADE_MISSING_TOOLS = frozenset(
     {"vrc_scan_avatar_reference_diagnostics"}
 )

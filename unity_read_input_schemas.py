@@ -1068,7 +1068,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_core_upgrade_status'] = {
 }
 UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_project_catalog_registration_status'] = {
     'type': 'object', 'additionalProperties': True,
-    'properties': {key: {'type': ['string', 'null'], 'description': 'Optional existing Unity project root; omit to list catalog registration status. projectRoot is the existing alias of projectPath.'} for key in ('projectPath', 'projectRoot')},
+    'properties': {key: {'type': ['string', 'null'], 'description': 'Optional existing Unity project root; omit to list catalogue availability only (registered is null without a project). projectRoot is the existing alias of projectPath.'} for key in ('projectPath', 'projectRoot')},
 }
 UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_scan_project_index'] = {
     'type': 'object', 'additionalProperties': True,

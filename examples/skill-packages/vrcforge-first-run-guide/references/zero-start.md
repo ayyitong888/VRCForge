@@ -33,6 +33,8 @@ Hub 路线不可用时，可从该官方版本详情页手动安装编辑器，�
 7. **接入 VRCForge。** 在 App 添加/选择这个精确工程，优先使用实际可用的监督 Core 安装流程；否则获取同版本 `VRCForge.unitypackage`，在正确 Unity 窗口完整导入。不要额外安装第三方 MCP Server。此时再按 repair guide 验证匹配工程/实例、Core、工具和编译状态。
 8. **确认可用。** 实际读取场景内目标 Avatar，才报告“已连接，可开始改模”。空工程没有 Avatar 要继续完成模型准备；安装成功、端口开启或项目已登记都不能替代目标读取。上传另由用户决定，不纳入本次连接验收。
 
+Avatar 模板装好 SDK，不等于用户模型已有 `VRC Avatar Descriptor`。已有空 Unity 工程也不必重建：先按 `references/repair-guide.md` 读包状态，缺 SDK 才通过现有规划/确认安装；SDK 已在、模型无 Descriptor 则处理模型组件。普通 Unity 任务不要求补 VRChat SDK。Core 因缺包无法编译时，用 App/backend 包管理与文件诊断，别循环调用依赖 Core 的场景工具。
+
 先简述整体顺序，再只给当前可操作的一步：去哪里下载、点哪个按钮、完成后应看到什么。已获授权且工具可做的步骤由 Agent 执行；需要账户、系统安装、选择付费模型或实际打开软件时，让用户完成并读回结果。不要一次要求用户理解全部 MCP/SDK/Core 术语。
 
 ## Agent 代下载安装包

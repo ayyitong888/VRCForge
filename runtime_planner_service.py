@@ -66,6 +66,18 @@ RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
     "Make the final answer self-contained and complete, so the user need not read earlier progress updates. "
     + QUESTION_LANGUAGE_INSTRUCTION + CALL_USER_USAGE_INSTRUCTION
 )
+RUNTIME_TROUBLESHOOTING_INSTRUCTION = (
+    "When a problem occurs, diagnose it step by step from the actual error and existing evidence. "
+    "Form a concrete hypothesis, search relevant official documentation and mature implementations, "
+    "then use the smallest targeted check that can confirm or reject that hypothesis. "
+    "Read the relevant source content, not just a search snippet, and check that it applies to the installed version. "
+    "Use each result to choose the next check; reuse established facts instead of restarting a fixed checklist. "
+    "Do not repeat an unchanged failed call or a possibly completed write without new evidence. "
+    "Fix the demonstrated cause within the authorized scope, reproduce the original case, "
+    "and check related callers that share that cause. Explain the finding and actionable next step; "
+    "do not assume the user has the product's source code. Documentation research is read-only guidance, "
+    "not a new approval gate or a reason to add speculative validation. "
+)
 RUNTIME_SCOPE_UNITY_INSTRUCTION = (
     "A Unity project is explicitly bound to this turn. Use the project tool catalog when it is relevant. "
     "For questions about the current scene, component bindings, or Avatar behavior, prefer the dedicated read-only inspection tools; "
@@ -4776,6 +4788,7 @@ class RuntimePlannerService:
             "Only verified outcomes support success; unrelated successes "
             "do not resolve failures. Otherwise answer honestly without claiming completion. "
             f"{RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION}"
+            f"{RUNTIME_TROUBLESHOOTING_INSTRUCTION}"
             'Use ordinary public assistant content for updates; use phase="commentary" only when the protocol supports it. '
             "When work remains, include the next tool call in the same response as the update and continue the task. "
             "Do not use action=reply for a progress update; reserve it for the final answer.\n"
@@ -5235,6 +5248,7 @@ class RuntimePlannerService:
                 "reply 字段是直接展示给用户的对话内容：用第一人称。"
                 f"{RUNTIME_REPLY_LANGUAGE_INSTRUCTION}"
                 f"{RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION}"
+                f"{RUNTIME_TROUBLESHOOTING_INSTRUCTION}"
                 "Put public updates in the reply field of the same JSON action object and continue that action; "
                 "do not add a preamble outside the JSON object. Reserve action=reply for the final answer. "
                 "Use already-visible tools directly; do not list or load a block for a tool that is already available. "

@@ -3771,17 +3771,31 @@ class AgentGateway:
         properties = ensure_dict(schema.get("properties"))
         if "projectPath" not in properties:
             return
-        raw_project = str(arguments.get("projectPath") or "").strip()
+        raw_project = str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
+        # This tool can report catalogue availability without examining any
+        # one project's registration. A caller that supplies projectPath still
+        # gets the project-specific membership check below.
+        if tool_name == "vrcforge_project_catalog_registration_status" and not raw_project:
+            return
         if raw_project:
             self._register_runtime_project_scope(raw_project)
             return
         if "projectPath" in ensure_list(schema.get("required")):
             return
         with self._lock:
-            scope_count = len(self._external_mcp_project_paths)
-        if scope_count > 1:
+            known_project_paths = sorted(self._external_mcp_project_paths, key=str.casefold)
+        if len(known_project_paths) > 1:
+            next_action = (
+                "Choose the exact intended projectPath from knownProjectPaths and retry the read "
+                "with arguments.projectPath set to that path. "
+                "If none is the intended project, ask the user to select it in the VRCForge App "
+                "project picker and provide its exact path; do not guess."
+            )
+            candidates = ", ".join(repr(path) for path in known_project_paths)
             raise AgentGatewayError(
-                "projectPath is required for this external MCP call because multiple Unity project scopes are active.",
+                "projectPath is required for this project-scoped external MCP call because the "
+                "Gateway has seen multiple Unity project scopes. Previously supplied projectPath "
+                f"candidates (not proof they are currently open): {candidates}. {next_action}",
                 status_code=409,
                 cause_code="external_mcp_project_scope_ambiguous",
                 failure_layer="gateway_validation",
@@ -3792,6 +3806,10 @@ class AgentGateway:
                 mutation_started=False,
                 committed=False,
                 commit_state="not_started",
+                details={
+                    "knownProjectPaths": known_project_paths,
+                    "nextAction": next_action,
+                },
             )
 
     def _register_runtime_project_scope(self, project_root: str) -> None:

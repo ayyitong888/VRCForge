@@ -430,7 +430,10 @@ EXPRESSION_MENU_MANAGE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
         "avatarPath": _AVATAR_PATH_PROPERTY,
         "action": {"type": "string", "enum": ["create", "update", "delete", "reorder"]},
         "assetDir": {"type": "string", "pattern": "^Assets/"},
-        "menuPath": {"type": "string"},
+        "menuPath": {
+            "type": "string",
+            "description": "Submenu control-name hierarchy relative to the Avatar's root expression menu, e.g. Clothing/Casual. Omit or use an empty string for the root. This is not an Assets/... asset path; subMenuAssetPath selects a submenu asset assigned to a control.",
+        },
         "controlName": {"type": "string"},
         "controlIndex": {"type": "integer", "minimum": 0},
         "newName": {"type": "string"},

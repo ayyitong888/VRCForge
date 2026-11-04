@@ -102,6 +102,7 @@ class ProjectCatalogRegistrationService:
             "ok": True,
             "schema": "vrcforge.project_catalog_registration_status.v1",
             "projectPath": str(project) if project is not None else "",
+            "scope": "project_registration" if project is not None else "catalogue_availability",
             "catalogs": catalogs,
         }
 

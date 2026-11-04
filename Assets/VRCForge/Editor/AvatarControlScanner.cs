@@ -495,7 +495,7 @@ namespace VRCForge.Editor
         {
             try
             {
-                var objectPath = (@params?["objectPath"]?.ToString() ?? string.Empty).Trim();
+                var objectPath = @params?["objectPath"]?.ToString() ?? string.Empty;
                 var active = @params?["active"]?.Value<bool?>() ?? false;
                 var saveAssets = @params?["saveAssets"]?.Value<bool?>() ?? true;
                 if (string.IsNullOrWhiteSpace(objectPath))
@@ -580,7 +580,7 @@ namespace VRCForge.Editor
 
         private static string NormalizePath(string value)
         {
-            return (value ?? string.Empty).Replace("\\", "/").Trim().Trim('/');
+            return (value ?? string.Empty).Replace("\\", "/").Trim('/');
         }
     }
 }

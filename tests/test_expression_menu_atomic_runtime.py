@@ -17,6 +17,8 @@ def test_menu_control_failure_preserves_existing_and_preview_rejects(tmp_path):
     if not dotnet or not compilers or not refs: pytest.skip("Local .NET SDK/reference pack required")
     compiler=compilers[-1]; newtonsoft=compiler.parents[2]/"Newtonsoft.Json.dll"
     source=(ROOT/"Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs").read_text(encoding="utf-8").split("public static class ManageExpressionMenuTool",1)[1].split("public static class ManageFxAnimatorTool",1)[0]
+    if os.environ.get("VRCFORGE_MENU_TEST_REF"):
+        source=subprocess.check_output(["git","show",os.environ["VRCFORGE_MENU_TEST_REF"]+":Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs"],cwd=ROOT,text=True,encoding="utf-8").split("public static class ManageExpressionMenuTool",1)[1].split("public static class ManageFxAnimatorTool",1)[0]
     signatures=["private static VRCExpressionsMenu.Control BuildControl", "private static VRCExpressionsMenu.Control.ControlType ParseControlType", "private static T LoadAssetOrNull<T>", "private static void SetSubParameters", "private static List<string> PlanMenuAssetPaths", "private static int ResolveControlIndex"]
     if "private static void ValidateReorder" in source:
         signatures.append("private static void ValidateReorder")
@@ -61,6 +63,8 @@ public static int Main(){
  Check(!ReferenceEquals(next,original)&&original.name=="Bunny"&&next.name=="Changed","successful construction returns detached replacement");
  Check(ReferenceEquals(next.sdkExtra,marker)&&next.value==1&&original.parameter.name=="Keep"&&next.parameter.name=="New","SDK fields preserved and nested original not modified");
  Check(next.subParameters.Length==2&&next.subParameters[1].name=="B"&&original.subParameters==null,"subparameter array replaced without sharing mutation");
+ try { PlanMenuAssetPaths("update",menu,"Assets/Menu.asset",new JObject(),"Assets","Assets/Menu.asset"); Check(false,"asset path must not resolve as menu hierarchy"); }
+ catch(InvalidOperationException error) { Check(error.Message.Contains("control-name hierarchy") && error.Message.Contains("empty menuPath") && error.Message.Contains("Assets/..."),"wrong menu path explains how to correct the call"); }
  return failures==0?0:1;
 }
 '''
@@ -73,4 +77,13 @@ public static int Main(){
     (tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8")
     result=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
-    assert result.stdout.count("PASS ")==7
+    assert result.stdout.count("PASS ")==8
+
+
+def test_menu_hierarchy_description_is_shared_by_preview_and_write():
+    from unity_tool_schema_projection import canonical_unity_read_tool_input_schema, canonical_unity_write_tool_input_schema
+    preview=canonical_unity_read_tool_input_schema("vrcforge_preview_manage_expression_menu")["properties"]["menuPath"]
+    write=canonical_unity_write_tool_input_schema("vrcforge_manage_expression_menu")["properties"]["menuPath"]
+    assert preview == write
+    assert "control-name hierarchy" in write["description"]
+    assert "Assets/..." in write["description"]

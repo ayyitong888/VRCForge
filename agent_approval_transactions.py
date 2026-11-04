@@ -3572,7 +3572,7 @@ class AgentApprovalTransactionService:
         project_key = self._project_lock_key(project_root)
         avatar_path = str(
             arguments.get("avatar_path") or arguments.get("avatarPath") or ""
-        ).strip().strip("/")
+        ).strip("/")
         transition = status.get("playModeTransition")
         completed_target = (
             transition.get("completedExecutionTarget") if isinstance(transition, Mapping) else None
@@ -3581,7 +3581,7 @@ class AgentApprovalTransactionService:
             return []
         if not any(
             isinstance(manager, Mapping)
-            and str(manager.get("avatarPath") or "").strip().strip("/") == avatar_path
+            and str(manager.get("avatarPath") or "").strip("/") == avatar_path
             and manager.get("moduleConnected") is True
             for manager in status["managers"]
         ):
@@ -3594,7 +3594,7 @@ class AgentApprovalTransactionService:
                 continue
             if self._entry_project_key(recovery) != project_key:
                 continue
-            recovery_avatar = str(recovery.get("avatarPath") or "").strip().strip("/")
+            recovery_avatar = str(recovery.get("avatarPath") or "").strip("/")
             if not recovery_avatar or recovery_avatar != avatar_path:
                 continue
             if not isinstance(recovery.get("executionTarget"), Mapping):
@@ -4348,6 +4348,11 @@ class AgentApprovalTransactionService:
         )).strip()
         if normalize_execution_mode(config.execution_mode) == "approval" and not confirmation_reason:
             confirmation_reason = "Current permission mode requires user confirmation for each write."
+        if normalize_execution_mode(config.execution_mode) == "auto":
+            confirmation_reason = (
+                "For external MCP calls, Auto mode uses manual approval for each write."
+                + (" " + confirmation_reason if confirmation_reason else "")
+            )
         if authoritative_preview_only:
             confirmation_reason = ""
 
@@ -4706,13 +4711,7 @@ class AgentApprovalTransactionService:
             current_config = self._ports.ensure_config()
             if (
                 not prepared.get("requiresUserConfirmation")
-                and (
-                    normalize_execution_mode(current_config.execution_mode) == "approval"
-                    or (
-                        str(prepared.get("riskLevel") or "").lower() in {"high", "critical"}
-                        and normalize_execution_mode(current_config.execution_mode) != "roslyn_full_auto"
-                    )
-                )
+                and normalize_execution_mode(current_config.execution_mode) in {"approval", "auto"}
             ):
                 raise AgentGatewayError(
                     "Permission changed after write preparation. Prepare this operation again under the current permission mode.",
@@ -5210,7 +5209,7 @@ class AgentApprovalTransactionService:
                 "operation_kind": "write",
                 "tool": target_tool,
                 "tool_routing_started": False if not handler_started else None,
-                "raw_result": source_failure_result,
+                "raw_result": failure_result,
                 "exception": exc,
                 "console_before": verification_baseline,
                 "console_after": (
@@ -5228,6 +5227,9 @@ class AgentApprovalTransactionService:
                     }
                 )
             error_object = build_external_tool_error(**error_constructor_args)
+            # Verification adds facts after dispatch; keep those in the failure
+            # projection while preserving the original Core receipt verbatim.
+            error_object["rawResult"] = source_failure_result
             write_failure = external_write_failure_view(error_object)
             if recovery is not None:
                 if _confirmed_no_write_failure(write_failure):
@@ -5294,7 +5296,7 @@ class AgentApprovalTransactionService:
                 "mutationStarted": completion_outcome.get("mutationStarted"),
                 "mutationApplied": completion_outcome.get("mutationApplied"),
                 "commitState": completion_outcome.get("commitState") or ("unknown" if handler_started else "not_started"),
-                "persistenceState": "unknown" if handler_started else "not_started",
+                "persistenceState": completion_outcome.get("persistenceState") or ("unknown" if handler_started else "not_started"),
                 "readbackState": "failed" if handler_started else "not_started",
                 "cleanupState": "complete" if _confirmed_atomic_rollback_failure(failure_result, write_failure) else "unknown" if handler_started else "not_applicable",
                 "retryable": False,

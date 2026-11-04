@@ -6,6 +6,10 @@ import subprocess
 import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "Assets/VRCForge/Editor/Generic/UnityComponentCrud.cs").read_text(encoding="utf-8")
+if os.environ.get("VRCFORGE_READER_TEST_REF"):
+    SOURCE = subprocess.check_output(
+        ["git", "show", os.environ["VRCFORGE_READER_TEST_REF"] + ":Assets/VRCForge/Editor/Generic/UnityComponentCrud.cs"],
+        cwd=ROOT, text=True, encoding="utf-8")
 
 @pytest.fixture
 def structured_probe(tmp_path):
@@ -32,6 +36,10 @@ namespace UnityEngine {
  public struct Vector4 { public float x,y,z,w; }
  public struct Quaternion { public float x,y,z,w; }
  public struct Color { public float r,g,b,a; }
+ public enum WrapMode { Default, Loop }
+ public enum WeightedMode { None, Both }
+ public struct Keyframe { public float time,value,inTangent,outTangent,inWeight,outWeight; public WeightedMode weightedMode; }
+ public class AnimationCurve { public Keyframe[] keys {get;set;} public WrapMode preWrapMode {get;set;} public WrapMode postWrapMode {get;set;} }
  public struct Bounds { public Vector3 center,extents; }
  public struct Matrix4x4 { public float m00,m01,m02,m03,m10,m11,m12,m13,m20,m21,m22,m23,m30,m31,m32,m33; }
  public class Scene { public bool IsValid()=>false; public string path=""; }
@@ -53,6 +61,7 @@ namespace VRCForge.Editor {
  public sealed class Unsupported { public int value=1; }
  [Serializable] public class Parent { public string name="parent"; }
  [Serializable] public sealed class Child : Parent { public new string name="child"; }
+ [Serializable] public sealed class Binding { public AnimationCurve RemapCurve; }
  class Runner {
   static void Check(bool ok,string message){if(!ok)throw new Exception(message);}
   static int Main(){
@@ -62,6 +71,16 @@ namespace VRCForge.Editor {
    var result=ComponentCrudCore.DescribeValue(values,200,out returned,out total,out truncated,out incomplete,enums);
    var metadata=(Dictionary<string,object>)enums["/1/kind"]; Check((string)metadata["name"]=="Int" && (int)metadata["value"]==1 && (string)metadata["type"]==typeof(Kind).FullName,"nested enum identity");
    var scalarEnums=new Dictionary<string,object>(); ComponentCrudCore.DescribeValue(Kind.Int,50,out returned,out total,out truncated,out incomplete,scalarEnums); Check((int)((Dictionary<string,object>)scalarEnums[""])["value"]==1,"scalar enum identity");
+   var curve = new AnimationCurve { keys = new[] { new Keyframe { time=0,value=0 }, new Keyframe { time=100,value=100,outWeight=.5f,weightedMode=WeightedMode.Both } }, preWrapMode=WrapMode.Loop };
+   var curveEnums=new Dictionary<string,object>();
+   var bindingRows=(List<object>)ComponentCrudCore.DescribeValue(new List<Binding>{new Binding{RemapCurve=curve}},50,out returned,out total,out truncated,out incomplete,curveEnums);
+   var curveRead=(Dictionary<string,object>)((Dictionary<string,object>)bindingRows[0])["RemapCurve"];
+   var curveKeys=(List<object>)curveRead["keys"];
+   Check(!truncated && !incomplete && curveKeys.Count==2 && (float)((Dictionary<string,object>)curveKeys[1])["value"]==100,"nested curve keys must be read completely");
+   Check((string)curveRead["preWrapMode"]=="Loop" && (int)((Dictionary<string,object>)curveEnums["/0/RemapCurve/preWrapMode"])["value"]==1,"curve wrap mode and enum identity");
+   ComponentCrudCore.DescribeValue(curve,1,out returned,out total,out truncated,out incomplete); Check(truncated && incomplete,"curve key limit remains explicit");
+   var directKeys=(List<object>)ComponentCrudCore.DescribeValue(curve.keys,50,out returned,out total,out truncated,out incomplete);
+   Check(!incomplete && (float)((Dictionary<string,object>)directKeys[1])["outWeight"]==.5f,"direct keyframe array read matches curve read");
    ComponentCrudCore.DescribeValue(values,200,out returned,out total,out truncated,out incomplete);
    Check(returned==91 && total==91 && !truncated && !incomplete,"91 typed entries must be complete");
    var rows=(List<object>)result; var first=(Dictionary<string,object>)rows[0]; Check((string)first["name"]=="p0" && (string)first["kind"]=="Float","enum and public field projection");

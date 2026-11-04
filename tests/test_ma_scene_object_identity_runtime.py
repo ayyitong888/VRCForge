@@ -37,5 +37,13 @@ Check(ResolveSceneObject("Avatar/Hat",avatar)==hat.gameObject,"root prefix regre
 Check(ResolveSceneObject("Container/Avatar/Hat",avatar)==hat.gameObject,"nested full path regressed");
 Check(ResolveSceneObject("Avatar",avatar)==avatar.gameObject,"root selector regressed");
 var same=Add("Hat",avatar);Check(Rejected("Hat",avatar),"duplicate sibling selected first");
+Resources.items.Clear();avatar=Add("Avatar");var outfit=Add("Outfit",avatar);
+var spaced=Add("Part ",outfit);var plain=Add("Part",outfit);
+Check(ResolveSceneObject("Avatar/Outfit/Part ",null)==spaced.gameObject,"trailing space full path lost");
+Check(ResolveSceneObject("Outfit/Part ",avatar)==spaced.gameObject,"trailing space scoped path lost");
+Check(ResolveSceneObject("Avatar/Outfit/Part",null)==plain.gameObject,"plain sibling aliased");
+Resources.items.Clear();avatar=Add(" Avatar ");spaced=Add(" Child ",avatar);
+Check(ResolveSceneObject(" Avatar / Child ",null)==spaced.gameObject,"leading name whitespace lost");
+Check(Rejected("Avatar/ Child"),"trimmed path aliases spaced object");
 }}
 '''.replace('BODIES',bodies))

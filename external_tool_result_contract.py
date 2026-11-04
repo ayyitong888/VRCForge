@@ -267,6 +267,7 @@ def canonical_result_facts(
     for key, names in (
         ("toolRoutingStarted", ("toolRoutingStarted",)),
         ("mutationStarted", ("mutationStarted",)),
+        ("mutationApplied", ("mutationApplied",)),
         ("committed", ("committed",)),
     ):
         raw_value = _first_present(expanded_sources, *names)

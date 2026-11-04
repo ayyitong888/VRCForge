@@ -15,7 +15,7 @@ TOOL = "vrcforge_checkpoint_choice_fixture"
 QUOTE = "这次不用 checkpoints"
 
 
-def fixture_gateway(tmp_path: Path, *, mode: str = "auto", fail: bool = False, checkpoint: bool = True):
+def fixture_gateway(tmp_path: Path, *, mode: str = "roslyn_full_auto", fail: bool = False, checkpoint: bool = True):
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = config.allow_write_requests = True

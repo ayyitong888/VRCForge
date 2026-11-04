@@ -373,7 +373,7 @@ namespace VRCForge.Editor
 
         private static GameObject ResolveAvatarObject(string avatarPath)
         {
-            var normalized = NormalizePath(avatarPath);
+            var normalized = ComponentCrudCore.NormalizePath(avatarPath);
             if (!string.IsNullOrEmpty(normalized))
             {
                 try
@@ -413,7 +413,7 @@ namespace VRCForge.Editor
                 return descriptors[0].gameObject;
             }
 
-            var matches = descriptors.Where(item => NormalizePath(GetTransformPath(item.transform)) == normalized).ToList();
+            var matches = descriptors.Where(item => ComponentCrudCore.NormalizePath(GetTransformPath(item.transform)) == normalized).ToList();
             if (matches.Count == 0)
             {
                 matches = descriptors.Where(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase)).ToList();

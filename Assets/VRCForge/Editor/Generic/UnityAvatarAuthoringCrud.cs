@@ -161,10 +161,10 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("No scene VRChat avatar descriptor was found.");
             }
 
-            var normalized = NormalizePath(avatarPath);
+            var normalized = ComponentCrudCore.NormalizePath(avatarPath);
             var matches = string.IsNullOrEmpty(normalized)
                 ? descriptors
-                : descriptors.Where(item => NormalizePath(GetTransformPath(item.transform)) == normalized).ToList();
+                : descriptors.Where(item => ComponentCrudCore.NormalizePath(GetTransformPath(item.transform)) == normalized).ToList();
             if (matches.Count == 0 && !normalized.Contains("/"))
                 matches = descriptors.Where(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase)).ToList();
             if (matches.Count != 1)
@@ -397,7 +397,7 @@ namespace VRCForge.Editor
             try
             {
                 @params = @params ?? new JObject();
-                var avatarPath = (@params["avatarPath"]?.ToString() ?? "").Trim();
+                var avatarPath = @params["avatarPath"]?.ToString() ?? "";
                 var parameterName = (@params["parameterName"]?.ToString() ?? "").Trim();
                 var type = AvatarAuthoringCrudCore.ParseExpressionParameterType(@params["valueType"]?.ToString() ?? "Int");
                 var defaultValue = @params["defaultValue"]?.Value<float?>() ?? 0f;
@@ -606,7 +606,7 @@ namespace VRCForge.Editor
         public class Parameters
         {
             [VRCForgeInput("Avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
-            [VRCForgeInput("Optional target menu asset path.", IsRequired = false)] public string menuPath { get; set; } = "";
+            [VRCForgeInput("Submenu control-name hierarchy from the Avatar root expression menu, e.g. Clothing/Casual; empty means root. Not an Assets/... asset path.", IsRequired = false)] public string menuPath { get; set; } = "";
             [VRCForgeInput("Display name for the control.", IsRequired = false)] public string controlName { get; set; } = "Control";
             [VRCForgeInput("Expression menu control type.", IsRequired = false)] public string controlType { get; set; } = "Toggle";
             [VRCForgeInput("Bound expression parameter name.", IsRequired = true)] public string parameterName { get; set; } = "";
@@ -627,7 +627,7 @@ namespace VRCForge.Editor
             try
             {
                 @params = @params ?? new JObject();
-                var avatarPath = (@params["avatarPath"]?.ToString() ?? "").Trim();
+                var avatarPath = @params["avatarPath"]?.ToString() ?? "";
                 var menuPath = AvatarAuthoringCrudCore.NormalizePath(@params["menuPath"]?.ToString() ?? "");
                 var controlName = (@params["controlName"]?.ToString() ?? "Control").Trim();
                 var controlTypeText = (@params["controlType"]?.ToString() ?? "Toggle").Trim();
@@ -1067,7 +1067,7 @@ namespace VRCForge.Editor
             try
             {
                 @params = @params ?? new JObject();
-                var avatarPath = (@params["avatarPath"]?.ToString() ?? "").Trim();
+                var avatarPath = @params["avatarPath"]?.ToString() ?? "";
                 var layerName = (@params["layerName"]?.ToString() ?? "").Trim();
                 var stateName = (@params["stateName"]?.ToString() ?? "State").Trim();
                 var parameterName = (@params["parameterName"]?.ToString() ?? "").Trim();

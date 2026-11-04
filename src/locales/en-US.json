@@ -790,7 +790,7 @@
     "approval": "Restricted",
     "approvalDesc": "Sandbox mode: high-risk commands and writes require individual approval. Safest option.",
     "auto": "Auto Approve",
-    "autoDesc": "Routine approvals pass automatically with an audit trail; deletes and outside-project paths still ask for confirmation.",
+    "autoDesc": "The built-in assistant reviews routine actions automatically; deletes and outside-project paths still require confirmation. External MCP uses manual approval.",
     "roslynFullAuto": "Full Permission",
     "roslynFullAutoDesc": "Auto approve all requests with an audit trail. Highest risk; no extra startup confirmation."
   },

@@ -94,13 +94,13 @@ def _bool(value: Any, default: bool) -> bool:
 
 def _component_target(params: dict[str, Any]) -> tuple[str, str]:
     return (
-        _text(params.get("game_object_path") or params.get("gameObjectPath") or params.get("object_path") or params.get("objectPath")),
+        _gameobject_target(params),
         _text(params.get("component_type") or params.get("componentType")),
     )
 
 
 def _gameobject_target(params: dict[str, Any]) -> str:
-    return _text(params.get("game_object_path") or params.get("gameObjectPath") or params.get("object_path") or params.get("objectPath"))
+    return str(params.get("game_object_path") or params.get("gameObjectPath") or params.get("object_path") or params.get("objectPath") or "")
 
 
 def build_unpack_prefab_request(params: dict[str, Any], *, preview: bool | None = None) -> dict[str, Any]:
@@ -122,7 +122,7 @@ def build_instantiate_prefab_request(params: dict[str, Any], *, preview: bool | 
     request = {
         "assetPath": _text(params.get("asset_path") or params.get("assetPath")),
         "guid": _text(params.get("guid")),
-        "parentPath": _text(params.get("parent_path") or params.get("parentPath")),
+        "parentPath": str(params.get("parent_path") or params.get("parentPath") or ""),
         "name": _text(params.get("name")),
         "worldPositionStays": bool(params.get("world_position_stays", params.get("worldPositionStays", True))),
         "preview": bool(params.get("preview", False)) if preview is None else preview,
@@ -167,7 +167,7 @@ def _avatar_primitive(params: dict[str, Any]) -> dict[str, Any]:
 
 def build_ensure_expression_parameter_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
     request: dict[str, Any] = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or ""),
         "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
         "valueType": str(params.get("value_type") or params.get("valueType") or "Int").strip() or "Int",
         "defaultValue": float(params.get("default_value", params.get("defaultValue", 0)) or 0),
@@ -185,7 +185,7 @@ def build_ensure_expression_parameter_request(params: dict[str, Any], preview: b
 
 def build_ensure_expression_menu_control_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
     request: dict[str, Any] = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or ""),
         "menuPath": str(params.get("menu_path") or params.get("menuPath") or "").strip(),
         "controlName": str(params.get("control_name") or params.get("controlName") or "").strip(),
         "controlType": str(params.get("control_type") or params.get("controlType") or "Toggle").strip() or "Toggle",
@@ -203,7 +203,7 @@ def build_ensure_expression_menu_control_request(params: dict[str, Any], preview
 
 def build_ensure_animator_state_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
     request: dict[str, Any] = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or ""),
         "layerName": str(params.get("layer_name") or params.get("layerName") or "").strip(),
         "stateName": str(params.get("state_name") or params.get("stateName") or "").strip(),
         "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
@@ -232,22 +232,23 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
     params = dict(arguments or {})
     if target_name == "vrcforge_gesture_manager_set_parameter":
         request = {
-            "avatarPath": _text(params.get("avatar_path") or params.get("avatarPath")),
+            "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or ""),
             "parameterName": _text(params.get("parameter_name") or params.get("parameterName")),
             "value": params.get("value"),
         }
         return [("vrc_gesture_manager_set_parameter", request)]
     if target_name == "vrcforge_gesture_manager_enter_play_mode":
         return [("vrc_gesture_manager_enter_play_mode", {
-            "avatarPath": _text(params.get("avatar_path") or params.get("avatarPath")),
+            "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or ""),
         })]
     if target_name == "vrcforge_select_scene_object":
         return [("vrc_select_scene_object", {
-            "gameObjectPath": _text(
+            "gameObjectPath": str(
                 params.get("game_object_path")
                 or params.get("gameObjectPath")
                 or params.get("object_path")
                 or params.get("objectPath")
+                or ""
             ),
         })]
     if target_name == "vrcforge_set_play_mode":
@@ -269,7 +270,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
 
     gameobject_tools = {
         "vrcforge_rename_gameobject": ("vrc_rename_gameobject", lambda: {"gameObjectPath": _gameobject_target(params), "newName": _text(params.get("new_name") or params.get("newName")), "preview": False}),
-        "vrcforge_reparent_gameobject": ("vrc_reparent_gameobject", lambda: {"gameObjectPath": _gameobject_target(params), "newParentPath": _text(params.get("new_parent_path") or params.get("newParentPath")), "worldPositionStays": bool(params.get("world_position_stays", params.get("worldPositionStays", True))), "preview": False, **sibling_index_arguments(params)}),
+        "vrcforge_reparent_gameobject": ("vrc_reparent_gameobject", lambda: {"gameObjectPath": _gameobject_target(params), "newParentPath": str(params.get("new_parent_path") or params.get("newParentPath") or ""), "worldPositionStays": bool(params.get("world_position_stays", params.get("worldPositionStays", True))), "preview": False, **sibling_index_arguments(params)}),
         "vrcforge_delete_gameobject": (
             "vrc_delete_gameobject",
             lambda: {
@@ -285,7 +286,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
         tool, factory = gameobject_tools[target_name]
         return [(tool, factory())]
     if target_name == "vrcforge_create_gameobject":
-        return [("vrc_create_gameobject", {"name": _text(params.get("name")), "parentPath": _text(params.get("parent_path") or params.get("parentPath")), "preview": False})]
+        return [("vrc_create_gameobject", {"name": _text(params.get("name")), "parentPath": str(params.get("parent_path") or params.get("parentPath") or ""), "preview": False})]
     if target_name == "vrcforge_instantiate_prefab":
         return [("vrc_instantiate_prefab", build_instantiate_prefab_request(params, preview=False))]
     if target_name == "vrcforge_duplicate_scene_object":
@@ -309,14 +310,14 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
         return [("vrc_duplicate_scene_object", request)]
     if target_name == "vrcforge_toggle_scene_object":
         save_assets = params.get("save_assets", params.get("saveAssets", True))
-        return [("vrc_toggle_scene_object", {"objectPath": _text(params.get("object_path") or params.get("objectPath")), "active": bool(params.get("active")), "saveAssets": save_assets is not False})]
+        return [("vrc_toggle_scene_object", {"objectPath": str(params.get("object_path") or params.get("objectPath") or ""), "active": bool(params.get("active")), "saveAssets": save_assets is not False})]
     if target_name == "vrcforge_remap_skinned_mesh_bone":
         return [("vrc_remap_skinned_mesh_bone", {
             "gameObjectPath": _gameobject_target(params),
             "componentIndex": int(params.get("component_index", params.get("componentIndex", 0)) or 0),
             "boneIndex": int(params.get("bone_index", params.get("boneIndex", 0)) or 0),
-            "expectedCurrentBonePath": _text(params.get("expected_current_bone_path") or params.get("expectedCurrentBonePath")),
-            "targetBonePath": _text(params.get("target_bone_path") or params.get("targetBonePath")),
+            "expectedCurrentBonePath": str(params.get("expected_current_bone_path") or params.get("expectedCurrentBonePath") or ""),
+            "targetBonePath": str(params.get("target_bone_path") or params.get("targetBonePath") or ""),
             "expectedMeshName": _text(params.get("expected_mesh_name") or params.get("expectedMeshName")),
             "preview": False,
         })]

@@ -84,6 +84,10 @@ namespace UnityEngine {
  public struct Vector4 { public float x,y,z,w; }
  public struct Quaternion { public float x,y,z,w; }
  public struct Color { public float r,g,b,a; }
+ public enum WrapMode { Default, Loop }
+ public enum WeightedMode { None, Both }
+ public struct Keyframe { public float time,value,inTangent,outTangent,inWeight,outWeight; public WeightedMode weightedMode; }
+ public class AnimationCurve { public Keyframe[] keys {get;set;} public WrapMode preWrapMode {get;set;} public WrapMode postWrapMode {get;set;} }
  public struct Bounds { public Vector3 center,extents; }
  public struct Matrix4x4 { public float m00,m01,m02,m03,m10,m11,m12,m13,m20,m21,m22,m23,m30,m31,m32,m33; }
  public class Scene { public bool IsValid()=>false; public string path=""; }

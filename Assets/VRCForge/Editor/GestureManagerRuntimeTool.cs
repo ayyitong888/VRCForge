@@ -694,7 +694,7 @@ namespace VRCForge.Editor
 
         private static string NormalizePath(string value)
         {
-            return (value ?? string.Empty).Trim().Trim('/').Replace('\\', '/');
+            return (value ?? string.Empty).Trim('/').Replace('\\', '/');
         }
     }
 
@@ -841,7 +841,7 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
-            var requestedAvatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
+            var requestedAvatarPath = @params?["avatarPath"]?.ToString() ?? string.Empty;
             var packageStatus = GestureManagerRuntimeBridge.ReadStatus(
                 requestedAvatarPath,
                 includeAllParameters: false);
@@ -1027,7 +1027,7 @@ namespace VRCForge.Editor
                     new { mutationStarted = false, committed = false, commitState = "not_started" });
             }
 
-            var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
+            var avatarPath = @params?["avatarPath"]?.ToString() ?? string.Empty;
             var parameterName = (@params?["parameterName"]?.ToString() ?? string.Empty).Trim();
             if (string.IsNullOrEmpty(parameterName))
             {

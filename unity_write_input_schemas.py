@@ -990,7 +990,7 @@ _WARDROBE_PUBLIC_PROPERTIES = {
     },
     "ensure_expression_menu_control": {
         **_WARDROBE_TARGET_PROPERTIES,
-        "menuPath": {"type": ["string", "null"], "description": "Optional menu path containing the control."},
+        "menuPath": {"type": ["string", "null"], "description": "Submenu control-name hierarchy relative to the Avatar root expression menu, e.g. Clothing/Casual. Empty or omitted means root; this is not an Assets/... asset path."},
         "controlName": {"type": ["string", "null"], "description": "Required exact menu control name to create or update."},
         "controlType": {"type": ["string", "null"], "default": "Toggle", "description": "Expression menu control type, validated by the existing Core handler."},
         "parameterName": {"type": ["string", "null"], "description": "Optional main expression parameter used by the control."},

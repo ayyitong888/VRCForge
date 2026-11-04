@@ -93,6 +93,7 @@ def test_optional_project_read_schemas_are_known_and_project_bindable() -> None:
         'vrcforge_preview_parameter_bit_packing',
         'vrcforge_preview_restore_checkpoint',
         'vrcforge_project_catalog_registration_status',
+        'vrcforge_read_local_image',
         'vrcforge_project_create_plan',
         'vrcforge_read_avatar_descriptor',
         'vrcforge_read_text_file',
@@ -131,8 +132,24 @@ def test_external_optional_project_read_fails_closed_after_two_scopes(tmp_path) 
     gateway._guard_external_mcp_project_scope(  # noqa: SLF001
         "vrcforge_scan_fx_animator", {"projectPath": r"D:\Projects\B"}
     )
-    with pytest.raises(AgentGatewayError, match="multiple Unity project scopes"):
-        gateway._guard_external_mcp_project_scope("vrcforge_scan_fx_animator", {})  # noqa: SLF001
+    with pytest.raises(AgentGatewayError, match="multiple Unity project scopes") as rejected:
+        gateway._guard_external_mcp_project_scope("vrcforge_list_avatars", {})  # noqa: SLF001
+    details = rejected.value.external_error["details"]
+    assert details["knownProjectPaths"] == sorted(gateway._external_mcp_project_paths)  # noqa: SLF001
+    assert "choose the exact intended projectpath" in details["nextAction"].casefold()
+    assert "do not guess" in details["nextAction"].casefold()
+
+
+def test_global_project_catalog_status_bypasses_optional_project_scope_guard(tmp_path) -> None:
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    gateway._register_runtime_project_scope(r"D:\Projects\A")  # noqa: SLF001
+    gateway._register_runtime_project_scope(r"D:\Projects\B")  # noqa: SLF001
+
+    gateway._guard_external_mcp_project_scope(  # noqa: SLF001
+        "vrcforge_project_catalog_registration_status", {}
+    )
 
 
 def test_internal_scopes_also_make_external_optional_read_fail_closed(tmp_path) -> None:

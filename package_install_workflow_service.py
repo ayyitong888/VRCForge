@@ -281,14 +281,29 @@ class PackageDetectionService:
         if project_path is None:
             info["warning"] = "No Unity project selected; package detection skipped."
             return info
+
+        def record_read_error(path: Path, error: Exception, *, directory: bool = False) -> None:
+            info.setdefault("readErrors", []).append({"path": str(path), "error": str(error), "isDirectory": directory})
+            info["warning"] = "Some package state could not be read; do not infer package absence from this result."
+            info["installed"] = None
+
+        def read_object(path: Path) -> dict[str, Any] | None:
+            try:
+                data = json.loads(self._ports.read_utf8_sig_text(path))
+                if not isinstance(data, dict):
+                    raise ValueError("Package JSON root must be an object.")
+                return data
+            except (OSError, ValueError, UnicodeError) as exc:
+                record_read_error(path, exc)
+                return None
+
         packages_dir = project_path / "Packages"
         for package_id in package_ids:
             embedded = packages_dir / package_id / "package.json"
             if self._ports.path_exists(embedded):
-                try:
-                    data = json.loads(self._ports.read_utf8_sig_text(embedded))
-                except (OSError, json.JSONDecodeError):
-                    data = {}
+                data = read_object(embedded)
+                if data is None:
+                    continue
                 info.update(
                     {
                         "installed": True,
@@ -309,9 +324,8 @@ class PackageDetectionService:
                 package_json = candidate / "package.json"
                 if not self._ports.path_exists(package_json):
                     continue
-                try:
-                    data = json.loads(self._ports.read_utf8_sig_text(package_json))
-                except (OSError, json.JSONDecodeError):
+                data = read_object(package_json)
+                if data is None:
                     continue
                 matched_id = next(
                     (
@@ -334,8 +348,8 @@ class PackageDetectionService:
                     }
                 )
                 return info
-        except OSError:
-            pass
+        except OSError as exc:
+            record_read_error(assets_dir, exc, directory=True)
         # Keep direct project declarations ahead of the resolved lock graph:
         # embedded packages, VPM, and direct UPM state are authoritative when
         # more than one source is present. The lock file is still needed for
@@ -348,9 +362,8 @@ class PackageDetectionService:
             manifest_path = packages_dir / manifest_name
             if not self._ports.path_exists(manifest_path):
                 continue
-            try:
-                manifest = json.loads(self._ports.read_utf8_sig_text(manifest_path))
-            except (OSError, json.JSONDecodeError):
+            manifest = read_object(manifest_path)
+            if manifest is None:
                 continue
             sections = (
                 [manifest.get("locked"), manifest.get("dependencies")]
@@ -359,6 +372,8 @@ class PackageDetectionService:
             )
             for section in sections:
                 if not isinstance(section, dict):
+                    if section is not None:
+                        record_read_error(manifest_path, ValueError("Package dependency section must be an object."))
                     continue
                 for package_id in package_ids:
                     entry = section.get(package_id)
@@ -407,6 +422,7 @@ class PackageInstallWorkflowPorts:
     read_compile_errors: Callable[[dict[str, Any]], dict[str, Any]]
     redact_support: Callable[[Any], Any]
     create_apply_request: CreateApplyRequestPort
+    sdk_package_ids: tuple[str, ...] | list[str] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,6 +574,13 @@ class PackageInstallWorkflowService:
             framework: self._ports.detect_package(project_path, list(spec["packageIds"]))
             for framework, spec in self._ports.addon_frameworks.items()
         }
+        package_id = str(normalized.get("packageId") or normalized.get("package_id") or "").strip().lower()
+        if package_id and not VPM_PACKAGE_ID_RE.fullmatch(package_id):
+            return {"ok": False, "error": "packageId must be a valid VPM package id, for example nadena.dev.modular-avatar."}
+        for known_id in dict.fromkeys([*self._ports.sdk_package_ids, *([package_id] if package_id else [])]):
+            existing = next((packages[name] for name, spec in self._ports.addon_frameworks.items()
+                             if spec["packageIds"] == [known_id] or packages[name].get("packageId") == known_id), None)
+            packages[known_id] = existing if existing is not None else self._ports.detect_package(project_path, [known_id])
         usable = sorted(
             [
                 manager
@@ -620,6 +643,7 @@ class PackageInstallWorkflowService:
         installed = bool(
             isinstance(package_state, dict) and package_state.get("installed")
         )
+        unreadable_state = (package_state or {}).get("installed") is None and bool((package_state or {}).get("readErrors"))
         installed_version = str((package_state or {}).get("version") or "")
         requested_version = str(
             normalized.get("packageVersion")
@@ -671,11 +695,11 @@ class PackageInstallWorkflowService:
             "upgradeRequested": upgrade_requested,
             "legacyBaselineVerification": baseline_report,
             "legacyPreservationRequired": preservation_ready,
-            "compatibilityAction": "migration_required" if assets_migration_required else "upgrade" if upgrade_available else "use_installed" if installed else "install_missing",
+            "compatibilityAction": "inspect_package_state" if unreadable_state else "migration_required" if assets_migration_required else "upgrade" if upgrade_available else "use_installed" if installed else "install_missing",
             "canExecuteCommandInstall": bool(strategy.get("commandInstaller"))
-            and bool(project_value),
-            "canCreateInstallRequest": bool(project_value) and (not installed or upgrade_available) and not assets_migration_required,
-            "canPrepareUpgradeRequest": upgrade_available and not assets_migration_required,
+            and bool(project_value) and not unreadable_state,
+            "canCreateInstallRequest": bool(project_value) and (not installed or upgrade_available) and not assets_migration_required and not unreadable_state,
+            "canPrepareUpgradeRequest": upgrade_available and not assets_migration_required and not unreadable_state,
         }
 
     def diagnose_install(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -709,7 +733,7 @@ class PackageInstallWorkflowService:
         )
         warnings: list[str] = []
         try:
-            package_status = self.package_manager_status({"projectPath": project_value})
+            package_status = self.package_manager_status({**normalized, "projectPath": project_value})
         except Exception as exc:  # noqa: BLE001 - diagnostics survive partial failures.
             package_status = {"ok": False, "error": str(exc)}
             warnings.append(f"Package manager status failed: {exc}")
@@ -721,6 +745,37 @@ class PackageInstallWorkflowService:
             compile_errors = {"ok": False, "error": str(exc)}
             warnings.append(f"Unity compile-error reader failed: {exc}")
         symptoms = self._classify_symptoms(safe_text, compile_errors, package_status)
+        package_state = (package_status.get("packages") or {}).get(package_id)
+        read_errors = []
+        for state in (package_status.get("packages") or {}).values():
+            for error in state.get("readErrors") or []:
+                if error not in read_errors:
+                    read_errors.append(error)
+        if read_errors:
+            symptoms = [item for item in symptoms if item["code"] != "unknown"]
+            symptoms.insert(0, {
+                "code": "package_state_unreadable",
+                "title": "Project package state could not be read completely",
+                "suggestion": "Inspect the reported file errors before deciding whether a package needs installing.",
+                "readErrors": read_errors,
+            })
+        if (package_id and project_value and Path(project_value).is_dir()
+                and isinstance(package_state, dict) and package_state.get("installed") is False
+                and not package_state.get("warning")):
+            symptoms = [item for item in symptoms if item["code"] != "unknown"]
+            symptoms.insert(0, {
+                "code": "missing_package",
+                "packageId": package_id,
+                "title": f"Requested package {package_id} was not found in the project package state",
+                "suggestion": "Plan installation of this package through the existing package manager; package absence alone does not establish the cause of a Core connection failure.",
+            })
+        if compile_errors.get("ok") is False:
+            symptoms = [item for item in symptoms if item["code"] != "unknown"]
+            symptoms.append({
+                "code": "compile_reader_unavailable",
+                "title": "Unity compile diagnostics could not be read",
+                "suggestion": "Use the returned host-side package facts and App diagnostics or Unity Console > Open Editor Log. Do not repeat the unavailable Core reader or treat this as zero compile errors.",
+            })
         suggestions = self._build_fix_suggestions(symptoms, package_status, package_id)
         return {
             "ok": True,
@@ -806,19 +861,35 @@ class PackageInstallWorkflowService:
 
     @staticmethod
     def _build_fix_suggestions(
-        symptoms: list[dict[str, str]],
+        symptoms: list[dict[str, Any]],
         package_status: dict[str, Any],
         package_id: str,
     ) -> list[dict[str, Any]]:
         suggestions: list[dict[str, Any]] = []
         codes = {item.get("code") for item in symptoms}
-        if "compile" in codes:
+        if "package_state_unreadable" in codes:
+            for item in symptoms:
+                for error in item.get("readErrors") or []:
+                    suggestions.append({
+                        "id": "inspect_package_state_file", "risk": "read_only",
+                        "tool": "vrcforge_list_directory" if error.get("isDirectory") else "vrcforge_read_text_file",
+                        "arguments": {"projectPath": package_status.get("projectPath", ""), "path": error["path"]},
+                        "summary": error["error"],
+                    })
+        if "missing_package" in codes:
+            suggestions.append({
+                "id": "missing_package_install_plan", "risk": "plan_only",
+                "tool": "vrcforge_package_install_plan",
+                "arguments": {"projectPath": package_status.get("projectPath", ""), "packageId": package_id},
+                "summary": f"Inspect the existing supervised installation plan for missing package {package_id}; do not install unrelated optional packages.",
+            })
+        if "compile" in codes and "compile_reader_unavailable" not in codes:
             suggestions.append({"id": "explain_compile_errors", "risk": "read_only", "tool": "vrcforge_get_compile_errors", "summary": "Read Unity compile errors and create a separate fix plan."})
         if {"manifest", "dependency"} & codes:
             suggestions.append({"id": "dependency_repair_plan", "risk": "plan_only", "tool": "vrcforge_package_manager_status", "summary": "Compare package manager status with manifest/lock state before any repair."})
         if "unitypackage" in codes:
             suggestions.append({"id": "unitypackage_import_plan", "risk": "plan_only", "tool": "vrcforge_plan_outfit_import", "summary": "Inspect the package and build a supervised import plan with rollback proof."})
-        if package_id and package_status.get("preferredCli"):
+        if package_id and package_status.get("preferredCli") and not {"missing_package", "package_state_unreadable"} & codes:
             suggestions.append({"id": "retry_vpm_install_request", "risk": "approval_required", "tool": "vrcforge_install_vpm_package", "summary": f"Retry package install for {package_id} only through the approval/checkpoint path."})
         if not suggestions:
             suggestions.append({"id": "support_bundle", "risk": "read_only", "tool": "vrcforge_support_bundle", "summary": "Collect redacted diagnostics before attempting repair."})
@@ -839,6 +910,8 @@ class PackageInstallWorkflowService:
             if isinstance(plan.get("packageState"), dict)
             else {}
         )
+        if package_state.get("installed") is None and package_state.get("readErrors"):
+            return {"ok": False, "status": "blocked", "error": "Package state could not be read; inspect the reported files before requesting installation.", "installPlan": plan}
         installed = bool(package_state.get("installed"))
         upgrade_requested = bool(
             normalized.get("upgrade") or normalized.get("upgradePackage")
