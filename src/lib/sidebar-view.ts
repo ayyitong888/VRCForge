@@ -1,6 +1,9 @@
 import type { TFunction } from "i18next";
+import type { AgentRuntimeRun } from "./api/types";
 import type { ChatThread, ConversationItem } from "./chat-types";
 import { formatChatSidebarTime, groupSidebarChats, type ChatSidebarGroups } from "./chat-thread";
+import { isExternalRuntimeStream } from "./runtime-stream-owner";
+import { runtimeTurnActivityStatus } from "./runtime-run-status";
 
 export type SidebarChatActivity = "running" | "completed";
 
@@ -20,13 +23,14 @@ export function buildChatSidebarView(
   normalizeProjectPath: (value: string) => string,
   nowMs = Date.now(),
   visibleChatId = "",
+  runs: AgentRuntimeRun[] = [],
 ): SidebarChatGroupsWithTimes {
   return {
     ...groupSidebarChats(chats, normalizeProjectPath),
     times: new Map(chats.map((chat) => [chat.id, formatChatSidebarTime(chat, nowMs, language)])),
     activityByChat: new Map(
       chats
-        .map((chat) => [chat.id, chatSidebarActivity(chat, visibleChatId)] as const)
+        .map((chat) => [chat.id, chatSidebarActivity(chat, visibleChatId, runs)] as const)
         .filter((entry): entry is readonly [string, SidebarChatActivity] => Boolean(entry[1])),
     ),
   };
@@ -48,8 +52,11 @@ export function chatLatestAgentMarker(chat: ChatThread): string | undefined {
   return undefined;
 }
 
-export function chatSidebarActivity(chat: ChatThread, activeChatId = ""): SidebarChatActivity | undefined {
-  if (chat.items.some((item) => item.type === "streaming")) {
+export function chatSidebarActivity(chat: ChatThread, activeChatId = "", runs: AgentRuntimeRun[] = []): SidebarChatActivity | undefined {
+  if (chat.items.some((item) => item.type === "streaming" && (
+    !isExternalRuntimeStream(item)
+    || runtimeTurnActivityStatus(runs, chat.sessionId, item.clientTurnId) !== false
+  ))) {
     return "running";
   }
   if (chat.id === activeChatId) return undefined;

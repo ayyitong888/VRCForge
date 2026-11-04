@@ -591,8 +591,9 @@ export function UserImageAttachments({
   );
 }
 
-export function StreamingPhaseStatus({ item, nowMs, showElapsed }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed: boolean }) {
+export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed: boolean; runtimeActive?: boolean }) {
   const { t } = useTranslation();
+  if (runtimeActive === false) return null;
   const elapsedSeconds = elapsedSecondsSince(item.createdAt, nowMs);
   const reconnectAttempt = item.providerRetry?.attempt;
   const waitingWindow = !reconnectAttempt && item.phase === "waiting_for_model"

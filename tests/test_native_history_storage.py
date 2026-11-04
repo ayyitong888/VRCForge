@@ -13,6 +13,21 @@ def owner(path):
     return AgentRuntimeSessionState(AgentRuntimeSessionStatePorts(threading.RLock(), NativeHistoryStore(path)))
 
 
+@pytest.mark.parametrize("dispatch", ["", "c"])
+def test_restart_preserves_dispatch_marker_and_pending_result_meaning(tmp_path, dispatch):
+    state = owner(tmp_path)
+    state.begin_native_turn("s", binding="b", turn_id="t", message="inspect")
+    state.append_native_assistant("s", binding="b", message={"role": "assistant", "tool_calls": [
+        {"id": "c", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+    ]})
+    state.mark_native_dispatch("s", binding="b", call_id=dispatch)
+
+    fresh = owner(tmp_path).begin_native_turn("s", binding="b", turn_id="next", message="continue")
+
+    result = next(json.loads(item["content"]) for item in fresh["messages"] if item["role"] == "tool")
+    assert result["status"] == ("execution_unknown" if dispatch else "not_executed")
+
+
 def populate(state):
     state.begin_native_turn("s", binding="project|provider", turn_id="t1", message="inspect")
     state.load_internal_tool_block_selected("s", "avatar", ["read_menu"])

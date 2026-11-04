@@ -547,17 +547,39 @@ class AgentRuntimeRunLedger:
         }
 
     def read_terminal_continuation(
-        self, *, session_id: str, client_turn_id: str, turn_id: str,
+        self, *, session_id: str, client_turn_id: str, turn_id: str = "",
     ) -> dict[str, Any] | None:
-        """Return only this invocation's already-persisted public terminal."""
-        if not session_id or not client_turn_id or not turn_id:
+        """Return this invocation's persisted terminal, selecting the latest turn when omitted."""
+        session_id = str(session_id or "").strip()
+        client_turn_id = str(client_turn_id or "").strip()
+        requested_turn_id = str(turn_id or "").strip()
+        select_latest_turn = not requested_turn_id
+        if not session_id or not client_turn_id:
             return None
         terminal = None
         for row in self._exact_run_events(session_id, client_turn_id):
-            if row.get("turnId") != turn_id or row.get("event") != "runtime_turn_completed":
+            row_turn_id = str(row.get("turnId") or "").strip()
+            if select_latest_turn and row.get("event") == "runtime_turn_started":
+                # A newer invocation with a reused client ID owns recovery. Do
+                # not resurrect an earlier terminal if this turn is still live
+                # or its durable public response was never recorded.
+                terminal = None
+                continue
+            if row.get("event") != "runtime_turn_completed":
+                continue
+            if select_latest_turn:
+                # This row is the newest exact terminal even if an early
+                # failure persisted it before a runtime_turn_started record.
+                terminal = None
+            elif row_turn_id != requested_turn_id:
                 continue
             continuation = _terminal_continuation(row)
-            if continuation is not None:
+            if (
+                continuation is not None
+                and continuation.get("sessionId") == session_id
+                and continuation.get("clientTurnId") == client_turn_id
+                and continuation.get("turnId") == row_turn_id
+            ):
                 terminal = project_runtime_turn_event(self._ports.redact(_public_event(continuation)))
         return terminal
 

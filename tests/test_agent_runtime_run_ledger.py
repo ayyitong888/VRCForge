@@ -1295,3 +1295,108 @@ def test_shell_terminal_event_after_append_recovers_once_after_gateway_rebuild(t
         and event.get("shellSessionId") == shell_session_id
         for event in restarted.runtime_runs.read_events(limit=0)
     ) == 1
+
+
+def test_latest_terminal_continuation_is_exact_to_latest_session_client_turn(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    old_identity = {"sessionId": "s-current", "clientTurnId": "cid-reused", "turnId": "old-turn"}
+    old_continuation = {
+        "schema": "vrcforge.runtime_turn_event.v1",
+        "continuationSource": "foreground_completed",
+        **old_identity,
+        "plan": {"reply": "old reply", "taskCompletion": {"status": "completed"}},
+    }
+    ledger.append({**old_identity, "event": "runtime_turn_started", "status": "running"})
+    ledger.append({**old_identity, "event": "runtime_turn_completed", "status": "completed",
+                   "continuationEvent": old_continuation})
+    new_identity = {**old_identity, "turnId": "new-turn"}
+    ledger.append({**new_identity, "event": "runtime_turn_started", "status": "running"})
+
+    # A newer invocation with the same CID must not resurrect its older reply.
+    assert ledger.read_terminal_continuation(session_id="s-current", client_turn_id="cid-reused") is None
+
+    new_continuation = {
+        "schema": "vrcforge.runtime_turn_event.v1",
+        "continuationSource": "foreground_completed",
+        **new_identity,
+        "plan": {"reply": "blocked at a user question", "taskCompletion": {"status": "blocked"}},
+    }
+    ledger.append({**new_identity, "event": "runtime_turn_completed", "status": "blocked",
+                   "continuationEvent": new_continuation})
+    recovered = ledger.read_terminal_continuation(session_id="s-current", client_turn_id="cid-reused")
+    assert recovered["turnId"] == "new-turn"
+    assert recovered["plan"]["reply"] == "blocked at a user question"
+    assert recovered["plan"]["taskCompletion"]["status"] == "blocked"
+    assert ledger.read_terminal_continuation(session_id="other-session", client_turn_id="cid-reused") is None
+
+
+def test_latest_terminal_without_persisted_continuation_stays_missing(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    identity = {"sessionId": "s-old", "clientTurnId": "cid-old", "turnId": "turn-old"}
+    ledger.append({**identity, "event": "runtime_turn_started", "status": "running"})
+    # Historical blocked rows may have summary/timeline data but no exact public
+    # continuation. Do not synthesize a response from those partial records.
+    ledger.append({**identity, "event": "runtime_turn_completed", "status": "blocked",
+                   "planSummary": "not an exact reply", "timeline": [{"kind": "assistant", "payload": {"summary": "partial"}}]})
+    assert ledger.read_terminal_continuation(session_id="s-old", client_turn_id="cid-old") is None
+
+
+def test_latest_terminal_continuation_recovers_completed_invocation(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    identity = {"sessionId": "s-complete", "clientTurnId": "cid-complete", "turnId": "turn-complete"}
+    continuation = {
+        "schema": "vrcforge.runtime_turn_event.v1",
+        "continuationSource": "foreground_completed",
+        **identity,
+        "plan": {"reply": "Completed invocation reply", "taskCompletion": {"status": "completed"}},
+    }
+    ledger.append({**identity, "event": "runtime_turn_started", "status": "running"})
+    ledger.append({**identity, "event": "runtime_turn_completed", "status": "completed",
+                   "continuationEvent": continuation})
+    recovered = ledger.read_terminal_continuation(session_id="s-complete", client_turn_id="cid-complete")
+    assert recovered["turnId"] == "turn-complete"
+    assert recovered["plan"]["reply"] == "Completed invocation reply"
+    assert recovered["plan"]["taskCompletion"]["status"] == "completed"
+
+
+def test_latest_terminal_continuation_accepts_authoritative_early_failure_without_start(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    identity = {"sessionId": "s-early", "clientTurnId": "cid-early", "turnId": "turn-early"}
+    continuation = {
+        "schema": "vrcforge.runtime_turn_event.v1",
+        "continuationSource": "foreground_completed",
+        **identity,
+        "plan": {"reply": "Persisted failure response"},
+    }
+    # The gateway can persist an early failure terminal before a start event.
+    ledger.append({**identity, "event": "runtime_turn_completed", "status": "failed",
+                   "continuationEvent": continuation})
+    recovered = ledger.read_terminal_continuation(session_id="s-early", client_turn_id="cid-early")
+    assert recovered["turnId"] == "turn-early"
+    assert recovered["plan"]["reply"] == "Persisted failure response"
+
+
+def test_later_early_failure_supersedes_old_terminal_for_reused_client_id(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    old_identity = {"sessionId": "s-reused", "clientTurnId": "cid-reused", "turnId": "turn-old"}
+    old_continuation = {
+        "schema": "vrcforge.runtime_turn_event.v1",
+        "continuationSource": "foreground_completed",
+        **old_identity,
+        "plan": {"reply": "old terminal"},
+    }
+    ledger.append({**old_identity, "event": "runtime_turn_started", "status": "running"})
+    ledger.append({**old_identity, "event": "runtime_turn_completed", "status": "completed",
+                   "continuationEvent": old_continuation})
+    new_identity = {**old_identity, "turnId": "turn-new-early-failure"}
+    new_continuation = {
+        "schema": "vrcforge.runtime_turn_event.v1",
+        "continuationSource": "foreground_completed",
+        **new_identity,
+        "plan": {"reply": "new early failure"},
+    }
+    ledger.append({**new_identity, "event": "runtime_turn_completed", "status": "failed",
+                   "continuationEvent": new_continuation})
+    recovered = ledger.read_terminal_continuation(session_id="s-reused", client_turn_id="cid-reused")
+    assert recovered["turnId"] == "turn-new-early-failure"
+    assert recovered["plan"]["reply"] == "new early failure"

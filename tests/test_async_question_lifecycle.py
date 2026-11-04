@@ -39,6 +39,86 @@ def test_async_question_does_not_end_independent_runtime_work(tmp_path):
     assert question["originTurnId"]
 
 
+def test_returned_blocked_question_reply_is_recovered_from_durable_ledger(tmp_path):
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    gateway.register_tool(
+        "vrcforge_ask_user",
+        "When to use: ask. When NOT to use: otherwise.",
+        "plan/preview",
+        gateway.create_runtime_question,
+    )
+    replies = iter([
+        {"text": json.dumps({
+            "action": "skill",
+            "skill_tool": "vrcforge_ask_user",
+            "skill_params": {"question": "Which outfit next?", "blocking": False},
+        })},
+        {"text": json.dumps({
+            "action": "reply",
+            "reply": "The question is recorded; the task is waiting for your choice.",
+            "completion_claim": {"satisfied": False},
+        })},
+    ])
+    bind_test_runtime_planner(gateway, lambda _prompt: next(replies))
+    original = gateway.runtime_message({
+        "message": "Ask which outfit should be selected next.",
+        "sessionId": "durable-question-session",
+        "clientTurnId": "durable-question-cid",
+        "projectRoot": str(tmp_path),
+    })
+    assert original["plan"]["nextStep"] == "needs_user_action"
+    assert gateway.runtime_runs.list_runs(
+        session_id="durable-question-session", client_turn_id="durable-question-cid"
+    )["runs"][0]["status"] == "blocked"
+
+    restarted = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    recovered = restarted.get_runtime_session(
+        "durable-question-session", client_turn_id="durable-question-cid"
+    )
+    assert recovered["status"] == "completed"
+    response = recovered["response"]
+    assert response["ok"] is True
+    assert response["sessionId"] == "durable-question-session"
+    assert response["session_id"] == "durable-question-session"
+    assert response["clientTurnId"] == "durable-question-cid"
+    assert response["turnId"] == original["turnId"]
+    assert response["turn_id"] == original["turnId"]
+    assert response["observe"] == {}
+    assert response["plan"]["shellNeeded"] is False
+    assert response["plan"]["nextStep"] == "needs_user_action"
+    if "taskCompletion" in original["plan"]:
+        assert response["plan"]["taskCompletion"]["status"] == original["plan"]["taskCompletion"]["status"]
+    else:
+        assert response["plan"]["taskCompletion"]["status"] == ""
+    assert response["plan"]["reply"] == original["plan"]["reply"]
+    assert response["continuationSource"] == "foreground_completed"
+    assert "steps" not in response
+    question = restarted.questions.list(session_id="durable-question-session")["questions"][0]
+    assert question["blocking"] is False
+    assert question["originClientTurnId"] == "durable-question-cid"
+
+    historical = {
+        "sessionId": "historical-blocked-session",
+        "clientTurnId": "historical-blocked-cid",
+        "turnId": "historical-blocked-turn",
+    }
+    restarted.runtime_runs.append({**historical, "event": "runtime_turn_started", "status": "running"})
+    restarted.runtime_runs.append({
+        **historical,
+        "event": "runtime_turn_completed",
+        "status": "blocked",
+        "planSummary": "summary is not a recoverable reply",
+        "timeline": [{"kind": "assistant", "payload": {"summary": "partial timeline"}}],
+    })
+    historical_recovery = restarted.get_runtime_session(
+        "historical-blocked-session", client_turn_id="historical-blocked-cid"
+    )
+    assert historical_recovery["status"] == "missing"
+    assert "response" not in historical_recovery
+
+
 def test_active_answer_steers_exact_turn_without_a_second_provider(tmp_path, monkeypatch):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     gateway.runtime_sessions.begin_turn(session_id="async-session", client_turn_id="origin-cid", turn_id="origin-turn")

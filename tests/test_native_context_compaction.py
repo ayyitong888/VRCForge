@@ -49,6 +49,28 @@ def plan(planner, turn, usage=None):
         return planner.plan_agent_turn("Continue checking", {}, {}, native_turn=turn, context_usage=usage)
 
 
+def test_native_compaction_after_dispatched_tool_applies_summary():
+    state, planner, model, turn = fixture(Compactor())
+    from internal_tool_blocks import canonical_tool_tree
+    turn.freeze_tool_block_ids(["core", *(row["id"] for row in canonical_tool_tree()["roots"])])
+    turn.freeze_binding_tool_definition(planner._binding_tool_definition(True))
+    turn.admit({"role": "assistant", "content": None, "tool_calls": [{
+        "id": "dispatched-read", "type": "function",
+        "function": {"name": "read", "arguments": "{}"},
+    }]})
+    turn.next_receipt()
+    state.settle_native_call("s", binding="b", call_id="dispatched-read", content='{"ok":true}')
+    before = turn.snapshot()
+    assert before["activeDispatchCallId"] == ""
+    result = plan(planner, turn)
+
+    assert result["nextStep"] == "done"
+    assert turn.compaction["applied"] is True
+    assert turn.compaction["afterTokens"] < turn.compaction["triggerTokens"]
+    assert model.requests
+    assert state._native_pending(turn.snapshot()) == set()
+
+
 def test_native_compaction_reuses_port_and_summarizes_settled_current_receipts():
     compactor = Compactor()
     state, planner, model, turn = fixture(compactor)

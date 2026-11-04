@@ -30,7 +30,8 @@ import { conversationRoundDateSeparators } from "../../lib/message-time";
 import { projectConversationTasks } from "../../lib/chat-task-projection";
 import { capturePreviewsForQuestion } from "../../lib/chat-timeline-presentation";
 import { ChatPositionRail, type ChatPositionMarker } from "./chat-position-rail";
-import { isActiveRuntimeRunStatus } from "../../lib/runtime-run-status";
+import { isExternalRuntimeStream } from "../../lib/runtime-stream-owner";
+import { runtimeTurnActivityStatus } from "../../lib/runtime-run-status";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -663,7 +664,8 @@ export function ChatWorkspace({
             const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
             const turnId = item.type === "agent" ? item.response.clientTurnId : item.type === "streaming" ? item.clientTurnId : "";
             const turnSessionId = runtimeSessionId || (item.type === "agent" ? item.response.sessionId || item.response.session_id : "");
-            const runtimeRun = turnId && turnSessionId ? runtimeRuns.find((run) => run.clientTurnId === turnId && run.sessionId === turnSessionId) : undefined;
+            const runtimeActive = turnId && turnSessionId ? runtimeTurnActivityStatus(runtimeRuns, turnSessionId, turnId) : undefined;
+            const itemRuntimeActive = item.type === "streaming" && !isExternalRuntimeStream(item) ? undefined : runtimeActive;
             const initialUser = turnId ? steeringProjection.initialUsersByTurnId.get(turnId) : undefined;
             const capturedOperation = item.type === "agent"
               ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
@@ -675,7 +677,7 @@ export function ChatWorkspace({
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <ConversationCard
                 item={item}
-                runtimeActive={runtimeRun ? isActiveRuntimeRunStatus(runtimeRun.status) : undefined}
+                runtimeActive={itemRuntimeActive}
                 reopenQuestionId={item.type === "question_answer" ? pendingQuestionPrompts.find((question) => question.questionId === item.questionId)?.questionId : undefined}
                 onReopenQuestion={onReplyInChat}
                 onOpenChatById={onOpenChatById}
@@ -731,7 +733,7 @@ export function ChatWorkspace({
                 onSaveOperationAsSkill={onSaveOperationAsSkill}
                 />
                 {item.type === "streaming" ? (
-                  <StreamingPhaseStatus item={item} nowMs={activityNowMs} showElapsed={false} />
+                  <StreamingPhaseStatus item={item} nowMs={activityNowMs} showElapsed={false} runtimeActive={itemRuntimeActive} />
                 ) : null}
               </div>
             );

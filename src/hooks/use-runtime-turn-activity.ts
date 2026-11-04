@@ -44,6 +44,31 @@ export function runtimeActivityOwner(chats: ChatThread[], identity: Identity): C
   return exact.length === 1 ? exact[0] : undefined;
 }
 
+/** Return a cancel target only when one active, exact turn belongs to this chat. */
+export function runtimeActivityCancelTarget(
+  chats: ChatThread[],
+  chat: ChatThread | undefined,
+  runs: AgentRuntimeRun[],
+): Identity & { turnId: string } | undefined {
+  if (!chat?.sessionId) return undefined;
+  const candidates = new Map<string, Identity & { turnId: string }>();
+  for (const run of runs) {
+    const sessionId = String(run.sessionId || "").trim();
+    const clientTurnId = String(run.clientTurnId || "").trim();
+    const turnId = String(run.turnId || "").trim();
+    if (!isActiveRuntimeRunStatus(run.status) || !sessionId || sessionId !== chat.sessionId
+      || !clientTurnId || !turnId || clientTurnId.includes(":question:")) continue;
+    const identity = { sessionId, clientTurnId, turnId };
+    if (runtimeActivityOwner(chats, identity)?.id !== chat.id || hasAuthoritativeReply(chat, identity)) continue;
+    candidates.set(JSON.stringify([sessionId, clientTurnId, turnId]), identity);
+  }
+  const matching = [...candidates.values()];
+  const projected = matching.filter((identity) => chat.items.some((item) => item.type === "streaming"
+    && item.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX) && item.clientTurnId === identity.clientTurnId));
+  const eligible = projected.length ? projected : matching;
+  return eligible.length === 1 ? eligible[0] : undefined;
+}
+
 function hasReply(chat: ChatThread, identity: Identity): boolean {
   return chat.items.some((item) => item.type === "agent" && responseMatchesIdentity(item.response, identity));
 }

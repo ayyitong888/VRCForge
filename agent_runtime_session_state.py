@@ -491,6 +491,8 @@ class AgentRuntimeSessionState:
             normalized["toolBlockIds"] = list(snapshot["toolBlockIds"])
         if "compactionRecovery" in snapshot:
             normalized["compactionRecovery"] = cls._merge_native_recoveries([], snapshot["compactionRecovery"])
+        if "activeDispatchCallId" in snapshot:
+            normalized["activeDispatchCallId"] = snapshot["activeDispatchCallId"]
         if normalized_messages[active_turn_start].get("role") != "user":
             raise ValueError("native active turn must begin with user message")
         cls._native_size_ok(normalized)

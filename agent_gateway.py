@@ -8820,11 +8820,11 @@ class AgentGateway:
             write_payload=write_payload,
             approval_id=approval_id,
         )
-        # Waiting turns keep their existing approval/question/tool path. Only
-        # a terminal foreground turn gets the crash-replay projection.
+        # A returned blocked invocation also has a durable response boundary;
+        # its projected taskCompletion/nextStep remain blocked or waiting.
         foreground_source = (
             "foreground_completed"
-            if run_status in {"completed", "failed", "denied", "cancelled"}
+            if run_status in {"completed", "failed", "denied", "cancelled", "blocked"}
             else ""
         )
         if native_binding:
@@ -9131,10 +9131,35 @@ class AgentGateway:
 
     def get_runtime_session(self, session_id: str, *, client_turn_id: str = "") -> dict[str, Any]:
         if str(client_turn_id or "").strip():
-            return self._runtime_session_state.final_response(
+            final_response = self._runtime_session_state.final_response(
                 session_id=session_id,
                 client_turn_id=client_turn_id,
             )
+            if final_response.get("status") != "missing":
+                return final_response
+            continuation = self._runtime_run_ledger.read_terminal_continuation(
+                session_id=session_id,
+                client_turn_id=client_turn_id,
+            )
+            if continuation is None:
+                return final_response
+            response = dict(continuation)
+            response["ok"] = True
+            response["session_id"] = continuation["sessionId"]
+            response["turn_id"] = continuation["turnId"]
+            response["observe"] = {}
+            response_plan = dict(ensure_dict(continuation.get("plan")))
+            response_plan["shellNeeded"] = False
+            response["plan"] = response_plan
+            if continuation.get("continuationSource") == "foreground_interrupted":
+                response["status"] = "interrupted"
+            return {
+                "ok": True,
+                "sessionId": continuation["sessionId"],
+                "clientTurnId": continuation["clientTurnId"],
+                "status": "completed",
+                "response": response,
+            }
         session = self._runtime_session_state.get_session(session_id)
         if not session:
             raise AgentGatewayError(f"Runtime session was not found: {session_id}", status_code=404)

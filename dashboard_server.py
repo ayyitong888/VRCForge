@@ -3272,7 +3272,11 @@ async def _execute_app_agent_runtime_message(
                 elif admission_rejected:
                     RUNTIME_QUEUE_PORT.release_runtime_followup(runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
                 else:
-                    recovery = AGENT_GATEWAY.get_runtime_session(runtime_request.session_id or "", client_turn_id=runtime_request.client_turn_id or "")
+                    recovery = await asyncio.to_thread(
+                        AGENT_GATEWAY.get_runtime_session,
+                        runtime_request.session_id or "",
+                        client_turn_id=runtime_request.client_turn_id or "",
+                    )
                     if recovery.get("status") in {"completed", "failed"}:
                         RUNTIME_QUEUE_PORT.ack_runtime_followup(runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
             except (OSError, AgentGatewayError):
@@ -3292,7 +3296,8 @@ async def _execute_app_agent_runtime_message(
     TELEGRAM_SERVICE.notify_foreground_result(payload)
     await EVENT_BUS.broadcast(
         "agentRuntimeRuns",
-        AGENT_GATEWAY.runtime_runs.list_runs(
+        await asyncio.to_thread(
+            AGENT_GATEWAY.runtime_runs.list_runs,
             limit=30,
             session_id=payload.get("sessionId") or payload.get("session_id") or "",
         ),
@@ -3554,7 +3559,11 @@ async def app_agent_runtime_cancel(cancel_request: AgentRuntimeCancelRequest) ->
     await EVENT_BUS.broadcast("agentRuntimeCancel", payload)
     await EVENT_BUS.broadcast(
         "agentRuntimeRuns",
-        AGENT_GATEWAY.runtime_runs.list_runs(limit=30, session_id=cancel_request.session_id or ""),
+        await asyncio.to_thread(
+            AGENT_GATEWAY.runtime_runs.list_runs,
+            limit=30,
+            session_id=cancel_request.session_id or "",
+        ),
     )
     return payload
 
@@ -4643,7 +4652,8 @@ async def app_agent_approve_and_execute(
         TELEGRAM_SERVICE.observe_continuation(continuation)
         await EVENT_BUS.broadcast(
             "agentRuntimeRuns",
-            AGENT_GATEWAY.runtime_runs.list_runs(
+            await asyncio.to_thread(
+                AGENT_GATEWAY.runtime_runs.list_runs,
                 limit=30,
                 session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
             ),
@@ -4709,7 +4719,8 @@ async def app_agent_reject(
         TELEGRAM_SERVICE.observe_continuation(continuation)
         await EVENT_BUS.broadcast(
             "agentRuntimeRuns",
-            AGENT_GATEWAY.runtime_runs.list_runs(
+            await asyncio.to_thread(
+                AGENT_GATEWAY.runtime_runs.list_runs,
                 limit=30,
                 session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
             ),
@@ -4780,7 +4791,8 @@ async def app_agent_request_approval_revision(approval_id: str, request: AgentAp
         TELEGRAM_SERVICE.observe_continuation(continuation)
         await EVENT_BUS.broadcast(
             "agentRuntimeRuns",
-            AGENT_GATEWAY.runtime_runs.list_runs(
+            await asyncio.to_thread(
+                AGENT_GATEWAY.runtime_runs.list_runs,
                 limit=30,
                 session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
             ),

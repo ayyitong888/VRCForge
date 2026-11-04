@@ -120,7 +120,8 @@ import {
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
 import { useDashboardProjectSelection } from "./hooks/use-dashboard-project-selection";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
-import { useRuntimeTurnActivity } from "./hooks/use-runtime-turn-activity";
+import { runtimeActivityCancelTarget, useRuntimeTurnActivity } from "./hooks/use-runtime-turn-activity";
+import { isExternalRuntimeStream } from "./lib/runtime-stream-owner";
 import {
   buildChatHistory,
   buildContextUsageFromRuntime,
@@ -146,7 +147,7 @@ import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-pa
 import { sortSidebarProjects } from "./lib/sidebar-project-order";
 import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
 import { isVrcForgeUnityToolsReady } from "./lib/unity-readiness";
-import { buildEmptyProjectState } from "./lib/sidebar-view";
+import { buildEmptyProjectState, chatSidebarActivity } from "./lib/sidebar-view";
 import { localizeRuntimeHealthMessage } from "./lib/runtime-workspace-view";
 import { resolveRuntimeAuthorizationStatus } from "./lib/runtime-authorization-status";
 import {
@@ -1104,7 +1105,7 @@ export default function App() {
     chatStorageReady,
     runtimeQueueVersion,
   });
-  const sending = chatRunSending || compacting;
+  const localActivitySending = chatRunSending || compacting;
   const visibleQueued = useMemo(
     () => queued.filter((turn) => turn.chatId === activeChat?.id),
     [activeChat?.id, queued],
@@ -1148,7 +1149,7 @@ export default function App() {
     sessionId,
     activeRuntimeProjectPath,
     activeProjectPath,
-    sending,
+    sending: localActivitySending,
     pendingApprovals,
     setBootstrap,
     setAgentApprovals,
@@ -1156,6 +1157,19 @@ export default function App() {
     chatIdForSessionId: (ownerSessionId) =>
       chats.find((chat) => chat.sessionId === ownerSessionId)?.id || "",
   });
+  const activeRuntimeCancelTarget = runtimeActivityCancelTarget(chats, activeChat || undefined, runtimeRuns);
+  const sending = localActivitySending || Boolean(activeRuntimeCancelTarget);
+  const runtimeAwareChatSidebar = useMemo(() => {
+    const visibleChatId = activeView === "chat" ? activeChatId : "";
+    const activityByChat = new Map(chatSidebar.activityByChat);
+    for (const chat of chats) {
+      if (!chat.items.some((item) => item.type === "streaming" && isExternalRuntimeStream(item))) continue;
+      const activity = chatSidebarActivity(chat, visibleChatId, runtimeRuns);
+      if (activity) activityByChat.set(chat.id, activity);
+      else activityByChat.delete(chat.id);
+    }
+    return { ...chatSidebar, activityByChat };
+  }, [activeChatId, activeView, chatSidebar, chats, runtimeRuns]);
   const applyQuestionRuntimeDelta = useQuestionContinuationActivity({
     chats,
     questions: agentQuestions,
@@ -3585,6 +3599,20 @@ export default function App() {
       stopCurrentRun();
       return;
     }
+    if (activeRuntimeCancelTarget) {
+      void requestAgentRunCancel(endpoint, {
+        ...activeRuntimeCancelTarget,
+        reason: "user_stop",
+      })
+        .then((result) => {
+          if (!result.ok) {
+            setError(result.status || "Agent cancellation was not accepted.");
+          }
+          return refreshRuntimeRuns(false);
+        })
+        .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+      return;
+    }
     if (compacting && activeChatId) {
       cancelCompaction(activeChatId);
       return;
@@ -4256,7 +4284,7 @@ export default function App() {
           runtimeConnected={runtimeConnected}
           loadingProjects={loadingProjects}
           projectItems={sidebarProjectItems}
-          chatSidebar={chatSidebar}
+          chatSidebar={runtimeAwareChatSidebar}
           backgroundGoalUnreadByChat={backgroundGoalState?.unreadByChat || {}}
           emptyProjectState={emptyProjectState}
           collapsedProjects={collapsedProjects}
