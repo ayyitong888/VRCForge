@@ -276,23 +276,53 @@ def test_persisted_policy_survives_store_restart_and_compaction_without_new_scan
     assert len(compactor.calls) == 1 and resumed_turn.snapshot()["activeTurnStart"] == 2
 
 
-def test_pending_current_call_defers_compaction_before_compactor_and_preserves_history():
+def test_pending_current_call_settles_at_assembly_then_compacts():
+    """Assembly-time settlement (7110908) superseded the pending-defer design:
+    a pending call at request assembly is a crash-window orphan, settled
+    honestly before any guard runs; oversized prior history then compacts
+    inline with the orphan transaction grouped like any other."""
     compactor = Compactor()
     state, planner, model, turn = fixture(compactor, prior_policy=True)
+    settled_snapshots = []
+    compactor.hook = lambda: settled_snapshots.append(state.native_conversation("s", binding="b"))
     state.append_native_assistant("s", binding="b", message={
         "role": "assistant", "content": None, "tool_calls": [{
             "id": "pending-current", "type": "function", "function": {"name": "read", "arguments": "{}"},
         }],
     })
-    before = state.native_conversation("s", binding="b")
 
     result = plan(planner, turn)
 
-    assert result["nextStep"] == "context_compaction_required"
-    assert compactor.calls == [] and model.requests == []
-    assert state.native_conversation("s", binding="b") == before
-    assert turn.compaction_attempted_snapshot is None
-    assert turn.compaction["failureClass"] == "pending_tool_calls"
+    assert result["nextStep"] == "done"
+    assert len(compactor.calls) == 1 and len(model.requests) == 1
+    assert len(settled_snapshots) == 1
+    settled = settled_snapshots[0]["messages"]
+    pending_calls = [
+        call for message in settled for call in message.get("tool_calls", [])
+        if call.get("id") == "pending-current"
+    ]
+    pending_results = [
+        message for message in settled
+        if message.get("role") == "tool" and message.get("tool_call_id") == "pending-current"
+    ]
+    assert len(pending_calls) == 1 and len(pending_results) == 1
+    settlement = json.loads(pending_results[0]["content"])
+    assert settlement["status"] == "execution_unknown" and settlement["isError"] is True
+    assert settlement["reason"] == "runtime_interrupted"
+
+    grouped = [entry["text"] for entry in compactor.calls[0][0] if "pending-current" in entry["text"]]
+    assert len(grouped) == 1
+    transaction = json.loads(grouped[0].split(": ", 1)[1])
+    assert len(transaction) == 2
+    assert transaction[0]["tool_calls"][0]["id"] == "pending-current"
+    assert transaction[1]["tool_call_id"] == "pending-current"
+    assert json.loads(transaction[1]["content"])["status"] == "execution_unknown"
+    assert not any(
+        call.get("id") == "pending-current"
+        for message in model.requests[0]["messages"]
+        for call in message.get("tool_calls", [])
+    )
+    assert state._native_pending(turn.snapshot()) == set()
 
 
 @pytest.mark.parametrize("failure", ["empty", "no_reduction", "exception", "cancel", "ui_cancel", "race"])
@@ -338,6 +368,11 @@ def test_failed_native_compaction_never_replaces_transcript_or_sends_oversized_r
 def test_native_current_turn_overflow_keeps_exact_history_without_compactor_call():
     compactor = Compactor()
     state, planner, model, turn = fixture(compactor, prior=False, current="current context " * 8000)
+    # Freeze request-assembly metadata first so this compares the complete
+    # native transaction snapshot, not a partially initialized fixture.
+    from internal_tool_blocks import canonical_tool_tree
+    turn.freeze_tool_block_ids(["core", *(row["id"] for row in canonical_tool_tree()["roots"])])
+    turn.freeze_binding_tool_definition(planner._binding_tool_definition(True))
     before = state.native_conversation("s", binding="b")
     result = plan(planner, turn)
     assert not compactor.calls and not model.requests
