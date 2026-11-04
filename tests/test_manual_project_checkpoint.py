@@ -38,6 +38,18 @@ def test_manual_checkpoint_archives_and_restores_project_files_including_package
         gateway.approval_transactions.create_manual_project_checkpoint,
         pre_write_checkpoint_required=False,
     )
+    registry = gateway.build_tool_registry(config)
+    checkpoint_tool = next(item for item in registry["tools"] if item["name"] == tool)
+    rollback_policy = checkpoint_tool["rollbackPolicy"]
+    assert checkpoint_tool["requiresApproval"] is True
+    assert checkpoint_tool["requiresCheckpoint"] is False
+    assert rollback_policy["kind"] == "create_new_backup_artifact"
+    assert rollback_policy["required"] is False
+    assert rollback_policy["approvalRequired"] is True
+    assert rollback_policy["preWriteCheckpointRequired"] is False
+    assert rollback_policy["checkpointScope"] == []
+    assert rollback_policy["restoreTool"] == ""
+    assert "restoring it is a separate approved write" in rollback_policy["note"]
     gateway.register_external_mcp_unity_tool(tool, "checkpoint")
     session = "external:manual-checkpoint"
     gateway._runtime_session_state.set_checkpoint_choice(

@@ -3698,7 +3698,16 @@ class AgentApprovalTransactionService:
                 "postRestoreValidationRequired": True,
                 "note": "The exact VCC, ALCOM, or Unity Hub catalogue bytes are receipt-bound before registration.",
             }
-        if handler.name == "vrcforge_create_safe_backup":
+        if handler.name in {"vrcforge_create_safe_backup", "vrcforge_create_project_checkpoint"}:
+            note = (
+                "Creates a new VRCForge-managed checkpoint archive of the project's Assets, Packages, and ProjectSettings "
+                "without changing those source files. Failed archive creation removes its partial archive; "
+                "a completed checkpoint is retained, and restoring it is a separate approved write."
+                if handler.name == "vrcforge_create_project_checkpoint"
+                else "Creates a new project-owned backup directory and manifest without changing source assets. "
+                "Unsaved editor memory is not captured. Failed creation cleans its own unchanged partial files; "
+                "a completed backup is retained, and restoring source assets is a separate approved write."
+            )
             return {
                 "schema": ROLLBACK_POLICY_SCHEMA,
                 "required": False,
@@ -3709,9 +3718,7 @@ class AgentApprovalTransactionService:
                 "restoreTool": "",
                 "coverageAudit": "",
                 "postRestoreValidationRequired": False,
-                "note": "Creates a new project-owned backup directory and manifest without changing source assets. "
-                        "Unsaved editor memory is not captured. Failed creation cleans its own unchanged partial files; "
-                        "a completed backup is retained, and restoring source assets is a separate approved write.",
+                "note": note,
             }
         if handler.name == "vrcforge_install_unity_core":
             return {
