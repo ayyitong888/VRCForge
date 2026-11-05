@@ -79,7 +79,7 @@ export type ContextUsage = {
   used: number;
   limit: number;
   limitKnown: boolean;
-  source: "provider_usage" | "unavailable";
+  source: "provider_usage" | "compaction_estimate" | "unavailable";
   exact: boolean;
   cached?: boolean;
   inputTokenSource?: "peak" | "last" | "legacy" | "legacy_total";

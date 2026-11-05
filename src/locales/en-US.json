@@ -883,6 +883,8 @@
     "usageSummaryTitle": "Usage",
     "usageSummaryRecorded": "recorded this turn",
     "usageSummaryTask": "task total",
+    "contextMeterEstimatedPercent": "Estimated {{percent}}% used after compaction",
+    "contextMeterEstimatedTokens": "Estimated {{used}} tokens after compaction",
     "usageSummaryInput": "Input",
     "usageSummaryOutput": "Output",
     "usageSummaryCache": "Cache read",

@@ -124,7 +124,7 @@ import { runtimeActivityCancelTarget, useRuntimeTurnActivity } from "./hooks/use
 import { isExternalRuntimeStream } from "./lib/runtime-stream-owner";
 import {
   buildChatHistory,
-  buildContextUsageFromRuntime,
+  buildChatContextUsage,
   cloneChatAttachments,
   conversationItemText,
   findProviderModelInfo,
@@ -1771,34 +1771,21 @@ export default function App() {
   );
   const contextItems = activeChat?.items;
   const latestContextUsage = useMemo(() => contextItems && latestAgentContextUsage(contextItems), [contextItems]);
+  const contextChat = activeChat ?? displayChat;
   const contextUsage = useMemo(() => {
     if (!apiConfig && !smokeMode) {
       return undefined;
     }
-    const nextUsage = buildContextUsageFromRuntime(
+    return buildChatContextUsage(
       latestContextUsage,
+      contextChat,
       providerSnapshot.provider,
       providerSnapshot.model,
       currentModelInfo,
       t,
       apiConfig?.contextWindow,
     );
-    if (nextUsage?.source === "provider_usage") {
-      return nextUsage;
-    }
-    const cachedUsage = buildContextUsageFromRuntime(
-      (activeChat ?? displayChat)?.contextUsageCache,
-      providerSnapshot.provider,
-      providerSnapshot.model,
-      currentModelInfo,
-      t,
-      apiConfig?.contextWindow,
-    );
-    if (cachedUsage?.source === "provider_usage") {
-      return { ...cachedUsage, cached: true };
-    }
-    return nextUsage;
-  }, [activeChat, apiConfig, currentModelInfo, displayChat?.contextUsageCache, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
+  }, [apiConfig, contextChat, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
   const compactDebugEntries = useMemo(
     () =>
       (activeChat?.items || [])

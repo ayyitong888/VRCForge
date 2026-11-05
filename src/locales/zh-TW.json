@@ -882,6 +882,8 @@
     "usageSummaryTitle": "用量",
     "usageSummaryRecorded": "本輪已記錄用量",
     "usageSummaryTask": "任務累計",
+    "contextMeterEstimatedPercent": "壓縮後估算已用 {{percent}}%",
+    "contextMeterEstimatedTokens": "壓縮後估算使用 {{used}} 個 token",
     "usageSummaryInput": "輸入",
     "usageSummaryOutput": "輸出",
     "usageSummaryCache": "快取讀取",

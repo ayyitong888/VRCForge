@@ -11,17 +11,28 @@ const root = resolve(import.meta.dirname, "..");
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
 const bundle = await build({ stdin: {resolveDir:root,loader:"tsx",contents:`
-import React from 'react';
+import React,{useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {ContextUsageMeter,AttachmentStrip} from './src/components/chat/composer';
+import {buildChatContextUsage} from './src/lib/conversation-utils';
 import i18n from './src/i18n';
 import {initReactI18next} from 'react-i18next';
 import messages from './src/locales/zh-CN.json';
 i18n.use(initReactI18next).init({lng:'zh-CN',resources:{'zh-CN':{translation:messages}},interpolation:{escapeValue:false}});
 const selected={id:'selection',name:'Selected text',size:12,type:'text/plain',text:'给你三个不同风格的名字，都适合黑白配色的模型：',payloadKind:'text'};
 const regular={...selected,id:'regular',name:'notes.txt'};
+function MeterFixture(){
+ const [stage,setStage]=useState('before');
+ window.setMeterStage=setStage;
+ const chat={compaction:{status:'applied',generation:'compact',provider:'fixture',model:'fixture',afterTokens:50000}};
+ const received={exact:true,inputTokens:120000,lastInputTokens:120000};
+ const usage=stage==='before'
+  ? {limitKnown:true,exact:true,ratio:10337/500000,used:10337,limit:500000,label:'',cacheHitRatio:0.8544,cacheUsageStatus:'complete'}
+  : buildChatContextUsage(stage==='measured'?received:undefined,chat,'fixture','fixture',{contextWindow:500000},i18n.t);
+ return <ContextUsageMeter usage={usage}/>;
+}
 createRoot(document.getElementById('root')).render(<main style={{padding:'180px 80px'}}>
-<ContextUsageMeter usage={{limitKnown:true,exact:true,ratio:10337/500000,used:10337,limit:500000,label:'',cacheHitRatio:0.8544,cacheUsageStatus:'complete'}}/>
+<MeterFixture/>
 {[false,true].map(compact=><section key={String(compact)} data-variant={String(compact)} style={{marginTop:80}}><AttachmentStrip compact={compact} attachments={[selected,regular]} onRemove={()=>{}}/></section>)}
 </main>);`},bundle:true,write:false,format:'iife',platform:'browser',jsx:'automatic'});
 const css=(await postcss([tailwindcss(resolve(root,'tailwind.config.ts'))]).process(
@@ -47,6 +58,12 @@ try {
  assert.equal(await visible.count(),0);
  await meter.focus();
  assert.equal(await visible.count(),1,'keyboard focus retains one custom popup');
+ await page.evaluate(()=>window.setMeterStage('compacted'));
+ await page.waitForFunction(()=>document.querySelector('[data-context-meter]')?.getAttribute('data-context-percent')==='10');
+ assert.match(await meter.getAttribute('aria-label'),/压缩后估算已用 10%/);
+ await page.evaluate(()=>window.setMeterStage('measured'));
+ await page.waitForFunction(()=>document.querySelector('[data-context-meter]')?.getAttribute('data-context-percent')==='24');
+ assert.match(await meter.getAttribute('aria-label'),/24% 已用/);
  for(const variant of ['false','true']) {
   const section=page.locator(`[data-variant="${variant}"]`);
   const remove=section.getByRole('button',{name:'移除',exact:true});

@@ -882,6 +882,8 @@
     "usageSummaryTitle": "使用量",
     "usageSummaryRecorded": "このターンの記録済み使用量",
     "usageSummaryTask": "タスク累計",
+    "contextMeterEstimatedPercent": "圧縮後の推定使用率 {{percent}}%",
+    "contextMeterEstimatedTokens": "圧縮後の推定使用量 {{used}} トークン",
     "usageSummaryInput": "入力",
     "usageSummaryOutput": "出力",
     "usageSummaryCache": "キャッシュ読取",

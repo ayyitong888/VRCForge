@@ -5,7 +5,7 @@ import ts from "typescript";
 import { build } from "esbuild";
 
 const bundle = await build({ entryPoints: ["src/lib/conversation-utils.ts"], bundle: true, write: false, format: "esm", platform: "node" });
-const { buildContextUsageFromRuntime } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
+const { buildChatContextUsage, buildContextUsageFromRuntime } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
 const translations = JSON.parse(readFileSync("src/locales/en-US.json", "utf8"));
 const t = (key, values = {}) => {
   const text = key.split(".").reduce((value, part) => value?.[part], translations) || key;
@@ -32,6 +32,25 @@ function nodes(node) {
   if (Array.isArray(node)) return node.flatMap(nodes);
   return node && typeof node === "object" ? [node, ...nodes(node.props?.children)] : [];
 }
+
+test("completed compaction immediately displays estimated occupancy until measured usage arrives", () => {
+  const compaction = { generation: "compact-1", status: "applied", afterTokens: 400, provider: "fixture", model: "fixture" };
+  const read = (usage, state = compaction, capacity = 2000, model = "fixture") =>
+    buildChatContextUsage(usage, { compaction: state }, "fixture", model, undefined, t, capacity);
+  const estimated = read(undefined);
+  assert.equal(estimated.used, 400);
+  assert.equal(estimated.exact, false);
+  assert.equal(estimated.cacheHitRatio, undefined);
+  const meter = exports.ContextUsageMeter({ usage: estimated });
+  assert.equal(meter.props["data-context-percent"], "20");
+  assert.match(meter.props["aria-label"], /Estimated 20% used/);
+  assert.match(meter.props["aria-label"], /Used 400, total 2000/);
+  assert.match(exports.ContextUsageMeter({ usage: read(undefined, compaction, 0) }).props["aria-label"], /Estimated 400 tokens/);
+  assert.equal(read(base).source, "provider_usage");
+  assert.equal(read(base).used, 600);
+  assert.equal(read(undefined, { ...compaction, status: "failed" }).source, "unavailable");
+  assert.equal(read(undefined, compaction, 2000, "different-model").source, "unavailable");
+});
 
 test("switching models never reuses another model's occupancy or cache rate", () => {
   assert.equal(buildContextUsageFromRuntime({ ...base, provider: "chatgpt", model: "old" }, "chatgpt", "new", undefined, t), undefined);

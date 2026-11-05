@@ -595,10 +595,13 @@ export function Composer({
 
 
 export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsage; className?: string }) {
-  const knownRatio = usage.limitKnown && usage.exact;
+  const estimated = usage.source === "compaction_estimate";
+  const knownRatio = usage.limitKnown && (usage.exact || estimated);
   const percent = knownRatio ? Math.round(Math.min(1, Math.max(0, usage.ratio)) * 100) : 0;
   const strokeColorClass = percent >= 90 ? "stroke-destructive" : percent >= 60 ? "stroke-amber-500" : "stroke-primary";
-  const tooltipTitle = usage.cached
+  const tooltipTitle = estimated
+    ? knownRatio ? i18n.t("chat.contextMeterEstimatedPercent", { percent }) : usage.label
+    : usage.cached
     ? i18n.t("chat.contextUsageCached", { value: knownRatio ? `${percent}%` : usage.label })
     : knownRatio
       ? i18n.t("chat.contextMeterPercentUsed", { percent })

@@ -7,7 +7,7 @@ import type {
   ProviderModelInfo,
 } from "./api";
 import { formatAttachmentSize } from "./chat-format";
-import type { ChatAttachment, ContextUsage, ConversationItem } from "./chat-types";
+import type { ChatAttachment, ChatThread, ContextUsage, ConversationItem } from "./chat-types";
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "./chat-types";
 import {
   CONTEXT_AUTO_COMPACT_RATIO,
@@ -74,6 +74,38 @@ export function normalizeProviderForContext(provider: string): string {
 export function findProviderModelInfo(models: ProviderModelInfo[], model: string): ProviderModelInfo | undefined {
   const target = normalizeModelId(model);
   return models.find((item) => normalizeModelId(item.id) === target);
+}
+
+export function buildChatContextUsage(
+  usage: AgentContextUsage | undefined,
+  chat: Pick<ChatThread, "compaction" | "contextUsageCache"> | null,
+  provider: string,
+  model: string,
+  modelInfo: ProviderModelInfo | undefined,
+  t: TFunction,
+  userContextWindow?: number,
+): ContextUsage | undefined {
+  const measured = buildContextUsageFromRuntime(usage, provider, model, modelInfo, t, userContextWindow);
+  if (measured?.source === "provider_usage") return measured;
+  if (chat?.contextUsageCache) {
+    const cached = buildContextUsageFromRuntime(chat.contextUsageCache, provider, model, modelInfo, t, userContextWindow);
+    if (cached?.source === "provider_usage") return { ...cached, cached: true };
+  }
+
+  const compact = chat?.compaction;
+  const used = numberOrNull(compact?.afterTokens);
+  if (compact?.status !== "applied" || used === null || !compact.provider || !compact.model
+    || normalizeContextProvider(compact.provider) !== normalizeContextProvider(provider)
+    || normalizeModelId(compact.model) !== normalizeModelId(model)) return measured;
+
+  const currentLimit = resolveContextLimit(provider, model, modelInfo, userContextWindow);
+  const limit = currentLimit.known ? currentLimit.limit : numberOrNull(compact.contextLimit) ?? 0;
+  const label = t("chat.contextMeterEstimatedTokens", { used: formatCount(used) });
+  return {
+    used, limit, limitKnown: limit > 0, exact: false, source: "compaction_estimate",
+    ratio: limit > 0 ? Math.min(1, used / limit) : 0,
+    label, title: label, warning: false,
+  };
 }
 
 export function buildContextUsageFromRuntime(
