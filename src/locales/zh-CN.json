@@ -819,8 +819,6 @@
     "stop": "停止",
     "send": "发送",
     "queue": "排队",
-    "runningInputShortcut": "Enter 引导当前任务 · Ctrl+Enter 发送下一条消息 · Shift+Enter 换行",
-    "idleInputShortcut": "Enter 发送 · Shift+Enter 换行",
     "queueCancellationFailed": "部分消息未能确认取消，已保留在队列中。请重试取消。",
     "steer": "追加到当前运行",
     "runtimePhase": {

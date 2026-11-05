@@ -137,7 +137,7 @@ import {
 } from "./lib/conversation-utils";
 import { ingestChatAttachment } from "./lib/attachment-ingest";
 import { serializeChatAttachments } from "./lib/conversation-utils";
-import { latestContextWindowUsage, resolveContextLimit } from "./lib/context-compaction";
+import { resolveContextLimit } from "./lib/context-compaction";
 import { thinkingTraceLabel } from "./lib/provider-ui";
 import { questionAnswerItem } from "./lib/question-answer";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem } from "./lib/chat-types";
@@ -1769,7 +1769,8 @@ export default function App() {
     },
     [modelOptions, modelOptionsScope, providerSnapshot.model, providerSnapshot.provider, savedBaseUrl],
   );
-  const latestContextUsage = useMemo(() => latestAgentContextUsage(conversation), [conversation]);
+  const contextItems = activeChat?.items;
+  const latestContextUsage = useMemo(() => contextItems && latestAgentContextUsage(contextItems), [contextItems]);
   const contextUsage = useMemo(() => {
     if (!apiConfig && !smokeMode) {
       return undefined;
@@ -1786,8 +1787,7 @@ export default function App() {
       return nextUsage;
     }
     const cachedUsage = buildContextUsageFromRuntime(
-      conversation.some((item) => item.type === "compact")
-        ? latestContextWindowUsage(conversation, true) : activeChat?.contextUsageCache,
+      (activeChat ?? displayChat)?.contextUsageCache,
       providerSnapshot.provider,
       providerSnapshot.model,
       currentModelInfo,
@@ -1798,7 +1798,7 @@ export default function App() {
       return { ...cachedUsage, cached: true };
     }
     return nextUsage;
-  }, [activeChat?.contextUsageCache, conversation, apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
+  }, [activeChat, apiConfig, currentModelInfo, displayChat?.contextUsageCache, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
   const compactDebugEntries = useMemo(
     () =>
       (activeChat?.items || [])

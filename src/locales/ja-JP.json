@@ -819,8 +819,6 @@
     "stop": "停止",
     "send": "送信",
     "queue": "キュー",
-    "runningInputShortcut": "Enter で実行中のタスクに指示 · Ctrl+Enter で次のメッセージを送信 · Shift+Enter で改行",
-    "idleInputShortcut": "Enter で送信 · Shift+Enter で改行",
     "queueCancellationFailed": "一部のメッセージのキャンセルを確認できず、キューに残しています。もう一度キャンセルしてください。",
     "steer": "実行中に追加",
     "runtimePhase": {

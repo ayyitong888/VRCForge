@@ -819,8 +819,6 @@
     "stop": "停止",
     "send": "發送",
     "queue": "排隊",
-    "runningInputShortcut": "Enter 引導目前工作 · Ctrl+Enter 傳送下一則訊息 · Shift+Enter 換行",
-    "idleInputShortcut": "Enter 傳送 · Shift+Enter 換行",
     "queueCancellationFailed": "部分訊息無法確認取消，已保留在佇列中。請重試取消。",
     "steer": "追加至目前執行",
     "runtimePhase": {
