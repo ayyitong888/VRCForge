@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
-import { build } from "esbuild";
+import { build, stop } from "esbuild";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
@@ -110,10 +110,14 @@ try {
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.evaluate(() => { window.testApi = window.createHarness(location.origin); });
+  let startupTimeout;
   await Promise.race([
     page.evaluate(() => window.testApi.startup()),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("startup waited for manual project refresh")), 3000)),
+    new Promise((_, reject) => {
+      startupTimeout = setTimeout(() => reject(new Error("startup waited for manual project refresh")), 3000);
+    }),
   ]);
+  clearTimeout(startupTimeout);
   assert.equal(bootstrapRequests, 1, "startup must fetch the cached bootstrap snapshot");
   assert.equal(manualRefreshRequests, 0, "startup must not invoke the blocking manual refresh route");
   assert.equal(await page.evaluate(() => window.testApi.bootstrap.health.projects.projects[0].name), "Disk cached project");
@@ -131,4 +135,5 @@ try {
   await browser?.close();
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
+  stop();
 }
