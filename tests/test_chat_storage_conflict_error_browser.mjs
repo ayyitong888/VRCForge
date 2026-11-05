@@ -32,7 +32,7 @@ const bundle = await build({
           projectPrefsReady:true,projectPaths:[],customProjectPaths:[],activeProjectPath:'',
           setActiveProjectPath:noop,setActiveView:noop,setError,expandProjectGroup:noop,initialChatState:initial});
         window.testApi={sessions};
-        return <pre id="state">{JSON.stringify({error,blocked:sessions.chatPersistenceBlocked,title:sessions.chats[0]?.title || ''})}</pre>;
+        return <pre id="state">{JSON.stringify({error,storageError:sessions.chatStorageError,blocked:sessions.chatPersistenceBlocked,title:sessions.chats[0]?.title || ''})}</pre>;
       }
       createRoot(document.getElementById('root')).render(<Fixture/>);
     `,
@@ -94,7 +94,9 @@ try {
   const state = await page.evaluate(() => JSON.parse(document.querySelector('#state').textContent));
   assert.equal(state.blocked, true, 'conflict remains persistence-blocked');
   assert.equal(state.title, 'local dirty', 'local dirty chat remains visible');
-  assert.equal(state.error, 'CONCURRENT_CONFLICT', 'autosave failure must not overwrite conflict reason');
+  assert.equal(state.storageError?.kind, 'conflict', 'the hook retains ownership of the unresolved conflict');
+  assert.equal(state.storageError?.message, 'CONCURRENT_CONFLICT', 'autosave failure must not overwrite conflict reason');
+  assert.equal(state.error, '', 'chat conflict state does not occupy the unrelated App error slot');
   console.log('PASS hook conflict message survives blocked autosave');
 } finally {
   await browser?.close();

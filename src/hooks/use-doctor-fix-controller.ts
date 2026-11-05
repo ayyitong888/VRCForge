@@ -7,7 +7,7 @@ type UseDoctorFixControllerParams = {
   projectPath: string;
   onRefresh: (result: DoctorFixResult) => Promise<void>;
   onMessage: (message: string, tone: "ok" | "warn" | "danger") => void;
-  onError: (message: string) => void;
+  onError: (message: string, checkId?: string) => void;
 };
 
 export function useDoctorFixController({
@@ -31,7 +31,7 @@ export function useDoctorFixController({
     setFixingCheckId(checkId);
     setLastFixResult(null);
     onMessage("", "ok");
-    onError("");
+    onError("", checkId);
     try {
       const result = await fixDoctorCheck(endpoint, checkId, {
         mode,
@@ -42,7 +42,7 @@ export function useDoctorFixController({
       const tone = doctorFixTone(result.status);
       onMessage(t(`doctor.fixStatus.${result.status}`, { defaultValue: result.status }), tone);
     } catch (cause) {
-      onError(cause instanceof Error ? cause.message : String(cause));
+      onError(cause instanceof Error ? cause.message : String(cause), checkId);
     } finally {
       setFixingCheckId("");
     }

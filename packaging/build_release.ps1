@@ -3,6 +3,7 @@ param(
     [string]$Version = "",
     [string]$UvRuntimeLicensePath = "third_party\uv-runtime",
     [string]$UnityPackagePath = "",
+    [string]$BackendDirectory = "",
     [string]$PayloadDownloadUrl = "",
     [string]$UvDownloadUrl = "https://github.com/astral-sh/uv/releases/download/0.9.17/uv-x86_64-pc-windows-msvc.zip",
     [string]$UvDownloadSha256 = "ebc76197bf3e1a58f9dac6f70f49b0ebd3e6907ab35289ce228bce5ba8a3f201",
@@ -579,6 +580,13 @@ try {
         throw "Package version must match the source VERSION file. requested=$Version source=$sourceVersion"
     }
     $reuseUnityPackage = -not [string]::IsNullOrWhiteSpace($UnityPackagePath)
+    $reuseBackend = -not [string]::IsNullOrWhiteSpace($BackendDirectory)
+    if ($reuseBackend) {
+        $suppliedBackendExe = Join-Path $BackendDirectory "vrcforge_backend.exe"
+        if (-not (Test-Path -LiteralPath $suppliedBackendExe -PathType Leaf)) {
+            throw "The supplied BackendDirectory does not contain vrcforge_backend.exe: $BackendDirectory"
+        }
+    }
     if ($UvDownloadSha256 -notmatch "^[0-9a-fA-F]{64}$") {
         if ($strictSourceBuild) {
             throw "Strict release build requires a pinned 64-hex UvDownloadSha256."
@@ -849,7 +857,14 @@ try {
     }
     Remove-Item -LiteralPath (Join-Path $legacyLauncherBuildRoot "VRCForge.pdb") -Force -ErrorAction SilentlyContinue
 
-    & .\packaging\build_backend.ps1 -OutputDir (Join-Path $payloadRoot "backend")
+    $backendOutputDirectory = Join-Path $payloadRoot "backend"
+    if ($reuseBackend) {
+        New-Item -ItemType Directory -Force -Path $backendOutputDirectory | Out-Null
+        Get-ChildItem -LiteralPath $BackendDirectory -Force |
+            Copy-Item -Destination $backendOutputDirectory -Recurse -Force
+    } else {
+        & .\packaging\build_backend.ps1 -OutputDir $backendOutputDirectory
+    }
     & .\packaging\build_alcom_litedb_reader.ps1 -OutputDirectory (Join-Path $repoRoot "tools\alcom_litedb_reader")
     if ($LASTEXITCODE -ne 0) {
         throw "ALCOM LiteDB reader build failed."

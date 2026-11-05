@@ -18,11 +18,13 @@ export function WorkspaceHeader({
   loadingDoctor,
   loading,
   error,
+  chatStorageError,
   onToggleTheme,
   onOpenDoctor,
   onRetryStartupOrHealth,
   onDismissDoctorPrompt,
   onStartRuntime,
+  onRetryChatStorage,
 }: {
   hideWindowHeader?: boolean;
   activeProjectLabel: string;
@@ -37,15 +39,18 @@ export function WorkspaceHeader({
   loadingDoctor: boolean;
   loading: boolean;
   error: string;
+  chatStorageError?: string;
   onToggleTheme: () => void;
   onOpenDoctor: () => void;
   onRetryStartupOrHealth: () => void;
   onDismissDoctorPrompt: () => void;
   onStartRuntime: () => void;
+  onRetryChatStorage?: () => void;
 }) {
   const { t } = useTranslation();
   const showErrorBanner = Boolean(error.trim())
     && (!showDoctorStartupPrompt || error.trim() !== startupIssue.trim());
+  const showChatStorageError = Boolean(chatStorageError?.trim());
   const activeTitle =
     activeView === "doctor"
       ? t("sidebar.doctor")
@@ -112,6 +117,23 @@ export function WorkspaceHeader({
             >
               {loading ? t("header.reconnecting") : t("header.reconnect")}
             </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {showChatStorageError ? (
+        <div className="mx-auto mt-3 w-full max-w-4xl px-4">
+          <div className="flex items-center gap-3 rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75" role="alert" data-workspace-chat-storage-error>
+            <span className="break-words">{chatStorageError}</span>
+            {onRetryChatStorage ? (
+              <Button
+                variant="ghost"
+                className="ml-auto h-7 shrink-0 px-2 text-xs text-destructive/80 hover:bg-destructive/10"
+                onClick={onRetryChatStorage}
+              >
+                {t("doctor.retry")}
+              </Button>
+            ) : null}
           </div>
         </div>
       ) : null}

@@ -74,7 +74,7 @@ import { AppUpdatePopup } from "./components/ui/app-update-popup";
 import type { AppUpdatePromptState, AppUpdateResult } from "./lib/api/app-update";
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
-import { chatSaveErrorMessage, useChatSessions } from "./hooks/use-chat-sessions";
+import { useChatSessions } from "./hooks/use-chat-sessions";
 import { useConversationScroll } from "./hooks/use-conversation-scroll";
 import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
 import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
@@ -861,6 +861,7 @@ export default function App() {
     chatSidebar,
     chatRecoveries,
     chatPersistenceBlocked,
+    chatStorageError,
     resolvingChatStorageConflict,
     resolveChatStorageConflict,
     reloadChatStorageState,
@@ -871,6 +872,7 @@ export default function App() {
     appendToChat,
     ensureActiveChat,
     persistChatsNow,
+    reportChatSaveError,
     getChatById,
     newConversation,
     togglePinChat,
@@ -2025,9 +2027,7 @@ export default function App() {
       items[index] = answerItem;
       return { ...chat, items };
     });
-    void persistChatsNow().catch((cause) => {
-      setError(chatSaveErrorMessage(cause, t("chat.sessionSaveBlocked"), t("chat.sessionSaveConflict")));
-    });
+    void persistChatsNow().catch(reportChatSaveError);
   };
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
     setActiveView("chat");
@@ -4203,7 +4203,8 @@ export default function App() {
       try {
         await reloadChatStorageState();
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        reportChatSaveError(cause);
+        return;
       }
     }
     await loadDoctor();
@@ -4223,7 +4224,13 @@ export default function App() {
       setDoctorMessage(message);
       setDoctorMessageTone(tone);
     },
-    onError: setError,
+    onError: (message, checkId) => {
+      if (checkId === "session.storage") {
+        if (message) reportChatSaveError(new Error(message));
+        return;
+      }
+      setError(message);
+    },
   });
 
   const projectChatWorkspace = activeView === "chat" && Boolean(activeChat?.projectPath);
@@ -4360,11 +4367,13 @@ export default function App() {
             loadingDoctor={loadingDoctor}
             loading={loading}
             error={error}
+            chatStorageError={chatStorageError?.message || ""}
             onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
             onOpenDoctor={() => void openDoctor()}
             onRetryStartupOrHealth={() => void retryStartupOrHealth()}
             onDismissDoctorPrompt={() => setDismissedDoctorPromptSignature(doctorPromptSignature)}
             onStartRuntime={() => void startRuntime()}
+            onRetryChatStorage={() => { void reloadChatStorageState().catch(() => undefined); }}
           />
 
           {activeView === "doctor" ? (
@@ -4383,7 +4392,7 @@ export default function App() {
               onFix={(checkId, mode) => void fixCheck(checkId, mode)}
               onResolveChatConflict={() => {
                 void resolveChatStorageConflict().catch((cause) => {
-                  setError(cause instanceof Error ? cause.message : String(cause));
+                  reportChatSaveError(cause);
                 });
               }}
               onOpenSettings={() => openSettingsSection("general")}

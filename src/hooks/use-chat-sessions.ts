@@ -59,6 +59,11 @@ type ChatStorageLoadOutcome = {
   shouldPersist: boolean;
 };
 
+type ChatStorageError = {
+  kind: "save" | "conflict" | "blocked";
+  message: string;
+};
+
 export function chatSaveErrorMessage(cause: unknown, recoveryFallback: string, conflictFallback = "Chat storage changed in another window. Retry the save."): string {
   if (cause instanceof ApiError && cause.status === 409) {
     const detail = cause.detail;
@@ -142,6 +147,7 @@ export function useChatSessions({
   const [chatRecoveries, setChatRecoveries] = useState<ChatRecoveryMarker[]>([]);
   const [chatPersistenceBlocked, setChatPersistenceBlocked] = useState(false);
   const [resolvingChatStorageConflict, setResolvingChatStorageConflict] = useState(false);
+  const [chatStorageError, setChatStorageError] = useState<ChatStorageError | null>(null);
 
   const chatsLoadedRef = useRef(false);
   const restoredChatRequestKeyRef = useRef("");
@@ -371,14 +377,26 @@ export function useChatSessions({
     chatStorageConflictRef.current = true;
     setChatPersistenceBlocked(true);
     setChatRecoveries([conflictMarker]);
-    setError(t("chat.sessionConcurrentConflict", { count: conflictIds.length }));
+    setChatStorageError({ kind: "conflict", message: t("chat.sessionConcurrentConflict", { count: conflictIds.length }) });
   }
 
   function setChatSaveError(cause: unknown, fallback: string) {
     if (chatStorageConflictRef.current) {
       return;
     }
-    setError(chatSaveErrorMessage(cause, fallback, t("chat.sessionSaveConflict")));
+    setChatStorageError({
+      kind: "save",
+      message: chatSaveErrorMessage(cause, fallback, t("chat.sessionSaveConflict")),
+    });
+  }
+
+  function clearResolvedChatStorageError() {
+    chatAutosaveFailureVersionRef.current = null;
+    setChatStorageError((current) => {
+      if (current?.kind === "conflict" && chatStorageConflictRef.current) return current;
+      if (current?.kind === "blocked" && chatPersistenceBlockedRef.current) return current;
+      return null;
+    });
   }
 
   async function reconcileFetchedChatStorage(
@@ -440,7 +458,7 @@ export function useChatSessions({
       chatStorageRecoveryBlockedRef.current = true;
       setChatPersistenceBlocked(true);
       setChatRecoveries(recoveries);
-      setError(t("chat.sessionRecoveryBlocked", { count: blockingRecoveries.length }));
+      setChatStorageError({ kind: "blocked", message: t("chat.sessionRecoveryBlocked", { count: blockingRecoveries.length }) });
       return { status: "blocked", chats: safeChats, shouldPersist: false };
     }
     const reconciliationBaseline = recoveringFromDamagedSource
@@ -481,6 +499,7 @@ export function useChatSessions({
     }
     chatPersistenceBlockedRef.current = false;
     chatStorageRecoveryBlockedRef.current = false;
+    chatStorageConflictRef.current = false;
     setChatPersistenceBlocked(false);
     setChatRecoveries(recoveries);
     if (recoveringFromDamagedSource || mergedDiffersFromRemote) {
@@ -531,6 +550,7 @@ export function useChatSessions({
       }
       chatDeletedIdsRef.current.clear();
     }
+    clearResolvedChatStorageError();
   }
 
   async function saveWithOneReconcileRetryWithinStorageOperation(
@@ -643,27 +663,32 @@ export function useChatSessions({
     if (!runtimeConnected || !projectPrefsReady) {
       return false;
     }
-    return enqueueChatStorageOperation(async () => {
-      const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths(), chatServerDigestsRef.current);
-      const outcome = await reconcileFetchedChatStorage(payload);
-      if (outcome.status !== "ready") {
-        return false;
-      }
-      if (chatsDirtyRef.current) {
-        await saveWithOneReconcileRetryWithinStorageOperation(
-          filterPersistableChats(chatsRef.current),
-          chatsSaveVersionRef.current,
-          true,
-        );
-      }
-      return true;
-    }, "reload");
-  }, [activeProjectPath, customProjectPaths, endpoint, projectPaths, projectPrefsReady, runtimeConnected, setError, t]);
+    try {
+      const reloaded = await enqueueChatStorageOperation(async () => {
+        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths(), chatServerDigestsRef.current);
+        const outcome = await reconcileFetchedChatStorage(payload);
+        if (outcome.status !== "ready") {
+          return false;
+        }
+        if (chatsDirtyRef.current) {
+          await saveWithOneReconcileRetryWithinStorageOperation(
+            filterPersistableChats(chatsRef.current),
+            chatsSaveVersionRef.current,
+            true,
+          );
+        }
+        return true;
+      }, "reload");
+      if (reloaded) clearResolvedChatStorageError();
+      return reloaded;
+    } catch (cause) {
+      setChatSaveError(cause, t("chat.sessionSaveBlocked"));
+      throw cause;
+    }
+  }, [activeProjectPath, customProjectPaths, endpoint, projectPaths, projectPrefsReady, runtimeConnected, t]);
 
   const externalReloadRef = useRef(reloadChatStorageState);
   externalReloadRef.current = reloadChatStorageState;
-  const externalReloadErrorRef = useRef(setError);
-  externalReloadErrorRef.current = setError;
   const externalReloadTimerRef = useRef<number | null>(null);
   const externalReloadActiveRef = useRef(false);
   const externalReloadInFlightRef = useRef(false);
@@ -692,11 +717,7 @@ export function useChatSessions({
       }
       externalReloadPendingRef.current = false;
       externalReloadInFlightRef.current = true;
-      void externalReloadRef.current().catch((cause) => {
-        if (externalReloadActiveRef.current && !chatStorageConflictRef.current) {
-          externalReloadErrorRef.current(cause instanceof Error ? cause.message : String(cause));
-        }
-      }).finally(() => {
+      void externalReloadRef.current().catch(() => undefined).finally(() => {
         externalReloadInFlightRef.current = false;
         if (!externalReloadActiveRef.current || !externalReloadPendingRef.current || externalReloadTimerRef.current !== null) {
           return;
@@ -790,6 +811,7 @@ export function useChatSessions({
         setChatPersistenceBlocked(false);
         setChatRecoveries([]);
         chatStorageConflictRef.current = false;
+        setChatStorageError(null);
         return true;
       }, "conflict-resolution");
     } finally {
@@ -843,6 +865,10 @@ export function useChatSessions({
 
   function persistChatsNow(): Promise<void> {
     return enqueueChatSave(true);
+  }
+
+  function reportChatSaveError(cause: unknown) {
+    setChatSaveError(cause, t("chat.sessionSaveBlocked"));
   }
 
   function enqueueDebouncedChatSave(): void {
@@ -1029,7 +1055,7 @@ export function useChatSessions({
         const detail = cause instanceof Error ? cause.message : String(cause ?? "Runtime cleanup did not complete.");
         setError(t("chat.deletePermanentlyPartialSuccess", { error: detail }));
       } else {
-        setError(chatSaveErrorMessage(cause, t("chat.deletePermanentlyFailed")));
+        setChatSaveError(cause, t("chat.deletePermanentlyFailed"));
       }
     }
   }
@@ -1104,6 +1130,7 @@ export function useChatSessions({
     chatSidebar,
     chatRecoveries,
     chatPersistenceBlocked,
+    chatStorageError,
     resolvingChatStorageConflict,
     resolveChatStorageConflict,
     reloadChatStorageState,
@@ -1115,6 +1142,7 @@ export function useChatSessions({
     appendToChat,
     ensureActiveChat,
     persistChatsNow,
+    reportChatSaveError,
     getChatById,
     newConversation,
     togglePinChat,

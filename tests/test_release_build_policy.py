@@ -1037,6 +1037,62 @@ def test_release_package_reuse_recovers_output_directory_after_tauri_clears_dist
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the release backend branch uses Windows paths")
+def test_release_backend_directory_reuse_skips_build_and_default_still_builds(tmp_path: Path) -> None:
+    source = _build_script()
+    start = source.index('    $backendOutputDirectory = Join-Path $payloadRoot "backend"')
+    end_marker = '    & .\\packaging\\build_alcom_litedb_reader.ps1'
+    end = source.index(end_marker, start)
+    backend_block = source[start:end]
+
+    packaging = tmp_path / "packaging"
+    packaging.mkdir()
+    (packaging / "build_backend.ps1").write_text(
+        "param([string]$OutputDir)\n"
+        "$repoRoot = Split-Path -Parent $PSScriptRoot\n"
+        "[System.IO.File]::WriteAllText((Join-Path $repoRoot 'backend-build-called'), 'yes')\n"
+        "New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null\n"
+        "[System.IO.File]::WriteAllText((Join-Path $OutputDir 'vrcforge_backend.exe'), 'rebuilt backend')\n"
+        "$global:LASTEXITCODE = 0\n",
+        encoding="utf-8",
+    )
+    probe = tmp_path / "probe-backend-reuse.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path\n"
+        "$BackendDirectory = Join-Path $repoRoot 'frozen-backend'\n"
+        "$payloadRoot = Join-Path $repoRoot 'payload-reuse'\n"
+        "New-Item -ItemType Directory -Force -Path $BackendDirectory,$payloadRoot | Out-Null\n"
+        "New-Item -ItemType Directory -Force -Path (Join-Path $BackendDirectory 'support') | Out-Null\n"
+        "[System.IO.File]::WriteAllText((Join-Path $BackendDirectory 'vrcforge_backend.exe'), 'accepted backend')\n"
+        "[System.IO.File]::WriteAllText((Join-Path $BackendDirectory 'support\\bundle.txt'), 'backend data')\n"
+        "$reuseBackend = $true\n"
+        f"{backend_block}\n"
+        "if (Test-Path -LiteralPath (Join-Path $repoRoot 'backend-build-called')) { throw 'reuse branch rebuilt backend' }\n"
+        "if ([System.IO.File]::ReadAllText((Join-Path $payloadRoot 'backend\\vrcforge_backend.exe')) -cne 'accepted backend') { throw 'reuse branch did not copy backend' }\n"
+        "if ([System.IO.File]::ReadAllText((Join-Path $payloadRoot 'backend\\support\\bundle.txt')) -cne 'backend data') { throw 'reuse branch lost backend directory contents' }\n"
+        "$payloadRoot = Join-Path $repoRoot 'payload-default'\n"
+        "New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null\n"
+        "$BackendDirectory = ''\n"
+        "$reuseBackend = $false\n"
+        "$global:LASTEXITCODE = 0\n"
+        f"{backend_block}\n"
+        "if (-not (Test-Path -LiteralPath (Join-Path $repoRoot 'backend-build-called'))) { throw 'default branch skipped backend build' }\n"
+        "if ([System.IO.File]::ReadAllText((Join-Path $payloadRoot 'backend\\vrcforge_backend.exe')) -cne 'rebuilt backend') { throw 'default branch did not build backend' }\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(probe)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_strict_evidence_outputs_reject_reparse_and_overwrite_paths() -> None:
     source = _build_script()
 

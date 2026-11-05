@@ -64,12 +64,14 @@ try{
  await page.evaluate(()=>{void window.sessions.deleteChatPermanently("chat-target")});
  await page.waitForFunction(()=>window.__error?.includes("chat patches do not exactly cover")||window.__storageTrace.some(event=>event.stage==="failed"));
  await page.waitForTimeout(1900);
- const state=await page.evaluate(()=>({ids:window.sessions.chats.map(chat=>chat.id),error:window.__error,trace:window.__storageTrace}));
+ const state=await page.evaluate(()=>({ids:window.sessions.chats.map(chat=>chat.id),error:window.__error,chatStorageError:window.sessions.chatStorageError,trace:window.__storageTrace}));
  assert.ok(posts.length>=1,"deleting a chat sends the durable chat-list update");
  assert.deepEqual(posts[0].serverIds,["chat-target"]);
  assert.ok(posts[0].unknownPatchIds.includes("chat-stale"),"replay captures the stale server-deleted chat id still present in the UI request");
  assert.equal(posts[0].patchIds.length,1);
  assert.equal(state.ids.includes("chat-target"),true,"failed durable deletion restores the chat row");
+ assert.equal(state.error,undefined,"a precommit chat-store rejection does not occupy the common App error slot");
+ assert.equal(state.chatStorageError?.kind,"save","the precommit deletion failure remains owned by chat storage");
  assert.equal(runtimeDeletes.length,0,"runtime history must remain when durable chat deletion is rejected");
  assert.equal(posts.length,1,"a stable 422 must not resend the unchanged chat generation every autosave tick");
  const explicitRetry=await page.evaluate(async()=>{try{await window.sessions.persistChatsNow();return false}catch{return true}});
@@ -92,5 +94,7 @@ try{
  assert.deepEqual(runtimeDeletes,["session-target"],"runtime cleanup occurs only after transcript deletion commits");
  assert.deepEqual(cleanupFailure.ids,["chat-stale"],"a later runtime cleanup error cannot resurrect a durably deleted chat");
  assert.equal(cleanupFailure.error,"Chat record deleted, but runtime history cleanup is incomplete: runtime cleanup failed");
+ await page.evaluate(()=>window.sessions.persistChatsNow());
+ assert.equal(await page.evaluate(()=>window.__error),cleanupFailure.error,"a later successful chat save must not clear a runtime cleanup failure");
  console.log(JSON.stringify({status:"passed",staleRequest:posts[0],stable422AutosaveRequests:1,explicitRetry,transientRetryStatuses:posts.slice(2,4).map(post=>post.status),runtimeDeletes,localIdsAfterCleanupFailure:cleanupFailure.ids,cleanupFailure:cleanupFailure.error}));
 }finally{await browser?.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
