@@ -749,6 +749,43 @@ def test_shell_continuation_cas_is_durable_private_and_session_idempotent(tmp_pa
     ) is False
 
 
+def test_recovery_reuses_shell_state_from_the_required_ledger_scan(tmp_path: Path, monkeypatch) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    ledger.append({
+        "event": "runtime_shell_continuation_pending",
+        "shellContinuationState": "pending",
+        "shellSessionId": "shell-recovery",
+        "continuationTaskSeed": {"taskId": "private-seed"},
+    })
+    ledger.append({
+        "event": "runtime_shell_continuation_dispatching",
+        "shellContinuationState": "dispatching",
+        "shellSessionId": "shell-recovery",
+        "continuationTaskSeed": {"taskId": "private-seed"},
+    })
+
+    ledger.recover_interrupted_runs()
+
+    def unexpected_reread(_self, **_kwargs):
+        raise AssertionError("shell reconciliation reread the runtime ledger after recovery")
+
+    monkeypatch.setattr(AgentRuntimeRunLedger, "read_events", unexpected_reread)
+    states = ledger.shell_continuation_states(limit=0)
+    assert len(states) == 1
+    assert states[0]["shellContinuationState"] == "dispatching"
+    states[0]["continuationTaskSeed"]["taskId"] = "caller-mutated"
+    assert ledger.shell_continuation_states(limit=0)[0]["continuationTaskSeed"]["taskId"] == "private-seed"
+    appended = ledger.append({
+        "event": "runtime_shell_continuation_delivered",
+        "shellContinuationState": "delivered",
+        "shellSessionId": "shell-recovery",
+        "continuationTaskSeed": {"taskId": "private-seed"},
+    })
+    appended["continuationTaskSeed"]["taskId"] = "append-caller-mutated"
+    assert ledger.shell_continuation_states(limit=0)[0]["continuationTaskSeed"]["taskId"] == "private-seed"
+    assert ledger.shell_continuation_states(limit=0)[0]["shellContinuationState"] == "delivered"
+
+
 def test_shell_continuation_interrupted_is_terminal_and_never_reclaimed(tmp_path: Path) -> None:
     ledger, _lock = make_ledger(tmp_path)
     terminal = {"shellSessionId": "shell-stable-2", "status": "finished", "exitCode": 0}

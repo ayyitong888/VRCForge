@@ -33,6 +33,7 @@ class SubAgentCollaborationPorts:
     build_roles: Callable[[], list[SubAgentRole]]
     build_handlers: Callable[[Any], dict[str, SubAgentHandler]]
     task_finished: Callable[[dict[str, Any]], None] = lambda _event: None
+    defer_projection_load: bool = False
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class SubAgentCollaborationService:
             lane_budget=ports.lane_budget,
             task_finished=ports.task_finished,
             wait_parent_idle=getattr(ports.gateway, "wait_runtime_session_idle", None),
+            defer_projection_load=ports.defer_projection_load,
         )
 
     @classmethod

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,7 @@ class ProjectSnapshotSelectionService:
         "_refresh_started_monotonic",
         "_cache_loaded",
         "_refresh_thread",
+        "_refresh_future",
     )
 
     def __init__(
@@ -84,6 +86,7 @@ class ProjectSnapshotSelectionService:
         self._refresh_started_monotonic = 0.0
         self._cache_loaded = False
         self._refresh_thread: Thread | None = None
+        self._refresh_future: Future[dict[str, Any]] | None = None
 
     def project_snapshot_list(self, value: Any) -> list[Any]:
         return value if isinstance(value, list) else []
@@ -128,7 +131,17 @@ class ProjectSnapshotSelectionService:
             self._last_error = ""
             self._last_duration_ms = int(payload.get("durationMs") or 0)
             self._last_changes = {"addedProjects": [], "removedProjects": [], "addedCount": 0, "removedCount": 0}
-            self._cache_monotonic = 0.0
+            try:
+                updated_at = datetime.fromisoformat(self._updated_at.replace("Z", "+00:00"))
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+                age_seconds = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)).total_seconds(),
+                )
+                self._cache_monotonic = time.monotonic() - age_seconds
+            except (OverflowError, TypeError, ValueError):
+                self._cache_monotonic = time.monotonic() - self.cache_ttl_seconds
         return copy.deepcopy(cached)
 
     def project_snapshot_identity(self, project: dict[str, Any]) -> str:
@@ -212,13 +225,22 @@ class ProjectSnapshotSelectionService:
                 self._last_error = f"Project cache write failed: {exc}"
 
     def refresh_project_snapshot_cache_sync(self) -> dict[str, Any]:
-        started_monotonic = time.monotonic()
-        started_at = datetime.now(timezone.utc).isoformat()
         with self._cache_lock:
-            self._refreshing = True
-            self._started_at = started_at
-            self._last_error = ""
-            self._refresh_started_monotonic = started_monotonic
+            future = self._refresh_future if self._refreshing else None
+            owns_refresh = future is None
+            if owns_refresh:
+                future = Future()
+                started_monotonic = time.monotonic()
+                started_at = datetime.now(timezone.utc).isoformat()
+                self._refreshing = True
+                self._started_at = started_at
+                self._last_error = ""
+                self._refresh_started_monotonic = started_monotonic
+                self._refresh_future = future
+        if not owns_refresh:
+            return copy.deepcopy(future.result())
+        error: Exception | None = None
+        result: dict[str, Any] | None = None
         try:
             payload = self._ports.build_snapshot()
             duration_ms = round((time.monotonic() - started_monotonic) * 1000)
@@ -227,12 +249,19 @@ class ProjectSnapshotSelectionService:
             result["scan"]["refreshing"] = False
             return result
         except Exception as exc:  # noqa: BLE001 - discovery must not take down app startup.
+            error = exc
             with self._cache_lock:
                 self._last_error = str(exc)
             raise
         finally:
             with self._cache_lock:
                 self._refreshing = False
+                self._refresh_thread = None
+                self._refresh_future = None
+                if error is not None:
+                    future.set_exception(error)
+                elif result is not None:
+                    future.set_result(copy.deepcopy(result))
 
     def schedule_project_snapshot_refresh(self, *, force: bool = False) -> bool:
         now = time.monotonic()
@@ -250,23 +279,32 @@ class ProjectSnapshotSelectionService:
             self._started_at = started_at
             self._last_error = ""
             self._refresh_started_monotonic = now
+            future: Future[dict[str, Any]] = Future()
+            self._refresh_future = future
 
         def run_refresh() -> None:
             result: dict[str, Any] | None = None
+            error: Exception | None = None
             try:
                 payload = self._ports.build_snapshot()
                 duration_ms = round((time.monotonic() - now) * 1000)
                 self._store_project_snapshot_cache(payload, started_at=started_at, duration_ms=int(duration_ms))
                 result = self.annotate_project_snapshot(payload, status="ready", cached=False)
+                result["scan"]["refreshing"] = False
             except Exception as exc:  # noqa: BLE001
+                error = exc
                 with self._cache_lock:
                     self._last_error = str(exc)
             finally:
                 with self._cache_lock:
                     self._refreshing = False
                     self._refresh_thread = None
+                    self._refresh_future = None
+                    if error is not None:
+                        future.set_exception(error)
+                    elif result is not None:
+                        future.set_result(copy.deepcopy(result))
             if result is not None:
-                result["scan"]["refreshing"] = False
                 self._ports.broadcast_projects(result)
 
         thread = Thread(target=run_refresh, name="vrcforge-project-discovery", daemon=True)
@@ -276,7 +314,7 @@ class ProjectSnapshotSelectionService:
         return True
 
     def bootstrap_project_snapshot_payload(self) -> dict[str, Any]:
-        return self.cached_project_snapshot_payload(refresh_async=True, force_refresh=True)
+        return self.cached_project_snapshot_payload(refresh_async=True)
 
     def cached_project_snapshot_payload(self, *, refresh_async: bool = True, force_refresh: bool = False) -> dict[str, Any]:
         self.load_project_snapshot_cache()

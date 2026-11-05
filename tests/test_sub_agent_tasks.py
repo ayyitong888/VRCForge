@@ -215,6 +215,31 @@ def test_startup_can_stage_parent_replay_without_blocking_on_the_callback(tmp_pa
     assert restarted.get_task(task_id)["task"]["parentContinuationStatus"] == "delivered"
 
 
+def test_deferred_projection_load_reads_once_during_owner_reconcile(tmp_path):
+    task_id = "sub_deferred_projection"
+    _write_task_projection(tmp_path, task_id, "completed")
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={},
+        reconcile_on_init=False,
+        defer_projection_load=True,
+    )
+    reads = 0
+    read_projection = registry._read_projection_state_locked
+
+    def count_projection_reads(*, strict_io):
+        nonlocal reads
+        reads += 1
+        return read_projection(strict_io=strict_io)
+
+    registry._read_projection_state_locked = count_projection_reads
+    assert reads == 0
+    assert registry.reconcile_startup(refresh_from_disk=True, replay_parent_continuations=False)
+    assert reads == 1
+    assert registry.get_task(task_id)["task"]["status"] == "completed"
+
+
 def test_delivered_marker_failure_never_replays_a_dispatched_side_effect(tmp_path):
     task_id = "sub_dispatched_once"
     _write_task_projection(

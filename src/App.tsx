@@ -448,7 +448,6 @@ export default function App() {
   >([]);
   const healthRefreshInFlightRef = useRef(false);
   const projectRefreshInFlightRef = useRef(false);
-  const projectRefreshTimerRef = useRef<number | null>(null);
   const bootstrapRequestSequenceRef = useRef(0);
   const bootstrapForegroundRequestRef = useRef(0);
   const bootstrapSilentRefreshPromiseRef = useRef<Promise<void> | null>(null);
@@ -2485,15 +2484,6 @@ export default function App() {
   }, [runtimeConnected, endpoint, activeProjectPath, bootstrap?.health.deferredDiagnostics]);
 
   useEffect(() => {
-    return () => {
-      if (projectRefreshTimerRef.current !== null) {
-        window.clearTimeout(projectRefreshTimerRef.current);
-        projectRefreshTimerRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (!isTauriRuntime()) {
       return;
     }
@@ -2617,25 +2607,10 @@ export default function App() {
     });
   }
 
-  function scheduleProjectRefresh(target: string) {
-    if (projectRefreshTimerRef.current !== null) {
-      window.clearTimeout(projectRefreshTimerRef.current);
-    }
-    projectRefreshTimerRef.current = window.setTimeout(() => {
-      projectRefreshTimerRef.current = null;
-      void refreshProjectList(target, { allowDuringStartup: true });
-    }, 0);
-  }
-
   async function refreshStartupWithMetrics(target: string, options: { refreshProjects?: boolean } = {}) {
-    if (options.refreshProjects) {
-      // Project discovery is an independent background request. Launch it now
-      // so it can overlap bootstrap hydration and the automatic update check.
-      scheduleProjectRefresh(target);
-    }
     const startedAt = performance.now();
     try {
-      await refreshWithRetry(target);
+      await refreshWithRetry(target, options);
     } finally {
       const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
       metrics.bootstrapRefreshMs ??= Math.round(performance.now() - startedAt);

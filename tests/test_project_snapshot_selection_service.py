@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -170,3 +171,123 @@ def test_async_refresh_is_single_flight_and_broadcasts_one_deep_copy(tmp_path: P
     assert len(broadcasts) == 1
     broadcasts[0]["projects"][0]["name"] = "Mutated broadcast"
     assert service.cached_project_snapshot_payload(refresh_async=False)["projects"][0]["name"] == "Only"
+
+
+def test_disk_cache_age_survives_service_restart_and_stale_cache_refreshes_in_background(tmp_path: Path) -> None:
+    original = make_service(
+        tmp_path,
+        build_snapshot=lambda: {"selectedProjectPath": "", "unityEditorPath": "", "projects": [{"name": "Cached", "path": "P"}]},
+    )
+    original.refresh_project_snapshot_cache_sync()
+
+    calls: list[int] = []
+    fresh_started = threading.Event()
+    release_fresh = threading.Event()
+
+    def fresh_builder() -> dict[str, Any]:
+        calls.append(1)
+        fresh_started.set()
+        assert release_fresh.wait(timeout=5)
+        return {"selectedProjectPath": "", "unityEditorPath": "", "projects": []}
+
+    restarted = make_service(
+        tmp_path,
+        build_snapshot=fresh_builder,
+    )
+    try:
+        fresh = restarted.cached_project_snapshot_payload(refresh_async=True)
+        assert fresh["projects"][0]["name"] == "Cached"
+        assert fresh["scan"]["cached"] is True
+        assert restarted._refresh_thread is None
+        assert calls == []
+    finally:
+        release_fresh.set()
+        if restarted._refresh_thread is not None:
+            restarted._refresh_thread.join(timeout=5)
+
+    cache_document = json.loads(restarted.cache_path.read_text(encoding="utf-8"))
+    cache_document["updatedAt"] = (datetime.now(timezone.utc) - timedelta(seconds=21)).isoformat()
+    restarted.cache_path.write_text(json.dumps(cache_document), encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+
+    def refresh_snapshot() -> dict[str, Any]:
+        started.set()
+        assert release.wait(timeout=5)
+        return {"selectedProjectPath": "", "unityEditorPath": "", "projects": [{"name": "Fresh", "path": "P"}]}
+
+    expired = make_service(tmp_path, build_snapshot=refresh_snapshot)
+    stale = expired.cached_project_snapshot_payload(refresh_async=True)
+    assert stale["projects"][0]["name"] == "Cached"
+    assert stale["scan"]["refreshing"] is True
+    assert started.wait(timeout=5)
+    thread = expired._refresh_thread
+    assert thread is not None
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert expired.cached_project_snapshot_payload(refresh_async=False)["projects"][0]["name"] == "Fresh"
+
+
+def test_manual_refresh_waits_for_inflight_background_scan_instead_of_scanning_twice(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    build_calls: list[int] = []
+
+    def build_snapshot() -> dict[str, Any]:
+        build_calls.append(1)
+        started.set()
+        assert release.wait(timeout=5)
+        return {"selectedProjectPath": "", "unityEditorPath": "", "projects": [{"name": "Fresh", "path": "P"}]}
+
+    service = make_service(tmp_path, build_snapshot=build_snapshot)
+    assert service.schedule_project_snapshot_refresh(force=True) is True
+    assert started.wait(timeout=5)
+    future = service._refresh_future
+    assert future is not None
+    original_result = future.result
+    joins_lock = threading.Lock()
+    joins = 0
+    both_joined = threading.Event()
+
+    def tracked_result(*args: Any, **kwargs: Any) -> Any:
+        nonlocal joins
+        with joins_lock:
+            joins += 1
+            if joins == 2:
+                both_joined.set()
+        return original_result(*args, **kwargs)
+
+    future.result = tracked_result
+
+    result: dict[str, Any] = {}
+    manual_started = [threading.Event(), threading.Event()]
+    manual_done = [threading.Event(), threading.Event()]
+
+    def manual_refresh(index: int) -> None:
+        manual_started[index].set()
+        result[f"payload-{index}"] = service.refresh_project_snapshot_cache_sync()
+        manual_done[index].set()
+
+    manual_threads = [threading.Thread(target=manual_refresh, args=(index,)) for index in range(2)]
+    for thread in manual_threads:
+        thread.start()
+    for started_event in manual_started:
+        assert started_event.wait(timeout=5)
+    assert both_joined.wait(timeout=5)
+    assert not any(done_event.is_set() for done_event in manual_done)
+    release.set()
+    for thread in manual_threads:
+        thread.join(timeout=5)
+    background_thread = service._refresh_thread
+    if background_thread is not None:
+        background_thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in manual_threads)
+    assert all(done_event.is_set() for done_event in manual_done)
+    assert len(build_calls) == 1
+    assert all(result[f"payload-{index}"]["projects"][0]["name"] == "Fresh" for index in range(2))
+
+    next_scan = service.refresh_project_snapshot_cache_sync()
+    assert len(build_calls) == 2
+    assert next_scan["projects"][0]["name"] == "Fresh"

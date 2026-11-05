@@ -113,6 +113,7 @@ class SubAgentTaskRegistry:
         lane_budget: RuntimeLaneBudget | None = None,
         task_finished: Callable[[dict[str, Any]], None] | None = None,
         wait_parent_idle: Callable[..., bool] | None = None,
+        defer_projection_load: bool = False,
     ) -> None:
         self.artifact_dir = Path(artifact_dir)
         self.roles = {role.id: role for role in roles}
@@ -131,10 +132,11 @@ class SubAgentTaskRegistry:
         self._startup_reconciled = False
         self._shutdown = False
         self._accepting = True
-        with self._lock:
-            self._load_projection_locked()
+        if not defer_projection_load:
+            with self._lock:
+                self._load_projection_locked()
         if reconcile_on_init:
-            self.reconcile_startup()
+            self.reconcile_startup(refresh_from_disk=defer_projection_load)
 
     def reconcile_startup(
         self,

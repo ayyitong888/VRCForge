@@ -363,19 +363,14 @@ def test_app_bootstrap_defers_heavy_catalog_and_hydrates_skills_asynchronously()
     startup_refresh = app[
         app.index("async function refreshStartupWithMetrics") : app.index("function resolveBackendReady")
     ]
-    assert "await refreshWithRetry(target);" in startup_refresh
-    assert "refreshWithRetry(target, options)" not in startup_refresh
-    assert "scheduleProjectRefresh(target);" in startup_refresh
-    assert startup_refresh.index("scheduleProjectRefresh(target);") < startup_refresh.index(
-        "await refreshWithRetry(target);"
-    )
-    assert "Project discovery is an independent background request" in app
-    assert "overlap bootstrap hydration and the automatic update check" in app
+    assert "await refreshWithRetry(target, options);" in startup_refresh
+    assert "scheduleProjectRefresh(target);" not in startup_refresh
+    assert "fetchBootstrap(target, { ...options, deferAgentCatalog: true })" in app
     assert "const [backgroundRuntimeReady, setBackgroundRuntimeReady] = useState(false);" in app
     assert "setBackgroundRuntimeReady(true);" in app
     assert "setBackgroundRuntimeReady(false);" in app
     assert "backgroundRuntimeReady," in app
-    assert 'fetchBootstrap(target, { deferAgentCatalog: true })' in app
+    assert 'fetchBootstrap(target, { ...options, deferAgentCatalog: true })' in app
     assert "bootstrap?.agentManifest?.skills ?? []" in app
     assert "const bootstrapRequestSequenceRef = useRef(0)" in app
     assert "const bootstrapForegroundRequestRef = useRef(0)" in app

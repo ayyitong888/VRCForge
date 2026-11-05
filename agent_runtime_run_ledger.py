@@ -122,7 +122,7 @@ class AgentRuntimeRunLedgerPorts:
 class AgentRuntimeRunLedger:
     """Persist and project runtime-run events without owning runtime execution."""
 
-    __slots__ = ("_ports", "_instance_nonce", "_list_runs_cache")
+    __slots__ = ("_ports", "_instance_nonce", "_list_runs_cache", "_shell_continuation_states_cache")
 
     def __init__(self, ports: AgentRuntimeRunLedgerPorts) -> None:
         self._ports = ports
@@ -133,6 +133,7 @@ class AgentRuntimeRunLedger:
         # the filtered event window for each query and advance it from the
         # append boundary; never retain/parse the complete JSONL in memory.
         self._list_runs_cache: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
+        self._shell_continuation_states_cache: dict[str, dict[str, Any]] | None = None
 
     @property
     def log_path(self) -> Path:
@@ -176,6 +177,11 @@ class AgentRuntimeRunLedger:
             with path.open("a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
                 self._ports.flush_and_fsync(log_file)
+            state = str(safe_entry.get("shellContinuationState") or "").strip()
+            shell_session_id = str(safe_entry.get("shellSessionId") or "").strip()
+            if state in {"pending", "dispatching", "delivered", "interrupted"} and shell_session_id:
+                if self._shell_continuation_states_cache is not None:
+                    self._shell_continuation_states_cache[shell_session_id] = copy.deepcopy(safe_entry)
         return safe_entry
 
     @staticmethod
@@ -247,12 +253,14 @@ class AgentRuntimeRunLedger:
             terminals: set[str] = set()
             interrupted: set[str] = set()
             continuation_rows: deque[tuple[int, dict[str, Any]]] = deque(maxlen=512)
+            shell_states: dict[str, dict[str, Any]] = {}
             start_times: dict[tuple[str, str], str] = {}
             consumed_offset = 0
             ordinal = 0
             try:
                 source = self.log_path.open("rb")
             except FileNotFoundError:
+                self._shell_continuation_states_cache = {}
                 return 0
             def owned_events():
                 # Existing ledgers can be large. Older records have no live
@@ -270,6 +278,7 @@ class AgentRuntimeRunLedger:
                         ordinal += 1
                         if (b'"continuationEvent"' not in line
                                 and b'"runtime_turn_started"' not in line
+                                and b'"shellContinuationState"' not in line
                                 and not starts and b'"runtimeOwnerNonce"' not in line):
                             continue
                         try:
@@ -277,6 +286,10 @@ class AgentRuntimeRunLedger:
                         except json.JSONDecodeError:
                             continue
                         if isinstance(event, dict):
+                            shell_state = str(event.get("shellContinuationState") or "").strip()
+                            shell_session_id = str(event.get("shellSessionId") or "").strip()
+                            if shell_state in {"pending", "dispatching", "delivered", "interrupted"} and shell_session_id:
+                                shell_states[shell_session_id] = event
                             if isinstance(event.get("continuationEvent"), dict):
                                 continuation_rows.append((ordinal, event))
                             if (event.get("event") == "runtime_turn_started"
@@ -378,6 +391,7 @@ class AgentRuntimeRunLedger:
                 }
             except OSError:
                 pass
+            self._shell_continuation_states_cache = shell_states
             return created
 
     def read_events(
@@ -860,13 +874,16 @@ class AgentRuntimeRunLedger:
     def shell_continuation_states(self, *, limit: int = 200) -> list[dict[str, Any]]:
         """Return the latest private dispatch state for each Shell session."""
 
-        latest: dict[str, dict[str, Any]] = {}
-        for event in self.read_events(limit=0):
-            state = str(event.get("shellContinuationState") or "").strip()
-            session_id = str(event.get("shellSessionId") or "").strip()
-            if state in {"pending", "dispatching", "delivered", "interrupted"} and session_id:
-                latest[session_id] = event
-        values = list(latest.values())
+        latest = self._shell_continuation_states_cache
+        if latest is None:
+            latest = {}
+            for event in self.read_events(limit=0):
+                state = str(event.get("shellContinuationState") or "").strip()
+                session_id = str(event.get("shellSessionId") or "").strip()
+                if state in {"pending", "dispatching", "delivered", "interrupted"} and session_id:
+                    latest[session_id] = event
+            self._shell_continuation_states_cache = latest
+        values = copy.deepcopy(list(latest.values()))
         if int(limit) <= 0:
             return values
         return values[-max(1, min(int(limit), 200)) :]
@@ -958,14 +975,8 @@ class AgentRuntimeRunLedger:
         return True
 
     def _latest_shell_continuation_locked(self, shell_session_id: str) -> dict[str, Any] | None:
-        for event in reversed(self.read_events(limit=0)):
-            if (
-                str(event.get("shellSessionId") or "").strip() == shell_session_id
-                and str(event.get("shellContinuationState") or "").strip()
-                in {"pending", "dispatching", "delivered", "interrupted"}
-            ):
-                return event
-        return None
+        self.shell_continuation_states(limit=0)
+        return (self._shell_continuation_states_cache or {}).get(shell_session_id)
 
     def _append_shell_continuation_state_locked(
         self,

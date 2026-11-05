@@ -1822,7 +1822,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(projects["projects"], [])
             self.assertIn(projects["scan"]["status"], {"pending", "refreshing"})
             self.assertEqual(schedule_refresh.call_count, 1)
-            schedule_refresh.assert_called_once_with(force=True)
+            schedule_refresh.assert_called_once_with(force=False)
         finally:
             dashboard_server.PROJECT_SNAPSHOT_SELECTION = original_service
 

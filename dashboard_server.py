@@ -2087,6 +2087,7 @@ SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
         build_roles=lambda: _SUB_AGENT_ROLES,
         build_handlers=lambda gateway: build_sub_agent_role_handlers(gateway, _SUB_AGENT_ROLES),
         task_finished=_sub_agent_task_finished,
+        defer_projection_load=True,
     )
 )
 AGENT_GATEWAY.bind_runtime_subagent_control(
