@@ -287,6 +287,9 @@ test("API rejection preserves known usage as incomplete instead of claiming exac
   harness.compactAgentHistoryState.promise = async () => { throw new Error("HTTP 503"); };
   const outcome = await harness.render(() => false).compactChat(request());
   assert.equal(outcome.status, "failed");
+  assert.equal(chat.compaction.status, "failed");
+  assert.equal(chat.compaction.message, "compact.failed");
+  assert.equal(harness.lastError, undefined, "the compaction status owns the failure notice");
   assert.equal(chat.compaction.providerUsage.exact, false);
   assert.equal(chat.compaction.providerUsage.inputTokens, 80);
   assert.equal(chat.compaction.providerUsage.outputTokens, 8);

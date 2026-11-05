@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import { ApiError } from "./http";
+import { AgentTurnDeliveryUnconfirmedError, ApiError } from "./http";
 import type { AgentApproval, AgentApprovalExecution, AgentContextUsage, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeContinuation, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, AgentTurnResponseRecovery, CompactionRecoveryEntry, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
 import type { ChatTimelineEvent } from "../chat-types";
 
@@ -137,7 +137,7 @@ export async function recoverAgentTurnResponse(
       if (signal?.aborted) throw new ApiError("Request cancelled.", 0);
       readFailures += 1;
       if (readFailures >= AGENT_TURN_RECOVERY_READ_FAILURE_LIMIT) {
-        throw cause;
+        throw new AgentTurnDeliveryUnconfirmedError(cause instanceof Error ? cause.message : String(cause));
       }
       await waitForPoll(signal);
       continue;
@@ -146,14 +146,14 @@ export async function recoverAgentTurnResponse(
       throw new ApiError("Request cancelled.", 0);
     }
     if (state.ok !== true || !["running", "completed", "failed", "missing"].includes(state.status)) {
-      throw new ApiError("Recovered Agent turn returned an invalid status.", 0, state);
+      throw new AgentTurnDeliveryUnconfirmedError("Recovered Agent turn returned an invalid status.");
     }
     if (state.sessionId !== sessionId || state.clientTurnId !== clientTurnId) {
-      throw new ApiError("Recovered Agent turn identity did not match the active request.", 0, state);
+      throw new AgentTurnDeliveryUnconfirmedError("Recovered Agent turn identity did not match the active request.");
     }
     if (state.status === "missing") {
       if (!accepted) throw initialError;
-      throw new ApiError(state.error || "Recovered Agent turn disappeared before completion.", 0, state);
+      throw new AgentTurnDeliveryUnconfirmedError(state.error || "Recovered Agent turn disappeared before completion.");
     }
     if (state.status === "failed") {
       throw new ApiError(state.error || "Recovered Agent turn failed.", 0, state);
@@ -163,7 +163,7 @@ export async function recoverAgentTurnResponse(
       const responseSessionId = response?.sessionId || response?.session_id;
       const responseClientTurnId = response?.clientTurnId;
       if (!response || responseSessionId !== sessionId || responseClientTurnId !== clientTurnId) {
-        throw new ApiError("Recovered Agent response identity did not match the active request.", 0, state);
+        throw new AgentTurnDeliveryUnconfirmedError("Recovered Agent response identity did not match the active request.");
       }
       return response;
     }

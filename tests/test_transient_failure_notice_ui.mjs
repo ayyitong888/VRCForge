@@ -3,13 +3,14 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const [app, controller, hook, toast, types, projection] = await Promise.all([
+const [app, controller, hook, toast, types, projection, conversation] = await Promise.all([
   readFile(resolve(root, "src", "App.tsx"), "utf8"),
   readFile(resolve(root, "src", "hooks", "use-chat-run-controller.ts"), "utf8"),
   readFile(resolve(root, "src", "hooks", "use-transient-failure-notice.ts"), "utf8"),
   readFile(resolve(root, "src", "components", "ui", "transient-failure-toast.tsx"), "utf8"),
   readFile(resolve(root, "src", "lib", "api", "types.ts"), "utf8"),
   readFile(resolve(root, "src", "lib", "vision-failure-notice.ts"), "utf8"),
+  readFile(resolve(root, "src", "components", "chat", "conversation-card.tsx"), "utf8"),
 ]);
 
 assert.match(hook, /TRANSIENT_FAILURE_NOTICE_MS\s*=\s*3_000/);
@@ -21,11 +22,11 @@ assert.match(toast, /bottom-8/);
 assert.match(toast, /left-1\/2/);
 assert.match(toast, /transient-failure-toast/);
 assert.match(app, /<TransientFailureToast/);
-assert.match(app, /attachment\.error/);
 assert.match(app, /showTransientFailure\("upload"/);
-assert.match(controller, /notifyFailure\?\.\("send"/);
-assert.match(controller, /projectVisionFailureNotice\(response/);
-assert.match(controller, /notifyFailure\?\.\(visualFailureNotice\.kind/);
+assert.doesNotMatch(app, /showTransientFailure\("upload", attachment\.error\)/);
+assert.doesNotMatch(controller, /notifyFailure/);
+assert.match(conversation, /projectVisionFailureNotice\(response/);
+assert.match(conversation, /data-chat-vision-error/);
 assert.match(projection, /response\.vision\?\.status\s*===\s*"error"/);
 assert.match(projection, /vrcforge_vision_audit_multi/);
 assert.match(projection, /providerError/);

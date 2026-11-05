@@ -20,13 +20,15 @@ const entry = `
     healthErrors: 0,
     healthWarnings: 0,
     startupIssue: "",
+    error: "",
     loadingDoctor: false,
     loading: false,
     onToggleTheme: () => {},
     onOpenDoctor: () => {},
     onRetryStartupOrHealth: () => {},
     onDismissDoctorPrompt: () => {},
-    onStartRuntime: () => {},
+    onDismissError: () => {},
+    onRetryChatStorage: () => {},
   };
   export function render(props) {
     return renderToStaticMarkup(React.createElement(WorkspaceHeader, {...base, ...props}));
@@ -49,7 +51,7 @@ async function compileAndLoad(sourceOverride) {
         api.onResolve({ filter: /^\.\.\/ui\/button$/ }, () => ({ path: "button", namespace: "header-test" }));
         api.onLoad({ filter: /.*/, namespace: "header-test" }, (args) => {
           if (args.path === "translation") return { contents: 'export const useTranslation=()=>({t:(key)=>key});', loader: "js" };
-          if (args.path === "icons") return { contents: 'export const AlertTriangle=()=>null,Moon=()=>null,Sun=()=>null;', loader: "js" };
+          if (args.path === "icons") return { contents: 'export const AlertTriangle=()=>null,Loader2=()=>null,Moon=()=>null,Sun=()=>null;', loader: "js" };
           return { contents: 'import React from "react"; export const Button=({variant: _variant, ...props})=>React.createElement("button",props,props.children);', loader: "jsx" };
         });
         if (sourceOverride) {
@@ -66,7 +68,7 @@ async function compileAndLoad(sourceOverride) {
 }
 
 const current = await compileAndLoad();
-const oldSource = execFileSync("git", ["show", "HEAD:src/components/workspace/workspace-header.tsx"], { cwd: root, encoding: "utf8" });
+const oldSource = execFileSync("git", ["show", "65b5520:src/components/workspace/workspace-header.tsx"], { cwd: root, encoding: "utf8" });
 const baseline = await compileAndLoad(oldSource);
 const distinct = {
   showDoctorStartupPrompt: true,
@@ -93,5 +95,19 @@ assert.equal((currentDuplicate.match(/data-workspace-error/g) || []).length, 0, 
 const currentPlain = current.render(plain);
 assert.match(currentPlain, /data-workspace-error/);
 assert.match(currentPlain, /runtime disconnected/);
+assert.doesNotMatch(currentPlain, /header\.reconnect/, "a generic action error has no runtime recovery button");
+
+const failedStartup = current.render({ ...duplicate, showDoctorStartupPrompt: false });
+assert.equal((failedStartup.match(/backend startup failed/g) || []).length, 1);
+assert.match(failedStartup, /doctor\.retry/);
+assert.doesNotMatch(failedStartup, /data-workspace-error|common\.dismiss/);
+
+const startupWaiting = current.render({ runtimeStarting: true });
+assert.match(startupWaiting, /role="status".*header\.reconnecting/);
+assert.doesNotMatch(startupWaiting, /role="alert"/);
+
+const storageBlocked = current.render({ chatStorageError: "Save is blocked", chatStorageNeedsDoctor: true });
+assert.match(storageBlocked, /data-workspace-chat-storage-error.*sidebar\.doctor/);
+assert.doesNotMatch(storageBlocked, /doctor\.retry/);
 
 console.log("workspace header conflict DOM: preimage RED / current GREEN");

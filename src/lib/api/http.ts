@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isDesktopLoopbackApiUrl } from "../desktop-routing";
 
+export class AgentTurnDeliveryUnconfirmedError extends Error {
+  readonly name = "AgentTurnDeliveryUnconfirmedError";
+}
+
 export class ApiError extends Error {
   public readonly code?: string;
   public readonly status: number;

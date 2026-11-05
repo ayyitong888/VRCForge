@@ -77,6 +77,7 @@ function Harness({ initialItems = [] }) {
     refreshRuntimeRuns: async () => {}, refreshBackgroundGoals: () => {},
     handleRuntimeSessionFailure: () => {}, setError: () => {},
     persistChatsNow: persist,
+    reportChatSaveError: () => {},
     traceSteerDelivery: (event) => window.__traceEvents.push(event),
     chats: chatState,
   });

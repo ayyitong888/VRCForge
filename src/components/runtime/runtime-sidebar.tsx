@@ -24,6 +24,7 @@ function componentValueFromMessage(component: ComponentStatus, localizeHealthMes
 export function RightRuntimeSidebar({
   runtimeConnected,
   loadingUnityStatus,
+  unityRefreshError,
   workspaceProjectLabel,
   workspaceProjectType,
   selectedProjectComponent,
@@ -57,6 +58,7 @@ export function RightRuntimeSidebar({
 }: {
   runtimeConnected: boolean;
   loadingUnityStatus: boolean;
+  unityRefreshError?: string;
   workspaceProjectLabel: string;
   workspaceProjectType: ProjectType;
   selectedProjectComponent: ComponentStatus;
@@ -133,6 +135,9 @@ export function RightRuntimeSidebar({
         </button>
       </div>
 
+      {workspaceProjectType === "unity" && unityRefreshError && !loadingUnityStatus ? (
+        <p role="alert" className="px-3 pt-2 text-xs text-muted-foreground" data-unity-refresh-error>{unityRefreshError}</p>
+      ) : null}
       {workspaceProjectType === "unity" ? <CoreVersionNotice detail={unityToolsComponent?.detail} /> : null}
       <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {projectWorkspace ? (

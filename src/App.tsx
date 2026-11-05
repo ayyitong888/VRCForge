@@ -707,7 +707,7 @@ export default function App() {
     setError,
   });
   const hasStartupIssue = startupIssue.trim().length > 0;
-  const hasEnvironmentAttention = runtimeConnected && (healthErrors > 0 || healthWarnings > 0);
+  const hasEnvironmentAttention = runtimeConnected && healthErrors > 0;
   const doctorPromptSignature = hasStartupIssue
     ? `startup:${startupIssue.trim()}`
     : `health:${Object.entries(healthComponents)
@@ -1096,9 +1096,9 @@ export default function App() {
     refreshBackgroundGoals: () => setBackgroundGoalRefreshSignal((current) => current + 1),
     handleRuntimeSessionFailure,
     setError,
-    notifyFailure: showTransientFailure,
     prepareTurnContext,
     persistChatsNow,
+    reportChatSaveError,
     traceSteerDelivery: developerOptionsEnabled
       ? (event) => console.debug("[vrcforge:steer-delivery]", event)
       : undefined,
@@ -1131,7 +1131,7 @@ export default function App() {
     agentMemory,
     memoryReviewUnreadCount,
     memoryReviewNeedsAttention,
-    workspaceStateError,
+    unityRefreshError,
     runtimeNotice,
     setRuntimeNotice,
     refreshUnityStatus,
@@ -2522,7 +2522,7 @@ export default function App() {
       ).then((result) => {
         if (result === "persistence_failed") {
           quitRequestedRef.current = false;
-          setError(t("chat.sessionSaveFailed"));
+          reportChatSaveError(new Error(t("chat.sessionSaveFailed")));
         }
       }).catch(() => {
         quitRequestedRef.current = false;
@@ -2589,7 +2589,6 @@ export default function App() {
   function refreshStartupInBackground(target: string, options: { refreshProjects?: boolean } = {}) {
     void refreshStartupWithMetrics(target, options).catch((cause) => {
       const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
       setStartupIssue(message);
     });
   }
@@ -2662,7 +2661,6 @@ export default function App() {
       if (isRuntimeSessionVerificationError(message)) {
         handleRuntimeSessionFailure(message);
       } else {
-        setError(message);
         setStartupIssue(message);
       }
     }
@@ -2677,7 +2675,6 @@ export default function App() {
     setAppSessionToken("");
     setBootstrap(null);
     setStartupIssue(message);
-    setError(message);
     setBackendMessage("session_mismatch");
   }
 
@@ -2690,7 +2687,6 @@ export default function App() {
           return readyEndpoint;
         } catch (cause) {
           const message = cause instanceof Error ? cause.message : String(cause);
-          setError(message);
           setStartupIssue(message);
           return null;
         }
@@ -2701,6 +2697,7 @@ export default function App() {
     runtimeStartingRef.current = true;
     setLoading(true);
     setError("");
+    setStartupIssue("");
     let targetEndpoint = endpoint;
     try {
       if (isTauriRuntime()) {
@@ -2745,7 +2742,6 @@ export default function App() {
       if (isRuntimeSessionVerificationError(message)) {
         handleRuntimeSessionFailure(message);
       } else {
-        setError(message);
         setStartupIssue(message);
       }
       return null;
@@ -2909,10 +2905,10 @@ export default function App() {
       cacheProjectSnapshot(projectsPayload);
       setError((current) => (current.toLowerCase().includes("project") ? "" : current));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
       if (options.throwOnError) {
         throw cause;
       }
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       projectRefreshInFlightRef.current = false;
       setLoadingProjects(false);
@@ -3472,9 +3468,6 @@ export default function App() {
       return;
     }
     if (!chatAvailable) {
-      const message = chatDisabledReason || t("chat.connectProviderBeforeSend");
-      setError(message);
-      showTransientFailure("send", message);
       return;
     }
     if (deliveryMode === "steer" && (message === "/compact" || message.startsWith("/compact "))) {
@@ -3591,7 +3584,6 @@ export default function App() {
     const remaining = Math.max(0, MAX_ATTACHMENTS_PER_TURN - attachments.length);
     if (remaining === 0) {
       const message = t("attachments.limitReached", { max: MAX_ATTACHMENTS_PER_TURN });
-      setError(message);
       showTransientFailure("upload", message);
       return;
     }
@@ -3608,12 +3600,8 @@ export default function App() {
         try {
           const attachment = await ingestChatAttachment(file, { endpoint, chatId }, t);
           nextAttachments.push(attachment);
-          if (attachment.error) {
-            showTransientFailure("upload", attachment.error);
-          }
         } catch (cause) {
           const message = cause instanceof Error ? cause.message : String(cause);
-          setError(message);
           showTransientFailure("upload", message);
         }
       }
@@ -3624,7 +3612,6 @@ export default function App() {
     }
     if (files.length > remaining) {
       const message = t("attachments.limitOneTurn", { max: MAX_ATTACHMENTS_PER_TURN });
-      setError(message);
       showTransientFailure("upload", message);
     }
   }
@@ -4001,7 +3988,7 @@ export default function App() {
 
   function addSelectionToComposer(text: string) {
     if (attachments.length >= MAX_ATTACHMENTS_PER_TURN) {
-      setError(t("attachments.limitReached", { max: MAX_ATTACHMENTS_PER_TURN }));
+      showTransientFailure("upload", t("attachments.limitReached", { max: MAX_ATTACHMENTS_PER_TURN }));
       clearSelectionMenu();
       return;
     }
@@ -4132,7 +4119,6 @@ export default function App() {
       await refresh();
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
       setStartupIssue(message);
     }
   }
@@ -4328,13 +4314,15 @@ export default function App() {
             startupIssue={startupIssue}
             loadingDoctor={loadingDoctor}
             loading={loading}
+            runtimeStarting={runtimeStartingRef.current}
             error={error}
             chatStorageError={chatStorageError?.message || ""}
+            chatStorageNeedsDoctor={chatStorageError?.kind === "blocked" || chatStorageError?.kind === "conflict"}
             onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
             onOpenDoctor={() => void openDoctor()}
             onRetryStartupOrHealth={() => void retryStartupOrHealth()}
             onDismissDoctorPrompt={() => setDismissedDoctorPromptSignature(doctorPromptSignature)}
-            onStartRuntime={() => void startRuntime()}
+            onDismissError={() => setError("")}
             onRetryChatStorage={() => { void reloadChatStorageState().catch(() => undefined); }}
           />
 
@@ -4647,6 +4635,7 @@ export default function App() {
               contextUsage={contextUsage}
               compaction={activeChat?.compaction}
               onCancelCompaction={activeChatId ? () => cancelCompaction(activeChatId) : undefined}
+              onRetryCompaction={activeChatId ? () => void compactChat() : undefined}
               providerLabel={providerSnapshot.providerLabel}
               model={providerSnapshot.model}
               providerReasoningEndpoint={providerSnapshot.provider === "chatgpt" ? endpoint : undefined}
@@ -4771,6 +4760,7 @@ export default function App() {
               {subAgentSidebarActive ? subAgentWorkspaceSurface : <AsyncRightRuntimeSidebar
               runtimeConnected={runtimeConnected}
               loadingUnityStatus={loadingUnityStatus}
+              unityRefreshError={unityRefreshError}
               workspaceProjectLabel={workspaceProjectLabel}
               workspaceProjectType={workspaceProjectType}
               selectedProjectComponent={selectedProjectComponent}

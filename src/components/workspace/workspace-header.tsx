@@ -17,13 +17,15 @@ export function WorkspaceHeader({
   startupIssue,
   loadingDoctor,
   loading,
+  runtimeStarting,
   error,
   chatStorageError,
+  chatStorageNeedsDoctor,
   onToggleTheme,
   onOpenDoctor,
   onRetryStartupOrHealth,
   onDismissDoctorPrompt,
-  onStartRuntime,
+  onDismissError,
   onRetryChatStorage,
 }: {
   hideWindowHeader?: boolean;
@@ -38,18 +40,19 @@ export function WorkspaceHeader({
   startupIssue: string;
   loadingDoctor: boolean;
   loading: boolean;
+  runtimeStarting?: boolean;
   error: string;
   chatStorageError?: string;
+  chatStorageNeedsDoctor?: boolean;
   onToggleTheme: () => void;
   onOpenDoctor: () => void;
   onRetryStartupOrHealth: () => void;
   onDismissDoctorPrompt: () => void;
-  onStartRuntime: () => void;
+  onDismissError?: () => void;
   onRetryChatStorage?: () => void;
 }) {
   const { t } = useTranslation();
-  const showErrorBanner = Boolean(error.trim())
-    && (!showDoctorStartupPrompt || error.trim() !== startupIssue.trim());
+  const showErrorBanner = Boolean(error.trim()) && error.trim() !== startupIssue.trim();
   const showChatStorageError = Boolean(chatStorageError?.trim());
   const activeTitle =
     activeView === "doctor"
@@ -81,42 +84,47 @@ export function WorkspaceHeader({
         </div>
       </header>}
 
-      {showDoctorStartupPrompt ? (
+      {runtimeStarting && !hasStartupIssue ? (
+        <div role="status" className="px-4 py-1 text-xs text-muted-foreground">{t("header.reconnecting")}</div>
+      ) : null}
+
+      {hasStartupIssue || showDoctorStartupPrompt ? (
         <div className="mx-auto mt-3 w-full max-w-4xl px-4">
-          <div className="flex min-w-0 items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 shadow-panel dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+          <div
+            role={hasStartupIssue ? "alert" : "status"}
+            className={hasStartupIssue
+              ? "flex min-w-0 items-center gap-3 rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+              : "flex min-w-0 items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"}
+          >
             <AlertTriangle className="h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1 space-y-0.5">
               <div className="font-medium">{hasStartupIssue ? t("header.startupIssueDetected") : t("header.envNeedsAttention")}</div>
-              <div className="break-words text-amber-900/80 dark:text-amber-100/80">
+              <div className="break-words">
                 {hasStartupIssue ? t("header.startupIssueDesc") : t("header.envNeedsAttentionDesc", { errors: healthErrors, warnings: healthWarnings })}
               </div>
-              {hasStartupIssue ? <div className="break-words text-amber-900/70 dark:text-amber-100/70">{startupIssue}</div> : null}
+              {hasStartupIssue ? <div className="break-words">{startupIssue}</div> : null}
             </div>
-            <Button variant="outline" className="h-7 shrink-0 px-2 text-xs" onClick={onOpenDoctor} disabled={loadingDoctor}>
+            {activeView !== "doctor" && <Button variant="outline" className="h-7 shrink-0 px-2 text-xs" onClick={onOpenDoctor} disabled={loadingDoctor}>
               {t("sidebar.doctor")}
-            </Button>
+            </Button>}
             <Button variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={onRetryStartupOrHealth} disabled={loading}>
               {loading ? t("doctor.retrying") : t("doctor.retry")}
             </Button>
-            <Button variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={onDismissDoctorPrompt}>
+            {!hasStartupIssue && <Button variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={onDismissDoctorPrompt}>
               {t("common.dismiss")}
-            </Button>
+            </Button>}
           </div>
         </div>
       ) : null}
 
       {showErrorBanner ? (
         <div className="mx-auto mt-3 w-full max-w-4xl px-4">
-          <div className="flex items-center gap-3 rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75" role="alert" data-workspace-error>
+          <div className="flex items-center gap-3 px-3 py-1 text-xs text-muted-foreground" role="alert" data-workspace-error>
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             <span className="break-words">{error}</span>
-            <Button
-              variant="ghost"
-              className="ml-auto h-7 shrink-0 px-2 text-xs text-destructive/80 hover:bg-destructive/10"
-              onClick={onStartRuntime}
-              disabled={loading}
-            >
-              {loading ? t("header.reconnecting") : t("header.reconnect")}
-            </Button>
+            {onDismissError && <Button variant="ghost" className="ml-auto h-7 shrink-0 px-2 text-xs" onClick={onDismissError}>
+              {t("common.dismiss")}
+            </Button>}
           </div>
         </div>
       ) : null}
@@ -125,13 +133,13 @@ export function WorkspaceHeader({
         <div className="mx-auto mt-3 w-full max-w-4xl px-4">
           <div className="flex items-center gap-3 rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75" role="alert" data-workspace-chat-storage-error>
             <span className="break-words">{chatStorageError}</span>
-            {onRetryChatStorage ? (
+            {(chatStorageNeedsDoctor ? activeView !== "doctor" : onRetryChatStorage) ? (
               <Button
                 variant="ghost"
                 className="ml-auto h-7 shrink-0 px-2 text-xs text-destructive/80 hover:bg-destructive/10"
-                onClick={onRetryChatStorage}
+                onClick={chatStorageNeedsDoctor ? onOpenDoctor : onRetryChatStorage}
               >
-                {t("doctor.retry")}
+                {t(chatStorageNeedsDoctor ? "sidebar.doctor" : "doctor.retry")}
               </Button>
             ) : null}
           </div>

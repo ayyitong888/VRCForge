@@ -61,13 +61,15 @@ function Harness() {
     startRuntime: async () => "http://127.0.0.1:8757", refresh: async () => {},
     refreshRuntimeRuns: async () => {}, refreshBackgroundGoals: () => {},
     handleRuntimeSessionFailure: () => {}, setError: (message) => window.__errors.push(message),
-    persistChatsNow: persist, chats: [chat],
+    persistChatsNow: persist, reportChatSaveError: (cause) => window.__storageErrors.push(cause.message), chats: [chat],
   });
   window.__controller = controller;
   return <div id="hook-mounted" />;
 }
 window.__events = [];
 window.__errors = [];
+window.__storageErrors = [];
+window.__items = () => chat.items;
 window.__providerRequests = [];
 window.__releasePersist = () => releasePersist?.();
 window.__failNextPersist = () => { failNextPersist = true; };
@@ -128,7 +130,9 @@ try {
 
   await page.evaluate(() => window.__failNextPersist());
   await page.evaluate(() => window.__submit("foreground-failed", "must remain local"));
-  await page.waitForFunction(() => window.__errors.length > 0);
+  await page.waitForFunction(() => window.__storageErrors.length === 1);
+  assert.deepEqual(await page.evaluate(() => window.__errors), [], "saving failure does not create a generic action error");
+  assert.equal(await page.evaluate(() => window.__items().filter(item => item.type === "error").length), 0, "saving failure does not become a chat send error");
   assert.equal(await page.evaluate(() => window.__providerRequests.length), 1, "a failed foreground save prevents runtime admission");
   assert.equal(await page.evaluate(() => window.__events.filter((event) => event === "persist_started").length), 2);
   assert.equal(pageErrors.length, 0, pageErrors.join("\n"));

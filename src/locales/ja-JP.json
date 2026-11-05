@@ -2201,6 +2201,7 @@
   },
   "errors": {
     "runtime": {
+      "runtime_unreachable": "VRCForge ランタイムに接続できませんでした。診断で状態を確認してから、このメッセージを再試行してください。",
       "agent_runtime_request_failed": "ランタイムリクエストが失敗しました。再試行するかログを確認してください。",
       "internal_error": "内部エラーが発生しました。続く場合はログを確認してください。",
       "authentication_failed": "リクエストが承認されませんでした。アプリを再接続してください。"

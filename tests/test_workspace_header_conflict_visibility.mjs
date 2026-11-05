@@ -8,7 +8,7 @@ const header = readFileSync(new URL("../src/components/workspace/workspace-heade
 // visible unless it is exactly the startup text already shown above.
 assert.match(
   header,
-  /const showErrorBanner\s*=\s*Boolean\(error\.trim\(\)\)\s*&&\s*\(!showDoctorStartupPrompt\s*\|\|\s*error\.trim\(\)\s*!==\s*startupIssue\.trim\(\)\)/,
+  /const showErrorBanner\s*=\s*Boolean\(error\.trim\(\)\)\s*&&\s*error\.trim\(\)\s*!==\s*startupIssue\.trim\(\)/,
   "workspace header must preserve a distinct runtime/storage error beside Doctor prompt",
 );
 assert.match(header, /\{showErrorBanner \? \(/);

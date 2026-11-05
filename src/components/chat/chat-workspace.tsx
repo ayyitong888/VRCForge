@@ -127,6 +127,7 @@ export function ChatWorkspace({
   contextUsage,
   compaction,
   onCancelCompaction,
+  onRetryCompaction,
   providerLabel,
   model,
   providerReasoningEndpoint,
@@ -226,6 +227,7 @@ export function ChatWorkspace({
   contextUsage?: ContextUsage;
   compaction?: ChatCompactionState;
   onCancelCompaction?: () => void;
+  onRetryCompaction?: () => void;
   providerLabel: string;
   model: string;
   providerReasoningEndpoint?: string;
@@ -595,7 +597,7 @@ export function ChatWorkspace({
             ) : null}
             {pendingQueue}
             {queueControls}
-            <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
+            <CompactionStatus state={compaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
             {activeGoalBar}
             {pendingReplyQuestion ? composer(false) : approvalComposer || composer(false)}
           </div>
@@ -772,7 +774,7 @@ export function ChatWorkspace({
           ) : null}
           {pendingQueue}
           {queueControls}
-          <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
+          <CompactionStatus state={compaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
           {handoffSendOpen ? (
             <div className="mb-2">
               <SessionHandoffSend
@@ -792,7 +794,11 @@ export function ChatWorkspace({
   );
 }
 
-function CompactionStatus({ state, onCancel }: { state?: ChatCompactionState; onCancel?: () => void }) {
+function CompactionStatus({ state, onCancel, onRetry }: {
+  state?: ChatCompactionState;
+  onCancel?: () => void;
+  onRetry?: () => void;
+}) {
   const { t } = useTranslation();
   if (!state || state.status === "idle" || state.status === "applied") {
     return null;
@@ -827,6 +833,11 @@ function CompactionStatus({ state, onCancel }: { state?: ChatCompactionState; on
         >
           <X className="h-3.5 w-3.5" />
           {t("compact.cancel")}
+        </button>
+      ) : null}
+      {state.status === "failed" && state.trigger === "manual" && onRetry ? (
+        <button type="button" className="h-7 rounded-md px-2 text-xs hover:bg-muted" onClick={onRetry}>
+          {t("doctor.retry")}
         </button>
       ) : null}
     </div>

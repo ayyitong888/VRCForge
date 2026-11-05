@@ -20,6 +20,7 @@ export function SubAgentConversation({ endpoint, turns }: { endpoint: string; tu
   const [refresh, setRefresh] = useState(0);
   const sessionId = turns[0]?.childSessionId || "";
   const turnKey = turns.map((turn) => `${turn.id}:${turn.status}`).join("|");
+  const polling = turns.some((turn) => RUNNING.has(turn.status));
 
   useEffect(() => {
     if (!endpoint || !sessionId) return;
@@ -49,14 +50,14 @@ export function SubAgentConversation({ endpoint, turns }: { endpoint: string; tu
       } finally {
         if (!controller.signal.aborted) {
           setLoading(false);
-          if (turns.some((turn) => RUNNING.has(turn.status))) timer = setTimeout(() => void read(), 1500);
+          if (polling) timer = setTimeout(() => void read(), 1500);
         }
       }
     }
     void read();
     return () => { controller.abort(); if (timer !== undefined) clearTimeout(timer); };
     // Poll cursors belong to this child and these turn identities, not list-object refreshes.
-  }, [endpoint, sessionId, turnKey, refresh]);
+  }, [endpoint, sessionId, turnKey, refresh, polling]);
 
   return (
     <div className="space-y-8" data-vrcforge-subagent-conversation data-subagent-session={sessionId}>
@@ -76,13 +77,17 @@ export function SubAgentConversation({ endpoint, turns }: { endpoint: string; tu
               {rows.length ? rows : turn.summary ? <ChatMarkdown text={turn.summary} /> : (
                 <p className="text-xs text-muted-foreground">{t("subagent.noConversation")}</p>
               )}
-              {turn.error ? <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">{turn.error}</p> : null}
+              {turn.error ? <p className="break-words text-xs text-muted-foreground">{turn.error}</p> : null}
             </div>
           </section>
         );
       })}
-      {loading ? <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />{t("common.loading")}</div> : null}
-      {error ? <div role="alert" className="rounded-lg border border-destructive/30 p-3 text-xs text-destructive">
+      {loading || (error && polling) ? (
+        <div role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />{t(error && polling ? "header.reconnecting" : "common.loading")}
+        </div>
+      ) : null}
+      {error && !polling && !loading ? <div role="alert" className="text-xs text-muted-foreground">
         <p>{error}</p>
         <Button variant="ghost" className="mt-1 h-7 px-2" onClick={() => setRefresh((value) => value + 1)}><RefreshCw className="h-3 w-3" />{t("common.refresh")}</Button>
       </div> : null}

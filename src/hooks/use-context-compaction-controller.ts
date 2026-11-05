@@ -392,9 +392,6 @@ export function useContextCompactionController({
         failureAfterTokens,
         compactionProviderUsage,
       );
-      if (request.trigger === "manual" && !cancelled) {
-        setError(t("compact.failed"));
-      }
       return { status: cancelled ? "cancelled" : "failed", decision, chat: getChatById(request.chatId) };
     } finally {
       unlinkAbort();

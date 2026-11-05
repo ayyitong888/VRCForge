@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Check,
   ChevronRight,
   Copy,
@@ -8,7 +9,6 @@ import {
   Pencil,
   Save,
   RotateCcw,
-  Wrench,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -20,6 +20,7 @@ import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presen
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
 import { elapsedSecondsSince, providerWaitingWindow, type AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText } from "../../lib/conversation-utils";
+import { projectVisionFailureNotice } from "../../lib/vision-failure-notice";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { cn, formatCount } from "../../lib/utils";
 import { formatLocalMessageTime, formatMessageDateSeparator } from "../../lib/message-time";
@@ -279,16 +280,22 @@ export function ConversationCard({
     // Render by stable code first (localized copy); the bounded schema message
     // is the fallback and legacy backends only ever supplied that text.
     const codeKey = item.code ? `errors.runtime.${item.code}` : "";
-    const codeText = codeKey && t(codeKey) !== codeKey ? t(codeKey) : item.text;
+    const runtimeUnreachable = item.text === "VRCForge runtime is still starting."
+      || item.text === "Could not connect to the VRCForge runtime.";
+    const codeText = runtimeUnreachable
+      ? t("errors.runtime.runtime_unreachable")
+      : codeKey && t(codeKey) !== codeKey ? t(codeKey) : item.text;
     return (
-      <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive/80">
-        <div className="break-words">{codeText}</div>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onOpenDoctor?.()}>
-            <Wrench className="h-3.5 w-3.5" />
+      <div className="px-1 py-1 text-xs text-muted-foreground" data-chat-turn-error>
+        <div className="flex items-start gap-1.5" role={canRetry ? "alert" : undefined}>
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span className="break-words">{codeText}</span>
+        </div>
+        {runtimeUnreachable && canRetry && onOpenDoctor ? (
+          <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onOpenDoctor}>
             {t("sidebar.doctor")}
           </Button>
-        </div>
+        ) : null}
         <MessageActions
           onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
         />
@@ -420,6 +427,7 @@ export function ConversationCard({
   const shell = response.shell;
   const skill = response.skill;
   const vision = response.vision;
+  const visionFailure = projectVisionFailureNotice(response, (key) => t(key));
   const write = response.write;
   const copyableReply = copyableAgentDialogueText(response);
   // The requested turn model is not proof of the model that answered. Keep
@@ -460,10 +468,16 @@ export function ConversationCard({
         <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
           {initialUserContent}
           {timelineRows}
+          {visionFailure ? (
+            <p className="flex items-start gap-1.5 text-xs text-muted-foreground" data-chat-vision-error>
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span className="break-words">{visionFailure.message}</span>
+            </p>
+          ) : null}
           <MessageActions
             createdAt={item.completedAt || response.completedAt}
             onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
-            onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
+            onRetry={canRetry && response.continuationSource !== "foreground_interrupted" ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
             onSaveAsSkill={saveOperationSummary ? () => onSaveOperationAsSkill?.(saveOperationSummary) : undefined}
             saveOperationTool={saveOperationTool}

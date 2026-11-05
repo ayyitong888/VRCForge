@@ -81,7 +81,7 @@ export function useRuntimeWorkspace({
   const [agentMemory, setAgentMemory] = useState<AgentMemory[]>(() => markdownSmokeMemories());
   const [memoryReviewUnreadCount, setMemoryReviewUnreadCount] = useState(0);
   const [memoryReviewNeedsAttention, setMemoryReviewNeedsAttention] = useState(false);
-  const [workspaceStateError, setWorkspaceStateError] = useState("");
+  const [unityRefreshError, setUnityRefreshError] = useState("");
   const [runtimeNotice, setRuntimeNotice] = useState("");
   const runtimeRefreshSeqRef = useRef(0);
   const activeDesktopRefreshSeqRef = useRef(0);
@@ -228,7 +228,7 @@ export function useRuntimeWorkspace({
     setAgentMemory([]);
     setMemoryReviewUnreadCount(0);
     setMemoryReviewNeedsAttention(false);
-    setWorkspaceStateError("");
+    setUnityRefreshError("");
   }
 
   useEffect(() => {
@@ -282,12 +282,10 @@ export function useRuntimeWorkspace({
     try {
       const payload = await refreshUnityReadiness(target);
       setBootstrap((current) => (current ? { ...current, health: payload.health } : current));
-      setWorkspaceStateError("");
-      setError((current) => (current.toLowerCase().includes("unity") ? "" : current));
+      setUnityRefreshError("");
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      setWorkspaceStateError(message);
-      setError(message);
+      setUnityRefreshError(message);
     } finally {
       setLoadingUnityStatus(false);
     }
@@ -451,14 +449,12 @@ export function useRuntimeWorkspace({
       setMemoryReviewUnreadCount(Math.max(0, Number(snapshot.memoryReview?.unreadCount) || 0));
       setMemoryReviewNeedsAttention(snapshot.memoryReview?.needsAttention === true);
       setRuntimeRunsError("");
-      setWorkspaceStateError("");
     } catch (cause) {
       if (!isLatestRefresh()) {
         return;
       }
       const message = cause instanceof Error ? cause.message : String(cause);
       setRuntimeRunsError(message);
-      setWorkspaceStateError(message);
       if (showError) {
         setRuntimeNotice(message);
       }
@@ -569,7 +565,7 @@ export function useRuntimeWorkspace({
     agentMemory,
     memoryReviewUnreadCount,
     memoryReviewNeedsAttention,
-    workspaceStateError,
+    unityRefreshError,
     runtimeNotice,
     setRuntimeNotice,
     refreshUnityStatus,

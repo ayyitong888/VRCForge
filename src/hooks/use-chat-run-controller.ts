@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError } from "../lib/api/http";
+import { AgentTurnDeliveryUnconfirmedError, ApiError } from "../lib/api/http";
 import { useTranslation } from "react-i18next";
 import {
   applyAgentRuntimeDeltaToStreamingItem,
@@ -46,7 +46,6 @@ import {
   sendAgentMessage,
 } from "../lib/api";
 import { DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS, type AgentRuntimeFollowup } from "../lib/api/agent-runtime";
-import { projectVisionFailureNotice } from "../lib/vision-failure-notice";
 import { createSteerDeliveryTrace, type SteerDeliveryTraceEvent } from "../lib/chat-steer-delivery";
 import {
   applyGeneratedChatTitle,
@@ -188,9 +187,9 @@ type UseChatRunControllerParams = {
   refreshBackgroundGoals: () => void;
   handleRuntimeSessionFailure: (message: string) => void;
   setError: (message: string) => void;
-  notifyFailure?: (kind: "vision" | "send", message: string) => void;
   prepareTurnContext?: (input: PrepareTurnContextInput) => Promise<PreparedTurnContext | null>;
   persistChatsNow: () => Promise<void>;
+  reportChatSaveError: (cause: unknown) => void;
   traceSteerDelivery?: (event: SteerDeliveryTraceEvent) => void;
   chats?: ChatThread[];
   chatStorageReady?: boolean;
@@ -213,9 +212,9 @@ export function useChatRunController({
   refreshBackgroundGoals,
   handleRuntimeSessionFailure,
   setError,
-  notifyFailure,
   prepareTurnContext,
   persistChatsNow,
+  reportChatSaveError,
   traceSteerDelivery,
   chats,
   chatStorageReady = true,
@@ -544,7 +543,7 @@ export function useChatRunController({
         if (!await removeQueuedTurn(turn.id)) failed = true;
       }
       if (failed) setError(t("chat.queueCancellationFailed"));
-      await persistChatsNow?.().catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+      await persistChatsNow?.().catch(reportChatSaveError);
     } finally {
       queueCancellationInFlightRef.current = false;
     }
@@ -666,9 +665,7 @@ export function useChatRunController({
             waitMs: performance.now() - persistStartedAt,
             errorType: cause instanceof Error ? cause.name : typeof cause,
           });
-          const message = cause instanceof Error ? cause.message : String(cause);
-          setError(message);
-          notifyFailure?.("send", message);
+          reportChatSaveError(cause);
           queueArbitratorRef.current.settle(turn.id, {
             acceptedSteer: false,
             stopRequested: false,
@@ -801,9 +798,7 @@ export function useChatRunController({
            trace("persist_rejected", { waitMs: performance.now() - persistStartedAt, errorType: cause instanceof Error ? cause.name : typeof cause });
            // Runtime admission already succeeded. A transcript save failure
            // cannot retract the input or turn an accepted steer into a retry.
-           const message = cause instanceof Error ? cause.message : String(cause);
-           setError(message);
-           notifyFailure?.("send", message);
+           reportChatSaveError(cause);
          });
          return "steered";
        }
@@ -821,11 +816,7 @@ export function useChatRunController({
        queueRef.current.push(durableTurn);
        queueRef.current.sort((a, b) => (a.queueSequence ?? Number.MAX_SAFE_INTEGER) - (b.queueSequence ?? Number.MAX_SAFE_INTEGER));
        updateChat(ownerChatId, (current) => ({ ...touchChat(current), items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id ? { ...item, queueStatus: durableTurn.queueStatus, queueEnvelope: { ...item.queueEnvelope, queueId: durableTurn.queueId, sequence: durableTurn.queueSequence } } : item) }));
-       await persistChatsNow?.().catch((cause) => {
-         const message = cause instanceof Error ? cause.message : String(cause);
-         setError(message);
-         notifyFailure?.("send", message);
-       });
+       await persistChatsNow?.().catch(reportChatSaveError);
       setQueued([...queueRef.current]);
       void refreshRuntimeRuns(false).catch(() => undefined);
       // The active run may have reached its finally block while the queue
@@ -878,7 +869,9 @@ export function useChatRunController({
         next = takeNextRunnableQueuedTurn(queueRef.current);
         setQueued([...queueRef.current]);
       }
-      return initialTurnSucceeded ? "started" : "failed";
+      if (initialTurnSucceeded) return "started";
+      const inputRetained = getChatById(chatId)?.items.some((item) => item.type === "user" && item.clientTurnId === turn.id);
+      return turn.questionId || inputRetained ? "failed" : "not_accepted";
     } finally {
       setQueued([...queueRef.current]);
       sendingRef.current = false;
@@ -960,9 +953,7 @@ export function useChatRunController({
             ...touchChat(current),
             items: current.items.filter((item) => item.type !== "user" || item.clientTurnId !== turn.id),
           }));
-          const message = cause instanceof Error ? cause.message : String(cause);
-          setError(message);
-          notifyFailure?.("send", message);
+          reportChatSaveError(cause);
           return "not_accepted";
         }
       }
@@ -1038,9 +1029,7 @@ export function useChatRunController({
       });
       // The durable follow-up and in-memory queue row remain authoritative;
       // transcript failure must never erase or relabel accepted work.
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
-      notifyFailure?.("send", message);
+      reportChatSaveError(cause);
     });
     if (!sendingRef.current && !stopRequestedRef.current && queueRef.current[0]?.id === queuedTurn.id) {
       void resumeQueuedTurns();
@@ -1164,6 +1153,7 @@ export function useChatRunController({
     const abortController = options?.abortController || new AbortController();
     let userItemId = "";
     let runtimeRequestStarted = false;
+    let savingBeforeDispatch = false;
     if (!background) {
       activeTurnAbortRef.current = abortController;
       const activeTurn = {
@@ -1184,7 +1174,8 @@ export function useChatRunController({
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
         if (!readyEndpoint) {
-          throw new Error(t("agent.coreDisconnectedSend"));
+          if (background) throw new Error(t("agent.coreDisconnectedSend"));
+          return false;
         }
         targetEndpoint = readyEndpoint;
       }
@@ -1280,7 +1271,9 @@ export function useChatRunController({
         });
         // A recovered runtime reply must have a durable owning chat and the
         // complete user message even if the app is killed during this turn.
+        savingBeforeDispatch = true;
         await persistChatsNow();
+        savingBeforeDispatch = false;
       }
       const computerUseGrant = !background && turn.computerUseRequested
         ? await issueComputerUseTurnGrant(targetEndpoint, {
@@ -1368,12 +1361,6 @@ export function useChatRunController({
           (left.queueSequence ?? Number.MAX_SAFE_INTEGER) - (right.queueSequence ?? Number.MAX_SAFE_INTEGER)
         ));
         setQueued([...queueRef.current]);
-      }
-      if (!background) {
-        const visualFailureNotice = projectVisionFailureNotice(response, (key) => t(key));
-        if (visualFailureNotice) {
-          notifyFailure?.(visualFailureNotice.kind, visualFailureNotice.message);
-        }
       }
       const providerUnavailable = response.backgroundGoalSkipped === true
         && response.status === "provider_unreachable"
@@ -1635,7 +1622,8 @@ export function useChatRunController({
       // A broken/aborted response channel does not prove backend cancellation.
       // Preserve its accepted dialogue as an interrupted transport placeholder;
       // the exact runtime receipt owns the eventual execution status.
-      const interrupted = abortController.signal.aborted || text.toLowerCase().includes("cancel");
+      const interrupted = cause instanceof AgentTurnDeliveryUnconfirmedError
+        || abortController.signal.aborted || text.toLowerCase().includes("cancel");
       const queueFailure = cause instanceof ApiError && cause.detail && typeof cause.detail === "object"
         ? cause.detail as { code?: string; message?: string } : null;
       if (!background && turn.queueId && queueFailure?.code === "followup_admission_rejected") {
@@ -1659,6 +1647,7 @@ export function useChatRunController({
       if (!background && turn.queueId && (!runtimeRequestStarted || text.includes("followup_queue_not_ready"))) {
         turn.queueStatus = "waiting_for_resources";
         markQueuedTurnStatus(turn.id, "waiting_for_resources");
+        if (savingBeforeDispatch) reportChatSaveError(cause);
         return false;
       }
       if (!background) {
@@ -1732,9 +1721,11 @@ export function useChatRunController({
         if (persistChatsNow) {
           await persistChatsNow().catch(() => undefined);
         }
-        setError(text);
+        if (isRuntimeSessionVerificationError(text)) handleRuntimeSessionFailure(text);
         return false;
       }
+      const sessionFailure = isRuntimeSessionVerificationError(text);
+      if (savingBeforeDispatch) reportChatSaveError(cause);
       if (options?.restoreOnFailure) {
         const snapshot = options.restoreOnFailure;
         updateChat(chatId, (current) => ({
@@ -1744,28 +1735,18 @@ export function useChatRunController({
           updatedAt: snapshot.updatedAt || current.updatedAt,
           items: stripTransientConversationItems(snapshot.items),
         }));
-        options.onFailure?.(text);
+        if (!savingBeforeDispatch && !sessionFailure) (options.onFailure ?? setError)(text);
       } else {
-      if (userItemId && text.toLowerCase().includes("cancel")) {
+        if (!savingBeforeDispatch && !sessionFailure) {
+          appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text,
+            ...(cause instanceof ApiError && cause.code ? { code: cause.code } : {}) });
+        }
         updateChat(chatId, (current) => ({
           ...touchChat(current),
-          sessionId: "",
-          items: current.items.filter((item) => item.id !== userItemId),
+          items: stripTransientConversationItems(current.items),
         }));
       }
-      appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text,
-              ...(cause instanceof ApiError && cause.code ? { code: cause.code } : {}) });
-      updateChat(chatId, (current) => ({
-        ...touchChat(current),
-        items: stripTransientConversationItems(current.items),
-      }));
-      }
-      if (isRuntimeSessionVerificationError(text)) {
-        handleRuntimeSessionFailure(text);
-      } else {
-        setError(text);
-      }
-      notifyFailure?.("send", text);
+      if (sessionFailure) handleRuntimeSessionFailure(text);
       return false;
     } finally {
       updateChat(chatId, (current) => {

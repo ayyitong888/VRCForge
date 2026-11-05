@@ -537,9 +537,9 @@ function renderFinalAssistantRow(entry: Extract<TimelinePresentationEntry, { typ
       key={entry.id}
       data-vrcforge-terminal-status={terminalFailureCode}
       role="status"
-      className="space-y-1.5 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm leading-relaxed"
+      className="space-y-1.5 px-1 py-1 text-sm leading-relaxed"
     >
-      <div className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
         <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
         <span>{i18n.t(terminalStatusKey)}</span>
       </div>

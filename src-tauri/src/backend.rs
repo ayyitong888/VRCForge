@@ -1478,7 +1478,7 @@ pub(crate) fn app_session_challenge_signature_matches(
 pub(crate) fn ensure_backend_session_verified(token: &str) -> Result<(), String> {
     if !backend_port_open() {
         clear_backend_session_verify_cache();
-        return Err("VRCForge runtime is still starting.".to_string());
+        return Err("Could not connect to the VRCForge runtime.".to_string());
     }
     if backend_session_verify_cache_valid() {
         return Ok(());

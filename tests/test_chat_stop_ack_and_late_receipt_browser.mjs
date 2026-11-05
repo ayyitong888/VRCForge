@@ -32,6 +32,8 @@ const bundle=await build({stdin:{resolveDir:process.cwd(),loader:'tsx',contents:
 import React,{useRef,useState,useCallback} from 'react';
 import {createRoot} from 'react-dom/client';
 import {useChatRunController} from './src/hooks/use-chat-run-controller';
+import {AgentTurnDeliveryUnconfirmedError} from './src/lib/api/http';
+import {ConversationCard} from './src/components/chat/conversation-card';
 import {useRuntimeTurnActivity} from './src/hooks/use-runtime-turn-activity';
 import {useRuntimeTurnContinuationDelivery} from './src/hooks/use-runtime-turn-continuation';
 const initial={id:'owner',sessionId:'session',projectPath:'',title:'Existing',items:[]};
@@ -47,18 +49,22 @@ function Harness(){
  const deliver=useRuntimeTurnContinuationDelivery({chats,appendToChat,updateChat});
  const delta=useRuntimeTurnActivity({endpoint:'http://isolated-fixture',runtimeConnected:true,chats,runs,updateChat,deliver});
  window.controller=controller;window.chats=chats;window.delta=delta;
+ window.failStatusRead=()=>window.sendReject(new AgentTurnDeliveryUnconfirmedError('temporary read failure'));
  window.start=()=>{window.turnPromise=controller.submitTurn({id:'cid',text:'fixture only',attachments:[],provider:'fixture',providerLabel:'Fixture',model:'fixture',sessionId:'session',planMode:false});};
  window.replace=(items,nextRuns)=>{latest.current=[{...initial,items}];setChats(latest.current);setRuns(nextRuns);};
  window.replaceChat=(chat,nextRuns)=>{latest.current=[chat];setChats(latest.current);setRuns(nextRuns);};
  window.setRuns=setRuns;
- return <div id='mounted'/>;
+ const outcome=chats[0]?.items.find(i=>i.type==='error'||i.response?.continuationSource==='foreground_interrupted');
+ return <div id='mounted'>
+   {outcome && <ConversationCard item={outcome} canRetry onOpenDoctor={()=>{}} onRetryItem={()=>{window.retryClicked=true;}}/>}
+ </div>;
 }
 createRoot(document.getElementById('root')).render(<Harness/>);
 `},bundle:true,write:false,format:'iife',jsx:'automatic',platform:'browser',plugins:[{name:'isolated-stop-receipt-api',setup(b){
  b.onResolve({filter:/^react-i18next$/},()=>({path:'translation',namespace:'fixture'}));
  b.onResolve({filter:/^\.\.\/lib\/api$/},a=>a.importer.endsWith('use-chat-run-controller.ts')?{path:'api',namespace:'fixture'}:undefined);
  b.onResolve({filter:/^\.\.\/lib\/api\/agent-runtime$/},a=>a.importer.endsWith('use-chat-run-controller.ts')?{path:'constants',namespace:'fixture'}:a.importer.endsWith('use-runtime-turn-activity.ts')?{path:'api',namespace:'fixture'}:undefined);
- b.onLoad({filter:/.*/,namespace:'fixture'},a=>({loader:'js',contents:a.path==='translation'?"export const useTranslation=()=>({t:k=>k});":a.path==='constants'?'export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS=12;':api}));
+ b.onLoad({filter:/.*/,namespace:'fixture'},a=>({loader:'js',contents:a.path==='translation'?"export const useTranslation=()=>({t:k=>k}); export const initReactI18next={type:'3rdParty',init(){}};":a.path==='constants'?'export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS=12;':api}));
 }}]});
 const server=createServer((_req,res)=>{res.setHeader('Content-Type','text/html');res.end(`<div id='root'></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`);});
 const{chromium}=createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH||'playwright');
@@ -100,6 +106,29 @@ try{
  assert.equal(await page.evaluate(()=>window.chats[0].items.filter(i=>i.type==='agent').length),1,'actual late receipt replaces the new interrupted placeholder once');
  assert.equal(await page.evaluate(()=>window.sendCount),1,'transport recovery never redispatches model work');
  console.log('PASS unknown transport cancellation preserves partial dialogue without claiming backend stop');
+
+ await reload();await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
+ await page.evaluate(()=>window.failStatusRead());
+ await page.waitForFunction(()=>window.chats[0].items.some(i=>i.type==='agent'||i.type==='error'));
+ assert.deepEqual(await page.evaluate(()=>({
+   outcomes:window.chats[0].items.filter(i=>i.type==='agent'||i.type==='error').map(i=>i.response?.status||i.type),
+   globalErrors:window.errors,
+   posts:window.sendCount,
+ })),{outcomes:['interrupted'],globalErrors:[],posts:1},'an unreadable receipt leaves one unconfirmed turn and does not resubmit');
+ await page.locator('[data-agent-transport-interrupted]').waitFor();
+ assert.equal(await page.getByRole('button',{name:'chat.retryMessage',exact:true}).count(),0,'uncertain delivery is read back instead of offered for replay');
+
+ await reload();await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
+ await page.evaluate(()=>window.sendReject(new Error('VRCForge runtime is still starting.')));
+ await page.waitForFunction(()=>window.chats[0].items.some(i=>i.type==='error'));
+ assert.deepEqual(await page.evaluate(()=>({
+   failures:window.chats[0].items.filter(i=>i.type==='error').map(i=>i.text),
+   globalErrors:window.errors,
+   posts:window.sendCount,
+ })),{failures:['VRCForge runtime is still starting.'],globalErrors:[],posts:1},'the reported preflight failure appears only in the conversation');
+ await page.getByRole('alert').getByText('errors.runtime.runtime_unreachable',{exact:true}).waitFor();
+ await page.getByRole('button',{name:'chat.retryMessage',exact:true}).click();
+ assert.equal(await page.evaluate(()=>window.retryClicked),true);
  }
  await reload();
  await page.evaluate(synthetic=>{

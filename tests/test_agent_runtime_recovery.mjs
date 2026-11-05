@@ -105,7 +105,7 @@ await assert.rejects(
     failedReads += 1;
     throw new Error("temporary read failure");
   }, undefined, noWait),
-  /temporary read failure/,
+  (error) => error.name === "AgentTurnDeliveryUnconfirmedError" && /temporary read failure/.test(error.message),
 );
 assert.equal(failedReads, 3, "poll read failures stop after three consecutive errors");
 
