@@ -731,7 +731,8 @@ def test_prepared_import_rejects_project_directory_identity_drift_before_core(tm
     assert "identity drifted" in result["error"]
 
 
-def test_prepared_import_second_core_uncertainty_requires_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("preflight_failed", [False, True])
+def test_prepared_import_second_core_uncertainty_requires_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preflight_failed: bool) -> None:
     project = _project(tmp_path)
     support, target = tmp_path / "Support.unitypackage", tmp_path / "Dress.unitypackage"
     support.write_bytes(b"support")
@@ -772,6 +773,16 @@ def test_prepared_import_second_core_uncertainty_requires_recovery(tmp_path: Pat
             return _completed_import(starts[-1], arguments["jobId"])
         call_count += 1
         if call_count == 2:
+            if preflight_failed:
+                from vrchat_blendshape_agent import _unity_mcp_pre_route_error
+
+                raise _unity_mcp_pre_route_error(
+                    "VRCForge could not inspect the target Unity editor for a blocking Reload dialog. No Core tool was called.",
+                    cause_code="unity_editor_window_probe_failed",
+                    core_tool=tool,
+                    failure_phase="editor_window_probe",
+                    details={"editorBlocker": {"available": False, "probeError": {"message": "Unity control text timed out"}}},
+                )
             raise dashboard_server.UnityMcpError("lost receipt")
         starts.append(dict(arguments))
         return _pending_import(arguments)
@@ -783,6 +794,18 @@ def test_prepared_import_second_core_uncertainty_requires_recovery(tmp_path: Pat
     assert result["commitState"] == "unknown"
     assert result["checkpointRecoveryRequired"] is True
     assert len(result["unityImports"]) == 1
+    if preflight_failed:
+        from agent_gateway import AgentGateway
+
+        gateway = AgentGateway.__new__(AgentGateway)
+        receipt = gateway._external_mcp_write_result("vrcforge_import_outfit_package", {"ok": False, "result": result})
+        outcome = receipt["outcome"]
+        assert outcome["error"]["code"] == "unity_editor_window_probe_failed"
+        assert outcome["commitState"] == "unknown"
+        failed_call = outcome["diagnostics"]["sourceError"]
+        assert failed_call["failurePhase"] == "editor_window_probe"
+        assert failed_call["toolRoutingStarted"] is False
+        assert outcome["diagnostics"]["editorBlocker"]["probeError"]["message"] == "Unity control text timed out"
 
 
 def test_prepared_import_timeout_never_retries_write_or_runs_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1257,8 +1280,9 @@ def test_loose_post_copy_identity_failure_returns_partial_recovery(
     ).read_bytes() == b"prefab"
 
 
+@pytest.mark.parametrize("pre_route", [False, True])
 def test_completed_import_refresh_failure_has_explicit_partial_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pre_route: bool
 ) -> None:
     project, package = _project(tmp_path), tmp_path / "Dress.unitypackage"
     package.write_bytes(b"package")
@@ -1276,6 +1300,15 @@ def test_completed_import_refresh_failure_has_explicit_partial_state(
     def invoke(_settings, tool, arguments, **_kwargs):
         if tool == "vrc_import_unitypackage":
             return _completed_import(arguments)
+        if pre_route:
+            from vrchat_blendshape_agent import _unity_mcp_pre_route_error
+
+            raise _unity_mcp_pre_route_error(
+                "The execution target changed during domain reload.",
+                cause_code="unity_core_starting",
+                core_tool=tool,
+                failure_phase="domain_reload",
+            )
         return dashboard_server.McpResult(
             0, "", "", {"ok": False, "error": "refresh failed"}
         )
@@ -1287,7 +1320,12 @@ def test_completed_import_refresh_failure_has_explicit_partial_state(
     assert result["commitState"] == "partial"
     assert result["checkpointRecoveryRequired"] is True
     assert result["failureLayer"] == "unity_asset_database_refresh"
-    assert result["error"] == "refresh failed"
+    assert result["completedImportJobIds"] == [JOB_ID]
+    if pre_route:
+        assert result["errorCode"] == "unity_core_starting"
+        assert result["diagnostics"]["sourceError"]["toolRoutingStarted"] is False
+    else:
+        assert result["error"] == "refresh failed"
 
 
 def test_loose_texture_import_completed_refresh_without_compilation_is_not_failed(

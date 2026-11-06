@@ -27,7 +27,7 @@ def test_dirty_scenes_are_filtered_by_the_declared_file_scope():
 def test_editor_state_gate_rejection_carries_an_actionable_next_action():
     assert 'var nextAction = code == "unsaved_open_scene"' in SOURCE
     assert "Save the untitled scene under Assets" in SOURCE
-    assert "Save the blocking dirty scenes or assets" in SOURCE
+    assert "scoped save tools" in SOURCE
     assert re.search(r"nextAction, blocking = true", SOURCE), "nextAction must be part of the failure payload"
 
 

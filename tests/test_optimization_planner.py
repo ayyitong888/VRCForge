@@ -1688,6 +1688,19 @@ def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypa
     assert captured["params"]["requires_explicit_approval"] is True
     assert "Optimizer package install requests" in captured["params"]["explicit_approval_reason"]
 
+    captured.clear()
+    with_repository = {
+        "projectPath": str(project),
+        "packageId": "com.anatawa12.avatar-optimizer",
+        "repository": "https://example.invalid/vpm/index.json",
+    }
+    blocked = workflow.request_install(with_repository, agent_name="test-agent")
+    assert blocked["ok"] is False
+    assert blocked["errorCode"] == "vpm_repository_input_unsupported"
+    assert blocked["installPlan"]["canExecuteCommandInstall"] is False
+    assert blocked["installPlan"]["canCreateInstallRequest"] is False
+    assert not captured
+
 
 def test_catalog_repository_is_plan_metadata_only_when_building_install_approval(tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"

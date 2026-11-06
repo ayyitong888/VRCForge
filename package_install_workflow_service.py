@@ -39,6 +39,10 @@ _VPM_PROCESS_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 _VPM_INSTALL_TIMEOUT_SECONDS = 300
 _VPM_JSON_READBACK_MAX_BYTES = 4 * 1024 * 1024
 _RUNTIME_COMPATIBILITY_ERROR_MAX_CHARS = 2000
+_VPM_REPOSITORY_INPUT_REJECTION = (
+    "Repository changes are not allowed in the sealed package-install lane; "
+    "configure the source separately and omit repository from the install request."
+)
 
 
 class RunBoundedProcessPort(Protocol):
@@ -637,6 +641,9 @@ class PackageInstallWorkflowService:
         project_value = self._project_path(normalized)
         managers = self._ports.locate_managers()
         strategy = self.select_strategy(normalized, managers)
+        explicit_repository = bool(str(
+            normalized.get("repository") or normalized.get("vpmRepository") or ""
+        ).strip())
         package_state = None
         if project_value and Path(project_value).is_dir():
             package_state = self._ports.detect_package(Path(project_value), [package_id])
@@ -683,6 +690,10 @@ class PackageInstallWorkflowService:
         preserve_legacy = normalized.get("preserveLegacyFiles") is True
         preservation_ready = bool(preserve_legacy and baseline_report and "treeDigest" in baseline_report)
         assets_migration_required = assets_migration_required and not (baseline_ok or preservation_ready)
+        repository_blocker = {
+            "code": "vpm_repository_input_unsupported",
+            "message": _VPM_REPOSITORY_INPUT_REJECTION,
+        } if explicit_repository else None
         return {
             "ok": True,
             **strategy,
@@ -697,9 +708,12 @@ class PackageInstallWorkflowService:
             "legacyPreservationRequired": preservation_ready,
             "compatibilityAction": "inspect_package_state" if unreadable_state else "migration_required" if assets_migration_required else "upgrade" if upgrade_available else "use_installed" if installed else "install_missing",
             "canExecuteCommandInstall": bool(strategy.get("commandInstaller"))
-            and bool(project_value) and not unreadable_state,
-            "canCreateInstallRequest": bool(project_value) and (not installed or upgrade_available) and not assets_migration_required and not unreadable_state,
-            "canPrepareUpgradeRequest": upgrade_available and not assets_migration_required and not unreadable_state,
+            and bool(project_value) and not unreadable_state and not explicit_repository,
+            "canCreateInstallRequest": bool(project_value) and (not installed or upgrade_available)
+            and not assets_migration_required and not unreadable_state and not explicit_repository,
+            "canPrepareUpgradeRequest": upgrade_available and not assets_migration_required
+            and not unreadable_state and not explicit_repository,
+            **({"commandInstallBlocker": repository_blocker} if repository_blocker else {}),
         }
 
     def diagnose_install(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -905,6 +919,12 @@ class PackageInstallWorkflowService:
         plan = self.plan_install(normalized)
         if not plan.get("ok"):
             return plan
+        blocker = plan.get("commandInstallBlocker")
+        if blocker:
+            return {
+                "ok": False, "status": "blocked", "errorCode": blocker["code"],
+                "error": blocker["message"], "installPlan": plan,
+            }
         package_state = (
             plan.get("packageState")
             if isinstance(plan.get("packageState"), dict)
@@ -1403,8 +1423,7 @@ class VpmPackageInstallPreparer:
         ).strip()
         if repository:
             raise AgentGatewayError(
-                "Repository changes are not allowed in the sealed package-install "
-                "lane; configure existing repositories separately.",
+                _VPM_REPOSITORY_INPUT_REJECTION,
                 status_code=403,
             )
         state = _sealed_vpm_project_state(

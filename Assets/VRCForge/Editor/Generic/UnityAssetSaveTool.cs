@@ -44,12 +44,16 @@ namespace VRCForge.Editor.Generic
                     "This path is a Unity scene. Use vrc_scene_save to save scenes: " + loadedPath, "unity_core_tool", "pre_mutation_validation");
             path = loadedPath;
 
-            var wasDirty = EditorUtility.IsDirty(asset);
+            var dirtyObjects = DirtyObjectsAtPath(path);
+            var wasDirty = dirtyObjects.Length > 0;
+            var foreignDirtyTypes = DirtyObjectTypes(dirtyObjects.Where(IsUnsavableImportedObject));
             if (preview)
                 return VRCForgeToolResult.Completed("Previewed one project asset save.", new
                 {
                     schema = "vrcforge.asset_save.v1", ok = true, preview = true, assetPath = path, wasDirty,
                     saved = false, noChange = !wasDirty,
+                    dirtyObjectTypes = DirtyObjectTypes(dirtyObjects),
+                    canSave = foreignDirtyTypes.Length == 0, unsavableDirtyObjectTypes = foreignDirtyTypes,
                     changed = false, commitState = "not_started", commitStateKnown = true,
                     mutationStarted = false, mutationApplied = false, committed = false,
                     verified = true, verification = "asset_loaded_and_dirty_state_read"
@@ -65,18 +69,28 @@ namespace VRCForge.Editor.Generic
                     verified = true, verification = "asset_is_clean"
                 });
 
+            if (foreignDirtyTypes.Length > 0)
+                return VRCForgeToolResult.RejectedBeforeMutation("imported_asset_objects_cannot_be_saved",
+                    "Unity cannot save dirty generated objects back to the imported source asset. Save the original source or explicitly reimport it to discard the in-memory changes.",
+                    "unity_core_tool", "pre_mutation_validation",
+                    details: new { assetPath = path, unsavableDirtyObjectTypes = foreignDirtyTypes });
+
             try
             {
-                SaveAssetIfDirtyOrThrow(asset, path);
+                if (dirtyObjects.Any(dirty => dirty is AssetImporter))
+                    AssetDatabase.WriteImportSettingsIfDirty(path);
+                if (dirtyObjects.Any(dirty => !(dirty is AssetImporter)))
+                    SaveAssetIfDirtyOrThrow(asset, path);
             }
             catch (Exception exception)
             {
                 return SaveStateUnknown(path, exception.GetType().Name + ": " + exception.Message);
             }
 
-            var remainsDirty = EditorUtility.IsDirty(asset);
-            if (remainsDirty)
-                return SaveStateUnknown(path, "Unity returned from SaveAssetIfDirty, but the asset remains dirty.");
+            var remaining = DirtyObjectsAtPath(path);
+            if (remaining.Length > 0)
+                return SaveStateUnknown(path, "Unity still reports dirty objects at this path: "
+                    + string.Join(", ", DirtyObjectTypes(remaining)) + ".");
 
             return VRCForgeToolResult.Completed("Saved the requested asset; Unity reports it clean.", new
             {
@@ -86,6 +100,24 @@ namespace VRCForge.Editor.Generic
                 mutationStarted = true, mutationApplied = true, committed = true,
                 verified = true, verification = "asset_is_clean_after_save"
             });
+        }
+
+        private static UnityEngine.Object[] DirtyObjectsAtPath(string path)
+        {
+            return Resources.FindObjectsOfTypeAll<UnityEngine.Object>()
+                .Where(asset => asset != null && EditorUtility.IsPersistent(asset) && EditorUtility.IsDirty(asset)
+                    && string.Equals(AssetDatabase.GetAssetPath(asset), path, StringComparison.Ordinal))
+                .ToArray();
+        }
+
+        private static string[] DirtyObjectTypes(IEnumerable<UnityEngine.Object> objects)
+        {
+            return objects.Select(asset => asset.GetType().Name).Distinct().OrderBy(name => name, StringComparer.Ordinal).ToArray();
+        }
+
+        internal static bool IsUnsavableImportedObject(UnityEngine.Object asset)
+        {
+            return !(asset is AssetImporter) && AssetDatabase.IsForeignAsset(asset);
         }
 
         internal static void SaveAssetIfDirtyOrThrow(UnityEngine.Object asset, string assetPath)

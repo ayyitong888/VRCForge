@@ -10,6 +10,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using VRCForge.Editor.Generic;
 
 namespace VRCForge.Editor
 {
@@ -118,11 +119,12 @@ namespace VRCForge.Editor
                 var dirtyScenePaths = loadedScenes.Where(scene => scene.isDirty).Select(scene => scene.path).ToArray();
                 var loadedScenePaths = new HashSet<string>(loadedScenes.Select(scene => scene.path), StringComparer.Ordinal);
                 // Include persistent main assets, subassets and importers; IsDirty is state, not provenance.
-                var dirtyAssetPaths = Resources.FindObjectsOfTypeAll<UnityEngine.Object>()
+                var dirtyAssets = Resources.FindObjectsOfTypeAll<UnityEngine.Object>()
                     .Where(asset => asset != null && EditorUtility.IsPersistent(asset) && EditorUtility.IsDirty(asset))
-                    .Select(AssetDatabase.GetAssetPath)
-                    .Where(path => !string.IsNullOrWhiteSpace(path) && path.StartsWith("Assets/", StringComparison.Ordinal)
-                        && !loadedScenePaths.Contains(path))
+                    .Select(asset => new { asset, path = AssetDatabase.GetAssetPath(asset) })
+                    .Where(entry => !string.IsNullOrWhiteSpace(entry.path) && entry.path.StartsWith("Assets/", StringComparison.Ordinal)
+                        && !loadedScenePaths.Contains(entry.path)).ToArray();
+                var dirtyAssetPaths = dirtyAssets.Select(entry => entry.path)
                     .Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray();
                 var fileScope = ExactFileScope(@params?["checkpointFiles"]);
                 var blockingDirtyAssetPaths = dirtyAssetPaths.Where(path => fileScope == null || fileScope.Contains(path)).ToArray();
@@ -147,16 +149,28 @@ namespace VRCForge.Editor
                     : blockingDirtyScenePaths.Length > 0 || blockingDirtyAssetPaths.Length > 0 ? "dirty_editor_state" : "";
                 if (code.Length > 0)
                 {
+                    var blockingPaths = new HashSet<string>(blockingDirtyAssetPaths, StringComparer.Ordinal);
+                    var blockingDirtyAssetObjects = dirtyAssets.Where(entry => blockingPaths.Contains(entry.path))
+                        .GroupBy(entry => entry.path, StringComparer.Ordinal).OrderBy(group => group.Key, StringComparer.Ordinal)
+                        .Select(group => new
+                        {
+                            assetPath = group.Key,
+                            dirtyObjectTypes = group.Select(entry => entry.asset.GetType().Name)
+                                .Distinct().OrderBy(name => name, StringComparer.Ordinal).ToArray(),
+                            hasUnsavableImportedObjects = group.Any(entry => UnityAssetSaveTool.IsUnsavableImportedObject(entry.asset))
+                        }).ToArray();
                     var nextAction = code == "unsaved_open_scene"
                         ? "Save the untitled scene under Assets with the scene save tool, then retry this write."
                         : code == "scene_outside_project_assets"
                             ? "Close or save the setup scene outside Assets, then retry this write."
-                            : "Save the blocking dirty scenes or assets with the scene save tool, then retry this write.";
+                            : blockingDirtyAssetObjects.Any(entry => entry.hasUnsavableImportedObjects)
+                                ? "Some dirty objects cannot be saved to their imported source. Inspect blockingDirtyAssetObjects and resolve those paths explicitly before retrying."
+                                : "Save the blocking scenes or assets with their scoped save tools, then retry this write.";
                     return VRCForgeToolResult.Failed(code, new
                     {
                         message = "A disk checkpoint cannot preserve unsaved editor state. Save intended changes explicitly before this asset write; open scenes must be under Assets.",
                         nextAction, blocking = true, recoverable = false, unsavedScenes, unsupportedScenes,
-                        dirtyScenePaths, blockingDirtyScenePaths, dirtyAssetPaths, blockingDirtyAssetPaths, benignDirtyAssetPaths, ignoredTransientScenes,
+                        dirtyScenePaths, blockingDirtyScenePaths, dirtyAssetPaths, blockingDirtyAssetPaths, blockingDirtyAssetObjects, benignDirtyAssetPaths, ignoredTransientScenes,
                         snapshotIncludesUnsavedState = false, saved = false,
                         mutationStarted = false, committed = false, commitState = "not_started"
                     });

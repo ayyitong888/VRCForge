@@ -23,7 +23,10 @@ using System;
 using System.Collections.Generic;
 using Newtonsoft.Json.Linq;
 namespace UnityEngine {
- public class Object { public string path; public bool dirty; public int saves; }
+ public class Object { public string path; public bool dirty, foreign; public int saves; }
+ public static class Resources {
+  public static T[] FindObjectsOfTypeAll<T>() where T:Object=>UnityEditor.AssetDatabase.Assets.Values.Concat(UnityEditor.AssetDatabase.Children).OfType<T>().ToArray();
+ }
  public enum LogType { Error, Assert, Warning, Log, Exception }
  public static class Application {
   public delegate void LogCallback(string condition,string stackTrace,LogType type);
@@ -34,14 +37,18 @@ namespace UnityEngine {
 }
 namespace UnityEditor {
  public class SceneAsset : UnityEngine.Object {}
- public static class EditorUtility { public static bool IsDirty(UnityEngine.Object o)=>o.dirty; }
+ public class AssetImporter : UnityEngine.Object {}
+ public static class EditorUtility { public static bool IsDirty(UnityEngine.Object o)=>o.dirty; public static bool IsPersistent(UnityEngine.Object o)=>o.path!=null; }
  public static class AssetDatabase {
   public static readonly Dictionary<string,UnityEngine.Object> Assets=new Dictionary<string,UnityEngine.Object>();
+  public static readonly List<UnityEngine.Object> Children=new List<UnityEngine.Object>();
   public static int Loads, Saves; public static bool ThrowOnSave, LeaveDirty;
   public static string SaveLog; public static UnityEngine.LogType SaveLogType;
   public static UnityEngine.Object LoadMainAssetAtPath(string p){Loads++;Assets.TryGetValue(p,out var o);return o;}
   public static string GetAssetPath(UnityEngine.Object o)=>o.path;
-  public static void SaveAssetIfDirty(UnityEngine.Object o){Saves++;o.saves++;if(ThrowOnSave)throw new Exception("save failed");if(SaveLog!=null)UnityEngine.Application.Emit(SaveLog,SaveLogType);if(!LeaveDirty)o.dirty=false;}
+  public static bool IsForeignAsset(UnityEngine.Object o)=>o.foreign;
+  public static void SaveAssetIfDirty(UnityEngine.Object o){Saves++;o.saves++;if(ThrowOnSave)throw new Exception("save failed");if(SaveLog!=null)UnityEngine.Application.Emit(SaveLog,SaveLogType);if(!LeaveDirty){o.dirty=false;foreach(var child in Children.Where(c=>c.path==o.path&&!(c is AssetImporter)))child.dirty=false;}}
+  public static bool WriteImportSettingsIfDirty(string path){foreach(var importer in Children.OfType<AssetImporter>().Where(c=>c.path==path))importer.dirty=false;return true;}
   public static void SaveAssets(){throw new Exception("global save is forbidden");}
  }
 }
@@ -50,7 +57,7 @@ namespace VRCForge.Core.MCP {
  [AttributeUsage(AttributeTargets.Property)] public sealed class VRCForgeInputAttribute:Attribute {public VRCForgeInputAttribute(string text){} public bool IsRequired{get;set;} public string DefaultLiteral{get;set;}}
  public sealed class VRCForgeToolResult { public string Kind,Code,Message;public object Payload; private VRCForgeToolResult(string k,string c,string m,object p){Kind=k;Code=c;Message=m;Payload=p;}
   public static VRCForgeToolResult Completed(string m,object p=null)=>new VRCForgeToolResult("completed","",m,p);
-  public static VRCForgeToolResult RejectedBeforeMutation(string c,string m,string l,string p)=>new VRCForgeToolResult("rejected",c,m,new {mutationStarted=false,committed=false,commitState="not_started"});
+  public static VRCForgeToolResult RejectedBeforeMutation(string c,string m,string l,string p,object details=null)=>new VRCForgeToolResult("rejected",c,m,new {mutationStarted=false,committed=false,commitState="not_started",details});
   public static VRCForgeToolResult FailedWithCode(string c,string m,object p=null)=>new VRCForgeToolResult("failed",c,m,p);
  }
 }
@@ -82,6 +89,12 @@ class Probe {
   target.dirty=true;AssetDatabase.SaveLogType=LogType.Warning;AssetDatabase.SaveLog="Warning for "+target.path;
   Check((string)Field(Call(target.path),"Kind")=="completed","target warning does not reject this save");
   Check(Application.ListenerCount==0,"successful save releases the log callback");
+  var child=new UnityEngine.Object{path=target.path,dirty=true};var importer=new AssetImporter{path=target.path,dirty=true};AssetDatabase.Children.Add(child);AssetDatabase.Children.Add(importer);
+  var pathPreview=Call(target.path,true);Check(!target.dirty&&child.dirty&&importer.dirty&&(bool)Field(Field(pathPreview,"Payload"),"wasDirty"),"preview detects dirty children and importer of a clean main asset");
+  var pathSaved=Call(target.path);Check((string)Field(pathSaved,"Kind")=="completed"&&!child.dirty&&!importer.dirty&&other.dirty,"exact path save covers children and importer, leaving unrelated state dirty");
+  child.dirty=true;AssetDatabase.LeaveDirty=true;var remains=Call(target.path);Check((string)Field(remains,"Code")=="asset_save_unconfirmed"&&child.dirty,"remaining dirty subasset is reported");
+  child.foreign=true;importer.dirty=true;var foreign=Call(target.path,true);Check(!(bool)Field(Field(foreign,"Payload"),"canSave"),"imported generated object is explicitly unsavable");
+  var blocked=Call(target.path);Check((string)Field(blocked,"Code")=="imported_asset_objects_cannot_be_saved"&&child.dirty&&importer.dirty,"mixed unsupported foreign save refuses before changing importer settings");
   return failures==0?0:1;
  }
 }
@@ -104,4 +117,4 @@ class Probe {
     (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions": {"tfm": "netcoreapp3.1", "framework": {"name": "Microsoft.NETCore.App", "version": "3.1.0"}}}), encoding="utf-8")
     result = subprocess.run([dotnet, str(output)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("PASS ") == 18
+    assert result.stdout.count("PASS ") == 23

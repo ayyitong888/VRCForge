@@ -44,6 +44,27 @@ def _journal_import_progress(**progress: Any) -> None:
         writer(copy.deepcopy(progress))
 
 
+def _core_failure_diagnostics(exc: BaseException) -> dict[str, Any]:
+    source = getattr(exc, "external_error", None)
+    if not isinstance(source, dict):
+        return {}
+    # The failed call's state is local to that call. An earlier import in the
+    # same approved sequence may already have committed.
+    details = source.get("details") or {}
+    diagnostics = {
+        **details,
+        "sourceError": {key: source[key] for key in (
+            "tool", "errorCode", "failureLayer", "failurePhase",
+            "toolRoutingStarted", "mutationStarted", "commitState",
+        )},
+    }
+    return {
+        "errorCode": source["errorCode"],
+        "failurePhase": source["failurePhase"],
+        "diagnostics": diagnostics,
+    }
+
+
 def verify_unitypackage_asset_content(
     package_path: str | Path,
     project_path: str | Path,
@@ -799,6 +820,7 @@ class PreparedOutfitImportApprovedWriteService:
                     "unityJobState": self._unity_job_state(payload),
                     "nextAction": f"Read vrcforge_get_unitypackage_import_status for jobId={job_id} in the same project; do not resubmit the import or infer rollback from a failed status read.",
                     "error": f"Import job {job_id} was already submitted. Status polling failed; the import outcome remains unknown. Poll diagnostic: {exc}",
+                    **_core_failure_diagnostics(exc),
                 }
             if str(payload.get("jobId") or "").strip().lower() != job_id:
                 raise RuntimeError(
@@ -1131,6 +1153,7 @@ class PreparedOutfitImportApprovedWriteService:
                         "jobId": payload.get("jobId"),
                         "status": payload.get("status"),
                         "errorCode": payload.get("errorCode"),
+                        **{key: payload[key] for key in ("failurePhase", "diagnostics") if key in payload},
                         "nextAction": payload.get("nextAction"),
                         "requestMayHaveCommitted": payload.get(
                             "requestMayHaveCommitted"
@@ -1193,6 +1216,7 @@ class PreparedOutfitImportApprovedWriteService:
                     "commitState": "partial",
                     "checkpointRecoveryRequired": True,
                     "kind": kind,
+                        "completedImportJobIds": [item["unityImport"]["jobId"] for item in imports],
                     "unityImports": imports,
                     "assetDatabaseRefresh": refresh,
                     "temporaryCleanupError": cleanup_error or None,
@@ -1284,6 +1308,17 @@ class PreparedOutfitImportApprovedWriteService:
                 **({"contentReadback": content_readback} if content_readback is not None else {}),
             }
         except self._ports.handled_errors as exc:
+            core_failure = _core_failure_diagnostics(exc)
+            failed_call = core_failure.get("diagnostics", {}).get("sourceError", {})
+            refresh_not_routed = (
+                failure_layer == "unity_asset_database_refresh"
+                and bool(imports)
+                and failed_call.get("toolRoutingStarted") is False
+                and failed_call.get("mutationStarted") is False
+            )
+            commit_uncertain = not refresh_not_routed and (
+                import_readback_pending or (write_started and loose_copied is None)
+            )
             cleanup_error = (
                 "" if write_started or imports else cleanup_materializations()
             )
@@ -1299,17 +1334,14 @@ class PreparedOutfitImportApprovedWriteService:
                     "failureLayer": failure_layer,
                     "mutationStarted": True,
                     "committed": True,
-                    "commitState": (
-                        "unknown"
-                        if import_readback_pending
-                        or (write_started and loose_copied is None)
-                        else "partial"
-                    ),
+                    "commitState": "unknown" if commit_uncertain else "partial",
                     "checkpointRecoveryRequired": True,
                     "kind": str(locals().get("kind") or ""),
+                    **({"completedImportJobIds": [item["unityImport"]["jobId"] for item in imports]} if imports else {}),
                     "unityImports": imports,
                     "temporaryCleanupError": cleanup_error or None,
                     "error": str(exc),
+                    **core_failure,
                 }
             return {
                 "ok": False,

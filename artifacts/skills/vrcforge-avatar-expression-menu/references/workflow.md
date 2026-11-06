@@ -32,6 +32,8 @@
 
 确认用户只要求的精确分类、目标菜单资产/页面、控件类型和字段。页面/多项操作使用 `vrcforge_preview_manage_expression_menu` / `vrcforge_manage_expression_menu`；单控件使用 `vrcforge_preview_ensure_expression_menu_control` / `vrcforge_ensure_expression_menu_control`。每次写入都先 preview，经当前权限策略与用户批准后才执行。
 
+将现有控件归入一个新分类时，用菜单管理工具建立子菜单，再按源控件的顺序、类型、值、主参数、子参数、图标和已有子菜单引用逐项建立。读取源控件完整的序列化字段，确认工具可保留其行为和显示后才迁移。读回目标控件后，再移除源页面的旧入口，保留它们引用的子菜单和参数。若有必须保留但工具无法表达的字段，暂停对应控件的迁移并说明具体字段。
+
 ## 5. 完整验收和停止条件
 
 优先以 `vrcforge_get_asset_info` 对精确菜单/参数资产执行 `includeText=true`，确认文本完整 (`sourceComplete=true`) 后，从真实序列化源核对目标控件名称、类型、参数、值、图标与 submenu 引用，以及 Expression Parameters 项的类型/默认/Saved/Synced。该工具返回原始 UTF-8 文本和完整文本 Resource，不会把普通 asset metadata 伪装成控件字段；二进制/不可读资产不能据此通过。此时可用 `vrcforge_scan_avatar_controls`、`vrcforge_scan_parameters` 对指定 Avatar 做只读实际状态核验，并仅核对匹配请求的控件和参数；scanner 只有 `projectPath` / `avatarPath` 范围且菜单扫描会遍历整树，因此这是按需 fallback，不是局部读的强制步骤。scanner 不暴露图标字段时，图标读回仍属未验证。只对照批准的 delta；验证报告/build readiness 不等于构建或运行时验证。
