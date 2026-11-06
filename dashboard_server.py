@@ -29497,6 +29497,15 @@ PREPARED_OUTFIT_IMPORT_APPROVED_WRITE = PreparedOutfitImportApprovedWriteService
             ),
             "prepared outfit import refresh",
         ),
+        read_model_renderers=lambda settings, path, offset: ensure_dict_payload(
+            extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_asset_info", {
+                "assetPath": path,
+                "includeRendererMaterials": True,
+                "rendererOffset": offset,
+                "rendererLimit": 16,
+            })),
+            "prepared FBX renderer readback",
+        ),
         monotonic=time.monotonic,
         sleep=time.sleep,
         timeout_seconds=lambda: 180.0,

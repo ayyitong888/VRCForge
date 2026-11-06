@@ -1,5 +1,6 @@
 """A single prepared FBX must reach the existing sealed loose-import lane."""
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,7 @@ def test_single_fbx_folder_has_no_invented_prefab_selection(tmp_path):
     assert plan["kind"] == "loose_prefab_copy"
     assert plan["selectedPrefab"] == plan["source"]["selectedPrefab"] == ""
     assert plan["expectedAssetPaths"] == [f"{TARGET}/{MODEL}"]
+    assert plan["expectedRenderableModelPath"] == f"{TARGET}/{MODEL}"
     assert plan["requiresApproval"] and plan["requiresCheckpoint"]
     assert not (project / TARGET).exists()
 
@@ -116,6 +118,51 @@ def test_registered_fbx_preparer_reaches_exact_approval_checkpoint_files(tmp_pat
     )
     assert not rejected["ok"] and "drifted" in rejected["error"]
     assert len(seen) == before
+
+
+@pytest.mark.parametrize("case", ["empty", "valid", "mesh_on_second_page"])
+def test_prepared_fbx_import_requires_unity_renderer_mesh_readback(tmp_path, monkeypatch, case):
+    import dashboard_server as server
+
+    project, source = fixture(tmp_path)
+    path = f"{TARGET}/{MODEL}"
+    prepared, _ = server.PREPARED_OUTFIT_IMPORT_PREPARER.prepare({
+        "projectPath": str(project), "packagePath": str(source), "targetFolder": TARGET,
+    }, None)
+    monkeypatch.setattr(server, "load_dashboard_settings",
+                        lambda _: SimpleNamespace(unity_mcp_timeout_seconds=30))
+    calls = []
+
+    def invoke(_settings, tool, arguments, **_kwargs):
+        calls.append((tool, dict(arguments)))
+        if tool == "vrc_refresh_asset_database":
+            return server.McpResult(0, "", "", {"ok": True, "status": "done"})
+        assert tool == "vrc_get_asset_info"
+        assert arguments["assetPath"] == path and arguments["includeRendererMaterials"] is True
+        offset = arguments["rendererOffset"]
+        has_more = case == "mesh_on_second_page" and offset == 0
+        rows = ([{"mesh": None}] if has_more else [] if case == "empty" else [{
+            "relativePath": "Model", "mesh": {"assetPath": path, "localFileId": "4300000"},
+        }])
+        return server.McpResult(0, "", "", {"assetPath": path, "rendererMaterialListing": {
+            "offset": offset, "truncated": has_more, "nextOffset": 1 if has_more else None,
+            "renderers": rows,
+        }})
+
+    monkeypatch.setattr(server, "invoke_unity_mcp", invoke)
+    result = server.PREPARED_OUTFIT_IMPORT_APPROVED_WRITE.execute(prepared)
+    assert calls[0][0] == "vrc_refresh_asset_database"
+    assert [args["rendererOffset"] for _, args in calls[1:]] == ([0, 1] if case == "mesh_on_second_page" else [0])
+    assert (project / path).is_file()
+    if case == "empty":
+        assert not result["ok"]
+        assert result["errorCode"] == "fbx_model_has_no_renderable_mesh"
+        assert result["commitState"] == "partial" and result["checkpointRecoveryRequired"]
+        assert result["modelReadback"]["assetPath"] == path
+    else:
+        assert result["ok"]
+        assert result["modelReadback"] == {"verified": True, "assetPath": path,
+                                           "rendererPath": "Model", "meshLocalFileId": "4300000"}
 
 
 @pytest.mark.parametrize("names,limit,expected", [

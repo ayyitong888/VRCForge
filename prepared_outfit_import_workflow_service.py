@@ -633,6 +633,7 @@ class PreparedOutfitImportApprovedWritePorts:
     map_error: Callable[[Exception], Exception]
     handled_errors: tuple[type[BaseException], ...]
     verify_imported_asset_content: Callable[[str | Path, str | Path, list[str]], dict[str, Any]] | None = None
+    read_model_renderers: Callable[[Any, str, int], dict[str, Any]] | None = None
 
 
 class PreparedOutfitImportApprovedWriteService:
@@ -640,6 +641,35 @@ class PreparedOutfitImportApprovedWriteService:
 
     def __init__(self, ports: PreparedOutfitImportApprovedWritePorts) -> None:
         self._ports = ports
+
+    def _verify_loose_model(self, settings: Any, path: str) -> dict[str, Any]:
+        read_renderers = self._ports.read_model_renderers
+        if read_renderers is None:
+            raise RuntimeError("Unity model readback is unavailable.")
+        offset = 0
+        while True:
+            model = read_renderers(settings, path, offset)
+            listing = model.get("rendererMaterialListing")
+            if model.get("ok") is False or model.get("assetPath") != path or not isinstance(listing, dict):
+                return {"verified": False, "assetPath": path, "code": "fbx_model_readback_unavailable",
+                        "error": model.get("error") or "Unity did not return renderer readback for the imported FBX."}
+            renderers = listing.get("renderers")
+            if (not isinstance(renderers, list) or listing.get("offset") != offset
+                    or any(not isinstance(renderer, dict) for renderer in renderers)):
+                raise RuntimeError("Unity returned an invalid FBX renderer page.")
+            for renderer in renderers:
+                mesh = renderer.get("mesh")
+                if (isinstance(mesh, dict) and mesh.get("assetPath") == path
+                        and mesh.get("localFileId") not in (None, "", "0", 0)):
+                    return {"verified": True, "assetPath": path, "rendererPath": renderer.get("relativePath"),
+                            "meshLocalFileId": mesh["localFileId"]}
+            if listing.get("truncated") is False:
+                return {"verified": False, "assetPath": path, "code": "fbx_model_has_no_renderable_mesh",
+                        "error": "The FBX was copied, but Unity did not import a Mesh used by any renderer."}
+            next_offset = listing.get("nextOffset")
+            if type(next_offset) is not int or not offset < next_offset <= 4096:
+                raise RuntimeError("Unity returned an invalid FBX renderer continuation.")
+            offset = next_offset
 
     @staticmethod
     def _asset_receipts(
@@ -944,6 +974,26 @@ class PreparedOutfitImportApprovedWriteService:
                         or "Asset refresh failed after loose outfit import.",
                     }
                 write_started = False
+                model_path = plan_payload.get("expectedRenderableModelPath")
+                model_readback = None
+                if model_path:
+                    failure_layer = "unity_model_readback"
+                    if model_path not in loose_copied.get("copiedFiles", []):
+                        raise RuntimeError("The planned FBX was absent from the approved copy receipt.")
+                    model_readback = self._verify_loose_model(settings, model_path)
+                    if not model_readback["verified"]:
+                        return {
+                            **loose_copied,
+                            "ok": False,
+                            "failureLayer": failure_layer,
+                            "commitState": "partial",
+                            "checkpointRecoveryRequired": True,
+                            "kind": kind,
+                            "assetDatabaseRefresh": refresh,
+                            "modelReadback": model_readback,
+                            "errorCode": model_readback["code"],
+                            "error": model_readback["error"],
+                        }
                 prefab_assets = [
                     str(path)
                     for path in loose_copied.get("copiedFiles") or []
@@ -955,6 +1005,7 @@ class PreparedOutfitImportApprovedWriteService:
                     **loose_copied,
                     "importedPrefabCandidates": prefab_assets,
                     "assetDatabaseRefresh": refresh,
+                    **({"modelReadback": model_readback} if model_readback is not None else {}),
                     # An assembly-definition-only dependency import has no
                     # outfit to bind; keep the next step a readback instead
                     # of sending the agent into avatar authoring.
@@ -1337,6 +1388,7 @@ class PreparedOutfitImportApprovedWriteService:
                     "commitState": "unknown" if commit_uncertain else "partial",
                     "checkpointRecoveryRequired": True,
                     "kind": str(locals().get("kind") or ""),
+                    **({"copiedFiles": loose_copied.get("copiedFiles", [])} if loose_copied is not None else {}),
                     **({"completedImportJobIds": [item["unityImport"]["jobId"] for item in imports]} if imports else {}),
                     "unityImports": imports,
                     "temporaryCleanupError": cleanup_error or None,

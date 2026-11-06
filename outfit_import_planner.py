@@ -313,6 +313,7 @@ def build_outfit_import_plan(
         plan = build_loose_prefab_plan(
             source_path=source_path,
             selected_prefab=selected_loose_entry or {},
+            selected_model=str(models[0]["path"]) if single_fbx_folder and not selected_loose_entry else "",
             project_root=project_root,
             target_root=target_root,
             base_avatar_name=effective_base_avatar_name,
@@ -650,6 +651,7 @@ def build_unitypackage_import_risk_facts(
 def build_loose_prefab_plan(
     source_path: Path,
     selected_prefab: dict[str, Any],
+    selected_model: str,
     project_root: Path | None,
     target_root: str,
     base_avatar_name: str | None,
@@ -721,6 +723,7 @@ def build_loose_prefab_plan(
             "selectedPrefab": str(selected_prefab.get("path") or ""),
         },
         "selectedPrefab": str(selected_prefab.get("path") or ""),
+        **({"expectedRenderableModelPath": f"{target_root}/{selected_model}"} if selected_model else {}),
         "expectedAssetPaths": [f"{target_root}/{path}" for path in expected_assets],
         "expectedAssetPathCount": len(expected_assets),
         "expectedAssetPathsComplete": expected_assets_complete,
