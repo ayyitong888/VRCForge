@@ -67,11 +67,11 @@ class ProviderApiConfig:
     context_window: int = 0
 
     def native_binding(self) -> str:
-        """Return the private replay binding for an explicitly native route."""
+        """Return the private replay binding for a native or negotiated route."""
 
-        if self.provider == "chatgpt" and self.api_type == "responses":
+        if self.provider == "chatgpt" and self.api_type in {"auto", "responses"}:
             credential_fingerprint_field = "accountIdFingerprint"
-        elif self.api_type in {"chat_completions", "responses", "messages", "generate_content"}:
+        elif self.api_type in {"auto", "chat_completions", "responses", "messages", "generate_content"}:
             credential_fingerprint_field = "apiKeyFingerprint"
         else:
             return ""

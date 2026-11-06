@@ -30,6 +30,7 @@ from provider_runtime_adapters import (
     OpenAIResponsesAdapter,
     ProviderRuntimeRequest,
     ProviderResponseError,
+    ProviderNativeToolRejection,
     ProviderTokenLimitError,
 )
 from chatgpt_integration.adapter import ChatGPTResponseError, ChatGPTResponsesAdapter
@@ -1867,7 +1868,7 @@ def request_llm_plan_with_metadata(
         native_route = explicit_protocol == "chat_completions" or explicit_protocol == "responses"
         native_route = native_route or (provider in {"anthropic", "deepseek", "custom"} and explicit_protocol == "messages")
         native_route = native_route or (provider in {"gemini", "vertexai", "custom"} and explicit_protocol == "generate_content")
-        if not native_route:
+        if not native_route and explicit_protocol != "auto":
             raise ValueError("Native messages/tools require an explicit chat_completions, messages, generate_content, or supported Responses protocol.")
     requested_api_type, resolved_api_type = normalize_provider_api_type(
         provider, settings.llm_model, getattr(settings, "llm_api_type", None)
@@ -1877,13 +1878,24 @@ def request_llm_plan_with_metadata(
         native_responses_route = resolved_api_type == "responses" and requested_api_type == "responses"
         native_messages_route = requested_api_type == "messages" and provider in {"anthropic", "deepseek", "custom"}
         native_gemini_route = requested_api_type == "generate_content" and provider in {"gemini", "vertexai", "custom"}
-        if not (native_chat_route or native_responses_route or native_messages_route or native_gemini_route):
+        if requested_api_type != "auto" and not (native_chat_route or native_responses_route or native_messages_route or native_gemini_route):
             raise ValueError("Native messages/tools require an explicit chat_completions, messages, generate_content, or Responses protocol.")
-        if not native_responses_route and any(
+        if requested_api_type != "auto" and not native_responses_route and any(
             isinstance(message, Mapping) and "responses_output" in message
             for message in (native_messages or ())
         ):
             raise ValueError("ChatGPT Responses history cannot be sent through a legacy chat route.")
+    native_auto = requested_api_type == "auto" and (native_messages is not None or native_tools is not None)
+    negotiated_api_type = requested_api_type
+    if native_auto:
+        # Once a native receipt exists its protocol owns replay, including after
+        # session recovery. The transient state also covers empty length receipts.
+        selected = (native_turn_state or {}).get("protocol") or next((
+            message["provider_protocol"] for message in reversed(native_messages or ())
+            if message.get("role") == "assistant" and message.get("provider_protocol")
+        ), "")
+        if selected:
+            negotiated_api_type = selected
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     def dispatch(
         candidate: ProviderProtocolCandidate,
@@ -1895,25 +1907,41 @@ def request_llm_plan_with_metadata(
             llm_model=candidate.model,
             llm_api_type=candidate.api_type,
         )
-        return _request_llm_protocol_with_metadata(
-            candidate_settings,
-            candidate.api_type,
-            prompt,
-            image_paths,
-            candidate_stream_callback,
-            cancel_event,
-            stream_activity_callback,
-            native_messages,
-            native_tools,
-            session_id,
-            native_turn_state,
-        )
+        if candidate.api_type != "responses" and any("responses_output" in message for message in (native_messages or ())):
+            raise ValueError("ChatGPT Responses history cannot be sent through a legacy chat route.")
+        try:
+            response = _request_llm_protocol_with_metadata(
+                candidate_settings,
+                candidate.api_type,
+                prompt,
+                image_paths,
+                candidate_stream_callback,
+                cancel_event,
+                stream_activity_callback,
+                native_messages,
+                native_tools,
+                session_id,
+                native_turn_state,
+            )
+
+        except ProviderNativeToolRejection as exc:
+            if native_auto:
+                exc.rejected_native_receipt["provider_protocol"] = candidate.api_type
+                if native_turn_state is not None:
+                    native_turn_state["protocol"] = candidate.api_type
+            raise
+        if native_auto:
+            if response.assistant_message:
+                response.assistant_message["provider_protocol"] = candidate.api_type
+            if native_turn_state is not None:
+                native_turn_state["protocol"] = candidate.api_type
+        return response
 
     try:
         return execute_provider_protocol_negotiation(
             provider=provider,
             model=settings.llm_model,
-            requested_api_type=requested_api_type,
+            requested_api_type=negotiated_api_type,
             dispatch=dispatch,
             stream_callback=stream_callback,
         )
@@ -2801,7 +2829,7 @@ def build_openai_compatible_request_payload(
         serialized_messages: list[dict[str, Any]] = []
         for message in native_messages:
             serialized = dict(message)
-            for internal_key in ("hidden", "gemini_parts", "anthropic_content", "truncation"):
+            for internal_key in ("hidden", "provider_protocol", "gemini_parts", "anthropic_content", "truncation"):
                 serialized.pop(internal_key, None)
             # Chat Completions treats an empty assistant tool_calls array as an
             # invalid tool-call turn. Preserve real calls and provider-specific

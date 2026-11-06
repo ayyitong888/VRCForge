@@ -634,9 +634,9 @@ def test_responses_history_cannot_be_sent_through_legacy_chat_route(monkeypatch)
         )
 
 
-@pytest.mark.parametrize("api_type", [None, "", "auto"])
+@pytest.mark.parametrize("api_type", [None, ""])
 @pytest.mark.parametrize("native_field", ["native_messages", "native_tools"])
-def test_legacy_native_protocol_must_be_explicit_before_negotiation(monkeypatch, api_type, native_field):
+def test_missing_native_protocol_rejected_before_negotiation(monkeypatch, api_type, native_field):
     import vrchat_blendshape_agent
 
     def unexpected_negotiation(**kwargs):

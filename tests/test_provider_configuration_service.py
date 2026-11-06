@@ -208,8 +208,8 @@ def test_clear_chatgpt_account_reference_when_gemini_is_current(tmp_path: Path) 
     assert reopened.resolve_api_request(ApiRequest(provider="gemini")).api_key == "gemini-key"
 
 
-@pytest.mark.parametrize("api_type", [None, "auto", "gemini"])
-def test_native_binding_requires_explicit_supported_protocol(api_type: str | None) -> None:
+@pytest.mark.parametrize("api_type", [None, "gemini"])
+def test_native_binding_rejects_unspecified_or_unsupported_protocol(api_type: str | None) -> None:
     config = ProviderApiConfig("custom", "secret", "https://provider.example/v1", "model", api_type=api_type)
     assert config.native_binding() == ""
 
@@ -671,6 +671,6 @@ def test_real_policy_cross_provider_still_requires_a_supported_model(tmp_path: P
     assert owner.config_path.read_bytes() == before
 
 
-@pytest.mark.parametrize("api_type", ["chat_completions", "responses", "messages", "generate_content"])
-def test_native_binding_for_supported_explicit_protocols(api_type):
+@pytest.mark.parametrize("api_type", ["auto", "chat_completions", "responses", "messages", "generate_content"])
+def test_native_binding_for_supported_protocols(api_type):
     assert ProviderApiConfig("custom", "secret", "https://provider.example/v1", "model", api_type=api_type).native_binding()

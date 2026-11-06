@@ -286,13 +286,18 @@ def test_native_planner_leaf_writes_joinable_rows_for_write_and_scan_mock_transp
         dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
 
 
-def test_provider_turn_binding_uses_frozen_explicit_native_route_only():
+def test_provider_turn_binding_uses_frozen_native_route():
     binding = dashboard_server._RuntimePlannerProviderTurnBinding()
     config = fixture_config()
     with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=config):
         with binding.bind({"native_binding": "client-forged", "api_type": "responses"}) as metadata:
             assert metadata.native_binding == config.native_binding()
-    non_native = replace(config, api_type="auto")
+    automatic = replace(config, api_type="auto")
+    with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=automatic):
+        with binding.bind({}) as metadata:
+            assert metadata.native_binding == automatic.native_binding()
+            assert metadata.native_binding
+    non_native = replace(config, api_type=None)
     with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=non_native):
         with binding.bind({}) as metadata:
             assert metadata.native_binding == ""

@@ -277,7 +277,7 @@ class AgentRuntimeSessionState:
     def _validate_native_assistant(cls, message: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(message, dict):
             raise ValueError("native assistant message must be an object")
-        allowed = {"role", "content", "tool_calls", "reasoning_content", "responses_output", "gemini_parts", "anthropic_content"}
+        allowed = {"role", "content", "tool_calls", "reasoning_content", "responses_output", "gemini_parts", "anthropic_content", "provider_protocol"}
         if set(message) - allowed:
             raise ValueError("native assistant message has unsupported fields")
         if message.get("role") != "assistant":
@@ -289,6 +289,8 @@ class AgentRuntimeSessionState:
         for field in ("gemini_parts", "anthropic_content"):
             if field in message and (not isinstance(message[field], list) or any(not isinstance(item, dict) for item in message[field])):
                 raise ValueError("native provider blocks must be object lists")
+        if "provider_protocol" in message and message["provider_protocol"] not in {"chat_completions", "responses", "messages", "generate_content"}:
+            raise ValueError("native provider protocol is invalid")
         calls = message.get("tool_calls", [])
         if not isinstance(calls, list):
             raise ValueError("native tool_calls must be a list")

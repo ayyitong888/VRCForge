@@ -439,9 +439,20 @@ def stream_response(
                 if not isinstance(output, list):
                     raise RuntimeError(f"{provider_label} returned an invalid output list.")
                 if output:
-                    if any(index >= len(output) or output[index] != item
-                           for index, item in completed_items.items()):
-                        raise RuntimeError(f"{provider_label} terminal output disagrees with completed items.")
+                    for index, item in completed_items.items():
+                        if index >= len(output):
+                            raise RuntimeError(f"{provider_label} terminal output omitted a completed item.")
+                        terminal_item = output[index]
+                        item_type = str(_value(item, "type") or "")
+                        if str(_value(terminal_item, "type") or "") != item_type:
+                            raise RuntimeError(f"{provider_label} terminal output changed completed item type.")
+                        item_id = str(_value(item, "id") or "")
+                        if item_id and str(_value(terminal_item, "id") or "") != item_id:
+                            raise RuntimeError(f"{provider_label} terminal output changed completed item identity.")
+                        if item_type == "function_call":
+                            for key in ("call_id", "name", "arguments"):
+                                if _value(terminal_item, key) != _value(item, key):
+                                    raise RuntimeError(f"{provider_label} terminal output changed completed tool-call {key}.")
                 elif completed_items:
                     available_items = {**started_items, **completed_items}
                     if sorted(completed_items) != list(range(len(completed_items))):

@@ -67,9 +67,11 @@ def test_deepseek_responses_binding_is_explicit_and_route_scoped() -> None:
     assert replace(config, api_key="secret-b").native_binding() != binding
     assert replace(config, model="deepseek-v4-pro").native_binding() != binding
     assert replace(config, api_type="chat_completions").native_binding() != binding
-    assert ProviderApiConfig(
+    automatic = ProviderApiConfig(
         "deepseek", "secret-a", "https://api.deepseek.example", "deepseek-v4-flash", api_type="auto"
-    ).native_binding() == ""
+    )
+    assert automatic.native_binding()
+    assert automatic.native_binding() != binding
     assert ProviderApiConfig(
         "openai", "secret-a", "https://api.openai.com/v1", "gpt-4.1-mini", api_type="responses"
     ).native_binding() == ""
@@ -114,9 +116,9 @@ def test_explicit_deepseek_responses_accepts_native_messages_and_tools(monkeypat
     assert observed["kwargs"]["native_tools"] == tools
 
 
-@pytest.mark.parametrize("api_type", [None, "", "auto"])
+@pytest.mark.parametrize("api_type", [None, ""])
 @pytest.mark.parametrize("native_field", ["native_messages", "native_tools"])
-def test_automatic_deepseek_protocol_rejects_native_payloads(
+def test_missing_deepseek_protocol_rejects_native_payloads(
     monkeypatch: pytest.MonkeyPatch, api_type: str | None, native_field: str
 ) -> None:
     monkeypatch.setattr(
