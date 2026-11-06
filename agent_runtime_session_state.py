@@ -277,7 +277,7 @@ class AgentRuntimeSessionState:
     def _validate_native_assistant(cls, message: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(message, dict):
             raise ValueError("native assistant message must be an object")
-        allowed = {"role", "content", "tool_calls", "reasoning_content", "responses_output"}
+        allowed = {"role", "content", "tool_calls", "reasoning_content", "responses_output", "gemini_parts", "anthropic_content"}
         if set(message) - allowed:
             raise ValueError("native assistant message has unsupported fields")
         if message.get("role") != "assistant":
@@ -286,6 +286,9 @@ class AgentRuntimeSessionState:
             raise ValueError("native assistant content must be string or null")
         if "reasoning_content" in message and message["reasoning_content"] is not None and not isinstance(message["reasoning_content"], str):
             raise ValueError("native reasoning_content must be string or null")
+        for field in ("gemini_parts", "anthropic_content"):
+            if field in message and (not isinstance(message[field], list) or any(not isinstance(item, dict) for item in message[field])):
+                raise ValueError("native provider blocks must be object lists")
         calls = message.get("tool_calls", [])
         if not isinstance(calls, list):
             raise ValueError("native tool_calls must be a list")
@@ -437,7 +440,9 @@ class AgentRuntimeSessionState:
                 raise ValueError("native snapshot message must be an object")
             role = message.get("role")
             if role == "user":
-                if set(message) != {"role", "content"} or not isinstance(message["content"], str) or not message["content"].strip():
+                if (set(message) - {"role", "content", "hidden"} or not {"role", "content"} <= set(message)
+                        or ("hidden" in message and message["hidden"] is not True)
+                        or not isinstance(message["content"], str) or not message["content"].strip()):
                     raise ValueError("native user message shape is invalid")
                 if pending:
                     raise ValueError("native snapshot has pending tool calls before user message")
@@ -737,7 +742,7 @@ class AgentRuntimeSessionState:
             self._save_native(session_id, normalized)
             return copy.deepcopy(normalized)
 
-    def append_native_user(self, session_id: str, *, binding: str, message: str, human: bool = True) -> None:
+    def append_native_user(self, session_id: str, *, binding: str, message: str, human: bool = True, hidden: bool = False) -> None:
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
         message = self._native_required(message, "message")
@@ -749,9 +754,9 @@ class AgentRuntimeSessionState:
                 raise ValueError("native conversation has pending tool calls")
             candidate = copy.deepcopy(snapshot)
             candidate["humanUserMessageIndices"] = human_indices(snapshot)
-            if human:
+            if human and not hidden:
                 candidate["humanUserMessageIndices"].append(len(candidate["messages"]))
-            candidate["messages"].append({"role": "user", "content": message})
+            candidate["messages"].append({"role": "user", "content": message, **({"hidden": True} if hidden else {})})
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
 

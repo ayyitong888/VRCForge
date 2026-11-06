@@ -138,6 +138,25 @@ class ProviderModelCatalogService:
             return configured
         return min(configured, catalog_limit)
 
+    def resolve_output_limit(self, config: ProviderApiConfig) -> int | None:
+        """Use existing model metadata; an unknown ceiling must not be guessed."""
+        descriptor = self.provider_config_descriptor(config)
+        maximum = self.coerce_positive_int(descriptor.get("maxOutputTokens"))
+        models = self._model_cache.get(self._model_cache_key(config))
+        if maximum is None and models is None:
+            try:
+                models = self.fetch_provider_models(config)
+            except Exception:
+                models = []
+        for item in models or []:
+            if str(item.get("id") or "").strip() == config.model:
+                known = [self.coerce_positive_int(item.get(key)) for key in ("maxOutputTokens", "outputTokenLimit")]
+                bounds = [value for value in (maximum, *known) if value is not None]
+                if bounds:
+                    maximum = min(bounds)
+                break
+        return maximum
+
     @staticmethod
     def _model_cache_key(config: ProviderApiConfig) -> tuple[str, str, str]:
         credential_fingerprint = hashlib.sha256(config.api_key.encode("utf-8")).hexdigest()

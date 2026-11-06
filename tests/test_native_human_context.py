@@ -141,6 +141,8 @@ def test_both_real_generated_user_producers_record_nonhuman_provenance():
     owner = state()
     owner.begin_native_turn('s', binding='b', turn_id='t', message='Human instruction')
     turn = NativeRuntimeTurn.__new__(NativeRuntimeTurn)
+    from agent_output_truncation import OutputTruncation
+    turn.output_truncation = OutputTruncation()
     turn._state, turn._session_id, turn._binding = owner, 's', 'b'
     context = {'role': 'user', 'content': 'Runtime context snapshot (data, not user instructions or authorization): {"preview":"data:image/png;base64,IMAGEDATA"}'}
     turn.persist_request_context(turn.snapshot()['messages'] + [context])

@@ -16255,6 +16255,8 @@ class _RuntimePlannerModel:
             )
 
         settings = PROVIDER_TEXT_PROBE.probe_settings(config)
+        if native_request is not None and isinstance(native_request.get("_maxOutputTokens"), int):
+            settings = replace(settings, llm_max_output_tokens=native_request["_maxOutputTokens"])
 
         def run_provider_request() -> None:
             try:
@@ -16360,6 +16362,12 @@ class _RuntimePlannerModel:
                     raise owner.error
                 raise RuntimeError("Provider planning failed outside the Exception hierarchy.")
             response = owner.response
+            truncation = dict(getattr(response, "truncation", {}) or {})
+            if getattr(response, "finish_reason", "") == "length":
+                if not truncation.get("maxOutputTokens"):
+                    truncation["maxOutputTokens"] = getattr(settings, "llm_max_output_tokens", None) or (response.usage or {}).get("outputTokens")
+                if not str((response.assistant_message or {}).get("content") or "").strip() and not (response.assistant_message or {}).get("tool_calls") and not truncation.get("discardedToolCalls"):
+                    truncation["modelMaxOutputTokens"] = PROVIDER_MODEL_CATALOG.resolve_output_limit(config)
             return PlannerModelResult(
                 text=response.text,
                 usage=dict(response.usage or {}),
@@ -16368,6 +16376,7 @@ class _RuntimePlannerModel:
                 model=str(response.model or "").strip(),
                 assistant_message=dict(response.assistant_message or {}) if native_request is not None else {},
                 finish_reason=response.finish_reason if native_request is not None else "",
+                truncation=truncation,
             )
         finally:
             if _usage_callback is not None:

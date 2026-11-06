@@ -7011,6 +7011,16 @@ class AgentGateway:
                     "nextStep": "cancelled",
                 }
                 break
+            if native_binding:
+                for issue in native_turn.output_truncation.notices:
+                    append_timeline_event("tool_result", label=issue["name"], tool=issue["name"], status=issue.get("status", "not_executed"),
+                        summary=f"工具：{summarize_text(issue['name'], 80)}；参数：{summarize_text(issue['arguments'], 400)}；原因：{summarize_text(issue['reason'], 180)}建议：{summarize_text(issue['suggestion'], 180)}")
+                native_turn.output_truncation.notices.clear()
+                if plan.get("_outputContinuation"):
+                    last_plan = plan
+                    continue
+                if not (plan.get("skillNeeded") or plan.get("writeNeeded") or plan.get("shellNeeded")):
+                    plan = native_turn.output_truncation.finish(plan)
             last_plan = plan
             if first_plan is None:
                 first_plan = plan
@@ -8585,6 +8595,7 @@ class AgentGateway:
                 "cancelled",
                 "context_compaction_required",
                 "loop_suppressed",
+                "output_length_limit",
             }
         )
         top_plan = last_plan if terminal_override else (
@@ -8753,6 +8764,8 @@ class AgentGateway:
             task_snapshot = ensure_dict(top_plan.get("task"))
             task_snapshot["status"] = "needs_user_action"
             top_plan["task"] = task_snapshot
+        if native_binding:
+            top_plan = native_turn.output_truncation.finish(top_plan)
         native_turn.settle(top_plan)
 
         # Non-analyzed image state is rendered by the structured vision step.
@@ -9855,6 +9868,7 @@ class AgentGateway:
         "cancelled": "cancelled", "canceled": "cancelled",
         "interrupted": "interrupted",
         "needs_user_action": "waiting_user", "paused": "waiting_user",
+        "output_length_limit": "waiting_user",
     }
 
     @classmethod

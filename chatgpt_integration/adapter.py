@@ -22,6 +22,7 @@ from responses_native_protocol import (
     NativeResponse,
     NativeToolRejection,
     build_responses_input as _build_responses_input,
+    is_hidden_continuation,
     _normalized_usage,
     parse_native_response as _parse_responses_native,
     stream_response as _stream_native_response,
@@ -48,6 +49,7 @@ class ChatGPTNativeResponse:
     usage: dict[str, Any] = field(default_factory=dict)
     reasoning_summary: list[Any] = field(default_factory=list)
     model: str = ""
+    truncation: dict[str, Any] = field(default_factory=dict)
 
 
 class ChatGPTResponsesAdapter:
@@ -172,6 +174,7 @@ class ChatGPTResponsesAdapter:
         cancel_event: Any | None = None,
         stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
         reasoning_effort: str = "",
+        max_output_tokens: int | None = None,
     ) -> ChatGPTNativeResponse:
         payload: dict[str, Any] = {
             "model": self._require_model(model),
@@ -183,6 +186,8 @@ class ChatGPTResponsesAdapter:
         effort = direct_reasoning_effort(reasoning_effort)
         if effort:
             payload["reasoning"] = {"effort": effort}
+        if max_output_tokens is not None:
+            payload["max_output_tokens"] = max_output_tokens
         grouped_tools = _namespace_tools(tools)
         if grouped_tools:
             payload["tools"] = grouped_tools
@@ -193,7 +198,7 @@ class ChatGPTResponsesAdapter:
             activity_callback=stream_activity_callback,
         )
         try:
-            return _parse_native_response(response, tools)
+            return _parse_native_response(response, tools, allow_empty_final=is_hidden_continuation(messages))
         except NativeToolRejection as exc:
             raise ProviderNativeToolRejection(response, exc.receipt.assistant_message) from exc
         except (ValueError, RuntimeError) as exc:
@@ -339,12 +344,15 @@ def _namespace_tools(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
 def _parse_native_response(
     response: Any,
     tools: Sequence[Mapping[str, Any]],
+    *,
+    allow_empty_final: bool = False,
 ) -> ChatGPTNativeResponse:
     parsed: NativeResponse = _parse_responses_native(
         response,
         tools,
         namespace=_NAMESPACE,
         require_encrypted_reasoning=True,
+        allow_empty_final=allow_empty_final,
     )
     return ChatGPTNativeResponse(
         text=parsed.text,
@@ -353,4 +361,5 @@ def _parse_native_response(
         usage=parsed.usage,
         reasoning_summary=parsed.reasoning_summary,
         model=parsed.model,
+        truncation=parsed.truncation,
     )

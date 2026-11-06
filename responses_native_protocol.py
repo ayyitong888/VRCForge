@@ -12,6 +12,7 @@ __all__ = [
     "NativeResponse",
     "build_responses_input",
     "flat_function_tools",
+    "is_hidden_continuation",
     "parse_native_response",
     "stream_response",
 ]
@@ -25,6 +26,7 @@ class NativeResponse:
     usage: dict[str, Any] = field(default_factory=dict)
     reasoning_summary: list[Any] = field(default_factory=list)
     model: str = ""
+    truncation: dict[str, Any] = field(default_factory=dict)
 
 
 class NativeToolRejection(RuntimeError):
@@ -134,15 +136,42 @@ def flat_function_tools(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, An
     return converted
 
 
+def is_hidden_continuation(messages: Sequence[Mapping[str, Any]]) -> bool:
+    """Return whether history ends in the exact internal continuation instruction."""
+    from agent_output_truncation import CONTINUE_MESSAGE
+
+    for message in reversed(messages):
+        if not isinstance(message, Mapping):
+            continue
+        role = str(message.get("role") or "")
+        if role in {"system", "developer"}:
+            continue
+        return (
+            role == "user"
+            and message.get("hidden") is True
+            and message.get("content") == CONTINUE_MESSAGE
+        )
+    return False
+
+
 def parse_native_response(
     response: Any,
     tools: Sequence[Mapping[str, Any]],
     namespace: str | None = "vrcforge",
     require_encrypted_reasoning: bool = True,
+    allow_empty_final: bool = False,
 ) -> NativeResponse:
     output = _value(response, "output")
+    status = str(_value(response, "status") or "").strip().lower()
+    incomplete_details = _value(response, "incomplete_details")
+    truncated = (
+        status == "incomplete"
+        and str(_value(incomplete_details, "reason") or "").strip().lower() == "max_output_tokens"
+    )
     if not isinstance(output, list):
-        raise RuntimeError("Responses returned an invalid output list.")
+        if not (truncated and output is None):
+            raise RuntimeError("Responses returned an invalid output list.")
+        output = []
     allowed_names = _tool_names(tools)
     text_parts: list[str] = []
     calls: list[dict[str, Any]] = []
@@ -150,6 +179,15 @@ def parse_native_response(
     summaries: list[Any] = []
     seen_ids: set[str] = set()
     unexposed = False
+    prior_truncation = _value(response, "_truncation")
+    completed_call_ids = set(
+        _value(response, "_completedCallIds")
+        if isinstance(_value(response, "_completedCallIds"), list) else []
+    )
+    discarded_calls = list(
+        _value(prior_truncation, "discardedToolCalls")
+        if isinstance(_value(prior_truncation, "discardedToolCalls"), list) else []
+    )
     for item in output:
         kind = str(_value(item, "type") or "")
         if kind == "reasoning":
@@ -158,6 +196,12 @@ def parse_native_response(
                 summaries.append(summary)
             if require_encrypted_reasoning:
                 if not isinstance(_value(item, "encrypted_content"), str):
+                    if truncated:
+                        # A truncated reasoning item may lack the encrypted
+                        # signature required to replay stateless Responses
+                        # history. Keep the length terminal state, but omit
+                        # this unsafe-to-replay item from the assistant receipt.
+                        continue
                     raise RuntimeError("Responses omitted encrypted reasoning required for stateless continuation.")
             else:
                 _validate_reasoning_content(item, RuntimeError)
@@ -177,6 +221,10 @@ def parse_native_response(
             call_id = str(_value(item, "call_id") or "").strip()
             name = str(_value(item, "name") or "").strip()
             arguments = _value(item, "arguments")
+            if (truncated and call_id not in completed_call_ids
+                    and str(_value(item, "status") or "").strip().lower() != "completed"):
+                discarded_calls.append(_discarded_call(call_id, name, arguments))
+                continue
             if not call_id or call_id in seen_ids or not name or not isinstance(arguments, str):
                 raise RuntimeError("Responses returned an invalid native tool call.")
             if not _namespace_matches(item, namespace):
@@ -194,7 +242,7 @@ def parse_native_response(
         raise RuntimeError("Responses returned an unsupported native output item.")
 
     text = "".join(text_parts)
-    if not text and not calls:
+    if not text and not calls and not truncated and not allow_empty_final:
         raise RuntimeError("Responses completed without a message or tool call.")
     assistant_message: dict[str, Any] = {
         "role": "assistant",
@@ -206,14 +254,25 @@ def parse_native_response(
     receipt = NativeResponse(
         text=text,
         assistant_message=assistant_message,
-        finish_reason="tool_calls" if calls else "stop",
+        finish_reason="length" if truncated else "tool_calls" if calls else "stop",
         usage=_normalized_usage(response),
         reasoning_summary=summaries,
         model=str(_value(response, "model") or "").strip(),
+        truncation={"discardedToolCalls": discarded_calls} if discarded_calls else {},
     )
     if unexposed:
         raise NativeToolRejection(receipt)
     return receipt
+
+
+def _discarded_call(call_id: str, name: str, arguments: Any) -> dict[str, str]:
+    return {
+        "id": call_id,
+        "name": name,
+        "arguments": arguments if isinstance(arguments, str) else "",
+        "reason": "Tool arguments were truncated before the protocol completion event.",
+        "suggestion": "Resend this operation as a smaller tool call.",
+    }
 
 
 def public_assistant_messages(receipt: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -230,8 +289,8 @@ def public_assistant_messages(receipt: Mapping[str, Any]) -> list[dict[str, str]
     for index, item in enumerate(items):
         if item.get("type") != "message":
             continue
-        text = _message_text(item).strip()
-        if not text:
+        text = _message_text(item)
+        if not text.strip():
             continue
         message = {"id": str(item.get("id") or f"message-{index}")[:180], "text": text[:32_000]}
         if item.get("phase") is not None:
@@ -277,6 +336,10 @@ def stream_response(
     watcher: threading.Thread | None = None
     stream: Any = None
     completed_items: dict[int, dict[str, Any]] = {}
+    started_items: dict[int, dict[str, Any]] = {}
+    call_argument_deltas: dict[int, list[str]] = {}
+    completed_call_indexes: set[int] = set()
+    completed_call_arguments: dict[int, str] = {}
     terminal_response: Any = None
     metrics = None
     request_succeeded = False
@@ -314,8 +377,13 @@ def stream_response(
                 stream_started = True
                 if activity_callback is not None:
                     activity_callback({"kind": "reasoning_activity"})
-            if event_type in {"error", "response.error", "response.failed", "response.incomplete"}:
+            if event_type in {"error", "response.error", "response.failed"}:
                 raise _stream_failure(event, provider_label)
+            if event_type == "response.incomplete":
+                details = _value(terminal_response, "incomplete_details") if terminal_response is not None else None
+                if str(_value(details, "reason") or "").strip().lower() != "max_output_tokens":
+                    raise _stream_failure(event, provider_label)
+                stream_started = True
             if event_type == "response.output_text.delta":
                 delta = str(_value(event, "delta") or "")
                 if delta:
@@ -324,24 +392,47 @@ def stream_response(
                         stream_callback(delta)
             elif event_type in {"response.output_item.added", "response.output_item.done"}:
                 item = _value(event, "item")
+                index = _value(event, "output_index")
+                if (event_type == "response.output_item.added"
+                        and type(index) is int and index >= 0 and item is not None):
+                    started_items[index] = _model_mapping(item)
                 if event_type == "response.output_item.done":
-                    index = _value(event, "output_index")
                     if type(index) is not int or index < 0 or item is None:
                         raise RuntimeError(f"{provider_label} output item index is invalid.")
                     final_item = _model_mapping(item)
                     if index in completed_items and completed_items[index] != final_item:
                         raise RuntimeError(f"{provider_label} output item changed after completion.")
                     completed_items[index] = final_item
+                    if str(_value(item, "type") or "") == "function_call":
+                        completed_call_indexes.add(index)
                 item_type = str(_value(item, "type") or "")
                 if item_type == "function_call" and activity_callback is not None:
                     stream_started = True
                     activity_callback({"kind": "tool_call_activity"})
-            if event_type == "response.completed":
+            if event_type == "response.function_call_arguments.done":
+                index = _value(event, "output_index")
+                if type(index) is int and index >= 0:
+                    completed_call_indexes.add(index)
+                    arguments = _value(event, "arguments")
+                    if isinstance(arguments, str):
+                        completed_call_arguments[index] = arguments
+            elif event_type == "response.function_call_arguments.delta":
+                index = _value(event, "output_index")
+                delta = _value(event, "delta")
+                if type(index) is int and index >= 0 and isinstance(delta, str):
+                    call_argument_deltas.setdefault(index, []).append(delta)
+            if event_type in {"response.completed", "response.incomplete"}:
                 response = _value(event, "response")
                 if response is None:
-                    raise RuntimeError(f"{provider_label} completed event omitted its response.")
+                    raise RuntimeError(f"{provider_label} terminal event omitted its response.")
                 status = str(_value(response, "status") or "completed").lower()
-                if status != "completed":
+                truncated = (
+                    event_type == "response.incomplete"
+                    and status == "incomplete"
+                    and str(_value(_value(response, "incomplete_details"), "reason") or "").strip().lower()
+                    == "max_output_tokens"
+                )
+                if status != "completed" and not truncated:
                     raise RuntimeError(f"{provider_label} stream did not complete successfully.")
                 result = _model_mapping(response)
                 output = result.get("output")
@@ -352,9 +443,44 @@ def stream_response(
                            for index, item in completed_items.items()):
                         raise RuntimeError(f"{provider_label} terminal output disagrees with completed items.")
                 elif completed_items:
+                    available_items = {**started_items, **completed_items}
                     if sorted(completed_items) != list(range(len(completed_items))):
                         raise RuntimeError(f"{provider_label} completed output has missing items.")
-                    result["output"] = [completed_items[index] for index in range(len(completed_items))]
+                    result["output"] = [available_items[index] for index in range(max(available_items) + 1)]
+                elif truncated and started_items:
+                    result["output"] = [started_items[index] for index in range(max(started_items) + 1)]
+                if truncated:
+                    output_items = result.get("output") or []
+                    retained: list[dict[str, Any]] = []
+                    discarded: list[dict[str, str]] = []
+                    completed_ids: list[str] = []
+                    for index, item in enumerate(output_items):
+                        if str(_value(item, "type") or "") == "function_call" and index in completed_call_arguments:
+                            item = dict(item)
+                            item["arguments"] = completed_call_arguments[index]
+                        elif index in call_argument_deltas and str(_value(item, "type") or "") == "function_call":
+                            item = dict(item)
+                            item["arguments"] = "".join(call_argument_deltas[index])
+                        if str(_value(item, "type") or "") != "function_call":
+                            retained.append(item)
+                            continue
+                        complete = index in completed_call_indexes
+                        if complete:
+                            retained.append(item)
+                            call_id = str(_value(item, "call_id") or "").strip()
+                            if call_id:
+                                completed_ids.append(call_id)
+                        else:
+                            discarded.append(_discarded_call(
+                                str(_value(item, "call_id") or "").strip(),
+                                str(_value(item, "name") or "").strip(),
+                                _value(item, "arguments"),
+                            ))
+                    result["output"] = retained
+                    if completed_ids:
+                        result["_completedCallIds"] = completed_ids
+                    if discarded:
+                        result["_truncation"] = {"discardedToolCalls": discarded}
                 # Execution and telemetry must consume the same reconciled
                 # receipt when the terminal event omits streamed output items.
                 terminal_response = result

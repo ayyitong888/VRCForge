@@ -248,7 +248,7 @@ def test_native_compatible_partial_stream_is_never_reissued(monkeypatch, partial
 
 
 @pytest.mark.parametrize("finish_reason", [None, "length"])
-def test_native_chat_stream_never_returns_receipt_for_eof_or_truncation(
+def test_native_chat_stream_eof_fails_but_length_returns_partial_text_without_calls(
     monkeypatch: pytest.MonkeyPatch, finish_reason: str | None,
 ) -> None:
     class Completions:
@@ -263,11 +263,21 @@ def test_native_chat_stream_never_returns_receipt_for_eof_or_truncation(
             return
 
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
-    with pytest.raises(RuntimeError, match="Native Chat"):
-        request_openai_compatible_plan_with_metadata(
+    if finish_reason is None:
+        with pytest.raises(RuntimeError, match="Native Chat"):
+            request_openai_compatible_plan_with_metadata(
+                _native_chat_settings(), "continue", stream_callback=lambda _text: None,
+                native_tools=[{"type": "function", "function": {"name": "read"}}],
+            )
+        return
+    response = request_openai_compatible_plan_with_metadata(
             _native_chat_settings(), "continue", stream_callback=lambda _text: None,
             native_tools=[{"type": "function", "function": {"name": "read"}}],
         )
+    assert response.finish_reason == "length"
+    assert response.assistant_message["tool_calls"] == []
+    assert response.truncation["discardedToolCalls"][0]["id"] == "partial"
+    assert response.truncation["discardedToolCalls"][0]["name"] == "read"
 
 
 def test_native_chat_stream_cancelled_tool_only_turn_has_no_receipt(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -633,6 +633,7 @@ class PlannerModelResult:
     assistant_message: Mapping[str, object] = field(default_factory=dict, repr=False)
     finish_reason: str = ""
     model: str = ""
+    truncation: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "usage", MappingProxyType(dict(self.usage)))
@@ -2525,6 +2526,8 @@ class RuntimePlannerService:
                     binding_tool_definition=binding_tool_definition,
                     dispatch_only=queued_receipt is not None,
                 ) if native else ({}, [])
+                if native and queued_receipt is None and native_turn.output_truncation.max_output_tokens is not None:
+                    native_request["_maxOutputTokens"] = native_turn.output_truncation.max_output_tokens
                 if native and queued_receipt is None and ensure_dict(observe.get("turn")).get("directImageInput") is True:
                     image_bound = any(
                         isinstance(item.get("content"), list)
@@ -2683,8 +2686,21 @@ class RuntimePlannerService:
                     parse_diagnostics: dict[str, object] = {}
                     if native:
                         receipt = deepcopy(dict(raw_response.assistant_message))
-                        if raw_response.finish_reason not in {"stop", "tool_calls"} or receipt.get("role") != "assistant":
-                            raise ValueError("Incomplete native assistant response cannot be admitted.")
+                        truncated = raw_response.finish_reason == "length"
+                        if raw_response.finish_reason not in {"stop", "tool_calls", "length"} or receipt.get("role") != "assistant":
+                            raise ValueError("Invalid native assistant response finish state.")
+                        if truncated and queued_receipt is None:
+                            continuation = native_turn.output_truncation.accept(
+                                receipt, {**dict(raw_response.truncation), "toolNames": [tool.name for tool in native_tools]}, native_turn,
+                            )
+                            if continuation != "tools":
+                                return {
+                                    "planner": "llm", "model": actual_model, "reply": "" if continuation == "continue" else continuation,
+                                    "summary": "Output length continuation" if continuation == "continue" else continuation,
+                                    "_outputContinuation": continuation == "continue", "continueLoop": continuation == "continue",
+                                    "nextStep": "continue" if continuation == "continue" else "output_length_limit",
+                                    **({"reason": "output_length_limit"} if continuation != "continue" else {}),
+                                }
                         calls = receipt.get("tool_calls") or []
                         if not isinstance(calls, list) or any(not isinstance(call, dict) or not isinstance(call.get("function"), dict) for call in calls):
                             raise ValueError("Invalid native tool call envelope.")
@@ -2692,7 +2708,12 @@ class RuntimePlannerService:
                         if any(not isinstance(item, str) or not item.strip() for item in native_call_ids) or len(set(native_call_ids)) != len(native_call_ids):
                             raise ValueError("Native tool call IDs must be nonempty and unique.")
                         if queued_receipt is None:
-                            native_turn.admit(receipt, tool_names=[tool.name for tool in native_tools])
+                            empty_continuation_final = (
+                                raw_response.finish_reason == "stop" and not calls
+                                and not receipt.get("content") and bool(native_turn.output_truncation.parts)
+                            )
+                            if not truncated and not empty_continuation_final:
+                                native_turn.admit(receipt, tool_names=[tool.name for tool in native_tools])
                             if rejected_native_batch:
                                 native_turn.reject_queued_receipt()
                                 rejection = {"kind": "control", "tool": "native_batch", "arguments": None,
@@ -2821,7 +2842,9 @@ class RuntimePlannerService:
 
             action = str(payload.get("action") or "").strip().lower()
             summary = str(payload.get("summary") or "").strip()
-            reply = str(payload.get("reply") or "").strip()
+            reply = str(payload.get("reply") or "")
+            if not (native and native_turn.output_truncation.parts):
+                reply = reply.strip()
             skill_tool = str(payload.get("skill_tool") or payload.get("skillTool") or "").strip()
             skill_params, valid_skill_params = model_object_field(
                 payload,
@@ -3165,7 +3188,7 @@ class RuntimePlannerService:
                         "nextStep": "needs_user_action", "reason": "native_final_answer_missing",
                     }
                 reply_text = reply or summary
-                if reply_text:
+                if reply_text or (native and native_turn.output_truncation.parts and not receipt.get("tool_calls")):
                     return {
                         **base,
                         "summary": reply_text,

@@ -47,6 +47,7 @@ _TERMINAL_BYPASS_STEPS = frozenset(
         "needs_user_action",
         "paused",
         "planner_failed",
+        "output_length_limit",
         "tool_failed",
         "waiting_for_tool",
     }
@@ -942,6 +943,8 @@ def approval_task_context(
         )
     if checkpoint_skip_authority is not None:
         context["checkpointSkipAuthority"] = checkpoint_skip_authority
+    if isinstance(seed.get("_outputTruncation"), Mapping):
+        context["_outputTruncation"] = copy.deepcopy(seed["_outputTruncation"])
     native_conversation = seed.get("_nativeConversation")
     if isinstance(native_conversation, Mapping):
         # Private continuation state is frozen outside the normal task-loop

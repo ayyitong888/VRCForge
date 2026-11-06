@@ -292,7 +292,7 @@ def test_provider_turn_binding_uses_frozen_explicit_native_route_only():
     with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=config):
         with binding.bind({"native_binding": "client-forged", "api_type": "responses"}) as metadata:
             assert metadata.native_binding == config.native_binding()
-    non_native = replace(config, api_type="responses")
+    non_native = replace(config, api_type="auto")
     with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=non_native):
         with binding.bind({}) as metadata:
             assert metadata.native_binding == ""

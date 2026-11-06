@@ -13,6 +13,7 @@ import pytest
 from agent_runtime_session_state import AgentRuntimeSessionState
 from chatgpt_integration.adapter import (
     CHATGPT_RESPONSES_BASE_URL,
+    ChatGPTResponseError,
     ChatGPTResponsesAdapter,
     build_responses_input,
 )
@@ -235,6 +236,31 @@ def test_native_replay_preserves_order_namespace_and_cached_usage():
     assert replay[4] == {
         "type": "function_call_output", "call_id": "call-1", "output": "file contents",
     }
+
+
+def test_chatgpt_native_incomplete_forwards_truncation_through_adapter():
+    partial_call = {
+        "id": "fc_partial", "type": "function_call", "status": "in_progress",
+        "call_id": "call-partial", "namespace": "vrcforge", "name": "vrcforge_read",
+        "arguments": '{"path":',
+    }
+    adapter, client, _ = make_adapter([
+        {"type": "response.output_item.added", "output_index": 0, "item": partial_call},
+        {"type": "response.incomplete", "response": {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [partial_call],
+            "usage": {},
+        }},
+    ])
+    response = adapter.send_native_request(
+        model="account-model", messages=[{"role": "user", "content": "read"}],
+        tools=[{"type": "function", "function": {"name": "vrcforge_read", "parameters": {}}}],
+    )
+    assert response.finish_reason == "length"
+    assert response.assistant_message["tool_calls"] == []
+    assert response.truncation["discardedToolCalls"][0]["id"] == "call-partial"
+    assert client.closed == 1
 
 
 def test_sdk_output_message_phase_round_trips_without_loss():
@@ -620,3 +646,42 @@ def test_legacy_native_protocol_must_be_explicit_before_negotiation(monkeypatch,
     settings = SimpleNamespace(llm_provider="custom", llm_model="fixture-model", llm_api_type=api_type)
     with pytest.raises(ValueError, match="explicit chat_completions"):
         request_llm_plan_with_metadata(settings, "continue", **{native_field: []})
+
+
+@pytest.mark.parametrize("limit, included", [(None, False), (4096, True)])
+def test_native_request_forwards_max_output_tokens(limit, included):
+    payloads = []
+    client = FakeClient([completed([{
+        "type": "message", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": "done"}],
+    }])])
+    client.responses.create = lambda **payload: payloads.append(deepcopy(payload)) or iter([completed([{
+        "type": "message", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": "done"}],
+    }])])
+    adapter, _, _ = make_adapter([], client_kwargs=lambda **_: client)
+
+    adapter.send_native_request(model="account-model", messages=[], tools=[], max_output_tokens=limit)
+
+    assert ("max_output_tokens" in payloads[0]) is included
+    if included:
+        assert payloads[0]["max_output_tokens"] == limit
+
+
+def test_native_empty_completion_is_allowed_only_after_hidden_continuation():
+    from agent_output_truncation import CONTINUE_MESSAGE
+
+    adapter, _, _ = make_adapter([completed([])])
+    history = [
+        {"role": "assistant", "content": "partial text"},
+        {"role": "user", "content": CONTINUE_MESSAGE, "hidden": True},
+    ]
+    result = adapter.send_native_request(model="account-model", messages=history, tools=[])
+    assert result.finish_reason == "stop"
+    assert result.assistant_message == {"role": "assistant", "content": None, "tool_calls": []}
+
+    ordinary, _, _ = make_adapter([completed([])])
+    with pytest.raises(ChatGPTResponseError, match="without a message or tool call"):
+        ordinary.send_native_request(
+            model="account-model", messages=[{"role": "user", "content": CONTINUE_MESSAGE}], tools=[],
+        )

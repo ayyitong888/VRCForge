@@ -168,37 +168,49 @@ def _provider_protocol_loopback(api_type: str, responses: list[dict[str, object]
                 self.send_response(404)
                 self.end_headers()
                 return
-            value = json.dumps(responses[len(records) - 1], ensure_ascii=False)
-            midpoint = max(1, len(value) // 2)
+            planner_result = responses[len(records) - 1]
+            value = json.dumps(planner_result, ensure_ascii=False)
+            action = str(planner_result.get("action") or "reply")
+            if action == "reply":
+                function_name = "vrcforge_runtime_action"
+                arguments = {key: planner_result[key] for key in (
+                    "action", "reply", "summary", "completion_claim",
+                ) if key in planner_result}
+            else:
+                function_name = "call_tool"
+                arguments = {"tool": planner_result.get("skill_tool"), "arguments": planner_result.get("skill_params") or {}}
+            arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+            midpoint = max(1, len(arguments_json) // 2)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             if api_type == "responses":
                 events = [
-                    {"type": "response.output_text.delta", "delta": value[:midpoint]},
-                    {"type": "response.output_text.delta", "delta": value[midpoint:]},
-                    {"type": "response.completed", "response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": value}]}], "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}}},
+                    {"type": "response.output_item.added", "output_index": 0, "item": {"type": "function_call", "call_id": f"call-{len(records)}", "name": function_name, "arguments": ""}},
+                    {"type": "response.function_call_arguments.delta", "output_index": 0, "delta": arguments_json[:midpoint]},
+                    {"type": "response.function_call_arguments.delta", "output_index": 0, "delta": arguments_json[midpoint:]},
+                    {"type": "response.output_item.done", "output_index": 0, "item": {"type": "function_call", "call_id": f"call-{len(records)}", "name": function_name, "arguments": arguments_json}},
+                    {"type": "response.completed", "response": {"status": "completed", "output": [{"type": "function_call", "call_id": f"call-{len(records)}", "name": function_name, "arguments": arguments_json}], "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}}},
                 ]
                 for event in events:
                     self.wfile.write(("event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n").encode())
             elif api_type == "messages":
                 events = [
                     ("message_start", {"type": "message_start", "message": {"id": "msg_fixture", "type": "message", "role": "assistant", "content": [], "model": "loop-model", "usage": {"input_tokens": 11, "output_tokens": 0}}}),
-                    ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
-                    ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": value[:midpoint]}}),
-                    ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": value[midpoint:]}}),
+                    ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": f"call-{len(records)}", "name": function_name, "input": {}}}),
+                    ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": arguments_json[:midpoint]}}),
+                    ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": arguments_json[midpoint:]}}),
                     ("content_block_stop", {"type": "content_block_stop", "index": 0}),
-                    ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}}),
+                    ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 7}}),
                     ("message_stop", {"type": "message_stop"}),
                 ]
                 for event, data in events:
                     self.wfile.write(("event: " + event + "\ndata: " + json.dumps(data) + "\n\n").encode())
             else:
                 # google-genai's streaming REST endpoint emits one SSE candidate per chunk.
-                for text in (value[:midpoint], value[midpoint:]):
-                    data = {"candidates": [{"content": {"parts": [{"text": text}], "role": "model"}}], "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7, "totalTokenCount": 18}}
-                    self.wfile.write(("data: " + json.dumps(data) + "\n\n").encode())
+                data = {"candidates": [{"content": {"parts": [{"functionCall": {"name": function_name, "args": arguments}}], "role": "model"}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7, "totalTokenCount": 18}}
+                self.wfile.write(("data: " + json.dumps(data) + "\n\n").encode())
             self.wfile.flush()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -315,9 +327,10 @@ def test_real_provider_protocol_failure_cannot_finish_as_success(tmp_path) -> No
 
 def _run_non_chat_protocol_loop(tmp_path, api_type: str, protocol_name: str) -> tuple[dict[str, object], list[dict[str, object]]]:
     records: list[dict[str, object]] = []
+    # Native callers must select a tool in the initial resident file block.
     responses = [
-        {"action": "skill", "skill_tool": "health", "skill_params": {}, "continueLoop": True},
-        {"action": "reply", "reply": f"{protocol_name} loop finished.", "continueLoop": False, "completion_claim": {"satisfied": True, "evidence_action_ids": [canonical_action_id("skill", "vrcforge_health", {})]}},
+        {"action": "skill", "skill_tool": "read_text_file", "skill_params": {"path": "ProjectSettings/ProjectVersion.txt"}, "continueLoop": True},
+        {"action": "reply", "reply": f"{protocol_name} loop finished.", "continueLoop": False, "completion_claim": {"satisfied": True, "evidence_action_ids": [canonical_action_id("skill", "vrcforge_read_text_file", {"path": "ProjectSettings/ProjectVersion.txt"})]}},
     ]
     with _provider_protocol_loopback(api_type, responses, records) as base_url:
         configured_service = _configured_service(tmp_path / f"{api_type}-provider-config.json", base_url, api_type)
@@ -341,7 +354,7 @@ def test_responses_protocol_loopback_supports_multiturn_finish(tmp_path) -> None
     assert all(record["path"] == "/v1/responses" for record in records)
     assert all(record["authorization"] == "Bearer fixture-loop-key" for record in records)
     assert all(record["body"]["model"] == "loop-model" for record in records)
-    assert "vrcforge_health completed" in json.dumps(records[1]["body"])
+    assert "vrcforge_read_text_file completed" in json.dumps(records[1]["body"])
     assert result["contextUsage"]["cumulativeInputTokens"] == 22
     assert result["contextUsage"]["cumulativeOutputTokens"] == 14
     assert result["contextUsage"]["cumulativeTotalTokens"] == 36
@@ -360,7 +373,7 @@ def test_anthropic_messages_protocol_loopback_supports_multiturn_finish(tmp_path
     assert all(record["x_api_key"] == "fixture-loop-key" for record in records)
     assert all(record["anthropic_version"] for record in records)
     assert all(record["body"]["model"] == "loop-model" for record in records)
-    assert "vrcforge_health completed" in json.dumps(records[1]["body"])
+    assert "vrcforge_read_text_file completed" in json.dumps(records[1]["body"])
     assert result["contextUsage"]["cumulativeInputTokens"] == 22
     assert result["contextUsage"]["cumulativeOutputTokens"] == 14
     assert result["contextUsage"]["cumulativeTotalTokens"] == 36
@@ -377,7 +390,7 @@ def test_gemini_generate_content_protocol_loopback_supports_multiturn_finish(tmp
     assert all("/models/loop-model:streamGenerateContent" in record["path"] for record in records)
     assert all(record["x_goog_api_key"] == "fixture-loop-key" or "key=fixture-loop-key" in record["path"] for record in records)
     assert all(record["body"]["contents"] for record in records)
-    assert "vrcforge_health completed" in json.dumps(records[1]["body"])
+    assert "vrcforge_read_text_file completed" in json.dumps(records[1]["body"])
     assert result["contextUsage"]["cumulativeInputTokens"] == 22
     assert result["contextUsage"]["cumulativeOutputTokens"] == 14
     assert result["contextUsage"]["cumulativeTotalTokens"] == 36

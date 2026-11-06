@@ -9,9 +9,11 @@ import os
 import re
 import threading
 import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from pydantic import BaseModel, Field, ValidationError
@@ -161,6 +163,302 @@ class LlmPlanResponse:
     assistant_message: dict[str, Any] = field(default_factory=dict, repr=False)
     finish_reason: str = ""
     model: str = ""
+    truncation: dict[str, Any] = field(default_factory=dict, repr=False)
+
+
+def _provider_finish_reason(value: Any) -> str:
+    """Normalize SDK enums and wire strings to the runtime's finish vocabulary."""
+    name = getattr(value, "name", None)
+    raw = str(name or value or "").rsplit(".", 1)[-1].strip().casefold()
+    if raw in {"length", "max_tokens", "max_output_tokens"}:
+        return "length"
+    if raw in {"end_turn", "stop_sequence", "stop"}:
+        return "stop"
+    if raw in {"tool_use", "tool_calls"}:
+        return "tool_calls"
+    return raw
+
+
+def _gemini_finish_reason(response: Any) -> str:
+    candidates = as_list(get_value(response, "candidates"))
+    candidate = candidates[0] if candidates else {}
+    return _provider_finish_reason(get_value(candidate, "finish_reason"))
+
+
+def _truncated_tool_call(call: Any) -> dict[str, Any]:
+    function = get_value(call, "function") or {}
+    return {
+        "id": str(get_value(call, "id") or ""),
+        "name": str(get_value(function, "name") or ""),
+        "arguments": str(get_value(function, "arguments") or ""),
+        "reason": "tool_call_truncated",
+        "suggestion": "Split the operation into smaller tool calls and send them again.",
+    }
+
+
+def _truncation_metadata(settings: Settings, calls: Sequence[Any] = ()) -> dict[str, Any]:
+    result: dict[str, Any] = {"discardedToolCalls": [_truncated_tool_call(call) for call in calls]}
+    limit = llm_max_output_tokens(settings)
+    if limit is not None:
+        result["maxOutputTokens"] = limit
+    return result
+
+
+def _native_messages_to_anthropic(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        if role == "system":
+            continue
+        if role == "assistant":
+            blocks: list[dict[str, Any]] = []
+            retained_blocks = message.get("anthropic_content")
+            if isinstance(retained_blocks, list):
+                blocks.extend(dict(block) for block in retained_blocks if isinstance(block, Mapping))
+                if blocks:
+                    converted.append({"role": "assistant", "content": blocks})
+                    continue
+            text = message.get("content")
+            if isinstance(text, str) and text:
+                blocks.append({"type": "text", "text": text})
+            for call in as_list(message.get("tool_calls")):
+                function = get_value(call, "function") or {}
+                try:
+                    arguments = json.loads(str(get_value(function, "arguments") or "{}"))
+                except (TypeError, ValueError):
+                    arguments = {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                blocks.append({"type": "tool_use", "id": str(get_value(call, "id") or ""),
+                               "name": str(get_value(function, "name") or ""), "input": arguments})
+            if blocks:
+                converted.append({"role": "assistant", "content": blocks})
+            continue
+        if role == "tool":
+            result = {"type": "tool_result", "tool_use_id": str(message.get("tool_call_id") or ""),
+                      "content": str(message.get("content") or "")}
+            if converted and converted[-1]["role"] == "user":
+                prior = converted[-1]["content"]
+                if not isinstance(prior, list):
+                    prior = [{"type": "text", "text": str(prior)}]
+                prior.append(result)
+                converted[-1]["content"] = prior
+            else:
+                converted.append({"role": "user", "content": [result]})
+            continue
+        if role == "user":
+            content = message.get("content", "")
+            if converted and converted[-1]["role"] == "user" and isinstance(converted[-1]["content"], list):
+                converted[-1]["content"].append({"type": "text", "text": str(content)})
+            else:
+                converted.append({"role": "user", "content": content})
+    return converted
+
+
+def _native_tools_to_anthropic(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool.get("function"), Mapping) else tool
+        if not isinstance(function, Mapping) or not function.get("name"):
+            continue
+        converted.append({"name": str(function["name"]),
+                          "description": str(function.get("description") or ""),
+                          "input_schema": function.get("parameters") or {"type": "object", "properties": {}}})
+    return converted
+
+
+def _native_anthropic_response(
+    settings: Settings,
+    response: Any,
+    *,
+    source: str,
+    completed_indices: set[int] | None = None,
+    partial_calls: Sequence[Mapping[str, Any]] = (),
+    raw_tool_arguments: Mapping[str, str] | None = None,
+    streamed_text: str = "",
+) -> LlmPlanResponse:
+    blocks = as_list(get_value(response, "content"))
+    completed = set(range(len(blocks))) if completed_indices is None else completed_indices
+    calls: list[dict[str, Any]] = []
+    retained: list[dict[str, Any]] = []
+    visible_text: list[str] = []
+    for index, block in enumerate(blocks):
+        block_type = str(get_value(block, "type") or "")
+        if block_type == "tool_use":
+            if index not in completed:
+                continue
+            name = str(get_value(block, "name") or "")
+            call_id = str(get_value(block, "id") or "")
+            arguments = get_value(block, "input") or {}
+            if name and call_id and isinstance(arguments, Mapping):
+                calls.append({"id": call_id, "type": "function", "function": {
+                    "name": name, "arguments": (raw_tool_arguments or {}).get(
+                        call_id, json.dumps(dict(arguments), ensure_ascii=False, separators=(",", ":"))
+                    ),
+                }})
+            retained.append(dict(block) if isinstance(block, Mapping) else block.model_dump())
+        elif block_type in {"thinking", "redacted_thinking", "text"}:
+            if index in completed or block_type == "text":
+                retained.append(dict(block) if isinstance(block, Mapping) else block.model_dump())
+            if block_type == "text":
+                value = str(get_value(block, "text") or "")
+                if value:
+                    visible_text.append(value)
+    finish_raw = get_value(response, "stop_reason")
+    finish = _provider_finish_reason(finish_raw)
+    is_truncated = finish == "max_tokens" or finish == "length"
+    receipt: dict[str, Any] = {"role": "assistant", "content": (streamed_text or "".join(visible_text)) or None,
+                               "tool_calls": calls}
+    if retained:
+        receipt["anthropic_content"] = retained
+    return LlmPlanResponse(
+        text=streamed_text or "".join(visible_text),
+        reasoning=extract_llm_reasoning_trace(response, settings, source=source),
+        usage=extract_llm_token_usage(response, settings, source=source),
+        assistant_message=receipt,
+        finish_reason=("length" if is_truncated else "tool_calls" if calls else finish),
+        model=actual_response_model(response),
+        truncation=_truncation_metadata(settings, partial_calls) if is_truncated or partial_calls else {},
+    )
+
+
+def _native_messages_to_gemini(
+    messages: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], str]:
+    contents: list[dict[str, Any]] = []
+    system_parts: list[str] = []
+    call_names: dict[str, str] = {}
+    for message in messages:
+        role = str(message.get("role") or "")
+        if role == "system":
+            if message.get("content"):
+                system_parts.append(str(message["content"]))
+            continue
+        if role == "assistant":
+            parts: list[dict[str, Any]] = []
+            if message.get("content"):
+                parts.append({"text": str(message["content"])})
+            for call in as_list(message.get("tool_calls")):
+                function = get_value(call, "function") or {}
+                name = str(get_value(function, "name") or "")
+                call_id = str(get_value(call, "id") or uuid.uuid4().hex)
+                if not name or not call_id:
+                    continue
+                try:
+                    args = json.loads(str(get_value(function, "arguments") or "{}"))
+                except (ValueError, TypeError):
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                call_names[call_id] = name
+                parts.append({"functionCall": {"name": name, "args": args}})
+            if isinstance(message.get("gemini_parts"), list):
+                parts = [dict(part) for part in message["gemini_parts"] if isinstance(part, Mapping)]
+                call_names.update({
+                    str(call.get("id") or ""): str(get_value(call.get("function"), "name") or "")
+                    for call in as_list(message.get("tool_calls"))
+                    if get_value(call.get("function"), "name")
+                })
+            if parts:
+                contents.append({"role": "model", "parts": parts})
+            continue
+        if role == "tool":
+            call_id = str(message.get("tool_call_id") or "")
+            name = call_names.get(call_id)
+            if not name:
+                continue
+            raw = str(message.get("content") or "")
+            try:
+                result = json.loads(raw)
+            except (TypeError, ValueError):
+                result = {"text": raw}
+            response_part = {"functionResponse": {"name": name, "response": {"result": result}}}
+            if contents and contents[-1]["role"] == "user":
+                contents[-1]["parts"].append(response_part)
+            else:
+                contents.append({"role": "user", "parts": [response_part]})
+            continue
+        if role == "user":
+            user_part = {"text": str(message.get("content") or "")}
+            if contents and contents[-1]["role"] == "user":
+                contents[-1]["parts"].append(user_part)
+            else:
+                contents.append({"role": "user", "parts": [user_part]})
+    return contents, "\n\n".join(system_parts)
+
+
+def _native_tools_to_gemini(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    def google_schema(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {"type": "OBJECT", "properties": {}}
+        allowed = {"type", "description", "properties", "required", "items", "enum", "nullable", "format"}
+        result = {key: item for key, item in value.items() if key in allowed}
+        if "type" in result:
+            result["type"] = str(result["type"]).upper()
+        if isinstance(result.get("properties"), Mapping):
+            result["properties"] = {str(name): google_schema(child) for name, child in result["properties"].items()}
+        if isinstance(result.get("items"), Mapping):
+            result["items"] = google_schema(result["items"])
+        return result
+
+    declarations: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool.get("function"), Mapping) else tool
+        if not isinstance(function, Mapping) or not function.get("name"):
+            continue
+        declarations.append({"name": str(function["name"]),
+                             "description": str(function.get("description") or ""),
+                             "parameters": google_schema(function.get("parameters"))})
+    return [{"function_declarations": declarations}] if declarations else []
+
+
+def _native_gemini_response(settings: Settings, response: Any) -> LlmPlanResponse:
+    candidates = as_list(get_value(response, "candidates"))
+    candidate = candidates[0] if candidates else {}
+    content = get_value(candidate, "content") or {}
+    parts = as_list(get_value(content, "parts"))
+    calls: list[dict[str, Any]] = []
+    replay_parts: list[dict[str, Any]] = []
+    discarded_calls: list[dict[str, Any]] = []
+    visible_text: list[str] = []
+    for part in parts:
+        function_call = get_value(part, "function_call") or get_value(part, "functionCall")
+        if function_call is not None:
+            name = str(get_value(function_call, "name") or "")
+            args = get_value(function_call, "args") or {}
+            if name and isinstance(args, Mapping):
+                calls.append({"id": uuid.uuid4().hex, "type": "function", "function": {
+                    "name": name, "arguments": json.dumps(dict(args), ensure_ascii=False, separators=(",", ":")),
+                }})
+                replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump())
+            else:
+                discarded_calls.append({"id": "", "name": name, "arguments": str(args),
+                                        "reason": "tool_call_truncated",
+                                        "suggestion": "Split the operation into smaller tool calls and send them again."})
+            continue
+        text = str(get_value(part, "text") or "")
+        if text and get_value(part, "thought") is not True:
+            visible_text.append(text)
+            replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump())
+        elif get_value(part, "thought_signature") or get_value(part, "thoughtSignature"):
+            replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump())
+    finish_raw = get_value(candidate, "finish_reason") or get_value(candidate, "finishReason")
+    finish = _provider_finish_reason(finish_raw)
+    receipt: dict[str, Any] = {"role": "assistant", "content": "".join(visible_text) or None,
+                               "tool_calls": calls}
+    if calls or replay_parts:
+        receipt["gemini_parts"] = replay_parts
+    is_truncated = finish == "max_tokens" or finish == "length"
+    return LlmPlanResponse(
+        text="".join(visible_text),
+        reasoning=extract_llm_reasoning_trace(response, settings, source="gemini"),
+        usage=extract_llm_token_usage(response, settings, source="gemini"),
+        assistant_message=receipt,
+        finish_reason="length" if is_truncated else ("tool_calls" if calls else finish),
+        model=actual_response_model(response),
+        truncation=({**_truncation_metadata(settings), "discardedToolCalls": discarded_calls}
+                    if discarded_calls else _truncation_metadata(settings) if is_truncated else {}),
+    )
 
 
 def actual_response_model(value: Any) -> str:
@@ -1566,18 +1864,21 @@ def request_llm_plan_with_metadata(
     provider = normalize_provider_name(settings.llm_provider)
     if provider != "chatgpt" and (native_messages is not None or native_tools is not None):
         explicit_protocol = str(getattr(settings, "llm_api_type", "") or "").strip().lower()
-        if explicit_protocol != "chat_completions" and not (provider == "deepseek" and explicit_protocol == "responses"):
-            raise ValueError("Native messages/tools require an explicit chat_completions protocol or supported native Responses route.")
+        native_route = explicit_protocol == "chat_completions" or explicit_protocol == "responses"
+        native_route = native_route or (provider in {"anthropic", "deepseek", "custom"} and explicit_protocol == "messages")
+        native_route = native_route or (provider in {"gemini", "vertexai", "custom"} and explicit_protocol == "generate_content")
+        if not native_route:
+            raise ValueError("Native messages/tools require an explicit chat_completions, messages, generate_content, or supported Responses protocol.")
     requested_api_type, resolved_api_type = normalize_provider_api_type(
         provider, settings.llm_model, getattr(settings, "llm_api_type", None)
     )
     if native_messages is not None or native_tools is not None:
         native_chat_route = requested_api_type == "chat_completions"
-        native_responses_route = resolved_api_type == "responses" and (
-            provider == "chatgpt" or (provider == "deepseek" and requested_api_type == "responses")
-        )
-        if not (native_chat_route or native_responses_route):
-            raise ValueError("Native messages/tools require an explicit chat_completions protocol or supported native Responses route.")
+        native_responses_route = resolved_api_type == "responses" and requested_api_type == "responses"
+        native_messages_route = requested_api_type == "messages" and provider in {"anthropic", "deepseek", "custom"}
+        native_gemini_route = requested_api_type == "generate_content" and provider in {"gemini", "vertexai", "custom"}
+        if not (native_chat_route or native_responses_route or native_messages_route or native_gemini_route):
+            raise ValueError("Native messages/tools require an explicit chat_completions, messages, generate_content, or Responses protocol.")
         if not native_responses_route and any(
             isinstance(message, Mapping) and "responses_output" in message
             for message in (native_messages or ())
@@ -1656,11 +1957,13 @@ def _request_llm_protocol_with_metadata(
         return request_gemini_plan_with_metadata(
             settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
             cancel_event=cancel_event, stream_activity_callback=stream_activity_callback,
+            native_messages=native_messages, native_tools=native_tools,
         )
     if api_type == "messages":
         return request_anthropic_plan_with_metadata(
             settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
             cancel_event=cancel_event, stream_activity_callback=stream_activity_callback,
+            native_messages=native_messages, native_tools=native_tools,
         )
     return request_openai_compatible_plan_with_metadata(
         settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
@@ -1689,15 +1992,20 @@ def request_responses_plan_with_metadata(
     image_paths = normalize_reference_image_paths(reference_image_paths=reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
     native_requested = native_messages is not None or native_tools is not None
-    if provider == "chatgpt" or (provider == "deepseek" and native_requested):
-        adapter_type = ChatGPTResponsesAdapter if provider == "chatgpt" else DeepSeekResponsesAdapter
+    if provider == "chatgpt" or native_requested:
+        adapter_type = (
+            ChatGPTResponsesAdapter if provider == "chatgpt"
+            else DeepSeekResponsesAdapter if provider == "deepseek"
+            else OpenAIResponsesAdapter
+        )
         adapter = adapter_type(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
             client_factory=client_factory,
-            **(_llm_sdk_retry_kwargs(settings) if provider == "deepseek" else {
-                "session_id": session_id, "native_turn_state": native_turn_state,
-            }),
+            **(
+                {"session_id": session_id, "native_turn_state": native_turn_state}
+                if provider == "chatgpt" else _llm_sdk_retry_kwargs(settings)
+            ),
         )
         source = f"{provider}-responses"
         if native_requested:
@@ -1710,9 +2018,8 @@ def request_responses_plan_with_metadata(
                 stream_callback=stream_callback,
                 cancel_event=cancel_event,
                 stream_activity_callback=stream_activity_callback,
-                **({"reasoning_effort": _responses_reasoning_effort(settings),
-                    "max_output_tokens": llm_max_output_tokens(settings)} if provider == "deepseek" else {}),
-                **({"reasoning_effort": _responses_reasoning_effort(settings)} if provider == "chatgpt" else {}),
+                **({"reasoning_effort": _responses_reasoning_effort(settings)} if provider in {"chatgpt", "deepseek"} else {}),
+                **{"max_output_tokens": llm_max_output_tokens(settings)},
             )
             parsed = _native_chat_response(
                 settings,
@@ -1731,6 +2038,8 @@ def request_responses_plan_with_metadata(
                 settings,
                 source=source,
             )
+            parsed.finish_reason = native_response.finish_reason
+            parsed.truncation = dict(native_response.truncation or {})
             return parsed
         response = adapter.send_request(
             ProviderRuntimeRequest(
@@ -1751,7 +2060,12 @@ def request_responses_plan_with_metadata(
             source=source,
         )
         usage = extract_llm_token_usage({"usage": response.usage}, settings, source=source)
-        return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage, model=str(getattr(response, "model", "") or "").strip())
+        return LlmPlanResponse(
+            text=response.text, reasoning=reasoning, usage=usage,
+            model=str(getattr(response, "model", "") or "").strip(),
+            finish_reason=str(getattr(response, "finish_reason", "") or ""),
+            truncation=dict(getattr(response, "truncation", {}) or {}),
+        )
     if native_messages is not None or native_tools is not None:
         raise ValueError("Native Responses history requires a supported native Responses adapter.")
     provider = normalize_provider_name(settings.llm_provider)
@@ -1788,7 +2102,12 @@ def request_responses_plan_with_metadata(
         source=source,
     )
     usage = extract_llm_token_usage({"usage": response.usage}, settings, source=source)
-    return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage, model=str(getattr(response, "model", "") or "").strip())
+    return LlmPlanResponse(
+        text=response.text, reasoning=reasoning, usage=usage,
+        model=str(getattr(response, "model", "") or "").strip(),
+        finish_reason=str(getattr(response, "finish_reason", "") or ""),
+        truncation=dict(getattr(response, "truncation", {}) or {}),
+    )
 
 
 def request_deepseek_responses_plan_with_metadata(
@@ -1860,6 +2179,8 @@ def request_gemini_plan_with_metadata(
     stream_callback: Callable[[str], None] | None = None,
     cancel_event: Any | None = None,
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+    native_messages: Sequence[Mapping[str, Any]] | None = None,
+    native_tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> LlmPlanResponse:
     validate_provider_api_key(settings.llm_api_key)
     try:
@@ -1876,18 +2197,38 @@ def request_gemini_plan_with_metadata(
         or normalize_reasoning_effort(settings.gemini_thinking_level)
         or llm_max_output_tokens(settings) is not None
         or bool(str(settings.llm_system_instruction or "").strip())
+        or bool(native_tools)
         or normalize_provider_name(settings.llm_provider) == "custom"
     ):
         try:
             from google.genai import types as genai_types
         except ImportError as exc:
             raise RuntimeError("The installed google-genai package does not expose the required content/config types.") from exc
+    native_mode = native_messages is not None or native_tools is not None
+    native_system = ""
     contents: Any = prompt
+    if native_mode:
+        contents, native_system = _native_messages_to_gemini(native_messages or ())
+        if not contents:
+            contents = [{"role": "user", "parts": [{"text": prompt}]}]
     if image_paths:
         image_parts = [build_google_genai_image_part(genai_types, path) for path in image_paths]
         contents = [prompt, *image_parts]
 
     generate_config = build_gemini_generate_config(settings, genai_types) if genai_types is not None else None
+    if native_mode:
+        config_fields: dict[str, Any] = {}
+        if generate_config is not None:
+            config_fields = dict(getattr(generate_config, "model_dump", lambda: {})() or {})
+        system_instruction = "\n\n".join(part for part in (str(settings.llm_system_instruction or "").strip(), native_system) if part)
+        if system_instruction:
+            config_fields["system_instruction"] = system_instruction
+        if llm_max_output_tokens(settings) is not None:
+            config_fields["max_output_tokens"] = llm_max_output_tokens(settings)
+        declarations = _native_tools_to_gemini(native_tools or ())
+        if declarations:
+            config_fields["tools"] = declarations
+        generate_config = genai_types.GenerateContentConfig(**config_fields) if genai_types is not None else config_fields
     client_kwargs: dict[str, Any] = {"api_key": settings.llm_api_key}
     if normalize_provider_name(settings.llm_provider) == "custom":
         if genai_types is None:
@@ -1903,6 +2244,52 @@ def request_gemini_plan_with_metadata(
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Gemini request cancelled.")
+        if native_mode:
+            if stream_callback is None:
+                response = client.models.generate_content(
+                    model=settings.llm_model, contents=contents, config=generate_config,
+                )
+            else:
+                text_parts: list[str] = []
+                structured_parts: dict[int, Any] = {}
+                last_chunk: Any = None
+                for chunk in client.models.generate_content_stream(
+                    model=settings.llm_model, contents=contents, config=generate_config,
+                ):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Gemini stream cancelled.")
+                    last_chunk = chunk
+                    candidates = as_list(get_value(chunk, "candidates"))
+                    candidate = candidates[0] if candidates else {}
+                    parts = as_list(get_value(get_value(candidate, "content") or {}, "parts"))
+                    for index, part in enumerate(parts):
+                        function_call = get_value(part, "function_call") or get_value(part, "functionCall")
+                        text_delta = str(get_value(part, "text") or "")
+                        if function_call is not None or get_value(part, "thought_signature") or get_value(part, "thoughtSignature"):
+                            # Gemini stream completion is the protocol boundary. Keep the latest
+                            # typed part at its position; never infer call completeness from JSON.
+                            structured_parts[index] = part
+                        elif text_delta:
+                            if get_value(part, "thought") is not True:
+                                text_parts.append(text_delta)
+                                stream_callback(text_delta)
+                if last_chunk is None:
+                    raise RuntimeError("Gemini stream ended without a response chunk.")
+                candidates = as_list(get_value(last_chunk, "candidates"))
+                last_candidate = candidates[0] if candidates else {}
+                final_parts: list[Any] = []
+                if text_parts:
+                    final_parts.append({"text": "".join(text_parts), "thought": False})
+                final_parts.extend(structured_parts[index] for index in sorted(structured_parts))
+                response = SimpleNamespace(
+                    candidates=[SimpleNamespace(
+                        finish_reason=get_value(last_candidate, "finish_reason") or get_value(last_candidate, "finishReason"),
+                        content=SimpleNamespace(role="model", parts=final_parts),
+                    )],
+                    usage_metadata=get_value(last_chunk, "usage_metadata") or get_value(last_chunk, "usageMetadata") or {},
+                    model_version=actual_response_model(last_chunk),
+                )
+            return _native_gemini_response(settings, response)
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
             final_chunk: Any = None
@@ -1925,7 +2312,9 @@ def request_gemini_plan_with_metadata(
                 text="".join(chunks),
                 reasoning=extract_llm_reasoning_trace(final_chunk, settings, source="gemini") if final_chunk is not None else {"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "gemini"},
                 usage=extract_llm_token_usage(final_chunk, settings, source="gemini") if final_chunk is not None else provider_stream_usage_missing(settings, "gemini"),
+                finish_reason=("length" if final_chunk is not None and _gemini_finish_reason(final_chunk) == "length" else ""),
                 model=actual_response_model(final_chunk),
+                truncation=_truncation_metadata(settings) if final_chunk is not None and _gemini_finish_reason(final_chunk) == "length" else {},
             )
         response = client.models.generate_content(
             model=settings.llm_model,
@@ -1936,7 +2325,9 @@ def request_gemini_plan_with_metadata(
             text=getattr(response, "text", "") or "",
             reasoning=extract_llm_reasoning_trace(response, settings, source="gemini"),
             usage=extract_llm_token_usage(response, settings, source="gemini"),
+            finish_reason=("length" if _gemini_finish_reason(response) == "length" else ""),
             model=actual_response_model(response),
+            truncation=_truncation_metadata(settings) if _gemini_finish_reason(response) == "length" else {},
         )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(format_multimodal_error(exc, settings, bool(image_paths), "Gemini")) from exc
@@ -2410,6 +2801,8 @@ def build_openai_compatible_request_payload(
         serialized_messages: list[dict[str, Any]] = []
         for message in native_messages:
             serialized = dict(message)
+            for internal_key in ("hidden", "gemini_parts", "anthropic_content", "truncation"):
+                serialized.pop(internal_key, None)
             # Chat Completions treats an empty assistant tool_calls array as an
             # invalid tool-call turn. Preserve real calls and provider-specific
             # reasoning fields, but omit the empty optional field.
@@ -2459,14 +2852,16 @@ def build_anthropic_request_payload(settings: Settings, user_content: Any) -> di
         level = ""
     budget = reasoning_thinking_budget(level)
     if budget is not None:
-        payload["max_tokens"] = ANTHROPIC_RESPONSE_BASE_MAX_TOKENS + budget
+        explicit_limit = llm_max_output_tokens(settings)
+        if explicit_limit is None:
+            payload["max_tokens"] = ANTHROPIC_RESPONSE_BASE_MAX_TOKENS + budget
         if anthropic_model_supports_adaptive_thinking(payload["model"]):
             if level in {"xhigh", "max"}:
                 payload["max_tokens"] = max(payload["max_tokens"], 65536)
             payload["thinking"] = {"type": "adaptive"}
             payload["output_config"] = {"effort": level}
         else:
-            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            payload["thinking"] = {"type": "enabled", "budget_tokens": min(budget, max(1, payload["max_tokens"] - 1))}
             if anthropic_model_supports_output_effort(payload["model"]):
                 payload["output_config"] = {"effort": level}
     return payload
@@ -2683,13 +3078,22 @@ def request_openai_compatible_plan_with_metadata(
                 if native_mode:
                     if cancel_event is not None and cancel_event.is_set():
                         raise RuntimeError("Native Chat stream cancelled.")
-                    if native_finish_reason == "length":
-                        raise ProviderTokenLimitError("Native Chat stream reached a token limit (finish_reason=length).")
-                    if native_finish_reason not in {"stop", "tool_calls"} or (native_finish_reason == "tool_calls" and not native_tool_calls):
+                    finish = _provider_finish_reason(native_finish_reason)
+                    if finish == "length":
+                        partial_calls = [native_tool_calls[index] for index in sorted(native_tool_calls)]
+                        result = _native_chat_response(
+                            settings,
+                            {"choices": [{"message": {"role": "assistant", "content": "".join(chunks), "tool_calls": [], "reasoning_content": "".join(native_reasoning_content)}, "finish_reason": "length"}], "usage": get_value(usage_event, "usage") if usage_event is not None else {}},
+                            source="openai-compatible",
+                            response_model=response_model,
+                        )
+                        result.truncation = _truncation_metadata(settings, partial_calls)
+                        return result
+                    if finish not in {"stop", "tool_calls"} or (finish == "tool_calls" and not native_tool_calls):
                         raise RuntimeError("Native Chat stream ended without a complete assistant receipt.")
                     return _native_chat_response(
                         settings,
-                        {"choices": [{"message": {"role": "assistant", "content": "".join(chunks), "tool_calls": [native_tool_calls[index] for index in sorted(native_tool_calls)], "reasoning_content": "".join(native_reasoning_content)}, "finish_reason": native_finish_reason}], "usage": get_value(usage_event, "usage") if usage_event is not None else {}},
+                            {"choices": [{"message": {"role": "assistant", "content": "".join(chunks), "tool_calls": [native_tool_calls[index] for index in sorted(native_tool_calls)], "reasoning_content": "".join(native_reasoning_content)}, "finish_reason": finish}], "usage": get_value(usage_event, "usage") if usage_event is not None else {}},
                         source="openai-compatible",
                         response_model=response_model,
                     )
@@ -2750,9 +3154,18 @@ def request_openai_compatible_plan_with_metadata(
                 raise RuntimeError("Native Chat request cancelled.")
             choice = response_choices[0] if response_choices else {}
             finish_reason = str(get_value(choice, "finish_reason") or "")
-            if finish_reason == "length":
-                raise ProviderTokenLimitError("Native Chat response reached a token limit (finish_reason=length).")
-            if finish_reason not in {"stop", "tool_calls"}:
+            finish = _provider_finish_reason(finish_reason)
+            if finish == "length":
+                raw_message = get_value(choice, "message") or {}
+                partial_calls = as_list(get_value(raw_message, "tool_calls"))
+                result = _native_chat_response(
+                    settings,
+                    {"choices": [{"message": {"role": "assistant", "content": get_value(raw_message, "content") or "", "tool_calls": [], "reasoning_content": get_value(raw_message, "reasoning_content") or ""}, "finish_reason": "length"}], "usage": get_value(response, "usage") or {}},
+                    source="openai-compatible",
+                )
+                result.truncation = _truncation_metadata(settings, partial_calls)
+                return result
+            if finish not in {"stop", "tool_calls"}:
                 raise RuntimeError("Native Chat response did not terminate with stop or tool_calls.")
             return _native_chat_response(settings, response, source="openai-compatible")
         return LlmPlanResponse(
@@ -2760,6 +3173,10 @@ def request_openai_compatible_plan_with_metadata(
             reasoning=extract_llm_reasoning_trace(response, settings, source="openai-compatible"),
             usage=extract_llm_token_usage(response, settings, source="openai-compatible"),
             model=actual_response_model(response),
+            finish_reason=_provider_finish_reason(get_value(response_choices[0], "finish_reason")) if response_choices else "",
+            truncation=_truncation_metadata(settings) if response_choices and _provider_finish_reason(
+                get_value(response_choices[0], "finish_reason")
+            ) == "length" else {},
         )
     except ProviderTokenLimitError:
         raise
@@ -2797,6 +3214,8 @@ def request_anthropic_plan_with_metadata(
     stream_callback: Callable[[str], None] | None = None,
     cancel_event: Any | None = None,
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+    native_messages: Sequence[Mapping[str, Any]] | None = None,
+    native_tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> LlmPlanResponse:
     validate_provider_api_key(settings.llm_api_key)
     try:
@@ -2845,17 +3264,49 @@ def request_anthropic_plan_with_metadata(
     response_source = "deepseek-messages" if provider_id == "deepseek" else "anthropic"
     try:
         request_payload = build_anthropic_request_payload(settings, user_content)
+        native_mode = native_messages is not None or native_tools is not None
+        if native_mode:
+            system_messages = [str(message.get("content") or "") for message in native_messages or ()
+                               if message.get("role") == "system" and message.get("content")]
+            if system_messages:
+                request_payload["system"] = "\n\n".join(
+                    part for part in [str(request_payload.get("system") or ""), *system_messages] if part
+                )
+            request_payload["messages"] = _native_messages_to_anthropic(native_messages or ())
+            declarations = _native_tools_to_anthropic(native_tools or ())
+            if declarations:
+                request_payload["tools"] = declarations
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Messages request cancelled.")
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
             final_message: Any = None
+            active_blocks: dict[int, dict[str, Any]] = {}
+            completed_blocks: set[int] = set()
             with client.messages.stream(**request_payload) as stream:
                 for event in stream:
                     if cancel_event is not None and cancel_event.is_set():
                         raise RuntimeError("Messages stream cancelled.")
                     event_type = str(get_value(event, "type") or "")
+                    index_value = get_value(event, "index")
+                    index = int(index_value) if isinstance(index_value, int) else -1
                     delta = get_value(event, "delta")
+                    if native_mode and event_type == "content_block_start":
+                        block = get_value(event, "content_block") or {}
+                        if str(get_value(block, "type") or "") == "tool_use":
+                            active_blocks[index] = {
+                                "id": str(get_value(block, "id") or ""),
+                                "name": str(get_value(block, "name") or ""),
+                                "arguments": "",
+                            }
+                        elif index >= 0:
+                            active_blocks[index] = {"block": dict(block) if isinstance(block, Mapping) else block.model_dump()}
+                    if native_mode and event_type == "content_block_delta" and index in active_blocks:
+                        delta_type = str(get_value(delta, "type") or "")
+                        if delta_type == "input_json_delta":
+                            active_blocks[index]["arguments"] += str(get_value(delta, "partial_json") or "")
+                    if native_mode and event_type == "content_block_stop" and index >= 0:
+                        completed_blocks.add(index)
                     if event_type in {"content_block_start", "content_block_delta", "message_start", "message_delta"}:
                         _provider_activity(stream_activity_callback)
                     text = str(get_value(delta, "text") or "")
@@ -2864,20 +3315,61 @@ def request_anthropic_plan_with_metadata(
                     chunks.append(text)
                     stream_callback(text)
                 final_message = stream.get_final_message()
+            if native_mode:
+                partial_calls: list[dict[str, Any]] = []
+                completed_content: list[dict[str, Any]] = []
+                raw_tool_arguments: dict[str, str] = {}
+                all_blocks = as_list(get_value(final_message, "content"))
+                for index, block in enumerate(all_blocks):
+                    if index not in completed_blocks:
+                        active = active_blocks.get(index)
+                        if isinstance(active, dict) and active.get("name"):
+                            partial_calls.append({"id": active.get("id", ""), "function": {
+                                "name": active.get("name", ""), "arguments": active.get("arguments", ""),
+                            }})
+                        continue
+                    raw = dict(block) if isinstance(block, Mapping) else block.model_dump()
+                    if raw.get("type") == "tool_use":
+                        active = active_blocks.get(index)
+                        if active is not None and active.get("arguments"):
+                            raw_tool_arguments[str(active.get("id") or "")] = str(active["arguments"])
+                    completed_content.append(raw)
+                native_response = {
+                    "content": completed_content,
+                    "stop_reason": get_value(final_message, "stop_reason"),
+                    "usage": get_value(final_message, "usage"),
+                    "model": get_value(final_message, "model"),
+                }
+                return _native_anthropic_response(
+                    settings, native_response, source=response_source,
+                    completed_indices=set(range(len(completed_content))),
+                    partial_calls=partial_calls, raw_tool_arguments=raw_tool_arguments,
+                    streamed_text="".join(chunks),
+                )
+            finish_reason = _provider_finish_reason(get_value(final_message, "stop_reason"))
+            is_truncated = finish_reason == "max_tokens"
             return LlmPlanResponse(
                 text="".join(chunks) or extract_anthropic_message_text(final_message),
                 reasoning=extract_llm_reasoning_trace(final_message, settings, source=response_source),
                 usage=extract_llm_token_usage(final_message, settings, source=response_source),
+                finish_reason="length" if is_truncated else finish_reason,
                 model=actual_response_model(final_message),
+                truncation=_truncation_metadata(settings) if is_truncated else {},
             )
         response = client.messages.create(
             **request_payload,
         )
+        if native_mode:
+            return _native_anthropic_response(settings, response, source=response_source)
+        finish_reason = _provider_finish_reason(get_value(response, "stop_reason"))
+        is_truncated = finish_reason == "max_tokens"
         return LlmPlanResponse(
             text=extract_anthropic_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source=response_source),
             usage=extract_llm_token_usage(response, settings, source=response_source),
+            finish_reason="length" if is_truncated else finish_reason,
             model=actual_response_model(response),
+            truncation=_truncation_metadata(settings) if is_truncated else {},
         )
     except Exception as exc:  # noqa: BLE001
         if image_paths:

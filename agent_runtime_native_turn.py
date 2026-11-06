@@ -114,6 +114,8 @@ class NativeRuntimeTurn:
         self._binding = binding
         # Transport-only state belongs to this turn, never durable conversation history.
         self.provider_turn_state: dict[str, str] = {}
+        from agent_output_truncation import OutputTruncation
+        self.output_truncation = OutputTruncation(**dict((continuation_context or {}).get("_outputTruncation") or {}))
         self._loop_state = loop_state
         self._native_decision: dict[str, Any] | None = None
         self._native_steers: list[dict[str, str]] = []
@@ -191,6 +193,9 @@ class NativeRuntimeTurn:
                 message=message,
                 initial_history=initial_history,
             )
+
+    def append_hidden(self, text: str) -> None:
+        self._state.append_native_user(self._session_id, binding=self._binding, message=text, human=False, hidden=True)
 
     def snapshot(self) -> dict[str, Any]:
         return self._state.native_conversation(self._session_id, binding=self._binding) or {}
@@ -505,6 +510,7 @@ class NativeRuntimeTurn:
             self._append_terminal_runtime_notice(terminal)
         if self._queued_calls:
             return
+        self.output_truncation.flush_feedback(self)
         while self._native_steers:
             steer = self._native_steers[0]
             self._state.append_native_user(
@@ -583,6 +589,8 @@ class NativeRuntimeTurn:
 
     def approval_seed(self, seed: dict[str, Any]) -> dict[str, Any]:
         """Attach the current validated native snapshot to an approval seed."""
+        from dataclasses import asdict
+        seed["_outputTruncation"] = asdict(self.output_truncation)
         if self._binding:
             snapshot = self._state.native_conversation(
                 self._session_id,

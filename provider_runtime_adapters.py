@@ -72,6 +72,8 @@ class ProviderRuntimeResponse:
     reasoning_summary: list[Any] = field(default_factory=list)
     # Exact model identifier reported by the provider response, when present.
     model: str = ""
+    finish_reason: str = ""
+    truncation: dict[str, Any] = field(default_factory=dict)
 
 
 _TOOL_NAME = "vrcforge_plan_action"
@@ -236,6 +238,9 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
     """Shared Responses parsing and streaming implementation."""
 
     _provider_label = "OpenAI-compatible Responses"
+    _native_namespace: str | None = None
+    _native_require_encrypted_reasoning = True
+    _native_system_role = "developer"
 
     def get_models(self) -> list[dict[str, Any]]:
         return []
@@ -252,9 +257,19 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
 
     def _parse_response(self, response: Any, *, planner_mode: bool) -> ProviderRuntimeResponse:
         status = str(_value(response, "status") or "")
-        if status and status != "completed":
+        incomplete_details = _value(response, "incomplete_details")
+        truncated = (
+            status.lower() == "incomplete"
+            and str(_value(incomplete_details, "reason") or "").strip().lower() == "max_output_tokens"
+        )
+        if status and status != "completed" and not truncated:
             raise RuntimeError(f"{self._provider_label} response did not complete ({status}).")
         output = _as_list(_value(response, "output"))
+        prior_truncation = _value(response, "_truncation")
+        discarded = list(
+            _value(prior_truncation, "discardedToolCalls")
+            if isinstance(_value(prior_truncation, "discardedToolCalls"), list) else []
+        )
         tool_calls = [item for item in output if str(_value(item, "type") or "") == "function_call"]
         if tool_calls:
             if not planner_mode:
@@ -268,15 +283,86 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
             # DeepSeek may emit one explanatory message before the authoritative
             # planner function call.  Ignore that text, but still fail closed on
             # multiple calls or any unknown output item.
-            if len(tool_calls) != 1 or unexpected:
+            if truncated:
+                complete_calls = []
+                for item in tool_calls:
+                    if str(_value(item, "status") or "").strip().lower() == "completed":
+                        complete_calls.append(item)
+                    else:
+                        discarded.append({
+                            "id": str(_value(item, "call_id") or "").strip(),
+                            "name": str(_value(item, "name") or "").strip(),
+                            "arguments": str(_value(item, "arguments") or ""),
+                            "reason": "Tool arguments were truncated before the protocol completion event.",
+                            "suggestion": "Resend this operation as a smaller tool call.",
+                        })
+                tool_calls = complete_calls
+            if len(tool_calls) > 1 or unexpected:
                 raise RuntimeError(f"{self._provider_label} returned an invalid planner tool call.")
-            return ProviderRuntimeResponse(text=self.parse_tool_call(tool_calls[0]), usage=_usage(response), reasoning_summary=_summaries(output), model=str(_value(response, "model") or "").strip())
+            if tool_calls:
+                return ProviderRuntimeResponse(text=self.parse_tool_call(tool_calls[0]), usage=_usage(response), reasoning_summary=_summaries(output), model=str(_value(response, "model") or "").strip(), finish_reason="length" if truncated else "tool_calls", truncation={"discardedToolCalls": discarded} if discarded else {})
+            if truncated:
+                return ProviderRuntimeResponse(text="", usage=_usage(response), reasoning_summary=_summaries(output), model=str(_value(response, "model") or "").strip(), finish_reason="length", truncation={"discardedToolCalls": discarded} if discarded else {})
         text = str(_value(response, "output_text") or "")
         if not text:
             text = "".join(_message_text(item) for item in output if str(_value(item, "type") or "") == "message")
-        if not text:
+        if not text and not truncated:
             raise RuntimeError(self._empty_completion_error())
-        return ProviderRuntimeResponse(text=text, usage=_usage(response), reasoning_summary=_summaries(output), model=str(_value(response, "model") or "").strip())
+        return ProviderRuntimeResponse(text=text, usage=_usage(response), reasoning_summary=_summaries(output), model=str(_value(response, "model") or "").strip(), finish_reason="length" if truncated else "stop", truncation={"discardedToolCalls": discarded} if discarded else {})
+
+    def send_native_request(
+        self,
+        *,
+        model: str,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+        stream_callback: Callable[[str], None] | None = None,
+        cancel_event: Any | None = None,
+        stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+        reasoning_effort: str = "",
+        max_output_tokens: int | None = None,
+    ) -> Any:
+        """Send and parse one native Responses turn without executing tools."""
+        from responses_native_protocol import (
+            NativeToolRejection, build_responses_input, flat_function_tools, is_hidden_continuation,
+            parse_native_response, stream_response,
+        )
+
+        self._validate_model(model)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError(f"{self._provider_label} request cancelled.")
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": build_responses_input(
+                messages, namespace=self._native_namespace,
+                require_encrypted_reasoning=self._native_require_encrypted_reasoning,
+                system_role=self._native_system_role,
+            ),
+            "store": False,
+            "stream": True,
+        }
+        functions = flat_function_tools(tools)
+        if functions:
+            payload["tools"] = functions
+        if reasoning_effort:
+            payload["reasoning"] = {"effort": reasoning_effort}
+        if max_output_tokens is not None:
+            payload["max_output_tokens"] = max_output_tokens
+        response = stream_response(
+            self._client(), payload, cancel_event=cancel_event,
+            stream_callback=stream_callback, activity_callback=stream_activity_callback,
+            error_factory=ProviderResponseError, provider_label=self._provider_label,
+        )
+        try:
+            return parse_native_response(
+                response, tools, namespace=self._native_namespace,
+                require_encrypted_reasoning=self._native_require_encrypted_reasoning,
+                allow_empty_final=is_hidden_continuation(messages),
+            )
+        except NativeToolRejection as exc:
+            raise ProviderNativeToolRejection(response, exc.receipt.assistant_message) from exc
+        except (ValueError, RuntimeError) as exc:
+            raise ProviderResponseError(str(exc), response) from exc
 
     def parse_tool_call(self, item: Any) -> str:
         if str(_value(item, "name") or "") != _TOOL_NAME:
@@ -353,6 +439,9 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
         text_parts: list[str] = []
         tool_args: list[str] = []
         tool_item: Any = None
+        completed_call_indexes: set[int] = set()
+        started_calls: dict[int, Any] = {}
+        argument_deltas: dict[int, list[str]] = {}
         usage: dict[str, Any] = {}
         final_seen = False
         def stream_error(message: str) -> RuntimeError:
@@ -370,7 +459,7 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
             if "reasoning" in event_type or "summary" in event_type:
                 if activity_callback is not None:
                     activity_callback({"kind": "reasoning_activity"})
-            if event_type in {"response.failed", "response.incomplete"}:
+            if event_type == "response.failed":
                 raise stream_error(f"{self._provider_label} stream did not complete.")
             if event_type == "response.output_text.delta":
                 delta = str(_value(event, "delta") or "")
@@ -379,16 +468,82 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
                     callback(delta)
             elif event_type in {"response.function_call_arguments.delta", "response.output_item.added"}:
                 item = _value(event, "item")
+                index = _value(event, "output_index")
                 if item is not None and str(_value(item, "type") or "") == "function_call":
                     tool_item = item
+                    if type(index) is int and index >= 0:
+                        started_calls[index] = item
                 delta = _value(event, "delta")
                 if isinstance(delta, str):
                     tool_args.append(delta)
-            elif event_type == "response.completed":
+                    if type(index) is int and index >= 0:
+                        argument_deltas.setdefault(index, []).append(delta)
+            elif event_type == "response.output_item.done":
+                item = _value(event, "item")
+                index = _value(event, "output_index")
+                if (str(_value(item, "type") or "") == "function_call"
+                        and type(index) is int and index >= 0):
+                    completed_call_indexes.add(index)
+            elif event_type == "response.function_call_arguments.done":
+                index = _value(event, "output_index")
+                if type(index) is int and index >= 0:
+                    completed_call_indexes.add(index)
+            elif event_type in {"response.completed", "response.incomplete"}:
                 final_seen = True
                 final_response = _value(event, "response") or event
+                incomplete_details = _value(final_response, "incomplete_details")
+                truncated = (
+                    event_type == "response.incomplete"
+                    and str(_value(incomplete_details, "reason") or "").strip().lower() == "max_output_tokens"
+                )
+                if event_type == "response.incomplete" and not truncated:
+                    raise stream_error(f"{self._provider_label} stream did not complete.")
                 usage = _usage(final_response)
                 final_output = _as_list(_value(final_response, "output"))
+                if truncated and not final_output and started_calls:
+                    discarded = [
+                        {
+                            "id": str(_value(item, "call_id") or "").strip(),
+                            "name": str(_value(item, "name") or "").strip(),
+                            "arguments": "".join(argument_deltas.get(index, [])) or str(_value(item, "arguments") or ""),
+                            "reason": "Tool arguments were truncated before the protocol completion event.",
+                            "suggestion": "Resend this operation as a smaller tool call.",
+                        }
+                        for index, item in sorted(started_calls.items())
+                        if index not in completed_call_indexes
+                    ]
+                    return ProviderRuntimeResponse(
+                        text="".join(text_parts), usage=usage,
+                        reasoning_summary=_summaries(_as_list(_value(final_response, "output"))),
+                        model=str(_value(final_response, "model") or "").strip(),
+                        finish_reason="length",
+                        truncation={"discardedToolCalls": discarded} if discarded else {},
+                    )
+                if truncated and final_output:
+                    normalized_response = {
+                        key: _value(final_response, key)
+                        for key in ("status", "incomplete_details", "output", "usage", "model")
+                    }
+                    retained = []
+                    discarded = []
+                    for index, item in enumerate(final_output):
+                        if str(_value(item, "type") or "") != "function_call":
+                            retained.append(item)
+                        elif index in completed_call_indexes:
+                            retained.append(item)
+                        else:
+                            discarded.append({
+                                "id": str(_value(item, "call_id") or "").strip(),
+                                "name": str(_value(item, "name") or "").strip(),
+                                "arguments": str(_value(item, "arguments") or ""),
+                                "reason": "Tool arguments were truncated before the protocol completion event.",
+                                "suggestion": "Resend this operation as a smaller tool call.",
+                            })
+                    normalized_response["output"] = retained
+                    if discarded:
+                        normalized_response["_truncation"] = {"discardedToolCalls": discarded}
+                    final_response = normalized_response
+                    final_output = retained
                 if final_output:
                     parsed = self.parse_response(final_response, planner_mode=planner_mode)
                     return ProviderRuntimeResponse(
@@ -396,6 +551,15 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
                         usage=parsed.usage or usage,
                         reasoning_summary=parsed.reasoning_summary,
                         model=parsed.model or str(_value(final_response, "model") or "").strip(),
+                        finish_reason=parsed.finish_reason,
+                        truncation=parsed.truncation,
+                    )
+                if truncated:
+                    return ProviderRuntimeResponse(
+                        text="", usage=usage,
+                        reasoning_summary=_summaries(_as_list(_value(final_response, "output"))),
+                        model=str(_value(final_response, "model") or "").strip(),
+                        finish_reason="length",
                     )
                 if tool_item is not None:
                     if not planner_mode:
@@ -422,6 +586,8 @@ class DeepSeekResponsesAdapter(_ResponsesProtocolAdapter):
     """Responses adapter for the explicitly recognized official DeepSeek models."""
 
     _provider_label = "DeepSeek Responses"
+    _native_require_encrypted_reasoning = False
+    _native_system_role = "system"
 
     def get_models(self) -> list[dict[str, Any]]:
         return [{"id": model, "supportedApiTypes": ["responses", "messages", "chat_completions"]}
@@ -430,55 +596,6 @@ class DeepSeekResponsesAdapter(_ResponsesProtocolAdapter):
     def _validate_model(self, model: str) -> None:
         if model not in DEEPSEEK_FLASH_MODELS and model != DEEPSEEK_PRO_MODEL:
             raise RuntimeError("DeepSeek Responses requires an exact recognized official model ID.")
-
-    def send_native_request(
-        self,
-        *,
-        model: str,
-        messages: Sequence[Mapping[str, Any]],
-        tools: Sequence[Mapping[str, Any]],
-        stream_callback: Callable[[str], None] | None = None,
-        cancel_event: Any | None = None,
-        stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
-        reasoning_effort: str = "",
-        max_output_tokens: int | None = None,
-    ) -> Any:
-        from responses_native_protocol import (
-            NativeToolRejection, build_responses_input, flat_function_tools, parse_native_response, stream_response,
-        )
-
-        self._validate_model(model)
-        if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError("DeepSeek Responses request cancelled.")
-        payload: dict[str, Any] = {
-            "model": model,
-            "input": build_responses_input(
-                messages, namespace=None, require_encrypted_reasoning=False, system_role="system",
-            ),
-            "store": False,
-            "stream": True,
-        }
-        functions = flat_function_tools(tools)
-        if functions:
-            payload["tools"] = functions
-        if reasoning_effort:
-            payload["reasoning"] = {"effort": reasoning_effort}
-        if max_output_tokens is not None:
-            payload["max_output_tokens"] = max_output_tokens
-        response = stream_response(
-            self._client(), payload, cancel_event=cancel_event,
-            stream_callback=stream_callback, activity_callback=stream_activity_callback,
-            error_factory=ProviderResponseError, provider_label=self._provider_label,
-        )
-        try:
-            return parse_native_response(
-                response, tools, namespace=None, require_encrypted_reasoning=False,
-            )
-        except NativeToolRejection as exc:
-            raise ProviderNativeToolRejection(response, exc.receipt.assistant_message) from exc
-        except (ValueError, RuntimeError) as exc:
-            raise ProviderResponseError(str(exc), response) from exc
-
 
 def _value(item: Any, key: str) -> Any:
     return item.get(key) if isinstance(item, dict) else getattr(item, key, None)

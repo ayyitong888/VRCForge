@@ -18,7 +18,7 @@ def human_user_projection(message: Any) -> dict[str, str] | None:
     Images are bound only to provider requests, not retained as instructions.
     Text parts survive, while literal inline image bytes do not.
     """
-    if not isinstance(message, dict) or message.get("role") != "user":
+    if not isinstance(message, dict) or message.get("role") != "user" or message.get("hidden") is True:
         return None
     text = message.get("content")
     if isinstance(text, list):
