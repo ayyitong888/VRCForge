@@ -16,6 +16,8 @@ allowed-tools:
   - vrcforge_scene_save
   - vrcforge_get_gameobject
   - vrcforge_get_property
+  - vrcforge_capture_screenshot
+  - vrcforge_call_user
   - vrcforge_preview_unpack_prefab
   - vrcforge_unpack_prefab
   - vrcforge_scan_avatar_controls
@@ -152,6 +154,8 @@ support-files:
 普通换装已有衣柜时，先定位衣柜参数/状态及其现有 AnimationClip，再只读本次要改的绑定。需要少量胸型或遮体曲线时，用 `vrcforge_scan_animation_bindings` 的 `clipPaths` 与 `bindingSelectors`（先 `bindingView=index` 确认绑定身份，再按需 `details`）；仅为补齐未读页沿用返回的分页请求。不要为几条曲线枚举整个 FX、面捕或无关动画。调用前以当前目录和已加载工具 block 返回的 `selectedTools` 为准，使用其中的精确 Agent 工具名；若因跨 block 而拒绝，返回目录选择正确 block，不猜别名或重试相近名称。
 
 ## 修改与验收
+
+用户指正后修正仍未通过，或同一部位的视觉验收反复不通过时，暂停该部位写入，用 `vrcforge_call_user` 附上当前目标视图、对象名和通过标准，请用户在 Unity 查看、必要时手调并明确验收结果。用户主动接手时立即暂停该部位写入。用户交回后，Agent 重新读取对象与相关绑定，保留手调结果并完成剩余配置和验证。独立工作可继续，常规试调仍由 Agent 完成。
 
 衣服要绕模型多角度看，覆盖前、后、左右侧；遮挡处再补斜角和局部近景，重点看衣服与身体、袜子与大腿、鞋子与脚的交界。正面和左右前方 45° 是捏脸检查的视角，不能替代整套衣服检查。按实际覆盖情况选角度，不机械凑截图数量；复用同一穿着状态已有的有效视图，只补没看清的部位。看不准或当前方法无法解决穿模时，通过当前可用的用户反馈方式附上目标图并说明需要判断的具体部位；模型效果未经用户明确通过或不通过前，不结束视觉验收。把“暂且通过”和“待 GM 确认”分开记录。静态多角度检查不自动授权进入 Play。
 

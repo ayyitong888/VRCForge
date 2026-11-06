@@ -37,6 +37,8 @@ allowed-tools:
   - vrcforge_set_constraint_sources
   - vrcforge_preview_unity_constraint_conversion
   - vrcforge_convert_unity_constraint
+  - vrcforge_capture_screenshot
+  - vrcforge_call_user
   - vrcforge_preview_manage_fx_animator
   - vrcforge_manage_fx_animator
   - vrcforge_preview_manage_expression_menu
@@ -64,6 +66,12 @@ support-files:
 ## 什么时候不使用
 
 整套服装 Setup Outfit、盲目替换已经有效的 constraint、未经授权的外部模型资源、自动暴露隐藏参数或跨 Avatar 批量复制。
+
+## 饰品位置的视觉验收与交接
+
+先按参考图和用户指定的接触点完成对齐，用 Unity 正面和能看清接触面的斜侧近景检查。用户指正后，按指正修正并复看。修正后仍未通过，或同一位置的视觉验收反复不通过，暂停该部位写入，调用 `vrcforge_call_user` 发起视觉验收。给出当前视图、Hierarchy 中准确的对象名、可移动的范围和通过标准，请用户查看、必要时亲手移动并明确验收结果。
+
+用户主动接手时立即暂停该部位写入。等待期间可继续独立工作。用户交回后重新读取该场景对象、变换和相关绑定，保留用户手调的位置，再由 Agent 完成剩余配置和验证。用户明确通过才关闭该项视觉验收。
 
 ## 社区证据与安全边界
 
