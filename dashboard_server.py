@@ -1502,6 +1502,7 @@ BACKGROUND_GOAL_MONITOR_TASK: asyncio.Task[None] | None = None
 BACKGROUND_GOAL_WAKE_DRAIN_TASKS: set[asyncio.Task[None]] = set()
 AGENT_MCP_INIT_TASK: asyncio.Task[None] | None = None
 SUB_AGENT_CONTINUATION_REPLAY_TASK: asyncio.Task[int] | None = None
+DASHBOARD_RUNTIME_STARTUP_TASK: asyncio.Task[bool] | None = None
 DASHBOARD_STATE: DashboardState | None = None
 DASHBOARD_RUNTIME = DashboardRuntimeState()
 memory_review_idle_gate = MemoryReviewIdleGate()
@@ -2150,25 +2151,6 @@ async def authorize_local_requests(request: Request, call_next):
     error_message = ""
     is_preflight = is_cors_preflight_request(request)
     transport_component = request_transport_component(request)
-    if not is_preflight and (request.url.path == "/mcp" or request.url.path.startswith("/mcp/")):
-        try:
-            authenticate_agent_request(request, allow_disabled=False)
-        except HTTPException as exc:
-            status_code = exc.status_code
-            record_debug_interaction(
-                {
-                    "kind": "http",
-                    "direction": "inbound",
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status": status_code,
-                    "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
-                    "error": str(exc.detail),
-                    "client": request.client.host if request.client else "",
-                },
-                component=transport_component,
-            )
-            return JSONResponse({"ok": False, "error": http_error_detail(exc)}, status_code=exc.status_code)
     if not is_preflight and artifact_route_requires_auth(request):
         try:
             authenticate_artifact_request(request)
@@ -2199,6 +2181,37 @@ async def authorize_local_requests(request: Request, call_next):
                     "direction": "inbound",
                     "method": request.method,
                     "path": request.url.path,
+                    "status": status_code,
+                    "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
+                    "error": str(exc.detail),
+                    "client": request.client.host if request.client else "",
+                },
+                component=transport_component,
+            )
+            return JSONResponse({"ok": False, "error": http_error_detail(exc)}, status_code=exc.status_code)
+    path = request.url.path
+    if DASHBOARD_RUNTIME_STARTUP_TASK is not None and not is_preflight:
+        handshake = request.method == "GET" and (
+            path == "/api/app/session-challenge"
+            or (path == "/api/health" and not health_request_has_app_auth(request))
+        )
+        shutdown = request.method == "POST" and path == APP_INTERNAL_SHUTDOWN_PATH
+        if not (handshake or shutdown):
+            error = await dashboard_runtime_startup_error()
+            if error is not None:
+                return JSONResponse({"ok": False, "error": error}, status_code=503)
+    # MCP authentication reads the Gateway config under the recovery lock.
+    if not is_preflight and (path == "/mcp" or path.startswith("/mcp/")):
+        try:
+            authenticate_agent_request(request, allow_disabled=False)
+        except HTTPException as exc:
+            status_code = exc.status_code
+            record_debug_interaction(
+                {
+                    "kind": "http",
+                    "direction": "inbound",
+                    "method": request.method,
+                    "path": path,
                     "status": status_code,
                     "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
                     "error": str(exc.detail),
@@ -2292,7 +2305,6 @@ async def replay_sub_agent_parent_continuations() -> int:
     return recovered
 
 
-@app.on_event("startup")
 async def on_startup() -> None:
     global STATUS_MONITOR_TASK
     global BACKGROUND_GOAL_MONITOR_TASK
@@ -2415,6 +2427,44 @@ async def on_startup() -> None:
     )
 
 
+async def dashboard_runtime_startup_error() -> dict[str, Any] | None:
+    task = DASHBOARD_RUNTIME_STARTUP_TASK
+    if task is None:
+        return None
+    if not await asyncio.shield(task):
+        return runtime_error("runtime_startup_failed", message="Dashboard runtime startup failed.")
+    server = current_owned_uvicorn_server()
+    if server is not None and server.should_exit:
+        return runtime_error("runtime_shutting_down", message="Dashboard runtime is shutting down.")
+    return None
+
+
+async def initialize_managed_dashboard_runtime(server: uvicorn.Server) -> bool:
+    global DASHBOARD_RUNTIME_STARTUP_TASK
+
+    try:
+        await on_startup()
+    except Exception as exc:
+        signal_owned_uvicorn_server_exit(server)
+        emit_log("error", "dashboard", "Dashboard runtime startup failed.", {"failureClass": type(exc).__name__})
+        return False
+    DASHBOARD_RUNTIME_STARTUP_TASK = None
+    return True
+
+
+@app.on_event("startup")
+async def start_dashboard_runtime() -> None:
+    global DASHBOARD_RUNTIME_STARTUP_TASK
+
+    server = current_owned_uvicorn_server()
+    if server is None:
+        await on_startup()
+        return
+    # The managed listener can authenticate the client while application
+    # state is still recovering. Stateful requests share the recovery task.
+    DASHBOARD_RUNTIME_STARTUP_TASK = asyncio.create_task(initialize_managed_dashboard_runtime(server))
+
+
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     global APP_UPDATE_SERVICE
@@ -2424,6 +2474,12 @@ async def on_shutdown() -> None:
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
     global SUB_AGENT_CONTINUATION_REPLAY_TASK
+    global DASHBOARD_RUNTIME_STARTUP_TASK
+
+    # Recovery may own worker threads that still write to the leased store.
+    if DASHBOARD_RUNTIME_STARTUP_TASK is not None:
+        await asyncio.shield(DASHBOARD_RUNTIME_STARTUP_TASK)
+    DASHBOARD_RUNTIME_STARTUP_TASK = None
 
     try:
         await TELEGRAM_SERVICE.stop()
@@ -10100,6 +10156,10 @@ async def dashboard_socket(websocket: WebSocket) -> None:
         await websocket.close(code=1008, reason=str(exc.detail))
         return
 
+    startup_error = await dashboard_runtime_startup_error()
+    if startup_error is not None:
+        await websocket.close(code=1011, reason=startup_error["message"])
+        return
     await EVENT_BUS.connect(websocket)
     try:
         await EVENT_BUS.send_to_client(websocket, "hello", await asyncio.to_thread(build_dashboard_socket_payload))
