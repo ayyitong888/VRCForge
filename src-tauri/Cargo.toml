@@ -1,6 +1,6 @@
 [package]
 name = "vrcforge-agentic-app"
-version = "1.10.7"
+version = "1.10.8"
 default-run = "vrcforge-agentic-app"
 description = "VRCForge agentic desktop application"
 authors = ["VRCForge"]
