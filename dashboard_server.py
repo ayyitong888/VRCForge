@@ -2241,7 +2241,8 @@ async def replay_sub_agent_parent_continuations() -> int:
             SUB_AGENT_COLLABORATION.interrupted_parent_continuations
         )
         for event in interrupted_sub_agents:
-            AGENT_GATEWAY.record_interrupted_runtime_task(
+            await asyncio.to_thread(
+                AGENT_GATEWAY.record_interrupted_runtime_task,
                 task_seed=(
                     dict(event.get("taskSeed"))
                     if isinstance(event.get("taskSeed"), dict)
