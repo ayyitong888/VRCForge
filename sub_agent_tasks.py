@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from runtime_error_schema import runtime_error_from_exception
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, BinaryIO, Callable
 
 from background_goal_runtime import RuntimeLaneBudget
 from runtime_planner_service import public_runtime_payload
@@ -21,6 +21,8 @@ SUB_AGENT_SCHEMA = "vrcforge.sub_agent_task.v2"
 SUB_AGENT_LIST_SCHEMA = "vrcforge.sub_agent_tasks.v2"
 SUB_AGENT_LOG_SCHEMA = "vrcforge.sub_agent_lifecycle.v2"
 SUB_AGENT_RESULT_SCHEMA = "vrcforge.sub_agent_result.v1"
+_RECOVERY_CHECKPOINT_SCHEMA = "vrcforge.sub_agent_recovery.v1"
+_RECOVERY_BOUNDARY_BYTES = 64
 SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT = 5
 
 _RUNNING_STATUSES = {"queued", "running", "cancelling"}
@@ -1218,25 +1220,12 @@ class SubAgentTaskRegistry:
     def _write_result_sidecar_locked(self, task_id: str, result: dict[str, Any], summary: str) -> None:
         path = self._result_path(task_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
+        _write_atomic_json(path, {
             "schema": SUB_AGENT_RESULT_SCHEMA,
             "taskId": task_id,
             "summary": summary,
             "result": result,
-        }
-        temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-        try:
-            with temporary.open("w", encoding="utf-8") as output:
-                json.dump(payload, output, ensure_ascii=False, sort_keys=True)
-                output.write("\n")
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, path)
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+        })
 
     def _read_result_sidecar_locked(self, task: SubAgentTask, *, strict_io: bool = False) -> None:
         if not task.result_available:
@@ -1315,30 +1304,37 @@ class SubAgentTaskRegistry:
         strict_io: bool,
     ) -> tuple[dict[str, SubAgentTask], dict[str, threading.Event]]:
         path = self._event_log_path()
+        tasks: dict[str, SubAgentTask] = {}
+        legacy_tasks: dict[str, SubAgentTask] = {}
+        snapshots: dict[str, dict[str, Any]] = {}
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            with path.open("rb") as source:
+                log_state = _log_state(os.fstat(source.fileno()))
+                checkpoint = self._read_recovery_checkpoint(source, log_state)
+                start = 0
+                if checkpoint is not None:
+                    start, snapshots, tasks, legacy_tasks = checkpoint
+                source.seek(start)
+                offset = start
+                unterminated = b""
+                for line in source:
+                    if not line.endswith(b"\n"):
+                        unterminated = line
+                        break
+                    self._project_event_line(line, snapshots, tasks, legacy_tasks)
+                    offset += len(line)
+                if strict_io and offset > start:
+                    self._write_recovery_checkpoint(source, log_state, offset, snapshots, legacy_tasks)
+                if unterminated:
+                    # A complete JSON object at EOF was readable before we had
+                    # checkpoints. Preserve it without advancing the cursor.
+                    self._project_event_line(unterminated, snapshots, tasks, legacy_tasks)
         except FileNotFoundError:
             return {}, {}
         except OSError:
             if strict_io:
                 raise
             return {}, {}
-        tasks: dict[str, SubAgentTask] = {}
-        legacy_tasks: dict[str, SubAgentTask] = {}
-        for line in lines:
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(entry, dict):
-                continue
-            snapshot = entry.get("task")
-            if isinstance(snapshot, dict):
-                task = self._task_from_snapshot(snapshot)
-                if task:
-                    tasks[task.id] = task
-                continue
-            self._project_legacy_event(entry, legacy_tasks)
         for task_id, task in legacy_tasks.items():
             tasks.setdefault(task_id, task)
         cancel_events: dict[str, threading.Event] = {}
@@ -1348,6 +1344,87 @@ class SubAgentTaskRegistry:
             if task.cancel_requested:
                 cancel_events[task.id].set()
         return tasks, cancel_events
+
+    def _project_event_line(
+        self, line: bytes, snapshots: dict[str, dict[str, Any]], tasks: dict[str, SubAgentTask],
+        legacy_tasks: dict[str, SubAgentTask],
+    ) -> None:
+        try:
+            entry = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        if not isinstance(entry, dict):
+            return
+        snapshot = entry.get("task")
+        if isinstance(snapshot, dict):
+            task = self._task_from_snapshot(snapshot)
+            if task:
+                snapshots[task.id] = snapshot
+                tasks[task.id] = task
+        else:
+            self._project_legacy_event(entry, legacy_tasks)
+
+    def _read_recovery_checkpoint(
+        self, source: BinaryIO, log_state: tuple[int, int, int, int],
+    ) -> tuple[int, dict[str, dict[str, Any]], dict[str, SubAgentTask], dict[str, SubAgentTask]] | None:
+        try:
+            checkpoint = json.loads(self._recovery_checkpoint_path().read_text(encoding="utf-8"))
+            if checkpoint["schema"] != _RECOVERY_CHECKPOINT_SCHEMA:
+                return None
+            device, inode, size, modified = checkpoint["log"]
+            offset = checkpoint["offset"]
+            if (not inode or (device, inode) != log_state[:2]
+                    or type(offset) is not int or not 0 < offset <= size <= log_state[2]
+                    or (size == log_state[2] and modified != log_state[3])):
+                return None
+            boundary = bytes.fromhex(checkpoint["boundary"])
+            if len(boundary) != min(offset, _RECOVERY_BOUNDARY_BYTES) or not boundary.endswith(b"\n"):
+                return None
+            source.seek(offset - len(boundary))
+            if source.read(len(boundary)) != boundary:
+                return None
+            snapshots: dict[str, dict[str, Any]] = {}
+            tasks: dict[str, SubAgentTask] = {}
+            legacy_tasks: dict[str, SubAgentTask] = {}
+            for key, target in (("tasks", tasks), ("legacyTasks", legacy_tasks)):
+                records = checkpoint[key]
+                if not isinstance(records, list):
+                    return None
+                for snapshot in records:
+                    task = self._task_from_snapshot(snapshot)
+                    if task is None or task.id in target:
+                        return None
+                    target[task.id] = task
+                    if key == "tasks":
+                        snapshots[task.id] = snapshot
+            return offset, snapshots, tasks, legacy_tasks
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            return None  # The original event log remains authoritative.
+
+    def _write_recovery_checkpoint(
+        self, source: BinaryIO, log_state: tuple[int, int, int, int], offset: int,
+        snapshots: dict[str, dict[str, Any]], legacy_tasks: dict[str, SubAgentTask],
+    ) -> None:
+        try:
+            if not log_state[1] or log_state != _log_state(self._event_log_path().stat()):
+                return
+            boundary_size = min(offset, _RECOVERY_BOUNDARY_BYTES)
+            source.seek(offset - boundary_size)
+            boundary = source.read(boundary_size)
+            _write_atomic_json(self._recovery_checkpoint_path(), {
+                "schema": _RECOVERY_CHECKPOINT_SCHEMA,
+                "log": log_state,
+                "offset": offset,
+                "boundary": boundary.hex(),
+                # Keep first-seen order for interruption and replay processing.
+                "tasks": list(snapshots.values()),
+                # Full lifecycle snapshots take precedence over legacy rows,
+                # including when the two are on opposite sides of the cursor.
+                "legacyTasks": [self._task_snapshot(task) for task_id, task in legacy_tasks.items()
+                                if task_id not in snapshots],
+            })
+        except (OSError, ValueError, RecursionError):
+            pass  # Cache publication failure must not block recovery.
 
     def _project_legacy_event(self, entry: dict[str, Any], tasks: dict[str, SubAgentTask]) -> None:
         task_id = str(entry.get("taskId") or "").strip()
@@ -1455,6 +1532,9 @@ class SubAgentTaskRegistry:
     def _event_log_path(self) -> Path:
         return self.artifact_dir / "sub-agent-events.jsonl"
 
+    def _recovery_checkpoint_path(self) -> Path:
+        return self.artifact_dir / "sub-agent-recovery.json"
+
     def _result_path(self, task_id: str) -> Path:
         safe_task_id = "".join(char for char in task_id if char.isalnum() or char in {"-", "_"})
         if safe_task_id != task_id or not safe_task_id:
@@ -1464,6 +1544,26 @@ class SubAgentTaskRegistry:
 
 class CancelledError(RuntimeError):
     pass
+
+
+def _log_state(stat: os.stat_result) -> tuple[int, int, int, int]:
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+def _write_atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def utc_now() -> str:
