@@ -1,4 +1,6 @@
 """Focused rules not already covered by the Gateway alternating-call replay."""
+import pytest
+
 from agent_general_no_progress import ToolLoopProgress, tool_result_digest
 from agent_task_loop import canonical_action_id
 
@@ -185,3 +187,63 @@ def test_identical_completed_write_reuses_its_result_digest(tmp_path, monkeypatc
     assert result["plan"]["reason"] == "tool_loop_repeated"
     assert len(writes) == 1
     assert len(serialized_receipts) == 1
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native", "legacy"])
+def test_gateway_connectivity_compares_business_facts_without_discarding_elapsed_time(tmp_path, monkeypatch, native):
+    from types import SimpleNamespace
+
+    import httpx
+    import unity_host_diagnostics as diagnostics
+    from tests.test_native_runtime_gateway import call, finish, run, setup_gateway
+
+    client = httpx.Client
+    for root, statuses in (("unchanged", [200] * 5), ("changing", [200, 201, 202, 203, 204])):
+        sent_statuses = []
+        times = iter(value for i in range(5) for value in (i, i + (100 + i) / 1000))
+        monkeypatch.setattr(diagnostics, "time", SimpleNamespace(monotonic=lambda: next(times)))
+
+        def respond(_request):
+            status = statuses[len(sent_statuses)]
+            sent_statuses.append(status)
+            return httpx.Response(status)
+
+        monkeypatch.setattr(diagnostics.httpx, "Client", lambda **kwargs: client(
+            transport=httpx.MockTransport(respond), **kwargs,
+        ))
+        project = tmp_path / root
+        gateway, _, _ = setup_gateway(project, [
+            *(call(f"diagnose-{i}", diagnostics.NETWORK_TOOL, {}) for i in range(5)), finish,
+        ])
+        if not native:
+            plans = iter([{
+                "planner": "llm", "summary": "Check connectivity.", "skillNeeded": True,
+                "skillTool": diagnostics.NETWORK_TOOL, "skillParams": {},
+                "continueLoop": True, "nextStep": "call_skill",
+            }] * 5 + [{"planner": "llm", "summary": "Connectivity checked.", "reply": "The API responded.", "nextStep": "done"}])
+            monkeypatch.setattr(gateway.runtime_planner, "native_conversation_binding", lambda _root: "")
+            monkeypatch.setattr(gateway.runtime_planner, "plan_agent_turn", lambda *_args, **_kwargs: next(plans).copy())
+        diagnostics.register_host_diagnostic_tools(gateway)
+        result = run(gateway, project, maxAgenticTurns=7, message="Check VRChat API connectivity.")
+        receipts = [step["result"] for step in result["steps"] if step.get("tool") == diagnostics.NETWORK_TOOL]
+        assert [receipt["httpStatus"] for receipt in receipts] == sent_statuses
+        assert [receipt["elapsedMs"] for receipt in receipts] == list(range(100, 100 + len(receipts)))
+        if root == "unchanged":
+            assert result["plan"]["nextStep"] == "paused"
+            assert result["plan"]["reason"] == "tool_loop_repeated"
+            assert sent_statuses == [200] * 4
+        else:
+            assert result["plan"]["nextStep"] == "done"
+            assert sent_statuses == statuses
+
+
+def test_progress_digest_keeps_undeclared_and_nested_business_fields():
+    receipt = {"elapsedMs": 100, "data": {"elapsedMs": 20}}
+    diagnostic = ("elapsedMs",)
+    timing_changed = {**receipt, "elapsedMs": 101}
+    nested_changed = {**timing_changed, "data": {"elapsedMs": 21}}
+
+    assert tool_result_digest(receipt) != tool_result_digest(timing_changed)
+    assert tool_result_digest(receipt, diagnostic_fields=diagnostic) == tool_result_digest(timing_changed, diagnostic_fields=diagnostic)
+    assert tool_result_digest(receipt, diagnostic_fields=diagnostic) != tool_result_digest(nested_changed, diagnostic_fields=diagnostic)
+    assert receipt == {"elapsedMs": 100, "data": {"elapsedMs": 20}}

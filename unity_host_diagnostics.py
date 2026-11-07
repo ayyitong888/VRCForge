@@ -132,4 +132,4 @@ def register_host_diagnostic_tools(gateway: Any) -> None:
         "read/debug", get_last_unity_crash)
     gateway.register_tool(NETWORK_TOOL,
         "When to use: diagnose suspected VRChat API connectivity trouble with one unauthenticated request from the Gateway. When NOT to use: do not run before every tool or upload, change proxy settings, log in, or treat this as proof Unity uses the same network/proxy. Negative example: HTTP 403 is a received HTTP response, not a connection timeout.",
-        "read/debug", check_vrchat_connectivity)
+        "read/debug", check_vrchat_connectivity, progress_diagnostic_fields=("elapsedMs",))

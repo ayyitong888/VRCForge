@@ -288,6 +288,13 @@ def _running_state(value: Any) -> str:
     return ""
 
 
+def is_shell_process_observation(tool: str, arguments: Any) -> bool:
+    return (
+        tool == "vrcforge_shell_process" and isinstance(arguments, Mapping)
+        and str(arguments.get("action") or "list").strip().lower() in {"list", "poll", "log"}
+    )
+
+
 _FIELD_MISSING = object()
 
 
@@ -1800,7 +1807,8 @@ class AgentTaskLoop:
             verification_profile=requirement_profile,
         )
         outcome_status = _status(effective.get("status"))
-        running_state = _running_state(raw_result)
+        # The process can still be running after its poll or log read has settled.
+        running_state = "" if is_shell_process_observation(tool, arguments) else _running_state(raw_result)
         observation = runtime_observation_receipt(raw_result)
         job = job_receipt(raw_result)
         if outcome_status == "pending" and job:

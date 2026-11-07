@@ -1448,6 +1448,40 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
         for field in ("skipped_binary", "skipped_resource_limit"):
             if type(result.get(field)) is int:
                 evidence[field] = result[field]
+    elif (tool == "vrcforge_shell_process" and result.get("action") in ("poll", "log")
+          and isinstance(result.get("output"), str)):
+        action = result["action"]
+        session = ensure_dict(result.get("session"))
+        source_truncated = result.get("sourceTruncated") is True or session.get("sourceTruncated") is True
+        evidence.update({"source": "shell_process_output", "action": action,
+                         "sourceTruncated": source_truncated,
+                         "truncated": source_truncated or result.get("truncated") is True})
+        evidence["session"] = {
+            key: session[key] for key, expected_type in (
+                ("sessionId", str), ("status", str), ("exitCode", int), ("waitingForInput", bool),
+                ("timedOut", bool), ("killed", bool), ("terminationFailed", bool),
+                ("cursorStart", int), ("cursorEnd", int),
+            ) if type(session.get(key)) is expected_type
+        }
+        for key in ("cursor", "fromCursor", "sourceCursorEnd", "lineOffset", "nextLineOffset", "lineCount"):
+            if type(result.get(key)) is int:
+                evidence[key] = result[key]
+        for key in ("hasMore", "cursorExpired"):
+            if type(result.get(key)) is bool:
+                evidence[key] = result[key]
+        if evidence.get("hasMore") is True:
+            request = ensure_dict(result.get("nextRequest"))
+            if (action == "poll" and request.get("action") == "poll"
+                    and isinstance(session.get("sessionId"), str) and request.get("sessionId") == session["sessionId"]
+                    and type(request.get("cursor")) is int and request["cursor"] == evidence.get("cursor")
+                    and type(request.get("limit")) is int and request["limit"] > 0):
+                evidence["nextRequest"] = {"tool": tool, "arguments": {
+                    key: request[key] for key in ("action", "sessionId", "cursor", "limit")}}
+            if action == "log":
+                evidence["continuation"] = "Read more lines from this session with log, nextLineOffset as lineOffset, and a bounded lineLimit."
+        # Keep source coordinates ahead of the body in the first retained page.
+        evidence["output"] = content(result["output"])
+        return evidence
     elif tool in {"shell", "unity_shell", "vrcforge_execute_shell"}:
         if isinstance(result.get("readEvidence"), dict):
             # The gateway assembles this from raw output before its durable

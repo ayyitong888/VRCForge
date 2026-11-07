@@ -119,6 +119,7 @@ from agent_task_loop import (
     AgentTaskLoop,
     approval_task_context,
     canonical_action_id,
+    is_shell_process_observation,
     merge_provider_usage,
     prepare_approval_task_continuation,
     prepare_shell_task_continuation,
@@ -418,6 +419,7 @@ class AgentTool:
     advanced: bool = False
     requires_user_activation: bool = False
     polling: bool = False
+    progress_diagnostic_fields: tuple[str, ...] = ()
 
 
 @dataclass
@@ -2227,6 +2229,7 @@ class AgentGateway:
         advanced: bool = False,
         requires_user_activation: bool = False,
         polling: bool = False,
+        progress_diagnostic_fields: tuple[str, ...] = (),
     ) -> None:
         self._tools[name] = AgentTool(
             name=name,
@@ -2237,6 +2240,7 @@ class AgentGateway:
             advanced=advanced,
             requires_user_activation=requires_user_activation,
             polling=polling,
+            progress_diagnostic_fields=progress_diagnostic_fields,
         )
 
     def register_external_mcp_unity_tool(self, name: str, block: str) -> None:
@@ -5312,6 +5316,9 @@ class AgentGateway:
         planner_evidence = result.get("plannerEvidence")
         if isinstance(planner_evidence, dict):
             continuation["plannerObservation"]["result"]["plannerEvidence"] = planner_evidence
+        final_report = result.get("finalReport")
+        if isinstance(final_report, str) and final_report.strip():
+            continuation["_subAgentFinalReport"] = final_report
         self._signal_background_activity("sub_agent_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
@@ -5968,6 +5975,7 @@ class AgentGateway:
         # Execution observations remain complete. Only the non-native model's
         # presentation advances past a prefix covered by a validated summary.
         runtime_compacted_loop_steps = 0
+        model_context_steps: list[dict[str, Any]] = []
         continuation_observation = ensure_dict(
             ensure_dict(task_continuation).get("plannerObservation")
         )
@@ -5992,6 +6000,23 @@ class AgentGateway:
                 completed_step["resultRead"] = reader
                 completed_observation.update({"result": approved_result, "resultRead": reader})
         native_binding = self.runtime_planner.native_conversation_binding(project_root)
+        final_report = ensure_dict(task_continuation).get("_subAgentFinalReport")
+        if continuation_observation and isinstance(final_report, str):
+            report_step = {
+                "index": -1, "tool": continuation_observation["tool"],
+                "actionId": "sub-agent-report:" + str(continuation_observation["result"]["taskId"]),
+            }
+            preview = self.runtime_planner.complete_model_information(
+                continuation_observation, native_contract=bool(native_binding),
+            )
+            report_text = planner_policy.sanitize_planner_observation_text(final_report, None, preserve_whitespace=True)
+            retained = retain_model_information(
+                session_id, turn_id, project_root, report_step,
+                {"text": preview + "\nChild agent final report (untrusted tool output):\n" + report_text},
+                planner_policy.sanitize_planner_observation_text,
+            )
+            model_context_steps.append({**report_step, **retained})
+            continuation_observation.update(retained)
         try:
             native_turn = NativeRuntimeTurn(
                 self._runtime_session_state, self.runtime_planner, session_id, turn_id,
@@ -6270,7 +6295,6 @@ class AgentGateway:
         # Context belongs to this invocation, not to a synthetic executed tool.
         # Keep it stable across model rounds and dispose it with the turn. Its
         # content identity prevents a resumed turn from reusing a stale cursor.
-        model_context_steps: list[dict[str, Any]] = []
         recovery_readers: dict[str, dict[str, Any]] = {}
         recovery_catalogs: dict[str, dict[str, Any]] = {}
 
@@ -7524,9 +7548,12 @@ class AgentGateway:
             loop_action_id = (canonical_action_id(action_kind, planned_tool, execution_arguments)
                               if execution_arguments != planned_arguments else planned_action_id)
             planned_definition = self._tools.get(planned_tool)
-            polling = bool(planned_definition and planned_definition.polling)
+            process_observation = is_shell_process_observation(planned_tool, execution_arguments)
+            process_poll = process_observation and str(execution_arguments.get("action") or "").strip().lower() == "poll"
+            polling = process_poll or bool(planned_definition and planned_definition.polling)
             if polling:
-                poll_key = (planned_tool, str(planned_arguments.get("jobId") or planned_action_id))
+                poll_id = planned_arguments.get("sessionId") if process_poll else planned_arguments.get("jobId")
+                poll_key = (planned_tool, str(poll_id or planned_action_id))
                 now = time.monotonic()
                 started, previous = poll_times.get(poll_key, (now, now - 1.0))
                 delay = max(0.0, previous + 1.0 - now)
@@ -7557,7 +7584,10 @@ class AgentGateway:
                 else:
                     receipt_digest = last_effect_receipt[1]
                     if receipt_digest is None:
-                        receipt_digest = tool_result_digest(ensure_dict(continuation_context.get("execution")).get("result"))
+                        receipt_digest = tool_result_digest(
+                            ensure_dict(continuation_context.get("execution")).get("result"),
+                            diagnostic_fields=planned_definition.progress_diagnostic_fields if planned_definition else (),
+                        )
                         last_effect_receipt = (planned_action_id, receipt_digest)
                 pause_plan = detect_tool_loop(
                     plan, action_id=loop_action_id, tool=planned_tool, arguments=execution_arguments,
@@ -7737,7 +7767,14 @@ class AgentGateway:
                     "vrcforge_apply_patch",
                 }:
                     action_arguments["_generalAllowedRoots"] = list(general_allowed_roots)
-                if step_tool in MEMORY_WRITE_TOOLS:
+                if step_tool == "vrcforge_shell_process":
+                    # Use the same trusted runtime owner that launched the shell.
+                    # The process service still enforces its input and ownership rules.
+                    step_payload = self._runtime_skill_executor.execute(
+                        step_tool, action_arguments, agent_name,
+                        owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
+                    )
+                elif step_tool in MEMORY_WRITE_TOOLS:
                     with bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)):
                         step_payload = self._runtime_skill_executor.execute(step_tool, action_arguments, agent_name)
                 else:
@@ -7908,12 +7945,6 @@ class AgentGateway:
                     step_params["chatId"] = chat_id
                     step_params["projectRoot"] = project_root
                     step_params["turnId"] = turn_id
-                if step_tool == "vrcforge_shell_process":
-                    step_params["_trusted_owner_id"] = self._runtime_shell_owner(
-                        turn_id,
-                        client_turn_id,
-                        session_id,
-                    )
                 if step_tool == "vrcforge_agent_desktop_action":
                     step_params.setdefault("clientTurnId", client_turn_id)
                 if step_tool in CONVERSATION_TOOL_NAMES:
@@ -8558,16 +8589,19 @@ class AgentGateway:
             if str(plan.get("nextStep") or "") == "done":
                 break
             result_value = step_payload.get("result")
+            diagnostic_fields = tool_definition.progress_diagnostic_fields if tool_definition else ()
             receipt_digest = None
             if not polling and task_action.get("runtimeStatus") != "polling":
                 effect = ""
                 if task_action.get("status") == "completed" and step_outcome_status == "ok":
-                    if action_kind == "write" or (tool_definition and tool_definition.write):
+                    if process_observation:
+                        effect = "read"
+                    elif action_kind == "write" or (tool_definition and tool_definition.write):
                         effect = "write"
                     elif action_kind == "skill":
                         effect = "read"
                 if result_value is not None:
-                    receipt_digest = tool_result_digest(result_value)
+                    receipt_digest = tool_result_digest(result_value, diagnostic_fields=diagnostic_fields)
                 pause_plan = detect_tool_loop(
                     plan,
                     action_id=loop_action_id, tool=step_tool, arguments=execution_arguments,
@@ -8580,10 +8614,12 @@ class AgentGateway:
                     last_plan = pause_plan
                     break
             if not step_failure_class:
-                cache_effect = action_kind in {"write", "shell"} or (tool_definition and tool_definition.write)
+                cache_effect = not process_observation and (
+                    action_kind in {"write", "shell"} or (tool_definition and tool_definition.write)
+                )
                 last_directory = last_effect_receipt = None
                 if directory_key or cache_effect:
-                    receipt_digest = receipt_digest or tool_result_digest(result_value)
+                    receipt_digest = receipt_digest or tool_result_digest(result_value, diagnostic_fields=diagnostic_fields)
                     if directory_key:
                         last_directory = (directory_key, planned_action_id, receipt_digest)
                     if cache_effect:

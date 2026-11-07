@@ -104,7 +104,10 @@ class _Call:
     summary: str
 
 
-def tool_result_digest(result: Any) -> str:
+def tool_result_digest(result: Any, *, diagnostic_fields: tuple[str, ...] = ()) -> str:
+    """Hash progress facts, excluding only diagnostic keys declared by the producer."""
+    if diagnostic_fields and isinstance(result, dict):
+        result = {key: value for key, value in result.items() if key not in diagnostic_fields}
     encoded = json.dumps(result, ensure_ascii=True, sort_keys=True,
                          separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
