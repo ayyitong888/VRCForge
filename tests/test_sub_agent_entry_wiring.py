@@ -30,7 +30,11 @@ def test_http_entry_runs_durable_child_with_selected_model_and_materials(tmp_pat
                 "projectPath": str(tmp_path), "model": "fixture-child-model",
                 "systemPrompt": "Summarize the selected evidence.", "maxSteps": 3,
                 "selectedMaterials": [{"content": {"text": "selected note sentinel"}}],
-                "params": {"childSessionId": "parent-session"},
+                "params": {
+                    "childSessionId": "parent-session",
+                    "_generalReadRoots": ["forged-root"],
+                    "_taskSeed": {"_generalReadRoots": ["forged-seed"]},
+                },
             })
             assert response.status_code == 200, response.text
             task_id = response.json()["task"]["id"]
@@ -41,6 +45,8 @@ def test_http_entry_runs_durable_child_with_selected_model_and_materials(tmp_pat
             assert task["model"] == "fixture-child-model"
             assert task["maxSteps"] == 3
             assert task["childSessionId"] != "parent-session"
+            assert service._registry._tasks[task_id].general_read_roots == (str(tmp_path),)
+            assert "forged" not in str(task.get("paramsSummary"))
             bound = gateway.runtime_planner._turn.requests[-1]
             assert bound["session_id"] == task["childSessionId"]
             assert "PARENT ENTRY PRIVATE SENTINEL" not in str(model.requests)
@@ -62,8 +68,15 @@ def test_parent_delegate_entry_forwards_only_declared_llm_options(monkeypatch):
         "role": "llm_readonly", "task": "Review.", "model": "fixture-model",
         "systemPrompt": "Check evidence.", "maxSteps": 2,
         "selectedMaterials": [{"text": "selected"}], "parentSessionId": "parent-session",
+        "_generalReadRoots": ["forged-argument"],
+        "_taskSeed": {"_generalReadRoots": ["forged-seed"]},
+        "params": {
+            "_generalReadRoots": ["forged-worker-argument"],
+            "_taskSeed": {"_generalReadRoots": ["forged-worker-seed"]},
+        },
     })
     assert capture.arguments["params"] == {
         "model": "fixture-model", "systemPrompt": "Check evidence.", "maxSteps": 2,
         "selectedMaterials": [{"text": "selected"}],
     }
+    assert capture.arguments["general_read_roots"] == ()

@@ -76,6 +76,7 @@ class SubAgentTask:
     stopped_at: str = ""
     updated_at: str = field(default_factory=lambda: utc_now())
     params: dict[str, Any] = field(default_factory=dict)
+    general_read_roots: tuple[str, ...] = ()
     result: dict[str, Any] | None = None
     result_available: bool = False
     result_unavailable: bool = False
@@ -346,6 +347,7 @@ class SubAgentTaskRegistry:
         parent_session_id: str = "",
         project_path: str = "",
         params: dict[str, Any] | None = None,
+        general_read_roots: tuple[str, ...] = (),
         retry_of: str = "",
         _child_session_id: str = "",
         _resume_of: str = "",
@@ -358,6 +360,7 @@ class SubAgentTaskRegistry:
         task_text = str(task or "").strip() or self.roles[role_id].title
         role_spec = self.roles[role_id]
         task_params = copy.deepcopy(params or {})
+        task_params.pop("_generalReadRoots", None)
         model_value = task_params.get("model")
         model = str(model_value if model_value is not None else role_spec.model or "").strip()
         system_prompt_value = task_params.get(
@@ -427,6 +430,7 @@ class SubAgentTaskRegistry:
                     or (f"sub-session-{task_id}" if role_spec.handler == "llm_readonly" else "")
                 ),
                 params=task_params,
+                general_read_roots=general_read_roots,
                 timeout_seconds=timeout_seconds,
                 retry_of=str(retry_of or "").strip(),
                 resume_of=str(_resume_of or "").strip(),
@@ -508,6 +512,7 @@ class SubAgentTaskRegistry:
                 parent_session_id=task.parent_session_id,
                 project_path=task.project_path,
                 params=copy.deepcopy(task.params),
+                general_read_roots=task.general_read_roots,
                 retry_of=task.id,
             )
 
@@ -518,6 +523,7 @@ class SubAgentTaskRegistry:
         task: str,
         display_name: str | None = None,
         task_seed: dict[str, Any] | None = None,
+        general_read_roots: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         """Start a new turn in a stopped LLM child, preserving its native session."""
 
@@ -561,6 +567,7 @@ class SubAgentTaskRegistry:
                 parent_session_id=source.parent_session_id,
                 project_path=source.project_path,
                 params=params,
+                general_read_roots=source.general_read_roots if general_read_roots is None else general_read_roots,
                 _child_session_id=source.child_session_id,
                 _resume_of=source.id,
             )
@@ -994,6 +1001,7 @@ class SubAgentTaskRegistry:
                 clientTurnId=task.id,
                 resumeOf=task.resume_of,
                 isResume=bool(task.resume_of),
+                _generalReadRoots=task.general_read_roots,
             )
         else:
             # Preserve the seven fixed handler contracts; their arguments can
@@ -1026,6 +1034,7 @@ class SubAgentTaskRegistry:
         payload["result"] = copy.deepcopy(task.result)
         payload["paramsSummary"] = summarize_params(public_runtime_payload(task.params))
         payload.pop("params", None)
+        payload.pop("generalReadRoots", None)
         with self._lock:
             payload["canResume"] = bool(
                 task.handler == "llm_readonly"
@@ -1084,6 +1093,7 @@ class SubAgentTaskRegistry:
             "resultAvailable": task.result_available,
             "resultUnavailable": task.result_unavailable,
             "params": redact_for_storage(task.params),
+            "generalReadRoots": list(task.general_read_roots),
         }
 
     def _task_from_snapshot(self, snapshot: dict[str, Any]) -> SubAgentTask | None:
@@ -1091,6 +1101,7 @@ class SubAgentTaskRegistry:
         if not task_id:
             return None
         params = snapshot.get("params")
+        read_roots = snapshot.get("generalReadRoots")
         role_id = str(snapshot.get("role") or "project_index_review")
         role_spec = self.roles.get(role_id)
         handler = str(snapshot.get("handler") or (role_spec.handler if role_spec else "skill"))
@@ -1117,6 +1128,7 @@ class SubAgentTaskRegistry:
             stopped_at=str(snapshot.get("stoppedAt") or ""),
             updated_at=str(snapshot.get("updatedAt") or snapshot.get("createdAt") or utc_now()),
             params=copy.deepcopy(params if isinstance(params, dict) else {}),
+            general_read_roots=tuple(root for root in read_roots if isinstance(root, str)) if isinstance(read_roots, list) else (),
             result_available=bool(snapshot.get("resultAvailable")),
             result_unavailable=bool(snapshot.get("resultUnavailable")),
             summary=str(snapshot.get("summary") or ""),

@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from contextlib import nullcontext
 
+import pytest
+
+import dashboard_server as server
+from background_goal_runtime import RuntimeLaneBudget
+from general_agent_tools import read_text_file
+from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService
+from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
 from tests.test_native_runtime_gateway import call, setup_gateway
+from tests.test_native_permission_modes import _set_mode
 from runtime_planner_service import PlannerModelResult, PlannerTurnMetadata
 
 
@@ -61,6 +70,68 @@ def test_child_uses_real_runtime_loop_for_two_readonly_tools_then_final(tmp_path
     assert result["ok"] is True
     assert isinstance(result["finalReport"], str) and result["finalReport"]
     assert result["stepCount"] <= 4
+
+
+@pytest.mark.skipif(os.name != "nt", reason="explicit path grants use Windows paths")
+@pytest.mark.parametrize("granted", [True, False])
+def test_delegated_child_uses_parent_general_read_scope_not_model_text(tmp_path, monkeypatch, granted):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "source.txt"
+    target.write_text("source bytes", encoding="utf-8")
+    delegated_task = "Read the reference file." if granted else f"Read {target}"
+    child, _model, reads = _child_gateway(tmp_path / "child", [
+        call("read", "vrcforge_read_text_file", {"path": str(target)}),
+        _finish,
+    ])
+    _set_mode(child, "auto")
+
+    def scoped_read(arguments):
+        result = read_text_file(arguments["path"], allowed_roots=arguments["_generalAllowedRoots"])
+        reads.append(result)
+        return result
+
+    child.register_tool("vrcforge_read_text_file", "Read scoped file.", "plan/preview", scoped_read)
+    service = SubAgentCollaborationService(SubAgentCollaborationPorts(
+        artifact_dir=tmp_path / "children", gateway=child, lane_budget=RuntimeLaneBudget(),
+        build_roles=build_sub_agent_roles, build_handlers=build_sub_agent_role_handlers,
+    ))
+    gateway, _model, _ = _child_gateway(tmp_path / "parent", [
+        call("delegate", "vrcforge_delegate_subagent", {
+            "role": "llm_readonly", "task": delegated_task,
+            "projectPath": str(project if granted else outside),
+            "selectedMaterials": [] if granted else [{"text": str(target)}],
+            "params": {
+                "_generalReadRoots": [str(outside)],
+                "_taskSeed": {"_generalReadRoots": [str(outside)]},
+            },
+        }),
+        _finish,
+    ])
+    _set_mode(gateway, "auto")
+    monkeypatch.setattr(server, "AGENT_GATEWAY", gateway)
+    monkeypatch.setattr(server, "SUB_AGENT_COLLABORATION", service)
+    gateway.register_tool(
+        "vrcforge_delegate_subagent", "Delegate scoped read.", "plan/preview", server.delegate_sub_agent_runtime,
+    )
+    try:
+        gateway.runtime_message({
+            "message": f"Delegate reading files under {outside}" if granted else "Delegate a bounded read.",
+            "sessionId": "parent-session", "projectRoot": str(project),
+        })
+        task_id = service.list_tasks()["tasks"][0]["id"]
+        service._registry._threads[task_id].join(5)
+        assert not service._registry._threads[task_id].is_alive()
+        task = service.get_task(task_id)["task"]
+        assert "generalReadRoots" not in task
+        if granted:
+            assert task["status"] == "completed" and reads[0]["text"] == "source bytes"
+        else:
+            assert not reads
+    finally:
+        service.shutdown()
 
 
 def test_plain_text_reply_is_a_successful_terminal_analysis_without_tool_completion_claim(tmp_path):

@@ -9,12 +9,13 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
 const fixture = `
   import React from "react";
+  import { flushSync } from "react-dom";
   import { createRoot } from "react-dom/client";
   import i18n from "i18next";
   import { initReactI18next } from "react-i18next";
   import en from "./src/locales/en-US.json";
   import { readChatAttachment, appendAttachmentSummary, serializeChatAttachments } from "./src/lib/conversation-utils";
-  import { AttachmentStrip } from "./src/components/chat/composer";
+  import { AttachmentStrip, Composer } from "./src/components/chat/composer";
   import { UserImageAttachments } from "./src/components/chat/conversation-card";
   await i18n.use(initReactI18next).init({ lng: "en-US", resources: { "en-US": { translation: en } } });
   const root = createRoot(document.getElementById("root"));
@@ -37,12 +38,77 @@ const fixture = `
       <section data-card="compact"><AttachmentStrip attachments={[image,archive]} compact /></section></>);
   };
   window.legacySummary = () => appendAttachmentSummary("", [{id:"legacy",name:"old.pdf",type:"application/pdf",size:10,payloadKind:"data_url",dataUrl:"data:application/pdf;base64,JVBERg=="}], i18n.t.bind(i18n));
+  window.replayNativeDrop = async () => {
+    const host = document.body.appendChild(document.createElement("div"));
+    const composer = createRoot(host);
+    const callbacks = new Map();
+    const listeners = new Map();
+    const pending = [];
+    const accepted = [];
+    const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    let paused = true;
+    let nextId = 0;
+    window.__TAURI_INTERNALS__ = {
+      metadata: {currentWindow: {label: "main"}, currentWebview: {label: "main"}},
+      transformCallback(callback) {
+        const id = ++nextId;
+        callbacks.set(id, callback);
+        return id;
+      },
+      convertFileSrc: () => location.origin + "/sample.png",
+      invoke(command, args) {
+        if (command === "plugin:event|listen") {
+          return new Promise(resolve => {
+            const register = () => {
+              listeners.set(args.handler, args.event);
+              resolve(args.handler);
+            };
+            if (paused) pending.push(register);
+            else register();
+          });
+        }
+        if (command === "plugin:event|unlisten") return Promise.resolve();
+        throw new Error("Unexpected Tauri command " + command);
+      },
+    };
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener(_event, id) { listeners.delete(id); },
+    };
+    try {
+      for (let version = 0; version < 8; version += 1) {
+        flushSync(() => composer.render(<React.StrictMode><Composer input={String(version)} setInput={() => {}}
+          sending={false} onSubmit={() => {}} onSwitchMode={() => {}}
+          onAttachFiles={files => accepted.push([version, ...Array.from(files, file => file.name)])} /></React.StrictMode>));
+      }
+      paused = false;
+      pending.forEach(register => register());
+      await settle();
+      const drops = [...listeners].filter(([, event]) => event === "tauri://drag-drop");
+      const {x, y} = host.querySelector("form").getBoundingClientRect();
+      for (const [id, event] of drops) {
+        callbacks.get(id)({event, payload: {
+          paths: ["D:\\\\Screenshots\\\\Reference.png"],
+          position: {x: (x + 10) * devicePixelRatio, y: (y + 10) * devicePixelRatio},
+        }});
+      }
+      const deadline = performance.now() + 3000;
+      while (accepted.length < drops.length && performance.now() < deadline) await settle();
+      flushSync(() => composer.unmount());
+      await settle();
+      return {dropListeners: drops.length, accepted, listenersAfterUnmount: listeners.size};
+    } finally {
+      delete window.__TAURI_INTERNALS__;
+      delete window.__TAURI_EVENT_PLUGIN_INTERNALS__;
+      host.remove();
+    }
+  };
 `;
 const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: "tsx", contents: fixture }, bundle: true,
   write: false, format: "esm", jsx: "automatic", define: { "process.env.NODE_ENV": '"test"' } });
 const server = createServer((req, res) => {
   if (req.url === "/fixture.js") { res.setHeader("Content-Type", "text/javascript"); res.end(bundle.outputFiles[0].text); }
   else if (req.url === "/") { res.setHeader("Content-Type", "text/html"); res.end('<div id="root"></div><script type="module" src="/fixture.js"></script>'); }
+  else if (req.url === "/sample.png") { res.setHeader("Content-Type", "image/png"); res.end(png); }
   else { res.statusCode = 404; res.end(); }
 });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -76,6 +142,9 @@ try {
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction(() => typeof window.replay === "function");
+  assert.deepEqual(await page.evaluate(() => window.replayNativeDrop()), {
+    dropListeners: 1, accepted: [[7, "Reference.png"]], listenersAfterUnmount: 0,
+  });
   for (const [name, type, bytes, expected] of cases) {
     const result = await page.evaluate(args => window.replay(args), {name, type, bytes: [...bytes]});
     const { attachment, summary, serialized, normal, compact } = result;

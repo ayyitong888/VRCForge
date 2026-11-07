@@ -22,7 +22,8 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
                       selected_materials: list[dict], cancel_event: Event,
                       client_turn_id: str = "", is_resume: bool = False,
                       allowed_tools: list[str] | tuple[str, ...] | None = None,
-                      provider: str = "") -> dict:
+                      provider: str = "",
+                      general_read_roots: tuple[str, ...] | None = None) -> dict:
     if cancel_event.is_set():
         return {"ok": False, "status": "cancelled", "childSessionId": child_session_id,
                 "finalReport": "Request cancelled.", "rawResult": {}, "stepCount": 0}
@@ -57,7 +58,7 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
     watcher.start()
     try:
         with gateway.runtime_planner.bind_role_instructions(system_prompt, allowed_tools=allowed_tools):
-            raw = gateway.runtime_message(params, agent_name="sub-agent")
+            raw = gateway.runtime_message(params, agent_name="sub-agent", child_read_roots=general_read_roots)
     finally:
         finished.set()
         watcher.join()

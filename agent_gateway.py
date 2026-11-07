@@ -759,6 +759,9 @@ class AgentGateway:
         self._runtime_skill_scope: contextvars.ContextVar[AgentTaskLoop | None] = contextvars.ContextVar(
             "vrcforge_runtime_skill_scope", default=None,
         )
+        self._runtime_subagent_read_scope: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+            "vrcforge_runtime_subagent_read_scope", default=(),
+        )
         # A material scan's complete compact index is borrowed only from its
         # exact in-process runtime invocation, then stored with the existing
         # result reference. Network callers cannot populate this slot.
@@ -1420,12 +1423,19 @@ class AgentGateway:
             register_channel_project_selection(self, self._project_selection_request)
 
     @contextmanager
-    def _bind_runtime_skill_scope(self, loop: AgentTaskLoop) -> Iterator[None]:
+    def _bind_runtime_skill_scope(
+        self, loop: AgentTaskLoop, *, subagent_read_roots: tuple[str, ...] = (),
+    ) -> Iterator[None]:
         token = self._runtime_skill_scope.set(loop)
+        scope_token = self._runtime_subagent_read_scope.set(subagent_read_roots)
         try:
             yield
         finally:
+            self._runtime_subagent_read_scope.reset(scope_token)
             self._runtime_skill_scope.reset(token)
+
+    def runtime_subagent_read_roots(self) -> tuple[str, ...]:
+        return self._runtime_subagent_read_scope.get()
 
     def capture_material_scan_result(self, payload: object) -> bool | None:
         """Borrow a validated compact index into the current exact scan call."""
@@ -4915,18 +4925,22 @@ class AgentGateway:
                           system_prompt: str = "", max_steps: int = 4,
                           project_path: str = "", selected_materials: list[dict] | None = None,
                           cancel_event: threading.Event, client_turn_id: str = "", is_resume: bool = False,
-                          allowed_tools: list[str] | tuple[str, ...] | None = None, provider: str = "") -> dict[str, Any]:
+                          allowed_tools: list[str] | tuple[str, ...] | None = None, provider: str = "",
+                          general_read_roots: tuple[str, ...] | None = None) -> dict[str, Any]:
         from agent_subagent_runtime import run_child_runtime
         return run_child_runtime(self, task=task, child_session_id=child_session_id, model=model,
                                  system_prompt=system_prompt, max_steps=max_steps, project_path=project_path,
                                  selected_materials=selected_materials or [], cancel_event=cancel_event,
                                  client_turn_id=client_turn_id, is_resume=is_resume,
-                                 allowed_tools=allowed_tools, provider=provider)
+                                 allowed_tools=allowed_tools, provider=provider,
+                                 general_read_roots=general_read_roots)
 
     def runtime_message(
         self,
         params: dict[str, Any] | None = None,
         agent_name: str = "desktop-agent",
+        *,
+        child_read_roots: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         params = dict(params or {})
         params.pop("_runtimeAdmitted", None)
@@ -4946,7 +4960,7 @@ class AgentGateway:
                     if not binding or self.runtime_sessions.native_conversation(session_id, binding=binding) is None:
                         raise AgentGatewayError("The original child history is unavailable for this provider/model route; no new conversation was started.", status_code=409)
                 with self._desktop.runtime_turn_context(params):
-                    result = self._runtime_message_impl(params, agent_name=agent_name)
+                    result = self._runtime_message_impl(params, agent_name=agent_name, child_read_roots=child_read_roots)
                 if agent_name == "sub-agent":
                     result["_resolvedSubAgentRoute"] = {"provider": str(params.get("provider") or ""), "model": str(params.get("model") or "")}
                     result["_subAgentResumable"] = bool(metadata.native_binding)
@@ -5315,6 +5329,7 @@ class AgentGateway:
         *,
         task_continuation: dict[str, Any] | None = None,
         continuation_shutdown_guard: bool = False,
+        child_read_roots: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         owned_params = params if isinstance(params, dict) else {}
         owned_params.pop("_runtimeTurnStarted", None)
@@ -5332,6 +5347,7 @@ class AgentGateway:
                 agent_name=agent_name,
                 task_continuation=task_continuation,
                 continuation_shutdown_guard=continuation_shutdown_guard,
+                child_read_roots=child_read_roots,
             )
             response_payload = planner_policy.public_runtime_payload(response_payload)
             return response_payload
@@ -5670,6 +5686,7 @@ class AgentGateway:
         *,
         task_continuation: dict[str, Any] | None = None,
         continuation_shutdown_guard: bool = False,
+        child_read_roots: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         params = params or {}
         if continuation_shutdown_guard:
@@ -5717,7 +5734,12 @@ class AgentGateway:
         ]
         # Explicit user paths grant narrow General read access in every chat.
         # These roots are never registered as Unity write/project authority.
-        root_candidates.extend(extract_explicit_local_roots(message))
+        if agent_name == "sub-agent":
+            # Child instructions and selected materials are task data. Only the
+            # server-owned parent scope can authorize local filesystem access.
+            root_candidates = list(child_read_roots) if child_read_roots is not None else [project_root]
+        else:
+            root_candidates.extend(extract_explicit_local_roots(message))
         seen_general_roots: set[str] = set()
         for candidate in root_candidates:
             if not candidate:
@@ -5737,6 +5759,7 @@ class AgentGateway:
         full_permission = self.approval_transactions.permission_audit_context(
             self.ensure_config()
         )["fullPermission"]
+        scoped_general_roots = tuple(general_allowed_roots)
         if full_permission:
             general_allowed_roots = host_scope_roots()
         continuation_context = ensure_dict(ensure_dict(task_continuation).get("context"))
@@ -7911,7 +7934,9 @@ class AgentGateway:
                     if material_capture_state is not None else None
                 )
                 try:
-                    with self._bind_runtime_skill_scope(task_loop), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
+                    with self._bind_runtime_skill_scope(
+                        task_loop, subagent_read_roots=scoped_general_roots if step_tool in SUB_AGENT_TASK_TOOLS else (),
+                    ), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
                         bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps], snapshot_lookup=self._scan_results.lookup if project_root else None) if step_tool == RESULT_READER_TOOL else nullcontext()
                     ):
                         step_payload = self._runtime_skill_executor.execute(

@@ -118,6 +118,7 @@ class SubAgentCollaborationService:
         parent_session_id: str = "",
         project_path: str = "",
         params: dict[str, Any] | None = None,
+        general_read_roots: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         return self._registry.create_task(
             role=role,
@@ -127,6 +128,7 @@ class SubAgentCollaborationService:
             parent_session_id=parent_session_id,
             project_path=project_path,
             params=params,
+            general_read_roots=general_read_roots,
         )
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
@@ -142,9 +144,10 @@ class SubAgentCollaborationService:
         task: str,
         display_name: str | None = None,
         task_seed: dict[str, Any] | None = None,
+        general_read_roots: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         return self._registry.resume_task(
-            task_id, task=task, display_name=display_name, task_seed=task_seed,
+            task_id, task=task, display_name=display_name, task_seed=task_seed, general_read_roots=general_read_roots,
         )
 
     def merge_task(

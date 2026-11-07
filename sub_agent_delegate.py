@@ -29,7 +29,7 @@ class RuntimeSkillGateway(Protocol):
                           system_prompt: str, max_steps: int, project_path: str,
                           selected_materials: list[dict[str, Any]], client_turn_id: str,
                           is_resume: bool, allowed_tools: list[str] | tuple[str, ...] | None,
-                          cancel_event: Any) -> dict[str, Any]: ...
+                          cancel_event: Any, general_read_roots: tuple[str, ...] | None) -> dict[str, Any]: ...
 
 
 def _checkpoint(cancel_event: Any) -> None:
@@ -359,6 +359,8 @@ def run_readonly_llm_agent(gateway: RuntimeSkillGateway, payload: dict[str, Any]
         raise RuntimeError("selectedMaterials must be a list of objects.")
     # Deliberately never forward parent native history, task seed, or arbitrary params.
     materials = [dict(item) for item in raw_materials]
+    # The registry projects this private value from its typed task record.
+    read_roots = payload.get("_generalReadRoots")
     response = gateway.run_sub_agent_llm(
         task=task,
         child_session_id=child_session_id,
@@ -371,6 +373,7 @@ def run_readonly_llm_agent(gateway: RuntimeSkillGateway, payload: dict[str, Any]
         client_turn_id=str(payload.get("taskId") or ""),
         is_resume=bool(payload.get("isResume")),
         allowed_tools=payload["tools"],
+        general_read_roots=read_roots if isinstance(read_roots, tuple) else (),
         cancel_event=cancel_event,
     )
     _checkpoint(cancel_event)

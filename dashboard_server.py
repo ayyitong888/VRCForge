@@ -87,6 +87,7 @@ from agent_command_safety import normalize_filesystem_path
 from general_agent_tools import (
     GENERAL_AGENT_WEB_TOOL_METADATA,
     MAX_READ_BYTES as GENERAL_MAX_READ_BYTES,
+    extract_explicit_local_roots,
     find_files as general_find_files,
     list_directory as general_list_directory,
     read_text_file as general_read_text_file,
@@ -7836,6 +7837,10 @@ def app_list_sub_agents(includeEvents: bool = False, limit: int = 50) -> dict[st
 async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]:
     if not request.parent_chat_id.strip():
         raise HTTPException(status_code=400, detail="Sub-agent tasks require a durable parentChatId.")
+    worker_params = {**request.params, **request.model_dump(
+        include={"model", "system_prompt", "max_steps", "selected_materials"},
+        by_alias=True, exclude_unset=True)}
+    worker_params.pop("_taskSeed", None)
     try:
         payload = SUB_AGENT_COLLABORATION.create_task(
             role=request.role,
@@ -7844,9 +7849,8 @@ async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]
             parent_chat_id=request.parent_chat_id,
             parent_session_id=request.parent_session_id,
             project_path=request.project_path,
-            params={**request.params, **request.model_dump(
-                include={"model", "system_prompt", "max_steps", "selected_materials"},
-                by_alias=True, exclude_unset=True)},
+            params=worker_params,
+            general_read_roots=(request.project_path, *extract_explicit_local_roots(request.task)),
         )
     except (RuntimeError, ValueError) as exc:
         raise runtime_http_error("sub_agent_request_failed", 400, exc) from exc
@@ -27006,9 +27010,11 @@ def _expected_prefab_assets(plan_payload: dict[str, Any]) -> list[str]:
 def resume_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str, Any]:
     arguments = dict(params or {})
     task_seed, _session_id = AGENT_GATEWAY.consume_runtime_task_link(arguments)
+    read_roots = AGENT_GATEWAY.runtime_subagent_read_roots()
     result = SUB_AGENT_COLLABORATION.resume_task(
         str(arguments.get("taskId") or ""), task=str(arguments.get("task") or ""),
-        display_name=arguments.get("displayName"), task_seed=task_seed or None)
+        display_name=arguments.get("displayName"), task_seed=task_seed or None,
+        general_read_roots=read_roots)
     if not result.get("ok"):
         return result
     task = result["task"]
@@ -27021,7 +27027,10 @@ def delegate_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str
 
     arguments = dict(params or {})
     task_seed, runtime_session_id = AGENT_GATEWAY.consume_runtime_task_link(arguments)
+    read_roots = AGENT_GATEWAY.runtime_subagent_read_roots()
     worker_params = ensure_dict(arguments.pop("params", None))
+    worker_params.pop("_taskSeed", None)
+    worker_params.pop("_generalReadRoots", None)
     for key in ("model", "systemPrompt", "maxSteps", "selectedMaterials"):
         if key in arguments:
             worker_params[key] = arguments[key]
@@ -27040,9 +27049,11 @@ def delegate_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str
             arguments.get("projectPath")
             or arguments.get("projectRoot")
             or arguments.get("project_path")
+            or (task_seed or {}).get("projectRoot")
             or ""
         ),
         params=worker_params,
+        general_read_roots=read_roots,
     )
     task = ensure_dict(created.get("task"))
     return {

@@ -122,6 +122,10 @@ export function Composer({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
+  const onAttachFilesRef = useRef(onAttachFiles);
+  useEffect(() => {
+    onAttachFilesRef.current = onAttachFiles;
+  }, [onAttachFiles]);
   useEffect(() => {
     const textarea = inputRef.current;
     if (!textarea) return;
@@ -246,10 +250,11 @@ export function Composer({
   };
   useEffect(() => {
     if (!hasTauriInternals()) return;
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     void getCurrentWebview().onDragDropEvent(async (event: { payload: DragDropEvent }) => {
       const payload = event.payload;
-      if (payload.type !== "drop" || !composerRef.current) return;
+      if (disposed || payload.type !== "drop" || !composerRef.current) return;
       const ratio = window.devicePixelRatio || 1;
       const bounds = composerRef.current.getBoundingClientRect();
       const x = payload.position.x / ratio;
@@ -267,10 +272,16 @@ export function Composer({
           // The existing attachment pipeline reports metadata/read failures after this point.
         }
       }
-      if (files.length) onAttachFiles?.(files);
-    }).then((cleanup) => { unlisten = cleanup; });
-    return () => { unlisten?.(); };
-  }, [onAttachFiles]);
+      if (!disposed && files.length) onAttachFilesRef.current?.(files);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   const handlePaste = (event: ClipboardEvent<HTMLFormElement>) => {
     const pastedFiles = [
       ...Array.from(event.clipboardData.files || []),
