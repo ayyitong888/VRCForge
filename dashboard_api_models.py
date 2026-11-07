@@ -177,6 +177,17 @@ class ManualBlendshapeItem(BaseModel):
 class ManualBlendshapeApplyRequest(DashboardRequest):
     adjustments: list[ManualBlendshapeItem] = Field(default_factory=list)
 
+    model_config = {"hide_input_in_errors": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_preview_avatar_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for field in ("avatarPath", "avatar_path"):
+                if field in data:
+                    raise ValueError(f"Rename `{field}` to `avatar` in Blendshape apply, keeping the same exact avatar path.")
+        return data
+
 
 class UndoBlendshapeRequest(ConnectionRequest):
     avatar_path: str

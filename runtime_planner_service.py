@@ -20,6 +20,10 @@ import time
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Callable, Mapping, Protocol
 
+from jsonschema import Draft202012Validator, ValidationError, validators
+from jsonschema.exceptions import best_match
+from referencing import Registry
+
 if TYPE_CHECKING:
     from agent_runtime_native_turn import NativeRuntimeTurn
 
@@ -332,181 +336,115 @@ def planner_tool_input_schema(name: str, *, tool_block_ids: list[str] | None = N
     )
 
 
-def _matches_planner_schema_type(value: object, value_type: str) -> bool:
-    if value_type == "null":
-        return value is None
-    if value_type == "string":
-        return isinstance(value, str)
-    if value_type == "boolean":
-        return isinstance(value, bool)
-    if value_type == "integer":
-        return (
-            isinstance(value, int) and not isinstance(value, bool)
-        ) or (
-            isinstance(value, float) and math.isfinite(value) and value.is_integer()
-        )
-    if value_type == "number":
-        return (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-        )
-    if value_type == "object":
-        return isinstance(value, Mapping)
-    if value_type == "array":
-        return isinstance(value, list)
-    return False
+def _validate_planner_schema_type(validator, declared_type, value, schema):
+    # Preserve fail-closed handling for malformed registered union types.
+    if isinstance(declared_type, list) and (
+        not declared_type
+        or any(not isinstance(item, str) for item in declared_type)
+        or len(set(declared_type)) != len(declared_type)
+    ):
+        yield ValidationError("Invalid schema type", validator="invalid_schema_type")
+        return
+    types = [declared_type] if isinstance(declared_type, str) else declared_type
+    if not isinstance(types, list) or any(
+        item not in {"string", "boolean", "integer", "number", "object", "array", "null"}
+        for item in types
+    ):
+        yield ValidationError("Invalid schema type", validator="invalid_schema_type")
+        return
+    yield from Draft202012Validator.VALIDATORS["type"](validator, declared_type, value, schema)
+
+
+def _finite_planner_number(_checker, value):
+    return Draft202012Validator.TYPE_CHECKER.is_type(value, "number") and (
+        not isinstance(value, float) or math.isfinite(value)
+    )
+
+
+_PLANNER_ARGUMENT_VALIDATOR = validators.extend(
+    Draft202012Validator,
+    {"type": _validate_planner_schema_type},
+    type_checker=Draft202012Validator.TYPE_CHECKER.redefine_many({
+        "number": _finite_planner_number,
+        "object": lambda checker, value: isinstance(value, Mapping),
+    }),
+)
+_PLANNER_SCHEMA_CODES = {
+    "type": "wrong_type", "required": "missing_required", "additionalProperties": "unknown_property",
+    "oneOf": "branch_mismatch", "anyOf": "branch_mismatch", "minLength": "min_length",
+    "maxLength": "max_length", "minItems": "min_items", "maxItems": "max_items",
+}
+
+
+def _planner_schema_issue(error: ValidationError):
+    # JSON Schema choice errors contain the errors from all attempted branches.
+    # Prefer the closest branch unless the failing constraint supplies explicit guidance.
+    hint = error.schema.get("x-validation-hint") if error.validator in {"oneOf", "anyOf", "not"} else None
+    if error.context and not hint:
+        error = best_match([error])
+        hint = error.schema.get("x-validation-hint") if error.validator in {"oneOf", "anyOf", "not"} else None
+    path = "".join(
+        f"[{part}]" if isinstance(part, int) else f".{part}"
+        for part in error.absolute_path
+    ).lstrip(".")
+    keyword = error.validator or "schema"
+    code = _PLANNER_SCHEMA_CODES.get(keyword, keyword)
+    expected = error.validator_value
+
+    if hint:
+        yield {"path": path or "$", "code": code, "expected": hint}
+        return
+    if keyword in {"required", "additionalProperties"} and isinstance(error.instance, Mapping):
+        if keyword == "required":
+            fields = [name for name in expected if name not in error.instance]
+            guidance = "present"
+        else:
+            properties = error.schema.get("properties", {})
+            patterns = error.schema.get("patternProperties", {})
+            fields = [
+                name for name in error.instance if name not in properties
+                and not any(re.search(pattern, name) for pattern in patterns)
+            ]
+            guidance = "declared property"
+        for field in fields:
+            yield {"path": f"{path}.{field}" if path else field, "code": code, "expected": guidance}
+        return
+
+    if keyword == "type" and isinstance(expected, list):
+        expected = " | ".join(expected)
+    elif keyword in {"enum", "oneOf", "anyOf", "not", "uniqueItems", "invalid_schema_type"}:
+        expected = {
+            "enum": "one of the declared values",
+            "oneOf": "exactly one declared branch",
+            "anyOf": "at least one declared branch",
+            "not": "remove the disallowed field combination",
+            "uniqueItems": "remove duplicate entries",
+            "invalid_schema_type": "non-empty unique JSON Schema types",
+        }[keyword]
+    elif not isinstance(expected, (str, int, float, bool)) and expected is not None:
+        expected = "match the registered constraint"
+    yield {"path": path or "$", "code": code, "expected": str(expected)}
 
 
 def validate_planner_tool_arguments(
     schema: object,
     arguments: object,
 ) -> dict[str, object]:
-    """Validate the bounded model-facing schema deterministically."""
-
+    """Validate the registered callable contract and project safe, field-level errors."""
     bounded_schema = bounded_planner_tool_schema(schema)
-    if not bounded_schema:
-        return {"ok": True, "code": "", "summary": "", "issues": []}
-    if not isinstance(arguments, Mapping):
-        return {
-            "ok": False,
-            "code": "planner_invalid_response",
-            "summary": "Tool arguments must be a JSON object.",
-            "issues": [{"path": "$", "code": "wrong_type", "expected": "object"}],
-        }
-
     issues: list[dict[str, str]] = []
-    _validate_planner_schema_node(bounded_schema, arguments, "", issues)
-    if not issues:
-        return {"ok": True, "code": "", "summary": "", "issues": []}
+    if bounded_schema:
+        validator = _PLANNER_ARGUMENT_VALIDATOR(bounded_schema, registry=Registry())
+        for error in validator.iter_errors(arguments):
+            for issue in _planner_schema_issue(error):
+                if issue not in issues:
+                    issues.append(issue)
     return {
-        "ok": False,
-        "code": "planner_invalid_response",
-        "summary": "Tool arguments do not match the registered shallow schema.",
+        "ok": not issues,
+        "code": "planner_invalid_response" if issues else "",
+        "summary": "Tool arguments do not match the registered input schema." if issues else "",
         "issues": issues,
     }
-
-
-def _planner_child_path(parent: str, child: str) -> str:
-    return f"{parent}.{child}" if parent else child
-
-
-def _append_planner_schema_issue(
-    issues: list[dict[str, str]], path: str, code: str, expected: str
-) -> None:
-    issues.append({"path": path or "$", "code": code, "expected": expected})
-
-
-def _validate_planner_schema_node(
-    schema: Mapping[str, object],
-    value: object,
-    path: str,
-    issues: list[dict[str, str]],
-) -> None:
-    declared_type = schema.get("type")
-    if isinstance(declared_type, list):
-        supported_types = {"string", "boolean", "integer", "number", "object", "array", "null"}
-        if (
-            not declared_type
-            or any(not isinstance(item, str) or item not in supported_types for item in declared_type)
-            or len(set(declared_type)) != len(declared_type)
-        ):
-            _append_planner_schema_issue(issues, path, "invalid_schema_type", "non-empty unique JSON Schema types")
-            return
-        value_type = next((item for item in declared_type if _matches_planner_schema_type(value, item)), "")
-        if not value_type:
-            _append_planner_schema_issue(issues, path, "wrong_type", " | ".join(declared_type))
-            return
-    else:
-        value_type = str(declared_type or "")
-    if not value_type and any(
-        key in schema for key in ("properties", "required", "additionalProperties")
-    ):
-        # JSON Schema branches commonly omit type when their object keywords
-        # already constrain the branch; retain the old planner behavior for
-        # oneOf/anyOf validation without mutating the projected schema.
-        value_type = "object"
-    if value_type and not _matches_planner_schema_type(value, value_type):
-        _append_planner_schema_issue(issues, path, "wrong_type", value_type)
-        return
-    if isinstance(schema.get("enum"), list) and value not in schema["enum"]:
-        _append_planner_schema_issue(issues, path, "enum", "one of the declared values")
-        return
-    if "const" in schema and value != schema.get("const"):
-        _append_planner_schema_issue(issues, path, "const", str(schema.get("const")))
-        return
-
-    if value_type in {"integer", "number"}:
-        number = float(value)  # type already checked above.
-        minimum = schema.get("minimum")
-        maximum = schema.get("maximum")
-        if isinstance(minimum, (int, float)) and number < float(minimum):
-            _append_planner_schema_issue(issues, path, "minimum", str(minimum))
-        if isinstance(maximum, (int, float)) and number > float(maximum):
-            _append_planner_schema_issue(issues, path, "maximum", str(maximum))
-    elif value_type == "string":
-        minimum = schema.get("minLength")
-        maximum = schema.get("maxLength")
-        if isinstance(minimum, (int, float)) and len(value) < int(minimum):
-            _append_planner_schema_issue(issues, path, "min_length", str(int(minimum)))
-        if isinstance(maximum, (int, float)) and len(value) > int(maximum):
-            _append_planner_schema_issue(issues, path, "max_length", str(int(maximum)))
-        pattern = schema.get("pattern")
-        if isinstance(pattern, str) and re.search(pattern, value) is None:
-            _append_planner_schema_issue(issues, path, "pattern", pattern)
-    elif value_type == "array":
-        minimum = schema.get("minItems")
-        maximum = schema.get("maxItems")
-        if isinstance(minimum, (int, float)) and len(value) < int(minimum):
-            _append_planner_schema_issue(issues, path, "min_items", str(int(minimum)))
-        if isinstance(maximum, (int, float)) and len(value) > int(maximum):
-            _append_planner_schema_issue(issues, path, "max_items", str(int(maximum)))
-        item_schema = schema.get("items")
-        if isinstance(item_schema, Mapping):
-            for index, item in enumerate(value):
-                _validate_planner_schema_node(item_schema, item, f"{path}[{index}]", issues)
-    elif value_type == "object":
-        properties = schema.get("properties")
-        property_map = properties if isinstance(properties, Mapping) else {}
-        required = schema.get("required")
-        required_names = required if isinstance(required, list) else []
-        for name in required_names:
-            if name not in value:
-                _append_planner_schema_issue(
-                    issues, _planner_child_path(path, str(name)), "missing_required", "present"
-                )
-        for raw_name, raw_value in value.items():
-            name = str(raw_name)
-            raw_spec = property_map.get(name)
-            child_path = _planner_child_path(path, name)
-            if not isinstance(raw_spec, Mapping):
-                if schema.get("additionalProperties") is False:
-                    _append_planner_schema_issue(
-                        issues, child_path, "unknown_property", "declared property"
-                    )
-                continue
-            _validate_planner_schema_node(raw_spec, raw_value, child_path, issues)
-
-    for branch_keyword in ("oneOf", "anyOf"):
-        raw_branches = schema.get(branch_keyword)
-        if not isinstance(raw_branches, list):
-            continue
-        matches = 0
-        for branch in raw_branches:
-            if not isinstance(branch, Mapping):
-                continue
-            branch_issues: list[dict[str, str]] = []
-            _validate_planner_schema_node(branch, value, path, branch_issues)
-            if not branch_issues:
-                matches += 1
-        valid = matches == 1 if branch_keyword == "oneOf" else matches >= 1
-        if not valid:
-            _append_planner_schema_issue(
-                issues,
-                path,
-                "branch_mismatch",
-                "exactly one declared branch" if branch_keyword == "oneOf" else "at least one declared branch",
-            )
 
 
 def planner_argument_validation_id(
