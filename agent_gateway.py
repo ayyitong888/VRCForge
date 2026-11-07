@@ -148,7 +148,9 @@ from external_tool_result_contract import (
     external_write_failure_view,
 )
 from agent_budget_policy import freeze_agent_budget_policy
-from agent_general_no_progress import LOOP_REASONS, LOOP_REMINDER, ToolLoopProgress, general_read_observation_key
+from agent_general_no_progress import (
+    LOOP_REASONS, LOOP_REMINDER, ToolLoopProgress, general_read_observation_key, tool_result_digest,
+)
 from general_agent_tools import (
     _authorized_path as _general_authorized_path,
     extract_explicit_local_roots,
@@ -6492,11 +6494,11 @@ class AgentGateway:
         repeated_failure_guard = RepeatedFailureGuard()
         tool_loop_progress = ToolLoopProgress(project_root)
         loop_reminder_pending = False
-        last_directory: tuple[str, str, Any] | None = None
-        last_effect_receipt: tuple[str, Any] | None = None
+        last_directory: tuple[str, str, str] | None = None
+        last_effect_receipt: tuple[str, str | None] | None = None
         if continuation_completion.get("status") == "completed" and continuation_context.get("requestedKind") in {"write", "shell"}:
-            last_effect_receipt = (str(continuation_context.get("requestedActionId") or ""),
-                                   ensure_dict(continuation_context.get("execution")).get("result"))
+            # A resumed receipt only needs a digest if the model asks to replay it.
+            last_effect_receipt = (str(continuation_context.get("requestedActionId") or ""), None)
 
         def detect_tool_loop(plan: dict[str, Any], **call: Any) -> dict[str, Any] | None:
             nonlocal loop_reminder_pending
@@ -7550,9 +7552,16 @@ class AgentGateway:
                 summary = "The same operation already completed. Use its receipt or inspect the result."
                 loop_state.append({"tool": "runtime_no_progress", "kind": "verification", "status": "suppressed",
                                    "result": {"summary": summary}, "actionId": planned_action_id})
+                if equivalent_directory:
+                    receipt_digest = last_directory[2]
+                else:
+                    receipt_digest = last_effect_receipt[1]
+                    if receipt_digest is None:
+                        receipt_digest = tool_result_digest(ensure_dict(continuation_context.get("execution")).get("result"))
+                        last_effect_receipt = (planned_action_id, receipt_digest)
                 pause_plan = detect_tool_loop(
                     plan, action_id=loop_action_id, tool=planned_tool, arguments=execution_arguments,
-                    result=last_directory[2] if equivalent_directory else last_effect_receipt[1],
+                    result_digest=receipt_digest,
                     status="suppressed", summary=summary, effect="",
                 )
                 if pause_plan:
@@ -8548,6 +8557,8 @@ class AgentGateway:
                 break
             if str(plan.get("nextStep") or "") == "done":
                 break
+            result_value = step_payload.get("result")
+            receipt_digest = None
             if not polling and task_action.get("runtimeStatus") != "polling":
                 effect = ""
                 if task_action.get("status") == "completed" and step_outcome_status == "ok":
@@ -8555,13 +8566,13 @@ class AgentGateway:
                         effect = "write"
                     elif action_kind == "skill":
                         effect = "read"
-                result_value = step_payload.get("result")
-                if result_value is None:
-                    result_value = step_payload.get("error") or step_outcome_status
+                if result_value is not None:
+                    receipt_digest = tool_result_digest(result_value)
                 pause_plan = detect_tool_loop(
                     plan,
                     action_id=loop_action_id, tool=step_tool, arguments=execution_arguments,
-                    result=result_value, status=result_status,
+                    result_digest=receipt_digest or tool_result_digest(step_payload.get("error") or step_outcome_status),
+                    status=result_status,
                     summary=planner_policy.sanitize_planner_observation_text(result_summary, 90),
                     effect=effect,
                 )
@@ -8569,11 +8580,14 @@ class AgentGateway:
                     last_plan = pause_plan
                     break
             if not step_failure_class:
-                last_directory = (directory_key, planned_action_id, step_payload.get("result")) if directory_key else None
-                last_effect_receipt = (
-                    (planned_action_id, step_payload.get("result"))
-                    if action_kind in {"write", "shell"} or (tool_definition and tool_definition.write) else None
-                )
+                cache_effect = action_kind in {"write", "shell"} or (tool_definition and tool_definition.write)
+                last_directory = last_effect_receipt = None
+                if directory_key or cache_effect:
+                    receipt_digest = receipt_digest or tool_result_digest(result_value)
+                    if directory_key:
+                        last_directory = (directory_key, planned_action_id, receipt_digest)
+                    if cache_effect:
+                        last_effect_receipt = (planned_action_id, receipt_digest)
         reasoning_trace = ensure_dict(reasoning_trace)
         context_usage = ensure_dict(context_usage)
         observed_context_usage = deepcopy(context_usage)

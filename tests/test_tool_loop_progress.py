@@ -1,12 +1,12 @@
 """Focused rules not already covered by the Gateway alternating-call replay."""
-from agent_general_no_progress import ToolLoopProgress
+from agent_general_no_progress import ToolLoopProgress, tool_result_digest
 from agent_task_loop import canonical_action_id
 
 
 def record(progress, tool, args, result, effect="read"):
     return progress.record(
         action_id=canonical_action_id(effect, tool, args), tool=tool,
-        arguments=args, result=result, status="ok", summary="", effect=effect,
+        arguments=args, result_digest=tool_result_digest(result), status="ok", summary="", effect=effect,
     )
 
 
@@ -155,18 +155,33 @@ def test_native_batch_delivers_reminder_after_pairing_results_and_settles_pause(
     assert any(message.get("hidden") for message in model.requests[3]["messages"])
 
 
-def test_identical_completed_write_is_not_reexecuted_to_count_replays(tmp_path):
+def test_identical_completed_write_reuses_its_result_digest(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    import agent_general_no_progress
     from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
     from tests.test_native_runtime_gateway import call, run
 
     project = tmp_path / "UnityProject"
     arguments = {"projectRoot": str(project), "value": 1}
+    receipt = {"ok": True, "status": "written", "data": "receipt data " * 80_000}
+    serialized_receipts = []
+
+    def count_receipt(value, **options):
+        encoded = json.dumps(value, **options)
+        if value == receipt:
+            serialized_receipts.append(len(encoded))
+        return encoded
+
+    monkeypatch.setattr(agent_general_no_progress, "json", SimpleNamespace(dumps=count_receipt))
     gateway, _, writes = _write_gateway_for_mode(tmp_path, [
         call(f"write-{index}", "fixture_write", arguments) for index in range(4)
-    ])
+    ], handler_result=receipt)
     _set_mode(gateway, "auto")
     gateway.approval_transactions.auto_approval_reviewer = lambda _: "allow_auto"
     result = run(gateway, project, maxAgenticTurns=6, message="Update the fixture once.")
     assert result["plan"]["nextStep"] == "paused"
     assert result["plan"]["reason"] == "tool_loop_repeated"
     assert len(writes) == 1
+    assert len(serialized_receipts) == 1

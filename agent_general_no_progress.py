@@ -104,6 +104,12 @@ class _Call:
     summary: str
 
 
+def tool_result_digest(result: Any) -> str:
+    encoded = json.dumps(result, ensure_ascii=True, sort_keys=True,
+                         separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class ToolLoopProgress:
     def __init__(self, project_root: str = "") -> None:
         self._project_root = project_root.replace("\\", "/")
@@ -116,13 +122,10 @@ class ToolLoopProgress:
         self._unchanged = 0
         self.reminded = False
 
-    def record(self, *, action_id: str, tool: str, arguments: Any, result: Any,
+    def record(self, *, action_id: str, tool: str, arguments: Any, result_digest: str,
                status: str, summary: str, effect: str) -> str:
-        encoded = json.dumps(result, ensure_ascii=True, sort_keys=True,
-                             separators=(",", ":"), default=str).encode("utf-8")
-        digest = hashlib.sha256(encoded).hexdigest()
         self._unchanged = self._unchanged + 1 if any(
-            row.result_digest == digest for row in self._calls
+            row.result_digest == result_digest for row in self._calls
         ) else 0
         target = {key.casefold(): value for key, value in action_target(arguments).items()}
         if isinstance(arguments, Mapping):
@@ -133,10 +136,10 @@ class ToolLoopProgress:
         scope = target.pop("projectroot", target.pop("projectpath", self._project_root))
         if target and scope:
             target["projectroot"] = scope
-        self._calls.append(_Call(action_id, digest, target, effect, tool, status, summary))
+        self._calls.append(_Call(action_id, result_digest, target, effect, tool, status, summary))
         if effect == "read" and target and self._unchanged_write():
             return "tool_loop_write_unverified"
-        if sum(row.action_id == action_id and row.result_digest == digest for row in self._calls) >= 3:
+        if sum(row.action_id == action_id and row.result_digest == result_digest for row in self._calls) >= 3:
             return "tool_loop_repeated"
         if self._unchanged >= 10:
             return "tool_loop_no_progress"
