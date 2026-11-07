@@ -47,6 +47,8 @@ Need an Avatar project? Create one with [Creator Companion (VCC)](https://vcc.do
 
 ## Choose your AI
 
+**The built-in agent is still in testing.** External MCP connections and common project operations are generally stable. For day-to-day avatar editing, use an external MCP client.
+
 - **Chat in VRCForge:** Open **Settings → Models**, choose your model service, enter your API key and save. Select a model and test the connection.
 - **Use an existing MCP agent:** Open **Settings → Connectors**, turn on **Connect external Agents**, select your client and click **Install MCP config**. You can also copy the general connection instructions to your agent. Keep VRCForge and Unity open, restart or reconnect the client, then ask the agent to inspect the avatar. Turn on **Allow project changes** when you want it to edit. [Detailed connection steps](USER_MANUAL.md#external-agent-connectors)
 
