@@ -60,6 +60,18 @@ def test_public_apply_rejects_core_payload_shape_instead_of_advertising_it():
         jsonschema.validate(payload, write_schema(APPLY))
 
 
+@pytest.mark.parametrize("avatar_key", ["avatarPath", "avatar_path"])
+def test_apply_names_unsupported_avatar_field_before_avatar_selection(avatar_key):
+    payload = {**BASE, avatar_key: "AvatarB", "adjustments": [ITEM]}
+    with pytest.raises(ValidationError, match=rf"Rename `{avatar_key}` to `avatar`") as error:
+        ManualBlendshapeApplyRequest(**payload)
+    assert "input_value=" not in str(error.value)
+
+    payload["avatar"] = payload.pop(avatar_key)
+    jsonschema.validate(payload, write_schema(APPLY))
+    assert ManualBlendshapeApplyRequest(**payload).avatar == "AvatarB"
+
+
 @pytest.mark.parametrize("avatar_key", ["avatar", "avatarPath", "avatar_path"])
 @pytest.mark.parametrize("item", [ITEM, CAMEL])
 def test_preview_aliases_reach_actual_registered_handler(monkeypatch, avatar_key, item):

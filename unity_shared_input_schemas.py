@@ -302,6 +302,7 @@ ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
                     {"required": ["keys"], "not": {"required": ["constantFloat"]}},
                     {"required": ["constantFloat"], "not": {"required": ["keys"]}},
                 ],
+                "x-validation-hint": "For a constant curve, keep constantFloat and remove keys. For a keyed curve, keep keys and remove constantFloat.",
             },
         },
     },
@@ -352,6 +353,7 @@ ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["properties"]["curves"]["items"] = {
                             "constantFloat": _ANIMATION_CURVE_ROW_SCHEMA["properties"]["constantFloat"],
                         },
                         "oneOf": _ANIMATION_CURVE_ROW_SCHEMA["oneOf"],
+                        "x-validation-hint": _ANIMATION_CURVE_ROW_SCHEMA["x-validation-hint"],
                     },
                 },
             },
@@ -379,7 +381,8 @@ ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["properties"]["clips"] = {
                              "curveSet": {"type": "integer", "minimum": 0, "maximum": 31,
                                           "description": "Zero-based index into this request's curveSets; mutually exclusive with curves."}},
               "oneOf": [{"required": ["curves"], "not": {"required": ["curveSet"]}},
-                        {"required": ["curveSet"], "not": {"required": ["curves"]}}]},
+                        {"required": ["curveSet"], "not": {"required": ["curves"]}}],
+              "x-validation-hint": "Keep curves for inline rows or curveSet for a reusable set. Supply one and remove the other."},
 }
 ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["properties"]["curveSets"] = {
     "type": "array", "minItems": 1, "maxItems": 32,
@@ -390,7 +393,8 @@ ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["allOf"] = [{
     "if": {"required": ["curveSets"]},
     "then": {"required": ["clips"]},
     "else": {"properties": {"clips": {"items": {"not": {"required": ["curveSet"]}}}}},
-}, {"oneOf": [
+}, {"x-validation-hint": "For a scene curve, set animatorRootPath and omit assetOnly. For an asset-only curve, set assetOnly=true and omit animatorRootPath.",
+    "oneOf": [
     {"required": ["animatorRootPath"], "properties": {"assetOnly": {"const": False}}},
     {"required": ["assetOnly"], "properties": {"assetOnly": {"const": True}}, "not": {"required": ["animatorRootPath"]}},
 ]}]

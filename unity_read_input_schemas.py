@@ -108,10 +108,10 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "allOf": [
             {
                 "if": {"properties": {"source": {"const": "memory"}}},
-                "then": {"not": {"anyOf": [
-                    {"required": ["file"]},
-                    {"required": ["offset"]},
-                ]}},
+                "then": {
+                    "not": {"anyOf": [{"required": ["file"]}, {"required": ["offset"]}]},
+                    "x-validation-hint": "Remove file and offset for memory logs, or set source to disk for a retained log file.",
+                },
             },
             {
                 "if": {"properties": {"offset": {}}, "required": ["offset"]},
@@ -692,7 +692,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "includeAllProjectClips": {"type": "boolean", "default": False, "description": "Include all project clips only when clipPaths and controllerPath are empty; normally leave false."},
             "includeBindingDetails": {"type": "boolean", "default": False, "description": "For legacy reads without bindingView or selection fields, opt in to bounded keyframe and object-reference arrays; omitted or false returns summaries. Selected reads use bindingView to choose summary, index, or details."},
             "bindingView": {"type": "string", "enum": ["summary", "index", "details"], "description": "For large controllers start with summary (clip identities/counts, no curves), then index (binding identities/counts), then exact selectors with details. Omitting all selection fields preserves legacy output. Selected reads are paged and do not write Unity files."},
-            "bindingSelectors": {"type": "array", "maxItems": 32, "items": {"type": "object", "additionalProperties": False, "anyOf": [{"required": ["path"]}, {"required": ["propertyName"]}], "properties": {"path": {"type": "string", "maxLength": 1024}, "propertyName": {"type": "string", "minLength": 1, "maxLength": 1024}, "componentType": {"type": "string", "minLength": 1, "maxLength": 1024}}}, "description": "Exact case-sensitive path/propertyName/componentType match. AND within a row, OR across rows. Empty path means animator root; omitted fields unrestricted. No wildcards. A no_matches result explicitly means zero matched bindings."},
+            "bindingSelectors": {"type": "array", "maxItems": 32, "items": {"type": "object", "additionalProperties": False, "anyOf": [{"required": ["path"]}, {"required": ["propertyName"]}], "x-validation-hint": "Set path or propertyName in this selector. componentType alone is insufficient.", "properties": {"path": {"type": "string", "maxLength": 1024}, "propertyName": {"type": "string", "minLength": 1, "maxLength": 1024}, "componentType": {"type": "string", "minLength": 1, "maxLength": 1024}}}, "description": "Exact case-sensitive path/propertyName/componentType match. AND within a row, OR across rows. Empty path means animator root; omitted fields unrestricted. No wildcards. A no_matches result explicitly means zero matched bindings."},
             "bindingOffset": {"type": "integer", "minimum": 0, "maximum": 2147483647, "description": "Global sorted binding offset within current clip page. Follow paging.nextRequest."},
             "bindingLimit": {"type": "integer", "minimum": 1, "maximum": 256, "description": "Selected binding page size, default 16. Small exact pages reduce agent tokens."},
             "clipOffset": {"type": "integer", "minimum": 0, "maximum": 2147483647, "description": "Sorted discovered clip offset. Follow paging.nextRequest."},

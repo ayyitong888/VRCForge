@@ -1,6 +1,8 @@
 import pytest
 
 from runtime_planner_service import validate_planner_tool_arguments
+from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
+from unity_shared_input_schemas import ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA
 
 
 def validate(spec, value, *, required=True):
@@ -82,3 +84,49 @@ def test_integer_accepts_integral_numbers_within_bounds(value):
 @pytest.mark.parametrize("value", [True, False, 1.5, float("inf"), float("-inf"), float("nan"), 0.0, 3.0])
 def test_integer_rejects_nonintegers_and_retains_bounds(value):
     assert not validate({"type": "integer", "minimum": 1, "maximum": 2}, value)["ok"]
+
+
+def test_animation_admission_explains_mutually_exclusive_curve_fields():
+    schema = ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA
+    row = {"bindingPath": "Body", "componentType": "SkinnedMeshRenderer",
+           "propertyName": "material._Color.a", "constantFloat": 0.5}
+    request = {"projectPath": "D:/FixtureUnity", "clipPath": "Assets/Test.anim",
+               "animatorRootPath": "Avatar", "curves": [row]}
+    assert validate_planner_tool_arguments(schema, request)["ok"]
+
+    conflict = {**request, "curves": [{**row, "keys": [{"time": 0, "value": 0.5}]}]}
+    issue = validate_planner_tool_arguments(schema, conflict)["issues"][0]
+    assert issue["path"] == "curves[0]"
+    assert "keys" in issue["expected"] and "constantFloat" in issue["expected"]
+    assert "remove" in issue["expected"].lower()
+
+
+def test_animation_admission_enforces_context_and_unique_group_paths():
+    schema = ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA
+    request = {"projectPath": "D:/FixtureUnity", "clipPath": "Assets/Test.anim",
+               "animatorRootPath": "Avatar", "curves": [{
+                   "bindingPaths": ["Body"],
+                   "componentType": "SkinnedMeshRenderer",
+                   "properties": [{"propertyName": "material._Color.a", "constantFloat": 0.5}],
+               }]}
+    assert validate_planner_tool_arguments(schema, request)["ok"]
+    for invalid in ({**request, "assetOnly": True},
+                    {name: value for name, value in request.items() if name != "animatorRootPath"}):
+        issue = validate_planner_tool_arguments(schema, invalid)["issues"][0]
+        assert "animatorRootPath" in issue["expected"] and "assetOnly" in issue["expected"]
+
+    request["curves"][0]["bindingPaths"].append("Body")
+    issue = validate_planner_tool_arguments(schema, request)["issues"][0]
+    assert issue["path"] == "curves[0].bindingPaths"
+    assert "duplicate" in issue["expected"].lower()
+
+
+@pytest.mark.parametrize("tool,arguments,path,fields", [
+    ("vrcforge_scan_animation_bindings", {"bindingSelectors": [{"componentType": "Transform"}]},
+     "bindingSelectors[0]", ("path", "propertyName")),
+    ("vrcforge_read_recent_logs", {"source": "memory", "file": "old.log"}, "$", ("file", "disk")),
+])
+def test_shared_constraints_guide_model_to_the_correct_input(tool, arguments, path, fields):
+    issue = validate_planner_tool_arguments(UNITY_READ_TOOL_INPUT_SCHEMAS[tool], arguments)["issues"][0]
+    assert issue["path"] == path
+    assert all(field in issue["expected"] for field in fields)
