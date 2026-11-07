@@ -46,6 +46,7 @@ VRCForge 是给 VRChat Avatar 创作者使用的开源改模工具。你可以�
 ## 选择 AI 入口
 
 **内置 Agent 仍在测试中。** 外部 MCP 的连接和常用工程操作基本稳定，日常改模建议优先使用外部 MCP 客户端。
+使用内置 Agent 遇到问题，欢迎到 [GitHub Issues](https://github.com/ayyitong888/VRCForge/issues) 反馈。
 
 - **在 VRCForge 里聊天：** 打开「设置 → 模型」，选择模型服务、填写 API Key，保存后选择模型并测试连接。
 - **用已有的 MCP Agent：** 打开「设置 → 连接器」，开启「连接外部 Agent」，选择客户端并点击「安装 MCP 配置」；也可复制通用连接说明交给 Agent。保持 VRCForge 和 Unity 开着，重启或重新连接客户端，再让 Agent 检查模型。需要改模时再打开「允许修改项目」。[详细连接步骤](USER_MANUAL.md#external-agent-connectors)
