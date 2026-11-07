@@ -1,6 +1,6 @@
 [package]
 name = "vrcforge-setup"
-version = "1.10.8"
+version = "1.10.9"
 edition = "2021"
 
 [build-dependencies]

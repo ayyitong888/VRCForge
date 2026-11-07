@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Current version](https://img.shields.io/badge/current-v1.10.8-d9487c?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.10.9-d9487c?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 
@@ -22,7 +22,7 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 
 > Unity / VRChat Avatar プロジェクトを書き換える機能を使う前に、必ずバックアップしてください。
 
-現在の正式版：[1.10.8](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.8) · [更新内容](docs/RELEASE_NOTES_1.10.8.md)
+現在の正式版：[1.10.9](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.9) · [更新内容](docs/RELEASE_NOTES_1.10.9.md)
 
 ## ダウンロード：App と Unity プラグインの両方が必要
 
@@ -30,8 +30,8 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 
 | 必須ダウンロード | インストール先 |
 | --- | --- |
-| **[App オフラインインストーラー（.exe）](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.8/VRCForge_Offline_Installer_x64.exe)** | Windows で実行。[Web インストーラー](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.8/VRCForge_Web_Installer_x64.exe) でも可。どちらか一つを選びます。 |
-| **[Unity Core プラグイン（VRCForge.unitypackage）](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.8/VRCForge.unitypackage)** | 接続する各 Unity プロジェクトに **Import All**。App のインストールだけでは Unity に接続できません。 |
+| **[App オフラインインストーラー（.exe）](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.9/VRCForge_Offline_Installer_x64.exe)** | Windows で実行。[Web インストーラー](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.9/VRCForge_Web_Installer_x64.exe) でも可。どちらか一つを選びます。 |
+| **[Unity Core プラグイン（VRCForge.unitypackage）](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.9/VRCForge.unitypackage)** | 接続する各 Unity プロジェクトに **Import All**。App のインストールだけでは Unity に接続できません。 |
 
 アップグレード時も App と Unity プラグインの両方を更新してください。
 
