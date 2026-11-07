@@ -1,14 +1,32 @@
-name: Validate 1.8.0 installer upgrade
+name: Validate Windows installer
+run-name: Validate Windows installer ${{ inputs.candidate_tag }} from ${{ inputs.previous_tag }}
 
 on:
   workflow_dispatch:
     inputs:
+      candidate_tag:
+        description: Tag of the candidate release
+        default: v1.8.0
+        type: string
+      previous_tag:
+        description: Tag of the published stable release to upgrade from
+        default: v1.7.10
+        type: string
+      require_candidate_draft:
+        description: Require the candidate release to still be a draft
+        default: false
+        type: boolean
+      installer_kind:
+        description: Installer technology used by both release assets
+        type: choice
+        options: [nsis, native]
+        default: nsis
       candidate_sha256:
-        description: SHA-256 of the reviewed 1.8.0 offline installer
+        description: SHA-256 of the reviewed candidate offline installer
         required: true
         type: string
       previous_sha256:
-        description: SHA-256 of the published 1.7.10 offline installer
+        description: SHA-256 of the published previous offline installer
         required: true
         type: string
 
@@ -33,8 +51,11 @@ jobs:
       run:
         shell: pwsh
     env:
+      CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+      PREVIOUS_TAG: ${{ inputs.previous_tag }}
       CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
       PREVIOUS_SHA256: ${{ inputs.previous_sha256 }}
+      INSTALLER_KIND: ${{ inputs.installer_kind }}
       VALIDATION_MODE: ${{ matrix.mode }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -42,23 +63,31 @@ jobs:
           persist-credentials: false
 
       - name: Download and bind exact repository release assets
+        id: bind
         env:
           GH_TOKEN: ${{ github.token }}
+          REQUIRE_CANDIDATE_DRAFT: ${{ inputs.require_candidate_draft }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted disposable VM required.' }
+          foreach ($tag in @($env:CANDIDATE_TAG, $env:PREVIOUS_TAG)) {
+            if ($tag -cnotmatch '\Av(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z') { throw 'Expected a stable version tag in vMAJOR.MINOR.PATCH form.' }
+          }
+          if ([version]$env:PREVIOUS_TAG.Substring(1) -ge [version]$env:CANDIDATE_TAG.Substring(1)) { throw 'The previous release must be older than the candidate.' }
+          $evidenceVersion = if ($env:CANDIDATE_TAG -ceq 'v1.8.0') { '180' } else { $env:CANDIDATE_TAG }
+          "evidence_version=$evidenceVersion" >> $env:GITHUB_OUTPUT
           foreach ($digest in @($env:CANDIDATE_SHA256, $env:PREVIOUS_SHA256)) {
-            if ($digest -cnotmatch '^[0-9a-fA-F]{64}$') { throw 'Expected SHA-256 must have exactly 64 hexadecimal characters.' }
+            if ($digest -cnotmatch '\A[0-9a-fA-F]{64}\z') { throw 'Expected SHA-256 must have exactly 64 hexadecimal characters.' }
           }
           $downloadRoot = Join-Path $env:RUNNER_TEMP 'installer-inputs'
           $evidenceRoot = Join-Path $env:GITHUB_WORKSPACE 'installer-evidence'
           New-Item -ItemType Directory -Path $downloadRoot, $evidenceRoot | Out-Null
           $bindings = @()
           $releaseInputs = @(
-            @{ Tag = 'v1.8.0'; Folder = 'candidate'; Sha = $env:CANDIDATE_SHA256.ToLowerInvariant() }
+            @{ Tag = $env:CANDIDATE_TAG; Folder = 'candidate'; Sha = $env:CANDIDATE_SHA256.ToLowerInvariant() }
           )
           if ($env:VALIDATION_MODE -eq 'upgrade') {
-            $releaseInputs += @{ Tag = 'v1.7.10'; Folder = 'previous'; Sha = $env:PREVIOUS_SHA256.ToLowerInvariant() }
+            $releaseInputs += @{ Tag = $env:PREVIOUS_TAG; Folder = 'previous'; Sha = $env:PREVIOUS_SHA256.ToLowerInvariant() }
           }
           foreach ($releaseInput in $releaseInputs) {
             $tag = $releaseInput.Tag
@@ -73,7 +102,8 @@ jobs:
             }
             if ($releaseMatches.Count -ne 1) { throw "Expected exactly one release for tag $tag; found $($releaseMatches.Count)." }
             $release = $releaseMatches[0]
-            if ($tag -eq 'v1.7.10' -and ($release.draft -or $release.prerelease)) { throw 'Previous installer must be a published stable release.' }
+            if ($releaseInput.Folder -eq 'previous' -and ($release.draft -or $release.prerelease)) { throw 'Previous installer must be a published stable release.' }
+            if ($releaseInput.Folder -eq 'candidate' -and $env:REQUIRE_CANDIDATE_DRAFT -eq 'true' -and -not $release.draft) { throw 'Candidate installer must belong to a draft release.' }
             $assetName = 'VRCForge_Offline_Installer_x64.exe'
             $assets = @($release.assets | Where-Object { $_.name -ceq $assetName })
             if ($assets.Count -ne 1 -or $assets[0].state -ne 'uploaded') { throw "Expected one complete installer asset for $tag." }
@@ -94,6 +124,7 @@ jobs:
             runId = $env:GITHUB_RUN_ID
             runAttempt = $env:GITHUB_RUN_ATTEMPT
             smokeScriptSha256 = (Get-FileHash scripts/smoke_installer_install_uninstall.py -Algorithm SHA256).Hash.ToLowerInvariant()
+            installerKind = $env:INSTALLER_KIND
             assets = $bindings
           } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidenceRoot 'input-binding.json') -Encoding utf8
 
@@ -106,16 +137,20 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $downloadRoot = Join-Path $env:RUNNER_TEMP 'installer-inputs'
           $evidenceRoot = Join-Path $env:GITHUB_WORKSPACE 'installer-evidence'
-          & python scripts/probe_installer_destination.py installer/VRCForge_WebPayload.ps1 (Join-Path $evidenceRoot 'destination-preflight.json')
-          if ($LASTEXITCODE -ne 0) { throw 'Read-only destination diagnostic failed to run.' }
+          if ($env:INSTALLER_KIND -eq 'nsis') {
+            & python scripts/probe_installer_destination.py installer/VRCForge_WebPayload.ps1 (Join-Path $evidenceRoot 'destination-preflight.json')
+            if ($LASTEXITCODE -ne 0) { throw 'Read-only destination diagnostic failed to run.' }
+          }
           $smokeArgs = @(
             'scripts/smoke_installer_install_uninstall.py',
             '--scope', 'production-clean',
             '--production-clean-confirmation', 'I-OWN-THIS-DISPOSABLE-WINDOWS-ENVIRONMENT',
+            '--installer-kind', $env:INSTALLER_KIND,
             '--installer', (Join-Path $downloadRoot 'candidate/VRCForge_Offline_Installer_x64.exe')
           )
           if ($env:VALIDATION_MODE -eq 'upgrade') {
             $smokeArgs += @('--upgrade-installer', (Join-Path $downloadRoot 'previous/VRCForge_Offline_Installer_x64.exe'))
+            if ($env:INSTALLER_KIND -eq 'native') { $smokeArgs += @('--upgrade-version', $env:PREVIOUS_TAG.Substring(1)) }
           }
           $smokeArgs += @('--artifacts-dir', $evidenceRoot, '--timeout', '180')
           # This step owns the read-only sampler job; it never receives GH_TOKEN.
@@ -137,10 +172,11 @@ jobs:
           $upgradeSha = if ($upgradeExpected) { $env:PREVIOUS_SHA256.ToLowerInvariant() } else { '' }
           $upgradePhase = if ($upgradeExpected) { 'passed' } else { 'skipped' }
           if ($report.ok -ne $true -or $report.summary.status -ne 'passed' -or
+              $report.installerKind -cne $env:INSTALLER_KIND -or
               $report.scope.mode -ne 'production-clean' -or $report.scope.cleanEnvironmentConfirmed -ne $true -or
               $report.installerSha256 -cne $env:CANDIDATE_SHA256.ToLowerInvariant() -or
               $report.upgradeInstallerSha256 -cne $upgradeSha -or
-              $report.summary.phases.upgrade -ne $upgradePhase -or $health.Count -ne 1 -or $health[0].version -ne '1.8.0') {
+              $report.summary.phases.upgrade -ne $upgradePhase -or $health.Count -ne 1 -or $health[0].version -cne $env:CANDIDATE_TAG.Substring(1)) {
             throw 'Installer report does not prove the requested version and immutable inputs.'
           }
 
@@ -148,7 +184,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: installer-180-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: installer-${{ steps.bind.outputs.evidence_version || 'unbound' }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: installer-evidence/
           if-no-files-found: warn
           retention-days: 7

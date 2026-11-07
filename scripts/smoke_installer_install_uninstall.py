@@ -39,9 +39,11 @@ def main() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Smoke-test VRCForge NSIS installer install/uninstall.")
+    parser = argparse.ArgumentParser(description="Smoke-test VRCForge installer install/uninstall.")
     parser.add_argument("--installer", default="dist/release/VRCForge_Offline_Installer_x64.exe")
     parser.add_argument("--upgrade-installer", default="", help="Optional older installer to install before upgrading with --installer.")
+    parser.add_argument("--installer-kind", choices=("nsis", "native"), default="nsis")
+    parser.add_argument("--upgrade-version", default="", help="Expected installed version of the native upgrade baseline.")
     parser.add_argument(
         "--scope",
         choices=("isolated-smoke", "production-clean"),
@@ -70,6 +72,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     upgrade_installer = Path(args.upgrade_installer).expanduser().resolve() if args.upgrade_installer else None
     smoke_id = str(getattr(args, "smoke_id", "")).strip()
     scope_mode = str(getattr(args, "scope", "isolated-smoke") or "isolated-smoke").strip()
+    native = getattr(args, "installer_kind", "nsis") == "native"
     install_dir = resolve_install_dir(args.install_dir, smoke_id)
     user_data_root = resolve_user_data_root(args.user_data_root, smoke_id)
     steps: list[dict[str, Any]] = []
@@ -84,6 +87,10 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     install_attempt_owned = False
     sentinel_path = user_data_root / SENTINEL_NAME
     try:
+        if native and (scope_mode != "production-clean" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
+            raise RuntimeError("Native installer UI automation requires a disposable GitHub-hosted Windows VM.")
+        if native and upgrade_installer is not None and not args.upgrade_version:
+            raise RuntimeError("Native upgrade smoke requires the expected baseline version.")
         steps.append(
             {
                 "name": "installer.exists",
@@ -141,7 +148,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             phases["install"] = "blocked"
             phases["uninstall"] = "blocked"
             phases["upgrade"] = "blocked" if upgrade_installer is not None else "skipped"
-            blocked_reason = "NSIS installers request admin elevation and write Program Files plus HKLM uninstall registry keys."
+            blocked_reason = "The installer requires admin elevation to write Program Files and the HKLM uninstall registry."
             return build_report(
                 args,
                 installer,
@@ -161,27 +168,40 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         if install_dir.exists():
             raise RuntimeError(f"Install directory already exists; refusing to overwrite during smoke: {install_dir}")
 
-        sentinel = create_preservation_sentinel(user_data_root, installer, upgrade_installer)
-        steps.append({"name": "preservation.sentinel_created", "ok": sentinel_path.is_file(), "path": str(sentinel_path), "sentinelId": sentinel["id"]})
-        if not sentinel_path.is_file():
-            raise RuntimeError("Preservation sentinel was not created.")
+        if not native:
+            sentinel = record_preservation_sentinel(steps, sentinel_path, installer, upgrade_installer)
 
         first_installer = upgrade_installer or installer
         install_attempt_owned = True
-        install_result = run_installer(first_installer, install_dir, args.timeout)
+        install_result = (
+            run_native_setup(first_installer, "install", args.timeout)
+            if native else run_installer(first_installer, install_dir, args.timeout)
+        )
         steps.append(command_step("installer.install", install_result.args, install_result))
         phases["install"] = "passed" if install_result.returncode == 0 else "failed"
         if install_result.returncode != 0:
             raise RuntimeError("Installer returned a non-zero exit code.")
 
+        if native:
+            # Seed after the first real installation so a fresh install starts with empty user data.
+            sentinel = record_preservation_sentinel(steps, sentinel_path, installer, upgrade_installer)
         if upgrade_installer is not None:
-            upgrade_result = run_installer(installer, install_dir, args.timeout)
+            if native:
+                baseline_version = (install_dir / "VERSION").read_text(encoding="utf-8").strip()
+                baseline_ok = baseline_version == args.upgrade_version
+                steps.append({"name": "upgrade_installer.version", "ok": baseline_ok, "version": baseline_version})
+                if not baseline_ok:
+                    raise RuntimeError("Installed baseline version does not match the requested upgrade source.")
+                upgrade_result = run_native_setup(installer, "upgrade", args.timeout)
+            else:
+                upgrade_result = run_installer(installer, install_dir, args.timeout)
             steps.append(command_step("installer.upgrade", upgrade_result.args, upgrade_result))
-            phases["upgrade"] = "passed" if upgrade_result.returncode == 0 and sentinel_path.is_file() else "failed"
+            preserved = sentinel_path.is_file() and read_json_file(sentinel_path).get("id") == sentinel["id"]
+            phases["upgrade"] = "passed" if upgrade_result.returncode == 0 and preserved else "failed"
             if upgrade_result.returncode != 0:
                 raise RuntimeError("Upgrade installer returned a non-zero exit code.")
-            steps.append({"name": "preservation.after_upgrade", "ok": sentinel_path.is_file(), "path": str(sentinel_path)})
-            if not sentinel_path.is_file():
+            steps.append({"name": "preservation.after_upgrade", "ok": preserved, "path": str(sentinel_path)})
+            if not preserved:
                 raise RuntimeError("User data sentinel was not preserved after upgrade.")
 
         expected = [
@@ -202,6 +222,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             smoke_id=str(getattr(args, "smoke_id", "") or "").strip(),
             phase=shortcut_phase,
             timeout=args.timeout,
+            **({"expected_icon": install_dir / "VRCForge.exe"} if native else {}),
         )
         steps.append(shortcut_step)
         if not shortcut_step["ok"]:
@@ -247,7 +268,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         if not backend_cleanup_ok:
             raise RuntimeError("Installed backend port remained in use after process stop.")
 
-        uninstall_steps, removed = uninstall_installed_payload(install_dir, args.timeout)
+        uninstall_steps, removed = uninstall_installed_payload(install_dir, args.timeout, native=native)
         steps.extend(uninstall_steps)
         phases["uninstall"] = "passed" if removed else "failed"
         if not removed:
@@ -285,7 +306,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             stop_process(backend_process)
             backend_process = None
         if install_attempt_owned and install_dir.exists():
-            cleanup_steps, removed = uninstall_installed_payload(install_dir, args.timeout, prefix="failure_cleanup")
+            cleanup_steps, removed = uninstall_installed_payload(install_dir, args.timeout, prefix="failure_cleanup", native=native)
             steps.extend(cleanup_steps)
             phases["uninstall"] = "passed" if removed else "failed"
         return build_report(
@@ -312,30 +333,50 @@ def run_installer(installer: Path, install_dir: Path, timeout: float) -> subproc
     return subprocess.run(cmd, cwd=str(installer.parent), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
 
 
+def run_native_setup(executable: Path, mode: str, timeout: float) -> subprocess.CompletedProcess[str]:
+    script = Path(__file__).with_name("drive_native_installer_ui.ps1")
+    cmd = [
+        "powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-File", str(script),
+        "-Executable", str(executable), "-Mode", mode, "-TimeoutSeconds", str(int(timeout)),
+    ]
+    return subprocess.run(cmd, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=timeout + 45, check=False)
+
+
+def record_preservation_sentinel(steps: list[dict[str, Any]], path: Path, installer: Path, upgrade_installer: Path | None) -> dict[str, Any]:
+    sentinel = create_preservation_sentinel(path.parent, installer, upgrade_installer)
+    steps.append({"name": "preservation.sentinel_created", "ok": path.is_file(), "path": str(path), "sentinelId": sentinel["id"]})
+    if not path.is_file():
+        raise RuntimeError("Preservation sentinel was not created.")
+    return sentinel
+
+
 def uninstall_installed_payload(
     install_dir: Path,
     timeout: float,
     *,
     prefix: str = "uninstall",
+    native: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     uninstall = install_dir / "Uninstall.exe"
     if not uninstall.is_file():
         return ([{"name": f"{prefix}.executable", "ok": False, "path": str(uninstall)}], False)
-    uninstall_cmd = [str(uninstall), "/S"]
-    result = subprocess.run(
-        uninstall_cmd,
-        cwd=str(install_dir.parent),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-    )
-    steps = [command_step(f"{prefix}.command", uninstall_cmd, result)]
+    if native:
+        result = run_native_setup(uninstall, "uninstall", timeout)
+    else:
+        result = subprocess.run(
+            [str(uninstall), "/S"],
+            cwd=str(install_dir.parent),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    steps = [command_step(f"{prefix}.command", result.args, result)]
     removed = result.returncode == 0 and wait_for_path_removed(install_dir, timeout=30.0)
     empty_remaining = bool(install_dir.exists() and is_empty_directory(install_dir))
     cleanup_removed = False
-    if result.returncode == 0 and not removed and empty_remaining:
+    if not native and result.returncode == 0 and not removed and empty_remaining:
         try:
             install_dir.rmdir()
             cleanup_removed = not install_dir.exists()
@@ -366,6 +407,7 @@ def inspect_installed_shortcuts(
     smoke_id: str,
     phase: str,
     timeout: float,
+    expected_icon: Path | None = None,
 ) -> dict[str, Any]:
     shortcut_name = f"VRCForge Smoke {smoke_id}.lnk" if smoke_id else "VRCForge.lnk"
     start_menu_group = f"VRCForge Smoke {smoke_id}" if smoke_id else "VRCForge"
@@ -420,14 +462,14 @@ def inspect_installed_shortcuts(
             "entries": [],
             "error": f"Shortcut inspection returned invalid JSON: {exc}",
         }
-    return evaluate_shortcut_contract(payload, install_dir, phase=phase)
+    return evaluate_shortcut_contract(payload, install_dir, phase=phase, expected_icon=expected_icon)
 
 
-def evaluate_shortcut_contract(payload: Any, install_dir: Path, *, phase: str) -> dict[str, Any]:
+def evaluate_shortcut_contract(payload: Any, install_dir: Path, *, phase: str, expected_icon: Path | None = None) -> dict[str, Any]:
     entries = payload if isinstance(payload, list) else []
     expected_target = install_dir / "VRCForge.exe"
     expected_working_directory = install_dir
-    expected_icon = install_dir / "VRCForge.ico"
+    expected_icon = expected_icon or install_dir / "VRCForge.ico"
     results: list[dict[str, Any]] = []
     for kind in ("desktop", "start-menu"):
         source = next((item for item in entries if isinstance(item, dict) and item.get("kind") == kind), {})
@@ -833,6 +875,7 @@ def build_report(
         "finishedAt": utc_now(),
         "installer": str(installer),
         "installerSha256": sha256_file(installer),
+        "installerKind": getattr(args, "installer_kind", "nsis"),
         "upgradeInstaller": str(upgrade_installer) if upgrade_installer else "",
         "upgradeInstallerSha256": sha256_file(upgrade_installer) if upgrade_installer else "",
         "installDir": str(install_dir),
