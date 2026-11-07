@@ -993,9 +993,9 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_plan_face_tuning only when that extra planning is actually needed. "
             "After visual review, save and reuse the apply receipt's persisted values; do not repeat discovery or "
             "build an additional numerical acceptance audit. Keep the approved write's checkpoint and same-target "
-            "refresh after saving. If the target or visible result is uncertain, or the current method cannot resolve "
-            "the fit, call vrcforge_call_user with the relevant managed view and a focused question about the exact "
-            "area; only an explicit pass or fail closes visual acceptance. Keep tentative acceptance separate from "
+            "refresh after saving. Use vrcforge_call_user with kind=visual_checkpoint and the current face views "
+            "to let the user judge the requested change before accepting it. Only explicit user approval passes "
+            "visual acceptance. Keep tentative acceptance separate from "
             "items awaiting GM confirmation. If the image has not been seen, say visual review is unverified rather "
             "than claiming success from parameter values alone."
         ),

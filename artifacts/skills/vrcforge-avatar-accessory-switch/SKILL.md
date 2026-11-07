@@ -39,6 +39,7 @@ allowed-tools:
   - vrcforge_convert_unity_constraint
   - vrcforge_capture_screenshot
   - vrcforge_call_user
+  - vrcforge_select_scene_object
   - vrcforge_preview_manage_fx_animator
   - vrcforge_manage_fx_animator
   - vrcforge_preview_manage_expression_menu
@@ -69,9 +70,9 @@ support-files:
 
 ## 饰品位置的视觉验收与交接
 
-先按参考图和用户指定的接触点完成对齐，用 Unity 正面和能看清接触面的斜侧近景检查。用户指正后，按指正修正并复看。修正后仍未通过，或同一位置的视觉验收反复不通过，暂停该部位写入，调用 `vrcforge_call_user` 发起视觉验收。给出当前视图、Hierarchy 中准确的对象名、可移动的范围和通过标准，请用户查看、必要时亲手移动并明确验收结果。
+先按参考图和用户指定的接触点完成对齐，用 Unity 正面和能看清接触面的斜侧近景检查。用 `vrcforge_call_user` 发起视觉验收，给用户看当前效果。用户明确通过后继续。位置不合适时，用 `vrcforge_select_scene_object` 选中并显示准确的可移动对象，告诉用户只需要调整哪个部位，暂停该对象写入，等用户摆好交回。
 
-用户主动接手时立即暂停该部位写入。等待期间可继续独立工作。用户交回后重新读取该场景对象、变换和相关绑定，保留用户手调的位置，再由 Agent 完成剩余配置和验证。用户明确通过才关闭该项视觉验收。
+用户主动接手时立即暂停该部位写入。等待期间可继续独立工作。用户交回后重新读取场景对象、变换和绑定，保留手调位置，完成剩余配置和复查。
 
 ## 社区证据与安全边界
 

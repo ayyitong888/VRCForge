@@ -30,6 +30,9 @@ CALL_USER_USAGE_INSTRUCTION = (
     "untested UI guesses, progress acknowledgments, or work the agent can complete. "
     "Before requesting clicks, confirm the requested control and action exist; do not invent UI instructions. "
     "Consolidate the same unresolved issue into one pending request rather than repeatedly interrupting. "
+    "For any requested appearance or motion edit, show the user the actual result in Unity or a current screenshot and use a visual_checkpoint before accepting it. "
+    "Continue dependent work when the user accepts. If a position needs adjustment, use vrcforge_select_scene_object to select the exact movable object in Unity, then hand it to the user. "
+    "Pause edits to that target while the user adjusts it. On handback, read the current transform and bindings, preserve the user adjustment, and finish the remaining approved work and review. "
     "Continue independent work without assuming an answer; existing approval and checkpoint requirements remain authoritative. "
 )
 QUESTION_LANGUAGE_INSTRUCTION = (
