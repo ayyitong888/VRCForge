@@ -7199,7 +7199,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(len(payload["steps"]), 3)
         self.assertEqual(payload["plan"]["nextStep"], "done")
 
-    def test_runtime_loop_suppresses_only_consecutive_successful_replay(self) -> None:
+    def test_runtime_loop_pauses_repeated_success_after_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config.json", root / "audit")
@@ -7231,22 +7231,12 @@ class DashboardServerTests(unittest.TestCase):
 
             payload = gateway.runtime_message({"message": "repeat the exact same read"})
 
-        self.assertEqual(calls, [tool])
-        # The first plan executes. Two duplicate correction passes are returned
-        # to the planner, and the third duplicate proposal hard-stops the turn.
+        self.assertEqual(calls, [tool] * 4)
         self.assertEqual(planner_calls, 4)
-        self.assertEqual(len(payload["steps"]), 1)
-        # AGT-009: a successful observation replay with no new evidence is
-        # bounded no-progress, not an unverified completion claim.
-        self.assertEqual(payload["plan"]["nextStep"], "planner_failed")
-        self.assertEqual(
-            payload["plan"]["plannerFailure"]["code"], "planner_no_progress"
-        )
-        self.assertIn("not marked complete", payload["plan"]["reply"])
-        self.assertNotIn("No repeated command was executed", payload["plan"]["reply"])
-        terminal = [event for event in payload["timeline"] if event["kind"] == "assistant"][-1]
-        self.assertEqual(terminal["payload"]["status"], "planner_failed")
-        self.assertEqual(terminal["payload"]["summary"], payload["plan"]["reply"])
+        self.assertEqual(len(payload["steps"]), 4)
+        self.assertEqual(payload["plan"]["nextStep"], "paused")
+        self.assertEqual(payload["plan"]["reason"], "tool_loop_repeated")
+        self.assertTrue(payload["plan"]["loopPause"]["questionId"])
 
     def test_runtime_loop_distinguishes_two_write_tools_with_same_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7326,7 +7316,7 @@ class DashboardServerTests(unittest.TestCase):
         )
         self.assertEqual(payload["plan"]["nextStep"], "done")
 
-    def test_runtime_loop_suppresses_only_three_identical_failures(self) -> None:
+    def test_runtime_loop_pauses_repeated_failures_after_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config.json", root / "audit")
@@ -7349,12 +7339,10 @@ class DashboardServerTests(unittest.TestCase):
             bind_test_runtime_planner(gateway, lambda _prompt: repeated_plan)
             payload = gateway.runtime_message({"message": "exercise bounded failure"})
 
-        self.assertEqual(len(payload["steps"]), 3)
-        self.assertEqual(payload["plan"]["nextStep"], "loop_suppressed")
-        self.assertEqual(payload["plan"]["loopSuppression"]["consecutive"], 3)
-        self.assertEqual(payload["plan"]["loopSuppression"]["failureClass"], "tool_error")
+        self.assertEqual(len(payload["steps"]), 4)
+        self.assertEqual(payload["plan"]["nextStep"], "paused")
+        self.assertEqual(payload["plan"]["reason"], "tool_loop_repeated")
         self.assertTrue(all(step["status"] == "failed" for step in payload["steps"]))
-        self.assertNotIn("value", payload["plan"]["loopSuppression"])
 
     def test_runtime_loop_does_not_suppress_distinct_failed_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2899,7 +2899,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(result["plan"]["nextStep"], "done", result)
         self.assertEqual(result["task"]["status"], "completed", result)
 
-    def test_project_agent_suppresses_exact_successful_read_replay_and_pivots(self) -> None:
+    def test_project_agent_can_recheck_once_and_finish(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
         planner_calls = 0
@@ -2961,12 +2961,12 @@ class AgentLoopP0Tests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(execute.call_count, 1, result)
+        self.assertEqual(execute.call_count, 2, result)
         self.assertEqual(planner_calls, 3, result)
-        self.assertEqual(planner_states[2][-1]["tool"], "runtime_no_progress")
+        self.assertEqual(planner_states[2][-1]["tool"], "vrcforge_list_directory")
         self.assertEqual(result["plan"]["nextStep"], "done", result)
 
-    def test_project_agent_stops_after_three_exact_read_replays(self) -> None:
+    def test_project_agent_pauses_after_reminder_and_exact_read_replay(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
         calls = 0
@@ -3002,8 +3002,9 @@ class AgentLoopP0Tests(unittest.TestCase):
             })
 
         self.assertEqual(calls, 4, result)
-        self.assertEqual(result["plan"]["nextStep"], "planner_failed", result)
-        self.assertEqual(result["plan"]["plannerFailure"]["code"], "planner_no_progress")
+        self.assertEqual(result["plan"]["nextStep"], "paused", result)
+        self.assertEqual(result["plan"]["reason"], "tool_loop_repeated")
+        self.assertTrue(result["plan"]["loopPause"]["questionId"])
 
     def test_nonzero_shell_exit_without_error_text_never_gets_success_summary(self) -> None:
         gateway = self.gateway

@@ -58,6 +58,7 @@ export function AgentQuestionCard({
   const continuationActive = continuationDisplay === "active";
   const continuationSettled = continuationDisplay === "settled" && Boolean(question.runtimeContinuation);
   const customValue = customValues[question.questionId] || "";
+  const runtimeToolLoopPause = question.sourceTool === "runtime_tool_loop";
   if (collapsedQuestionId === question.questionId && !busyChoice) {
     return (
       <button type="button" className="w-full rounded-xl border border-border bg-workspace px-3 py-2 text-left text-sm hover:bg-muted/50" onClick={() => setCollapsedQuestionId("")} data-question-reopen={question.questionId}>
@@ -103,7 +104,7 @@ export function AgentQuestionCard({
       <div className="mb-1.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
         <HelpCircle className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 font-normal">{t("questionCard.title")}</span>
-        {onReplyInChat ? (
+        {onReplyInChat && !runtimeToolLoopPause ? (
           <button
             type="button"
             className="shrink-0 rounded-md px-1 py-0.5 text-xs text-muted-foreground underline-offset-2 hover:bg-muted hover:text-foreground hover:underline disabled:opacity-60"
@@ -224,7 +225,7 @@ export function AgentQuestionCard({
         })}
         </div>
 
-          <form
+          {!runtimeToolLoopPause ? <form
             className="mt-2 flex min-w-0 items-center gap-2 px-1 py-1"
             onSubmit={(event) => {
               event.preventDefault();
@@ -267,7 +268,7 @@ export function AgentQuestionCard({
                 {t("chat.send")}
               </button>
             </div>
-          </form>
+          </form> : null}
       </div>
 
       </> : null}

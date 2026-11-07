@@ -93,6 +93,7 @@ from agent_question_service import (
     AgentQuestionScopePorts,
     AgentQuestionService,
     GoalQuestionResolutionPort,
+    RUNTIME_TOOL_LOOP_SOURCE,
     RuntimeQuestionResolutionPort,
 )
 from desktop_computer_use_service import DesktopComputerUsePorts, DesktopComputerUseService
@@ -147,7 +148,7 @@ from external_tool_result_contract import (
     external_write_failure_view,
 )
 from agent_budget_policy import freeze_agent_budget_policy
-from agent_general_no_progress import general_read_observation_key
+from agent_general_no_progress import LOOP_REASONS, LOOP_REMINDER, ToolLoopProgress, general_read_observation_key
 from general_agent_tools import (
     _authorized_path as _general_authorized_path,
     extract_explicit_local_roots,
@@ -414,6 +415,7 @@ class AgentTool:
     write: bool = False
     advanced: bool = False
     requires_user_activation: bool = False
+    polling: bool = False
 
 
 @dataclass
@@ -1920,8 +1922,8 @@ class AgentGateway:
             "tool": "vrcforge_ask_user", "kind": "skill", "status": "completed",
             "result": {"questionId": question_id, "answer": continuation_prompt},
         }
-        if asynchronous:
-            # A completed asynchronous ask has no pending native call to resume.
+        if asynchronous or seed.get("_toolLoopPause") is True:
+            # These decisions have no pending native call to resume.
             # Keep task obligations, but append to the current conversation.
             context = dict(ensure_dict(continuation.get("context")))
             context.pop("_nativeConversation", None)
@@ -2222,6 +2224,7 @@ class AgentGateway:
         write: bool = False,
         advanced: bool = False,
         requires_user_activation: bool = False,
+        polling: bool = False,
     ) -> None:
         self._tools[name] = AgentTool(
             name=name,
@@ -2231,6 +2234,7 @@ class AgentGateway:
             write=write,
             advanced=advanced,
             requires_user_activation=requires_user_activation,
+            polling=polling,
         )
 
     def register_external_mcp_unity_tool(self, name: str, block: str) -> None:
@@ -6485,11 +6489,28 @@ class AgentGateway:
                     "retainImages": bool(vision_payload.get("retainImages")),
                 }
             )
-        # Suppress only an immediately repeated successful action. A distinct
-        # successful action is a state-observation boundary, so A -> B -> A is
-        # allowed for read-after-change verification within the bounded budget.
-        last_successful_action_id = ""
         repeated_failure_guard = RepeatedFailureGuard()
+        tool_loop_progress = ToolLoopProgress(project_root)
+        loop_reminder_pending = False
+        last_directory: tuple[str, str, Any] | None = None
+        last_effect_receipt: tuple[str, Any] | None = None
+        if continuation_completion.get("status") == "completed" and continuation_context.get("requestedKind") in {"write", "shell"}:
+            last_effect_receipt = (str(continuation_context.get("requestedActionId") or ""),
+                                   ensure_dict(continuation_context.get("execution")).get("result"))
+
+        def detect_tool_loop(plan: dict[str, Any], **call: Any) -> dict[str, Any] | None:
+            nonlocal loop_reminder_pending
+            reason = tool_loop_progress.record(**call)
+            if not reason:
+                return None
+            if not tool_loop_progress.reminded:
+                loop_reminder_pending = True
+                return None
+            return {**plan, "nextStep": "paused", "continueLoop": False,
+                    "reason": reason, "reply": LOOP_REASONS[reason],
+                    "loopPause": {"recentCalls": tool_loop_progress.recent_calls()}}
+
+        poll_times: dict[tuple[str, str], tuple[float, float]] = {}
         shell_scope_denials = 0
         recoverable_failure_refeeds = 0
         shell_payload: dict[str, Any] | None = None
@@ -6537,7 +6558,11 @@ class AgentGateway:
             task_loop.require_action(kind="write", tool=required_memory_tool)
 
         def record_consumed_steers(items: list[dict[str, Any]]) -> None:
+            nonlocal loop_reminder_pending
             native_turn.queue_steers(items)
+            if items:
+                tool_loop_progress.reset()
+                loop_reminder_pending = False
             nonlocal memory_request_text
             for item in items:
                 input_id = str(item.get("inputId") or "").strip()
@@ -6561,21 +6586,12 @@ class AgentGateway:
         completion_claim_correction_attempted = False
         visual_correction_audits: list[Mapping[str, Any]] = []
         visual_correction_started_at: float | None = None
-        general_no_progress_attempts = 0
-        last_general_read_key = ""
         unresolved_planner_argument_failure: dict[str, Any] | None = None
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
         unresolved_completion_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
         shell_review_terminal_outcome: dict[str, Any] | None = None
         unresolved_completion_action_keys: dict[str, tuple[str, str]] = {}
         pending_approval_outcome: dict[str, Any] | None = None
-        if continuation_context and str(continuation_completion.get("status") or "").casefold() == "completed":
-            completed_requested_action_id = str(
-                continuation_context.get("requestedActionId") or ""
-            ).strip()
-            if completed_requested_action_id:
-                last_successful_action_id = completed_requested_action_id
-
         def discard_runtime_compaction_for_cancel() -> None:
             nonlocal runtime_compaction
             if runtime_compaction_usage_checkpoint is not None:
@@ -6763,8 +6779,6 @@ class AgentGateway:
                 pre_provider=True,
             )
             bootstrap_payload["outcome"] = bootstrap_action["outcome"]
-            if bootstrap_action.get("status") == "completed":
-                last_successful_action_id = bootstrap_action_id
             bootstrap_step: dict[str, Any] = {
                 "tool": bootstrap_tool,
                 "kind": "skill",
@@ -6807,6 +6821,13 @@ class AgentGateway:
             iteration_started = time.perf_counter()
             settle_started = time.perf_counter()
             native_turn.settle()
+            if loop_reminder_pending and not native_turn.has_queued_calls:
+                if native_binding:
+                    native_turn.append_hidden(LOOP_REMINDER)
+                else:
+                    history.append({"role": "user", "text": LOOP_REMINDER, "hidden": True})
+                tool_loop_progress.reminded = True
+                loop_reminder_pending = False
             settled_at = time.perf_counter()
             if handoff_terminal is not None:
                 last_plan = handoff_terminal
@@ -7407,10 +7428,6 @@ class AgentGateway:
                     break
                 continue
 
-            # Only a consecutive semantic replay is suppressed. A distinct
-            # successful action moves the observation boundary and permits the
-            # same read again for verification. Failed actions remain governed
-            # by the bounded repeated-failure guard below.
             planned_tool = str(
                 plan.get("writeTool")
                 or plan.get("skillTool")
@@ -7502,60 +7519,44 @@ class AgentGateway:
                 planned_tool,
                 planned_arguments,
             )
-            general_read_key = (
-                general_read_observation_key(
-                    kind=action_kind,
-                    tool=planned_tool,
-                    arguments=planned_arguments,
-                )
+            loop_action_id = (canonical_action_id(action_kind, planned_tool, execution_arguments)
+                              if execution_arguments != planned_arguments else planned_action_id)
+            planned_definition = self._tools.get(planned_tool)
+            polling = bool(planned_definition and planned_definition.polling)
+            if polling:
+                poll_key = (planned_tool, str(planned_arguments.get("jobId") or planned_action_id))
+                now = time.monotonic()
+                started, previous = poll_times.get(poll_key, (now, now - 1.0))
+                delay = max(0.0, previous + 1.0 - now)
+                if now + delay - started >= 180.0:
+                    last_plan = {**plan, "nextStep": "waiting_for_tool", "continueLoop": False,
+                                 "reason": "tool_poll_timeout", "reply": "等待工具状态超时，任务结果仍待确认。"}
+                    break
+                if delay and not self._wait_for_provider_retry(
+                    delay, session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+                ):
+                    last_plan = {**plan, "nextStep": "cancelled", "continueLoop": False}
+                    break
+                poll_times[poll_key] = (started, time.monotonic())
+            directory_key = general_read_observation_key(kind=action_kind, tool=planned_tool, arguments=planned_arguments)
+            equivalent_directory = bool(
+                directory_key and last_directory and directory_key == last_directory[0]
+                and planned_action_id != last_directory[1]
             )
-            semantic_general_replay = bool(
-                general_read_key and general_read_key == last_general_read_key
-            )
-            consecutive_general_replay = bool(
-                planned_action_id == last_successful_action_id
-            )
-            if semantic_general_replay or consecutive_general_replay:
-                general_no_progress_attempts += 1
-                correction_summary = (
-                    "The proposed action would repeat an already successful observation and was not executed. "
-                    "Use a materially different read/find/search/file-inspection step, run a command that can add new evidence, "
-                    "or finish only when the existing evidence really answers the user."
+            duplicate_effect = bool(last_effect_receipt and planned_action_id == last_effect_receipt[0])
+            if not polling and (duplicate_effect or equivalent_directory):
+                # Preserve the effect boundary for an already-completed write or
+                # Shell command. Its replay receives evidence, not a second write.
+                summary = "The same operation already completed. Use its receipt or inspect the result."
+                loop_state.append({"tool": "runtime_no_progress", "kind": "verification", "status": "suppressed",
+                                   "result": {"summary": summary}, "actionId": planned_action_id})
+                pause_plan = detect_tool_loop(
+                    plan, action_id=loop_action_id, tool=planned_tool, arguments=execution_arguments,
+                    result=last_directory[2] if equivalent_directory else last_effect_receipt[1],
+                    status="suppressed", summary=summary, effect="",
                 )
-                loop_state.append(
-                    {
-                        "tool": "runtime_no_progress",
-                        "kind": "verification",
-                        "status": "suppressed",
-                        "result": {
-                            "code": "duplicate_observation",
-                            "actionId": planned_action_id,
-                            "summary": correction_summary,
-                        },
-                        "outcome": {
-                            "status": "needs_correction",
-                            "summary": correction_summary,
-                            "verification": {"state": "not_required", "checks": []},
-                        },
-                    }
-                )
-                if general_no_progress_attempts >= 3:
-                    last_plan = {
-                        **plan,
-                        "summary": "The model repeated an observation without making progress.",
-                        "reply": (
-                            "VRCForge stopped this turn because repeated inspection proposals added no new evidence. "
-                            "The task failed to make progress and is not marked complete."
-                        ),
-                        "plannerFailed": True,
-                        "plannerFailure": {
-                            "code": "planner_no_progress",
-                            "phase": "post_tool",
-                            "retryable": True,
-                        },
-                        "continueLoop": False,
-                        "nextStep": "planner_failed",
-                    }
+                if pause_plan:
+                    last_plan = pause_plan
                     break
                 continue
             # Delegation remains an ordinary Runtime tool call. Its separate
@@ -8119,9 +8120,9 @@ class AgentGateway:
                 steps[-1].update(model_information)
                 loop_state[-1].update(model_information)
 
-            scan_tool = self._tools.get(step_tool)
-            if (retained_result and is_scan_tool(step_tool) and scan_tool is not None
-                    and not scan_tool.write and step_payload.get("status") == "executed"):
+            tool_definition = self._tools.get(step_tool)
+            if (retained_result and is_scan_tool(step_tool) and tool_definition is not None
+                    and not tool_definition.write and step_payload.get("status") == "executed"):
                 snapshot_step = steps[-1]
                 private_result_read: dict[str, Any] = {}
                 if step_tool == "vrcforge_scan_materials" and private_material_scan_result is not None:
@@ -8459,7 +8460,7 @@ class AgentGateway:
                     )
                     if superseded_key is not None:
                         unresolved_completion_outcomes.pop(superseded_key, None)
-            if step_failure_class:
+            if step_failure_class and not polling and action_kind in {"write", "shell"}:
                 if action_kind == "shell":
                     failure_arguments: Any = {
                         "command": command,
@@ -8467,12 +8468,7 @@ class AgentGateway:
                         "workspaceRoot": params.get("workspace_root") or params.get("workspaceRoot"),
                         "shellParams": shell_step_params,
                     }
-                elif action_kind == "write":
-                    failure_arguments = action_arguments
                 else:
-                    # Runtime-only session/task ownership fields are injected
-                    # into step_params after canonical planning. They must not
-                    # change the identity of an otherwise identical failure.
                     failure_arguments = action_arguments
                 if repeated_failure_guard.record_failure(
                     step_tool,
@@ -8493,11 +8489,8 @@ class AgentGateway:
                         "loopSuppression": suppression,
                     }
                     break
-            else:
+            elif not step_failure_class:
                 repeated_failure_guard.record_success()
-                last_successful_action_id = planned_action_id
-                general_no_progress_attempts = 0
-                last_general_read_key = general_read_key
                 if (
                     unresolved_planner_argument_failure is not None
                     and task_action.get("status") == "completed"
@@ -8555,6 +8548,32 @@ class AgentGateway:
                 break
             if str(plan.get("nextStep") or "") == "done":
                 break
+            if not polling and task_action.get("runtimeStatus") != "polling":
+                effect = ""
+                if task_action.get("status") == "completed" and step_outcome_status == "ok":
+                    if action_kind == "write" or (tool_definition and tool_definition.write):
+                        effect = "write"
+                    elif action_kind == "skill":
+                        effect = "read"
+                result_value = step_payload.get("result")
+                if result_value is None:
+                    result_value = step_payload.get("error") or step_outcome_status
+                pause_plan = detect_tool_loop(
+                    plan,
+                    action_id=loop_action_id, tool=step_tool, arguments=execution_arguments,
+                    result=result_value, status=result_status,
+                    summary=planner_policy.sanitize_planner_observation_text(result_summary, 90),
+                    effect=effect,
+                )
+                if pause_plan:
+                    last_plan = pause_plan
+                    break
+            if not step_failure_class:
+                last_directory = (directory_key, planned_action_id, step_payload.get("result")) if directory_key else None
+                last_effect_receipt = (
+                    (planned_action_id, step_payload.get("result"))
+                    if action_kind in {"write", "shell"} or (tool_definition and tool_definition.write) else None
+                )
         reasoning_trace = ensure_dict(reasoning_trace)
         context_usage = ensure_dict(context_usage)
         observed_context_usage = deepcopy(context_usage)
@@ -8621,6 +8640,8 @@ class AgentGateway:
             handoff_terminal is not None
             or last_plan.get("scopeDenied") is True
             or last_plan.get("restoreFailureTurnStop") is True
+            or "loopPause" in last_plan
+            or last_plan.get("reason") == "tool_poll_timeout"
             or str(last_plan.get("nextStep") or "") in {
                 "plan_mode_blocked",
                 "cancelled",
@@ -8805,6 +8826,28 @@ class AgentGateway:
         if native_binding:
             top_plan = native_turn.output_truncation.finish(top_plan)
         native_turn.settle(top_plan)
+        if top_plan.get("nextStep") == "paused" and top_plan.get("loopPause"):
+            pause = top_plan["loopPause"]
+            recent = "\n".join(
+                f"{call['tool'][:64]} · {call['status'][:24]} · {call['summary'][:80]}"
+                for call in pause["recentCalls"]
+            )
+            seed = runtime_approval_seed(
+                requested_tool="vrcforge_ask_user", requested_kind="skill",
+                tool_calls_used=tool_calls_used, exposure_layer=runtime_exposure_layer,
+                provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                provider_usage=task_seed_provider_usage(),
+            )
+            seed["_toolLoopPause"] = True
+            question = self.questions.create({
+                "sourceTool": RUNTIME_TOOL_LOOP_SOURCE, "sessionId": session_id, "projectRoot": project_root,
+                "question": f"{top_plan['reply']}\n\n最近的调用记录\n{recent}"[:1000],
+                "options": [{"id": "continue", "label": "继续", "value": "继续任务，请换一种方法。"},
+                            {"id": "stop", "label": "停止"}],
+                "_runtimeTaskSeed": seed, "_runtimeSessionId": session_id,
+                "_runtimeClientTurnId": client_turn_id,
+            })["question"]
+            pause["questionId"] = question["questionId"]
 
         # Non-analyzed image state is rendered by the structured vision step.
         if (

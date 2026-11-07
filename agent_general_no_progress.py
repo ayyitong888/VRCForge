@@ -1,11 +1,15 @@
-"""Bounded semantic replay detection for projectless general Agent turns."""
-
+"""Turn-local tool progress detection over the last twenty settled calls."""
 from __future__ import annotations
 
+from collections import deque
+from dataclasses import dataclass
+import hashlib
+import json
 import ntpath
 import re
 from typing import Any, Mapping
 
+from agent_action_targets import action_target
 
 _DIRECTORY_COMMAND = re.compile(
     r"^\s*(?:dir|ls|gci|get-childitem)\b(?P<arguments>.*)$",
@@ -81,4 +85,81 @@ def general_read_observation_key(
     return f"directory_listing:{target}" if target else ""
 
 
-__all__ = ["general_read_observation_key"]
+LOOP_REMINDER = "最近几次调用结果没有变化，可能在原地打转。请检查写入是否生效，或换一种方法。"
+LOOP_REASONS = {
+    "tool_loop_repeated": "同一工具调用和结果已重复出现三次。",
+    "tool_loop_no_progress": "连续十次工具调用都没有带来新的结果。",
+    "tool_loop_write_unverified": "写入参数已改变，但同一对象的读回结果没有变化，写入可能未生效。",
+}
+
+
+@dataclass(frozen=True)
+class _Call:
+    action_id: str
+    result_digest: str
+    target: dict[str, Any]
+    effect: str
+    tool: str
+    status: str
+    summary: str
+
+
+class ToolLoopProgress:
+    def __init__(self, project_root: str = "") -> None:
+        self._project_root = project_root.replace("\\", "/")
+        self._calls: deque[_Call] = deque(maxlen=20)
+        self._unchanged = 0
+        self.reminded = False
+
+    def reset(self) -> None:
+        self._calls.clear()
+        self._unchanged = 0
+        self.reminded = False
+
+    def record(self, *, action_id: str, tool: str, arguments: Any, result: Any,
+               status: str, summary: str, effect: str) -> str:
+        encoded = json.dumps(result, ensure_ascii=True, sort_keys=True,
+                             separators=(",", ":"), default=str).encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        self._unchanged = self._unchanged + 1 if any(
+            row.result_digest == digest for row in self._calls
+        ) else 0
+        target = {key.casefold(): value for key, value in action_target(arguments).items()}
+        if isinstance(arguments, Mapping):
+            for name, value in arguments.items():
+                key = str(name).replace("_", "").casefold()
+                if (key.endswith("id") or key in {"object", "parametername", "blendshapename"}) and isinstance(value, str) and value:
+                    target.setdefault(key, value)
+        scope = target.pop("projectroot", target.pop("projectpath", self._project_root))
+        if target and scope:
+            target["projectroot"] = scope
+        self._calls.append(_Call(action_id, digest, target, effect, tool, status, summary))
+        if effect == "read" and target and self._unchanged_write():
+            return "tool_loop_write_unverified"
+        if sum(row.action_id == action_id and row.result_digest == digest for row in self._calls) >= 3:
+            return "tool_loop_repeated"
+        if self._unchanged >= 10:
+            return "tool_loop_no_progress"
+        return ""
+
+    def _unchanged_write(self) -> bool:
+        rows = list(self._calls)
+        current = rows[-1]
+        latest_write = None
+        for index in range(len(rows) - 2, -1, -1):
+            row = rows[index]
+            if row.target != current.target:
+                continue
+            if row.effect == "write" and latest_write is None:
+                latest_write = row
+            elif row.effect == "read" and row.action_id == current.action_id:
+                if latest_write is None or row.result_digest != current.result_digest:
+                    return False
+                earlier_write = next((prior for prior in reversed(rows[:index])
+                                      if prior.effect == "write" and prior.target == current.target), None)
+                return earlier_write is not None and earlier_write.action_id != latest_write.action_id
+        return False
+
+    def recent_calls(self) -> list[dict[str, str]]:
+        return [{"tool": row.tool, "status": row.status, "summary": row.summary}
+                for row in list(self._calls)[-5:]]

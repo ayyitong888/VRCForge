@@ -23,6 +23,7 @@ AGENT_QUESTION_SCHEMA = "vrcforge.agent_question.v1"
 AGENT_QUESTION_MAX_ITEMS = 60
 QUESTION_KINDS = frozenset({"decision", "visual_checkpoint"})
 VISUAL_RESOLUTIONS = frozenset({"pass", "fail", "uncertain", "later"})
+RUNTIME_TOOL_LOOP_SOURCE = "runtime_tool_loop"
 CALL_USER_USAGE_INSTRUCTION = (
     "Treat call_user as an exceptional human handoff. First inspect current evidence and relevant supported tools, "
     "and identify the specific capability or permission gap requiring a human action or judgment. "
@@ -219,6 +220,14 @@ class AgentQuestionService:
         values = dict(params or {})
         source_tool = str(values.get("sourceTool") or values.get("source_tool") or "").strip().lower()
         kind = str(values.get("kind") or values.get("questionKind") or "decision").strip().lower()
+        runtime_seed = values.get("_runtimeTaskSeed")
+        tool_loop_pause = (
+            source_tool == RUNTIME_TOOL_LOOP_SOURCE
+            and isinstance(runtime_seed, Mapping)
+            and runtime_seed.get("_toolLoopPause") is True
+        )
+        if source_tool == RUNTIME_TOOL_LOOP_SOURCE and not tool_loop_pause:
+            raise AgentQuestionServiceError("Runtime tool-loop Questions require an owned pause seed.", status_code=403)
         if kind not in QUESTION_KINDS:
             raise AgentQuestionServiceError("Unsupported Question kind.", status_code=400)
         question = _question_text(values.get("question") or values.get("prompt"), "question", 1000)
@@ -252,6 +261,15 @@ class AgentQuestionService:
             raise AgentQuestionServiceError("Question choices require at least two options.", status_code=400)
         project_root = self._scope_text(values, "projectRoot", "project_root", "projectPath")
         session_id = self._scope_text(values, "sessionId", "session_id")
+        goal_delivery_id = str(values.get("goalDeliveryId") or values.get("goal_delivery_id") or "").strip()
+        blocking = not (values.get("blocking") is False and kind == "decision" and not goal_delivery_id)
+        if tool_loop_pause:
+            option_ids = {option["id"] for option in options}
+            if (kind != "decision" or not blocking or goal_delivery_id
+                    or len(options) != 2 or option_ids != {"continue", "stop"}):
+                raise AgentQuestionServiceError(
+                    "Runtime tool-loop Questions require a blocking continue/stop decision.", status_code=400,
+                )
         question_id = f"question_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         event: dict[str, object] = {
             "event": "question_created",
@@ -264,12 +282,11 @@ class AgentQuestionService:
             "projectRoot": project_root,
             "sessionId": session_id,
             "owner": self._summarize(values.get("owner") or "agent", 80),
-            "goalDeliveryId": str(values.get("goalDeliveryId") or values.get("goal_delivery_id") or "").strip(),
+            "goalDeliveryId": goal_delivery_id,
         }
         if source_tool:
             event["sourceTool"] = source_tool
-        runtime_seed = values.get("_runtimeTaskSeed")
-        event["blocking"] = not (values.get("blocking") is False and kind == "decision" and not event["goalDeliveryId"])
+        event["blocking"] = blocking
         if isinstance(runtime_seed, Mapping) and runtime_seed:
             event["runtimeTaskSeed"] = dict(runtime_seed)
             event["runtimeSessionId"] = str(values.get("_runtimeSessionId") or values.get("sessionId") or "").strip()
@@ -316,6 +333,7 @@ class AgentQuestionService:
             raise AgentQuestionServiceError("questionId is required.", status_code=400)
         continuation_answer: str | None = None
         feedback_pending = False
+        tool_loop_stop = False
         settle_only = bool(values.get("settleOnly") or values.get("settle_only"))
         feedback_attachments = _question_attachments(values.get("attachments"))
         with _locked(self._persistence.shared_state_lock):
@@ -328,6 +346,11 @@ class AgentQuestionService:
                 raise AgentQuestionServiceError("The task that asked this Question was stopped.", status_code=409)
             goal_delivery_id = str(existing.get("goalDeliveryId") or "").strip()
             runtime_seed = existing.get("runtimeTaskSeed")
+            tool_loop_pause = (
+                str(existing.get("sourceTool") or "").strip().lower() == RUNTIME_TOOL_LOOP_SOURCE
+                and isinstance(runtime_seed, Mapping)
+                and runtime_seed.get("_toolLoopPause") is True
+            )
             if settle_only:
                 if goal_delivery_id:
                     raise AgentQuestionServiceError("settleOnly is not available for Goal-owned Questions.", status_code=409)
@@ -362,6 +385,11 @@ class AgentQuestionService:
                      if isinstance(option, Mapping) and str(option.get("id") or "") == selected_option_id),
                     None,
                 ) if selected_option_id else None
+                if tool_loop_pause and (selected_option_id not in {"continue", "stop"} or feedback_attachments):
+                    raise AgentQuestionServiceError(
+                        "Choose Continue or Stop for this runtime tool-loop Question.", status_code=400,
+                    )
+                tool_loop_stop = tool_loop_pause and selected_option_id == "stop"
                 # The App submits custom replies and skips as answer-source IDs;
                 # only a declared choice ID must belong to the Question options.
                 if selected_option_id not in {"", "custom", "skip"} and selected_option is None:
@@ -446,11 +474,11 @@ class AgentQuestionService:
                         event["resolution"] = resolution
                         event["questionFeedbackRevision"] = feedback_revision
                         event["runtimeQuestionFeedbackPending"] = False
-                    if settle_only:
+                    if settle_only or tool_loop_stop:
                         event["runtimeContinuationStatus"] = "settled_without_dispatch"
                     if feedback_attachments:
                         event["attachments"] = feedback_attachments
-                    if runtime_seed and not goal_delivery_id and not settle_only:
+                    if runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop:
                         # The saved answer and the not-yet-dispatched marker are
                         # one durable event, so a restart cannot lose the handoff.
                         event["runtimeContinuationStatus"] = "queued"
@@ -466,7 +494,8 @@ class AgentQuestionService:
                 resolved_id,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
-        if (runtime_seed and not goal_delivery_id and not settle_only and self._runtime_resolution is not None
+        if (runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop
+                and self._runtime_resolution is not None
                 and not payload.get("idempotent")):
             # This copy is ephemeral: durable Question records keep the stricter
             # redacted answer, while the trusted runtime handoff can bind an

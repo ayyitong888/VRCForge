@@ -27995,18 +27995,21 @@ def register_agent_gateway_tools() -> None:
         "When to use: resume read-only status polling for an existing VRCForge UnityPackage import after a timeout or reconnect, using its exact jobId. When NOT to use: do not use it to start or retry an import, guess a jobId, restore a checkpoint, or dismiss a recovery record. Negative example: do not call this tool with a package path when no import job has been started.",
         "read/debug",
         get_unitypackage_import_status_sync,
+        polling=True,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_get_setup_outfit_status",
         "When to use: read one existing Modular Avatar Setup Outfit job by its exact jobId after a timeout or reconnect. When NOT to use: do not start, retry, cancel, approve, restore, or infer completion from a missing job. Negative example: do not call it with an outfit path or without the exact project executionTarget.",
         "read/debug",
         get_setup_outfit_status_sync,
+        polling=True,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_get_build_test_status",
         "When to use: poll one existing local VRChat SDK Build & Test job by its exact jobId and read the Core result unchanged. When NOT to use: do not start another build, guess a jobId, upload, publish, retry automatically, or restore the project. Negative example: do not call it with an avatar path before vrcforge_build_test_avatar has returned a jobId.",
         "read/debug",
         get_build_test_status_sync,
+        polling=True,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_read_vrchat_sdk_builder_alerts",
@@ -28025,6 +28028,7 @@ def register_agent_gateway_tools() -> None:
         "When to use: poll one existing VRChat avatar upload job by its exact jobId and return the Core result unchanged, including build/upload phases and remote commit uncertainty. When NOT to use: do not start or retry an upload, guess a jobId, change visibility, or restore local files. Negative example: do not call it with an avatar path before vrcforge_build_and_upload_avatar returns a jobId.",
         "read/debug",
         get_avatar_upload_status_sync,
+        polling=True,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_unity_constraint_conversion",
@@ -28279,6 +28283,7 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_get_runtime_observation",
         "When to use: query one existing finite observation job on its exact Avatar and Editor, including partial status and actual frame cadence. When NOT to use: do not start or repeat a parameter change. Negative example: do not query a job against another Avatar.",
         "runtime/observation", runtime_observation_status_sync,
+        polling=True,
     )
     register_write_handler(
         "vrcforge_start_runtime_observation",

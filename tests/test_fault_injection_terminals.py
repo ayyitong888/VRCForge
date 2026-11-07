@@ -217,12 +217,9 @@ def test_no_progress_loop_lands_terminal(tmp_path: Path) -> None:
             "_projectContextActive": True,
         })
 
-    assert planner_calls == 4, "the loop guard must cut in on the third replay"
-    failure = (result.get("plan") or {}).get("plannerFailure") or {}
-    status = _turn_status(result)
-    assert status is not None or failure.get("code") == "planner_no_progress", (
-        "repeated no-progress must land a terminal state with a machine code"
-    )
+    assert planner_calls == 4
+    assert result["plan"]["nextStep"] == "paused"
+    assert result["plan"]["reason"] == "tool_loop_repeated"
 
     gateway, model, _invoked = _write_gateway_for_mode(project, [
         {
@@ -239,7 +236,7 @@ def test_no_progress_loop_lands_terminal(tmp_path: Path) -> None:
 
 
 def test_identical_successful_calls_trip_the_general_no_progress_guard(tmp_path: Path) -> None:
-    """Any tool, not only directory reads: three identical successful calls stop."""
+    """An identical successful web read also pauses after a reminder."""
     from unittest.mock import patch
 
     from tests.test_native_permission_modes import _write_gateway_for_mode
@@ -276,10 +273,9 @@ def test_identical_successful_calls_trip_the_general_no_progress_guard(tmp_path:
             "_projectContextActive": True,
         })
 
-    failure = (result.get("plan") or {}).get("plannerFailure") or {}
-    assert failure.get("code") == "planner_no_progress", (
-        "identical successful tool calls across any tool must trip the guard"
-    )
+    assert result["plan"]["nextStep"] == "paused"
+    assert result["plan"]["reason"] == "tool_loop_repeated"
+    assert planner_calls == 4
 
 
 def test_crashed_native_pending_normalizes_for_next_request(tmp_path: Path) -> None:
