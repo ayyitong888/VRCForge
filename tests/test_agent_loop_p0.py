@@ -1986,6 +1986,46 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertIn("Multiple avatars", payload["plan"].get("summary", ""))
 
+    def test_auto_shell_denial_ends_turn_with_reason_before_replanning(self) -> None:
+        from approval_auto_review import ShellAutoReview
+
+        gateway = self.gateway
+        config = gateway.ensure_config()
+        config.execution_mode = "auto"
+        gateway.save_config(config)
+        reason = "The command exceeds the scope of the requested read."
+        plan = {
+            "planner": "llm", "shellNeeded": True, "shellCommand": "Get-Content reference.txt",
+            "shellParams": {"cwd": self.temp_dir.name}, "continueLoop": True, "nextStep": "call_shell",
+        }
+        with patch.object(
+            dashboard_server.PROVIDER_MODEL_CATALOG, "resolve_context_limit", return_value=100_000,
+        ), patch.object(
+            gateway.runtime_planner, "plan_agent_turn",
+            side_effect=[dict(plan), dict(plan), {"planner": "llm", "reply": "Done", "nextStep": "done"}],
+        ) as planner, patch.object(
+            gateway.shell, "_auto_reviewer", side_effect=[ShellAutoReview("deny", reason), ShellAutoReview("allow")],
+        ) as reviewer, patch.object(
+            gateway.shell, "_execute_direct", return_value={
+                "ok": True, "status": "executed", "result": {"ok": True, "exitCode": 0, "stdout": "fixture"},
+            },
+        ) as launch:
+            result = gateway.runtime_message({"message": "Read the requested reference file.", "sessionId": "auto-review-stop"})
+
+        assert planner.call_count == 1
+        assert reviewer.call_count == 1
+        launch.assert_not_called()
+        assert result["plan"]["nextStep"] == "tool_failed"
+        assert result["plan"]["continueLoop"] is False
+        assert result["plan"]["error"]["code"] == "shell_auto_review_denied"
+        assert reason in result["plan"]["reply"]
+        assert any(
+            event.get("kind") == "assistant"
+            and event.get("payload", {}).get("phase") == "final_answer"
+            and reason in event["payload"].get("summary", "")
+            for event in result["timeline"]
+        )
+
     def test_unplanned_message_provider_failure_is_typed_not_fake_disconnect(self) -> None:
         gateway = self.gateway
 

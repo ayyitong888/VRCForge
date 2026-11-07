@@ -14,7 +14,8 @@ def config(protocol="responses"):
     return ProviderApiConfig("openai", "private-review-key", "https://example.invalid/v1", "same-main-model", protocol, "")
 
 
-def test_review_uses_independent_tool_free_responses_request(monkeypatch):
+@pytest.mark.parametrize("lightweight", [False, True])
+def test_review_uses_independent_tool_free_responses_request(monkeypatch, lightweight):
     observed = {}
     def send(request):
         observed["request"] = request
@@ -27,13 +28,18 @@ def test_review_uses_independent_tool_free_responses_request(monkeypatch):
     probe = ProviderTextProbeRunner(_probe_policy(observed), sdk)
     monkeypatch.setattr(dashboard, "PROVIDER_TEXT_PROBE", probe)
     monkeypatch.setattr(dashboard, "request_llm_plan_with_metadata", lambda *_a, **_k: pytest.fail("planner transport used"))
-    model = dashboard._RuntimePlannerModel(SimpleNamespace(current_config=config))
+    model = dashboard._RuntimePlannerModel(
+        SimpleNamespace(current_config=config),
+        review_config=(lambda current: replace(current, model="fixture-luna")) if lightweight else None,
+    )
     result = model.review("Review only this frozen approval.")
     assert result.text == '{"decision":"allow_auto"}'
     assert observed["key"] == "private-review-key"
     request = vars(observed["request"])
     assert request["mode"] == "probe"
-    assert request["model"] == "same-main-model"
+    assert request["model"] == ("fixture-luna" if lightweight else "same-main-model")
+    assert result.planner_label.endswith(request["model"])
+    assert result.model == request["model"]
     assert "independent approval reviewer" in request["instructions"]
     assert request["max_output_tokens"] == 4096
     assert request["prompt"] == "Review only this frozen approval."

@@ -23,6 +23,7 @@ from agent_command_safety import (
     strip_quotes,
     tokenize_command,
 )
+from approval_auto_review import ShellAutoReview
 from agent_shell_process_supervisor import (
     ManagedShellProcess,
     ShellProcessSupervisor,
@@ -189,6 +190,7 @@ class AgentShellService:
         )
         self._session_input_buffers: dict[str, str] = {}
         self._project_path_guard: Callable[[], Any] | None = None
+        self._auto_reviewer: Callable[[dict[str, Any]], ShellAutoReview] | None = None
 
     def _spawn_session_process(
         self,
@@ -205,6 +207,9 @@ class AgentShellService:
         """Bind the cooperative registered-project guard used by shared Shell."""
 
         self._project_path_guard = provider
+
+    def bind_auto_reviewer(self, reviewer: Callable[[dict[str, Any]], ShellAutoReview]) -> None:
+        self._auto_reviewer = reviewer
 
     @property
     def active_process_count(self) -> int:
@@ -471,6 +476,58 @@ class AgentShellService:
                         }
                     }
                 return response
+            if task_context is not None and self._ports.approvals.execution_mode() == "auto":
+                params = dict(params)
+                environment_overrides = self._environment_overrides(params)
+                if "env" in params:
+                    params["env"] = environment_overrides
+                evidence = {
+                    "command": command,
+                    "cwd": classification["cwd"],
+                    "workspaceRoot": classification["workspaceRoot"],
+                    "protectedProject": classification["projectRoot"],
+                    "runner": classification["plannedRunner"],
+                    "environmentOverrides": dict(environment_overrides),
+                    "timeoutSeconds": self._timeout_seconds(params),
+                    "background": bool(params.get("background")),
+                    "pty": bool(params.get("pty")),
+                    "userObjective": str(task_context.get("objective") or task_context.get("userObjective") or ""),
+                }
+                review = ShellAutoReview("unavailable", "No independent reviewer is configured.")
+                if self._auto_reviewer is not None:
+                    try:
+                        review = self._auto_reviewer(evidence)
+                    except Exception:
+                        review = ShellAutoReview("unavailable", "The independent reviewer failed.")
+                self._ports.append_audit({
+                    "event": "shell_independent_auto_review",
+                    "agent": agent_name,
+                    "commandHash": classification["commandHash"],
+                    "cwd": classification["cwd"],
+                    "reviewerDecision": review.decision,
+                    "reason": review.reason,
+                })
+                if review.decision != "allow":
+                    denied = review.decision == "deny"
+                    error = (
+                        f"Automatic approval review rejected this shell command: {review.reason}"
+                        if denied else f"Automatic approval review could not complete: {review.reason}"
+                    )
+                    return {
+                        "ok": False,
+                        "status": "rejected",
+                        "classification": classification,
+                        "error": error,
+                        "mutationStarted": False,
+                        "errorDetails": {
+                            "error": {
+                                "type": "permission",
+                                "code": "shell_auto_review_denied" if denied else "shell_auto_review_unavailable",
+                                "retryable": False,
+                            }
+                        },
+                    }
+
             if classification["risk"] == "high":
                 approval = self._create_approval(
                     params,

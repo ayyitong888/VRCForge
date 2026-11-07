@@ -84,6 +84,31 @@ def test_catalog_owner_has_no_dashboard_host_or_implementation_facade() -> None:
     assert ProviderModelCatalogSdkPorts.__dataclass_params__.frozen is True
 
 
+@pytest.mark.parametrize(("models", "expected"), [
+    (["model-sol", "model-mini", "model-luna"], "model-luna"),
+    (["model-sol", "model-mini", "model-mini-transcribe"], "model-mini"),
+    (["model-sol", "model-vision"], "selected-model"),
+])
+def test_review_uses_advertised_lightweight_text_model_or_active_model(models, expected):
+    calls = []
+    service = _service(calls=calls, response={"data": [{"id": model} for model in models]})
+    config = replace(_config("openai"), thinking_level="high")
+    reviewer = service.resolve_review_config(config)
+    assert reviewer.model == expected
+    assert (reviewer.provider, reviewer.api_type, reviewer.base_url, reviewer.api_key) == (
+        config.provider, config.api_type, config.base_url, config.api_key,
+    )
+    assert reviewer.thinking_level == ("high" if expected == config.model else "")
+    assert service.resolve_review_config(config) == reviewer
+    assert sum(row[0] == "openai" for row in calls) == 1
+
+
+def test_review_can_use_the_active_model_when_the_provider_catalog_is_unavailable():
+    config = _config("openai")
+    service = _service(response={"data": []})
+    assert service.resolve_review_config(config) == config
+
+
 @pytest.mark.parametrize(
     ("provider", "expected_call"),
     [

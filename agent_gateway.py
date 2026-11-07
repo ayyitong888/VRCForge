@@ -6566,6 +6566,7 @@ class AgentGateway:
         unresolved_planner_argument_failure: dict[str, Any] | None = None
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
         unresolved_completion_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
+        shell_review_terminal_outcome: dict[str, Any] | None = None
         unresolved_completion_action_keys: dict[str, tuple[str, str]] = {}
         pending_approval_outcome: dict[str, Any] | None = None
         if continuation_context and str(continuation_completion.get("status") or "").casefold() == "completed":
@@ -8305,6 +8306,11 @@ class AgentGateway:
             task_action_id = str(task_action.get("actionId") or "").strip()
             correction_action_ids = task_action.get("correctedActionIds") or []
             scope_error_code = str(ensure_dict(step_outcome.get("error")).get("code") or "")
+            if action_kind == "shell" and scope_error_code in {"shell_auto_review_denied", "shell_auto_review_unavailable"}:
+                # The independent decision is terminal for this turn. Do not
+                # let later proposals try the action against another review.
+                shell_review_terminal_outcome = step_outcome
+                break
             repeated_shell_scope_denial = False
             if action_kind == "shell" and scope_error_code == "unity_project_shell_scope":
                 # The first receipt contains a concrete cwd/tool correction. Allow
@@ -8766,6 +8772,13 @@ class AgentGateway:
         )
         if handoff_terminal is not None:
             top_plan = {**handoff_terminal, "task": task_loop.snapshot("await_user_instruction")}
+        elif shell_review_terminal_outcome is not None:
+            top_plan = completion_gate_plan({
+                **top_plan,
+                "reply": shell_review_terminal_outcome["summary"],
+                "completionClaim": {"satisfied": False},
+            }, shell_review_terminal_outcome) or top_plan
+            top_plan["task"] = task_loop.snapshot()
         elif isinstance(top_plan, dict):
             top_plan = task_loop.gate_terminal(top_plan)
             if (native_binding and last_plan.get("nextStep") == "done"

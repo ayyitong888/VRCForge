@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from provider_configuration_service import ProviderApiConfig
@@ -156,6 +157,38 @@ class ProviderModelCatalogService:
                     maximum = min(bounds)
                 break
         return maximum
+
+    def resolve_review_config(self, config: ProviderApiConfig) -> ProviderApiConfig:
+        """Prefer an advertised lightweight text route on the same Provider."""
+
+        models = self._model_cache.get(self._model_cache_key(config))
+        if models is None:
+            try:
+                models = self.fetch_provider_models(config)
+            except Exception:
+                return config
+        candidates: list[tuple[int, str]] = []
+        for item in models:
+            model = str(item.get("id") or "").strip()
+            words = set(re.findall(r"[a-z]+", model.casefold()))
+            if not model or words & {"embedding", "moderation", "realtime", "transcribe", "tts", "image", "audio"}:
+                continue
+            for rank, sizes in enumerate(({"luna"}, {"nano", "haiku", "lite"}, {"mini", "flash", "small"})):
+                if words & sizes:
+                    break
+            else:
+                continue
+            try:
+                descriptor = self._policy.provider_model_descriptor(config.provider, model, config.api_type)
+            except (RuntimeError, ValueError):
+                continue
+            capabilities = descriptor.get("capabilities") or []
+            if not capabilities or "text" in capabilities:
+                candidates.append((rank, model))
+        if not candidates:
+            return config
+        _, model = min(candidates, key=lambda candidate: (candidate[0], candidate[1] != config.model, candidate[1]))
+        return config if model == config.model else replace(config, model=model, thinking_level="")
 
     @staticmethod
     def _model_cache_key(config: ProviderApiConfig) -> tuple[str, str, str]:

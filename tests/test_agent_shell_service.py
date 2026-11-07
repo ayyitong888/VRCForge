@@ -1158,9 +1158,65 @@ def test_service_has_no_dynamic_host_or_compatibility_facade() -> None:
     assert not any(isinstance(node, ast.FunctionDef) and node.name.startswith("execute_shell") for node in ast.walk(tree))
 
 
+@pytest.mark.parametrize("decision", ["allow", "deny", "unavailable", "callback_error"])
+def test_internal_auto_shell_uses_review_before_host_process(tmp_path: Path, decision: str) -> None:
+    from agent_tool_result_contract import normalize_agent_tool_result
+    from approval_auto_review import review_auto_shell
+
+    process_owner = FakeProcessOwner()
+    gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit", shell_process_ports=process_owner.ports())
+    config = gateway.ensure_config()
+    config.execution_mode = "auto"
+    gateway.save_config(config)
+    project = tmp_path / "Registered"
+    project.mkdir()
+    cwd = tmp_path / "Host"
+    cwd.mkdir()
+    gateway.shell.bind_project_path_guard(lambda: UnityPathGuard([str(project)], current_root=str(project)))
+    command = 'Get-Content -LiteralPath "reference.txt"'
+    reviews = []
+
+    def review_request(prompt):
+        assert not process_owner.processes
+        reviews.append(json.loads(prompt.splitlines()[-1]))
+        if decision == "unavailable":
+            raise TimeoutError("provider did not reply")
+        return json.dumps({"decision": decision, "reason": "Target is outside the requested directory." if decision == "deny" else ""})
+
+    def review(evidence):
+        if decision == "callback_error":
+            reviews.append(evidence)
+            raise RuntimeError("private provider exception")
+        return review_auto_shell(evidence, review_request)
+
+    gateway.shell.bind_auto_reviewer(review)
+    result = gateway.shell.execute(
+        {"command": command, "cwd": str(cwd), "workspace_root": str(project), "projectRoot": str(project)},
+        task_context={"objective": f"Read reference.txt under {cwd}"},
+    )
+    assert len(reviews) == 1
+    assert reviews[0]["command"] == command
+    assert reviews[0]["cwd"] == str(cwd)
+    assert reviews[0]["workspaceRoot"] == str(project)
+    assert reviews[0]["userObjective"] == f"Read reference.txt under {cwd}"
+    if decision == "allow":
+        assert result["status"] == "executed" and len(process_owner.processes) == 1
+    else:
+        assert result["status"] == "rejected" and not process_owner.processes
+        assert result["mutationStarted"] is False
+        code = "shell_auto_review_denied" if decision == "deny" else "shell_auto_review_unavailable"
+        reason = "Target is outside the requested directory." if decision == "deny" else "review could not complete"
+        outcome = normalize_agent_tool_result(result, fallback_summary="Shell failed", write=False)
+        assert outcome["error"]["code"] == code
+        assert reason in outcome["summary"]
+        assert "private provider exception" not in outcome["summary"]
+
+
 def test_gateway_composes_shell_owner_with_fake_process_and_nonrecoverable_v14_approval(
     tmp_path: Path,
 ) -> None:
+    from approval_auto_review import ShellAutoReview
+
     process_owner = FakeProcessOwner()
     gateway = AgentGateway(
         tmp_path / "agent_gateway.json",
@@ -1181,6 +1237,8 @@ def test_gateway_composes_shell_owner_with_fake_process_and_nonrecoverable_v14_a
         encoding="utf-8",
     )
 
+    reviewed = []
+    gateway.shell.bind_auto_reviewer(lambda evidence: reviewed.append(evidence) or ShellAutoReview("allow"))
     pending = gateway.shell.execute(
         {
             "command": "Remove-Item Assets/file.txt",
@@ -1189,8 +1247,11 @@ def test_gateway_composes_shell_owner_with_fake_process_and_nonrecoverable_v14_a
             "projectRoot": str(project),
             "session_id": "session-1",
             "turn_id": "turn-1",
-        }
+        },
+        task_context={"objective": "Remove Assets/file.txt from the selected project."},
     )
+    assert len(reviewed) == 1
+    assert reviewed[0]["protectedProject"] == str(project)
     assert pending["status"] == "pending_approval"
     approval = pending["approval"]
     assert approval["requiresExplicitApproval"] is True
