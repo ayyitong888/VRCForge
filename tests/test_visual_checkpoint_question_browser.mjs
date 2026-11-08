@@ -12,12 +12,14 @@ const entry = `
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AgentQuestionCard } from ${JSON.stringify(path.join(root, "src/components/chat/agent-question-card.tsx"))};
+import { RightRuntimeSidebar } from ${JSON.stringify(path.join(root, "src/components/runtime/runtime-sidebar.tsx"))};
 function Fixture() {
   const [question, setQuestion] = useState({ questionId: "visual-1", kind: "visual_checkpoint", status: "pending", question: "Inspect the preview", options: [
     { id: "pass", label: "Pass" }, { id: "fail", label: "Fail" }, { id: "uncertain", label: "Uncertain" }, { id: "later", label: "Later" },
   ] });
   const [answer, setAnswer] = useState(null);
   const [replyQuestionId, setReplyQuestionId] = useState("");
+  const [dismissed, setDismissed] = useState(false);
   async function onAnswerQuestion(questionId, optionId, value) {
     if (window.failNextAnswer) {
       window.failNextAnswer = false;
@@ -29,9 +31,13 @@ function Fixture() {
   return React.createElement("main", null,
     React.createElement("output", { "data-answer": true }, answer ? JSON.stringify(answer) : ""),
     React.createElement("output", { "data-reply-question": true }, replyQuestionId),
-    React.createElement(AgentQuestionCard, { questions: [question], onAnswerQuestion, onReplyInChat: setReplyQuestionId,
+    React.createElement(AgentQuestionCard, { questions: dismissed ? [] : [question], onAnswerQuestion, onReplyInChat: setReplyQuestionId,
+      onDismissQuestion: () => setDismissed(true),
       capturePreviewsForQuestion: () => [{ resourceUri: "vrcforge://scene-capture-preview/8d886299-9be1-4baf-8e1f-e205f3a8e5fc?context=runtime%3Asession-fixture&revision=1&store=11111111111111111111111111111111", label: "front", sessionId: "session-fixture" }],
       resourceImageContextForQuestion: () => ({ endpoint: location.origin, chatId: "fixture", sessionId: "session-fixture", clientTurnId: "turn-fixture" }) }),
+    React.createElement(RightRuntimeSidebar, { workspaceProjectType: "general", projectWorkspace: false,
+      agentProgress: [], activeDesktopActions: [], userAttachmentSources: [], authorizationStatus: { status: "ok" },
+      localizeHealthMessage: () => "", dismissedQuestion: dismissed ? { label: question.question, onReopen: () => setDismissed(false) } : undefined }),
   );
 }
 createRoot(document.getElementById("root")).render(React.createElement(Fixture));
@@ -74,6 +80,11 @@ try {
   assert.equal(await page.locator("[data-answer]").textContent(), "", "previewing a capture never answers the question");
   await preview.getByRole("button", { name: "chat.closeImagePreview" }).click();
   await preview.waitFor({ state: "detached" });
+  await page.getByRole("button", { name: "common.close", exact: true }).click();
+  assert.equal(await page.getByRole("region", { name: "questionCard.label" }).count(), 0, "X hides the question card");
+  assert.equal(await page.locator("[data-question-reopen='visual-1']").count(), 0, "X does not leave a collapsed card in the dock");
+  assert.equal(await page.locator("[data-answer]").textContent(), "", "X never submits an answer");
+  await page.locator("[data-vrcforge-status='dismissed-question']").click();
   await page.getByRole("button", { name: "Reply in chat" }).click();
   assert.equal(await page.locator("[data-reply-question]").textContent(), "visual-1", "reply-in-chat keeps the question id");
   assert.equal(await page.getByText("Recommended", { exact: true }).count(), 0, "visual checkpoints do not recommend Pass");
@@ -106,7 +117,7 @@ try {
     assert.equal(await page.getByRole("region", { name: "questionCard.label" }).count(), 0, `${label} closes the original question`);
     assert.equal(await page.locator("[data-question-reopen='visual-1']").count(), 0);
   }
-  console.log("visual checkpoint question UI: every choice closes the question, retry preserves answer, image preview passed");
+  console.log("visual checkpoint question UI: dismissal/reopen without answer, every choice closes the question, retry preserves answer, image preview passed");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

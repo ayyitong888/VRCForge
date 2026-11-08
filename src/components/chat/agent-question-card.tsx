@@ -12,6 +12,7 @@ import type { QuestionCapturePreview } from "../../lib/chat-timeline-presentatio
 export function AgentQuestionCard({
   questions,
   onAnswerQuestion,
+  onDismissQuestion,
   onStopContinuation,
   onReplyInChat,
   capturePreviewsForQuestion,
@@ -19,6 +20,7 @@ export function AgentQuestionCard({
 }: {
   questions: AgentQuestion[];
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
+  onDismissQuestion: (questionId: string) => void;
   onStopContinuation?: (question: AgentQuestion) => void | Promise<void>;
   /** Focus the shared composer; the owner should retain this question id and send text/attachments through the normal composer path. */
   onReplyInChat?: (questionId: string) => void;
@@ -141,7 +143,7 @@ export function AgentQuestionCard({
             </button>
           </div>
         ) : null}
-        <button type="button" className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted disabled:opacity-50" aria-label={t("common.close")} title={t("common.close")} onClick={() => setCollapsedQuestionId(question.questionId)} disabled={Boolean(busyChoice)}><X className="h-4 w-4" /></button>
+        <button type="button" className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted disabled:opacity-50" aria-label={t("common.close")} title={t("common.close")} onClick={() => onDismissQuestion(question.questionId)} disabled={Boolean(busyChoice)}><X className="h-4 w-4" /></button>
       </div>
 
       {!continuationActive && !continuationSettled ? <div className="app-scrollbar mb-2 max-h-[20vh] overflow-y-auto whitespace-pre-wrap break-words text-sm font-normal text-foreground">

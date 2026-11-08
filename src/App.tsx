@@ -405,6 +405,7 @@ export default function App() {
   const [subAgentActionBusyTaskIds, setSubAgentActionBusyTaskIds] = useState<Set<string>>(() => new Set());
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [pendingReplyQuestionId, setPendingReplyQuestionId] = useState("");
+  const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
   const attachmentLoadsRef = useRef(0);
   const replySubmitInFlightRef = useRef(false);
@@ -1165,6 +1166,8 @@ export default function App() {
       chats.find((chat) => chat.sessionId === ownerSessionId)?.id || "",
   });
   const activeRuntimeCancelTarget = runtimeActivityCancelTarget(chats, activeChat || undefined, runtimeRuns);
+  const scopedAgentQuestions = hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : [];
+  const dismissedAgentQuestion = scopedAgentQuestions.find((question) => question.status === "pending" && dismissedQuestionIds.has(question.questionId));
   const sending = localActivitySending || Boolean(activeRuntimeCancelTarget);
   const runtimeAwareChatSidebar = useMemo(() => {
     const visibleChatId = activeView === "chat" ? activeChatId : "";
@@ -4672,7 +4675,7 @@ export default function App() {
               conversation={conversation}
               attachmentPayloads={displayChat?.attachmentPayloads}
               queued={visibleQueued}
-              agentQuestions={hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : []}
+              agentQuestions={scopedAgentQuestions.filter((question) => question.status !== "pending" || !dismissedQuestionIds.has(question.questionId))}
               backgroundGoalDeliveries={
                 activeChatId
                   ? (backgroundGoalState?.recent || []).filter((delivery) => delivery.chatId === activeChatId)
@@ -4683,6 +4686,7 @@ export default function App() {
               onBackgroundGoalProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
               onBackgroundGoalCatchUpDismiss={dismissBackgroundGoalCatchUp}
               onAnswerQuestion={answerRuntimeQuestion}
+              onDismissQuestion={(questionId) => setDismissedQuestionIds((current) => new Set(current).add(questionId))}
               onReplyInChat={replyToAgentQuestionInComposer}
               focusInput={Boolean(pendingReplyQuestionId)}
               pendingReplyQuestionId={pendingReplyQuestionId}
@@ -4799,6 +4803,17 @@ export default function App() {
               approvalsLoaded={agentApprovals !== null}
               pendingApprovals={pendingApprovals}
               runtimeReviewCount={runtimeAttention.length}
+              dismissedQuestion={dismissedAgentQuestion ? {
+                label: dismissedAgentQuestion.header || dismissedAgentQuestion.question || dismissedAgentQuestion.questionId,
+                onReopen: () => {
+                  setDismissedQuestionIds((current) => {
+                    const next = new Set(current);
+                    next.delete(dismissedAgentQuestion.questionId);
+                    return next;
+                  });
+                  setActiveView("chat");
+                },
+              } : undefined}
               workspaceSummary={workspaceDiff}
               activeDesktopActions={activeDesktopActions}
               refreshUnityStatus={refreshUnityStatus}

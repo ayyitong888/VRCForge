@@ -1,4 +1,4 @@
-import { Bot, Box, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
+import { Bot, Box, Folder, HelpCircle, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -47,6 +47,7 @@ export function RightRuntimeSidebar({
   approvalsLoaded,
   pendingApprovals,
   runtimeReviewCount = 0,
+  dismissedQuestion,
   workspaceSummary,
   activeDesktopActions,
   refreshUnityStatus,
@@ -81,6 +82,7 @@ export function RightRuntimeSidebar({
   approvalsLoaded: boolean;
   pendingApprovals: number;
   runtimeReviewCount?: number;
+  dismissedQuestion?: { label: string; onReopen: () => void };
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
   refreshUnityStatus: () => void | Promise<void>;
@@ -140,6 +142,17 @@ export function RightRuntimeSidebar({
       ) : null}
       {workspaceProjectType === "unity" ? <CoreVersionNotice detail={unityToolsComponent?.detail} /> : null}
       <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        {dismissedQuestion ? (
+          <button type="button" className="mb-3 w-full rounded-xl border border-border/80 px-2 text-left hover:bg-muted/50"
+            data-vrcforge-status="dismissed-question" onClick={dismissedQuestion.onReopen}>
+            <RuntimeInfoRow
+              icon={<HelpCircle className="h-4 w-4" />}
+              label={t("questionCard.title")}
+              value={dismissedQuestion.label}
+              suffix={<StatusDot status="warning" />}
+            />
+          </button>
+        ) : null}
         {projectWorkspace ? (
           <ProjectWorkbenchSections
             workspaceProjectLabel={workspaceProjectLabel}

@@ -154,6 +154,7 @@ export function ChatWorkspace({
   onBackgroundGoalProviderWarningsRendered,
   onBackgroundGoalCatchUpDismiss,
   onAnswerQuestion,
+  onDismissQuestion,
   onReplyInChat,
   onOpenChatById,
   focusInput = false,
@@ -255,6 +256,7 @@ export function ChatWorkspace({
   onBackgroundGoalProviderWarningsRendered: (warnings: AgentGoalBackgroundAcknowledgement[]) => void;
   onBackgroundGoalCatchUpDismiss: () => void;
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
+  onDismissQuestion: (questionId: string) => void;
   onReplyInChat?: (questionId: string) => void;
   /** Opens another conversation in this project scope by chat id. */
   onOpenChatById?: (chatId: string) => void;
@@ -593,6 +595,7 @@ export function ChatWorkspace({
                 <AgentQuestionCard
                   questions={pendingQuestionPrompts}
                   onAnswerQuestion={onAnswerQuestion}
+                  onDismissQuestion={onDismissQuestion}
                   onReplyInChat={onReplyInChat}
                   capturePreviewsForQuestion={questionCapturePreviews}
                   resourceImageContextForQuestion={questionResourceImageContext}
@@ -779,6 +782,7 @@ export function ChatWorkspace({
             <AgentQuestionCard
               questions={pendingQuestionPrompts}
               onAnswerQuestion={onAnswerQuestion}
+              onDismissQuestion={onDismissQuestion}
               onReplyInChat={onReplyInChat}
               capturePreviewsForQuestion={questionCapturePreviews}
               resourceImageContextForQuestion={questionResourceImageContext}
