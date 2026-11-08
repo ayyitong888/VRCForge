@@ -1,5 +1,5 @@
 import { Minus, Plus, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 export type ChatImageSource = { src: string; alt: string };
@@ -8,11 +8,61 @@ export function ChatImagePreview({ src, alt, onClose }: ChatImageSource & { onCl
   const { t } = useTranslation();
   const dialog = useRef<HTMLDialogElement>(null);
   const image = useRef<HTMLImageElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
+  const zoomAnchor = useRef<{ x: number; y: number; imageX: number; imageY: number }>();
+  const drag = useRef<{ pointerId: number; x: number; y: number; left: number; top: number }>();
   const [size, setSize] = useState<{ width: number; height: number }>();
   const [zoom, setZoom] = useState(1);
-  const changeZoom = useCallback((step: number) => {
+  const [dragging, setDragging] = useState(false);
+  const changeZoom = useCallback((step: number, point?: { x: number; y: number }) => {
+    const container = viewport.current;
+    const bounds = image.current?.getBoundingClientRect();
+    if (container && bounds?.width && bounds.height) {
+      const viewportBounds = container.getBoundingClientRect();
+      const x = point?.x ?? viewportBounds.left + container.clientWidth / 2;
+      const y = point?.y ?? viewportBounds.top + container.clientHeight / 2;
+      zoomAnchor.current = {
+        x, y, imageX: (x - bounds.left) / bounds.width, imageY: (y - bounds.top) / bounds.height,
+      };
+    }
     setZoom((current) => Math.min(4, Math.max(0.5, current + step)));
   }, []);
+
+  useLayoutEffect(() => {
+    const anchor = zoomAnchor.current;
+    zoomAnchor.current = undefined;
+    const bounds = image.current?.getBoundingClientRect();
+    const container = viewport.current;
+    if (!anchor || !bounds || !container) return;
+    container.scrollLeft += bounds.left + bounds.width * anchor.imageX - anchor.x;
+    container.scrollTop += bounds.top + bounds.height * anchor.imageY - anchor.y;
+  }, [zoom]);
+
+  function startDrag(event: PointerEvent<HTMLImageElement>) {
+    const container = viewport.current;
+    if (!container || event.button !== 0 || !event.isPrimary
+      || (container.scrollWidth <= container.clientWidth && container.scrollHeight <= container.clientHeight)) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    drag.current = {
+      pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      left: container.scrollLeft, top: container.scrollTop,
+    };
+    setDragging(true);
+  }
+
+  function moveImage(event: PointerEvent<HTMLImageElement>) {
+    const start = drag.current;
+    const container = viewport.current;
+    if (!start || start.pointerId !== event.pointerId || !container) return;
+    container.scrollLeft = start.left + start.x - event.clientX;
+    container.scrollTop = start.top + start.y - event.clientY;
+  }
+
+  function stopDrag(event: PointerEvent<HTMLImageElement>) {
+    if (drag.current?.pointerId !== event.pointerId) return;
+    drag.current = undefined;
+    setDragging(false);
+  }
 
   useEffect(() => {
     if (dialog.current && !dialog.current.open) dialog.current.showModal();
@@ -20,7 +70,7 @@ export function ChatImagePreview({ src, alt, onClose }: ChatImageSource & { onCl
     const onWheel = (event: WheelEvent) => {
       if (!event.deltaY) return;
       event.preventDefault();
-      changeZoom(event.deltaY < 0 ? 0.25 : -0.25);
+      changeZoom(event.deltaY < 0 ? 0.25 : -0.25, { x: event.clientX, y: event.clientY });
     };
     target?.addEventListener("wheel", onWheel, { passive: false });
     return () => target?.removeEventListener("wheel", onWheel);
@@ -37,16 +87,19 @@ export function ChatImagePreview({ src, alt, onClose }: ChatImageSource & { onCl
       aria-label={t("chat.imagePreview")}
       onClose={onClose}
     >
-      <div className="app-scrollbar absolute inset-0 overflow-auto overscroll-contain" onClick={() => dialog.current?.close()}>
+      <div ref={viewport} className="app-scrollbar absolute inset-0 overflow-auto overscroll-contain" onClick={() => dialog.current?.close()}>
         <div className="flex min-h-full w-max min-w-full items-center justify-center px-6 py-16">
           <img
             ref={image}
             src={src}
             alt={alt}
             draggable={false}
-            className="block h-auto max-w-none shrink-0 select-none rounded-lg"
+            className={"block h-auto max-w-none shrink-0 touch-none select-none rounded-lg" + (dragging ? " cursor-grabbing" : zoom > 1 ? " cursor-grab" : "")}
             style={{ width: fittedWidth ? `calc(${fittedWidth} * ${zoom})` : undefined }}
             onLoad={({ currentTarget }) => setSize({ width: currentTarget.naturalWidth, height: currentTarget.naturalHeight })}
+            onPointerDown={startDrag}
+            onPointerMove={moveImage}
+            onLostPointerCapture={stopDrag}
             onClick={(event) => event.stopPropagation()}
           />
         </div>
