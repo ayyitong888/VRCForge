@@ -35,11 +35,12 @@ CALL_USER_USAGE_INSTRUCTION = (
 )
 QUESTION_LANGUAGE_INSTRUCTION = (
     "For both ask_user and call_user, write the heading, question and choices in the user's language, using everyday language. "
-    "Briefly explain what is blocked and why the user's help is needed, then ask for one concrete decision or action. "
+    "Start with what you found and why the user's decision is needed. Ask for one concrete decision or action. "
+    "Say what accepting or declining would do in this situation. Name the website or object and the specific change, permission, or data involved. "
     "For a manual action, use short numbered steps: where to click, what to change, important limits, and how to report the result. "
     "Keep exact visible names needed to find an object, component or button; explain unavoidable technical terms beside them. "
     "Leave API names, internal IDs, diagnostic details and the agent's verification plan out of the question. "
-    "Use short choices describing the user's decision or observed result, including an unable-to-find/unsure choice when relevant. "
+    "Use short, specific choices such as 'Allow optional cookies' and 'Keep cookies off' instead of a bare 'Yes' or 'No'. Include an unsure choice when relevant. "
     "For visual_checkpoint choices, use option objects with unique IDs and an explicit resolution value (pass, fail, uncertain, or later). "
     "A submitted reply closes that question. Only pass grants visual acceptance; follow up only when there is a new decision to make. "
 )
