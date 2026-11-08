@@ -164,7 +164,10 @@ def _pre_routing_gateway_rejection(
             )
             recovery["requiredInput"] = "arguments.projectPath"
         return recovery
-    if cause_code == "external_mcp_project_scope_ambiguous":
+    if cause_code in {
+        "external_mcp_project_scope_ambiguous", "external_mcp_project_path_required",
+        "external_mcp_project_path_conflict",
+    }:
         # The project guard runs before Tool dispatch. Require its explicit
         # evidence; a status code or exception message alone proves no such thing.
         if not isinstance(source, Mapping) or (

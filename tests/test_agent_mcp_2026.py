@@ -431,15 +431,16 @@ def test_prompt_provenance_rejection_is_a_pre_routing_validation_error():
     assert "http_500" not in json.dumps(data)
 
 
-def test_actual_ambiguous_project_guard_returns_http409_without_recovery(tmp_path):
+@pytest.mark.parametrize("scope_count", [0, 1, 2])
+def test_actual_missing_project_guard_returns_http409_without_recovery(tmp_path, scope_count):
     from fastapi.testclient import TestClient
 
     gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
     gateway.save_config(config)
-    gateway._register_runtime_project_scope(str(tmp_path / "project-a"))
-    gateway._register_runtime_project_scope(str(tmp_path / "project-b"))
+    for index in range(scope_count):
+        gateway._register_runtime_project_scope(str(tmp_path / f"project-{index}"))
     calls = []
     name = "vrcforge_avatar_encryption_scan"
     gateway.register_tool(name, "Read encryption candidates.", "read/debug", lambda args: calls.append(args))
@@ -456,7 +457,9 @@ def test_actual_ambiguous_project_guard_returns_http409_without_recovery(tmp_pat
     assert response.status_code == 409, response.text
     data = response.json()["error"]["data"]
     assert calls == []
-    assert data["errorCode"] == "external_mcp_project_scope_ambiguous"
+    assert data["errorCode"] == (
+        "external_mcp_project_scope_ambiguous" if scope_count > 1 else "external_mcp_project_path_required"
+    )
     assert data["failurePhase"] == "external_mcp_project_scope_validation"
     assert data["operationKind"] == "read"
     assert data["tool"] == name
@@ -500,7 +503,7 @@ def test_actual_list_avatars_ambiguity_returns_known_projects_and_selection_acti
     assert data["errorCode"] == "external_mcp_project_scope_ambiguous"
     assert data["details"]["knownProjectPaths"] == sorted(gateway._external_mcp_project_paths)  # noqa: SLF001
     assert "choose the exact intended projectpath" in data["details"]["nextAction"].casefold()
-    assert "ask the user to select it in the VRCForge App project picker" in data["details"]["nextAction"]
+    assert "ask the user for the exact root" in data["details"]["nextAction"]
 
 
 def test_actual_project_catalog_status_without_path_runs_with_multiple_scopes(tmp_path):

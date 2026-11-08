@@ -10082,16 +10082,22 @@ def agent_runtime_session(session_id: str, request: Request) -> dict[str, Any]:
 @app.post("/api/agent/tool/{tool_name}")
 async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentToolRequest) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=False)
+    params = dict(tool_request.params or {})
     try:
+        if tool_name == "vrcforge_request_apply":
+            target = str(params.get("target_tool") or params.get("targetTool") or "").strip()
+            arguments = ensure_dict(params.get("arguments") or params.get("params"))
+            AGENT_GATEWAY._guard_external_mcp_project_scope(target, arguments)
+        else:
+            AGENT_GATEWAY._guard_external_mcp_project_scope(tool_name, params)
         payload = await asyncio.to_thread(
             AGENT_GATEWAY.call_tool,
             tool_name,
-            tool_request.params,
+            params,
             tool_request.agent_name,
         )
     except AgentGatewayError as exc:
         raise runtime_http_error("internal_error", exc.status_code, exc) from exc
-    params = ensure_dict(tool_request.params or {})
     session_id = str(params.get("sessionId") or params.get("session_id") or "")
     project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "")
     if tool_name.startswith("vrcforge_progress_"):

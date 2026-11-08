@@ -496,8 +496,7 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         assert internal.block == dashboard_server.canonical_tool_owner(
             "unity/" + gateway.external_mcp_tool_block_for_name(name, write=False), internal.name
         )
-        canonical = external_catalog[name]["inputSchema"]
-        assert external_catalog[name]["inputSchema"] == canonical
+        canonical = gateway.shared_agent_tool_descriptor(name, write=False)["inputSchema"]
         assert internal.input_schema == bounded_planner_tool_schema(canonical)
         assert internal.definition_digest == external_catalog[name]["definitionDigest"]
         assert internal.description == external_catalog[name]["description"]
@@ -517,8 +516,7 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         assert internal.block == dashboard_server.canonical_tool_owner(
             "unity/" + gateway.external_mcp_tool_block_for_name(name, write=True), internal.name
         )
-        canonical = external_catalog[name]["inputSchema"]
-        assert external_catalog[name]["inputSchema"] == canonical
+        canonical = gateway.shared_agent_tool_descriptor(name, write=True)["inputSchema"]
         assert_internal_write_schema(internal.input_schema, canonical, approved_execution=handler.requires_approved_execution_context)
         assert internal.definition_digest == external_catalog[name]["definitionDigest"]
         assert internal.description == external_catalog[name]["description"]
@@ -529,7 +527,9 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         "vrcforge_install_vpm_package",
         write=True,
     )["inputSchema"]
-    assert external_catalog["vrcforge_install_vpm_package"]["inputSchema"] == wrapper_schema
+    external_wrapper = external_catalog["vrcforge_install_vpm_package"]["inputSchema"]
+    assert set(wrapper_schema["required"]) <= set(external_wrapper["required"])
+    assert "projectPath" in external_wrapper["required"]
 
 
 def test_internal_shared_facades_reject_inputs_the_external_contract_rejects() -> None:

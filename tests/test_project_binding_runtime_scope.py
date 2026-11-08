@@ -127,10 +127,10 @@ def test_external_optional_project_read_fails_closed_after_two_scopes(tmp_path) 
 
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     gateway._guard_external_mcp_project_scope(  # noqa: SLF001 - focused policy test
-        "vrcforge_scan_fx_animator", {"projectPath": r"D:\Projects\A"}
+        "vrcforge_scan_fx_animator", {"projectPath": str(tmp_path / "A")}
     )
     gateway._guard_external_mcp_project_scope(  # noqa: SLF001
-        "vrcforge_scan_fx_animator", {"projectPath": r"D:\Projects\B"}
+        "vrcforge_scan_fx_animator", {"projectPath": str(tmp_path / "B")}
     )
     with pytest.raises(AgentGatewayError, match="multiple Unity project scopes") as rejected:
         gateway._guard_external_mcp_project_scope("vrcforge_list_avatars", {})  # noqa: SLF001
@@ -138,6 +138,78 @@ def test_external_optional_project_read_fails_closed_after_two_scopes(tmp_path) 
     assert details["knownProjectPaths"] == sorted(gateway._external_mcp_project_paths)  # noqa: SLF001
     assert "choose the exact intended projectpath" in details["nextAction"].casefold()
     assert "do not guess" in details["nextAction"].casefold()
+
+
+@pytest.mark.parametrize("registered_scope_count", [0, 1])
+@pytest.mark.parametrize("tool_name", ["vrcforge_scan_blendshapes", "vrcforge_apply_blendshapes"])
+def test_external_project_path_is_explicit_even_with_a_single_scope(tmp_path, tool_name, registered_scope_count):
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    project = str(tmp_path / "project")
+    if registered_scope_count:
+        gateway._register_runtime_project_scope(project)
+
+    with pytest.raises(AgentGatewayError, match="arguments.projectPath") as rejected:
+        gateway._guard_external_mcp_project_scope(tool_name, {})
+
+    assert rejected.value.external_error["toolRoutingStarted"] is False
+    assert rejected.value.external_error["mutationStarted"] is False
+    assert rejected.value.external_error["commitState"] == "not_started"
+    gateway._guard_external_mcp_project_scope(tool_name, {"projectPath": project})
+
+
+def test_external_project_scope_rejects_conflicting_path_aliases(tmp_path):
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    with pytest.raises(AgentGatewayError, match="same project"):
+        gateway._guard_external_mcp_project_scope(
+            "vrcforge_scan_blendshapes", {"projectPath": str(tmp_path / "a"), "project_path": str(tmp_path / "b")},
+        )
+
+
+def test_external_project_scope_preserves_explicit_nested_paths_and_rejects_relative_paths(tmp_path):
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    with pytest.raises(AgentGatewayError, match="absolute projectPath"):
+        gateway._guard_external_mcp_project_scope("vrcforge_scan_blendshapes", {"projectPath": "Other"})
+
+    arguments = {"arguments": {"projectPath": str(tmp_path)}}
+    gateway._guard_external_mcp_project_scope("vrcforge_preview_parameter_bit_packing", arguments)
+    assert arguments["projectPath"] == str(tmp_path)
+
+
+@pytest.mark.parametrize(("tool_name", "params"), [
+    ("vrcforge_scan_blendshapes", {"scope": "all"}),
+    ("vrcforge_request_apply", {"targetTool": "vrcforge_apply_blendshapes", "arguments": {"avatar": "Avatar"}}),
+])
+def test_legacy_external_tool_endpoint_rejects_missing_project(tmp_path, monkeypatch, tool_name, params):
+    from fastapi.testclient import TestClient
+
+    from agent_gateway import AgentGateway
+    import dashboard_server
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+    monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
+    monkeypatch.setattr(gateway, "call_tool", lambda *_: pytest.fail("External tool dispatched without a project"))
+
+    client = TestClient(dashboard_server.app, client=("127.0.0.1", 51234))
+    try:
+        response = client.post(
+            "/api/agent/tool/" + tool_name,
+            headers={"Authorization": "Bearer " + config.token},
+            json={"agent_name": "test", "params": params},
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 409, response.text
+    assert "arguments.projectPath" in response.text
 
 
 def test_global_project_catalog_status_bypasses_optional_project_scope_guard(tmp_path) -> None:
