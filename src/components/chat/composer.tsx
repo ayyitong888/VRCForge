@@ -380,7 +380,7 @@ export function Composer({
           onChange={(event) => { setPaletteDismissed(false); setInput(event.target.value); }}
           className={cn(
             "app-scrollbar w-full resize-none bg-transparent px-1 outline-none placeholder:text-muted-foreground",
-            questionPromptVisible ? "col-start-2 row-start-1 min-h-[28px] max-h-32 min-w-0 flex-1 text-sm" : "min-h-[76px] text-base",
+            questionPromptVisible ? "col-start-2 row-start-1 min-h-[28px] max-h-32 min-w-0 flex-1 py-1 text-sm" : "min-h-[76px] text-base",
           )}
           rows={questionPromptVisible ? 1 : undefined}
           placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
