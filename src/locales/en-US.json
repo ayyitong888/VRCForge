@@ -1915,6 +1915,8 @@
     }
   },
   "questionCard": {
+    "recordedResponse": "Question response",
+    "skippedConfirmation": "Skipped confirmation",
     "visualCheckpoint": {
       "options": {
         "pass": "Pass",

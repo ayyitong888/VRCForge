@@ -1908,6 +1908,8 @@
     }
   },
   "questionCard": {
+    "recordedResponse": "提問回覆",
+    "skippedConfirmation": "已跳過確認",
     "visualCheckpoint": {
       "options": {
         "pass": "通過",

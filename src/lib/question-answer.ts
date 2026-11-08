@@ -3,7 +3,7 @@ import type { ChatAttachment, ConversationItem } from "./chat-types";
 
 /** Keep an answer tied to its ask_user record without creating a new user turn. */
 export function questionAnswerItem(
-  question: Pick<AgentQuestion, "questionId" | "header" | "question" | "questionFeedbackRevision" | "updatedAt" | "attachments">,
+  question: Pick<AgentQuestion, "questionId" | "header" | "question" | "questionFeedbackRevision" | "updatedAt" | "attachments" | "selectedOptionId">,
   text: string,
   attachments?: ChatAttachment[],
 ): Extract<ConversationItem, { type: "question_answer" }> {
@@ -24,6 +24,7 @@ export function questionAnswerItem(
     ...(question.question?.trim() ? { question: question.question.trim() } : {}),
     text,
     revision,
+    ...(question.selectedOptionId ? { selectedOptionId: question.selectedOptionId } : {}),
     ...(question.updatedAt ? { updatedAt: question.updatedAt } : {}),
     ...(visibleAttachments?.length ? { attachments: visibleAttachments } : {}),
   };

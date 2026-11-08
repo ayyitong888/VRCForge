@@ -1908,6 +1908,8 @@
     }
   },
   "questionCard": {
+    "recordedResponse": "質問への回答",
+    "skippedConfirmation": "確認をスキップしました",
     "visualCheckpoint": {
       "options": {
         "pass": "合格",

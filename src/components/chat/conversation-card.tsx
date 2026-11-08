@@ -8,6 +8,7 @@ import {
   Loader2,
   Pencil,
   Save,
+  SkipForward,
   RotateCcw,
   X,
 } from "lucide-react";
@@ -261,25 +262,40 @@ export function ConversationCard({
 
   if (item.type === "question_answer") {
     const attachments = resolveAttachmentPayloadReferences(item.attachments || [], attachmentPayloads);
+    const skipped = item.selectedOptionId === "skip" && !attachments.length && !reopenQuestionId;
+    const label = t(skipped ? "questionCard.skippedConfirmation" : "questionCard.recordedResponse");
     const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
     const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
     return (
-      <div className="group flex min-w-0 justify-end" data-question-answer={item.questionId} data-question-continuation-input>
-        <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
-          {images.length ? <UserImageAttachments messageId={item.id} attachments={images} /> : null}
-          {item.question || item.text ? (
-            <div className="min-w-0 max-w-full space-y-2 rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-question-answer-text data-chat-quote-content>
-              {item.question ? <div data-question-answer-question><ChatMarkdown text={`**${item.question}**`} /></div> : null}
-              {item.text ? <div className="font-normal" data-question-answer-value><ChatMarkdown text={item.text} /></div> : null}
+      <div className="min-w-0 max-w-2xl space-y-1.5 border-l border-border px-3 py-1 text-xs text-muted-foreground"
+        data-question-answer={item.questionId} data-question-continuation-input data-question-skipped={skipped || undefined}>
+        {item.question ? (
+          <details>
+            <summary className="w-fit cursor-pointer rounded-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{label}</summary>
+            <div className="mt-1.5 border-l border-border pl-3 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-question-answer-question data-chat-quote-content>
+              <ChatMarkdown text={item.question} />
             </div>
-          ) : null}
-          {otherAttachments.length ? <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm"><AttachmentStrip attachments={otherAttachments} compact /></div> : null}
-          {reopenQuestionId && onReopenQuestion ? (
-            <button type="button" className="rounded-md px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:bg-background hover:text-foreground hover:underline" onClick={() => onReopenQuestion(reopenQuestionId)} data-question-reopen={reopenQuestionId}>
-              {t("questionCard.replyInChat")}
-            </button>
-          ) : null}
-        </div>
+          </details>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 font-medium">
+            {skipped ? <SkipForward className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+            {label}
+          </span>
+        )}
+        {!skipped && item.text ? (
+          <div className="text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-question-answer-text data-question-answer-value data-chat-quote-content>
+            <ChatMarkdown text={item.text} />
+          </div>
+        ) : null}
+        {images.length ? (
+          <div className="w-fit max-w-full"><UserImageAttachments messageId={item.id} attachments={images} /></div>
+        ) : null}
+        {otherAttachments.length ? <AttachmentStrip attachments={otherAttachments} compact /> : null}
+        {reopenQuestionId && onReopenQuestion ? (
+          <button type="button" className="rounded-md px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:bg-background hover:text-foreground hover:underline" onClick={() => onReopenQuestion(reopenQuestionId)} data-question-reopen={reopenQuestionId}>
+            {t("questionCard.replyInChat")}
+          </button>
+        ) : null}
       </div>
     );
   }

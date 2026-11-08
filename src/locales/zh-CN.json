@@ -1915,6 +1915,8 @@
     }
   },
   "questionCard": {
+    "recordedResponse": "提问回复",
+    "skippedConfirmation": "已跳过确认",
     "visualCheckpoint": {
       "options": {
         "pass": "通过",

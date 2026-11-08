@@ -339,9 +339,16 @@ export function ChatWorkspace({
     (item) => item.type !== "user" || item.composerQueued !== true,
   )));
   const conversationItems = steeringProjection.items.map((item) => {
-    if (item.type !== "question_answer" || item.question !== undefined) return item;
-    const question = projectedAgentQuestions.find((candidate) => candidate.questionId === item.questionId)?.question;
-    return question ? { ...item, question } : item;
+    if (item.type !== "question_answer") return item;
+    if (item.question !== undefined && item.selectedOptionId !== undefined) return item;
+    const receipt = projectedAgentQuestions.find((candidate) => candidate.questionId === item.questionId);
+    if (!receipt) return item;
+    const selectedOptionId = item.selectedOptionId ?? (item.revision !== undefined
+      && receipt.questionFeedbackRevision === item.revision ? receipt.selectedOptionId : undefined);
+    const question = item.question ?? receipt.question;
+    return question !== item.question || selectedOptionId !== item.selectedOptionId
+      ? { ...item, question, selectedOptionId }
+      : item;
   });
   const conversationRenderScope = sessionHandoffSourceChatId || "chat";
   const conversationItemKeyOccurrences = new Map<string, number>();
