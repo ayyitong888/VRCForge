@@ -7,6 +7,7 @@ using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
+using UnityEditor.Animations;
 using UnityEngine;
 using UnityEngine.Rendering;
 using VRCForge.Core.MCP;
@@ -357,10 +358,23 @@ namespace VRCForge.Editor
             }
         }
 
+        private static bool IsControllerOnlyAnimation(JToken arguments)
+        {
+            return !string.IsNullOrWhiteSpace((string)arguments?["controllerPath"])
+                && string.IsNullOrWhiteSpace((string)arguments?["avatarPath"])
+                && !(arguments?["clipPaths"] is JArray clips
+                    && clips.Values<string>().Any(path => !string.IsNullOrWhiteSpace(path)));
+        }
+
         private static Scope Measure(string[] roots, JObject selector)
         {
-            var materialScope = (string)selector?["scanTool"] == "vrcforge_scan_avatar_materials";
-            var includeTextures = (bool?)selector?["arguments"]?["includeTextures"] ?? true;
+            var tool = (string)selector?["scanTool"];
+            var arguments = selector?["arguments"];
+            var materialScope = tool == "vrcforge_scan_avatar_materials";
+            var controllerScope = (tool == "vrcforge_scan_fx_animator"
+                    && !string.IsNullOrWhiteSpace((string)arguments?["controllerPath"]))
+                || (tool == "vrcforge_scan_animation_bindings" && IsControllerOnlyAnimation(arguments));
+            var includeTextures = (bool?)arguments?["includeTextures"] ?? true;
             var selectedMaterialIds = materialScope ? ReadMaterialSelectionIds(selector) : null;
             var scope = new Scope { epoch = state.epoch, sceneEpoch = state.sceneEpoch, roots = roots, scene = materialScope,
                 capturedAt = DateTime.UtcNow.ToString("o"), objects = new Dictionary<string, string>(), files = new Dictionary<string, string>() };
@@ -402,7 +416,10 @@ namespace VRCForge.Editor
                         if (!AssetPath(dependency)) continue;
                         paths.Add(dependency);
                         contentRequiredPaths.Add(dependency);
-                        foreach (var asset in materialScope ? Array.Empty<Object>() : AssetDatabase.LoadAllAssetsAtPath(dependency))
+                        // A controller scan follows references from the selected controller.
+                        // Keep file fingerprints without adding unrelated sub-assets as roots.
+                        if (materialScope || controllerScope) continue;
+                        foreach (var asset in AssetDatabase.LoadAllAssetsAtPath(dependency))
                             if (asset != null && !(asset is MonoScript)) pending.Enqueue(asset);
                     }
                 }
@@ -523,11 +540,16 @@ namespace VRCForge.Editor
             foreach (var name in new[] { "assetPath", "controllerPath", "clipPath" })
                 if (!string.IsNullOrEmpty((string)arguments[name])) paths.Add((string)arguments[name]);
             if (arguments["clipPaths"] is JArray clips) paths.AddRange(clips.Values<string>());
+            var controllerOnlyAnimation = tool == "vrcforge_scan_animation_bindings" && IsControllerOnlyAnimation(arguments);
             foreach (var path in paths)
             {
                 if (!AssetPath(path)) throw new InvalidDataException("invalid_asset_path");
                 var asset = AssetDatabase.LoadMainAssetAtPath(path);
                 if (asset == null) throw new InvalidDataException("scope_asset_missing");
+                // An empty controller makes the animation reader fall back to the avatar.
+                if (controllerOnlyAnimation && path == (string)arguments["controllerPath"]
+                    && (!(asset is AnimatorController controller) || AssetTools.ReadControllerClips(controller).Count == 0))
+                    throw new InvalidDataException("animation_controller_scope_unavailable");
                 roots.Add(Identity(asset));
             }
             var avatarPath = (string)arguments["avatarPath"] ?? "";

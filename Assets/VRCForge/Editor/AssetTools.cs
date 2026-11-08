@@ -464,7 +464,7 @@ namespace VRCForge.Editor
             return null;
         }
 
-        private static List<AnimationClip> ReadControllerClips(AnimatorController controller)
+        internal static List<AnimationClip> ReadControllerClips(AnimatorController controller)
         {
             var result = new List<AnimationClip>();
             foreach (var layer in controller.layers ?? Array.Empty<AnimatorControllerLayer>())

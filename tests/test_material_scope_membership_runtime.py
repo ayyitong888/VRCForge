@@ -105,6 +105,7 @@ def test_material_scope_remeasures_renderer_membership_without_watching_bones(tm
             "private sealed class Scope",
             "private sealed class Watch",
             "private static IEnumerable<Object> MaterialScopeTargets(",
+            "private static bool IsControllerOnlyAnimation(",
             "private static Scope Measure(",
             "internal static JObject Validate(",
             "private static HashSet<string> ReadMaterialSelectionIds(",
