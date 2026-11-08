@@ -516,6 +516,8 @@ export default function App() {
     providerTestPassed,
     providerTestPassedForPersistedConfig,
     providerConnectedAt,
+    providerRuntimeConnectedAt,
+    bindRuntimeProviderConnection,
     providerReadyForOnboarding,
     visionProvider,
     visionApiKey,
@@ -1105,6 +1107,7 @@ export default function App() {
     chats,
     chatStorageReady,
     runtimeQueueVersion,
+    bindRuntimeProviderConnection,
   });
   const localActivitySending = chatRunSending || compacting;
   const visibleQueued = useMemo(
@@ -1990,6 +1993,7 @@ export default function App() {
     apiConfig,
     providerTestPassed: providerTestPassedForPersistedConfig,
     providerConnectedAt,
+    providerRuntimeConnectedAt,
   });
   const localizeHealthMessage = useCallback(
     (message?: string) => localizeRuntimeHealthMessage(t, message),

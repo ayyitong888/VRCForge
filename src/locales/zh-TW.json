@@ -204,7 +204,7 @@
     "internalAgent": "內部 Agent",
     "authorization": "Agent 連線",
     "agentConnection": "Agent 連線",
-    "internalApiConfigured": "內部 API 已連線（連線測試通過）",
+    "internalApiConfigured": "內部 API 已連線",
     "internalOAuthConnected": "ChatGPT OAuth 已登入",
     "internalApiNeedsTest": "內部 API 已設定 · 請測試連線",
     "internalOAuthNeedsTest": "ChatGPT OAuth 帳號已設定 · 請測試連線",

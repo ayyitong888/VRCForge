@@ -79,6 +79,15 @@ const bothConnected = {
 assert.equal(exports.resolveRuntimeAuthorizationStatus({ ...bothConnected, providerConnectedAt: 3000 }).source, "internal", "a later successful internal connection replaces the external source");
 assert.equal(exports.resolveRuntimeAuthorizationStatus({ ...bothConnected, providerConnectedAt: 1000 }).source, "external", "a later external connection replaces the internal source");
 assert.equal(exports.resolveRuntimeAuthorizationStatus({ ...bothConnected, providerConnectedAt: 3000, providerTestPassed: false }).source, "external", "an invalid internal result cannot win using an old connection time");
+const runtimeVerified = exports.resolveRuntimeAuthorizationStatus({
+  ...bothConnected, providerTestPassed: false, providerRuntimeConnectedAt: 3000,
+});
+assert.equal(runtimeVerified.source, "internal", "successful Agent traffic is newer internal connection evidence");
+assert.equal(runtimeVerified.status, "ok");
+assert.equal(runtimeVerified.internalTestPassed, false, "real traffic does not pretend the manual test ran");
+assert.equal(exports.resolveRuntimeAuthorizationStatus({
+  ...bothConnected, providerTestPassed: false, providerRuntimeConnectedAt: 1000,
+}).source, "external", "later authenticated external traffic keeps source priority");
 assert.equal(exports.resolveRuntimeAuthorizationStatus({
   runtimeConnected: true,
   apiConfig: { configured: true, provider: "anthropic" },

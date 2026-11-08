@@ -204,7 +204,7 @@
     "internalAgent": "Internal Agent",
     "authorization": "Agent connections",
     "agentConnection": "Agent connection",
-    "internalApiConfigured": "Internal API connected (test passed)",
+    "internalApiConfigured": "Internal API connected",
     "internalOAuthConnected": "ChatGPT OAuth is signed in",
     "internalApiNeedsTest": "Internal API configured · test connection",
     "internalOAuthNeedsTest": "ChatGPT OAuth account configured · test connection",

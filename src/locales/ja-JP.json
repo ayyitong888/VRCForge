@@ -204,7 +204,7 @@
     "internalAgent": "内部 Agent",
     "authorization": "Agent 接続",
     "agentConnection": "Agent 接続",
-    "internalApiConfigured": "内部 API 接続済み（接続テスト成功）",
+    "internalApiConfigured": "内部 API 接続済み",
     "internalOAuthConnected": "ChatGPT OAuth にサインイン済みです",
     "internalApiNeedsTest": "内部 API 設定済み · 接続をテストしてください",
     "internalOAuthNeedsTest": "ChatGPT OAuth アカウント設定済み · 接続をテストしてください",

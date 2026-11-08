@@ -194,6 +194,7 @@ type UseChatRunControllerParams = {
   chats?: ChatThread[];
   chatStorageReady?: boolean;
   runtimeQueueVersion?: number;
+  bindRuntimeProviderConnection?: (endpoint: string, provider: string, model: string) => (() => void) | undefined;
 };
 
 export function useChatRunController({
@@ -219,6 +220,7 @@ export function useChatRunController({
   chats,
   chatStorageReady = true,
   runtimeQueueVersion = 0,
+  bindRuntimeProviderConnection,
 }: UseChatRunControllerParams) {
   const { t } = useTranslation();
   const [sending, setSending] = useState(false);
@@ -237,7 +239,7 @@ export function useChatRunController({
   const queueCancellationGenerationRef = useRef(0);
   const queueCancellationInFlightRef = useRef(false);
   const steerIntentRef = useRef(new Map<string, QueuedTurn>());
-  const streamingTurnChatRef = useRef(new Map<string, string>());
+  const streamingTurnsRef = useRef(new Map<string, { chatId: string; confirmProviderConnection?: () => void }>());
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const dispatchedTurnAbortRef = useRef<AbortController | null>(null);
   const backgroundTurnAbortRefs = useRef(new Map<string, AbortController>());
@@ -556,11 +558,17 @@ export function useChatRunController({
     if (!clientTurnId || (!delta.textDelta && !phase && !timelineEvent && delta.activity !== true)) {
       return;
     }
-    const chatId = streamingTurnChatRef.current.get(clientTurnId);
-    if (!chatId) {
+    const owner = streamingTurnsRef.current.get(clientTurnId);
+    if (!owner) {
       return;
     }
-    updateChat(chatId, (chat) => {
+    // The backend's provider activity or an accepted model message proves the
+    // connection. Local phase changes, retries and tool receipts don't.
+    if ((delta.activity === true && phase === "waiting_for_model")
+      || (timelineEvent?.kind === "assistant" && timelineEvent.payload?.messageId && timelineEvent.payload.summary?.trim())) {
+      owner.confirmProviderConnection?.();
+    }
+    updateChat(owner.chatId, (chat) => {
       const index = chat.items.findIndex((item) => item.type === "streaming" && item.clientTurnId === clientTurnId);
       if (index < 0) {
         return chat;
@@ -1240,7 +1248,7 @@ export function useChatRunController({
       };
       const message = turn.text;
       if (!background) {
-        streamingTurnChatRef.current.set(turn.id, chatId);
+        streamingTurnsRef.current.set(turn.id, { chatId });
         updateChat(chatId, (current) => {
           const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
           const storedUserItem: ConversationItem = {
@@ -1284,7 +1292,11 @@ export function useChatRunController({
         : null;
       if (abortController.signal.aborted) throw new Error("Request cancelled.");
       runtimeRequestStarted = true;
-      if (!background) dispatchedTurnAbortRef.current = abortController;
+      const confirmProviderConnection = bindRuntimeProviderConnection?.(targetEndpoint, turn.provider, turn.model);
+      if (!background) {
+        dispatchedTurnAbortRef.current = abortController;
+        streamingTurnsRef.current.set(turn.id, { chatId, confirmProviderConnection });
+      }
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
         planMode: turn.planMode === true,
@@ -1307,6 +1319,9 @@ export function useChatRunController({
          followupLaneId: turn.queueLaneId || turn.chatId,
          compactionRecovery: collectCompactionRecovery(baseItems),
         });
+      if (response.ok && response.plan?.planner === "llm" && !response.plan.plannerFailure) {
+        confirmProviderConnection?.();
+      }
       const consumedSteerInputIds = new Set(
         (response.consumedSteerInputIds || []).filter((inputId) => typeof inputId === "string" && inputId.length > 0),
       );
@@ -1765,7 +1780,7 @@ export function useChatRunController({
         currentTurnRef.current = null;
         setCurrentTurn(null);
       }
-      streamingTurnChatRef.current.delete(turn.id);
+      streamingTurnsRef.current.delete(turn.id);
     }
   }
 

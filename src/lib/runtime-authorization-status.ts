@@ -20,8 +20,8 @@ function detailRecord(detail: unknown): Record<string, unknown> | null {
 }
 
 /**
- * Resolve the user-facing authorization source from facts already loaded by
- * bootstrap. Gateway readiness and model labels are deliberately ignored:
+ * Resolve the user-facing authorization source from connection evidence.
+ * Gateway readiness and model labels are deliberately ignored:
  * neither proves that an external client has an authenticated session.
  */
 export function resolveRuntimeAuthorizationStatus({
@@ -30,12 +30,14 @@ export function resolveRuntimeAuthorizationStatus({
   apiConfig,
   providerTestPassed = false,
   providerConnectedAt = 0,
+  providerRuntimeConnectedAt = 0,
 }: {
   runtimeConnected: boolean;
   externalAgentComponent?: ComponentStatus;
   apiConfig?: Pick<ApiConfig, "configured" | "provider" | "apiKeyPresent"> | null;
   providerTestPassed?: boolean;
   providerConnectedAt?: number;
+  providerRuntimeConnectedAt?: number;
 }): RuntimeAuthorizationStatus {
   const detail = detailRecord(externalAgentComponent?.detail);
   const externalConnected = runtimeConnected && detail?.connected === true;
@@ -51,12 +53,14 @@ export function resolveRuntimeAuthorizationStatus({
     && apiConfig?.configured === true
     && (provider !== "chatgpt" || apiConfig.apiKeyPresent === true);
   const internalTestPassed = internalConfigured && providerTestPassed === true;
+  const internalConnected = internalConfigured && (internalTestPassed || providerRuntimeConnectedAt > 0);
+  const internalConnectedAt = Math.max(internalTestPassed ? providerConnectedAt : 0, providerRuntimeConnectedAt);
   const internalKind: RuntimeAuthorizationStatus["internalKind"] = internalConfigured
     ? provider === "chatgpt" ? "oauth" : "api"
     : "none";
   const externalConnectedAt = Number(detail?.lastConnectedAt || 0);
-  const source: RuntimeAuthorizationStatus["source"] = internalTestPassed
-    && (!externalConnected || providerConnectedAt > externalConnectedAt)
+  const source: RuntimeAuthorizationStatus["source"] = internalConnected
+    && (!externalConnected || internalConnectedAt > externalConnectedAt)
     ? "internal"
     : externalConnected
       ? "external"
@@ -65,7 +69,7 @@ export function resolveRuntimeAuthorizationStatus({
   if (!runtimeConnected) {
     return { source, status: "error", externalState: "unavailable", externalConnected, internalConfigured, internalTestPassed, internalKind };
   }
-  if (externalConnected || internalTestPassed) {
+  if (externalConnected || internalConnected) {
     return { source, status: "ok", externalState, externalConnected, internalConfigured, internalTestPassed, internalKind };
   }
   if (externalAgentComponent?.status === "error" && !internalConfigured) {

@@ -10,6 +10,11 @@ const recoveryChat = process.env.VRCFORGE_RECOVERY_CHAT_PATH
  ? JSON.parse(await readFile(process.env.VRCFORGE_RECOVERY_CHAT_PATH,'utf8')) : undefined;
 
 const api = `
+export const fetchProviderModels = async () => ({models:[]});
+export const fetchReasoningVariants = async () => ({});
+export const testProviderCapability = async () => { throw new Error('Unexpected provider probe'); };
+export const updateApiConfig = async () => ({});
+export const updateVisionConfig = async () => ({});
 export const cancelAgentRunFollowup = async () => ({ok:true});
 export const listAgentRunFollowups = async () => ({ok:true,items:[]});
 export const fetchAgentQuestions = async () => ({ok:true,questions:[]});
@@ -32,6 +37,8 @@ const bundle=await build({stdin:{resolveDir:process.cwd(),loader:'tsx',contents:
 import React,{useRef,useState,useCallback} from 'react';
 import {createRoot} from 'react-dom/client';
 import {useChatRunController} from './src/hooks/use-chat-run-controller';
+import {useProviderSettings} from './src/hooks/use-provider-settings';
+import {resolveRuntimeAuthorizationStatus} from './src/lib/runtime-authorization-status';
 import {AgentTurnDeliveryUnconfirmedError} from './src/lib/api/http';
 import {ConversationCard} from './src/components/chat/conversation-card';
 import {useRuntimeTurnActivity} from './src/hooks/use-runtime-turn-activity';
@@ -43,26 +50,31 @@ window.receipt={ok:true,sessionId:'session',clientTurnId:'cid',status:'running'}
 function Harness(){
  const[chats,setChats]=useState([initial]);const latest=useRef(chats);latest.current=chats;
  const[runs,setRuns]=useState([]);
+ const endpoint='http://isolated-fixture';
+ const [apiConfig,setApiConfig]=useState({configured:true,provider:'chatgpt',model:'fixture',apiKeyPresent:true,credentialFingerprint:'first'});
+ const settings=useProviderSettings({endpoint,runtimeConnected:true,apiConfig,startRuntime:async()=>endpoint,refresh:async()=>{},setError:()=>{}});
+ const auth=resolveRuntimeAuthorizationStatus({runtimeConnected:true,apiConfig,providerRuntimeConnectedAt:settings.providerRuntimeConnectedAt});
+ window.rotateCredential=()=>setApiConfig(config=>({...config,credentialFingerprint:'changed'}));
  const updateChat=useCallback((id,fn)=>{let changed=false;latest.current=latest.current.map(c=>{if(c.id!==id)return c;const n=fn(c);changed||=n!==c;return n;});if(changed)setChats(latest.current);window.chats=latest.current;return changed;},[]);
  const appendToChat=useCallback((id,item)=>updateChat(id,c=>({...c,items:[...c.items,item]})),[updateChat]);
- const controller=useChatRunController({endpoint:'http://isolated-fixture',runtimeConnected:true,sessionId:'session',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=> 'owner',updateChat,appendToChat,touchChat:c=>c,startRuntime:async()=>'',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),persistChatsNow:()=>window.holdPersist?new Promise(resolve=>{window.persistResolve=resolve;}):Promise.resolve(),chats});
+ const controller=useChatRunController({endpoint,runtimeConnected:true,sessionId:'session',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=> 'owner',updateChat,appendToChat,touchChat:c=>c,startRuntime:async()=>'',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),persistChatsNow:()=>window.holdPersist?new Promise(resolve=>{window.persistResolve=resolve;}):Promise.resolve(),chats,bindRuntimeProviderConnection:settings.bindRuntimeProviderConnection});
  const deliver=useRuntimeTurnContinuationDelivery({chats,appendToChat,updateChat});
  const delta=useRuntimeTurnActivity({endpoint:'http://isolated-fixture',runtimeConnected:true,chats,runs,updateChat,deliver});
  window.controller=controller;window.chats=chats;window.delta=delta;
  window.failStatusRead=()=>window.sendReject(new AgentTurnDeliveryUnconfirmedError('temporary read failure'));
- window.start=()=>{window.turnPromise=controller.submitTurn({id:'cid',text:'fixture only',attachments:[],provider:'fixture',providerLabel:'Fixture',model:'fixture',sessionId:'session',planMode:false});};
+ window.start=()=>{window.turnPromise=controller.submitTurn({id:'cid',text:'fixture only',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',sessionId:'session',planMode:false});};
  window.replace=(items,nextRuns)=>{latest.current=[{...initial,items}];setChats(latest.current);setRuns(nextRuns);};
  window.replaceChat=(chat,nextRuns)=>{latest.current=[chat];setChats(latest.current);setRuns(nextRuns);};
  window.setRuns=setRuns;
  const outcome=chats[0]?.items.find(i=>i.type==='error'||i.response?.continuationSource==='foreground_interrupted');
- return <div id='mounted'>
+ return <div id='mounted' data-provider-status={auth.status} data-credential={apiConfig.credentialFingerprint}>
    {outcome && <ConversationCard item={outcome} canRetry onOpenDoctor={()=>{}} onRetryItem={()=>{window.retryClicked=true;}}/>}
  </div>;
 }
 createRoot(document.getElementById('root')).render(<Harness/>);
 `},bundle:true,write:false,format:'iife',jsx:'automatic',platform:'browser',plugins:[{name:'isolated-stop-receipt-api',setup(b){
  b.onResolve({filter:/^react-i18next$/},()=>({path:'translation',namespace:'fixture'}));
- b.onResolve({filter:/^\.\.\/lib\/api$/},a=>a.importer.endsWith('use-chat-run-controller.ts')?{path:'api',namespace:'fixture'}:undefined);
+ b.onResolve({filter:/^\.\.\/lib\/api$/},a=>/use-(chat-run-controller|provider-settings)\.ts$/.test(a.importer)?{path:'api',namespace:'fixture'}:undefined);
  b.onResolve({filter:/^\.\.\/lib\/api\/agent-runtime$/},a=>a.importer.endsWith('use-chat-run-controller.ts')?{path:'constants',namespace:'fixture'}:a.importer.endsWith('use-runtime-turn-activity.ts')?{path:'api',namespace:'fixture'}:undefined);
  b.onLoad({filter:/.*/,namespace:'fixture'},a=>({loader:'js',contents:a.path==='translation'?"export const useTranslation=()=>({t:k=>k}); export const initReactI18next={type:'3rdParty',init(){}};":a.path==='constants'?'export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS=12;':api}));
 }}]});
@@ -74,6 +86,30 @@ try{
  const reload=async()=>{await page.goto(`http://127.0.0.1:${server.address().port}`);await page.locator('#mounted').waitFor({state:'attached'});};
  await reload();
  if(!process.env.VRCFORGE_STOP_TEST_CASE?.startsWith('late')){
+ const mounted=page.locator('#mounted');
+ const progress={type:'agentRuntimeDelta',sessionId:'session',clientTurnId:'cid',timelineEvent:{
+   id:'first-model-progress',sequence:0,kind:'assistant',timestamp:'2026-11-08T14:26:21Z',
+   payload:{messageId:'model-message-fixture',phase:'commentary',status:'progress',summary:'Accepted model progress'},
+ }};
+ await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
+ await page.evaluate(delta=>{
+   window.controller.applyRuntimeDelta({...delta,clientTurnId:'another-turn'});
+   window.controller.applyRuntimeDelta({type:'agentRuntimeDelta',sessionId:'session',clientTurnId:'cid',phase:'waiting_for_model'});
+ },progress);
+ assert.equal(await mounted.getAttribute('data-provider-status'),'warning','dispatch and unrelated model events leave the connection unverified');
+ await page.evaluate(delta=>window.controller.applyRuntimeDelta(delta),progress);
+ await page.waitForFunction(()=>document.querySelector('#mounted').dataset.providerStatus==='ok',null,{timeout:2000});
+ assert.equal(await page.evaluate(()=>window.sendCount),1,'real Agent output makes the status green without a separate probe');
+ await page.evaluate(()=>window.rotateCredential());
+ await page.waitForFunction(()=>document.querySelector('#mounted').dataset.credential==='changed');
+ assert.equal(await mounted.getAttribute('data-provider-status'),'warning','changing the saved credential invalidates the old green status');
+ await reload();await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
+ await page.evaluate(()=>window.rotateCredential());
+ await page.waitForFunction(()=>document.querySelector('#mounted').dataset.credential==='changed');
+ await page.evaluate(delta=>window.controller.applyRuntimeDelta(delta),progress);
+ assert.equal(await mounted.getAttribute('data-provider-status'),'warning','late output for the old credential cannot verify the new credential');
+ console.log('PASS real owned model output verifies only its saved provider connection');
+ await reload();
  await page.evaluate(()=>{window.holdPersist=true;window.start();});await page.waitForFunction(()=>typeof window.persistResolve==='function');await page.evaluate(()=>{window.controller.stopCurrentRun();window.holdPersist=false;window.persistResolve();});await page.waitForTimeout(100);
  assert.equal(await page.evaluate(()=>window.sendCount),0,'Stop before runtime dispatch prevents admission instead of abandoning a pending turn into execution');
  assert.equal(await page.evaluate(()=>window.cancelRequests.length),0,'local preparation Stop does not claim to cancel an unadmitted backend turn');

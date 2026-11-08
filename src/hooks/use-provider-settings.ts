@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AppBootstrap,
@@ -185,6 +185,30 @@ export function useProviderSettings({
     ? providerFingerprint({ provider: apiConfig.provider || "gemini", baseUrl: apiConfig.base_url || "", model: apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"), apiType: apiConfig.api_type || apiConfig.apiType || "auto" })
     : "";
   const persistedProviderConfigured = apiConfig?.configured === true;
+  const credentialFingerprint = apiConfig?.credentialFingerprint;
+  const runtimeProviderScope = useMemo(() => ({
+    endpoint,
+    provider: savedProvider,
+    model: savedModel,
+    fingerprint: persistedProviderFingerprint,
+    credentialFingerprint,
+    configured: runtimeConnected && persistedProviderConfigured && credentialFingerprint !== undefined,
+  }), [endpoint, savedProvider, savedModel, persistedProviderFingerprint, credentialFingerprint, runtimeConnected, persistedProviderConfigured]);
+  const runtimeProviderScopeRef = useRef(runtimeProviderScope);
+  runtimeProviderScopeRef.current = runtimeProviderScope;
+  const [runtimeProviderEvidence, setRuntimeProviderEvidence] = useState<{ scope: typeof runtimeProviderScope; connectedAt: number }>();
+
+  function bindRuntimeProviderConnection(targetEndpoint: string, provider: string, model: string): (() => void) | undefined {
+    const scope = runtimeProviderScopeRef.current;
+    if (!scope.configured || scope.endpoint !== targetEndpoint || scope.provider !== provider || scope.model !== model) return;
+    let confirmed = false;
+    return () => {
+      if (confirmed || runtimeProviderScopeRef.current !== scope) return;
+      confirmed = true;
+      setRuntimeProviderEvidence({ scope, connectedAt: Date.now() });
+    };
+  }
+
   const selectedModelInfo = modelOptions.find((item) => item.id === apiModel);
   const selectedModelCapabilities = selectedModelInfo?.capabilities ??
     (apiConfig?.provider === apiProvider && apiConfig?.model === apiModel ? apiConfig.capabilities : undefined);
@@ -480,6 +504,8 @@ export function useProviderSettings({
     testingProvider,
     providerTestMessage,
     providerConnectedAt,
+    providerRuntimeConnectedAt: runtimeProviderEvidence?.scope === runtimeProviderScope ? runtimeProviderEvidence.connectedAt : 0,
+    bindRuntimeProviderConnection,
     providerTestPassed: providerTestPassed && providerTestFingerprint === providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }) && providerTestEndpoint === endpoint,
     providerTestPassedForPersistedConfig: providerTestPassed
       && runtimeConnected
