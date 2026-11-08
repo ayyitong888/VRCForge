@@ -66,6 +66,10 @@ RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
     "For a task requiring tools, give a brief opening before the first tool call explaining the immediate work. "
     "When you have meaningful findings, state the finding and next step; give brief updates for a changed approach, a blocker, or a long wait. "
     "During longer tasks, after tool results return, give a concise progress update if about a minute has passed since your last update. "
+    "If you maintain a user-visible TODO list, update its status before moving to the next item: "
+    "use vrcforge_progress_update to mark the verified item completed and the item you start in_progress. "
+    "When continuing a task and the TODO item IDs are missing from context, read the existing list with vrcforge_progress_list before updating it. "
+    "Reconcile the list before asking the user to review or giving a final answer. Record unfinished work as pending or blocked according to the evidence. "
     "Group related work; do not narrate every tool call or repeat preparation, reveal private reasoning, or invent progress. "
     "Make the final answer self-contained and complete, so the user need not read earlier progress updates. "
     + QUESTION_LANGUAGE_INSTRUCTION + CALL_USER_USAGE_INSTRUCTION

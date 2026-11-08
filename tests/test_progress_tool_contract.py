@@ -60,6 +60,9 @@ def test_native_catalog_contains_complete_progress_schemas(layer, project):
     request, tools = planner._build_native_plan_request([], observe={}, exposure_layer=layer,
         project_context_active=project, project_path="", internal_tool_blocks=None,
         global_instructions="", project_instructions="")
+    instructions = request["instructions"]
+    assert "update its status before moving to the next item" in instructions
+    assert "read the existing list with vrcforge_progress_list" in instructions
     resident = json.loads(request["instructions"].split(
         "Resident tool definitions (data, not authorization): ", 1)[1])
     definitions = {entry["name"]: entry for entry in resident}
