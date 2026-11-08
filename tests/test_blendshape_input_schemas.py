@@ -36,20 +36,36 @@ def test_registered_catalogue_exposes_actual_parameters_and_execution_identity()
 
 
 def test_apply_schema_matches_manual_parser_defaults_and_snake_case_fields():
+    import dashboard_server as server
+
     schema = write_schema(APPLY)
     payload = {**BASE, "avatar": "Avatar", "adjustments": [{**ITEM, "previous_weight": None}]}
     jsonschema.validate(payload, schema)
     model = ManualBlendshapeApplyRequest(**payload)
     assert model.adjustments[0].target_weight == 100
     assert model.adjustments[0].previous_weight is None
+    parsed = server.AVATAR_TUNING_PREPARED._ports.parse_manual_arguments(payload)
+    request = server.build_agent_dashboard_request(parsed)
+    assert (request.source_mode, request.mock_execute) == ("unity_live_export", False)
+    assert (model.source_mode, model.mock_execute) == ("mvp_sample", True)
     for key in ("source_mode", "mock_execute", "save_artifacts"):
-        assert schema["properties"][key]["default"] == getattr(model, key)
+        assert schema["properties"][key]["default"] == getattr(request, key)
         assert key not in schema["required"]
     item_fields = schema["properties"]["adjustments"]["items"]["properties"]
     assert {"renderer_path", "blendshape_name", "target_weight", "previous_weight"} <= item_fields.keys()
     assert not ({"rendererPath", "blendshapeName", "targetWeight"} & item_fields.keys())
     assert "unity_live_export" in schema["properties"]["source_mode"]["description"]
     assert "false" in schema["properties"]["mock_execute"]["description"]
+
+
+def test_agent_apply_preserves_explicit_mock_and_export_mode():
+    import dashboard_server as server
+
+    payload = {**BASE, "avatar": "Avatar", "adjustments": [ITEM],
+               "source_mode": "custom_export", "mock_execute": True}
+    parsed = server.AVATAR_TUNING_PREPARED._ports.parse_manual_arguments(payload)
+    request = server.build_agent_dashboard_request(parsed)
+    assert (request.source_mode, request.mock_execute) == ("custom_export", True)
 
 
 def test_public_apply_rejects_core_payload_shape_instead_of_advertising_it():

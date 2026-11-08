@@ -94,7 +94,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "vrcforge_apply_blendshapes": {
         "type": "object",
         "additionalProperties": True,
-        "description": "when-to-use: apply approved BlendShape weights after inspecting exact targets. when-NOT-to-use: do not use for read-only inspection or pass the preview's Core applyPayload directly. Live editing requires source_mode=unity_live_export and mock_execute=false.",
+        "description": "when-to-use: request approval for live BlendShape weights after inspecting exact targets. when-NOT-to-use: do not use for read-only inspection or pass the preview's Core applyPayload directly.",
         "required": ["adjustments"],
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
@@ -113,8 +113,8 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                     },
                 },
             },
-            "source_mode": {"type": "string", "enum": ["unity_live_export", "configured_export", "custom_export", "mvp_sample"], "default": "mvp_sample", "description": "Set unity_live_export for a live Unity edit; the manual request model otherwise defaults to mvp_sample."},
-            "mock_execute": {"type": "boolean", "default": True, "description": "Set false for an approved live Unity edit; the manual request model defaults to true and a mock apply is rejected by the write workflow."},
+            "source_mode": {"type": "string", "enum": ["unity_live_export", "configured_export", "custom_export", "mvp_sample"], "default": "unity_live_export", "description": "Defaults to unity_live_export for live Unity target validation before approval."},
+            "mock_execute": {"type": "boolean", "default": False, "description": "Defaults to false for a live approval request. Mock execution is preview-only."},
             "save_artifacts": {"type": "boolean", "default": True, "description": "Controls workflow artifacts, not whether the approved Unity write saves assets."},
             "scope": {"type": ["string", "null"], "description": "Use all for clothing or body shapes; face limits face-oriented workflows."},
         },

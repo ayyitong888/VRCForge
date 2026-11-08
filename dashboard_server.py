@@ -29738,7 +29738,7 @@ AVATAR_TUNING_PREPARED = AvatarTuningPreparedService(
     ports=AvatarTuningPreparedPorts(
         parse_manual_arguments=lambda arguments: ManualBlendshapeApplyRequest(
             **arguments
-        ).model_dump(),
+        ).model_dump(exclude_unset=True),
         parse_mock_execute=lambda arguments: build_agent_dashboard_request(
             arguments
         ).mock_execute,
