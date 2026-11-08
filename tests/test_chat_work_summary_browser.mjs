@@ -124,6 +124,11 @@ try {
     await tools.locator('[data-agent-turn-process-group] button').first().click();
     const list=tools.locator('[data-agent-tool-call-group] [data-agent-process-content]');
     const height=await list.evaluate(element=>element.clientHeight);
+    const rowGap=await list.evaluate(element=>{
+      const [first,next]=element.children;
+      return next.getBoundingClientRect().top-first.getBoundingClientRect().bottom;
+    });
+    assert.ok(rowGap<=4,`expanded tool rows should have at most 4px between them, got ${rowGap}px`);
     assert.equal(await list.evaluate(element=>element.scrollHeight>element.clientHeight),count>5,'only groups over five calls scroll');
     assert.equal(await list.locator('button').count(),count,'all calls remain available');
     if (count>5) {

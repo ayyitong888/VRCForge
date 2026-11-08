@@ -1411,7 +1411,10 @@ function WorkSegmentRow({
       </button>
       {open ? (
         <div
-          className={cn("mt-3 space-y-3 py-1", scrollable && "app-scrollbar max-h-44 overflow-y-auto overscroll-y-contain pr-1")}
+          className={cn(
+            kind === "tool" ? "mt-1 space-y-1" : "mt-3 space-y-3 py-1",
+            scrollable && "app-scrollbar max-h-[8.5rem] overflow-y-auto overscroll-y-contain pr-1",
+          )}
           role={scrollable ? "region" : undefined}
           aria-label={scrollable ? summaryMeta : undefined}
           tabIndex={scrollable ? 0 : undefined}
