@@ -74,6 +74,8 @@ try {
     assert.equal(await item.locator('[data-question-answer-value]').innerText(), answer);
     assert.equal(await item.locator('[data-question-answer-value]').isVisible(), true);
     const originalQuestion = item.locator('[data-question-answer-question]');
+    assert.equal(await originalQuestion.isVisible(), false, 'saved questions initially hide the full quote');
+    await item.locator('[data-question-answer-quote] summary').click();
     const bubble = item.locator('[data-user-message-bubble]');
     const prompt = item.locator('[data-chat-question-prompt]');
     assert.ok((await bubble.boundingBox()).x > (await prompt.boundingBox()).x, 'the reply is aligned to the right');
