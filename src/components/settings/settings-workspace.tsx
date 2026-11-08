@@ -267,18 +267,9 @@ export function SettingsWorkspace({
       <div className="mx-auto w-full max-w-3xl">
         {visibleSection === "general" ? (
           <>
-            <section>
-              <h2 className="text-base font-semibold">{t("settings.onboarding")}</h2>
-              <p className="mt-1 text-sm text-muted-foreground">{t("settings.onboardingDesc")}</p>
-              <div className="mt-4">
-                <Button type="button" variant="outline" onClick={onRestartOnboarding}>
-                  <RefreshCw className="mr-1 h-4 w-4" />
-                  {t("settings.restartOnboarding")}
-                </Button>
-              </div>
-            </section>
+            <h1 className="text-xl font-semibold text-foreground">{t("settings.navGeneral")}</h1>
 
-            <section className="mt-10">
+            <section className="mt-6">
               <ThemeCustomizationPanel
                 value={themeCustomization}
                 backgroundError={themeBackgroundError}
@@ -287,7 +278,7 @@ export function SettingsWorkspace({
               />
             </section>
 
-            <section className="mt-10">
+            <section className="mt-6">
               <h2 className="text-base font-semibold">
                 <Globe className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
                 {t("settings.language")}
@@ -298,6 +289,7 @@ export function SettingsWorkspace({
                   <button
                     key={loc.code}
                     type="button"
+                    aria-pressed={currentLanguage === loc.code}
                     onClick={() => onLocaleChange(loc.code)}
                     className={cn(
                       "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
@@ -312,13 +304,13 @@ export function SettingsWorkspace({
               </div>
             </section>
 
-            <section className="mt-10">
-              <label className="block text-base font-semibold" htmlFor="settings-running-enter-action">
+            <section className="mt-6">
+              <label className="block text-sm font-semibold" htmlFor="settings-running-enter-action">
                 {t("settings.runningEnterAction")}
               </label>
               <select
                 id="settings-running-enter-action"
-                className="mt-3 max-w-full rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground"
+                className="mt-3 max-w-full rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 value={runningEnterAction}
                 onChange={(event) => onRunningEnterActionChange(event.target.value === "steer" ? "steer" : "queue")}
               >
@@ -327,7 +319,7 @@ export function SettingsWorkspace({
               </select>
             </section>
 
-            <section className="mt-10">
+            <section className="mt-6">
               <BackgroundGoalSettings
                 enabled={backgroundGoalNotificationsEnabled}
                 saving={savingAdvancedSettings}
@@ -336,11 +328,11 @@ export function SettingsWorkspace({
               />
             </section>
 
-            <section className="mt-10">
+            <section className="mt-6">
               <AgentQuestionNotificationSoundSettings />
             </section>
 
-            <section className="mt-10">
+            <section className="mt-6">
                 <DiagnosticsSettingsPanel
                 endpoint={endpoint}
                 developerOptionsEnabled={developerOptionsEnabled}
@@ -354,17 +346,27 @@ export function SettingsWorkspace({
               />
             </section>
 
-            <section className="mt-10" data-vrcforge-about>
+            <section className="mt-6" data-vrcforge-about>
               <h2 className="text-base font-semibold">{t("settings.aboutTitle")}</h2>
               <div className="mt-4 rounded-xl border border-border bg-card p-4">
                 <div className="text-sm font-semibold">{t("settings.aboutProduct", { version: appVersion })}</div>
                 <div className="mt-2 text-sm text-muted-foreground">{t("settings.aboutMcp")}</div>
                 <div className="mt-2 text-sm text-muted-foreground">{t("settings.aboutSafety")}</div>
                 <div className="mt-2 text-xs text-muted-foreground">{t("settings.aboutLicense")}</div>
+                <div className="mt-4 border-t border-border pt-4">
+                  <h3 className="text-sm font-semibold">{t("settings.onboarding")}</h3>
+                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.onboardingDesc")}</p>
+                  <div className="mt-4">
+                    <Button type="button" variant="outline" onClick={onRestartOnboarding}>
+                      <RefreshCw className="mr-1 h-4 w-4" />
+                      {t("settings.restartOnboarding")}
+                    </Button>
+                  </div>
+                </div>
               </div>
             </section>
 
-            <section className="mt-10 pb-6">
+            <section className="mt-6 pb-6">
               <DeveloperOptionsControl
                 endpoint={endpoint}
                 enabled={developerOptionsEnabled}
