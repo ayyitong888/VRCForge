@@ -6,6 +6,9 @@
     "toggleTheme": "切换主题"
   },
   "coreConnection": {
+    "connectedToolsUnavailable": "Unity 已连接，头像工具暂不可用",
+    "reviewEditor": "请检查所选工程和 Unity Console。",
+    "moreGuidance": "排查说明",
     "title": "Unity 暂时无法执行工具",
     "compileErrors": "Unity 项目有编译错误。请打开 Unity 的 Console，先处理第一条红色编译错误，等编译完成后再检查连接。",
     "missingCore": "所选项目中的 Core 文件不完整或尚未安装。请从与 App 同版本的 GitHub Release 下载 VRCForge.unitypackage，在这个项目中 Import All，并等待编译完成。",
@@ -127,6 +130,7 @@
     "dismiss": "关闭通知"
   },
   "workspace": {
+    "environmentDetails": "环境详情",
     "title": "任务状态",
     "refreshStatus": "刷新 Unity 工具",
     "showSidebar": "显示右侧栏",

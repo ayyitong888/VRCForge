@@ -6,6 +6,9 @@
     "toggleTheme": "切換主題"
   },
   "coreConnection": {
+    "connectedToolsUnavailable": "Unity 已連線，虛擬角色工具暫不可用",
+    "reviewEditor": "請檢查所選專案及 Unity Console。",
+    "moreGuidance": "疑難排解",
     "title": "Unity 暫時無法執行工具",
     "compileErrors": "Unity 專案有編譯錯誤。請開啟 Unity 的 Console，先處理第一條紅色編譯錯誤，等編譯完成後再檢查連線。",
     "missingCore": "所選專案中的 Core 檔案不完整或尚未安裝。請從與 App 同版本的 GitHub Release 下載 VRCForge.unitypackage，在此專案中 Import All，並等待編譯完成。",
@@ -127,6 +130,7 @@
     "dismiss": "關閉通知"
   },
   "workspace": {
+    "environmentDetails": "環境詳細資料",
     "title": "任務狀態",
     "refreshStatus": "刷新 Unity 工具",
     "showSidebar": "顯示右側欄",

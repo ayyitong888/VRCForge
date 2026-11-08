@@ -6,6 +6,9 @@
     "toggleTheme": "Toggle theme"
   },
   "coreConnection": {
+    "connectedToolsUnavailable": "Unity is connected. Avatar tools are unavailable.",
+    "reviewEditor": "Check the selected project and Unity Console.",
+    "moreGuidance": "Troubleshooting",
     "title": "Unity tools are not ready",
     "compileErrors": "The Unity project has compilation errors. Open Unity Console, resolve the first red compilation error, then wait for compilation to finish before checking the connection again.",
     "missingCore": "Core is missing or incomplete in the selected project. Download VRCForge.unitypackage from the same GitHub Release as the App, choose Import All in this project, and wait for compilation to finish.",
@@ -127,6 +130,7 @@
     "dismiss": "Dismiss notification"
   },
   "workspace": {
+    "environmentDetails": "Environment details",
     "title": "Task Status",
     "refreshStatus": "Refresh Unity tools",
     "showSidebar": "Show runtime sidebar",

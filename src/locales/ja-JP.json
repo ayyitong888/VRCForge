@@ -6,6 +6,9 @@
     "toggleTheme": "テーマを切り替える"
   },
   "coreConnection": {
+    "connectedToolsUnavailable": "Unity に接続済みですが、アバターツールは利用できません",
+    "reviewEditor": "選択中のプロジェクトと Unity コンソールを確認してください。",
+    "moreGuidance": "対処方法",
     "title": "Unity ツールを実行できません",
     "compileErrors": "Unity プロジェクトにコンパイルエラーがあります。Unity Console を開き、最初の赤いコンパイルエラーを解決してください。コンパイルの完了後に接続を再確認してください。",
     "missingCore": "選択したプロジェクトの Core が未導入または不完全です。App と同じバージョンの GitHub Release から VRCForge.unitypackage を取得し、このプロジェクトで Import All を選択してコンパイルの完了を待ってください。",
@@ -127,6 +130,7 @@
     "dismiss": "通知を閉じる"
   },
   "workspace": {
+    "environmentDetails": "環境の詳細",
     "title": "タスク状況",
     "refreshStatus": "Unity ツールを更新",
     "showSidebar": "右サイドバーを表示",

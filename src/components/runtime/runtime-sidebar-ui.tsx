@@ -316,6 +316,7 @@ export function RuntimeSection({
   title,
   count,
   action,
+  compact = false,
   collapsed,
   onToggle,
   children,
@@ -323,14 +324,15 @@ export function RuntimeSection({
   title: string;
   count?: ReactNode;
   action?: ReactNode;
+  compact?: boolean;
   collapsed?: boolean;
   onToggle: () => void;
   children: ReactNode;
 }) {
   return (
-    <section className="border-b border-border py-3">
-      <div className="mb-2 flex w-full items-center justify-between gap-2">
-        <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" onClick={onToggle}>
+    <section className={cn("border-b border-border", compact ? "py-1.5" : "py-3")}>
+      <div className={cn("flex w-full items-center justify-between gap-2", !collapsed && !compact && "mb-2")}>
+        <button type="button" aria-expanded={!collapsed} className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onToggle}>
           {collapsed ? <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
           <span className="truncate text-sm font-semibold text-foreground">{title}</span>
         </button>

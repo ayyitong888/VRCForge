@@ -142,7 +142,6 @@ export function RightRuntimeSidebar({
       {workspaceProjectType === "unity" && unityRefreshError && !loadingUnityStatus ? (
         <p role="alert" className="px-3 pt-2 text-xs text-muted-foreground" data-unity-refresh-error>{unityRefreshError}</p>
       ) : null}
-      {workspaceProjectType === "unity" ? <CoreVersionNotice detail={unityToolsComponent?.detail} /> : null}
       <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {dismissedQuestion ? (
           <button type="button" className="mb-3 w-full rounded-xl border border-border/80 px-2 text-left hover:bg-muted/50"
@@ -154,6 +153,14 @@ export function RightRuntimeSidebar({
               suffix={<StatusDot status="warning" />}
             />
           </button>
+        ) : null}
+        {approvalPanel}
+        {workspaceProjectType === "unity" ? (
+          <CoreVersionNotice
+            detail={unityToolsComponent?.detail}
+            bridgeStatus={normalizedStatus(unityBridgeComponent)}
+            toolsStatus={normalizedStatus(unityToolsComponent)}
+          />
         ) : null}
         {projectWorkspace ? (
           <ProjectWorkbenchSections
@@ -177,7 +184,6 @@ export function RightRuntimeSidebar({
             userAttachmentSources={userAttachmentSources}
             onLocateUserAttachmentSource={onLocateUserAttachmentSource}
             onOpenUserAttachmentSource={onOpenUserAttachmentSource}
-            approvalsLoaded={approvalsLoaded}
             pendingApprovals={pendingApprovals}
             runtimeReviewCount={runtimeReviewCount}
             workspaceSummary={workspaceSummary}
@@ -283,7 +289,6 @@ export function RightRuntimeSidebar({
             </div>
           </>
         )}
-        {approvalPanel}
       </div>
     </aside>
   );

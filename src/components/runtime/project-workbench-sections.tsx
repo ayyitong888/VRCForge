@@ -135,7 +135,6 @@ export function ProjectWorkbenchSections({
   userAttachmentSources,
   onLocateUserAttachmentSource,
   onOpenUserAttachmentSource,
-  approvalsLoaded,
   pendingApprovals,
   runtimeReviewCount = 0,
   workspaceSummary,
@@ -164,7 +163,6 @@ export function ProjectWorkbenchSections({
   userAttachmentSources: UserAttachmentSource[];
   onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
-  approvalsLoaded: boolean;
   pendingApprovals: number;
   runtimeReviewCount?: number;
   workspaceSummary: WorkspaceDiffSummary | null;
@@ -189,6 +187,7 @@ export function ProjectWorkbenchSections({
       return initialSections;
     }
   });
+  const [unityEnvironmentExpanded, setUnityEnvironmentExpanded] = useState(false);
   const [showAllChangedFiles, setShowAllChangedFiles] = useState(false);
   const [showAllOutputFiles, setShowAllOutputFiles] = useState(false);
   const [showAllAttachmentSources, setShowAllAttachmentSources] = useState(false);
@@ -203,12 +202,6 @@ export function ProjectWorkbenchSections({
   const backendStatus = backendComponent?.status || "unknown";
   const backendValue = localizeHealthMessage(backendComponent?.message)
     || (runtimeConnected ? t("workspace.online") : t("workspace.notLoaded"));
-  const approvalStatus = !approvalsLoaded ? "unknown" : pendingApprovals > 0 ? "warning" : "ok";
-  const approvalValue = !approvalsLoaded
-    ? t("workspace.notLoaded")
-    : pendingApprovals > 0
-      ? t("workspace.pendingApprovals", { count: pendingApprovals })
-      : t("workspace.noPendingApprovals");
   const repoSummary = workspaceSummary;
   const workspaceFileCount = repoSummary?.fileCount ?? 0;
   const localRoot = repoSummary?.requestedRoot || repoSummary?.gitRoot || workspaceProjectLabel;
@@ -218,7 +211,7 @@ export function ProjectWorkbenchSections({
     repoStatus === "changed" ? "warning" : repoStatus === "not_git" || repoStatus === "missing" || repoStatus === "error" ? "error" : "ok";
   const runningDesktopActions = (activeDesktopActions || []).filter(isRunningDesktopAction);
   const showWorkspaceSummary = Boolean(repoSummary);
-  const workspaceSectionTitle = isUnityProject ? t("workspace.environment") : (workspaceProjectLabel || t("workspace.workspace"));
+  const workspaceSectionTitle = isUnityProject ? t("workspace.environmentDetails") : (workspaceProjectLabel || t("workspace.workspace"));
 
   const workspaceFiles = repoSummary?.files || [];
   const { changed: workspaceChangedFiles, outputs: workspaceOutputFiles } = useMemo(() => splitWorkspaceFiles(workspaceFiles), [workspaceFiles]);
@@ -262,6 +255,27 @@ export function ProjectWorkbenchSections({
 
   return (
     <>
+      {isUnityProject && pendingApprovals > 0 ? (
+        <button type="button" className="mb-1 w-full rounded-lg border border-amber-500/35 bg-amber-500/10 px-2 text-left hover:bg-amber-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-vrcforge-status="approval" onClick={onOpenPendingApprovals}>
+          <RuntimeInfoRow
+            icon={<ListChecks className="h-4 w-4" />}
+            label={t("workspace.pendingConfirmation")}
+            value={t("workspace.pendingApprovals", { count: pendingApprovals })}
+            suffix={<StatusDot status="warning" />}
+          />
+        </button>
+      ) : null}
+      {isUnityProject && runtimeReviewCount > 0 ? (
+        <div data-vrcforge-status="runtime-attention" className="border-b border-border px-1">
+          <RuntimeInfoRow
+            icon={<ListChecks className="h-4 w-4" />}
+            label={t("workspace.runtimeReviewTitle")}
+            value={t("workspace.runtimeReviewCount", { count: runtimeReviewCount })}
+            suffix={<StatusDot status="warning" />}
+          />
+        </div>
+      ) : null}
       <RuntimeSection
         title={isUnityProject ? t("workspace.todo") : t("workspace.progress")}
         collapsed={Boolean(collapsedSections.todo)}
@@ -281,6 +295,7 @@ export function ProjectWorkbenchSections({
 
       <RuntimeSection
         title={t("workspace.subAgents")}
+        compact={isUnityProject && subAgentTaskCount === 0}
         collapsed={Boolean(collapsedSections.subAgents)}
         onToggle={() => toggleSection("subAgents")}
         count={<span className="text-xs tabular-nums text-muted-foreground">{formatCount(subAgentTaskCount)}</span>}
@@ -326,8 +341,8 @@ export function ProjectWorkbenchSections({
 
       <RuntimeSection
         title={workspaceSectionTitle}
-        collapsed={Boolean(collapsedSections.environment)}
-        onToggle={() => toggleSection("environment")}
+        collapsed={isUnityProject ? !unityEnvironmentExpanded : Boolean(collapsedSections.environment)}
+        onToggle={() => isUnityProject ? setUnityEnvironmentExpanded((expanded) => !expanded) : toggleSection("environment")}
       >
         <div className="rounded-xl border border-border/80 bg-background/65 px-3 py-2 shadow-sm">
           <div data-vrcforge-project-environment>
@@ -483,7 +498,7 @@ export function ProjectWorkbenchSections({
                 )}
               </>
             )}
-            {runtimeReviewCount > 0 ? (
+            {!isUnityProject && runtimeReviewCount > 0 ? (
               <div data-vrcforge-status="runtime-attention">
                 <RuntimeInfoRow
                   icon={<ListChecks className="h-4 w-4" />}
@@ -492,16 +507,6 @@ export function ProjectWorkbenchSections({
                   suffix={<StatusDot status="warning" />}
                 />
               </div>
-            ) : null}
-            {isUnityProject ? (
-              <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
-                <RuntimeInfoRow
-                  icon={<ListChecks className="h-4 w-4" />}
-                  label={t("workspace.pendingConfirmation")}
-                  value={approvalValue}
-                  suffix={<StatusDot status={approvalStatus} />}
-                />
-              </button>
             ) : null}
           </div>
         </div>
