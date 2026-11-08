@@ -23,6 +23,14 @@ const durationTimeline=(seconds)=>[
  {...e('duration-end-'+seconds,seconds,'tool_result',{actionId:'duration-'+seconds,tool:'vrcforge_list_directory',status:'ok'}),sequence:1},
 ];
 const item={id:'history',type:'agent',response:{clientTurnId:'history-turn',plan:{nextStep:'done',reply:'The follow-up inspection completed.'},timeline}};
+const toolListItem=(count)=>({
+  id:'tool-list-'+count,type:'agent',response:{clientTurnId:'tool-list-turn-'+count,plan:{nextStep:'done',reply:'Inspection finished.'},
+  timeline:Array.from({length:count},(_,i)=>[
+    e('list-call-'+i,i*2,'tool_call',{actionId:'list-'+i,tool:'vrcforge_read_text_file',status:'started'}),
+    e('list-result-'+i,i*2+1,'tool_result',{actionId:'list-'+i,tool:'vrcforge_read_text_file',status:'ok'}),
+  ]).flat(),
+  steps:Array.from({length:count},(_,i)=>({kind:'tool',actionId:'list-'+i,result:{path:'file-'+i+'.txt',content:'Exact receipt '+i}})),
+}});
 const durationItem=(id,seconds)=>({id,type:'agent',response:{clientTurnId:id+'-turn',plan:{nextStep:'done',reply:'duration fixture'},timeline:durationTimeline(seconds)}});
 const pending={id:'pending',type:'streaming',clientTurnId:'pending-turn',text:'',timeline:[e('p',0,'tool_call',{actionId:'p',tool:'vrcforge_write_file',status:'prepared'})]};
 const recovered={id:'recovered',type:'streaming',clientTurnId:'recovered-turn',text:'',timeline:[e('r1',0,'tool_call',{actionId:'r1',tool:'unity_bind_execution_target',status:'started'}),e('r1r',1,'tool_result',{actionId:'r1',tool:'unity_bind_execution_target',status:'ok'}),e('r2',2,'tool_call',{actionId:'r2',tool:'unity_get_gameobject',status:'started'}),e('r2r',190,'tool_result',{actionId:'r2',tool:'unity_get_gameobject',status:'ok'})]};
@@ -33,7 +41,7 @@ function RunningToTerminal(){const [terminal,setTerminal]=useState(false); const
   ? {id:'transition',type:'agent',response:{clientTurnId:'transition-turn',status:'completed',plan:{nextStep:'done',reply:'The live inspection finished.'},timeline:[...transitionTimeline,e('transition-final',2,'assistant',{summary:'The live inspection finished.',phase:'final_answer',status:'done'})]}}
   : {id:'transition',type:'streaming',clientTurnId:'transition-turn',text:'',timeline:transitionTimeline};
   return <><button id="transition-to-terminal" type="button" onClick={()=>setTerminal(true)}>Finish turn</button><ConversationCard item={current}/></>;}
-void initializeI18n().then(()=>createRoot(document.getElementById('root')).render(<><section id="transition"><RunningToTerminal/></section><section id="active-agent"><ConversationCard item={recoveredAgent} runtimeActive={true}/></section><section id="history"><ConversationCard item={item}/></section><section id="pending"><ConversationCard item={pending}/></section><section id="interrupted"><ConversationCard item={interrupted}/></section><section id="recovered"><ConversationCard item={recovered}/></section><section id="duration-59m59s"><ConversationCard item={durationItem('duration-59m59s',3599)}/></section><section id="duration-1h"><ConversationCard item={durationItem('duration-1h',3600)}/></section><section id="duration-1h10m45s"><ConversationCard item={durationItem('duration-1h10m45s',4245)}/></section></>));
+void initializeI18n().then(()=>createRoot(document.getElementById('root')).render(<><section id="transition"><RunningToTerminal/></section><section id="active-agent"><ConversationCard item={recoveredAgent} runtimeActive={true}/></section><section id="history"><ConversationCard item={item}/></section><section id="pending"><ConversationCard item={pending}/></section><section id="interrupted"><ConversationCard item={interrupted}/></section><section id="recovered"><ConversationCard item={recovered}/></section><section id="duration-59m59s"><ConversationCard item={durationItem('duration-59m59s',3599)}/></section><section id="duration-1h"><ConversationCard item={durationItem('duration-1h',3600)}/></section><section id="duration-1h10m45s"><ConversationCard item={durationItem('duration-1h10m45s',4245)}/></section>{[5,6].map(count=><section key={count} id={'tool-list-'+count}><ConversationCard item={toolListItem(count)}/></section>)}</>));
 ` }, bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", plugins: baseline ? [{name:'frozen-timeline-baseline',setup(plugin){plugin.onLoad({filter:/conversation-timeline\.tsx$/},()=>({loader:'tsx',contents:execFileSync('git',['show',baseline+':src/components/chat/conversation-timeline.tsx'],{encoding:'utf8'})}));}}] : [] });
 const server = createServer((_, response) => { response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(`<style>${css}</style><div id="root" style="width:720px"></div><script>${result.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script>`); });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -59,12 +67,30 @@ try {
   assert.match(await processFold.locator('[data-agent-operation-summary-status]').innerText(),/1/,'collapsed process discloses historical failures');
   assert.ok((await history.innerText()).includes('The follow-up inspection completed.'),'history failure does not hide the final result');
   assert.equal(await history.locator('[role="alert"]').count(),0,'historical failure does not declare a new current blocker');
-  await processFold.locator('button').first().click();
+  const summaryButton=processFold.locator('button').first();
+  const colors=(button)=>button.evaluate(async element=>{
+    const style=getComputedStyle(element);
+    void style.color;
+    await Promise.all(element.getAnimations().map(animation=>animation.finished));
+    return {text:style.color,background:style.backgroundColor};
+  });
+  const checkTextHover=async button=>{
+    await page.mouse.move(0,0);
+    const resting=await colors(button);
+    await button.hover();
+    const hovered=await colors(button);
+    assert.notEqual(hovered.text,resting.text,'hover emphasizes the row text');
+    assert.equal(hovered.background,resting.background,'hover adds no background fill');
+  };
+  await checkTextHover(summaryButton);
+  await summaryButton.click();
   const group=processFold.locator('[data-agent-tool-call-group]');
   const title=await group.locator('[data-agent-tool-group-title]').innerText();
   assert.doesNotMatch(title,/Called 2 tools|调用了 2 个工具/,'group heading describes operations rather than only count');
   assert.match(await group.locator('[data-agent-operation-summary-status]').innerText(),/1/,'group preserves failure records while collapsed');
   assert.equal(await group.locator('button.group\\/run').count(),2,'opening completed work exposes individual tool calls without another group click');
+  await checkTextHover(group.locator('button').first());
+  await checkTextHover(group.locator('button.group\\/run').first());
   await group.locator('button.group\\/run').last().click();
   assert.ok((await group.locator('[data-agent-invocation-output-card]').innerText()).includes('Historical read failure'),'exact error detail stays inspectable');
   await processFold.locator('button').first().click();
@@ -93,5 +119,21 @@ try {
   const recoveredSummary=activeAgent.locator('[data-agent-turn-process-group] button').first();
   assert.equal(await recoveredSummary.getAttribute('aria-expanded'),'true','a recovered agent item with active CID state stays expanded');
   assert.equal(await recoveredSummary.isDisabled(),true,'active recovered summary exposes its non-collapsible state accessibly');
+  for (const count of [5,6]) {
+    const tools=page.locator('#tool-list-'+count);
+    await tools.locator('[data-agent-turn-process-group] button').first().click();
+    const list=tools.locator('[data-agent-tool-call-group] [data-agent-process-content]');
+    const height=await list.evaluate(element=>element.clientHeight);
+    assert.equal(await list.evaluate(element=>element.scrollHeight>element.clientHeight),count>5,'only groups over five calls scroll');
+    assert.equal(await list.locator('button').count(),count,'all calls remain available');
+    if (count>5) {
+      await list.focus();
+      await page.keyboard.press('End');
+      await page.waitForFunction(element=>element.scrollTop>0,await list.elementHandle());
+      await list.locator('button').last().click();
+      assert.match(await list.locator('[data-agent-invocation-output-card]').innerText(),/Exact receipt 5/,'the last scrolled row opens its own full receipt');
+      assert.equal(await list.evaluate(element=>element.clientHeight),height,'opening detail leaves the scroll area height fixed');
+    }
+  }
   assert.deepEqual(errors,[]); console.log('work summary, historical failure, original detail and prepared stage browser passed');
 } finally { await browser?.close(); await new Promise(resolve=>server.close(resolve)); }

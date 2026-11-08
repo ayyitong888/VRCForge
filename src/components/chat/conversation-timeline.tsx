@@ -425,6 +425,7 @@ export function buildDurableTimelineRows(
           showStatus={calls.some(({ invocation }) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
           openByDefault={!options.live}
+          scrollable={calls.length > 5}
         >
           {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail, options.onOpenChatById))}
         </WorkSegmentRow>
@@ -1314,7 +1315,7 @@ export function RunRow({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="group/run flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
+        className="group/run flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:text-foreground focus-visible:text-foreground"
       >
         <Icon className="h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0 truncate text-xs" title={title}>{title}</span>
@@ -1347,6 +1348,7 @@ function WorkSegmentRow({
   controlledOpen,
   onOpenChange,
   processHeader = false,
+  scrollable = false,
   children,
 }: {
   kind: TimelineBatchKind;
@@ -1361,6 +1363,7 @@ function WorkSegmentRow({
   controlledOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   processHeader?: boolean;
+  scrollable?: boolean;
   children: ReactNode;
 }) {
   const [localOpen, setLocalOpen] = useState(openByDefault);
@@ -1378,7 +1381,7 @@ function WorkSegmentRow({
           if (controlledOpen === undefined) setLocalOpen(next);
           onOpenChange?.(next);
         }}
-        className="group/work-segment flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 py-2 text-left transition-colors hover:bg-muted/50"
+        className="group/work-segment flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 py-2 text-left transition-colors hover:text-foreground focus-visible:text-foreground"
       >
         {processHeader ? (
           <>
@@ -1386,23 +1389,33 @@ function WorkSegmentRow({
               <span className="truncate" data-agent-turn-process-title>{title}</span>
               {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
             </span>
-            {summaryMeta ? <span className="min-w-0 truncate text-xs text-muted-foreground/70" data-agent-turn-tool-count>{summaryMeta}</span> : null}
+            {summaryMeta ? <span className="min-w-0 truncate text-xs opacity-70" data-agent-turn-tool-count>{summaryMeta}</span> : null}
             {showStatus ? <span data-agent-operation-summary-status className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
           </>
         ) : (
           <>
             {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
             <span className="min-w-0 truncate text-sm leading-relaxed" data-agent-tool-group-title>{title}</span>
-            {summaryMeta ? <span className="min-w-0 truncate text-xs text-muted-foreground/70">{summaryMeta}</span> : null}
+            {summaryMeta ? <span className="min-w-0 truncate text-xs opacity-70">{summaryMeta}</span> : null}
             {showStatus ? <span data-agent-operation-summary-status className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
             <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
               {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             </span>
           </>
         )}
-        {summary ? <span className="basis-full truncate text-xs font-normal text-muted-foreground/80" title={summary} data-agent-turn-process-summary>{summary}</span> : null}
+        {summary ? <span className="basis-full truncate text-xs font-normal opacity-80" title={summary} data-agent-turn-process-summary>{summary}</span> : null}
       </button>
-      {open ? <div className="mt-3 space-y-3 py-1" data-agent-process-content>{children}</div> : null}
+      {open ? (
+        <div
+          className={cn("mt-3 space-y-3 py-1", scrollable && "app-scrollbar max-h-44 overflow-y-auto overscroll-y-contain pr-1")}
+          role={scrollable ? "region" : undefined}
+          aria-label={scrollable ? summaryMeta : undefined}
+          tabIndex={scrollable ? 0 : undefined}
+          data-agent-process-content
+        >
+          {children}
+        </div>
+      ) : null}
     </div>
   );
 }
