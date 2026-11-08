@@ -224,6 +224,7 @@ export function SidebarSection({
 
 export function SidebarProject({
   name,
+  detail,
   meta,
   active = false,
   collapsed = false,
@@ -240,6 +241,7 @@ export function SidebarProject({
   dragHandle,
 }: {
   name: string;
+  detail?: string;
   meta?: string;
   active?: boolean;
   collapsed?: boolean;
@@ -281,8 +283,8 @@ export function SidebarProject({
     <div
       onContextMenu={onContextMenu}
       className={cn(
-        "group flex h-11 w-full min-w-0 items-center rounded-md pr-1 text-sm transition-colors",
-        active ? "bg-muted text-foreground" : "text-muted-foreground",
+        "group flex min-h-10 w-full min-w-0 items-center rounded-md pr-1 text-sm transition-colors",
+        active ? "bg-muted/70 text-foreground" : "text-muted-foreground",
         onClick ? "hover:bg-muted hover:text-foreground" : "cursor-default",
       )}
     >
@@ -291,14 +293,17 @@ export function SidebarProject({
         {...(dragHandle && !dragHandle.disabled ? dragHandle.attributes : {})}
         {...(dragHandle && !dragHandle.disabled ? dragHandle.listeners : {})}
         data-vrcforge-project-drag-row={dragHandle && !dragHandle.disabled ? name : undefined}
-        title={dragHandle && !dragHandle.disabled ? i18n.t("sidebar.dragProject") : undefined}
+        title={[name, detail, meta].filter(Boolean).join("\n")}
         onClick={onClick} disabled={!onClick}
-        className="flex h-full min-w-0 flex-1 touch-pan-y select-none items-center gap-3 px-3 text-left active:cursor-grabbing"
+        className="flex min-h-10 min-w-0 flex-1 touch-pan-y select-none items-center gap-2.5 rounded-md px-3 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing"
       >
         <Folder className="h-4 w-4 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">{name}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate">{name}</span>
+          {detail ? <span className="mt-0.5 block truncate text-xs text-muted-foreground" data-project-path-detail>{detail}</span> : null}
+        </span>
         {pinned ? <Pin className="h-3.5 w-3.5 shrink-0 text-primary/60" /> : null}
-        {meta ? <span className="max-w-[78px] shrink-0 truncate text-xs text-muted-foreground">{meta}</span> : null}
+        {!onClick && meta ? <span className="max-w-[78px] shrink-0 truncate text-xs text-muted-foreground">{meta}</span> : null}
       </button>
       {onOpenMenu ? (
         <button
@@ -398,9 +403,11 @@ export function SidebarChat({
       data-vrcforge-chat-active={active ? "true" : "false"}
       onContextMenu={onContextMenu}
       className={cn(
-        "group flex h-9 w-full min-w-0 items-center rounded-md text-sm transition-colors",
+        "group relative flex h-9 w-full min-w-0 items-center rounded-md text-sm transition-colors",
         indent ? "pl-6" : "",
-        active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+        active
+          ? "bg-primary/10 font-medium text-foreground before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
+          : "text-muted-foreground hover:bg-muted hover:text-foreground",
       )}
     >
       <button
@@ -408,8 +415,9 @@ export function SidebarChat({
         {...(dragHandle && !dragHandle.disabled ? dragHandle.attributes : {})}
         {...(dragHandle && !dragHandle.disabled ? dragHandle.listeners : {})}
         data-vrcforge-chat-drag-row={dragHandle && !dragHandle.disabled ? chatId : undefined}
-        title={dragHandle && !dragHandle.disabled ? t("sidebar.dragChat") : undefined}
-        onClick={onClick} className="flex h-full min-w-0 flex-1 touch-pan-y select-none items-center gap-2 px-3 text-left active:cursor-grabbing"
+        title={title}
+        aria-current={active ? "page" : undefined}
+        onClick={onClick} className="flex h-full min-w-0 flex-1 touch-pan-y select-none items-center gap-2 rounded-md px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing"
       >
         {indent ? null : <MessageSquare className="h-4 w-4 shrink-0" />}
         <span className="min-w-0 flex-1 truncate">{title}</span>

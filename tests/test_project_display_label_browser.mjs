@@ -20,6 +20,7 @@ const bundle = await build({
       import i18n from "i18next";
       import { initReactI18next } from "react-i18next";
       import en from "./src/locales/en-US.json";
+      import { SidebarChat, SidebarProject } from "./src/components/sidebar/sidebar";
       import { useProjectManagement } from "./src/hooks/use-project-management";
       i18n.use(initReactI18next).init({lng:"en-US",resources:{"en-US":{translation:en}}});
       const projects = [
@@ -41,11 +42,15 @@ const bundle = await build({
           onProjectAdded: noop,
           onActiveProjectHidden: noop,
         });
-        return <main>{management.projectItems.map((project) =>
+        const [activeChat, setActiveChat] = React.useState("a");
+        return <main style={{ width: 190 }}>{management.projectItems.map((project) =>
           <div data-testid={project.path.includes("left") ? "left" : "right"} key={project.path}>
-            {management.projectDisplayLabel(project)}
+            <span data-legacy-label>{management.projectDisplayLabel(project)}</span>
+            <SidebarProject name={management.projectDisplayName(project)} detail={management.projectDisplayDetail(project)}
+              meta="6000.0.1f1" onClick={noop} />
           </div>
-        )}</main>;
+        )}{["a", "b"].map(id => <SidebarChat key={id} chatId={id} title={id.toUpperCase()} active={activeChat===id}
+          onClick={() => setActiveChat(id)} />)}</main>;
       }
       createRoot(document.getElementById("root")).render(<Fixture/>);
     `,
@@ -88,12 +93,19 @@ try {
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.getByTestId("left").waitFor({ timeout: 3000 });
-  const left = await page.getByTestId("left").innerText();
-  const right = await page.getByTestId("right").innerText();
+  const left = await page.getByTestId("left").locator("[data-legacy-label]").innerText();
+  const right = await page.getByTestId("right").locator("[data-legacy-label]").innerText();
   assert.equal(left, "VRCForge (left/VRCForge)");
   assert.equal(right, "VRCForge (right/VRCForge)");
   assert.notEqual(left, right, "same-name projects must remain distinguishable");
-  console.log("production projectDisplayLabel same-name suffix regression: passed");
+  assert.equal(await page.getByTestId("left").locator("[data-project-path-detail]").innerText(), "left/VRCForge");
+  assert.equal(await page.getByTestId("right").locator("[data-project-path-detail]").innerText(), "right/VRCForge");
+  assert.doesNotMatch(await page.getByTestId("right").innerText(), /6000/);
+  assert.match(await page.getByTestId("right").getByRole("button").getAttribute("title"), /6000/);
+  assert.equal(await page.locator('[aria-current="page"]').innerText(), "A");
+  await page.getByRole("button", { name: "B", exact: true }).click();
+  assert.equal(await page.locator('[aria-current="page"]').innerText(), "B");
+  console.log("same-name sidebar projects remain distinct and expose the current conversation");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

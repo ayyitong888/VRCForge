@@ -58,6 +58,8 @@ type AppSidebarProps = {
   renamingChatId: string;
   renameDraft: string;
   projectDisplayName: (project?: SidebarProjectItem) => string;
+  projectDisplayDetail?: (project?: SidebarProjectItem) => string;
+  desktopWindow?: boolean;
   onNewTemporaryChat: () => void;
   onOpenProjectPicker: () => void;
   onOpenDoctor: () => void;
@@ -104,6 +106,8 @@ export function AppSidebar({
   renamingChatId,
   renameDraft,
   projectDisplayName,
+  projectDisplayDetail,
+  desktopWindow = false,
   onNewTemporaryChat,
   onOpenProjectPicker,
   onOpenDoctor,
@@ -183,12 +187,14 @@ export function AppSidebar({
         collapsed ? "items-stretch [&_nav_button]:justify-center [&_nav_button]:px-0 [&_nav_span]:hidden" : "md:px-3",
       )}
     >
-      <div className={cn("flex h-9 items-center gap-2 px-2", collapsed ? "justify-center" : "justify-between")}>
-        <Bot className="h-4 w-4 shrink-0 text-primary" />
-        {collapsed ? null : <div className="hidden min-w-0 flex-1 truncate text-sm font-semibold md:block">VRCForge</div>}
-      </div>
+      {!desktopWindow ? (
+        <div className={cn("flex h-9 items-center gap-2 px-2", collapsed ? "justify-center" : "justify-between")}>
+          <Bot className="h-4 w-4 shrink-0 text-primary" />
+          {collapsed ? null : <div className="hidden min-w-0 flex-1 truncate text-sm font-semibold md:block">VRCForge</div>}
+        </div>
+      ) : null}
 
-      <nav className="mt-4 space-y-0.5">
+      <nav className={cn("space-y-0.5", !desktopWindow && "mt-4")}>
         <SidebarNavButton
           icon={<MessageSquare className="h-4 w-4 shrink-0" />}
           label={t("sidebar.tempChat")}
@@ -207,7 +213,7 @@ export function AppSidebar({
         <SidebarNavButton icon={<History className="h-4 w-4 shrink-0" />} label={t("checkpoint.checkpoints")} active={activeView === "checkpoints"} onClick={onOpenCheckpoints} />
       </nav>
 
-      {collapsed ? null : (
+      {collapsed || !projectGroups.general.length ? null : (
         <SidebarSection title={t("project.generalProject")} action={onResetProjectOrder ? (
           <button type="button" onClick={() => onResetProjectOrder(projectGroups.general.map((project) => projectKey(project)).filter(Boolean))} title={t("sidebar.sortProjectsByConversation")} aria-label={t("sidebar.sortProjectsByConversation")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
             <ListFilter className="h-3.5 w-3.5" />
@@ -221,6 +227,7 @@ export function AppSidebar({
                 <div key={key} className="min-w-0">
                   <SidebarProject
                     name={projectDisplayName(project)}
+                    detail={projectDisplayDetail?.(project)}
                     meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
                     active={activeView === "chat" && normalizeProjectPathKey(key) === normalizeProjectPathKey(activeProjectPath)}
                     collapsed={projectCollapsed}
@@ -300,6 +307,7 @@ export function AppSidebar({
                 <div key={key} className="min-w-0">
                   <SidebarProject
                     name={projectDisplayName(project)}
+                    detail={projectDisplayDetail?.(project)}
                     meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
                     active={activeView === "chat" && normalizeProjectPathKey(key) === normalizeProjectPathKey(activeProjectPath)}
                     collapsed={projectCollapsed}

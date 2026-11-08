@@ -314,26 +314,32 @@ export function useProjectManagement({
     return projectUiPrefs.aliases[normalizeProjectPathKey(key)] || project.name || project.path || "Unity Project";
   }
 
-  function projectDisplayLabel(project?: { path?: string; name?: string }): string {
+  function projectDisplayDetail(project?: { path?: string; name?: string }): string {
     const base = projectDisplayName(project);
     if (!project?.path || !base) {
-      return base;
+      return "";
     }
     const duplicatePaths = projectItems
       .filter((candidate) => projectDisplayName(candidate) === base && candidate.path)
       .map((candidate) => candidate.path as string);
     if (duplicatePaths.length < 2) {
-      return base;
+      return "";
     }
     const normalizedParts = project.path.replace(/\\/g, "/").split("/").filter(Boolean);
     for (let depth = 1; depth <= normalizedParts.length; depth += 1) {
       const suffix = normalizedParts.slice(-depth).join("/");
       const matches = duplicatePaths.filter((candidate) => candidate.replace(/\\/g, "/").split("/").filter(Boolean).slice(-depth).join("/") === suffix);
       if (matches.length === 1) {
-        return `${base} (${suffix})`;
+        return suffix;
       }
     }
-    return `${base} (${project.path})`;
+    return project.path;
+  }
+
+  function projectDisplayLabel(project?: { path?: string; name?: string }): string {
+    const base = projectDisplayName(project);
+    const detail = projectDisplayDetail(project);
+    return detail ? `${base} (${detail})` : base;
   }
 
   function togglePinProject(path: string) {
@@ -584,6 +590,7 @@ export function useProjectManagement({
     unhideProject,
     projectDisplayName,
     projectDisplayLabel,
+    projectDisplayDetail,
     togglePinProject,
     startRenameProject,
     commitRenameProject,

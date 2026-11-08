@@ -745,6 +745,7 @@ export default function App() {
     unhideProject,
     projectDisplayName,
     projectDisplayLabel,
+    projectDisplayDetail,
     togglePinProject,
     startRenameProject,
     commitRenameProject,
@@ -4170,7 +4171,9 @@ export default function App() {
           projectRenameDraft={projectRenameDraft}
           renamingChatId={renamingChatId}
           renameDraft={renameDraft}
-          projectDisplayName={projectDisplayLabel}
+          projectDisplayName={projectDisplayName}
+          projectDisplayDetail={projectDisplayDetail}
+          desktopWindow={desktopWindow}
           onNewTemporaryChat={openTemporaryChat}
           onOpenProjectPicker={() => {
             setProjectModalError("");
