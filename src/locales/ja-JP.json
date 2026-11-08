@@ -330,6 +330,12 @@
     "desktopActionRecorded": "{{action}} を記録しました: {{status}}。"
   },
   "settings": {
+    "checkpointArchiveCapacity": "バックアップ容量",
+    "checkpointArchiveAtLimit": "上限に到達",
+    "checkpointArchiveOverLimit": "上限を超過",
+    "checkpointArchiveWithinLimit": "上限未満",
+    "checkpointArchiveSelection": "{{count}} 件を選択 · 選択可能 {{eligible}} 件",
+    "checkpointArchiveFile": "アーカイブファイル",
     "title": "設定",
     "subtitle": "権限モード、モデルプロバイダ、グローバルカスタム指示を設定します。",
     "permissionMode": "権限モード",

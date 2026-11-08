@@ -330,6 +330,12 @@
     "desktopActionRecorded": "{{action}} 已记录：{{status}}。"
   },
   "settings": {
+    "checkpointArchiveCapacity": "备份容量",
+    "checkpointArchiveAtLimit": "已达上限",
+    "checkpointArchiveOverLimit": "已超上限",
+    "checkpointArchiveWithinLimit": "仍有余量",
+    "checkpointArchiveSelection": "已选 {{count}} 个 · 可选 {{eligible}} 个",
+    "checkpointArchiveFile": "归档文件",
     "title": "设置",
     "subtitle": "配置权限模式、模型供应商与全局自定义指令。",
     "permissionMode": "权限模式",

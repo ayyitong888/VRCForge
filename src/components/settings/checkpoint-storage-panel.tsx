@@ -2,7 +2,6 @@ import { Archive, FolderOpen, FolderPlus, Loader2, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ExternalAgentConnectorStatus } from "../../lib/api";
-import { formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
@@ -52,12 +51,29 @@ export function CheckpointStoragePanel({
   onDeleteSelected,
   onRelocate,
 }: CheckpointStoragePanelProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const usage = status?.gateway?.checkpointArchiveUsage;
   const prune = status?.gateway?.checkpointArchivePrune;
-  const maxSizeMb = status?.gateway?.checkpointArchiveMaxSizeMb ?? usage?.maxSizeMb ?? 0;
-  const maxCount = status?.gateway?.checkpointArchiveMaxCount ?? usage?.maxCount ?? 4;
-  const usageText = `${formatStorageSize(usage?.sizeBytes)} / ${maxSizeMb > 0 ? `${formatCount(maxSizeMb)} MB` : t("settings.unlimited")}`;
+  const maxSizeMb = status?.gateway?.checkpointArchiveMaxSizeMb ?? usage?.maxSizeMb;
+  const maxCount = status?.gateway?.checkpointArchiveMaxCount ?? usage?.maxCount;
+  const maxBytes = maxSizeMb === undefined ? undefined : maxSizeMb * BYTES_PER_MB;
+  const archiveCount = usage?.archiveCount;
+  const sizeBytes = usage?.sizeBytes;
+  const sizeUnit = (sizeBytes ?? 0) >= BYTES_PER_GB ? BYTES_PER_GB : BYTES_PER_MB;
+  const formatCount = new Intl.NumberFormat(i18n.language);
+  const capacityState = archiveLimitState(sizeBytes, maxBytes);
+  const countState = archiveLimitState(archiveCount, maxCount);
+  const limitLabel = {
+    at: t("settings.checkpointArchiveAtLimit"),
+    over: t("settings.checkpointArchiveOverLimit"),
+    within: t("settings.checkpointArchiveWithinLimit"),
+    unknown: t("common.unavailable"),
+    unlimited: t("settings.unlimited"),
+  };
+  const capacityText = sizeBytes === undefined ? "" : formatStorageSize(sizeBytes, sizeUnit, i18n.language);
+  const capacityLimitText = maxBytes ? formatStorageSize(maxBytes, sizeUnit, i18n.language) : "";
+  const countText = archiveCount === undefined ? "" : formatCount.format(archiveCount);
+  const countLimitText = maxCount ? formatCount.format(maxCount) : "";
   const directory = usage?.directory || "";
 
   const archives = useMemo(
@@ -144,18 +160,19 @@ export function CheckpointStoragePanel({
   const pendingDeleteCount = hasPendingDelete ? pendingDeleteIds.length : selectedCount;
 
   return (
-    <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+    <div className="rounded-xl border border-border bg-card p-5">
       <div className="flex min-w-0 items-center gap-2">
         <Archive className="h-4 w-4 shrink-0 text-primary" />
         <h2 className="min-w-0 flex-1 truncate text-base font-semibold">{t("settings.storage")}</h2>
-        <Badge tone={maxSizeMb > 0 || maxCount > 0 ? "ok" : "muted"} className="shrink-0">
-          {maxSizeMb > 0 || maxCount > 0 ? t("settings.limitOn") : t("settings.unlimited")}
-        </Badge>
       </div>
 
+      <dl className="mt-4 grid gap-3 sm:grid-cols-2">
+        <ArchiveQuota label={t("settings.checkpointArchiveCapacity")} value={capacityText}
+          limit={capacityLimitText} state={capacityState} stateLabel={limitLabel[capacityState]} kind="capacity" />
+        <ArchiveQuota label={t("settings.checkpointArchiveCount")} value={countText}
+          limit={countLimitText} state={countState} stateLabel={limitLabel[countState]} kind="count" />
+      </dl>
       <div className="mt-4 grid gap-3">
-        <DataLine label={t("settings.checkpointArchiveUsage")} value={usageText} />
-        <DataLine label={t("settings.checkpointArchiveCount")} value={`${formatCount(usage?.archiveCount)}${maxCount > 0 ? ` / ${formatCount(maxCount)}` : ""}`} />
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <div className="min-w-0 flex-1">
             <DataLine label={t("settings.checkpointArchiveDirectory")} value={directory || "-"} />
@@ -210,7 +227,7 @@ export function CheckpointStoragePanel({
         <div className="mt-3 text-xs text-muted-foreground">
           {t("settings.checkpointArchivePruned", {
             count: prune.deletedCount ?? 0,
-            size: formatStorageSize(prune.deletedBytes),
+            size: formatStorageSize(prune.deletedBytes, undefined, i18n.language),
           })}
         </div>
       ) : null}
@@ -237,9 +254,9 @@ export function CheckpointStoragePanel({
           ) : null}
         </div>
 
-        {selectedCount > 0 ? (
+        {archives.length ? (
           <div className="mt-2 text-xs text-muted-foreground">
-            {t("settings.checkpointArchiveSelectedCount", { count: selectedCount })}
+            {t("settings.checkpointArchiveSelection", { count: selectedCount, eligible: selectableIds.length })}
           </div>
         ) : null}
         {hasPendingDelete ? (
@@ -260,23 +277,33 @@ export function CheckpointStoragePanel({
                 ? t("settings.checkpointArchiveRecoveryProtectedHint")
                 : t("settings.checkpointArchiveRecentProtectedHint");
               const checked = selected.has(id);
+              const { action, timestamp } = getArchiveDisplay(item);
+              const title = action || t("settings.checkpointArchiveFile");
+              const localTime = timestamp?.toLocaleString(i18n.language, { dateStyle: "medium", timeStyle: "short" });
               return (
                 <li
                   key={id}
-                  className="flex min-w-0 items-center gap-3 border-b border-border/60 px-3 py-2 last:border-b-0"
+                  className="flex min-w-0 flex-wrap items-start gap-3 border-b border-border/60 px-3 py-2 last:border-b-0"
                 >
                   <input
                     type="checkbox"
                     checked={checked}
+                    aria-label={localTime ? title + ", " + localTime : title}
                     disabled={disabled || isProtected}
                     onChange={() => toggleOne(id)}
                     className="h-4 w-4 shrink-0 accent-primary disabled:opacity-40"
                   />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{item.label || id}</div>
-                    <div className="truncate text-xs text-muted-foreground/80">{item.path || id}</div>
+                    <div className="break-words text-sm font-medium">{title}</div>
+                    {localTime ? <time dateTime={timestamp?.toISOString()} className="text-xs text-muted-foreground">{localTime}</time> : null}
+                    <details className="text-xs text-muted-foreground">
+                      <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                        {t("settings.checkpointArchiveFile")}
+                      </summary>
+                      <div className="mt-1 break-all font-mono">{item.path || id}</div>
+                    </details>
                   </div>
-                  <div className="shrink-0 text-xs text-muted-foreground">{formatStorageSize(item.sizeBytes)}</div>
+                  <div className="shrink-0 text-xs text-muted-foreground">{item.sizeBytes === undefined ? t("common.unavailable") : formatStorageSize(item.sizeBytes, undefined, i18n.language)}</div>
                   {(isProtected || isAutoProtected) ? (
                     <Badge tone="warn" className="shrink-0" title={protectionHint}>
                       {protectionLabel}
@@ -332,10 +359,59 @@ export function CheckpointStoragePanel({
   );
 }
 
-function formatStorageSize(bytes?: number) {
+const BYTES_PER_MB = 1024 * 1024;
+const BYTES_PER_GB = 1024 * BYTES_PER_MB;
+
+function archiveLimitState(used: number | undefined, limit: number | undefined) {
+  if (limit === 0) return "unlimited";
+  if (used === undefined || limit === undefined) return "unknown";
+  if (used > limit) return "over";
+  if (used === limit) return "at";
+  return "within";
+}
+
+function ArchiveQuota({ label, value, limit, state, stateLabel, kind }: {
+  label: string;
+  value: string;
+  limit: string;
+  state: ReturnType<typeof archiveLimitState>;
+  stateLabel: string;
+  kind: "capacity" | "count";
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border px-3 py-2" data-checkpoint-archive-quota={kind} data-limit-state={state}>
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        {value ? <span className="text-sm font-semibold tabular-nums">{value}{limit ? " / " + limit : ""}</span> : null}
+        <span className={state === "at" || state === "over" ? "text-xs font-medium text-amber-800 dark:text-amber-300" : "text-xs text-muted-foreground"}>{stateLabel}</span>
+      </dd>
+    </div>
+  );
+}
+
+function getArchiveDisplay(item: ArchiveEntry) {
+  const label = item.label?.trim() || "";
+  const separator = label.lastIndexOf(" · ");
+  const dateLabel = separator < 0 ? label : label.slice(separator + 3);
+  const createdAt = /^\d{4}-\d{2}-\d{2}T/.test(dateLabel) ? Date.parse(dateLabel) : NaN;
+  const hasCreatedAt = Number.isFinite(createdAt);
+  const date = new Date(hasCreatedAt ? createdAt : (item.modifiedAt ?? NaN) * 1000);
+  const rawAction = hasCreatedAt ? (separator < 0 ? "" : label.slice(0, separator)) : label;
+  const action = /^(vrcforge|unity)_[a-z0-9_]+$/.test(rawAction)
+    ? rawAction.replace(/^[^_]+_/, "").replace(/_/g, " ").replace(/^./, (first) => first.toUpperCase())
+    : rawAction;
+  return { action, timestamp: Number.isFinite(date.getTime()) ? date : undefined };
+}
+
+function formatStorageSize(bytes?: number, unit?: number, locale?: string) {
   const value = typeof bytes === "number" && Number.isFinite(bytes) ? Math.max(0, bytes) : 0;
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  const divisor = unit ?? (value >= BYTES_PER_GB ? BYTES_PER_GB : BYTES_PER_MB);
+  const digits = divisor === BYTES_PER_GB ? 2 : 1;
+  const amount = value / divisor;
+  const minimum = 10 ** -digits;
+  const format = new Intl.NumberFormat(locale, { maximumFractionDigits: digits });
+  const label = divisor === BYTES_PER_GB ? "GB" : "MB";
+  return amount > 0 && amount < minimum
+    ? "<" + format.format(minimum) + " " + label
+    : format.format(amount) + " " + label;
 }

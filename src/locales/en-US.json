@@ -330,6 +330,12 @@
     "desktopActionRecorded": "{{action}} recorded ({{status}})."
   },
   "settings": {
+    "checkpointArchiveCapacity": "Backup capacity",
+    "checkpointArchiveAtLimit": "At limit",
+    "checkpointArchiveOverLimit": "Over limit",
+    "checkpointArchiveWithinLimit": "Below limit",
+    "checkpointArchiveSelection": "{{count}} selected · {{eligible}} eligible",
+    "checkpointArchiveFile": "Archive file",
     "title": "Settings",
     "subtitle": "Configure permission mode, model provider, and global custom instructions.",
     "permissionMode": "Permission Mode",
