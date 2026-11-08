@@ -841,6 +841,7 @@
     "providerNotConfigured": "No model API key is configured. Open Settings or connect an external agent.",
     "providerResponseTimedOut": "Provider had no activity for 300 seconds. Retry manually; VRCForge did not retry or replay this request.",
     "runtimeTerminal": {
+      "questionContinuationInterruptedMessage": "Your answer was saved, but the task could not continue.",
       "noProgressStatus": "Stopped · No progress · Not complete",
       "noProgressMessage": "VRCForge stopped this turn because the model kept proposing inspections that added no new evidence. The task failed to make progress and is not marked complete.",
       "providerTimeoutStatus": "Provider timeout · Not complete",

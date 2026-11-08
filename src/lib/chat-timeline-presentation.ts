@@ -239,7 +239,11 @@ export function projectRuntimeResponseForDisplay(
   translate: RuntimePresentationTranslator,
 ): AgentRuntimeResponse {
   const failureCode = String(response.plan.plannerFailure?.code || "");
-  const failureMessageKey = RUNTIME_FAILURE_MESSAGE_KEYS[failureCode];
+  const interruptedQuestion = response.continuationSource === "question_answered"
+    && (response.turnId || response.turn_id)?.startsWith("interrupted:question:");
+  const failureMessageKey = interruptedQuestion
+    ? "chat.runtimeTerminal.questionContinuationInterruptedMessage"
+    : RUNTIME_FAILURE_MESSAGE_KEYS[failureCode];
   if (!failureMessageKey) return response;
   // A later planning failure cannot erase already executed tools. Missing phase
   // is unknown, so the code-specific messages must not claim zero execution.

@@ -54,8 +54,6 @@ export function buildAgentTimelineRows({
   approval,
   approvalAction,
   onModifyApproval,
-  showIntent,
-  nextStep,
   planLabel,
   providerLine,
   awaitingApproval,
@@ -76,8 +74,6 @@ export function buildAgentTimelineRows({
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
   onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
-  showIntent: boolean;
-  nextStep: string;
   planLabel: string;
   providerLine: string;
   awaitingApproval: boolean;
@@ -98,7 +94,6 @@ export function buildAgentTimelineRows({
     response = { ...response, plan: { ...response.plan, reply: "", summary: "" } };
     providerLine = "";
     planLabel = "";
-    showIntent = false;
   }
   // Turn state is UI chrome, not an assistant answer. Preserve the durable
   // activity and model words; never render the model-context recovery digest.
@@ -111,7 +106,6 @@ export function buildAgentTimelineRows({
         .map((step) => ["started", "running", "pending"].includes(step.status || "")
           ? { ...step, status: "interrupted" } : step),
     };
-    showIntent = false;
   }
   const finishStatusRows = (rows: ReactNode[]): ReactNode[] => interrupted ? [...rows,
     ...(interruptedPartial && !response.timeline?.some((event) => event.kind === "assistant" && event.payload?.summary?.trim() === interruptedPartial) ? [
@@ -214,8 +208,6 @@ export function buildAgentTimelineRows({
       approval,
       approvalAction,
       onModifyApproval,
-      showIntent,
-      nextStep,
       planLabel,
       providerLine,
       awaitingApproval,
@@ -280,8 +272,6 @@ export function buildAgentTimelineRows({
     approval,
     approvalAction,
     onModifyApproval,
-    showIntent,
-    nextStep,
     planLabel,
     providerLine,
     awaitingApproval,
@@ -786,25 +776,7 @@ function buildAgentTimelineRowsFromSteps({
       }
       continue;
     }
-    if (normalizedKind === "plan") {
-      rows.push(
-        <RunRow
-          key={rowKey}
-          icon="plan"
-          title={response.plan.skillTool ? response.plan.skillTool : response.plan.shellCommand ? response.plan.shellCommand : displayStep(nextStepLabel(step) || nextStepLabel(step) || "plan")}
-          statusTone="muted"
-          statusLabel={response.plan.skillTool ? "tool planned" : response.plan.shellCommand ? "command planned" : "planned"}
-        >
-          <DataLine label="Planner" value={response.plan.plannerLabel || displayPlanner(response.plan.planner)} />
-          {response.plan.skillTool ? <DataLine label="Tool" value={response.plan.skillTool} mono /> : null}
-          {response.plan.skillCategory ? <DataLine label="Category" value={response.plan.skillCategory} /> : null}
-          {response.plan.shellCommand ? <OutputBlock label="Command" value={response.plan.shellCommand} /> : null}
-          {response.plan.expectedResult ? <DataLine label="Expected" value={response.plan.expectedResult} /> : null}
-          {step.summary ? <DataLine label="Step" value={step.summary} /> : null}
-        </RunRow>,
-      );
-      continue;
-    }
+    if (normalizedKind === "plan") continue;
     if (normalizedKind === "reasoning") {
       rows.push(
       );
@@ -992,8 +964,6 @@ function buildLegacyAgentTimelineRows({
   approval,
   approvalAction,
   onModifyApproval,
-  showIntent,
-  nextStep,
   planLabel,
   providerLine,
   awaitingApproval,
@@ -1008,8 +978,6 @@ function buildLegacyAgentTimelineRows({
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
   onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
-  showIntent: boolean;
-  nextStep: string;
   planLabel: string;
   providerLine: string;
   awaitingApproval: boolean;
@@ -1028,23 +996,6 @@ function buildLegacyAgentTimelineRows({
   );
   if (!planReply && shouldSurfaceModelIdentity && planLabel) {
     rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t, "reply-model"));
-  }
-  if (showIntent && nextStep) {
-    rows.push(
-      <RunRow
-        key="intent"
-        icon="plan"
-        title={displayStep(nextStep)}
-        statusTone="muted"
-        statusLabel={response.plan.skillTool ? "tool planned" : response.plan.shellCommand ? "command planned" : "planned"}
-      >
-        <DataLine label="Planner" value={response.plan.plannerLabel || displayPlanner(response.plan.planner)} />
-        {response.plan.skillTool ? <DataLine label="Tool" value={response.plan.skillTool} mono /> : null}
-        {response.plan.skillCategory ? <DataLine label="Category" value={response.plan.skillCategory} /> : null}
-        {response.plan.shellCommand ? <OutputBlock label="Command" value={response.plan.shellCommand} /> : null}
-        {response.plan.expectedResult ? <DataLine label="Expected" value={response.plan.expectedResult} /> : null}
-      </RunRow>,
-    );
   }
   if (vision) {
     rows.push(
@@ -1285,12 +1236,6 @@ export function formatRuntimeModelLine(providerLabel: string | undefined, model:
   return [provider, modelName].filter(Boolean).join(" · ");
 }
 
-function nextStepLabel(step: OrderedAgentStep["step"]): string {
-  if (typeof step.kind === "string" && step.kind.trim()) {
-    return step.kind;
-  }
-  return "";
-}
 export function RunRow({
   icon,
   title,
@@ -1470,23 +1415,6 @@ export function InlineApprovalCard({
       ) : null}
     </div>
   );
-}
-
-export function displayPlanner(planner: string): string {
-  if (planner === "llm") return i18n.t("planner.ai");
-  return i18n.t("planner.fallback");
-}
-
-function displayStep(step: string): string {
-  const labels: Record<string, string> = {
-    classify_shell: i18n.t("step.classifyShell"),
-    execute_shell: i18n.t("step.executeShell"),
-    call_skill: i18n.t("step.callSkill"),
-    request_approval: i18n.t("shell.awaitConfirmation"),
-    await_user_instruction: i18n.t("step.awaitUserInstruction"),
-    done: i18n.t("step.done"),
-  };
-  return labels[step] || step;
 }
 
 function riskTone(risk: string): "ok" | "warn" | "danger" | "muted" {

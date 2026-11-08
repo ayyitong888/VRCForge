@@ -32,7 +32,7 @@ import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
 import type { ChatResourceImageContext as ChatResourceImageContextValue } from "../../lib/api/chat-resource-image";
 import { AttachmentStrip } from "./composer";
-import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, displayPlanner, formatPayload, formatRuntimeModelLine } from "./conversation-timeline";
+import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, formatPayload, formatRuntimeModelLine } from "./conversation-timeline";
 
 export function ConversationCard({
   item,
@@ -444,8 +444,6 @@ export function ConversationCard({
   const providerLine = formatRuntimeModelLine("", response.model);
   const replySource = providerLine;
   const awaitingApproval = shell?.status === "pending_approval";
-  const nextStep = response.plan.nextStep || "";
-  const showIntent = Boolean(nextStep) && nextStep !== "await_user_instruction" && nextStep !== "done";
   const timelineRows = buildAgentTimelineRows({
     response,
     shell,
@@ -455,8 +453,6 @@ export function ConversationCard({
     approval,
     approvalAction,
     onModifyApproval,
-    showIntent,
-    nextStep,
     planLabel: replySource,
     providerLine,
     awaitingApproval,

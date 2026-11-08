@@ -841,6 +841,7 @@
     "providerNotConfigured": "モデル API キーが未設定です。設定を開くか、外部 agent を接続してください。",
     "providerResponseTimedOut": "Provider から 300 秒間応答がありませんでした。手動で再試行してください。VRCForge はこのリクエストを自動再試行・再実行していません。",
     "runtimeTerminal": {
+      "questionContinuationInterruptedMessage": "回答は保存されましたが、タスクを続行できませんでした。",
       "noProgressStatus": "停止 · 進展なし · 未完了",
       "noProgressMessage": "新しい根拠を追加しない調査をモデルが繰り返し提案したため、VRCForge はこのターンを停止しました。タスクは進展しなかったため失敗し、完了扱いにはなっていません。",
       "providerTimeoutStatus": "Provider タイムアウト · 未完了",

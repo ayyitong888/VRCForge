@@ -841,6 +841,7 @@
     "providerNotConfigured": "尚未配置模型 API Key。请打开设置，或连接外部 agent。",
     "providerResponseTimedOut": "Provider 已连续 300 秒没有活动，请手动重试。VRCForge 没有自动重试或重放本次请求。",
     "runtimeTerminal": {
+      "questionContinuationInterruptedMessage": "回答已保存，任务续接失败。",
       "noProgressStatus": "已停止 · 无进展 · 未完成",
       "noProgressMessage": "模型持续提出无法增加新证据的检查，VRCForge 已停止本轮。任务因无进展而失败，未标记为完成。",
       "providerTimeoutStatus": "Provider 超时 · 未完成",
