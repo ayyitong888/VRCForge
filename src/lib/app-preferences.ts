@@ -10,6 +10,7 @@ export type LayoutPaneWidths = {
 };
 
 export type ThemeMode = "light" | "dark";
+export type RunningEnterAction = "queue" | "steer";
 
 export const ONBOARDING_FLAG_KEY = "vrcforge_onboarded";
 export const COLLAPSED_PROJECTS_KEY = "vrcforge_collapsed_projects";
@@ -21,6 +22,7 @@ export const LAYOUT_PANE_WIDTHS_KEY = "vrcforge_layout_pane_widths";
 export const RIGHT_RUNTIME_SECTION_COLLAPSED_KEY = "vrcforge_right_runtime_sections_collapsed";
 export const DEVELOPER_OPTIONS_ENABLED_KEY = "vrcforge_developer_options_enabled";
 export const AUTOMATIC_UPDATE_CHECK_DISABLED_KEY = "vrcforge_automatic_update_check_disabled";
+const RUNNING_ENTER_ACTION_KEY = "vrcforge_running_enter_action";
 
 export const DEFAULT_LEFT_PANE_WIDTH = 280;
 export const DEFAULT_RIGHT_PANE_WIDTH = 320;
@@ -93,6 +95,22 @@ export function persistAutomaticUpdateCheckEnabled(enabled: boolean): void {
     }
   } catch {
     // A blocked preference store must not prevent update checks or dismissal.
+  }
+}
+
+export function loadRunningEnterAction(): RunningEnterAction {
+  try {
+    return window.localStorage.getItem(RUNNING_ENTER_ACTION_KEY) === "steer" ? "steer" : "queue";
+  } catch {
+    return "queue";
+  }
+}
+
+export function persistRunningEnterAction(action: RunningEnterAction): void {
+  try {
+    window.localStorage.setItem(RUNNING_ENTER_ACTION_KEY, action);
+  } catch {
+    // The current window can still use the setting.
   }
 }
 

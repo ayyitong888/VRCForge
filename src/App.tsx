@@ -112,8 +112,10 @@ import {
   loadLayoutPaneWidths,
   loadAutomaticUpdateCheckEnabled,
   loadDeveloperOptionsEnabled,
+  loadRunningEnterAction,
   loadThemePreference,
   persistAutomaticUpdateCheckEnabled,
+  persistRunningEnterAction,
   type LayoutPaneWidths,
   type ThemeMode,
 } from "./lib/app-preferences";
@@ -337,6 +339,7 @@ export default function App() {
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [pendingApprovalPanelOpen, setPendingApprovalPanelOpen] = useState(false);
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
+  const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
   const [developerOptionsEverEnabled, setDeveloperOptionsEverEnabled] = useState(false);
   const [computerUseEnabled, setComputerUseEnabled] = useState(false);
@@ -3474,20 +3477,20 @@ export default function App() {
     if (!chatAvailable) {
       return;
     }
-    if (deliveryMode === "steer" && (message === "/compact" || message.startsWith("/compact "))) {
+    if (message === "/compact" || message.startsWith("/compact ")) {
       void compactChat();
       setInput("");
       return;
     }
-    if (deliveryMode === "steer" && (message === "/goal" || message.startsWith("/goal "))) {
+    if (message === "/goal" || message.startsWith("/goal ")) {
       void handleGoalSlashCommand(message);
       return;
     }
-    if (deliveryMode === "steer" && (message === "/memory" || message.startsWith("/memory "))) {
+    if (message === "/memory" || message.startsWith("/memory ")) {
       void createMemoryFromSlash(message);
       return;
     }
-    if (deliveryMode === "steer" && (message === "/delegate" || message.startsWith("/delegate "))) {
+    if (message === "/delegate" || message.startsWith("/delegate ")) {
       const command = parseDelegateCommand(
         message,
         skills.map((skill) => skill.name),
@@ -3501,12 +3504,12 @@ export default function App() {
       setInput("");
       return;
     }
-    if (deliveryMode === "steer" && (message === "/handoff" || message.startsWith("/handoff "))) {
+    if (message === "/handoff" || message.startsWith("/handoff ")) {
       setHandoffSendOpen((current) => !current);
       setInput("");
       return;
     }
-    if (deliveryMode === "steer" && (message === "/desktop" || message.startsWith("/desktop "))) {
+    if (message === "/desktop" || message.startsWith("/desktop ")) {
       if (!developerOptionsEnabled || !computerUseEnabled) {
         setError(t("computerUse.disabled"));
         return;
@@ -4498,6 +4501,11 @@ export default function App() {
               loading={loading}
               runtimeConnected={runtimeConnected}
               currentLanguage={i18n.language}
+              runningEnterAction={runningEnterAction}
+              onRunningEnterActionChange={(action) => {
+                setRunningEnterAction(action);
+                persistRunningEnterAction(action);
+              }}
               themeCustomization={themeCustomization}
               themeBackgroundError={themeBackgroundError}
               apiProvider={apiProvider}
@@ -4606,6 +4614,7 @@ export default function App() {
               setInput={setInput}
               sending={sending}
               queueAllowed={(chatRunSending || pendingQuestionSessionIds.has(activeChat?.sessionId || "")) && !stopRequested}
+              runningEnterAction={runningEnterAction}
               permission={permission}
               onSubmit={submitMessage}
               onQueue={() => void submitMessage(undefined, "queue")}

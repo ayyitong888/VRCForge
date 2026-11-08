@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "
 import { useTranslation } from "react-i18next";
 import { updateAgentGoal } from "../../lib/api";
 import type { AgentApproval, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
+import type { RunningEnterAction } from "../../lib/app-preferences";
 import type {
   ApprovalActionState,
   ChatAttachment,
@@ -104,6 +105,7 @@ export function ChatWorkspace({
   setInput,
   sending,
   queueAllowed,
+  runningEnterAction,
   permission,
   onSubmit,
   onQueue,
@@ -204,6 +206,7 @@ export function ChatWorkspace({
   setInput: (value: string) => void;
   sending: boolean;
   queueAllowed: boolean;
+  runningEnterAction?: RunningEnterAction;
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
   onQueue?: (event?: FormEvent) => void;
@@ -433,6 +436,7 @@ export function ChatWorkspace({
       setInput={setInput}
       sending={composerSending}
       queueAllowed={queueAllowed}
+      runningEnterAction={runningEnterAction}
       permission={permission}
       onSubmit={onSubmit}
       onQueue={onQueue}

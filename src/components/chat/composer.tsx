@@ -4,6 +4,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { Fragment, type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
+import type { RunningEnterAction } from "../../lib/app-preferences";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "../../lib/permission-ui";
 import { cn, formatCount } from "../../lib/utils";
 import { formatAttachmentSize } from "../../lib/chat-format";
@@ -42,6 +43,7 @@ export function Composer({
   setInput,
   sending,
   queueAllowed = false,
+  runningEnterAction = "queue",
   permission,
   onSubmit,
   onQueue,
@@ -79,6 +81,7 @@ export function Composer({
   setInput: (value: string) => void;
   sending: boolean;
   queueAllowed?: boolean;
+  runningEnterAction?: RunningEnterAction;
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
   onQueue?: (event?: FormEvent) => void;
@@ -417,14 +420,13 @@ export function Composer({
             }
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
-              if (sending && !queueAllowed) return;
-              if (sending && (event.ctrlKey || event.metaKey)) {
-                // A distinct message follows the current turn through the existing serial queue.
-                (onQueue || onSubmit)();
-              } else if (sending) {
-                (onSteerNow || onSubmit)();
-              } else {
+              if (!sending) {
                 onSubmit();
+              } else if (queueAllowed) {
+                const modified = event.ctrlKey || event.metaKey;
+                const steer = runningEnterAction === "steer" ? !modified : modified;
+                if (steer) (onSteerNow || onSubmit)();
+                else onQueue?.();
               }
             }
           }}
