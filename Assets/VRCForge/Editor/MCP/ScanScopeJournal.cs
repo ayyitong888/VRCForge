@@ -8,6 +8,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Rendering;
 using VRCForge.Core.MCP;
 using Object = UnityEngine.Object;
 
@@ -188,7 +189,10 @@ namespace VRCForge.Editor
             // Material inventory reports texture metadata. Serializing pixel buffers is unbounded and
             // adds data which that reader does not observe.
             var text = target is Texture texture
-                ? TextureObservation(texture).ToString(Formatting.None) : EditorJsonUtility.ToJson(target);
+                ? TextureObservation(texture).ToString(Formatting.None)
+                : target is Shader shader
+                    ? ShaderObservation(shader).ToString(Formatting.None)
+                    : EditorJsonUtility.ToJson(target);
             // Material inventory observes mesh names and assignments, not mesh
             // vertex buffers. Keep name changes visible on their owning slot.
             var mesh = target is SkinnedMeshRenderer skinned ? skinned.sharedMesh
@@ -216,6 +220,41 @@ namespace VRCForge.Editor
                 throw failure;
             }
             return Hash(text);
+        }
+
+        private static JObject ShaderObservation(Shader shader)
+        {
+            // Readers use the live declaration, including built-in shaders. Source
+            // files, imported dependencies and dirty counts are tracked separately.
+            var properties = new JArray();
+            var count = shader.GetPropertyCount();
+            for (var i = 0; i < count; i++)
+            {
+                var type = shader.GetPropertyType(i);
+                var property = new JObject { ["name"] = shader.GetPropertyName(i), ["type"] = type.ToString() };
+                switch (type)
+                {
+                    case ShaderPropertyType.Color:
+                    case ShaderPropertyType.Vector:
+                        var vector = shader.GetPropertyDefaultVectorValue(i);
+                        property["default"] = new JArray(vector.x, vector.y, vector.z, vector.w);
+                        break;
+                    case ShaderPropertyType.Int:
+                        property["default"] = shader.GetPropertyDefaultIntValue(i);
+                        break;
+                    case ShaderPropertyType.Float:
+                    case ShaderPropertyType.Range:
+                        property["default"] = shader.GetPropertyDefaultFloatValue(i);
+                        break;
+                    case ShaderPropertyType.Texture:
+                        property["default"] = shader.GetPropertyTextureDefaultName(i);
+                        break;
+                }
+                properties.Add(property);
+            }
+            return new JObject { ["name"] = shader.name, ["renderQueue"] = shader.renderQueue,
+                ["properties"] = properties, ["keywords"] = new JArray(shader.keywordSpace.keywords
+                    .Select(keyword => keyword.name).OrderBy(name => name, StringComparer.Ordinal)) };
         }
 
         internal static JObject TextureObservation(Texture texture)
@@ -303,15 +342,30 @@ namespace VRCForge.Editor
                 .OrderBy(value => value, StringComparer.Ordinal)));
         }
 
+        private static IEnumerable<Object> MaterialScopeTargets(string[] roots)
+        {
+            foreach (var id in roots)
+            {
+                if (!(Resolve(id) is GameObject root) || root == null)
+                    throw new InvalidDataException("scope_object_missing");
+                foreach (var renderer in ShaderMaterialScanner.QueryRenderers(root.transform))
+                {
+                    yield return renderer;
+                    var filter = ShaderMaterialScanner.QueryMeshFilter(renderer);
+                    if (filter != null) yield return filter;
+                }
+            }
+        }
+
         private static Scope Measure(string[] roots, JObject selector)
         {
             var materialScope = (string)selector?["scanTool"] == "vrcforge_scan_avatar_materials";
             var includeTextures = (bool?)selector?["arguments"]?["includeTextures"] ?? true;
             var selectedMaterialIds = materialScope ? ReadMaterialSelectionIds(selector) : null;
-            var scope = new Scope { epoch = state.epoch, sceneEpoch = state.sceneEpoch, roots = roots,
+            var scope = new Scope { epoch = state.epoch, sceneEpoch = state.sceneEpoch, roots = roots, scene = materialScope,
                 capturedAt = DateTime.UtcNow.ToString("o"), objects = new Dictionary<string, string>(), files = new Dictionary<string, string>() };
             var materialSelectorProofs = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-            var pending = new Queue<Object>(roots.Select(Resolve));
+            var pending = new Queue<Object>(materialScope ? MaterialScopeTargets(roots) : roots.Select(Resolve));
             var paths = new HashSet<string>();
             var metadataOnlyTexturePaths = new HashSet<string>();
             var contentRequiredPaths = new HashSet<string>();
@@ -335,6 +389,10 @@ namespace VRCForge.Editor
                     watch.hash = hash;
                     watch.dirty = dirty;
                 }
+                var rendererIdentity = materialScope && target is Renderer scopedRenderer
+                    ? RendererComponentIdentity.Create(scopedRenderer) : null;
+                if (rendererIdentity != null)
+                    hash = Hash(hash + "|" + rendererIdentity.componentId + "|" + rendererIdentity.scenePath + "|" + rendererIdentity.sceneHandle);
                 scope.objects[id] = watch.revision + ":" + dirty + ":" + hash;
                 scope.scene |= !EditorUtility.IsPersistent(target);
                 if (AssetPath(path) && paths.Add(path))
@@ -348,20 +406,19 @@ namespace VRCForge.Editor
                             if (asset != null && !(asset is MonoScript)) pending.Enqueue(asset);
                     }
                 }
-                if (target is GameObject gameObject)
+                if (!materialScope && target is GameObject gameObject)
                 {
                     foreach (var component in gameObject.GetComponents<Component>())
                     {
-                        if (materialScope && !(component is Transform) && !(component is Renderer) && !(component is MeshFilter)) continue;
                         if (component == null) throw new InvalidDataException("missing_component");
                         pending.Enqueue(component);
                     }
                     foreach (Transform child in gameObject.transform) pending.Enqueue(child.gameObject);
                 }
-                if (materialScope && selectedMaterialIds != null && target is Renderer renderer)
+                if (rendererIdentity != null && selectedMaterialIds != null && target is Renderer renderer)
                 {
                     // Match ShaderMaterialScanner's renderer path, slot order, and ID algorithm.
-                    var rendererPath = RendererComponentIdentity.Create(renderer).rendererPath;
+                    var rendererPath = rendererIdentity.rendererPath;
                     var sharedMaterials = renderer.sharedMaterials ?? Array.Empty<Material>();
                     for (var slotIndex = 0; slotIndex < sharedMaterials.Length; slotIndex++)
                     {
@@ -378,6 +435,9 @@ namespace VRCForge.Editor
                 }
                 if (materialScope && target is Material material)
                     foreach (var texture in MaterialTextureDependencies(material, includeTextures)) pending.Enqueue(texture);
+                // Shader asset dependencies were collected above. The material
+                // reader has no references in the compiled shader payload.
+                if (materialScope && target is Shader) continue;
                 using (var serialized = new SerializedObject(target))
                 {
                     var property = serialized.GetIterator();
@@ -444,6 +504,17 @@ namespace VRCForge.Editor
                 "vrcforge_scan_avatar_controls", "vrcforge_scan_avatar_parameters", "vrcforge_scan_avatar_materials",
                 "vrcforge_scan_avatar_items", "vrcforge_read_avatar_descriptor" }.Contains(tool))
                 throw new InvalidDataException("scan_scope_undeclared");
+            if (tool == "vrcforge_scan_avatar_materials")
+            {
+                var materialRoots = ShaderMaterialScanner.ResolveAvatarRoots((string)arguments["avatarPath"])
+                    .Select(root => Identity(root.gameObject)).OrderBy(id => id, StringComparer.Ordinal).ToArray();
+                if (materialRoots.Length == 0 || materialRoots.Length > MaxObjects)
+                    throw new InvalidDataException("scope_roots_unavailable");
+                if (parameters["objectIds"] is JArray trustedRoots
+                    && !materialRoots.SequenceEqual(trustedRoots.Values<string>().OrderBy(id => id, StringComparer.Ordinal)))
+                    throw new InvalidDataException("scope_membership_changed");
+                return materialRoots;
+            }
             var explicitPaths = parameters["assetPaths"] as JArray;
             var objectIds = parameters["objectIds"] as JArray;
             if (objectIds != null) foreach (var id in objectIds) roots.Add(id.Value<string>());

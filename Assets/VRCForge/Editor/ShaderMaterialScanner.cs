@@ -94,7 +94,7 @@ namespace VRCForge.Editor
             bool includeTextures = true)
         {
             var normalizedAvatarPath = NormalizePath(avatarPath);
-            var avatars = ResolveAvatarRoots(normalizedAvatarPath);
+            var avatars = ResolveAvatarRoots(avatarPath);
             var materials = new List<MaterialInventoryItem>();
             var selectedMaterialIds = materialIds == null
                 ? null
@@ -108,10 +108,7 @@ namespace VRCForge.Editor
             foreach (var avatarRoot in avatars)
             {
                 sceneNames.Add(avatarRoot.gameObject.scene.name);
-                var scopeIsAvatarRoot = ReferenceEquals(FindAvatarRoot(avatarRoot), avatarRoot);
-                var renderers = avatarRoot.GetComponentsInChildren<Renderer>(true)
-                    .Where(IsSceneObject)
-                    .Where(renderer => !scopeIsAvatarRoot || ReferenceEquals(FindAvatarRoot(renderer.transform), avatarRoot))
+                var renderers = QueryRenderers(avatarRoot)
                     .Select(renderer => new
                     {
                         renderer,
@@ -334,8 +331,18 @@ namespace VRCForge.Editor
             };
         }
 
-        private static List<Transform> ResolveAvatarRoots(string normalizedAvatarPath)
+        internal static Renderer[] QueryRenderers(Transform avatarRoot)
         {
+            var scopeIsAvatarRoot = ReferenceEquals(FindAvatarRoot(avatarRoot), avatarRoot);
+            return avatarRoot.GetComponentsInChildren<Renderer>(true)
+                .Where(IsSceneObject)
+                .Where(renderer => !scopeIsAvatarRoot || ReferenceEquals(FindAvatarRoot(renderer.transform), avatarRoot))
+                .ToArray();
+        }
+
+        internal static List<Transform> ResolveAvatarRoots(string avatarPath)
+        {
+            var normalizedAvatarPath = NormalizePath(avatarPath);
             var renderers = Resources.FindObjectsOfTypeAll<Renderer>().Where(IsSceneObject).ToList();
             var roots = new Dictionary<int, Transform>();
 
@@ -450,8 +457,14 @@ namespace VRCForge.Editor
                 return skinned.sharedMesh.name;
             }
 
-            var filter = renderer.GetComponent<MeshFilter>();
+            var filter = QueryMeshFilter(renderer);
             return filter != null && filter.sharedMesh != null ? filter.sharedMesh.name : "";
+        }
+
+        internal static MeshFilter QueryMeshFilter(Renderer renderer)
+        {
+            return renderer is SkinnedMeshRenderer skinned && skinned.sharedMesh != null
+                ? null : renderer.GetComponent<MeshFilter>();
         }
 
         private static DissolveReadiness GetDissolveReadiness(Material material, string shaderFamily, string shaderName)
