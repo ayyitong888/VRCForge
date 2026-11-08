@@ -1781,6 +1781,7 @@
     }
   },
   "package": {
+    "confirmUninstall": "Uninstall {{name}}?",
     "title": ".vsk Skill Packages",
     "store": "Store",
     "governance": "Governance",

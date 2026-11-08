@@ -1774,6 +1774,7 @@
     }
   },
   "package": {
+    "confirmUninstall": "解除安裝 {{name}}？",
     "title": ".vsk 技能套件管理",
     "store": "儲存位置",
     "governance": "治理與信任",

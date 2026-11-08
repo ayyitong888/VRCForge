@@ -1,7 +1,7 @@
 import { formatPayload } from "../../lib/conversation-utils";
 import { Check, Copy, Eye, EyeOff, FileUp, Loader2, Plus, RefreshCw, Shield, Trash2, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { DragDropEvent } from "@tauri-apps/api/webview";
 import i18n from "../../i18n";
 import type {
@@ -79,6 +79,15 @@ export function SkillPackageManagerPanel({
   const [localMessage, setLocalMessage] = useState("");
   const [localError, setLocalError] = useState("");
   const [packageActionId, setPackageActionId] = useState("");
+  const [uninstallPackage, setUninstallPackage] = useState<SkillPackageEntry | null>(null);
+  const uninstallDialog = useRef<HTMLDialogElement>(null);
+  const uninstallTitleId = useId();
+  useEffect(() => {
+    const dialog = uninstallDialog.current;
+    if (!dialog) return;
+    if (uninstallPackage && !dialog.open) dialog.showModal();
+    if (!uninstallPackage && dialog.open) dialog.close();
+  }, [uninstallPackage]);
   const [governanceReason, setGovernanceReason] = useState("");
   const [signerFingerprint, setSignerFingerprint] = useState("");
   const [blockPackageId, setBlockPackageId] = useState("");
@@ -384,19 +393,32 @@ export function SkillPackageManagerPanel({
           {packages.map((pkg, index) => {
             const id = skillPackageId(pkg);
             const enabled = skillPackageEnabled(pkg);
+            const availability = skillPackageAvailability(pkg);
             const busy = loading || Boolean(packageActionId);
             const hasUnityTools = hasUnityToolEntrypoint(pkg);
             return (
               <div key={`${id}-${index}`} className="grid min-w-0 gap-3 rounded-lg border border-border/60 bg-card px-3 py-3 text-xs sm:grid-cols-[minmax(0,1fr)_auto]" data-vrcforge-installed-skill-card>
                 <div className="min-w-0">
-                  <div className="break-words font-medium">{skillPackageTitle(pkg)}</div>
-                  <div className="break-all text-muted-foreground">{id}</div>
-                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-                    <Badge tone={skillPackageLabelTone(skillPackageRisk(pkg))} className="h-5 px-1.5 text-[10px]">{skillPackageRiskLabel(pkg)}</Badge>
-                    {skillPackageLabels(pkg).map((label) => (
-                      <Badge key={label} title={skillPackageExecutionDescription(pkg)} tone={skillPackageLabelTone(label)} className="h-5 px-1.5 text-[10px]">{label}</Badge>
-                    ))}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <div className="break-words font-medium text-sm">{skillPackageTitle(pkg)}</div>
+                    <Badge tone={availability.tone}>{availability.label}</Badge>
                   </div>
+                  {availability.reason ? <p className="mt-1 break-words text-muted-foreground">{availability.reason}</p> : null}
+                  <details className="mt-1">
+                    <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                      {i18n.t("vskOpen.details")}
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      <div className="break-all text-muted-foreground">{id}</div>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge tone={skillPackageLabelTone(skillPackageRisk(pkg))}>{skillPackageRiskLabel(pkg)}</Badge>
+                        {skillPackageLabels(pkg).map((label) => (
+                          <Badge key={label} tone={skillPackageLabelTone(label)}>{label}</Badge>
+                        ))}
+                      </div>
+                      <p className="break-words text-muted-foreground">{skillPackageExecutionDescription(pkg)}</p>
+                    </div>
+                  </details>
                 </div>
                 <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
                   <SkillSwitch
@@ -414,55 +436,69 @@ export function SkillPackageManagerPanel({
                     {i18n.t("package.installUnityTools")}
                   </Button> : null}
                   <details className="relative">
-                    <summary className="flex h-8 cursor-pointer list-none items-center rounded-md border border-border px-2 text-xs text-muted-foreground">{i18n.t("package.advancedActions")}</summary>
+                    <summary className="flex h-8 cursor-pointer list-none items-center rounded-md border border-border px-2 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                      {i18n.t("package.advancedActions")}
+                    </summary>
                     <div className="absolute right-0 z-10 mt-1 flex min-w-40 flex-col gap-1 rounded-md border border-border bg-card p-1 shadow-panel">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="h-8 px-2 text-xs"
-                    disabled={busy || skillPackageSigner(pkg) === "-"}
-                    onClick={() => void runTrustSigner(skillPackageSigner(pkg))}
-                  >
-                    <Check className="h-3.5 w-3.5" />
-                    {i18n.t("package.trust")}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="h-8 px-2 text-xs"
-                    disabled={busy || skillPackageSigner(pkg) === "-"}
-                    onClick={() => void runRevokeSigner(skillPackageSigner(pkg))}
-                  >
-                    <X className="h-3.5 w-3.5" />
-                    {i18n.t("package.revoke")}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="danger"
-                    className="h-8 px-2 text-xs"
-                    disabled={busy || id === "-"}
-                    onClick={() => void runBlockPackage(pkg)}
-                  >
-                    <EyeOff className="h-3.5 w-3.5" />
-                    {i18n.t("package.block")}
-                  </Button>
+                      <Button type="button" variant="ghost" className="h-8 justify-start px-2 text-xs"
+                        disabled={busy || skillPackageSigner(pkg) === "-"}
+                        onClick={() => void runTrustSigner(skillPackageSigner(pkg))}
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                        {i18n.t("package.trust")}
+                      </Button>
+                      <Button type="button" variant="ghost" className="h-8 justify-start px-2 text-xs"
+                        disabled={busy || skillPackageSigner(pkg) === "-"}
+                        onClick={() => void runRevokeSigner(skillPackageSigner(pkg))}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        {i18n.t("package.revoke")}
+                      </Button>
+                      <Button type="button" variant="ghost" className="h-8 justify-start px-2 text-xs text-destructive"
+                        disabled={busy || id === "-"}
+                        onClick={() => void runBlockPackage(pkg)}
+                      >
+                        <EyeOff className="h-3.5 w-3.5" />
+                        {i18n.t("package.block")}
+                      </Button>
+                      <Button type="button" variant="ghost" className="h-8 justify-start px-2 text-xs text-destructive"
+                        disabled={busy || id === "-"}
+                        onClick={() => setUninstallPackage(pkg)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        {i18n.t("package.uninstall")}
+                      </Button>
                     </div>
                   </details>
-                  <Button
-                    type="button"
-                    variant="danger"
-                    className="h-8 px-2 text-xs"
-                    disabled={busy || id === "-"}
-                    onClick={() => void runUninstall(id)}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    {i18n.t("package.uninstall")}
-                  </Button>
                 </div>
               </div>
             );
           })}
         </div>
+
+        <dialog
+          ref={uninstallDialog}
+          aria-labelledby={uninstallTitleId}
+          className="m-auto w-[min(28rem,90vw)] rounded-xl border border-border bg-card p-5 text-foreground shadow-panel backdrop:bg-black/50"
+          onCancel={(event) => { event.preventDefault(); setUninstallPackage(null); }}
+        >
+          {uninstallPackage ? (
+            <>
+              <h2 id={uninstallTitleId} className="text-lg font-semibold">
+                {i18n.t("package.confirmUninstall", { name: skillPackageTitle(uninstallPackage) })}
+              </h2>
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <Button type="button" autoFocus variant="outline" onClick={() => setUninstallPackage(null)}>{i18n.t("common.cancel")}</Button>
+                <Button type="button" variant="danger" disabled={loading || Boolean(packageActionId)} onClick={() => {
+                  setUninstallPackage(null);
+                  void runUninstall(skillPackageId(uninstallPackage));
+                }}>
+                  {i18n.t("package.uninstall")}
+                </Button>
+              </div>
+            </>
+          ) : null}
+        </dialog>
 
         <details className="grid gap-3 rounded-lg border border-border bg-background p-3">
           <summary className="cursor-pointer text-sm font-medium">
@@ -745,6 +781,29 @@ function skillPackagePermissions(pkg: SkillPackageEntry): string[] {
   return [...permissions, ...tierValues];
 }
 
+function skillPackageAvailability(pkg: SkillPackageEntry): { label: string; tone: "ok" | "warn" | "danger" | "muted"; reason?: string } {
+  const governance = skillPackageGovernance(pkg);
+  const blocked = (governance.enableAllowed ?? governance.enable_allowed) === false;
+  const reasons = governance.blockingReasons ?? governance.blocking_reasons;
+  const policyReason = Array.isArray(reasons) ? reasons.find((reason): reason is string => typeof reason === "string" && Boolean(reason.trim())) : undefined;
+  const safeMode = skillPackageSafeMode(governance);
+  const disabledBySafeMode = safeMode.disablesRiskLevel === true || safeMode.disables_risk_level === true;
+  const signer = governance.signerTrustStatus ?? governance.signer_trust_status;
+  if (blocked) {
+    const reason = disabledBySafeMode ? "package.labels.safeModeDisabled" : "package.labels.enableBlocked";
+    return { label: i18n.t("package.labels.blocked"), tone: "danger", reason: policyReason || i18n.t(reason) };
+  }
+  if (pkg.available === false) {
+    return { label: i18n.t("common.unavailable"), tone: "warn", reason: pkg.errors?.[0] };
+  }
+  if (pkg.enabled === false) {
+    const reason = disabledBySafeMode ? i18n.t("package.labels.safeModeDisabled")
+      : signer === "untrusted" ? i18n.t("package.labels.untrustedSigner") : undefined;
+    return { label: i18n.t("package.messages.packageDisabled"), tone: "muted", reason };
+  }
+  return { label: i18n.t("package.messages.packageEnabled"), tone: "ok" };
+}
+
 function skillPackageLabels(pkg: SkillPackageEntry): string[] {
   const labels: string[] = [];
   labels.push(i18n.t(`package.executionMode.${skillPackageExecutionMode(pkg)}`));
@@ -778,7 +837,7 @@ function skillPackageLabels(pkg: SkillPackageEntry): string[] {
   } else if (signerStatus === "untrusted") {
     labels.push("Untrusted signer");
   }
-  if (safeMode.defaultEnabled === false || safeMode.disablesRiskLevel === true || safeMode.disables_risk_level === true) {
+  if (safeMode.disablesRiskLevel === true || safeMode.disables_risk_level === true) {
     labels.push("Safe Mode disabled");
   }
   if (importAllowed === false) {
@@ -790,7 +849,7 @@ function skillPackageLabels(pkg: SkillPackageEntry): string[] {
   if (pkg.dryRun) {
     labels.push("Dry run");
   }
-  if (pkg.enabled === false || pkg.available === false || errorText.includes("blocked")) {
+  if (enableAllowed === false || errorText.includes("blocked")) {
     labels.push("Blocked");
   }
   return [...new Set(labels)];

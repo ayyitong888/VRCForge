@@ -1781,6 +1781,7 @@
     }
   },
   "package": {
+    "confirmUninstall": "卸载 {{name}}？",
     "title": ".vsk 技能包管理",
     "store": "存储位置",
     "governance": "治理与信任",
