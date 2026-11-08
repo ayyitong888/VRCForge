@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import time
+import pytest
 
 from agent_gateway import AgentGateway
 from dashboard_api_models import AgentQuestionAnswerRequest
@@ -31,10 +31,14 @@ def test_question_answer_route_preserves_visual_verdict_and_attachment(tmp_path,
         "sessionId": "fixture-chat", "projectRoot": str(tmp_path),
     })
     result = asyncio.run(server.app_answer_agent_question(question["questionId"], request))
-    assert result["question"]["status"] == "pending"
+    assert result["question"]["status"] == "answered"
     assert result["question"]["attachments"][0]["dataUrl"] == attachment["dataUrl"]
     assert broadcasts[-1][0] == "agentQuestions"
-    result = asyncio.run(server.app_answer_agent_question(question["questionId"],
+    another_question = gateway.call_user({
+        "question": "Inspect the updated preview", "kind": "visual_checkpoint",
+        "sessionId": "fixture-chat", "projectRoot": str(tmp_path),
+    })["question"]
+    result = asyncio.run(server.app_answer_agent_question(another_question["questionId"],
         AgentQuestionAnswerRequest.model_validate({
             "answer": "Synthetic fixture passed", "resolution": "pass",
             "sessionId": "fixture-chat", "projectRoot": str(tmp_path),
@@ -43,36 +47,46 @@ def test_question_answer_route_preserves_visual_verdict_and_attachment(tmp_path,
     assert result["question"]["resolution"] == "pass"
 
 
-def test_multiple_feedback_turns_keep_visual_gate_until_explicit_verdict(tmp_path):
+@pytest.mark.parametrize(("choice", "resolution"), [
+    ("later", "later"), ("uncertain", "uncertain"), ("skip", ""),
+    ("fail", "fail"), ("custom", ""), ("pass", "pass"),
+])
+def test_visual_answer_route_closes_question_and_delivers_exact_choice(tmp_path, monkeypatch, choice, resolution):
     from tests.test_agent_question_runtime_continuation import _scripted_question
     gateway, first, question, prompts, results, completed = _scripted_question(
-        tmp_path, question_params={"kind": "visual_checkpoint", "sourceTool": "call_user"},
+        tmp_path, question_params={
+            "kind": "visual_checkpoint", "sourceTool": "call_user",
+            "options": [{"id": option, "label": option.title(), "resolution": option}
+                        for option in ("pass", "fail", "uncertain", "later")],
+        },
     )
+    monkeypatch.setattr(server, "AGENT_GATEWAY", gateway)
+
+    async def ignore_broadcast(_name, _payload):
+        pass
+
+    monkeypatch.setattr(server.EVENT_BUS, "broadcast", ignore_broadcast)
+    text = "Please inspect the shoes" if choice == "custom" else "" if choice == "skip" else choice.title()
+    request = AgentQuestionAnswerRequest.model_validate({
+        "answer": text, "selectedOptionId": choice, "sessionId": "runtime-session",
+        "projectRoot": str(tmp_path),
+    })
     try:
-        for text in ["First detail: inspect the shoes", "Second detail: inspect the thighs"]:
-            completed.clear()
-            gateway.questions.answer(question["questionId"], {
-                "answer": text, "sessionId": "runtime-session", "projectRoot": str(tmp_path),
-            })
-            assert completed.wait(5)
+        result = asyncio.run(server.app_answer_agent_question(question["questionId"], request))
+        assert result["question"]["status"] == "answered"
+        assert result["question"]["resolution"] == resolution
+        assert result["question"]["selectedOptionId"] == choice
+        assert completed.wait(5), "the visual answer must reach the model even without a pass verdict"
+        assert len(prompts) == 2
+        assert (text or "skip") in prompts[-1]
+        if choice != "pass":
+            assert "It does not approve the preview." in prompts[-1]
             assert results[-1]["plan"]["nextStep"] == "needs_user_action"
             assert results[-1]["task"]["status"] != "completed"
-            assert gateway.questions.list(session_id="runtime-session")["questions"][0]["status"] == "pending"
-            # Wait for the dispatcher's existing ownership to release before another human reply.
-            for _ in range(100):
-                if not gateway._question_continuations_inflight:
-                    break
-                time.sleep(.01)
-        assert len(prompts) == 3
-        assert results[0]["clientTurnId"] != results[1]["clientTurnId"]
-        completed.clear()
-        gateway.questions.answer(question["questionId"], {
-            "answer": "Synthetic fixture passed", "resolution": "pass",
-            "sessionId": "runtime-session", "projectRoot": str(tmp_path),
-        })
-        assert completed.wait(5)
-        assert len(prompts) == 4
         assert gateway.questions.list(session_id="runtime-session")["questions"] == []
         assert results[-1]["task"]["taskId"] == first["task"]["taskId"]
+        repeated = asyncio.run(server.app_answer_agent_question(question["questionId"], request))
+        assert repeated["idempotent"] is True
     finally:
         assert gateway.shutdown_runtime_continuations(5)["ok"]
+    assert len(prompts) == 2, "a retry must not dispatch the answer again"

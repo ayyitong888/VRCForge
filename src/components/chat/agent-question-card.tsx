@@ -93,7 +93,6 @@ export function AgentQuestionCard({
       await onAnswerQuestion(question.questionId, optionId, value);
       setCustomValues((current) => ({ ...current, [question.questionId]: "" }));
       setRetryAnswers((current) => { const next = { ...current }; delete next[question.questionId]; return next; });
-      setCollapsedQuestionId(question.questionId);
     } catch (cause) {
       setQuestionErrors((current) => ({ ...current, [question.questionId]: cause instanceof Error ? cause.message : String(cause) }));
     } finally {

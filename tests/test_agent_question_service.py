@@ -163,13 +163,15 @@ def test_visual_custom_or_skip_does_not_infer_acceptance_from_text(tmp_path, sel
         "options": [{"id": "pass", "label": "Pass", "resolution": "pass"},
                     {"id": "fail", "label": "Fail", "resolution": "fail"}],
     })["question"]
+    if selection == "skip":
+        with pytest.raises(AgentQuestionServiceError, match="cannot record a visual resolution"):
+            service.answer(question["questionId"], {"selectedOptionId": selection, "resolution": "pass"})
     result = service.answer(question["questionId"], {"selectedOptionId": selection, "answer": "Pass"})
-    assert result["feedback"] is True
-    assert result["question"]["status"] == "pending"
+    assert result["question"]["status"] == "answered"
     assert result["question"]["resolution"] == ""
 
 
-def test_visual_checkpoint_has_explicit_resolution_and_replays_defer(tmp_path: Path) -> None:
+def test_goal_visual_defer_closes_question_and_delivers_without_accepting(tmp_path: Path) -> None:
     resolutions: list[tuple[str, str]] = []
     service = _service(tmp_path, threading.RLock(), resolutions)
     values = {
@@ -202,11 +204,13 @@ def test_visual_checkpoint_has_explicit_resolution_and_replays_defer(tmp_path: P
             "answer": "The screenshot is ambiguous.",
         },
     )
-    assert deferred["deferred"] is True
-    assert deferred["question"]["status"] == "pending"
+    assert deferred["question"]["status"] == "answered"
     assert deferred["question"]["resolution"] == "later"
-    assert resolutions == []
-    assert '"event": "question_deferred"' in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
+    assert len(resolutions) == 1
+    assert resolutions[0][0] == question_id
+    assert "It does not approve the preview." in resolutions[0][1]
+    assert "The screenshot is ambiguous." in resolutions[0][1]
+    assert '"event": "question_answered"' in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
 
     passed = service.answer(
         question_id,
@@ -217,9 +221,9 @@ def test_visual_checkpoint_has_explicit_resolution_and_replays_defer(tmp_path: P
             "answer": "Pass",
         },
     )
+    assert passed["idempotent"] is True
     assert passed["question"]["status"] == "answered"
-    assert passed["question"]["resolution"] == "pass"
-    assert len(resolutions) == 1
+    assert passed["question"]["resolution"] == "later"
 
 
 def test_legacy_full_owned_pass_label_settles_and_repeats_idempotently(tmp_path: Path) -> None:
@@ -275,7 +279,8 @@ def test_legacy_pending_feedback_with_same_pass_option_can_be_settled(tmp_path: 
     assert sum(event.get("event") == "question_answered" and event.get("questionId") == qid for event in records) == 1
 
 
-def test_visual_fail_and_uncertain_are_distinct_feedback_not_acceptance(tmp_path: Path) -> None:
+@pytest.mark.parametrize("resolution", ["fail", "uncertain"])
+def test_visual_fail_and_uncertain_close_question_without_acceptance(tmp_path: Path, resolution) -> None:
     dispatched: list[tuple[str, dict, str]] = []
     service = AgentQuestionService(
         AgentQuestionPersistence(AgentQuestionPersistencePorts(
@@ -302,21 +307,15 @@ def test_visual_fail_and_uncertain_are_distinct_feedback_not_acceptance(tmp_path
         ],
     })["question"]
     qid = question["questionId"]
-    failed = service.answer(qid, {"sessionId": "s", "selectedOptionId": "fail", "answer": "Fail"})
-    assert failed["feedback"] is True
-    assert failed["question"]["status"] == "pending"
-    assert failed["question"]["resolution"] == "fail"
-    duplicate = service.answer(qid, {"sessionId": "s", "selectedOptionId": "fail", "answer": "Fail"})
+    answer = {"sessionId": "s", "selectedOptionId": resolution, "answer": resolution.title()}
+    submitted = service.answer(qid, answer)
+    assert submitted["question"]["status"] == "answered"
+    assert submitted["question"]["resolution"] == resolution
+    assert submitted["question"]["runtimeQuestionFeedbackPending"] is True
+    duplicate = service.answer(qid, answer)
     assert duplicate["idempotent"] is True
     assert len(dispatched) == 1
-    uncertain = service.answer(qid, {"sessionId": "s", "selectedOptionId": "uncertain", "answer": "Uncertain"})
-    assert uncertain["feedback"] is True
-    assert uncertain["question"]["status"] == "pending"
-    assert uncertain["question"]["resolution"] == "uncertain"
-    assert uncertain["question"]["questionFeedbackRevision"] == 2
-    assert len(dispatched) == 2
-    with pytest.raises(AgentQuestionServiceError, match="does not belong"):
-        service.answer(qid, {"sessionId": "s", "selectedOptionId": "option-1", "answer": "Pass"})
+    assert dispatched[0][1]["_authenticatedQuestionFeedbackPending"] is True
 
 
 def test_question_schema_exposes_structured_visual_resolution() -> None:
@@ -327,9 +326,11 @@ def test_question_schema_exposes_structured_visual_resolution() -> None:
 def test_visual_checkpoint_rejects_inferred_or_unknown_resolution(tmp_path: Path) -> None:
     service = _service(tmp_path, threading.RLock(), [])
     created = service.create({"kind": "visual_checkpoint", "question": "Inspect the preview", "sessionId": "s"})
+    with pytest.raises(AgentQuestionServiceError, match="Unsupported visual checkpoint resolution"):
+        service.answer(created["question"]["questionId"], {"sessionId": "s", "answer": "Looks okay", "resolution": "unknown"})
     feedback = service.answer(created["question"]["questionId"], {"sessionId": "s", "answer": "Looks okay"})
-    assert feedback["feedback"] is True
-    assert feedback["question"]["status"] == "pending"
+    assert feedback["question"]["status"] == "answered"
+    assert feedback["question"]["resolution"] == ""
 
 
 def test_visual_checkpoint_settle_only_records_superseded_fail_without_dispatch(tmp_path: Path) -> None:
@@ -354,7 +355,10 @@ def test_visual_checkpoint_settle_only_records_superseded_fail_without_dispatch(
         "_runtimeTaskSeed": {"sessionId": "s", "taskId": "old-task"},
     })["question"]
     qid = str(question["questionId"])
-    service.answer(qid, {"sessionId": "s", "answer": "The old preview needs repair."})
+    service._persistence.append({
+        "event": "question_feedback", "questionId": qid, "status": "pending",
+        "answer": "The old preview needs repair.", "questionFeedbackRevision": 1,
+    })
     service.record_runtime_continuation(qid, "interrupted", error="superseded by a later foreground turn")
     settled = service.answer(qid, {
         "sessionId": "s", "resolution": "fail", "settleOnly": True,
@@ -363,10 +367,10 @@ def test_visual_checkpoint_settle_only_records_superseded_fail_without_dispatch(
     assert settled["question"]["status"] == "answered"
     assert settled["question"]["resolution"] == "fail"
     assert settled["question"]["runtimeContinuationStatus"] == "settled_without_dispatch"
-    assert len(dispatches) == 1
+    assert dispatches == []
     repeated = service.answer(qid, {"sessionId": "s", "resolution": "fail", "settleOnly": True})
     assert repeated["idempotent"] is True
-    assert len(dispatches) == 1
+    assert dispatches == []
 
 
 def test_question_dedup_is_call_user_scoped_and_persists_source(tmp_path: Path) -> None:
@@ -406,10 +410,10 @@ def test_visual_feedback_attachment_reaches_runtime_without_resolving_acceptance
         "sessionId": "s", "projectRoot": "D:/P", "answer": "Please inspect this image.",
         "attachments": [{"name": "preview.png", "payloadHash": "a" * 64, "payloadKind": "vault_file"}],
     })
-    assert feedback["feedback"] is True
-    assert feedback["question"]["status"] == "pending"
+    assert feedback["question"]["status"] == "answered"
+    assert feedback["question"]["runtimeQuestionFeedbackPending"] is True
     assert dispatched[0][1]["_authenticatedUserAttachments"][0]["payloadHash"] == "a" * 64
-    assert '"event": "question_feedback"' in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
+    assert '"event": "question_answered"' in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
     replayed: list[dict] = []
     restarted = AgentQuestionService(
         service._persistence, service._scope, GoalQuestionResolutionPort(resolve=lambda _id, _prompt: None),

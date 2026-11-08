@@ -2038,13 +2038,13 @@ export default function App() {
           ? { ...payload.runtimeContinuation, sessionId: payload.runtimeContinuation.sessionId || sessionId }
           : agentQuestions.find((item) => item.questionId === questionId)?.runtimeContinuation,
       });
+      void refreshRuntimeRuns(false);
       const answerChat = chats.find((chat) => chat.sessionId === answeredQuestion?.sessionId);
       const answerChatId = answerChat?.id;
       const answerItem = questionAnswerItem(payload.question, payload.question.answer || value);
       if (answerChat && answerChatId) {
         persistQuestionAnswer(answerChatId, answerItem);
       }
-      void refreshRuntimeRuns(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       throw cause;
