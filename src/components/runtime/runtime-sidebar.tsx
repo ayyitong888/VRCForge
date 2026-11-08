@@ -46,6 +46,7 @@ export function RightRuntimeSidebar({
   onOpenUserAttachmentSource,
   approvalsLoaded,
   pendingApprovals,
+  approvalPanel,
   runtimeReviewCount = 0,
   dismissedQuestion,
   workspaceSummary,
@@ -81,6 +82,7 @@ export function RightRuntimeSidebar({
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
   approvalsLoaded: boolean;
   pendingApprovals: number;
+  approvalPanel?: ReactNode;
   runtimeReviewCount?: number;
   dismissedQuestion?: { label: string; onReopen: () => void };
   workspaceSummary: WorkspaceDiffSummary | null;
@@ -281,6 +283,7 @@ export function RightRuntimeSidebar({
             </div>
           </>
         )}
+        {approvalPanel}
       </div>
     </aside>
   );

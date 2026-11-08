@@ -168,6 +168,7 @@ export function ChatWorkspace({
   onScrollToBottom,
   pendingApprovalForResponse,
   scopedPendingApprovals,
+  approvalReveal,
   approvalActions,
   latestRetryableItemId,
   latestEditableUserItemId,
@@ -270,6 +271,7 @@ export function ChatWorkspace({
   showScrollToBottom: boolean;
   onScrollToBottom: () => void;
   pendingApprovalForResponse: (response: AgentRuntimeResponse) => AgentApproval | null;
+  approvalReveal?: { approvalId: string } | null;
   approvalActions: Record<string, ApprovalActionState>;
   latestRetryableItemId: string;
   latestEditableUserItemId: string;
@@ -504,6 +506,7 @@ export function ChatWorkspace({
       approvals={scopedPendingApprovals}
       actions={approvalActions}
       disabled={sending}
+      reveal={approvalReveal}
       onApprove={onApprove}
       onReject={onReject}
       onModifyApproval={onModifyApproval}

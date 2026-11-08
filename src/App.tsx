@@ -93,7 +93,7 @@ import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice"
 import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
-import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, questionBelongsToRuntimeScope } from "./lib/runtime-scope";
+import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, questionBelongsToRuntimeScope } from "./lib/runtime-scope";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import { flushChatsBeforeQuit } from "./lib/app-quit";
 import {
@@ -338,6 +338,7 @@ export default function App() {
   const [activeProjectType, setActiveProjectType] = useState<ProjectType>("general");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [pendingApprovalPanelOpen, setPendingApprovalPanelOpen] = useState(false);
+  const [approvalReveal, setApprovalReveal] = useState<{ chatId: string; approvalId: string } | null>(null);
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
@@ -1026,9 +1027,18 @@ export default function App() {
     (item) => item.status === "pending" && approvalBelongsToRuntimeScope(item, runtimeScope),
   );
   const pendingApprovalItems = projectPendingApprovalItems.filter(
-    (item) => approvalBelongsToRuntimeScope(item, runtimeScope, { requireSession: true }),
+    (item) => displayChat && pendingApprovalOwner(item, chats)?.id === displayChat.id,
   );
   const pendingApprovals = projectPendingApprovalItems.length;
+  const openPendingApprovalOwner = useCallback((approval: AgentApproval) => {
+    const owner = pendingApprovalOwner(approval, chats);
+    if (!owner) return false;
+    openChat(owner);
+    setSelectedSubAgentPanelOpen(false);
+    setPendingApprovalPanelOpen(false);
+    setApprovalReveal({ chatId: owner.id, approvalId: approval.id });
+    return true;
+  }, [openChat, chats]);
   const hasUnresolvedRuntimeState = (chatId: string, targetSessionId: string): boolean => {
     const asRecord = (value: unknown): Record<string, unknown> | undefined => (
       typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined
@@ -1713,42 +1723,9 @@ export default function App() {
           setError(t("approval.notificationExpired"));
           return;
         }
-        const approvalSessionId = String(approval.taskContext?.sessionId || "").trim();
-        const approvalTurnId = String(approval.taskContext?.turnId || "").trim();
-        const approvalClientTurnId = String(approval.taskContext?.clientTurnId || "").trim();
-        const ownerChat = chats.find((chat) => {
-          if (approvalSessionId && chat.sessionId !== approvalSessionId) {
-            return false;
-          }
-          return chat.items.some((item) => {
-            if (item.type !== "agent") {
-              return false;
-            }
-            const response = item.response;
-            const responseApprovalId = String(
-              response.approvalId
-              || response.approval_id
-              || response.shell?.approvalId
-              || response.shell?.approval_id
-              || response.shell?.approval?.id
-              || response.write?.approvalId
-              || response.write?.approval_id
-              || "",
-            );
-            return responseApprovalId === approval.id
-              || (approvalTurnId && (response.turnId === approvalTurnId || response.turn_id === approvalTurnId))
-              || (approvalClientTurnId && response.clientTurnId === approvalClientTurnId);
-          });
-        });
-        if (ownerChat) {
-          openChat(ownerChat);
+        if (!openPendingApprovalOwner(approval)) {
+          setError(t("approval.notificationFailed"));
         }
-        setActiveView("chat");
-        setSelectedSubAgentPanelOpen(false);
-        window.setTimeout(() => {
-          document.querySelector<HTMLElement>(`[data-approval-id="${approval.id.replace(/["\\]/g, "\\$&")}"]`)
-            ?.scrollIntoView({ block: "center", behavior: "smooth" });
-        }, 0);
       })().catch((cause) => {
         if (active) {
           setError(cause instanceof Error ? cause.message : t("approval.notificationFailed"));
@@ -1767,7 +1744,7 @@ export default function App() {
       active = false;
       unlistenAction?.();
     };
-  }, [chats, endpoint, openChat, t]);
+  }, [endpoint, openPendingApprovalOwner, t]);
   const currentModelInfo = useMemo(
     () => {
       const modelScopeMatches =
@@ -4706,6 +4683,7 @@ export default function App() {
               onScrollToBottom={conversationScroll.scrollToBottom}
               pendingApprovalForResponse={pendingApprovalForResponse}
               scopedPendingApprovals={pendingApprovalItems}
+              approvalReveal={approvalReveal?.chatId === displayChat?.id ? approvalReveal : null}
               approvalActions={approvalActions}
               editingItemId={editingMessage?.chatId === activeChatId ? editingMessage.itemId : ""}
               editingText={editingMessage?.draftText || ""}
@@ -4739,17 +4717,6 @@ export default function App() {
               onHandoffSendOpenChange={setHandoffSendOpen}
             />
           )}
-          {activeView !== "chat" || pendingApprovalPanelOpen ? (
-            <PendingApprovalsStrip
-              approvals={projectPendingApprovalItems}
-              actions={approvalActions}
-              loading={loading}
-              onApprove={approveShell}
-              onReject={rejectShell}
-              onClose={activeView === "chat" ? () => setPendingApprovalPanelOpen(false) : undefined}
-            />
-          ) : null}
-
         </section>
         {rightSidebarVisible ? (
           <>
@@ -4802,6 +4769,16 @@ export default function App() {
               onOpenUserAttachmentSource={openUserAttachmentSource}
               approvalsLoaded={agentApprovals !== null}
               pendingApprovals={pendingApprovals}
+              approvalPanel={pendingApprovalPanelOpen ? (
+                <PendingApprovalsStrip
+                  approvals={projectPendingApprovalItems}
+                  actions={approvalActions}
+                  loading={loading}
+                  onApprove={approveShell}
+                  onReject={rejectShell}
+                  onClose={() => setPendingApprovalPanelOpen(false)}
+                />
+              ) : undefined}
               runtimeReviewCount={runtimeAttention.length}
               dismissedQuestion={dismissedAgentQuestion ? {
                 label: dismissedAgentQuestion.header || dismissedAgentQuestion.question || dismissedAgentQuestion.questionId,
@@ -4821,7 +4798,9 @@ export default function App() {
               providerTestAttempted={Boolean(providerTestMessage.trim())}
               onHideSidebar={() => setRightSidebarCollapsed(true)}
               onOpenPendingApprovals={() => {
-                setPendingApprovalPanelOpen(true);
+                const target = projectPendingApprovalItems.length === 1 ? projectPendingApprovalItems[0] : undefined;
+                if (target && openPendingApprovalOwner(target)) return;
+                setPendingApprovalPanelOpen((current) => !current);
               }}
               localizeHealthMessage={localizeHealthMessage}
               />}

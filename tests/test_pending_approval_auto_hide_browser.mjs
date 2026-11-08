@@ -15,9 +15,11 @@ import { ScopedPendingApprovalCard } from ${JSON.stringify(path.join(root, "src/
 import { PendingApprovalsStrip } from ${JSON.stringify(path.join(root, "src/components/approvals/pending-approvals-strip.tsx"))};
 const approval = { id: "approval-1", status: "pending", taskContext: { approvalRevisionUsed: false } };
 function Fixture() {
+  const [reveal, setReveal] = React.useState(null);
   return React.createElement("main", null,
+    React.createElement("button", { onClick: () => setReveal({ approvalId: approval.id }) }, "Open pending approval"),
     React.createElement("section", { "data-scoped": true }, React.createElement(ScopedPendingApprovalCard, {
-      approvals: [approval], actions: {}, disabled: false, onApprove: () => {}, onReject: () => {}, onModifyApproval: () => {},
+      approvals: [approval], actions: {}, disabled: false, reveal, onApprove: () => {}, onReject: () => {}, onModifyApproval: () => {},
     })),
     React.createElement("section", { "data-strip": true }, React.createElement(PendingApprovalsStrip, {
       approvals: [approval], actions: {}, loading: false, onApprove: () => {}, onReject: () => {},
@@ -75,6 +77,9 @@ try {
   await scoped.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.clock.runFor(30_000);
   assert.equal(await scoped.locator("[data-approval-reopen]").count(), 1, "scoped approval collapses after editing ends and the idle interval elapses");
+  await page.getByRole("button", { name: "Open pending approval" }).click();
+  await scoped.locator('[data-approval-id="approval-1"]').waitFor();
+  assert.equal(await scoped.getByRole("button", { name: "Approve" }).count(), 1, "navigation reopens the exact pending approval without taking a decision");
   await strip.locator("[data-approval-reopen]").click();
   assert.equal(await strip.getByRole("button", { name: "Approve" }).count(), 1, "collapsed approval strip can be reopened");
   console.log("pending approval auto-hide browser regression: 30-second collapse, edit pause/draft retention, and reopen passed");

@@ -12,7 +12,10 @@ const exports = {};
 vm.runInNewContext(output, {
   exports,
   module: { exports },
-  require: () => ({ normalizeProjectPathKey: (value = "") => value.replace(/\//g, "\\").trim().toLowerCase() }),
+  require: () => ({
+    normalizeProjectPathKey: (value = "") => value.replace(/\//g, "\\").trim().toLowerCase(),
+    approvalIdFromResponse: (response) => response.approvalId || "",
+  }),
 });
 
 const scope = { sessionId: "session-owner", projectRoot: "C:\\UnityProject" };
@@ -27,6 +30,19 @@ assert.equal(exports.approvalBelongsToRuntimeScope(approval("other-session"), sc
 assert.equal(exports.approvalBelongsToRuntimeScope(approval("session-owner", "D:\\Other"), scope, { requireSession: true }), false);
 assert.equal(exports.approvalBelongsToRuntimeScope(approval("other-session"), scope), true);
 assert.equal(exports.approvalBelongsToRuntimeScope(approval("session-owner"), { sessionId: "", projectRoot: scope.projectRoot }, { requireSession: true }), false);
+const owner = { id: "owner", sessionId: "session-owner", projectPath: scope.projectRoot, items: [] };
+const other = { ...owner, id: "other", sessionId: "other-session" };
+const owned = approval("session-owner");
+assert.equal(exports.pendingApprovalOwner(owned, [other, owner]), owner, "a unique catalog owner needs no loaded response body");
+assert.equal(exports.pendingApprovalOwner(owned, [other]), undefined, "an orphan never becomes an approval in the active chat");
+assert.equal(exports.pendingApprovalOwner(owned, [{ ...owner, projectPath: "D:\\Other" }]), undefined, "a cross-project session match is insufficient");
+const receiptOwner = { ...owner, id: "receipt-owner", items: [{ type: "agent", response: { approvalId: owned.id } }] };
+assert.equal(exports.pendingApprovalOwner(owned, [owner, { ...owner, id: "duplicate" }]), undefined, "duplicate sessions need exact receipt evidence");
+assert.equal(exports.pendingApprovalOwner(owned, [owner, receiptOwner]), receiptOwner);
+const receiptOnly = { ...owned, taskContext: undefined };
+assert.equal(exports.pendingApprovalOwner(receiptOnly, [owner, receiptOwner]), receiptOwner, "a legacy request still requires an exact same-project receipt");
+assert.equal(exports.pendingApprovalOwner(receiptOnly, [{ ...receiptOwner, projectPath: "D:\\Other" }]), undefined);
+assert.equal(exports.pendingApprovalOwner({ ...owned, status: "applied" }, [owner]), undefined, "settled approvals cannot reopen");
 assert.equal(exports.questionBelongsToRuntimeScope({ questionId: "q", sessionId: "session-owner", projectRoot: scope.projectRoot }, scope, { requireSession: true }), true);
 assert.equal(exports.questionBelongsToRuntimeScope({ questionId: "q", sessionId: "other-session", projectRoot: scope.projectRoot }, scope, { requireSession: true }), false);
 assert.deepEqual(
