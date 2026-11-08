@@ -1446,6 +1446,17 @@
     }
   },
   "connector": {
+    "configInstalled": "Client config installed",
+    "gatewayEnabled": "External access enabled",
+    "gatewayDisabled": "External access disabled",
+    "gatewayUnknown": "External access status unavailable",
+    "verifyAfterEnable": "Enable external access before verifying the host.",
+    "bridgeCheckExpired": "Previous bridge check expired. Verify again in the host.",
+    "hostNotVerified": "Verify the connection in the host.",
+    "writePolicySaved": "This saved policy takes effect when external access is enabled. Each write still requires approval.",
+    "stepConfigureClient": "Set up the client",
+    "stepVerifyHost": "Reconnect and verify",
+    "showSetupDetails": "View instructions and raw config",
     "configStatusHint": "Let an external Agent use VRCForge tools: enable the connection, install its config, then reload or reconnect the Agent.",
     "stepEnable": "Enable external Agent connection",
     "chooseHost": "Target Agent",

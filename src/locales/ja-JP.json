@@ -1439,6 +1439,17 @@
     }
   },
   "connector": {
+    "configInstalled": "クライアント設定済み",
+    "gatewayEnabled": "外部接続は有効",
+    "gatewayDisabled": "外部接続は無効",
+    "gatewayUnknown": "外部接続の状態を確認できません",
+    "verifyAfterEnable": "外部接続を有効にしてから、クライアントの接続を確認してください。",
+    "bridgeCheckExpired": "前回のブリッジ確認は期限切れです。クライアントで再確認してください。",
+    "hostNotVerified": "クライアントで接続を確認してください。",
+    "writePolicySaved": "保存した設定は外部接続を有効にすると適用されます。書き込みには引き続き承認が必要です。",
+    "stepConfigureClient": "クライアントを設定",
+    "stepVerifyHost": "再接続して確認",
+    "showSetupDetails": "手順と設定の詳細を表示",
     "configStatusHint": "外部 Agent から VRCForge を使うには、接続を有効にして設定を追加し、Agent を再読み込みします。",
     "stepEnable": "外部 Agent 接続を有効化",
     "chooseHost": "接続先 Agent",

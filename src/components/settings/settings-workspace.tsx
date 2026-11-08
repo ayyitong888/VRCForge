@@ -630,6 +630,7 @@ export function SettingsWorkspace({
           <ExternalAgentConnectorsPanel
             status={connectorStatus}
             loading={loadingConnectors}
+            runtimeConnected={runtimeConnected}
             message={connectorMessage}
             selectedProjectPath={selectedProjectPath}
             onRefresh={onLoadConnectors}

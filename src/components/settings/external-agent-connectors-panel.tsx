@@ -1,8 +1,9 @@
-import { Copy, Download, Loader2, RefreshCw, Shield, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { ChevronDown, Copy, Download, Loader2, RefreshCw, Shield, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ExternalAgentConnectorClient, ExternalAgentConnectorStatus } from "../../lib/api";
 import { normalizeConnectorClient } from "../../lib/connector-ui";
+import { hasRecentConnectorSelfTest } from "../../lib/connector-verification";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -38,6 +39,7 @@ function sameConnectorConfigPath(left: string | undefined, right: string): boole
 type ExternalAgentConnectorsPanelProps = {
   status: ExternalAgentConnectorStatus | null;
   loading: boolean;
+  runtimeConnected: boolean;
   message: string;
   selectedProjectPath: string;
   onRefresh: () => void;
@@ -52,6 +54,7 @@ type ExternalAgentConnectorsPanelProps = {
 export function ExternalAgentConnectorsPanel({
   status,
   loading,
+  runtimeConnected,
   message,
   selectedProjectPath,
   onRefresh,
@@ -82,13 +85,6 @@ export function ExternalAgentConnectorsPanel({
   const deepseekHarnessText = status?.clientConfigs?.deepseekHarness?.text || "";
   const agentConfig = status?.clientConfigs?.generic?.text || "";
   const clients = status?.clients;
-  const setupConfig = setupClient === "codexApp" || setupClient === "codexCli"
-    ? codexStdioText
-    : setupClient === "claudeCode" || setupClient === "claudeCowork"
-      ? claudeStdioText
-      : setupClient === "deepseekHarness"
-        ? deepseekHarnessText
-        : genericStdioText;
   const setupState = clients?.[setupClient];
   const setupAction = status?.connectorActions?.[setupClient];
   const setupActionVisible = setupAction?.action === "install"
@@ -100,6 +96,39 @@ export function ExternalAgentConnectorsPanel({
   const genericInstalledHere = setupClient === "generic" && Boolean(setupState?.installed)
     && sameConnectorConfigPath(setupState?.requestedConfigPath || setupState?.configPath, genericPath);
   const setupInstalled = setupClient === "generic" ? genericInstalledHere : Boolean(setupState?.installed);
+  const gatewayState = !runtimeConnected || !gateway ? "unknown" : gateway.enabled ? "enabled" : "disabled";
+  const configState = !setupState ? "unknown"
+    : bindingConflict || setupState.conflict || setupState.lastError ? "attention"
+      : setupInstalled ? "installed" : "missing";
+  const configLabel = t({
+    unknown: "connector.notChecked",
+    attention: bindingConflict ? "connector.bindingConflict" : "connector.needsAttention",
+    installed: "connector.configInstalled",
+    missing: "connector.notInstalled",
+  }[configState]);
+  const expiresAt = (setupActionVisible ? setupAction?.verificationExpiresAt ?? 0 : 0) * 1000;
+  const [verificationTime, setVerificationTime] = useState(Date.now);
+  useEffect(() => {
+    const now = Date.now();
+    setVerificationTime(now);
+    if (expiresAt <= now) return;
+    const timer = window.setTimeout(() => setVerificationTime(Date.now()), expiresAt - now + 1);
+    return () => window.clearTimeout(timer);
+  }, [expiresAt]);
+  const checked = status && setupActionVisible && setupAction && configState === "installed"
+    && hasRecentConnectorSelfTest({ ...status, connectorActions: { [setupClient]: setupAction } },
+      runtimeConnected, selectedProjectPath, verificationTime);
+  const expired = setupActionVisible && setupAction?.ok && expiresAt > 0 && expiresAt <= verificationTime;
+  const verification = gatewayState === "disabled" ? "disabled" : gatewayState === "unknown" ? "unknown"
+    : checked ? "bridge-checked" : expired ? "expired" : "unchecked";
+  const verificationLabel = t({
+    unknown: "common.unavailable",
+    disabled: "connector.verifyAfterEnable",
+    "bridge-checked": "connector.selfTestPassed",
+    expired: "connector.bridgeCheckExpired",
+    unchecked: "connector.hostNotVerified",
+  }[verification]);
+  const approvalCount = runtimeConnected ? gateway?.pendingApprovalCount ?? 0 : 0;
   const setupPrompt = agentConfig
     ? `${t("connector.agentPrompt")}\n\n${agentConfig}`
     : "";
@@ -150,62 +179,83 @@ export function ExternalAgentConnectorsPanel({
     },
   ];
   return (
-    <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+    <div className="rounded-xl border border-border bg-card p-5">
       <div className="flex min-w-0 items-center gap-2">
         <Shield className="h-4 w-4 shrink-0 text-primary" />
-        <h2 className="min-w-0 flex-1 truncate text-base font-semibold">{t("connector.title")}</h2>
+        <h2 className="min-w-0 flex-1 text-xl font-semibold">{t("connector.title")}</h2>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">{t("connector.configStatusHint")}</p>
-
-      <div className="mt-4 grid gap-3 rounded-lg border border-border bg-background p-3" data-onboarding-client={setupClient} data-onboarding-client-label={t(`connector.hosts.${setupClient}`)}>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold">1. {t("connector.stepEnable")}</span>
-          <Badge tone={gateway?.enabled ? "ok" : "muted"}>{gateway?.enabled ? t("connector.enabled") : t("connector.disabled")}</Badge>
-        </div>
-        <div data-onboarding-external="gateway" className="grid">
-          <ConnectorToggle label={t("connector.gateway")} checked={Boolean(gateway?.enabled)} disabled={loading || !status} onChange={onToggleGateway} />
-        </div>
-        <div className="grid gap-1">
-          <ConnectorToggle label={t("connector.allowProjectChanges")} checked={Boolean(gateway?.allowWriteRequests)} disabled={loading || !status} onChange={onToggleWriteRequests} />
-          <p className="px-1 text-xs text-muted-foreground">{t("connector.writePolicyHint")}</p>
-        </div>
-        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-          <label className="grid gap-1 text-xs font-medium text-muted-foreground" htmlFor="connector-setup-client">
-            {t("connector.chooseHost")}
-            <select id="connector-setup-client" value={setupClient} onChange={(event) => setSetupClient(event.target.value as ExternalAgentConnectorClient)} disabled={loading} className="h-9 min-w-0 rounded-md border border-border bg-card px-2 text-sm text-foreground">
-              {(["deepseekHarness", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"] as const).map((client) => (
-                <option key={client} value={client}>{t(`connector.hosts.${client}`)}</option>
-              ))}
-            </select>
-          </label>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge tone={setupInstalled ? "ok" : setupState?.conflict || setupState?.lastError ? "warn" : "muted"}>
-              {setupState ? (setupState.conflict || setupState.lastError ? t("connector.needsAttention") : setupInstalled ? t("connector.installed") : t("connector.notInstalled")) : t("connector.notChecked")}
-            </Badge>
-            <Button type="button" disabled={loading || !setupState || !installable || bindingConflict || (setupClient === "generic" && !genericPath)} onClick={() => onInstall(setupClient, setupClient === "generic" ? genericPath : undefined)}>
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              {t("connector.install")}
-            </Button>
-          </div>
-        </div>
-        {setupClient === "generic" ? (
-          <label className="grid gap-1 text-xs font-medium text-muted-foreground" htmlFor="connector-agent-config-path">
-            {t("connector.genericPathLabel")}
-            <input id="connector-agent-config-path" type="text" value={genericConfigPath} disabled={loading} placeholder={t("connector.genericPathPlaceholder")} onChange={(event) => { setGenericConfigPath(event.target.value); storeGenericConfigPath(event.target.value.trim()); }} className="h-9 w-full min-w-0 rounded-md border border-border bg-card px-2 font-mono text-xs text-foreground" />
-          </label>
+      <div className="mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border pb-4 text-sm"
+        role="status" data-connector-gateway={gatewayState} data-connector-config={configState}>
+        <span className="font-semibold">{t({
+          enabled: "connector.gatewayEnabled",
+          disabled: "connector.gatewayDisabled",
+          unknown: "connector.gatewayUnknown",
+        }[gatewayState])}</span>
+        <span className="text-muted-foreground">{configLabel}</span>
+        {approvalCount > 0 ? (
+          <Badge tone="warn">{t("workspace.pendingApprovals", { count: approvalCount })}</Badge>
         ) : null}
-        {needsProject ? <div className="text-xs text-amber-700 dark:text-amber-300">{t("connector.needsProjectHint")}</div> : null}
-        {!installable ? <div className="text-xs text-amber-700 dark:text-amber-300">{t("connector.notInstallableHint")}</div> : null}
-        {setupActionVisible && setupAction ? <div className={cn("rounded-md px-3 py-2 text-xs", setupAction.ok ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-destructive/10 text-destructive")}>
-          <div className="font-medium">{setupAction.ok ? t("connector.bridgeTestPassed", { host: t(`connector.hosts.${setupClient}`) }) : t("connector.selfTestFailed")}</div>
-          {setupAction.error ? <div className="mt-1 break-words">{setupAction.error}</div> : null}
-          {setupAction.suggestion || setupAction.handshake?.suggestion ? <div className="mt-1 break-words">{setupAction.suggestion || setupAction.handshake?.suggestion}</div> : null}
-        </div> : null}
-        {message && !setupActionVisible ? <p role="status" className="text-xs text-muted-foreground">{message}</p> : null}
-        <div className="text-xs text-muted-foreground">2. {t("connector.stepInstall")}<br />3. {t("connector.stepReload", { host: t(`connector.hosts.${setupClient}`) })}</div>
       </div>
 
-      <section className="mt-4 grid gap-3 rounded-lg border border-primary/30 bg-primary/5 p-3" data-connector-agent-instructions>
+      <div className="mt-4 grid gap-5" data-onboarding-client={setupClient} data-onboarding-client-label={t(`connector.hosts.${setupClient}`)}>
+        <section className="grid gap-2">
+          <h3 className="text-sm font-semibold">1. {t("connector.stepEnable")}</h3>
+          <div data-onboarding-external="gateway" className="grid">
+            <ConnectorToggle label={t("connector.gateway")} checked={Boolean(gateway?.enabled)} disabled={loading || !status} onChange={onToggleGateway} />
+          </div>
+          <ConnectorToggle label={t("connector.allowProjectChanges")} checked={Boolean(gateway?.allowWriteRequests)} disabled={loading || !status} onChange={onToggleWriteRequests} />
+          <p className="text-xs text-muted-foreground">
+            {t(gatewayState === "disabled" && gateway?.allowWriteRequests ? "connector.writePolicySaved" : "connector.writePolicyHint")}
+          </p>
+        </section>
+
+        <section className="grid gap-2 border-t border-border pt-4">
+          <h3 className="text-sm font-semibold">2. {t("connector.stepConfigureClient")}</h3>
+          <p className="text-xs text-muted-foreground">{t("connector.stepInstall")}</p>
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+            <label className="grid gap-1 text-xs font-medium text-muted-foreground" htmlFor="connector-setup-client">
+              {t("connector.chooseHost")}
+              <select id="connector-setup-client" value={setupClient} onChange={(event) => setSetupClient(event.target.value as ExternalAgentConnectorClient)} disabled={loading} className="h-9 min-w-0 rounded-md border border-border bg-card px-2 text-sm text-foreground">
+                {(["deepseekHarness", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"] as const).map((client) => (
+                  <option key={client} value={client}>{t(`connector.hosts.${client}`)}</option>
+                ))}
+              </select>
+            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" variant={gatewayState === "enabled" ? "primary" : "outline"} disabled={loading || !setupState || !installable || bindingConflict || (setupClient === "generic" && !genericPath)} onClick={() => onInstall(setupClient, setupClient === "generic" ? genericPath : undefined)}>
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                {t("connector.install")}
+              </Button>
+            </div>
+          </div>
+          {setupClient === "generic" ? (
+            <label className="grid gap-1 text-xs font-medium text-muted-foreground" htmlFor="connector-agent-config-path">
+              {t("connector.genericPathLabel")}
+              <input id="connector-agent-config-path" type="text" value={genericConfigPath} disabled={loading} placeholder={t("connector.genericPathPlaceholder")} onChange={(event) => { setGenericConfigPath(event.target.value); storeGenericConfigPath(event.target.value.trim()); }} className="h-9 w-full min-w-0 rounded-md border border-border bg-card px-2 font-mono text-xs text-foreground" />
+            </label>
+          ) : null}
+          {needsProject ? <div className="text-xs text-amber-700 dark:text-amber-300">{t("connector.needsProjectHint")}</div> : null}
+          {!installable ? <div className="text-xs text-amber-700 dark:text-amber-300">{t("connector.notInstallableHint")}</div> : null}
+        </section>
+
+        <section className="grid gap-2 border-t border-border pt-4" data-connector-verification={verification}>
+          <h3 className="text-sm font-semibold">3. {t("connector.stepVerifyHost")}</h3>
+          <p className={cn("text-xs", checked ? "text-emerald-700 dark:text-emerald-300" : "text-muted-foreground")}>{verificationLabel}</p>
+          {gatewayState === "enabled" ? (
+            <p className="text-xs text-muted-foreground">{t("connector.stepReload", { host: t(`connector.hosts.${setupClient}`) })}</p>
+          ) : null}
+          {setupActionVisible && setupAction && !setupAction.ok ? (
+            <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <div className="font-medium">{t("connector.selfTestFailed")}</div>
+              {setupAction.error ? <div className="mt-1 break-words">{setupAction.error}</div> : null}
+              {setupAction.suggestion || setupAction.handshake?.suggestion ? <div className="mt-1 break-words">{setupAction.suggestion || setupAction.handshake?.suggestion}</div> : null}
+            </div>
+          ) : null}
+          {message && !setupActionVisible ? <p role="status" className="text-xs text-muted-foreground">{message}</p> : null}
+        </section>
+      </div>
+
+      <section className="mt-4 grid gap-3 rounded-lg border border-border bg-background/40 p-3" data-connector-agent-instructions>
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h3 className="min-w-0 flex-1 text-sm font-semibold">{t("connector.agentSetupTitle")}</h3>
           <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={!setupPrompt} onClick={() => onCopy(setupPrompt, t("connector.agentSetupTitle"))}>
@@ -213,11 +263,19 @@ export function ExternalAgentConnectorsPanel({
             {t("connector.copyAgentSetup")}
           </Button>
         </div>
-        <p className="text-xs text-muted-foreground">{t("connector.agentSetupHint")}</p>
-        {agentConfig ? <>
-          <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">{t("connector.agentPrompt")}</div>
-          <pre className="max-w-full overflow-x-auto whitespace-pre-wrap break-all rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed text-foreground">{agentConfig}</pre>
-        </> : <p className="text-xs text-muted-foreground">{t("connector.noConfigYet")}</p>}
+        {agentConfig ? (
+          <details className="group min-w-0">
+            <summary className="flex cursor-pointer list-none items-center gap-2 rounded-sm text-xs font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+              <ChevronDown className="h-3.5 w-3.5 shrink-0 group-open:rotate-180" aria-hidden="true" />
+              {t("connector.showSetupDetails")}
+            </summary>
+            <div className="mt-3 grid min-w-0 gap-2">
+              <p className="text-xs text-muted-foreground">{t("connector.agentSetupHint")}</p>
+              <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{t("connector.agentPrompt")}</p>
+              <pre className="app-scrollbar max-h-56 max-w-full overflow-auto rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed text-foreground">{agentConfig}</pre>
+            </div>
+          </details>
+        ) : <p className="text-xs text-muted-foreground">{t("connector.noConfigYet")}</p>}
       </section>
 
       <details className="mt-4 rounded-lg border border-border bg-background p-3">
@@ -538,13 +596,14 @@ function ConnectorToggle({
     <button
       type="button"
       disabled={disabled}
+      aria-pressed={checked}
       onClick={() => onChange(!checked)}
       className={cn(
-        "flex h-11 min-w-0 items-center gap-3 rounded-md border px-3 text-left text-sm transition-colors disabled:opacity-60",
+        "flex min-h-11 min-w-0 items-center gap-3 rounded-md border px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60",
         checked ? "border-primary bg-primary/5" : "border-border bg-background hover:bg-muted",
       )}
     >
-      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className="min-w-0 flex-1 break-words">{label}</span>
       <Badge tone={checked ? "ok" : "muted"} className="h-6 shrink-0 px-2">
         {checked ? t("connector.on") : t("connector.off")}
       </Badge>

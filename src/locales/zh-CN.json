@@ -1446,6 +1446,17 @@
     }
   },
   "connector": {
+    "configInstalled": "客户端配置已安装",
+    "gatewayEnabled": "外部连接已开启",
+    "gatewayDisabled": "外部连接已关闭",
+    "gatewayUnknown": "外部连接状态暂不可用",
+    "verifyAfterEnable": "请先开启外部连接，再验证客户端。",
+    "bridgeCheckExpired": "上次桥接自检已过期，请在客户端重新验证。",
+    "hostNotVerified": "请在客户端验证连接。",
+    "writePolicySaved": "此策略已保存，开启外部连接后生效。实际写入仍需审批。",
+    "stepConfigureClient": "配置客户端",
+    "stepVerifyHost": "重连并验证",
+    "showSetupDetails": "查看说明与原始配置",
     "configStatusHint": "让外部 Agent 使用 VRCForge 工具：开启连接，安装配置，再重载或重连 Agent。",
     "stepEnable": "开启外部 Agent 连接",
     "chooseHost": "目标 Agent",

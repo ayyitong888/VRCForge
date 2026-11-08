@@ -1439,6 +1439,17 @@
     }
   },
   "connector": {
+    "configInstalled": "用戶端設定已安裝",
+    "gatewayEnabled": "外部連線已開啟",
+    "gatewayDisabled": "外部連線已關閉",
+    "gatewayUnknown": "外部連線狀態暫無法取得",
+    "verifyAfterEnable": "請先開啟外部連線，再驗證用戶端。",
+    "bridgeCheckExpired": "上次橋接自我檢查已過期，請在用戶端重新驗證。",
+    "hostNotVerified": "請在用戶端驗證連線。",
+    "writePolicySaved": "此原則已儲存，開啟外部連線後生效。實際寫入仍須核准。",
+    "stepConfigureClient": "設定用戶端",
+    "stepVerifyHost": "重新連線並驗證",
+    "showSetupDetails": "查看說明與原始設定",
     "configStatusHint": "讓外部 Agent 使用 VRCForge 工具：開啟連線、安裝設定，再重新載入或重新連線 Agent。",
     "stepEnable": "開啟外部 Agent 連線",
     "chooseHost": "目標 Agent",
