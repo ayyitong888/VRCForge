@@ -1,11 +1,13 @@
-import { AlertTriangle, ChevronDown, ChevronRight, Copy, Download, Loader2, RefreshCw, Settings, Shield, Wrench } from "lucide-react";
-import { useMemo, useState } from "react";
+import { AlertTriangle, ChevronRight, Copy, Download, Loader2, RefreshCw, Settings, Shield, Wrench } from "lucide-react";
+import { useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChatRecoveryMarker, DoctorCheck, DoctorFixMode, DoctorFixResult, DoctorReport, DoctorSkillTriageRow } from "../../lib/api";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
+
+const doctorPriority: Record<string, number> = { error: 0, warning: 1, unknown: 2 };
 
 export function DoctorWorkspace({
   report,
@@ -47,7 +49,18 @@ export function DoctorWorkspace({
   const { t } = useTranslation();
   const summary = report?.summary;
   const checks = report?.checks ?? [];
-  const suggestedFixes = checks.filter((check) => check.status !== "ok" && (check.fixCommand || check.howToFix)).slice(0, 8);
+  const suggestedFixes = checks
+    .filter((check) => check.status !== "ok" && (check.fixCommand || check.howToFix))
+    .sort((left, right) => (doctorPriority[left.status] ?? 2) - (doctorPriority[right.status] ?? 2))
+    .slice(0, 8);
+  const checkDetails = useRef(new Map<string, HTMLDetailsElement>());
+  function revealCheck(id: string) {
+    const detail = checkDetails.current.get(id);
+    if (detail) {
+      detail.open = true;
+      detail.querySelector("summary")?.focus();
+    }
+  }
   const groupedChecks = useMemo(() => groupDoctorChecks(checks, report?.sections), [checks, report?.sections]);
   return (
     <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
@@ -63,16 +76,20 @@ export function DoctorWorkspace({
                 {report?.selectedUnityEnvironment?.label ? <span className="truncate">{report.selectedUnityEnvironment.label}</span> : null}
               </div>
             </div>
-            <Badge tone={report?.ok ? "ok" : "warn"} className="shrink-0">
-              {report?.ok ? t("doctor.ready") : t("connector.needsAttention")}
-            </Badge>
+            {report ? (
+              <Badge tone={report.ok ? "ok" : "warn"} className="shrink-0">
+                {report.ok ? t("doctor.ready") : t("doctor.needsAttention")}
+              </Badge>
+            ) : null}
           </div>
-          <div className="mt-5 grid gap-3 sm:grid-cols-4">
-            <DoctorSummaryTile label={t("doctor.ok")} value={summary?.okCount ?? 0} tone="ok" />
-            <DoctorSummaryTile label={t("doctor.warning")} value={summary?.warningCount ?? 0} tone="warn" />
-            <DoctorSummaryTile label={t("doctor.error")} value={summary?.errorCount ?? 0} tone="danger" />
-            <DoctorSummaryTile label={t("doctor.unknown")} value={summary?.unknownCount ?? 0} tone="muted" />
-          </div>
+          {summary ? (
+            <ul className="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <li className={summary.errorCount ? "font-semibold text-destructive" : undefined}>{t("doctor.error")} <span className="tabular-nums">{summary.errorCount}</span></li>
+              <li>{t("doctor.warning")} <span className="tabular-nums">{summary.warningCount}</span></li>
+              <li>{t("doctor.unknown")} <span className="tabular-nums">{summary.unknownCount}</span></li>
+              <li>{t("doctor.ok")} <span className="tabular-nums">{summary.okCount}</span></li>
+            </ul>
+          ) : null}
           <div className="mt-5 flex flex-wrap justify-end gap-2">
             {message ? (
               <Badge tone={messageTone} className="mr-auto shrink-0">
@@ -91,7 +108,7 @@ export function DoctorWorkspace({
               <Copy className="h-4 w-4" />
               {t("connector.copy")}
             </Button>
-            <Button type="button" onClick={onRefresh} disabled={loading}>
+            <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
               {t("doctor.retry")}
             </Button>
@@ -107,19 +124,26 @@ export function DoctorWorkspace({
                 {suggestedFixes.length}
               </Badge>
             </div>
-            <div className="grid gap-2">
+            <ul className="divide-y divide-border">
               {suggestedFixes.map((check) => (
-                <div key={`fix-${check.id}`} className="grid gap-1 rounded-lg border border-border bg-background px-3 py-2 text-sm">
+                <li key={check.id} className="grid gap-1 py-2.5 first:pt-0 last:pb-0">
                   <div className="flex min-w-0 items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate font-medium">{check.title}</span>
+                    <button
+                      type="button"
+                      onClick={() => revealCheck(check.id)}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left text-sm font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      {check.title}
+                      <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                    </button>
                     <Badge tone={doctorTone(check.status)} className="h-6 shrink-0">
                       {doctorStatusLabel(check.status, t)}
                     </Badge>
                   </div>
-                  <div className="break-words text-xs text-muted-foreground">{check.fixCommand || check.howToFix}</div>
-                </div>
+                  <div className="break-words text-xs text-muted-foreground">{check.howToFix || check.fixCommand}</div>
+                </li>
               ))}
-            </div>
+            </ul>
           </section>
         ) : null}
 
@@ -196,6 +220,10 @@ export function DoctorWorkspace({
                 <DoctorCheckRow
                   key={check.id}
                   check={check}
+                  detailRef={(element) => {
+                    if (element) checkDetails.current.set(check.id, element);
+                    else checkDetails.current.delete(check.id);
+                  }}
                   fixingCheckId={fixingCheckId}
                   onFix={onFix}
                   formatPayload={formatPayload}
@@ -241,41 +269,21 @@ function groupDoctorChecks(
   }));
 }
 
-function DoctorSummaryTile({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: "ok" | "warn" | "danger" | "muted";
-}) {
-  return (
-    <div className="min-w-0 rounded-lg border border-border bg-background px-3 py-3">
-      <div className="truncate text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 flex items-center gap-2">
-        <Badge tone={tone} className="h-6 px-2">
-          {value}
-        </Badge>
-      </div>
-    </div>
-  );
-}
-
 function DoctorCheckRow({
   check,
+  detailRef,
   fixingCheckId,
   onFix,
   formatPayload,
 }: {
   check: DoctorCheck;
+  detailRef: (element: HTMLDetailsElement | null) => void;
   fixingCheckId: string;
   onFix: (checkId: string, mode: DoctorFixMode) => void;
   formatPayload: (value: unknown) => string;
 }) {
   const { t } = useTranslation();
   const openByDefault = check.status === "error" || check.status === "warning";
-  const [open, setOpen] = useState(openByDefault);
   const tone = doctorTone(check.status);
   const fixing = fixingCheckId === check.id;
   const fixingAny = Boolean(fixingCheckId);
@@ -283,47 +291,37 @@ function DoctorCheckRow({
   const canForce = canFix && (check.fixModes || []).includes("force");
   const skillRows = check.id === "skills.registry" ? doctorSkillRows(check.detail) : [];
   return (
-    <div className="overflow-hidden rounded-md border border-border/70 bg-background/70">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50"
-      >
-        {open ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-        )}
+    <details ref={detailRef} open={openByDefault} className="group overflow-hidden rounded-md border border-border/70 bg-background/70">
+      <summary className="flex w-full min-w-0 cursor-pointer list-none items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+        <ChevronRight aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground group-open:rotate-90" />
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{check.title}</span>
         <Badge tone={tone} className="shrink-0">
           {doctorStatusLabel(check.status, t)}
         </Badge>
-      </button>
-      {open ? (
-        <div className="grid gap-3 border-t border-border px-4 py-4">
-          <DataLine label={t("doctor.whatFailed")} value={check.whatFailed || (check.status === "ok" ? "-" : check.message)} />
-          <DataLine label={t("doctor.why")} value={check.whyItMatters || "-"} />
-          <DataLine label={t("doctor.howToFix")} value={check.howToFix || "-"} />
-          {check.fixCommand ? <DataLine label={t("doctor.fix")} value={check.fixCommand} /> : null}
-          {canFix ? (
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onFix(check.id, "safe")} disabled={fixingAny}>
-                {fixing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}
-                {t("doctor.safeFix")}
+      </summary>
+      <div className="grid gap-3 border-t border-border px-4 py-4">
+        <DataLine label={t("doctor.whatFailed")} value={check.whatFailed || (check.status === "ok" ? "-" : check.message)} />
+        <DataLine label={t("doctor.why")} value={check.whyItMatters || "-"} />
+        <DataLine label={t("doctor.howToFix")} value={check.howToFix || "-"} />
+        {check.fixCommand ? <DataLine label={t("doctor.fix")} value={check.fixCommand} /> : null}
+        {canFix ? (
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onFix(check.id, "safe")} disabled={fixingAny}>
+              {fixing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}
+              {t("doctor.safeFix")}
+            </Button>
+            {canForce ? (
+              <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onFix(check.id, "force")} disabled={fixingAny}>
+                {t("doctor.forceFix")}
               </Button>
-              {canForce ? (
-                <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onFix(check.id, "force")} disabled={fixingAny}>
-                  {t("doctor.forceFix")}
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-          <DataLine label={t("doctor.message")} value={check.message || "-"} />
-          {skillRows.length ? <DoctorSkillRows rows={skillRows} /> : null}
-          {check.detail !== undefined ? <OutputBlock label={t("doctor.detail")} value={formatPayload(check.detail)} /> : null}
-        </div>
-      ) : null}
-    </div>
+            ) : null}
+          </div>
+        ) : null}
+        <DataLine label={t("doctor.message")} value={check.message || "-"} />
+        {skillRows.length ? <DoctorSkillRows rows={skillRows} /> : null}
+        {check.detail !== undefined ? <OutputBlock label={t("doctor.detail")} value={formatPayload(check.detail)} /> : null}
+      </div>
+    </details>
   );
 }
 
