@@ -33,10 +33,12 @@ import { createRoot } from "react-dom/client";
 import { ChatWorkspace } from "./src/components/chat/chat-workspace";
 import { projectQuestionContinuationActivity } from "./src/hooks/use-runtime-turn-continuation";
 import { initializeI18n } from "./src/i18n";
+import { questionAnswerItem } from "./src/lib/question-answer";
 const noop = () => {};
 function Fixture() {
   const [conversation, setConversation] = useState([]);
   const [questions, setQuestions] = useState([]);
+  const [dismissedQuestionIds, setDismissedQuestionIds] = useState(new Set());
   const [runs, setRuns] = useState([]);
   const [draft, setDraft] = useState("");
   const conversationEndRef = useRef(null);
@@ -56,7 +58,14 @@ function Fixture() {
     projects={[]} onBindProject={noop} conversation={chat.items} queued={[]}
     agentQuestions={questions} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
     onBackgroundGoalCatchUpRendered={noop} onBackgroundGoalProviderWarningsRendered={noop}
-    onBackgroundGoalCatchUpDismiss={noop} onAnswerQuestion={noop}
+    onBackgroundGoalCatchUpDismiss={noop} dismissedQuestionIds={dismissedQuestionIds}
+    onDismissQuestion={(id) => setDismissedQuestionIds(new Set([id]))}
+    onReopenQuestion={() => setDismissedQuestionIds(new Set())}
+    onAnswerQuestion={(id, option, value) => {
+      const answered = { ...questions.find((question) => question.questionId === id), status: "answered", selectedOptionId: option };
+      setQuestions([answered]);
+      setConversation((items) => [...items, questionAnswerItem(answered, value)]);
+    }}
     conversationEndRef={conversationEndRef} onConversationMouseUp={noop} onConversationScroll={noop}
     showScrollToBottom={false} onScrollToBottom={noop} pendingApprovalForResponse={() => null}
     approvalActions={{}} latestRetryableItemId="" latestEditableUserItemId=""
@@ -112,6 +121,41 @@ try {
   };
   await page.waitForFunction(() => typeof window.setConversation === "function");
   if (process.env.VRCFORGE_TASK_REPLAY_ONLY !== "1") {
+  const referencePrompt = "示例 Question：查看头像截图时，你想先看哪一部分？";
+  await render([user("first", start), agent(referencePrompt, later, "needs_user_action", "first")]);
+  await page.evaluate((prompt) => window.setQuestions([{
+    questionId: "reference-q", status: "pending", originClientTurnId: "first", question: prompt,
+    options: ["脸部细节", "全身效果", "侧面轮廓"].map((label) => ({ id: label, label })),
+  }]), referencePrompt);
+  const questionDock = page.locator("[data-chat-question-dock]");
+  const questionEntry = page.locator('[data-chat-answer-question="reference-q"]');
+  await questionDock.waitFor();
+  assert.equal(await questionEntry.locator("xpath=ancestor::*[@data-conversation-item-id]").getAttribute("data-conversation-item-id"), referencePrompt);
+  assert.ok(await questionDock.locator("xpath=following-sibling::*").count(), "question card sits above the independent composer");
+  await questionDock.getByRole("button", { name: /close|关闭/i }).click();
+  assert.equal(await questionDock.count(), 0, "close hides the dock card");
+  await questionEntry.click();
+  await questionDock.getByRole("button", { name: /脸部细节/ }).click();
+  const referenceAnswer = page.locator('[data-question-answer="reference-q"]');
+  await referenceAnswer.waitFor();
+  assert.equal(await questionEntry.count(), 0, "the answered question leaves no pending action");
+  assert.equal(await questionDock.count(), 0);
+  assert.equal(await referenceAnswer.locator("[data-chat-question-prompt]").count(), 0, "the original assistant prompt is kept in its original turn without duplication");
+  assert.equal(await referenceAnswer.locator("[data-question-answer-question]").innerText(), referencePrompt);
+  assert.equal(await referenceAnswer.locator("[data-question-answer-value]").innerText(), "脸部细节");
+  await page.evaluate(() => window.setQuestions([]));
+  const historicalTurn = agent("historic final reply", later, "done", "first");
+  historicalTurn.response.timeline = [{
+    id: "historic-question", timestamp: start, sequence: 1, kind: "assistant",
+    payload: { summary: referencePrompt, status: "done", phase: "commentary" },
+  }];
+  await render([user("first", start), historicalTurn,
+    { id: "historic-answer", type: "question_answer", questionId: "historic-q", question: referencePrompt, text: "脸部细节" },
+    { id: "historic-answer-2", type: "question_answer", questionId: "historic-q", question: referencePrompt, text: "侧面轮廓" },
+  ]);
+  assert.equal(await page.locator('[data-chat-question-prompt="historic-q"]').count(), 0, "a prompt inside an older run is not recreated for each answer");
+  assert.equal(await page.locator('[data-question-answer="historic-q"] [data-user-message-bubble]').count(), 2);
+
   for (const phase of ["preparing", "waiting_for_model", "running_tool", "waiting_for_approval", "verifying"]) {
     await render([{ ...stream("status-spacing", start), phase, text: "Complete the requested editor action, then reply so the inspection can continue." }]);
     const body = await page.locator("[data-conversation-streaming-turn]").boundingBox();
@@ -208,11 +252,11 @@ try {
     await render(taskReplay.items);
     const humanAnswer = page.locator("[data-question-answer]");
     assert.equal(await humanAnswer.locator("[data-user-message-bubble]").count(), 1, "human answer is one user bubble within the existing task");
-    const fullQuestion = humanAnswer.locator("[data-question-answer-question] strong");
-    assert.equal(await fullQuestion.count(), 1, "the complete original question is bold on the first line of the answer bubble");
+    const fullQuestion = humanAnswer.locator("[data-question-answer-question]");
+    assert.equal(await fullQuestion.count(), 1, "the complete original question is quoted on the first line of the answer bubble");
     assert.equal(await fullQuestion.innerText(), taskReplay.questions[0].question, "legacy answer uses the full exact-qid question without truncating to its header");
     assert.equal(await humanAnswer.locator("[data-question-answer-value] strong").count(), 0, "the answer's ordinary text is not made bold with the question");
-    assert.ok(await fullQuestion.evaluate((node) => Number(getComputedStyle(node).fontWeight) >= 600), "the question is visibly bold");
+    assert.notEqual(await fullQuestion.evaluate((node) => getComputedStyle(node.querySelector(".chat-markdown")).color), await humanAnswer.locator("[data-question-answer-value]").evaluate((node) => getComputedStyle(node.querySelector(".chat-markdown")).color), "the quoted question is visually secondary");
     assert.ok(await humanAnswer.locator("[data-question-answer-value]").evaluate((node) => Number(getComputedStyle(node).fontWeight) < 600), "the answer retains ordinary font weight");
     const questionBounds = await humanAnswer.locator("[data-question-answer-question]").boundingBox();
     const answerValueBounds = await humanAnswer.locator("[data-question-answer-value]").boundingBox();

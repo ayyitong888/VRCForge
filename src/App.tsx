@@ -1967,6 +1967,16 @@ export default function App() {
     setPendingReplyQuestionId(questionId);
     setActiveView("chat");
   };
+  const reopenAgentQuestion = (questionId: string) => {
+    setDismissedQuestionIds((current) => {
+      if (!current.has(questionId)) return current;
+      const next = new Set(current);
+      next.delete(questionId);
+      return next;
+    });
+    setPendingReplyQuestionId("");
+    setActiveView("chat");
+  };
   const stopRuntimeQuestionContinuation = async (question: AgentQuestion) => {
     const continuation = question.runtimeContinuation;
     if (!continuation || !["queued", "running"].includes(String(continuation.status || "").toLowerCase())) return;
@@ -4535,7 +4545,8 @@ export default function App() {
               conversation={conversation}
               attachmentPayloads={displayChat?.attachmentPayloads}
               queued={visibleQueued}
-              agentQuestions={scopedAgentQuestions.filter((question) => question.status !== "pending" || !dismissedQuestionIds.has(question.questionId))}
+              agentQuestions={scopedAgentQuestions}
+              dismissedQuestionIds={dismissedQuestionIds}
               backgroundGoalDeliveries={
                 activeChatId
                   ? (backgroundGoalState?.recent || []).filter((delivery) => delivery.chatId === activeChatId)
@@ -4547,6 +4558,7 @@ export default function App() {
               onBackgroundGoalCatchUpDismiss={dismissBackgroundGoalCatchUp}
               onAnswerQuestion={answerRuntimeQuestion}
               onDismissQuestion={(questionId) => setDismissedQuestionIds((current) => new Set(current).add(questionId))}
+              onReopenQuestion={reopenAgentQuestion}
               onReplyInChat={replyToAgentQuestionInComposer}
               focusInput={Boolean(pendingReplyQuestionId)}
               pendingReplyQuestionId={pendingReplyQuestionId}
@@ -4665,14 +4677,7 @@ export default function App() {
               runtimeReviewCount={runtimeAttention.length}
               dismissedQuestion={dismissedAgentQuestion ? {
                 label: dismissedAgentQuestion.header || dismissedAgentQuestion.question || dismissedAgentQuestion.questionId,
-                onReopen: () => {
-                  setDismissedQuestionIds((current) => {
-                    const next = new Set(current);
-                    next.delete(dismissedAgentQuestion.questionId);
-                    return next;
-                  });
-                  setActiveView("chat");
-                },
+                onReopen: () => reopenAgentQuestion(dismissedAgentQuestion.questionId),
               } : undefined}
               workspaceSummary={workspaceDiff}
               activeDesktopActions={activeDesktopActions}

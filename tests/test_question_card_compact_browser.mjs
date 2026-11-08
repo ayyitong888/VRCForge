@@ -60,7 +60,7 @@ await build({
     plugin.onLoad({ filter: /.*/, namespace: "question-card" }, (args) => ({
       contents: args.path === "translation"
         ? 'export const useTranslation=()=>({t:(key,fallback)=>({"questionCard.label":"Agent question","questionCard.title":"Question","questionCard.previous":"Previous","questionCard.next":"Next","questionCard.position":"{{current}} of {{total}}","questionCard.customPlaceholder":"Type another answer...","chat.send":"Send","questionCard.skip":"Skip","questionCard.skipAnswer":"Skipped","questionCard.retry":"Retry","questionCard.replyInChat":"Reply in chat"}[key]||fallback||key)});'
-        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null;',
+        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null; export const Minus=()=>null; export const Plus=()=>null;',
       loader: "js",
     }));
   } }],

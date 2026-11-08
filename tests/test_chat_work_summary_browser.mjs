@@ -69,13 +69,15 @@ try {
   for (const [id, answer] of [['#review-1', 'Skipped'], ['#review-2', 'Skipped'], ['#review-3', 'Keep the navy outfit.']]) {
     const item = page.locator(id);
     assert.equal(await item.locator('[data-question-skipped]').count(), 0, 'only a recorded skip action receives skipped status');
-    assert.equal(await item.locator('[data-user-message-bubble]').count(), 0, 'historical responses look different from user turns');
-    assert.equal(await item.locator('summary').innerText(), 'Question response');
+    assert.equal(await item.locator('[data-user-message-bubble]').count(), 1, 'a saved answer is a user bubble');
+    assert.equal(await item.locator('[data-chat-question-prompt]').innerText(), 'Review the avatar from the front.', 'a legacy question is restored to the timeline');
     assert.equal(await item.locator('[data-question-answer-value]').innerText(), answer);
     assert.equal(await item.locator('[data-question-answer-value]').isVisible(), true);
     const originalQuestion = item.locator('[data-question-answer-question]');
-    assert.equal(await originalQuestion.isVisible(), false);
-    await item.locator('summary').click();
+    const bubble = item.locator('[data-user-message-bubble]');
+    const prompt = item.locator('[data-chat-question-prompt]');
+    assert.ok((await bubble.boundingBox()).x > (await prompt.boundingBox()).x, 'the reply is aligned to the right');
+    assert.notEqual(await originalQuestion.evaluate(el => getComputedStyle(el.querySelector('.chat-markdown')).color), await bubble.evaluate(el => getComputedStyle(el.querySelector('[data-question-answer-value] .chat-markdown')).color), 'the quoted question is muted');
     assert.equal(await originalQuestion.innerText(), 'Review the avatar from the front.');
     assert.equal(await originalQuestion.isVisible(), true);
   }

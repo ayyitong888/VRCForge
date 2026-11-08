@@ -11,6 +11,7 @@ import type { QuestionCapturePreview } from "../../lib/chat-timeline-presentatio
 
 export function AgentQuestionCard({
   questions,
+  reveal,
   onAnswerQuestion,
   onDismissQuestion,
   onStopContinuation,
@@ -19,6 +20,7 @@ export function AgentQuestionCard({
   resourceImageContextForQuestion,
 }: {
   questions: AgentQuestion[];
+  reveal?: { questionId: string };
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   onDismissQuestion: (questionId: string) => void;
   onStopContinuation?: (question: AgentQuestion) => void | Promise<void>;
@@ -39,12 +41,23 @@ export function AgentQuestionCard({
   const [collapsedQuestionId, setCollapsedQuestionId] = useState("");
   const [capturePreview, setCapturePreview] = useState<(ChatImageSource & { questionId: string }) | null>(null);
   const submittingRef = useRef(false);
+  const cardRef = useRef<HTMLElement>(null);
   const [questionErrors, setQuestionErrors] = useState<Record<string, string>>({});
   const [retryAnswers, setRetryAnswers] = useState<Record<string, { optionId: string; value: string }>>({});
 
   useEffect(() => {
     setIndex((current) => Math.min(current, Math.max(0, pendingQuestions.length - 1)));
   }, [pendingQuestions.length]);
+
+  useEffect(() => {
+    if (!reveal) return;
+    const nextIndex = pendingQuestions.findIndex((candidate) => candidate.questionId === reveal.questionId);
+    if (nextIndex < 0) return;
+    setIndex(nextIndex);
+    setCollapsedQuestionId("");
+    const frame = window.requestAnimationFrame(() => cardRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [reveal]);
 
   const question = pendingQuestions[index];
   const activeCapturePreview = capturePreview?.questionId === question?.questionId ? capturePreview : null;
@@ -104,22 +117,12 @@ export function AgentQuestionCard({
   };
 
   const content = (
-    <section className="app-scrollbar max-h-[48vh] overflow-y-auto rounded-2xl border border-border bg-workspace p-4" aria-label={t("questionCard.label")}>
-      <div className="mb-1.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+    <section ref={cardRef} tabIndex={-1}
+      className="app-scrollbar max-h-[48vh] overflow-y-auto rounded-[1.25rem] border border-border bg-background px-3 py-3 outline-none"
+      aria-label={t("questionCard.label")}>
+      <div className="mb-3 flex min-w-0 items-center gap-2 px-2 text-sm text-muted-foreground">
         <HelpCircle className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 font-normal">{t("questionCard.title")}</span>
-        {onReplyInChat && !runtimeToolLoopPause ? (
-          <button
-            type="button"
-            className="shrink-0 rounded-md px-1 py-0.5 text-xs text-muted-foreground underline-offset-2 hover:bg-muted hover:text-foreground hover:underline disabled:opacity-60"
-            onClick={() => onReplyInChat(question.questionId)}
-            disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
-            data-question-reply-in-chat={question.questionId}
-            aria-label={t("questionCard.replyInChat")}
-          >
-            <Pencil className="h-4 w-4" aria-label={t("questionCard.replyInChat")} />
-          </button>
-        ) : null}
         {pendingQuestions.length > 1 ? (
           <div className="flex shrink-0 items-center gap-1">
             <button
@@ -146,7 +149,7 @@ export function AgentQuestionCard({
         <button type="button" className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted disabled:opacity-50" aria-label={t("common.close")} title={t("common.close")} onClick={() => onDismissQuestion(question.questionId)} disabled={Boolean(busyChoice)}><X className="h-4 w-4" /></button>
       </div>
 
-      {!continuationActive && !continuationSettled ? <div className="app-scrollbar mb-2 max-h-[20vh] overflow-y-auto whitespace-pre-wrap break-words text-sm font-normal text-foreground">
+      {!continuationActive && !continuationSettled ? <div className="app-scrollbar mb-2 max-h-[20vh] overflow-y-auto whitespace-pre-wrap break-words px-2 text-sm font-semibold text-foreground">
         {question.question || question.questionId}
       </div> : null}
 
@@ -203,7 +206,7 @@ export function AgentQuestionCard({
       ) : null}
 
       {!continuationActive && !continuationSettled ? <><div className="grid gap-1.5">
-        <div className="app-scrollbar grid max-h-48 gap-1 overflow-y-auto pr-1">
+        <div className="app-scrollbar grid max-h-48 gap-1 overflow-y-auto">
         {options.map((option, optionIndex) => {
           const value = isVisualCheckpoint ? optionAnswer(option) : option.value || option.label;
           const busy = busyChoice === option.id;
@@ -211,7 +214,7 @@ export function AgentQuestionCard({
             <button
               key={option.id}
               type="button"
-              className="grid min-w-0 grid-cols-[20px_minmax(0,1fr)] items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-muted/50 disabled:opacity-60"
+              className="group grid min-w-0 grid-cols-[20px_minmax(0,1fr)_1rem] items-center gap-2 rounded-xl px-2 py-1.5 text-left transition-colors hover:bg-muted focus-visible:bg-muted disabled:opacity-60"
               onClick={() => void answer(option.id, value)}
               disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
               title={option.description || option.label}
@@ -225,6 +228,7 @@ export function AgentQuestionCard({
                 </span>
                 {option.description ? <span className="block whitespace-pre-wrap break-words text-xs text-muted-foreground">{option.description}</span> : null}
               </span>
+              <span className="text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" aria-hidden="true">→</span>
             </button>
           );
         })}
@@ -237,7 +241,16 @@ export function AgentQuestionCard({
               void answer("custom", customValue.trim());
             }}
           >
-            <Pencil className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+            {onReplyInChat ? (
+              <button type="button"
+                className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-60"
+                onClick={() => onReplyInChat(question.questionId)}
+                disabled={Boolean(busyChoice)}
+                data-question-reply-in-chat={question.questionId}
+                aria-label={t("questionCard.replyInChat")} title={t("questionCard.replyInChat")}>
+                <Pencil className="h-4 w-4" aria-hidden="true" />
+              </button>
+            ) : <Pencil className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
             <input
               type="text"
               value={customValue}
@@ -268,7 +281,7 @@ export function AgentQuestionCard({
               <button
                 type="submit"
                 className="rounded-full bg-primary px-3 py-1 text-sm font-medium text-primary-foreground disabled:bg-muted-foreground/50"
-              disabled={!customValue.trim() || Boolean(busyChoice) || continuationActive || continuationSettled}
+                disabled={!customValue.trim() || Boolean(busyChoice) || continuationActive || continuationSettled}
               >
                 {t("chat.send")}
               </button>

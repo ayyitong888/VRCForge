@@ -19,10 +19,10 @@ const mocks = {
 };
 await Promise.all([
   fs.writeFile(mocks.translation, 'export function useTranslation(){return {t:(key,fallback)=>typeof fallback === "string" ? fallback : key};}\n'),
-  fs.writeFile(mocks.icons, 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null;\n'),
+  fs.writeFile(mocks.icons, 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null; export const Minus=()=>null; export const Plus=()=>null;\n'),
   fs.writeFile(mocks.utils, 'export const cn=(...values)=>values.filter(Boolean).join(" "); export const formatCount=(value)=>String(value);\n'),
   fs.writeFile(mocks.continuation, 'export const questionContinuationDisplay=()=>"none";\n'),
-  fs.writeFile(mocks.markdown, 'export const ChatMarkdown=()=>null; export const ChatResourceImageContext=({children})=>children;\n'),
+  fs.writeFile(mocks.markdown, 'export const ChatMarkdown=()=>null; export const ChatCaptureThumbnail=()=>null; export const ChatResourceImageContext=({children})=>children;\n'),
   fs.writeFile(entry, `
     import React from "react";
     import { renderToStaticMarkup } from "react-dom/server";

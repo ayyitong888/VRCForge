@@ -63,8 +63,7 @@ export function ConversationCard({
   saveOperationSummary,
   saveOperationTool,
   onSaveOperationAsSkill,
-  reopenQuestionId,
-  onReopenQuestion,
+  questionAlreadyShown,
   onOpenChatById,
   runtimeActive,
 }: {
@@ -97,8 +96,7 @@ export function ConversationCard({
   saveOperationSummary?: PathToSkillOperationSummary;
   saveOperationTool?: string;
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
-  reopenQuestionId?: string;
-  onReopenQuestion?: (questionId: string) => void;
+  questionAlreadyShown?: boolean;
   /** Opens another conversation in this project scope by chat id. */
   onOpenChatById?: (chatId: string) => void;
   /** Exact session/CID activity from the current runtime ledger, when available. */
@@ -262,40 +260,54 @@ export function ConversationCard({
 
   if (item.type === "question_answer") {
     const attachments = resolveAttachmentPayloadReferences(item.attachments || [], attachmentPayloads);
-    const skipped = item.selectedOptionId === "skip" && !attachments.length && !reopenQuestionId;
-    const label = t(skipped ? "questionCard.skippedConfirmation" : "questionCard.recordedResponse");
+    const skipped = item.selectedOptionId === "skip" && !attachments.length;
+    if (skipped) {
+      return (
+        <div className="min-w-0 max-w-2xl border-l border-border px-3 py-1 text-xs text-muted-foreground"
+          data-question-answer={item.questionId} data-question-continuation-input data-question-skipped>
+          {item.question ? (
+            <details>
+              <summary className="w-fit cursor-pointer rounded-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{t("questionCard.skippedConfirmation")}</summary>
+              <div className="mt-1.5 border-l border-border pl-3 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-chat-quote-content>
+                <ChatMarkdown text={item.question} />
+              </div>
+            </details>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 font-medium">
+              <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
+              {t("questionCard.skippedConfirmation")}
+            </span>
+          )}
+        </div>
+      );
+    }
     const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
     const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
     return (
-      <div className="min-w-0 max-w-2xl space-y-1.5 border-l border-border px-3 py-1 text-xs text-muted-foreground"
-        data-question-answer={item.questionId} data-question-continuation-input data-question-skipped={skipped || undefined}>
-        {item.question ? (
-          <details>
-            <summary className="w-fit cursor-pointer rounded-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{label}</summary>
-            <div className="mt-1.5 border-l border-border pl-3 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-question-answer-question data-chat-quote-content>
-              <ChatMarkdown text={item.question} />
-            </div>
-          </details>
-        ) : (
-          <span className="inline-flex items-center gap-1.5 font-medium">
-            {skipped ? <SkipForward className="h-3.5 w-3.5" aria-hidden="true" /> : null}
-            {label}
-          </span>
-        )}
-        {!skipped && item.text ? (
-          <div className="text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-question-answer-text data-question-answer-value data-chat-quote-content>
-            <ChatMarkdown text={item.text} />
+      <div className="min-w-0 space-y-3" data-question-answer={item.questionId} data-question-continuation-input>
+        {item.question && !questionAlreadyShown ? (
+          <div className="text-sm [&_.chat-markdown]:[overflow-wrap:anywhere]" data-chat-question-prompt={item.questionId} data-chat-quote-content>
+            <ChatMarkdown text={item.question} />
           </div>
         ) : null}
-        {images.length ? (
-          <div className="w-fit max-w-full"><UserImageAttachments messageId={item.id} attachments={images} /></div>
-        ) : null}
-        {otherAttachments.length ? <AttachmentStrip attachments={otherAttachments} compact /> : null}
-        {reopenQuestionId && onReopenQuestion ? (
-          <button type="button" className="rounded-md px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:bg-background hover:text-foreground hover:underline" onClick={() => onReopenQuestion(reopenQuestionId)} data-question-reopen={reopenQuestionId}>
-            {t("questionCard.replyInChat")}
-          </button>
-        ) : null}
+        <div className="ml-auto flex w-fit min-w-0 max-w-[min(92%,42rem)] flex-col items-end gap-2">
+          {item.question || item.text ? (
+            <div className="min-w-0 max-w-full space-y-1 rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble>
+              {item.question ? (
+                <blockquote className="[&_.chat-markdown]:text-muted-foreground" data-question-answer-question>
+                  <ChatMarkdown text={item.question} />
+                </blockquote>
+              ) : null}
+              {item.text ? (
+                <div data-question-answer-text data-question-answer-value data-chat-quote-content>
+                  <ChatMarkdown text={item.text} />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {images.length ? <UserImageAttachments messageId={item.id} attachments={images} /> : null}
+          {otherAttachments.length ? <AttachmentStrip attachments={otherAttachments} compact /> : null}
+        </div>
       </div>
     );
   }

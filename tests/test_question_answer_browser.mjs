@@ -63,7 +63,7 @@ await build({
     plugin.onLoad({ filter: /.*/, namespace: "qa" }, (args) => ({
       contents: args.path === "translation"
         ? 'export const useTranslation=()=>({t:(_key,fallback)=>fallback||_key});'
-        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null;',
+        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null; export const Minus=()=>null; export const Plus=()=>null;',
       loader: "js",
     }));
   } }],
