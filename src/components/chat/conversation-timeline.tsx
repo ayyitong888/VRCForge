@@ -21,6 +21,7 @@ import {
 import type { ApprovalActionState, ChatTimelineEvent, ConversationItem } from "../../lib/chat-types";
 import { cancelledAgentReplyText, isCancelledRuntimeResponse } from "../../lib/conversation-utils";
 import { isAgentShellResult } from "../../lib/runtime-parsing";
+import { formatLocalMessageTime } from "../../lib/message-time";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -284,16 +285,34 @@ export function buildAgentTimelineRows({
   return finishRows(fallbackRows);
 }
 
-/** One gallery per turn, ordered by receipt. Images embedded in the answer stay inline. */
+type CaptureImage = { uri: string; angle: string };
+type CaptureReceipt = { images: CaptureImage[]; timestamp?: string };
+
+const CAPTURE_ANGLE_ORDER = ["front", "back", "side_left", "side_right", "face", "bottom"];
+
+function captureAngleRank(angle: string): number {
+  const rank = CAPTURE_ANGLE_ORDER.indexOf(angle);
+  return rank < 0 ? CAPTURE_ANGLE_ORDER.length : rank;
+}
+
+/** One gallery per turn. Each receipt keeps its own set of camera views. */
 function buildCaptureImageRows(steps: AgentRuntimeResponse["steps"] = [], alreadyRendered = "", events: ChatTimelineEvent[] = []): ReactNode[] {
-  const images: Array<{ uri: string; label: string }> = [];
+  const receipts = new Map<string, CaptureReceipt>();
   const seen = new Set<string>();
   const results = [
     ...events.filter(event => event.kind === "tool_result" && event.payload.captures?.length)
-      .map(event => ({ captures: event.payload.captures })),
-    ...steps.map(step => step.result),
+      .map(event => ({
+        key: event.payload.actionId ? `action:${event.payload.actionId}` : `event:${event.id}`,
+        value: { captures: event.payload.captures },
+        timestamp: event.timestamp,
+      })),
+    ...steps.map((step, index) => ({
+      key: step.actionId ? `action:${step.actionId}` : `step:${index}`,
+      value: step.result,
+      timestamp: undefined,
+    })),
   ];
-  for (const value of results) {
+  for (const { key, value, timestamp } of results) {
     const result = value as { captures?: unknown[]; preview?: unknown; angle?: unknown } | undefined;
     if (!result || typeof result !== "object") continue;
     for (const capture of Array.isArray(result.captures) ? result.captures : [result]) {
@@ -304,43 +323,71 @@ function buildCaptureImageRows(steps: AgentRuntimeResponse["steps"] = [], alread
         || !/^vrcforge:\/\/scene-capture-preview\/[0-9a-f-]+\?/i.test(uri)
         || seen.has(uri) || alreadyRendered.includes(uri)) continue;
       seen.add(uri);
-      images.push({ uri, label: typeof angle === "string" ? angle.replace(/[\[\]\r\n]/g, " ") : "" });
+      let receipt = receipts.get(key);
+      if (!receipt) {
+        receipt = { images: [], timestamp };
+        receipts.set(key, receipt);
+      }
+      receipt.images.push({ uri, angle: typeof angle === "string" ? angle.replace(/[\[\]\r\n]/g, " ").trim() : "" });
     }
   }
-  return images.length ? [<CaptureImageActivity key={images[0].uri} images={images} />] : [];
+  const groups = [...receipts.values()];
+  return groups.length ? [<CaptureImageActivity key={groups[0].images[0].uri} receipts={groups} />] : [];
 }
 
-function CaptureImageActivity({ images }: { images: Array<{ uri: string; label: string }> }) {
-  const { t } = useTranslation();
+function CaptureImageActivity({ receipts }: { receipts: CaptureReceipt[] }) {
+  const { t, i18n } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const [preview, setPreview] = useState<ChatImageSource | null>(null);
   const [resourcePreview, setResourcePreview] = useState<{ uri: string; label: string; request: number } | null>(null);
-  const labels = images.map(({ label }) => label ? t(`chat.captureAngles.${label}`, label) : t("chat.imagePreview"));
-  const labeledImages = images.map((image, index) => ({
-    uri: image.uri,
-    label: labels.indexOf(labels[index]) !== labels.lastIndexOf(labels[index]) ? `${labels[index]} · ${index + 1}` : labels[index],
-  }));
+  const angleCounts = new Map<string, number>();
+  for (const { images } of receipts) {
+    for (const { angle } of images) angleCounts.set(angle, (angleCounts.get(angle) || 0) + 1);
+  }
+  const groups = receipts.map(({ images, timestamp }, index) => {
+    const heading = t("chat.captureBatch", { index: index + 1 });
+    const sorted = [...images].sort((left, right) => captureAngleRank(left.angle) - captureAngleRank(right.angle));
+    const labels = sorted.map(({ uri, angle }, viewIndex) => {
+      const view = angle ? t(`chat.captureAngles.${angle}`, angle) : t("chat.imagePreview");
+      const hasRepeatedView = (angleCounts.get(angle) || 0) > 1;
+      const batchLabel = hasRepeatedView && receipts.length > 1 ? `${view} · ${heading}` : view;
+      const duplicateInReceipt = hasRepeatedView && sorted.some((image) => image.uri !== uri && image.angle === angle);
+      const suffix = duplicateInReceipt ? ` · ${viewIndex + 1}` : "";
+      return { uri, label: batchLabel + suffix, caption: view + suffix };
+    });
+    return { heading, time: formatLocalMessageTime(timestamp, i18n.resolvedLanguage), images: labels };
+  });
+  const labeledImages = groups.flatMap((group) => group.images);
   return <div data-agent-capture-images className="px-1 text-sm">
     <div className="flex flex-wrap items-center gap-x-3">
-      <button type="button" className="flex items-center gap-2 py-2 text-muted-foreground" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-        <Eye className="h-4 w-4" /><span>{t("vision.images")} · {images.length}</span>
+      <button type="button" className="flex items-center gap-2 rounded-sm py-2 text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+        <Eye className="h-4 w-4" /><span>{t("vision.images")} · {labeledImages.length}</span>
         {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
       </button>
       {labeledImages.map(image => (
         <button key={image.uri} type="button" aria-haspopup="dialog" data-agent-capture-link
-          className="text-blue-600 underline-offset-2 hover:underline dark:text-blue-400"
+          className="rounded-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onClick={() => setResourcePreview(current => ({ ...image, request: (current?.request ?? 0) + 1 }))}>
           {image.label}
         </button>
       ))}
     </div>
-    {expanded ? <div className="flex gap-3 overflow-x-auto pb-2">
-      {labeledImages.map(image => <div key={image.uri} data-agent-capture-image className="w-36 shrink-0">
-        <ChatCaptureThumbnail uri={image.uri} alt={image.label} className="h-24" onOpen={image => {
-          setResourcePreview(null);
-          setPreview(image);
-        }} />
-      </div>)}
+    {expanded ? <div className="space-y-3 pb-2">
+      {groups.map(group => <section key={group.images[0].uri} data-agent-capture-receipt className="border-t border-border pt-2">
+        {groups.length > 1 ? <h3 className="mb-2 flex items-baseline gap-2 text-xs font-medium">
+          <span>{group.heading}</span>
+          {group.time ? <span className="font-normal text-muted-foreground">{group.time}</span> : null}
+        </h3> : null}
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,8.5rem),1fr))] gap-2">
+          {group.images.map(image => <div key={image.uri} data-agent-capture-image className="min-w-0">
+            <ChatCaptureThumbnail uri={image.uri} alt={image.label} className="h-24" onOpen={image => {
+              setResourcePreview(null);
+              setPreview(image);
+            }} />
+            <div className="mt-1 break-words text-xs text-muted-foreground">{image.caption}</div>
+          </div>)}
+        </div>
+      </section>)}
     </div> : null}
     {preview ? <ChatImagePreview {...preview} onClose={() => setPreview(null)} /> : null}
     {resourcePreview ? <ChatCaptureResourcePreview key={resourcePreview.request} uri={resourcePreview.uri} alt={resourcePreview.label} onClose={() => setResourcePreview(null)} /> : null}

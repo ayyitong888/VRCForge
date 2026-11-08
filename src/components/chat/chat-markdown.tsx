@@ -268,13 +268,21 @@ function isChatResourceImageUri(value: string): boolean {
 
 export function ChatCaptureThumbnail({ uri, alt, className, onOpen }: { uri: string; alt: string; className: string; onOpen: (image: ChatImageSource) => void }) {
   const context = useContext(ChatResourceImageContext);
-  if (!context || !isChatResourceImageUri(uri)) return alt ? <span>{alt}</span> : null;
+  const { t } = useTranslation();
+  if (!context || !isChatResourceImageUri(uri)) return <CaptureThumbnailPlaceholder className={className} label={t("chat.imageUnavailable")} />;
   return <AuthenticatedChatResourceImage uri={uri} alt={alt} context={context} className="h-full w-full object-contain" thumbnail={{ className, onOpen }} />;
+}
+
+function CaptureThumbnailPlaceholder({ className, label }: { className: string; label: string }) {
+  return <span role="status" className={cn("flex w-full items-center justify-center rounded-md border border-border bg-muted/40 px-2 text-center text-xs text-muted-foreground", className)}>
+    {label}
+  </span>;
 }
 
 export function ChatCaptureResourcePreview({ uri, alt, onClose }: { uri: string; alt: string; onClose: () => void }) {
   const context = useContext(ChatResourceImageContext);
-  if (!context || !isChatResourceImageUri(uri)) return null;
+  const { t } = useTranslation();
+  if (!context || !isChatResourceImageUri(uri)) return <span role="status">{t("chat.imageUnavailable")}</span>;
   return <AuthenticatedChatResourceImage uri={uri} alt={alt} context={context} onClosePreview={onClose} />;
 }
 
@@ -308,6 +316,7 @@ function AuthenticatedChatResourceImage({
     return () => controller.abort();
   }, [context.endpoint, context.chatId, context.projectPath, context.sessionId, context.clientTurnId, uri]);
   if (!src) {
+    if (thumbnail) return <CaptureThumbnailPlaceholder className={thumbnail.className} label={t(unavailable ? "chat.imageUnavailable" : "common.loading")} />;
     if (unavailable) return <span role="status">{alt ? `${alt} · ${t("chat.imageUnavailable")}` : t("chat.imageUnavailable")}</span>;
     if (onClosePreview) return <span role="status">{t("common.loading")}</span>;
     return alt ? <span>{alt}</span> : null;

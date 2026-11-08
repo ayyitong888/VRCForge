@@ -9,9 +9,11 @@ const uri=`vrcforge://scene-capture-preview/8d886299-9be1-4baf-8e1f-e205f3a8e5fc
 const preview={schema:'vrcforge.scene_capture_preview.v1',mimeType:'image/png',captureId:'8d886299-9be1-4baf-8e1f-e205f3a8e5fc',resourceUri:uri};
 const backId='f75e7e6b-e22e-40c3-af08-1b19ce0d9578';
 const back={...preview,captureId:backId,resourceUri:uri.replace(preview.captureId,backId)};
+const againId='f10d4588-76af-4608-8893-f631bb8c7561';
+const frontAgain={...preview,captureId:againId,resourceUri:uri.replace(preview.captureId,againId)};
 const response=process.env.VRCFORGE_CAPTURE_RECEIPT?JSON.parse(await readFile(process.env.VRCFORGE_CAPTURE_RECEIPT,'utf8')).response:{sessionId:'session-fixture',clientTurnId:'turn-fixture',plan:{summary:'Captured result',reply:'Review the result.'},steps:[
- {kind:'tool',result:{captures:[{angle:'front',preview}]}},
- {kind:'tool',result:{captures:[{angle:'back',preview:back},{angle:'duplicate',preview}]}},
+ {kind:'tool',actionId:'first-shot',result:{captures:[{angle:'back',preview:back},{angle:'front',preview}]}},
+ {kind:'tool',actionId:'second-shot',result:{captures:[{angle:'front',preview:frontAgain},{angle:'duplicate',preview}]}},
 ]};
 const captures=response.steps.flatMap(step=>step.result?.captures || []).filter(c=>c.preview?.schema==='vrcforge.scene_capture_preview.v1');
 const unique=new Set(captures.map(c=>c.preview.resourceUri));
@@ -44,14 +46,33 @@ try{
  assert.equal(await page.locator('[data-agent-capture-image] img').count(),0,'tool image activities start collapsed');
  assert.equal(calls.length,0,'named references do not fetch unopened images');
  const firstLink=groups.locator('[data-agent-capture-link]').first();
- if(!process.env.VRCFORGE_CAPTURE_RECEIPT) assert.equal(await firstLink.innerText(),'Front view');
+ if(!process.env.VRCFORGE_CAPTURE_RECEIPT) {
+   assert.deepEqual(await groups.locator('[data-agent-capture-link]').allInnerTexts(),[
+     'Front view · Capture 1','Back view','Front view · Capture 2',
+   ],'views are ordered within their original receipts, and repeated angles identify the capture');
+ }
  await firstLink.click();
  await page.locator('dialog[open] img').waitFor();
  assert.equal(calls.length,1,'a named reference opens only the selected capture');
  await page.keyboard.press('Escape');
  await page.locator('dialog[open]').waitFor({state:'detached'});
+ if(!process.env.VRCFORGE_CAPTURE_RECEIPT) {
+   assert.equal(calls[0].uri,uri);
+   await groups.getByRole('button',{name:'Front view · Capture 2',exact:true}).click();
+   await page.locator('dialog[open] img').waitFor();
+   assert.equal(calls.at(-1).uri,frontAgain.resourceUri,'the later front image opens its own immutable resource');
+   await page.keyboard.press('Escape');
+   await page.locator('dialog[open]').waitFor({state:'detached'});
+ }
  await groups.locator('button[aria-expanded=false]').click();
  await page.waitForFunction(count=>document.querySelectorAll('[data-agent-capture-image] img').length===count,unique.size);
+ if(!process.env.VRCFORGE_CAPTURE_RECEIPT) {
+   const batches=groups.locator('[data-agent-capture-receipt]');
+   assert.deepEqual(await batches.locator('h3').allInnerTexts(),['Capture 1','Capture 2']);
+   assert.deepEqual(await batches.locator('img').evaluateAll(images=>images.map(image=>image.alt)),[
+     'Front view · Capture 1','Back view','Front view · Capture 2',
+   ]);
+ }
  const firstCapture=page.locator('[data-agent-capture-image]').first();
  const thumbnail=firstCapture.locator('img');
  assert.equal(await thumbnail.evaluate(img=>getComputedStyle(img).objectFit),'contain','a square capture must fit fully inside the wide thumbnail');
@@ -134,5 +155,19 @@ try{
  await page.locator('[data-agent-capture-images]').waitFor();
  assert.equal(await page.locator('[data-agent-tool-call-group]').count(),1,'capture receipts do not split a consecutive tool group');
  assert.equal(await page.locator('[data-agent-capture-images]').count(),1,'consecutive captures have one row');
+ const retired={id:'retired-preview',type:'agent',response:{...response,timeline:[],steps:[
+   {kind:'tool',actionId:'retired-shot',result:{captures:[{angle:'front',preview:{...preview,resourceUri:uri.replace(/\?.*$/, '?legacy=1')}}]}},
+ ]}};
+ await page.evaluate(({item,context})=>window.mount(item,context),{item:retired,context});
+ const retiredGallery=page.locator('[data-agent-capture-images]');
+ await retiredGallery.locator('button[aria-expanded=false]').click();
+ const unavailable=retiredGallery.locator('[data-agent-capture-image] [role=status]');
+ await unavailable.getByText('Image unavailable',{exact:true}).waitFor();
+ assert.ok((await unavailable.boundingBox()).height>=90,'unavailable preview keeps the thumbnail slot');
+ assert.equal(await retiredGallery.locator('[data-agent-capture-image]').getByText('Front view',{exact:true}).count(),1,'the view caption appears once');
+ const callCount=calls.length;
+ await retiredGallery.locator('[data-agent-capture-link]').click();
+ assert.equal(await retiredGallery.getByText('Image unavailable',{exact:true}).count(),2,'opening an expired reference gives feedback');
+ assert.equal(calls.length,callCount,'an obsolete reference does not cross the image resource boundary');
  assert.deepEqual(errors,[]);console.log(`PASS final/live capture activities, dialog, ${unique.size} previews, exact turn context, commentary dedup and result-time ordering`);
 }finally{await browser?.close();await new Promise(r=>server.close(r));}
