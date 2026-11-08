@@ -426,7 +426,7 @@ export function buildDurableTimelineRows(
   if (!presentation.entries.length) {
     return (options.interleavedUserMessages || []).map((message) => options.renderInterleavedUserMessage?.(message) || (
       <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-        <div className="max-w-[78%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">{message.text}</div>
+        <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20">{message.text}</div>
       </div>
     ));
   }
@@ -453,7 +453,7 @@ export function buildDurableTimelineRows(
       flushToolCalls();
       processRows.push(options.renderInterleavedUserMessage?.(message) || (
         <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-          <div className="max-w-[78%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">{message.text}</div>
+          <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20">{message.text}</div>
         </div>
       ));
       nextInterleavedMessage += 1;
@@ -529,7 +529,7 @@ export function buildDurableTimelineRows(
     const message = interleavedMessages[nextInterleavedMessage++];
     processRows.push(options.renderInterleavedUserMessage?.(message) || (
       <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-        <div className="max-w-[78%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">{message.text}</div>
+        <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20">{message.text}</div>
       </div>
     ));
   }

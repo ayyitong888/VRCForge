@@ -238,7 +238,7 @@ export function ConversationCard({
           ) : null}
           {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} /> : null}
           {item.text ? (
-            <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
+            <div className="min-w-0 max-w-full rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
               <UserMessageText text={item.text} />
             </div>
           ) : null}
@@ -522,7 +522,7 @@ function renderInterleavedUserMessage(
       <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
         {images.length ? <UserImageAttachments messageId={message.id} attachments={images} /> : null}
         {message.text ? (
-          <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
+          <div className="min-w-0 max-w-full rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
             <UserMessageText text={message.text} />
           </div>
         ) : null}
