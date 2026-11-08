@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, ChevronDown, ChevronRight, CircleStop, ExternalLink, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { presentApproval } from "../../lib/approval-presentation";
@@ -27,7 +27,8 @@ import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ApprovalRevisionEditor } from "../approvals/approval-revision-editor";
-import { ChatMarkdown } from "./chat-markdown";
+import { ChatCaptureThumbnail, ChatMarkdown } from "./chat-markdown";
+import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 
 type AgentTimelineStep = NonNullable<AgentRuntimeResponse["steps"]>[number] & {
   actionId?: string;
@@ -318,26 +319,18 @@ export function buildCaptureImageRows(steps: AgentRuntimeResponse["steps"] = [],
 function CaptureImageActivity({ images }: { images: Array<{ uri: string; label: string }> }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  const [preview, setPreview] = useState<{ src: string; label: string } | null>(null);
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => { if (preview && !dialog.current?.open) dialog.current?.showModal(); }, [preview]);
+  const [preview, setPreview] = useState<ChatImageSource | null>(null);
   return <div data-agent-capture-images className="px-1 text-sm">
     <button type="button" className="flex items-center gap-2 py-2 text-muted-foreground" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
       <Eye className="h-4 w-4" /><span>{t("vision.images")} · {images.length}</span>
       {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
     </button>
     {expanded ? <div className="flex gap-3 overflow-x-auto pb-2">
-      {images.map(image => <button key={image.uri} type="button" data-agent-capture-image
-        className="w-36 shrink-0 overflow-hidden rounded-lg [&_img]:my-0 [&_img]:h-24 [&_img]:w-36 [&_img]:object-cover"
-        aria-label={t("chat.imagePreview")} onClick={event => {
-          const src = event.currentTarget.querySelector("img")?.src;
-          if (src?.startsWith("data:image/png;base64,")) setPreview({ src, label: image.label });
-        }}><ChatMarkdown text={`![${image.label}](${image.uri})`} /></button>)}
+      {images.map(image => <div key={image.uri} data-agent-capture-image className="w-36 shrink-0">
+        <ChatCaptureThumbnail uri={image.uri} alt={image.label} className="h-24" onOpen={setPreview} />
+      </div>)}
     </div> : null}
-    <dialog ref={dialog} className="max-h-[92vh] max-w-[94vw] rounded-xl bg-background p-4 backdrop:bg-black/70" onClose={() => setPreview(null)}>
-      <button type="button" className="mb-2 block text-sm text-muted-foreground" onClick={() => dialog.current?.close()}>{t("chat.closeImagePreview")}</button>
-      {preview ? <img src={preview.src} alt={preview.label} className="max-h-[82vh] max-w-[86vw] object-contain" /> : null}
-    </dialog>
+    {preview ? <ChatImagePreview {...preview} onClose={() => setPreview(null)} /> : null}
   </div>;
 }
 

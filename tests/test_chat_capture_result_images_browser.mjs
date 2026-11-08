@@ -3,6 +3,8 @@ import {build} from 'esbuild';
 import {readFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {createRequire} from 'node:module';
+import postcss from 'postcss';
+import tailwindcss from 'tailwindcss';
 const uri=`vrcforge://scene-capture-preview/8d886299-9be1-4baf-8e1f-e205f3a8e5fc?context=runtime%3Asession-fixture&revision=1&store=${'1'.repeat(32)}`;
 const preview={schema:'vrcforge.scene_capture_preview.v1',mimeType:'image/png',captureId:'8d886299-9be1-4baf-8e1f-e205f3a8e5fc',resourceUri:uri};
 const response=process.env.VRCFORGE_CAPTURE_RECEIPT?JSON.parse(await readFile(process.env.VRCFORGE_CAPTURE_RECEIPT,'utf8')).response:{sessionId:'session-fixture',clientTurnId:'turn-fixture',plan:{summary:'Captured result',reply:'Review the result.'},steps:[{kind:'tool',result:{captures:[{angle:'front',preview},{angle:'duplicate',preview}]}}]};
@@ -15,13 +17,18 @@ import {ConversationCard} from './src/components/chat/conversation-card';import 
 const root=createRoot(document.getElementById('root'));
 window.mount=async(item,context)=>{await initializeI18n();root.render(<ConversationCard item={item} chatResourceImageContext={context}/>);};
 `},bundle:true,write:false,format:'iife',platform:'browser',jsx:'automatic'});
-const server=createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end('<div id="root"></div><script>'+bundle.outputFiles[0].text.replaceAll('</script','<\\/script')+'</script>');});
+const css=(await postcss([tailwindcss("./tailwind.config.ts")]).process((await readFile("src/theme.css","utf8"))+"\n@tailwind base; @tailwind components; @tailwind utilities;",{from:undefined})).css;
+const server=createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end('<style>'+css+'</style><div id="root"></div><script>'+bundle.outputFiles[0].text.replaceAll('</script','<\\/script')+'</script>');});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const require=createRequire(import.meta.url);const{chromium}=require(process.env.VRCFORGE_PLAYWRIGHT_PATH||'playwright');let browser;
 try{
  browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage();const calls=[],errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.route('**/api/app/agent/resource-image',async route=>{const request=route.request().postDataJSON();calls.push(request);assert.ok(unique.has(request.uri));await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({uri:request.uri,mimeType:'image/png',sha256:'a'.repeat(64),pngBase64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5foAAAAASUVORK5CYII='})});});
  const endpoint=`http://127.0.0.1:${server.address().port}`;await page.goto(endpoint);const context={endpoint,chatId:'fixture',projectPath:'fixture-project'};
+ const pngBase64=await page.evaluate(()=>{
+   const canvas=document.createElement('canvas');canvas.width=720;canvas.height=720;
+   return canvas.toDataURL().split(',')[1];
+ });
+ await page.route('**/api/app/agent/resource-image',async route=>{const request=route.request().postDataJSON();calls.push(request);assert.ok(unique.has(request.uri));await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({uri:request.uri,mimeType:'image/png',sha256:'a'.repeat(64),pngBase64})});});
  await page.evaluate(({response,context})=>window.mount({id:'final',type:'agent',response},context),{response,context});
  if(response.timeline?.some(event=>event.kind==='tool_result')) {
    await page.locator('[data-agent-turn-process-group] > div > button').first().click();
@@ -30,10 +37,44 @@ try{
  assert.equal(await page.locator('[data-agent-capture-image] img').count(),0,'tool image activities start collapsed');
  while(await page.locator('[data-agent-capture-images] > button[aria-expanded=false]').count()) await page.locator('[data-agent-capture-images] > button[aria-expanded=false]').first().click();
  await page.waitForFunction(count=>document.querySelectorAll('[data-agent-capture-image] img').length===count,unique.size);
- await page.locator('[data-agent-capture-image]').first().click();
- await page.locator('dialog[open] img').waitFor();
+ const firstCapture=page.locator('[data-agent-capture-image]').first();
+ const thumbnail=firstCapture.locator('img');
+ assert.equal(await thumbnail.evaluate(img=>getComputedStyle(img).objectFit),'contain','a square capture must fit fully inside the wide thumbnail');
+ const source=await thumbnail.getAttribute('src');
+ const initialFetchCount=calls.length;
+ const dialog=page.locator('dialog[open]');
+ const openPreview=async()=>{
+   await firstCapture.click();
+   await dialog.locator('img').waitFor();
+ };
+ await openPreview();
+ const image=dialog.locator('img');
+ assert.equal(await image.getAttribute('src'),source,'full-size preview and thumbnail display the same pixels');
+ const close=dialog.getByRole('button',{name:'Close image preview'});
+ const closeBox=await close.boundingBox();
+ const viewport=page.viewportSize();
+ assert.ok(closeBox.y<60&&closeBox.x+closeBox.width>viewport.width-60,'close control is in the top right');
+ const fit=(await image.boundingBox()).width;
+ await dialog.getByRole('button',{name:'Zoom in'}).click();
+ assert.ok((await image.boundingBox()).width>fit,'zoom in increases image size');
+ await dialog.getByRole('button',{name:'Zoom out'}).click();
+ assert.equal((await image.boundingBox()).width,fit,'zoom out returns to fit');
+ await image.hover();
+ await page.mouse.wheel(0,-120);
+ await dialog.getByText('125%',{exact:true}).waitFor();
+ await page.mouse.wheel(0,120);
+ await dialog.getByText('100%',{exact:true}).waitFor();
+ await image.click();
+ assert.equal(await dialog.count(),1,'clicking the image keeps it open');
+ await close.click();
+ await dialog.waitFor({state:'detached'});
+ await openPreview();
+ await page.mouse.click(8,viewport.height/2);
+ await dialog.waitFor({state:'detached'});
+ await openPreview();
  await page.keyboard.press('Escape');
- await page.waitForFunction(()=>document.querySelectorAll('dialog[open]').length===0);
+ await dialog.waitFor({state:'detached'});
+ assert.equal(calls.length,initialFetchCount,'preview does not fetch the capture again');
  assert.equal(await page.locator('[data-agent-capture-image]').count(),unique.size,'each immutable capture renders once, independently of model prose');
  // A durable tool-result marker without captures must not suppress the persisted step previews.
  const markerOnly={...response,timeline:[{id:'marker',sequence:0,kind:'tool_result',timestamp:new Date().toISOString(),payload:{tool:'capture',actionId:'capture',status:'ok'}}]};

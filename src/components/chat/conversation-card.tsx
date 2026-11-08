@@ -11,7 +11,7 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
@@ -26,6 +26,7 @@ import { cn, formatCount } from "../../lib/utils";
 import { formatLocalMessageTime, formatMessageDateSeparator } from "../../lib/message-time";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { ChatImagePreview } from "./chat-image-preview";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
@@ -525,25 +526,6 @@ export function UserImageAttachments({
 }) {
   const [preview, setPreview] = useState<ChatAttachment | null>(null);
   const { t } = useTranslation();
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  const closeLabel = t("chat.closeImagePreview");
-  useEffect(() => {
-    if (!preview) {
-      return;
-    }
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    closeButtonRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setPreview(null);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      previousFocus?.focus();
-    };
-  }, [preview]);
   useEffect(() => {
     const openRequestedAttachment = (event: Event) => {
       const detail = (event as CustomEvent<{ messageId?: string; attachmentId?: string }>).detail;
@@ -568,38 +550,19 @@ export function UserImageAttachments({
           <div key={attachment.id} className="relative">
             <button
               type="button"
-              className="group/image block overflow-hidden rounded-lg border border-border bg-muted/70 transition hover:border-foreground/30 focus:outline-none focus:ring-2 focus:ring-ring"
+              className="block cursor-zoom-in overflow-hidden rounded-lg border border-border bg-muted/70 transition hover:border-foreground/30 focus:outline-none focus:ring-2 focus:ring-ring"
               onClick={() => setPreview(attachment)}
+              aria-haspopup="dialog"
               aria-label={t("chat.imagePreview")}
               title={attachment.name}
             >
-              <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-cover transition group-hover/image:scale-[1.02]" />
+              <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-contain" />
             </button>
           </div>
         ))}
       </div>
       {preview?.dataUrl ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("chat.imagePreview")}
-          onClick={() => setPreview(null)}
-        >
-          <div className="relative flex max-h-full max-w-full items-center justify-center" onClick={(event) => event.stopPropagation()}>
-            <button
-              ref={closeButtonRef}
-              type="button"
-              className="fixed right-5 top-5 z-10 rounded-full bg-black/70 p-2 text-white transition hover:bg-black focus:outline-none focus:ring-2 focus:ring-white/80"
-              onClick={() => setPreview(null)}
-              aria-label={closeLabel}
-              title={closeLabel}
-            >
-              <X className="h-4 w-4" />
-            </button>
-            <img src={preview.dataUrl} alt={preview.name} className="max-h-[82vh] max-w-[86vw] rounded-xl object-contain shadow-panel" />
-          </div>
-        </div>
+        <ChatImagePreview src={preview.dataUrl} alt={preview.name} onClose={() => setPreview(null)} />
       ) : null}
     </>
   );

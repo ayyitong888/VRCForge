@@ -874,6 +874,8 @@
     "imagePreview": "画像プレビュー",
     "imageUnavailable": "画像を利用できません",
     "closeImagePreview": "画像プレビューを閉じる",
+    "zoomIn": "拡大",
+    "zoomOut": "縮小",
     "contextMeterUsed": "{{value}} 使用済み",
     "contextMeterPercentUsed": "{{percent}}% 使用済み",
     "contextMeterTokenDetail": "使用済み {{used}}、合計 {{limit}}",

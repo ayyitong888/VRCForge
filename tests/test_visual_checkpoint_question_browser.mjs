@@ -23,7 +23,8 @@ function Fixture() {
     React.createElement("output", { "data-answer": true }, answer ? JSON.stringify(answer) : ""),
     React.createElement("output", { "data-reply-question": true }, replyQuestionId),
     React.createElement(AgentQuestionCard, { questions: [question], onAnswerQuestion, onReplyInChat: setReplyQuestionId,
-      capturePreviewsForQuestion: () => [{ resourceUri: "vrcforge://scene-capture-preview/8d886299-9be1-4baf-8e1f-e205f3a8e5fc?context=runtime%3Asession-fixture", label: "front", sessionId: "session-fixture" }] }),
+      capturePreviewsForQuestion: () => [{ resourceUri: "vrcforge://scene-capture-preview/8d886299-9be1-4baf-8e1f-e205f3a8e5fc?context=runtime%3Asession-fixture&revision=1&store=11111111111111111111111111111111", label: "front", sessionId: "session-fixture" }],
+      resourceImageContextForQuestion: () => ({ endpoint: location.origin, chatId: "fixture", sessionId: "session-fixture", clientTurnId: "turn-fixture" }) }),
   );
 }
 createRoot(document.getElementById("root")).render(React.createElement(Fixture));
@@ -37,7 +38,7 @@ await build({
     plugin.onLoad({ filter: /.*/, namespace: "checkpoint" }, (args) => ({
       contents: args.path === "translation"
         ? 'export const useTranslation=()=>({t:(key,fallback)=>({"questionCard.visualCheckpoint.options.pass":"Pass","questionCard.visualCheckpoint.options.fail":"Fail","questionCard.visualCheckpoint.options.uncertain":"Uncertain","questionCard.visualCheckpoint.options.later":"Later","questionCard.visualCheckpoint.notePlaceholder":"Optional visual-checkpoint note...","questionCard.customPlaceholder":"Type another answer...","chat.send":"Send","questionCard.skip":"Skip","questionCard.skipAnswer":"Skipped","questionCard.replyInChat":"Reply in chat"}[key]||fallback||key)});'
-        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null;',
+        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null; export const Minus=()=>null; export const Plus=()=>null;',
       loader: "js",
     }));
   } }],
@@ -51,8 +52,24 @@ let browser;
 try {
   browser = await chromium.launch({ headless: true, channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge" });
   const page = await browser.newPage();
+  await page.clock.install();
+  await page.route("**/api/app/agent/resource-image", async (route) => {
+    const { uri } = route.request().postDataJSON();
+    await route.fulfill({ json: {
+      uri, mimeType: "image/png", sha256: "a".repeat(64),
+      pngBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5foAAAAASUVORK5CYII=",
+    } });
+  });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   assert.equal(await page.locator("[data-question-capture-previews]").count(), 1, "question card exposes the related capture preview");
+  await page.locator("[data-question-capture-previews] button").click({ timeout: 2500 });
+  const preview = page.getByRole("dialog");
+  await preview.getByRole("img", { name: "front" }).waitFor();
+  await page.clock.fastForward(31_000);
+  assert.equal(await preview.count(), 1, "the question stays open while the user inspects an image");
+  assert.equal(await page.locator("[data-answer]").textContent(), "", "previewing a capture never answers the question");
+  await preview.getByRole("button", { name: "chat.closeImagePreview" }).click();
+  await preview.waitFor({ state: "detached" });
   assert.equal(await page.getByText("Recommended", { exact: true }).count(), 0, "visual checkpoints do not recommend Pass");
   const input = page.getByPlaceholder("Type another answer...");
   assert.equal(await input.count(), 1, "visual checkpoints share the compact text reply row");

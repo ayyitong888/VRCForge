@@ -875,6 +875,8 @@
     "imagePreview": "图片预览",
     "imageUnavailable": "图片暂不可用",
     "closeImagePreview": "关闭图片预览",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
     "contextMeterUsed": "已用 {{value}}",
     "contextMeterPercentUsed": "{{percent}}% 已用",
     "contextMeterTokenDetail": "已用 {{used}} 标记，共 {{limit}}",

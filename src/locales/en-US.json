@@ -875,6 +875,8 @@
     "imagePreview": "Image preview",
     "imageUnavailable": "Image unavailable",
     "closeImagePreview": "Close image preview",
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
     "contextMeterUsed": "{{value}} used",
     "contextMeterPercentUsed": "{{percent}}% used",
     "contextMeterTokenDetail": "Used {{used}}, total {{limit}}",

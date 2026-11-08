@@ -4,7 +4,8 @@ import { useTranslation } from "react-i18next";
 import type { AgentQuestion } from "../../lib/api";
 import { cn, formatCount } from "../../lib/utils";
 import { questionContinuationDisplay } from "../../hooks/use-runtime-turn-continuation";
-import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
+import { ChatCaptureThumbnail, ChatResourceImageContext } from "./chat-markdown";
+import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 import type { ChatResourceImageContext as ChatResourceImageContextValue } from "../../lib/api/chat-resource-image";
 import type { QuestionCapturePreview } from "../../lib/chat-timeline-presentation";
 
@@ -34,6 +35,7 @@ export function AgentQuestionCard({
   const [busyChoice, setBusyChoice] = useState("");
   const [editing, setEditing] = useState(false);
   const [collapsedQuestionId, setCollapsedQuestionId] = useState("");
+  const [capturePreview, setCapturePreview] = useState<(ChatImageSource & { questionId: string }) | null>(null);
   const submittingRef = useRef(false);
   const [questionErrors, setQuestionErrors] = useState<Record<string, string>>({});
   const [retryAnswers, setRetryAnswers] = useState<Record<string, { optionId: string; value: string }>>({});
@@ -43,11 +45,12 @@ export function AgentQuestionCard({
   }, [pendingQuestions.length]);
 
   const question = pendingQuestions[index];
+  const activeCapturePreview = capturePreview?.questionId === question?.questionId ? capturePreview : null;
   useEffect(() => {
-    if (!question || busyChoice || editing) return undefined;
+    if (!question || busyChoice || editing || activeCapturePreview) return undefined;
     const timer = window.setTimeout(() => setCollapsedQuestionId(question.questionId), 30_000);
     return () => window.clearTimeout(timer);
-  }, [question?.questionId, busyChoice, editing]);
+  }, [question?.questionId, busyChoice, editing, activeCapturePreview]);
   if (!question) {
     return null;
   }
@@ -149,12 +152,13 @@ export function AgentQuestionCard({
       {!continuationActive && !continuationSettled && capturePreviews.length ? (
         <div className="mb-3 flex gap-2 overflow-x-auto" data-question-capture-previews>
           {capturePreviews.map((capture) => (
-            <div key={capture.resourceUri} className="w-40 shrink-0 rounded-md border border-border p-1 [&_.chat-markdown]:leading-none">
-              <ChatMarkdown text={`![${capture.label || t("chat.imagePreview")}](${capture.resourceUri})`} />
+            <div key={capture.resourceUri} className="w-40 shrink-0">
+              <ChatCaptureThumbnail uri={capture.resourceUri} alt={capture.label} className="h-36" onOpen={(image) => setCapturePreview({ ...image, questionId: question.questionId })} />
             </div>
           ))}
         </div>
       ) : null}
+      {activeCapturePreview ? <ChatImagePreview {...activeCapturePreview} onClose={() => setCapturePreview(null)} /> : null}
 
       {continuationActive || continuationSettled ? (
         <div className="mb-3 flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-2.5 py-2 text-xs" role="status">
