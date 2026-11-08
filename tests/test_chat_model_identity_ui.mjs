@@ -27,11 +27,7 @@ mustNotContain(composer, "�", "composer source must not contain replacement ch
 mustNotContain(composer, "��", "composer source must not contain mojibake separators");
 mustContain(composer, 'source: "unavailable" as const', "composer keeps an unavailable context meter when runtime usage is absent");
 mustContain(composer, 'data-context-percent={knownRatio ? String(percent) : "unknown"}', "unknown usage is not rendered as fake zero percent");
-mustContain(composer, "data-context-ring", "context usage uses the compact circular meter");
-mustContain(composer, 'className="stroke-border"', "context usage keeps a visible continuous base ring");
-mustNotContain(composer, 'strokeDasharray="4 5"', "unknown context usage must not render as a dashed ring");
-mustContain(composer, 'percent >= 90 ? "stroke-destructive" : percent >= 60 ? "stroke-amber-500" : "stroke-primary"', "context ring preserves the 60 and 90 percent color thresholds");
-mustContain(composer, 'data-context-segment={percent >= 90 ? "high" : percent >= 60 ? "medium" : "low"}', "context ring preserves semantic color segments");
+
 
 mustNotContain(card, 'displayPlanner("llm")', "streaming/agent cards should not impersonate default planner");
 mustContain(card, "const runtimeModelLabel = formatRuntimeModelLine(item.providerLabel, item.model);", "streaming card now uses runtime model formatter");

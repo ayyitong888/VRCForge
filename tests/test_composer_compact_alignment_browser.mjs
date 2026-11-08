@@ -17,7 +17,9 @@ const bundle = await build({
     import { initializeI18n } from "./src/i18n";
     function Fixture() {
       const [input, setInput] = useState("");
-      return <Composer input={input} setInput={setInput} sending={false} questionPromptVisible
+      const [questionPromptVisible, setQuestionPromptVisible] = useState(true);
+      window.setQuestionPromptVisible = setQuestionPromptVisible;
+      return <Composer input={input} setInput={setInput} sending={false} questionPromptVisible={questionPromptVisible}
         providerLabel="ChatGPT" model="gpt-6.1-sol" onSubmit={() => {}} onSwitchMode={() => {}} />;
     }
     void initializeI18n().then(() => createRoot(document.getElementById("root")).render(<Fixture />));
@@ -62,7 +64,18 @@ try {
   await input.fill("First line\nSecond line");
   const twoLines = await assertCentered("two-line draft");
   assert.equal(twoLines.height, oneLine.height + twoLines.lineHeight, "the textarea still grows by one line");
-  console.log("compact question composer centers placeholder and drafts with its controls");
+  await input.fill("");
+  await page.evaluate(() => window.setQuestionPromptVisible(false));
+  const regularHeight = () => input.evaluate((element) => element.offsetHeight);
+  await page.waitForFunction(() => !document.querySelector("textarea").className.includes("row-start-1"));
+  assert.equal(await regularHeight(), oneLine.height, "an empty ordinary composer uses one line");
+  await input.fill("First line\nSecond line");
+  assert.equal(await regularHeight(), twoLines.height, "ordinary drafts grow with their contents");
+  await input.fill(Array.from({ length: 30 }, () => "Long draft").join("\n"));
+  assert.equal(await regularHeight(), 128, "ordinary composer stops growing and scrolls");
+  await input.fill("");
+  assert.equal(await regularHeight(), oneLine.height, "clearing a draft restores the compact height");
+  console.log("question and ordinary composers fit their drafts and keep compact empty states");
 } finally {
   await browser.close();
 }

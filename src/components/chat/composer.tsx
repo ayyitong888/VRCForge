@@ -132,15 +132,10 @@ export function Composer({
   useEffect(() => {
     const textarea = inputRef.current;
     if (!textarea) return;
-    if (!questionPromptVisible) {
-      textarea.style.height = "";
-      textarea.style.overflowY = "";
-      return;
-    }
     textarea.style.height = "28px";
-    const nextHeight = Math.min(128, Math.max(28, textarea.scrollHeight));
-    textarea.style.height = `${nextHeight}px`;
-    textarea.style.overflowY = textarea.scrollHeight > 128 ? "auto" : "hidden";
+    const contentHeight = textarea.scrollHeight;
+    textarea.style.height = `${Math.min(128, Math.max(28, contentHeight))}px`;
+    textarea.style.overflowY = contentHeight > 128 ? "auto" : "hidden";
   }, [input, questionPromptVisible]);
   useEffect(() => {
     if (focusInput) {
@@ -318,7 +313,7 @@ export function Composer({
       onDrop={handleDrop}
       onPaste={handlePaste}
       data-vrcforge-composer-dropzone
-      className={cn("relative chat-composer-shell", questionPromptVisible && "rounded-2xl", dragActive && "ring-2 ring-primary/35")}
+      className={cn("relative chat-composer-shell shadow-none", questionPromptVisible && "rounded-2xl", dragActive && "ring-2 ring-primary/35")}
     >
       {paletteOpen ? (
         <div className="absolute bottom-full left-0 right-0 z-30 mb-2 max-h-72 overflow-y-auto rounded-xl border border-border bg-card p-1 shadow-panel" data-composer-command-palette>
@@ -364,7 +359,7 @@ export function Composer({
         "transition-colors",
         questionPromptVisible ? "grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto_auto] items-center gap-1 rounded-2xl border-0 bg-transparent p-1" : "chat-composer-frame",
         !questionPromptVisible && (dragActive ? "border-primary/50 bg-primary/5" : "border-border"),
-        !questionPromptVisible && (compact ? "p-3" : "p-4"),
+        !questionPromptVisible && (compact ? "px-2.5 py-2" : "px-3 py-2.5"),
       )}>
         {selectedTextAttachments.length ? (
           <div className={questionPromptVisible ? "col-span-full row-start-2" : ""}>
@@ -380,9 +375,9 @@ export function Composer({
           onChange={(event) => { setPaletteDismissed(false); setInput(event.target.value); }}
           className={cn(
             "app-scrollbar w-full resize-none bg-transparent px-1 outline-none placeholder:text-muted-foreground",
-            questionPromptVisible ? "col-start-2 row-start-1 min-h-[28px] max-h-32 min-w-0 flex-1 py-1 text-sm" : "min-h-[76px] text-base",
+            questionPromptVisible ? "col-start-2 row-start-1 min-h-[28px] max-h-32 min-w-0 flex-1 py-1 text-sm" : "min-h-7 max-h-32 py-1 text-sm",
           )}
-          rows={questionPromptVisible ? 1 : undefined}
+          rows={1}
           placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
           disabled={Boolean(disabledReason)}
           onKeyDown={(event) => {
@@ -438,7 +433,7 @@ export function Composer({
         ) : null}
         <div className={cn(
           "min-w-0 items-center",
-          questionPromptVisible ? "contents" : "mt-3 grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 xl:grid-cols-[auto_minmax(0,1fr)_auto]",
+          questionPromptVisible ? "contents" : "mt-1.5 grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 xl:grid-cols-[auto_minmax(0,1fr)_auto]",
         )}>
           <div className={cn(
             "flex min-w-0 items-center gap-2",
@@ -611,7 +606,7 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
   const estimated = usage.source === "compaction_estimate";
   const knownRatio = usage.limitKnown && (usage.exact || estimated);
   const percent = knownRatio ? Math.round(Math.min(1, Math.max(0, usage.ratio)) * 100) : 0;
-  const strokeColorClass = percent >= 90 ? "stroke-destructive" : percent >= 60 ? "stroke-amber-500" : "stroke-primary";
+  const usageTone = !knownRatio ? "unknown" : percent >= 90 ? "high" : percent >= 60 ? "medium" : "low";
   const tooltipTitle = estimated
     ? knownRatio ? i18n.t("chat.contextMeterEstimatedPercent", { percent }) : usage.label
     : usage.cached
@@ -634,40 +629,20 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
   const accessibleLabel = [tooltipTitle, tooltipDetail, cacheDetail].filter(Boolean).join("\n");
   return (
     <div
-      className={cn("group relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full", className)}
+      className={cn("group relative flex h-8 min-w-9 shrink-0 items-center justify-center rounded-md px-1 text-xs tabular-nums text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", className)}
       tabIndex={0}
       aria-label={accessibleLabel}
       data-context-meter="true"
       data-context-percent={knownRatio ? String(percent) : "unknown"}
     >
-      <svg className="h-6 w-6 -rotate-90" viewBox="0 0 24 24" aria-hidden="true" data-context-ring>
-        <circle cx="12" cy="12" r="9" fill="none" strokeWidth="2.5" className="stroke-border" />
-        {knownRatio ? (
-          <circle
-            cx="12"
-            cy="12"
-            r="9"
-            pathLength="100"
-            fill="none"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeDasharray={`${percent} 100`}
-            className={cn("transition-[stroke-dasharray,stroke] duration-500", strokeColorClass)}
-            data-context-segment={percent >= 90 ? "high" : percent >= 60 ? "medium" : "low"}
-          />
-        ) : (
-          <circle
-            cx="12"
-            cy="12"
-            r="9"
-            pathLength="100"
-            fill="none"
-            strokeWidth="2.5"
-            className="stroke-muted-foreground/45"
-            data-context-segment="unknown"
-          />
-        )}
-      </svg>
+      <span
+        aria-hidden="true"
+        className={cn(usageTone === "high" && "text-destructive", usageTone === "medium" && "text-amber-700 dark:text-amber-400")}
+        data-context-segment={usageTone}
+        data-context-value
+      >
+        {knownRatio ? `${estimated ? "≈" : ""}${percent}%` : "—"}
+      </span>
       <div className="pointer-events-none absolute bottom-full left-1/2 z-40 mb-2 hidden w-52 -translate-x-1/2 rounded-lg border border-border bg-card px-3 py-2 text-center text-xs text-foreground shadow-panel group-hover:block group-focus:block">
         <div className="font-medium">{i18n.t("chat.contextMeterTitle")}</div>
         <div className="mt-1 text-muted-foreground">{tooltipTitle}</div>

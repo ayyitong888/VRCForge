@@ -53,15 +53,6 @@ assert.match(composer, /break-words/);
 assert.match(composer, /xl:whitespace-nowrap/);
 assert.doesNotMatch(composer, /providerModelLabel[\s\S]{0,220}truncate/);
 
-// Context usage is one continuous ring. Known usage overlays a coloured arc
-// on a complete base circle; unknown usage is a complete solid neutral ring.
-assert.match(composer, /data-context-ring/);
-assert.match(composer, /className="stroke-border"/);
-assert.match(composer, /percent >= 90 \? "stroke-destructive" : percent >= 60 \? "stroke-amber-500" : "stroke-primary"/);
-assert.match(composer, /strokeDasharray=\{`\$\{percent\} 100`\}/);
-assert.match(composer, /data-context-segment="unknown"/);
-assert.doesNotMatch(composer, /strokeDasharray="[^\"]+"[\s\S]{0,180}data-context-segment="unknown"/);
-
 // General projects follow the compact Cowork hierarchy; Unity keeps its
 // environment-specific surface.
 assert.match(workbench, /title=\{isUnityProject \? t\("workspace\.todo"\) : t\("workspace\.progress"\)\}/);
