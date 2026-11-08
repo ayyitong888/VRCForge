@@ -336,7 +336,7 @@ export function ChatGptOAuthSettings({
   }
 
   return (
-    <section className="rounded-2xl border border-border bg-card p-5 shadow-composer" data-chatgpt-oauth-panel>
+    <section className="rounded-xl border border-border bg-card p-4" data-chatgpt-oauth-panel>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <div className="min-w-0 flex-1 basis-40">
           <h3 className="truncate text-sm font-semibold leading-5 tracking-normal text-foreground">{t("chatgptOAuth.title")}</h3>

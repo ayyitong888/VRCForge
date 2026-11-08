@@ -330,6 +330,7 @@
     "desktopActionRecorded": "{{action}} を記録しました: {{status}}。"
   },
   "settings": {
+    "visionUsesChatModel": "チャットモデルを使用",
     "checkpointArchiveCapacity": "バックアップ容量",
     "checkpointArchiveAtLimit": "上限に到達",
     "checkpointArchiveOverLimit": "上限を超過",

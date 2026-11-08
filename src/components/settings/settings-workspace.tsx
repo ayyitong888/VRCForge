@@ -1,7 +1,7 @@
 import { version as appVersion } from "../../../package.json";
-import { Check, Eye, Globe, Loader2, RefreshCw, Settings2 } from "lucide-react";
+import { Check, ChevronDown, Eye, Globe, Loader2, RefreshCw } from "lucide-react";
 import type { FormEvent } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SUPPORTED_LOCALES } from "../../i18n";
 import type { SettingsSection } from "../../lib/app-view";
@@ -251,7 +251,9 @@ export function SettingsWorkspace({
   onSaveNotes,
 }: SettingsWorkspaceProps) {
   const { t } = useTranslation();
-  const [showChatGptProviderPicker, setShowChatGptProviderPicker] = useState(false);
+  const [providerPanel, setProviderPanel] = useState<"subscription" | "api" | null>(null);
+  const visibleProvider = providerPanel ?? (apiProvider === "chatgpt" ? "subscription" : "api");
+  useEffect(() => setProviderPanel(null), [apiProvider]);
   const currentPermissionVisual = permissionVisualState(permission);
   const visionKeySaved = hasSavedProviderKey(visionProvider, visionConfig);
   const visibleSection: SettingsSection = activeSection === "developer" && !developerOptionsEnabled ? "general" : activeSection;
@@ -426,104 +428,109 @@ export function SettingsWorkspace({
 
         {visibleSection === "models" ? (
         <section className="pb-6">
-          <h2 className="text-base font-semibold">{t("settings.modelProvider")}</h2>
+          <h1 className="text-xl font-semibold text-foreground">{t("settings.modelProvider")}</h1>
           <p className="mt-1 text-sm text-muted-foreground">{t("settings.providerDesc")}</p>
           {providerConfigurationLocked ? <p role="status" className="mt-2 text-sm text-muted-foreground">{t("provider.runtimeConfigLocked")}</p> : null}
-          <fieldset disabled={providerConfigurationLocked} className="min-w-0 disabled:opacity-60">
-          <div data-onboarding-provider={apiProvider === "chatgpt" ? "connection" : undefined}>
-          <div className="mt-4">
-            <ChatGptOAuthSettings
-              endpoint={endpoint}
-              runtimeConnected={runtimeConnected}
-              apiProvider={apiProvider}
-              apiModel={apiModel}
-              savingApiConfig={savingApiConfig}
-              testingProvider={testingProvider}
-              providerTestMessage={providerTestMessage}
-              providerTestPassed={providerTestPassed}
-              developerOptionsEnabled={developerOptionsEnabled}
-              onTestProvider={onProviderTest}
-              onProviderConfigChanged={onProviderConfigChanged}
-            />
-          </div>
-          <div className="mt-4">
-            {apiProvider === "chatgpt" && !showChatGptProviderPicker ? (
-              <Button type="button" variant="outline" onClick={() => setShowChatGptProviderPicker(true)}>
-                <Settings2 className="h-4 w-4" />
-                {t("chatgptOAuth.chooseApiProvider")}
+          <div className="mt-4 flex w-fit max-w-full flex-wrap gap-1 rounded-lg border border-border bg-muted/40 p-1" role="group" aria-label={t("settings.modelProvider")}>
+            {(["subscription", "api"] as const).map((panel) => (
+              <Button
+                key={panel}
+                type="button"
+                variant="ghost"
+                aria-pressed={visibleProvider === panel}
+                aria-controls={panel === "subscription" ? "subscription-model-settings" : "api-model-settings"}
+                onClick={() => setProviderPanel(panel)}
+                className={cn("h-auto min-h-9 min-w-0 whitespace-normal px-3 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", visibleProvider === panel && "bg-card text-primary shadow-sm hover:bg-card")}
+              >
+                {t(panel === "subscription" ? "chatgptOAuth.title" : "provider.apiProvider")}
               </Button>
-            ) : (
-              <ProviderSetup
-                provider={apiProvider}
-                apiKey={apiKey}
-                baseUrl={apiBaseUrl}
-                model={apiModel}
-                apiType={apiType}
-                contextWindow={apiContextWindow}
-                modelCapabilities={selectedModelCapabilities}
-                capabilitySource={selectedModelCapabilitySource}
-                thinkingLevel={apiThinkingLevel}
-                reasoningVariants={reasoningVariants}
-                saving={savingApiConfig}
-                models={modelOptions}
-                loadingModels={loadingModels}
-                modelsError={modelsError}
+            ))}
+          </div>
+          <fieldset disabled={providerConfigurationLocked} className="mt-4 min-w-0 disabled:opacity-60">
+            <div id="subscription-model-settings" hidden={visibleProvider !== "subscription"}
+              data-onboarding-provider={visibleProvider === "subscription" && apiProvider === "chatgpt" ? "connection" : undefined}>
+              <ChatGptOAuthSettings
+                endpoint={endpoint}
+                runtimeConnected={runtimeConnected}
+                apiProvider={apiProvider}
+                apiModel={apiModel}
+                savingApiConfig={savingApiConfig}
                 testingProvider={testingProvider}
                 providerTestMessage={providerTestMessage}
-                runtimeConnected={runtimeConnected}
-                keySaved={apiKeySaved}
-                providerPickerOnly={apiProvider === "chatgpt"}
-                onLoadModels={onLoadModels}
+                providerTestPassed={providerTestPassed}
+                developerOptionsEnabled={developerOptionsEnabled}
                 onTestProvider={onProviderTest}
-                onProviderChange={(value) => {
-                  onProviderChange(value);
-                  setShowChatGptProviderPicker(value === "chatgpt");
-                }}
-                onApiKeyChange={onApiKeyChange}
-                onBaseUrlChange={onApiBaseUrlChange}
-                onModelChange={onApiModelChange}
-                onProtocolAutoNegotiationChange={onProtocolAutoNegotiationChange}
-                onApiTypeChange={onApiTypeChange}
-                onContextWindowChange={onApiContextWindowChange}
-                onThinkingLevelChange={onApiThinkingLevelChange}
-                onSubmit={onSaveApiProvider}
+                onProviderConfigChanged={onProviderConfigChanged}
               />
-            )}
-          </div>
-          </div>
+            </div>
+            <div id="api-model-settings" hidden={visibleProvider !== "api"}>
+              {visibleProvider === "api" ? (
+                <ProviderSetup
+                  provider={apiProvider}
+                  apiKey={apiKey}
+                  baseUrl={apiBaseUrl}
+                  model={apiModel}
+                  apiType={apiType}
+                  contextWindow={apiContextWindow}
+                  modelCapabilities={selectedModelCapabilities}
+                  capabilitySource={selectedModelCapabilitySource}
+                  thinkingLevel={apiThinkingLevel}
+                  reasoningVariants={reasoningVariants}
+                  saving={savingApiConfig}
+                  models={modelOptions}
+                  loadingModels={loadingModels}
+                  modelsError={modelsError}
+                  testingProvider={testingProvider}
+                  providerTestMessage={providerTestMessage}
+                  runtimeConnected={runtimeConnected}
+                  keySaved={apiKeySaved}
+                  providerPickerOnly={apiProvider === "chatgpt"}
+                  onLoadModels={onLoadModels}
+                  onTestProvider={onProviderTest}
+                  onProviderChange={onProviderChange}
+                  onApiKeyChange={onApiKeyChange}
+                  onBaseUrlChange={onApiBaseUrlChange}
+                  onModelChange={onApiModelChange}
+                  onProtocolAutoNegotiationChange={onProtocolAutoNegotiationChange}
+                  onApiTypeChange={onApiTypeChange}
+                  onContextWindowChange={onApiContextWindowChange}
+                  onThinkingLevelChange={onApiThinkingLevelChange}
+                  onSubmit={onSaveApiProvider}
+                />
+              ) : null}
+            </div>
           </fieldset>
-          <div className="mt-10 flex min-w-0 items-center gap-2">
-            <h2 className="text-base font-semibold">
-              <Eye className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
-              {t("settings.visionProfile")}
-            </h2>
-            {visionConfig?.configured ? (
-              <Badge tone={visionConfig.enabled ? "ok" : "muted"} className="shrink-0">
-                {visionConfig.enabled ? t("vision.statusActive") : t("vision.statusDisabled")}
+          <details className="group mt-6 rounded-xl border border-border bg-card px-4">
+            <summary className="flex min-w-0 cursor-pointer list-none flex-wrap items-center gap-2 rounded-md py-3 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+              <Eye className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <span>{t("settings.visionProfile")}</span>
+              <Badge tone={visionConfig?.configured && visionConfig.enabled ? "ok" : "muted"} className="h-6 shrink-0">
+                {t(visionConfig?.configured && visionConfig.enabled ? "vision.statusActive" : "settings.visionUsesChatModel")}
               </Badge>
-            ) : null}
-          </div>
-          <p className="mt-1 text-sm text-muted-foreground">{t("settings.visionProfileDesc")}</p>
-          <div className="mt-4">
-            <VisionProfileSetup
-              provider={visionProvider}
-              apiKey={visionApiKey}
-              baseUrl={visionBaseUrl}
-              model={visionModel}
-              enabled={visionEnabled}
-              saving={savingVisionConfig}
-              runtimeConnected={runtimeConnected}
-              keySaved={visionKeySaved}
-              configured={Boolean(visionConfig?.configured)}
-              onProviderChange={onVisionProviderChange}
-              onApiKeyChange={onVisionApiKeyChange}
-              onBaseUrlChange={onVisionBaseUrlChange}
-              onModelChange={onVisionModelChange}
-              onEnabledChange={onVisionEnabledChange}
-              onSubmit={onSaveVisionProfile}
-              onClear={onClearVisionProfile}
-            />
-          </div>
+              <ChevronDown className="ml-auto h-4 w-4 shrink-0 text-muted-foreground group-open:rotate-180" aria-hidden="true" />
+            </summary>
+            <div className="border-t border-border py-4">
+              <p className="mb-4 text-sm text-muted-foreground">{t("settings.visionProfileDesc")}</p>
+              <VisionProfileSetup
+                provider={visionProvider}
+                apiKey={visionApiKey}
+                baseUrl={visionBaseUrl}
+                model={visionModel}
+                enabled={visionEnabled}
+                saving={savingVisionConfig}
+                runtimeConnected={runtimeConnected}
+                keySaved={visionKeySaved}
+                configured={Boolean(visionConfig?.configured)}
+                onProviderChange={onVisionProviderChange}
+                onApiKeyChange={onVisionApiKeyChange}
+                onBaseUrlChange={onVisionBaseUrlChange}
+                onModelChange={onVisionModelChange}
+                onEnabledChange={onVisionEnabledChange}
+                onSubmit={onSaveVisionProfile}
+                onClear={onClearVisionProfile}
+              />
+            </div>
+          </details>
         </section>
         ) : null}
 

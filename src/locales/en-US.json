@@ -330,6 +330,7 @@
     "desktopActionRecorded": "{{action}} recorded ({{status}})."
   },
   "settings": {
+    "visionUsesChatModel": "Uses chat model",
     "checkpointArchiveCapacity": "Backup capacity",
     "checkpointArchiveAtLimit": "At limit",
     "checkpointArchiveOverLimit": "Over limit",

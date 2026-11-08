@@ -330,6 +330,7 @@
     "desktopActionRecorded": "{{action}} 已記錄：{{status}}。"
   },
   "settings": {
+    "visionUsesChatModel": "使用對話模型",
     "checkpointArchiveCapacity": "備份容量",
     "checkpointArchiveAtLimit": "已達上限",
     "checkpointArchiveOverLimit": "已超過上限",

@@ -132,7 +132,7 @@ export function ProviderSetup({
 
   if (providerPickerOnly) {
     return (
-      <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+      <div className="rounded-xl border border-border bg-card p-4">
         <SettingsFieldLabel label={i18n.t("provider.apiProvider")} heading onboardingTarget="connection">
           <select
             value={provider}
@@ -155,7 +155,7 @@ export function ProviderSetup({
   }
 
   return (
-    <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+    <form onSubmit={onSubmit} className="rounded-xl border border-border bg-card p-4">
       <div className="grid gap-4">
         <SettingsFieldLabel label={i18n.t("provider.apiProvider")} heading onboardingTarget="connection">
           <select
@@ -403,7 +403,7 @@ export function VisionProfileSetup({
     !runtimeConnected || saving || Boolean(enabled && provider && (!model.trim() || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved)));
 
   return (
-    <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+    <form onSubmit={onSubmit} className="rounded-xl border border-border bg-card p-4">
       <div className="grid gap-4">
         <label className="flex cursor-pointer items-start gap-2 text-sm">
           <input
