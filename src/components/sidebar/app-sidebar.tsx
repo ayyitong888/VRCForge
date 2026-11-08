@@ -6,7 +6,6 @@ import {
   Bug,
   Database,
   FolderPlus,
-  Gauge,
   History,
   ListFilter,
   MessageSquare,
@@ -62,7 +61,6 @@ type AppSidebarProps = {
   onNewTemporaryChat: () => void;
   onOpenProjectPicker: () => void;
   onOpenDoctor: () => void;
-  onOpenOptimization: () => void;
   onOpenProtection: () => void;
   onOpenSkills: () => void;
   onOpenCheckpoints: () => void;
@@ -110,7 +108,6 @@ export function AppSidebar({
   onNewTemporaryChat,
   onOpenProjectPicker,
   onOpenDoctor,
-  onOpenOptimization,
   onOpenProtection,
   onOpenSkills,
   onOpenCheckpoints,
@@ -202,7 +199,6 @@ export function AppSidebar({
         />
         <SidebarNavButton icon={<FolderPlus className="h-4 w-4 shrink-0" />} label={t("sidebar.newProject")} onClick={onOpenProjectPicker} />
         <SidebarNavButton icon={<Shield className="h-4 w-4 shrink-0" />} label={t("sidebar.doctor")} active={activeView === "doctor"} onClick={onOpenDoctor} />
-        <SidebarNavButton icon={<Gauge className="h-4 w-4 shrink-0" />} label={t("sidebar.optimization")} active={activeView === "optimization"} onClick={onOpenOptimization} />
         <SidebarNavButton icon={<Shield className="h-4 w-4 shrink-0" />} label={t("encryption.protection")} active={activeView === "protection"} onClick={onOpenProtection} />
         <SidebarNavButton
           icon={<Wrench className="h-4 w-4 shrink-0" />}

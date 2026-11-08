@@ -41,7 +41,7 @@ Download the matching files from [GitHub Releases](https://github.com/ayyitong88
 | Tool Registry v1 | Standard tool metadata exposed to desktop, MCP/gateway, and CLI surfaces | Available |
 | CLI diagnostics and readiness | Packaged `vrcforge` CLI covers doctor, provider test, Unity/project/avatar scans, validation, Build/Test readiness, checkpoints, skill/tool registry, and request-based apply/rollback | Available |
 | Full Validator and Build/Test readiness | `vrcforge.validation.v1` plus Build/Test readiness gates for compile, SDK/plugin/package, expression, animator, material, performance, and generated-residue findings | Available |
-| Model Optimization Planner | Read-only optimization dashboard, baseline scan, target profiles, dependency doctor, VRAM/material/mesh/parameter audits, and step-by-step plan output | Available |
+| Model Optimization Planner | Read-only optimization planning, baseline scan, target profiles, dependency doctor, VRAM/material/mesh/parameter audits, and step-by-step plan output | Available |
 | Optimizer integrations | Planning and guarded apply-request surfaces are available, while live writer and rollback-proof coverage varies by integration; AAO dedicated writers remain deferred, and unsupported VRCFury writes stay blocked until validated | Beta; inspect the integration-specific preview and proof status |
 | Before/after screenshot capture and vision review | 执行前后截图与视觉复核 | 已可用 / Available |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | 已可用 / Available |
@@ -405,7 +405,6 @@ Use locks when you want to keep part of a good result. Locked Blendshapes are hi
 | Parameters | Reviews Expression Parameter usage | 参数 | 查看表达参数占用 |
 | Screenshots | Captures and reviews avatar screenshots | 截图 | 捕获并查看 Avatar 截图 |
 | Checkpoints | Lists pre-write checkpoints and requests restore | Checkpoints | 查看写入前快照并申请回退 |
-| Optimization | Finds expensive Avatar content and prepares a reviewable plan | 优化 | 找出主要性能问题并生成可审查方案 |
 | Protection | Chooses a protection level and previews its impact before approval | 保护 | 选择保护级别并在确认前查看影响 |
 | Skills | Finds, checks, and configures Agent capabilities | 能力 | 查找、检查和配置 Agent 能力 |
 | Connection diagnostics | Shows connection results and failure reasons | 连接诊断 | 显示连接结果和失败原因 |

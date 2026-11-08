@@ -41,7 +41,6 @@ import { LayoutSplitter } from "./components/workspace/layout-splitter";
 import { WorkspaceHeader } from "./components/workspace/workspace-header";
 import { DesktopTitlebar } from "./components/workspace/desktop-titlebar";
 import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
-import { OptimizationWorkspace } from "./components/optimization/optimization-workspace";
 import { ProtectionWorkspace } from "./components/protection/protection-workspace";
 import { ComputerUseActivitySurface } from "./components/runtime/computer-use-activity-surface";
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
@@ -81,7 +80,6 @@ import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
 import { useBackgroundGoalRuns } from "./hooks/use-background-goal-runs";
 import { parseGoalWakeDirective } from "./hooks/use-goal-wake";
 import { useProjectManagement } from "./hooks/use-project-management";
-import { useOptimizationWorkspaceController } from "./hooks/use-optimization-workspace-controller";
 import { useProtectionWorkspaceController } from "./hooks/use-protection-workspace-controller";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
@@ -648,43 +646,6 @@ export default function App() {
     runtimeConnected,
     healthComponents.vrcForgeUnityTools,
   );
-  const {
-    optimizationReport,
-    optimizationTargetProfile,
-    optimizationAvatarPath,
-    optimizationAvatars,
-    loadingOptimizationAvatars,
-    optimizationAvatarMessage,
-    loadingOptimization,
-    optimizationMessage,
-    requestingOptimizationAction,
-    requestingOptimizationDependency,
-    optimizationActionOptions,
-    optimizationProofs,
-    selectedOptimizationProof,
-    loadingOptimizationProofs,
-    optimizationProofMessage,
-    openOptimization,
-    loadOptimizationPlan,
-    loadOptimizationProofs,
-    selectOptimizationProof,
-    loadOptimizationAvatars,
-    setOptimizationAvatarPath,
-    setOptimizationTargetProfile,
-    updateOptimizationActionOption,
-    requestOptimizationAction,
-    requestOptimizationDependencyInstall,
-  } = useOptimizationWorkspaceController({
-    endpoint,
-    runtimeConnected,
-    unityToolsReady: vrcForgeToolsReady,
-    activeView,
-    activeProjectPath,
-    setActiveView,
-    startRuntime,
-    refreshSilently,
-    setError,
-  });
   const {
     protectionPlan,
     protectionProfile,
@@ -4246,7 +4207,6 @@ export default function App() {
             setShowProjectModal(true);
           }}
           onOpenDoctor={() => void openDoctor()}
-          onOpenOptimization={() => void openOptimization()}
           onOpenProtection={() => void openProtection()}
           onOpenSkills={() => void openSkills()}
           onOpenCheckpoints={() => void openCheckpoints()}
@@ -4439,36 +4399,6 @@ export default function App() {
               onRefresh={() => void loadProtectionPlan(endpoint, protectionProfile, true)}
               onRefreshAvatars={() => void loadProtectionAvatars(endpoint, true)}
               onRequestApply={(family) => void requestProtectionApply(family)}
-            />
-          ) : activeView === "optimization" ? (
-            <OptimizationWorkspace
-              report={optimizationReport}
-              proofs={optimizationProofs}
-              selectedProof={selectedOptimizationProof}
-              endpoint={endpoint}
-              permission={permission}
-              selectedProjectPath={activeProjectPath}
-              avatarPath={optimizationAvatarPath}
-              avatars={optimizationAvatars}
-              targetProfile={optimizationTargetProfile}
-              loading={loadingOptimization}
-              loadingProofs={loadingOptimizationProofs}
-              loadingAvatars={loadingOptimizationAvatars}
-              message={optimizationMessage}
-              proofMessage={optimizationProofMessage}
-              avatarMessage={optimizationAvatarMessage}
-              actionOptions={optimizationActionOptions}
-              requestingActionId={requestingOptimizationAction}
-              requestingDependencyId={requestingOptimizationDependency}
-              onAvatarPathChange={setOptimizationAvatarPath}
-              onTargetProfileChange={setOptimizationTargetProfile}
-              onRefresh={() => void loadOptimizationPlan()}
-              onRefreshProofs={() => void loadOptimizationProofs()}
-              onSelectProof={(runId) => void selectOptimizationProof(runId)}
-              onRefreshAvatars={() => void loadOptimizationAvatars()}
-              onActionOptionChange={updateOptimizationActionOption}
-              onRequestAction={(card) => void requestOptimizationAction(card)}
-              onRequestDependency={(dependency) => void requestOptimizationDependencyInstall(dependency)}
             />
           ) : activeView === "settings" ? (
             <SettingsWorkspace

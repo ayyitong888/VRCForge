@@ -32,7 +32,7 @@ const bundle = await build({
       }))};
       const noop=()=>{};
       const callbacks=Object.fromEntries([
-        "onOpenProjectPicker","onOpenDoctor","onOpenOptimization","onOpenProtection",
+        "onOpenProjectPicker","onOpenDoctor","onOpenProtection",
         "onOpenSkills","onOpenCheckpoints","onOpenSettings","onOpenSettingsSection",
         "onBackFromSettings","onRefreshProjects","onProjectMenu","onProjectRenameChange",
         "onProjectRenameCommit","onChatMenu",
@@ -87,6 +87,7 @@ try {
   const read=async()=>JSON.parse(await page.getByTestId("state").textContent());
   await page.getByTestId("state").waitFor();
   assert.equal((await read()).activeChatId,"unity-old");
+  assert.equal(await page.getByRole("button",{name:"Optimization",exact:true}).count(),0);
   for(const type of ["unity","general","unity","general"]){
     const label=type==="unity"?"Unity fixture":"General fixture";
     await page.getByRole("button",{name:label,exact:true}).click();

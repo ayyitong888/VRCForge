@@ -57,9 +57,7 @@ export function WorkspaceHeader({
   const activeTitle =
     activeView === "doctor"
       ? t("sidebar.doctor")
-      : activeView === "optimization"
-        ? t("sidebar.optimization")
-        : activeView === "protection"
+      : activeView === "protection"
           ? t("encryption.protection")
           : activeView === "skills"
             ? t("sidebar.skills")

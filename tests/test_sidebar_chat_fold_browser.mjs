@@ -78,7 +78,7 @@ const bundle = await build({
         </div>;
       }
       const callbacks=Object.fromEntries([
-        "onNewTemporaryChat","onOpenProjectPicker","onOpenDoctor","onOpenOptimization","onOpenProtection",
+        "onNewTemporaryChat","onOpenProjectPicker","onOpenDoctor","onOpenProtection",
         "onOpenSkills","onOpenCheckpoints","onOpenSettings","onOpenSettingsSection",
         "onBackFromSettings","onRefreshProjects","onSelectProject","onToggleProjectCollapse",
         "onReorderProjects","onResetProjectOrder",

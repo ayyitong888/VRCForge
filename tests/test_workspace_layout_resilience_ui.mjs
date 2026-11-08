@@ -4,8 +4,7 @@ import { resolve } from "node:path";
 
 const read = (path) => readFile(resolve(import.meta.dirname, "..", path), "utf8");
 
-const [optimization, protection, skills, contract] = await Promise.all([
-  read("src/components/optimization/optimization-workspace.tsx"),
+const [protection, skills, contract] = await Promise.all([
   read("src/components/protection/protection-workspace.tsx"),
   read("src/components/skills/skills-workspace.tsx"),
   read("docs/PRODUCT_REGRESSION_CONTRACT.md"),
@@ -13,16 +12,6 @@ const [optimization, protection, skills, contract] = await Promise.all([
 
 // These workspaces live between two independently sized sidebars. Their
 // layout must react to the actual center-column width, not the window width.
-assert.match(optimization, /data-vrcforge-optimization-overview/);
-assert.match(optimization, /OPTIMIZATION_OVERVIEW_GRID/);
-assert.match(optimization, /OPTIMIZATION_PROFILE_GRID/);
-assert.match(optimization, /OPTIMIZATION_PROOF_GRID/);
-assert.match(optimization, /OPTIMIZATION_DEPENDENCY_GRID/);
-assert.match(optimization, /OPTIMIZATION_ACTION_GRID/);
-assert.match(optimization, /OPTIMIZATION_PROOF_STAGE_GRID/);
-assert.match(optimization, /function OptimizationProofLine/);
-assert.doesNotMatch(optimization, /(?:sm|md|lg|xl):grid-cols-/);
-
 assert.match(protection, /data-vrcforge-protection-profiles/);
 assert.match(protection, /PROTECTION_PROFILE_GRID/);
 assert.match(protection, /PROTECTION_WORKSPACE_GRID/);
