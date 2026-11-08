@@ -475,7 +475,6 @@ export function buildDurableTimelineRows(
           statusLabel={historicalFailureLabel(calls.map(({ invocation }) => invocation))}
           showStatus={calls.some(({ invocation }) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
-          openByDefault={!options.live}
           scrollable={calls.length > 5}
         >
           {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail, options.onOpenChatById))}
@@ -1394,7 +1393,7 @@ function WorkSegmentRow({
             <span className="min-w-0 truncate text-sm leading-relaxed" data-agent-tool-group-title>{title}</span>
             {summaryMeta ? <span className="min-w-0 truncate text-xs opacity-70">{summaryMeta}</span> : null}
             {showStatus ? <span data-agent-operation-summary-status className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
-            <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
+            <span className="ml-auto shrink-0 opacity-60 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
               {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             </span>
           </>

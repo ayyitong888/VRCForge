@@ -124,13 +124,19 @@ try {
   const title=await group.locator('[data-agent-tool-group-title]').innerText();
   assert.doesNotMatch(title,/Called 2 tools|调用了 2 个工具/,'group heading describes operations rather than only count');
   assert.match(await group.locator('[data-agent-operation-summary-status]').innerText(),/1/,'group preserves failure records while collapsed');
-  assert.equal(await group.locator('button.group\\/run').count(),2,'opening completed work exposes individual tool calls without another group click');
-  await checkTextHover(group.locator('button').first());
+  const toolGroupButton=group.locator('button').first();
+  assert.equal(await toolGroupButton.getAttribute('aria-expanded'),'false','opening completed work leaves the nested tool group folded');
+  assert.equal(await group.locator('[data-agent-process-content]').count(),0,'folded tool groups mount no tool rows');
+  await checkTextHover(toolGroupButton);
+  await toolGroupButton.click();
+  assert.equal(await group.locator('button.group\\/run').count(),2,'clicking the tool group reveals individual calls');
   await checkTextHover(group.locator('button.group\\/run').first());
   await group.locator('button.group\\/run').last().click();
   assert.ok((await group.locator('[data-agent-invocation-output-card]').innerText()).includes('Historical read failure'),'exact error detail stays inspectable');
   await processFold.locator('button').first().click();
   assert.equal(await processFold.locator('button').first().getAttribute('aria-expanded'),'false','terminal turn work summary remains user-collapsible');
+  await summaryButton.click();
+  assert.equal(await toolGroupButton.getAttribute('aria-expanded'),'false','reopening the turn leaves tool details folded again');
   const pending=page.locator('#pending');
   assert.match(await pending.locator('[data-agent-turn-process-title]').innerText(), /Handled in —/, 'missing duration stays explicitly unknown instead of changing the process heading');
   const pendingProcess=pending.locator('[data-agent-turn-process-group]');
@@ -158,6 +164,7 @@ try {
   for (const count of [5,6]) {
     const tools=page.locator('#tool-list-'+count);
     await tools.locator('[data-agent-turn-process-group] button').first().click();
+    await tools.locator('[data-agent-tool-call-group] button').first().click();
     const list=tools.locator('[data-agent-tool-call-group] [data-agent-process-content]');
     const height=await list.evaluate(element=>element.clientHeight);
     const rowGap=await list.evaluate(element=>{
