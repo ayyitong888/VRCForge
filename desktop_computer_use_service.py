@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from agent_browser_service import BrowserService
 from desktop_executor import DesktopController
 from desktop_operations import (
     DESKTOP_INTERACTIVE_OPERATIONS,
@@ -111,6 +112,7 @@ class DesktopComputerUseService:
         self._runtime_computer_use_context = threading.local()
         self._desktop_action_condition = threading.Condition(self._lock)
         self._computer_use_turn_grants: dict[str, dict[str, str]] = {}
+        self.browser = BrowserService()
         self._worker = EmbeddedDesktopWorker(
             self,
             capture_dir,
@@ -127,6 +129,9 @@ class DesktopComputerUseService:
         return self.audit_dir / "desktop-bridges.jsonl"
 
     def configure_paths(self, audit_dir: Path) -> None:
+        if self.audit_dir != audit_dir:
+            self.browser.close()
+            self.browser = BrowserService()
         with self._lock:
             self.audit_dir = audit_dir
             self.capture_dir = audit_dir / "desktop-captures"
@@ -171,7 +176,10 @@ class DesktopComputerUseService:
         return ""
 
     @contextmanager
-    def runtime_turn_context(self, params: dict[str, Any]) -> Iterator[None]:
+    def runtime_turn_context(
+        self, params: dict[str, Any], *, browser_requested: bool = False, browser_parent_turn_id: str = "",
+        browser_adult_confirmed: bool = False, browser_click_target: str = "", browser_click_approved: bool = False,
+    ) -> Iterator[None]:
         context = self._runtime_computer_use_context
         previous = {
             "enabled": bool(getattr(context, "enabled", False)),
@@ -181,6 +189,11 @@ class DesktopComputerUseService:
             "turn_id": str(getattr(context, "turn_id", "")),
             "client_turn_id": str(getattr(context, "client_turn_id", "")),
             "project_root": str(getattr(context, "project_root", "")),
+            "browser_requested": bool(getattr(context, "browser_requested", False)),
+            "browser_parent_turn_id": str(getattr(context, "browser_parent_turn_id", "")),
+            "browser_adult_confirmed": bool(getattr(context, "browser_adult_confirmed", False)),
+            "browser_click_target": str(getattr(context, "browser_click_target", "")),
+            "browser_click_approved": bool(getattr(context, "browser_click_approved", False)),
         }
         computer_use_requested = bool(params.get("_computerUseRequested"))
         if computer_use_requested:
@@ -196,6 +209,11 @@ class DesktopComputerUseService:
                 ),
             )
         context.enabled = computer_use_requested
+        context.browser_requested = browser_requested
+        context.browser_parent_turn_id = browser_parent_turn_id
+        context.browser_adult_confirmed = browser_adult_confirmed
+        context.browser_click_target = browser_click_target
+        context.browser_click_approved = browser_click_approved
         visual_theme = str(params.get("_computerUseVisualTheme") or "light").strip().lower()
         context.visual_theme = visual_theme if visual_theme in {"light", "dark"} else "light"
         context.visual_accent = self.normalize_visual_accent(params.get("_computerUseVisualAccent"))
@@ -557,6 +575,48 @@ class DesktopComputerUseService:
             and config.computer_use_enabled
             and self.computer_use_turn_active()
         )
+
+    def browser_model_invocable(self) -> bool:
+        context = self._runtime_computer_use_context
+        session_id = getattr(context, "session_id", "")
+        client_turn_id = getattr(context, "client_turn_id", "")
+        parent_turn_id = getattr(context, "browser_parent_turn_id", "")
+        return bool(session_id and client_turn_id and (
+            getattr(context, "browser_requested", False)
+            or (parent_turn_id and self.browser.can_resume(session_id, client_turn_id, parent_turn_id))
+        ))
+
+    def run_browser_tool(self, params: dict[str, Any]) -> dict[str, Any]:
+        if not self.browser_model_invocable():
+            raise self._error("Start a browser turn with /browser in the App to authorize browser access.", 403)
+        context = self._runtime_computer_use_context
+        session_id, turn_id, client_turn_id = context.session_id, context.turn_id, context.client_turn_id
+        click_authority = ""
+        if (params.get("operation") == "click" and context.browser_click_target
+                and context.browser_click_target == params.get("target")):
+            if not context.browser_click_approved:
+                return {"ok": False, "status": "denied", "summary": "The user did not approve this browser click."}
+            context.browser_click_approved = False
+            click_authority = "approved"
+        return self.browser.execute(
+            params,
+            session_id=session_id,
+            client_turn_id=client_turn_id,
+            parent_turn_id=context.browser_parent_turn_id,
+            adult_confirmed=context.browser_adult_confirmed,
+            click_authority=click_authority,
+            cancelled=lambda: self._ports.runtime_cancel_requested(
+                session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+            ),
+        )
+
+    def release_browser_turn(self) -> None:
+        context = self._runtime_computer_use_context
+        session_id, client_turn_id = context.session_id, context.client_turn_id
+        parent_turn_id = context.browser_parent_turn_id
+        if parent_turn_id and self.browser.can_resume(session_id, client_turn_id, parent_turn_id):
+            self.browser.cancel_owner(session_id, parent_turn_id)
+        self.browser.cancel_owner(session_id, client_turn_id)
 
     def require_computer_use_enabled(self) -> Any:
         config = self._ports.ensure_config()

@@ -2564,6 +2564,8 @@ async def on_shutdown() -> None:
             {},
         )
 
+    await asyncio.to_thread(AGENT_GATEWAY.desktop.browser.close)
+
     try:
         sub_agent_shutdown = await asyncio.to_thread(
             SUB_AGENT_COLLABORATION.shutdown,
@@ -3257,6 +3259,8 @@ async def _execute_app_agent_runtime_message(
     human_user_message: bool,
 ) -> dict[str, Any]:
     runtime_params = agent_runtime_request_payload(runtime_request)
+    browser_requested = False
+    browser_adult_confirmed = False
     if human_user_message:
         # Only the authenticated App route creates owner authorization. Internal
         # agent-forwarded dispatch reuses this runner without minting that marker.
@@ -3267,6 +3271,17 @@ async def _execute_app_agent_runtime_message(
             "clientTurnId": runtime_request.client_turn_id or "",
             "projectRoot": str(runtime_request.project_root or runtime_request.project_path or "").strip(),
         }
+        command = re.fullmatch(r"/browser(?:\s+(.*))?", runtime_request.message.strip(), flags=re.DOTALL)
+        if command and not runtime_request.goal_delivery_id:
+            task = (command[1] or "").strip()
+            adult = re.fullmatch(r"--18-plus(?:\s+(.*))?", task, flags=re.DOTALL)
+            if adult:
+                browser_adult_confirmed = True
+                task = (adult[1] or "").strip()
+            if not task:
+                raise HTTPException(status_code=400, detail="Add the browser task after /browser.")
+            browser_requested = True
+            runtime_params["message"] = task
     followup_claim_token = ""
     runtime_returned = False
     admission_rejected = False
@@ -3310,6 +3325,8 @@ async def _execute_app_agent_runtime_message(
                 AGENT_GATEWAY.runtime_message,
                 runtime_params,
                 agent_name=runtime_request.agent_name,
+                **({"browser_requested": True, "browser_adult_confirmed": browser_adult_confirmed}
+                   if browser_requested else {}),
             )
         runtime_returned = True
         payload = attach_agent_harness_journey_receipt(payload)
@@ -16707,6 +16724,7 @@ RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
         "vrcforge_apply_patch",
         "vrcforge_web_fetch",
         "vrcforge_web_search",
+        "vrcforge_browser",
         "vrcforge_agent_desktop_action",
         "vrcforge_get_goal",
         "vrcforge_create_goal",
@@ -17096,6 +17114,7 @@ class _RuntimePlannerCatalog:
             for projection in projections
             for tool in [AGENT_GATEWAY._tools.get(projection.internal_name)]
             if tool is not None
+            if tool.name != "vrcforge_browser" or AGENT_GATEWAY._tool_runtime_visible(tool, gateway_config, layer)
         ) + routable_write_tools
         skill_payloads = AGENT_GATEWAY.skills.build_skill_registry(
             gateway_config,
@@ -27607,6 +27626,12 @@ def register_agent_gateway_tools() -> None:
         lambda params: AGENT_GATEWAY.goal.update_agent_goal_from_agent(params or {}),
     )
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_browser",
+        "when-to-use: In a user-authorized /browser turn, use operation=open with an HTTP(S) URL in a visible app-owned Edge or Chrome window. Use operation=read to refresh the current tab, or pass nextOffset as offset to continue its snapshot. To click a current page control, use operation=click with its exact target ref. An adult age check may proceed when the user affirmed 18+ in this task. Other clicks, including cookies and account authorization, raise an App confirmation. If approved, repeat that exact click once. Ask the user to handle any credential entry in the same tab, then read again. Use operation=disconnect when finished. when-NOT-to-use: Do not use this for background work, credentials, CAPTCHA, or desktop actions. Negative example: do not present a confirmation page as the requested document.",
+        "read/debug",
+        AGENT_GATEWAY.run_browser_tool,
+    )
     AGENT_GATEWAY.register_tool(
         "vrcforge_agent_desktop_action",
         "Run an action only inside a user-started Computer Use turn. The call shape is {action: 'computer_use', params: {operation: 'list_apps'}}: action selects the desktop bridge and params.operation selects the bounded operation. Supported params.operation values are list_apps, launch_app, list_windows, get_window, window_state/get_window_state, inspect_window, screenshot, focus_window/activate_window, move_pointer, cursor_position, click, drag, scroll, type_text, key_press/press_key, focus_element, invoke_element, set_value, secondary_action/perform_secondary_action, wait, and sequence. Start with the read-only list_apps example, carry the returned window handle plus app/process identity, then use window_state for a bounded screenshot and/or UI Automation text. Input actions require and automatically activate a target window; click and value/secondary actions can use a fresh elementIndex. Never target terminals, authentication/security UI, password managers, ChatGPT/Codex, or Windows-key shortcuts. Before deleting, sending/submitting, uploading, installing, changing permissions/settings, or making financial/medical actions, call vrcforge_ask_user at action time unless the exact action was explicitly pre-approved and policy permits that. Execution stays visible, cancellable, and scoped to the explicit turn.",

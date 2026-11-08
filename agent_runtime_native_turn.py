@@ -54,13 +54,20 @@ class NativeRuntimeTurn:
                 if not isinstance(function, Mapping):
                     continue
                 name = function.get("name")
+                args = {}
                 if name == "call_tool":
                     try:
                         args = json.loads(function.get("arguments", ""))
                     except (TypeError, ValueError):
                         continue
                     name = args.get("tool") if isinstance(args, dict) else None
-                if name not in {"vrcforge_ask_user", "vrcforge_call_user", "ask_user", "call_user"}:
+                if name in {"vrcforge_browser", "browser"}:
+                    browser_args = args.get("arguments") if isinstance(args, Mapping) else None
+                    if not isinstance(browser_args, Mapping) or not seed.get("_browserClickTarget") or (
+                        browser_args.get("operation"), browser_args.get("target")
+                    ) != ("click", seed["_browserClickTarget"]):
+                        continue
+                elif name not in {"vrcforge_ask_user", "vrcforge_call_user", "ask_user", "call_user"}:
                     continue
                 call_id = str(tool_call.get("id") or "").strip()
                 if call_id:
@@ -435,7 +442,7 @@ class NativeRuntimeTurn:
                 # Only the explicit question tool owns a user-answer wait.
                 # Other needs_user_action outcomes (for example a scope
                 # denial) are terminal and must not block the next turn.
-                if str(item.get("tool") or "") not in {"vrcforge_ask_user", "vrcforge_call_user"}:
+                if str(item.get("tool") or "") not in {"vrcforge_ask_user", "vrcforge_call_user", "vrcforge_browser"}:
                     return False
                 for candidate in (item.get("result"), item.get("resultRead"), outcome):
                     if isinstance(candidate, Mapping) and str(candidate.get("questionId") or "").strip():

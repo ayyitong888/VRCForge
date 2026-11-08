@@ -107,6 +107,19 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
     name = str(tool_name or "").strip()
     if name == "vrcforge_agent_desktop_action":
         return deepcopy(_DESKTOP_ACTION_SCHEMA)
+    if name == "vrcforge_browser":
+        return {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": ["open", "read", "click", "disconnect"]},
+                "url": {"type": "string", "description": "HTTP(S) page to open. Required for open."},
+                "browser": {"type": "string", "enum": ["edge", "chrome"], "description": "Optional browser for a new window."},
+                "offset": {"type": "integer", "minimum": 0, "description": "For read, use nextOffset from the previous page. Omit to capture the current tab again."},
+                "target": {"type": "string", "description": "Exact control ref from the current browser snapshot. Required for click."},
+            },
+            "required": ["operation"],
+            "additionalProperties": False,
+        }
     registered = UNITY_READ_TOOL_INPUT_SCHEMAS.get(name)
     if isinstance(registered, Mapping):
         # A retained checkpoint supplies its own project/restore scope, including

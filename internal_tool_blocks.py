@@ -289,7 +289,7 @@ _FILE_TOOLS = frozenset(
         "vrcforge_apply_patch",
     }
 )
-_WEB_TOOLS = frozenset({"vrcforge_web_fetch", "vrcforge_web_search"})
+_WEB_TOOLS = frozenset({"vrcforge_web_fetch", "vrcforge_web_search", "vrcforge_browser"})
 _DESKTOP_TOOLS = frozenset({"vrcforge_agent_desktop_action"})
 _SHELL_TOOLS = frozenset(
     {

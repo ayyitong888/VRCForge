@@ -479,6 +479,7 @@ RUNTIME_BLOCKED_SKILLS = {
 }
 EXTERNAL_AGENT_INTERNAL_TOOLS = {
     "vrcforge_agent_message",
+    "vrcforge_browser",
     "vrcforge_apply_approved",
     "vrcforge_execute_approved_shell",
     "vrcforge_vision_audit_multi",
@@ -1352,6 +1353,7 @@ class AgentGateway:
                 "vrcforge_vision_audit_multi",
                 "vrcforge_ask_user",
                 "vrcforge_call_user",
+                "vrcforge_browser",
                 PROJECT_SELECTION_TOOL,
             }:
                 tool_params = dict(tool_params)
@@ -1677,6 +1679,24 @@ class AgentGateway:
             values["_runtimeClientTurnId"] = str(seed.get("clientTurnId") or "")
         return self.questions.create(values)
 
+    def run_browser_tool(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = dict(params)
+        seed, runtime_session_id = self.consume_runtime_task_link(params)
+        result = self._desktop.run_browser_tool(params)
+        if result.get("code") != "browser_click_confirmation_required" or seed is None:
+            return result
+        seed["_browserClickTarget"] = result["target"]
+        question = self.create_runtime_question({
+            "sourceTool": "browser",
+            "header": "Confirm a browser click",
+            "question": f'The page on {result["site"]} has a “{result["label"]}” control. Allow the Agent to select it once? This sends that choice to the website.',
+            "options": [{"id": "approve", "label": "Send this choice once"}, {"id": "deny", "label": "Leave the page as it is"}],
+            "_runtimeTaskLinkAuthority": _RUNTIME_TASK_LINK_AUTHORITY,
+            "_runtimeSessionId": runtime_session_id,
+            "_taskSeed": seed,
+        })
+        return {**result, "ok": True, "question": question["question"]}
+
     def call_user(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Create a scope-bound user checkpoint through the existing Question service.
 
@@ -1910,6 +1930,8 @@ class AgentGateway:
     ) -> Mapping[str, Any] | None:
         """Resume one foreground task through the existing planner continuation path."""
         seed = dict(task_seed or {})
+        browser_click_target = str(seed.pop("_browserClickTarget", "") or "")
+        browser_click_approved = seed.pop("_authenticatedBrowserClickApproved", False) is True
         asynchronous = seed.get("_questionBlocking") is False
         feedback_pending = bool(seed.pop("_authenticatedQuestionFeedbackPending", False))
         client_turn_id = self._question_continuation_client_turn_id(question_id, seed)
@@ -1964,6 +1986,11 @@ class AgentGateway:
             "tool": "vrcforge_ask_user", "kind": "skill", "status": "completed",
             "result": {"questionId": question_id, "answer": continuation_prompt},
         }
+        if browser_click_target:
+            continuation["plannerObservation"]["result"]["answer"] = (
+                f"The user authorized only browser click target {browser_click_target}. Repeat that exact click once."
+                if browser_click_approved else "The user did not authorize the click. Continue without it."
+            )
         if asynchronous or seed.get("_toolLoopPause") is True:
             # These decisions have no pending native call to resume.
             # Keep task obligations, but append to the current conversation.
@@ -1978,7 +2005,10 @@ class AgentGateway:
             with self.runtime_planner.bind_turn(params) as metadata:
                 params["_contextCompactionLimit"] = metadata.verified_context_limit
                 params["_plannerAttemptLabel"] = metadata.planner_label
-                with self._desktop.runtime_turn_context(params):
+                with self._desktop.runtime_turn_context(
+                    params, browser_parent_turn_id=str(seed.get("clientTurnId") or ""),
+                    browser_click_target=browser_click_target, browser_click_approved=browser_click_approved,
+                ):
                     return self._runtime_message_impl(
                         params,
                         agent_name=agent_name,
@@ -4989,6 +5019,8 @@ class AgentGateway:
         agent_name: str = "desktop-agent",
         *,
         child_read_roots: tuple[str, ...] | None = None,
+        browser_requested: bool = False,
+        browser_adult_confirmed: bool = False,
     ) -> dict[str, Any]:
         params = dict(params or {})
         params.pop("_runtimeAdmitted", None)
@@ -5007,7 +5039,9 @@ class AgentGateway:
                     session_id = str(params.get("session_id") or params.get("sessionId") or "")
                     if not binding or self.runtime_sessions.native_conversation(session_id, binding=binding) is None:
                         raise AgentGatewayError("The original child history is unavailable for this provider/model route; no new conversation was started.", status_code=409)
-                with self._desktop.runtime_turn_context(params):
+                with self._desktop.runtime_turn_context(
+                    params, browser_requested=browser_requested, browser_adult_confirmed=browser_adult_confirmed,
+                ):
                     result = self._runtime_message_impl(params, agent_name=agent_name, child_read_roots=child_read_roots)
                 if agent_name == "sub-agent":
                     result["_resolvedSubAgentRoute"] = {"provider": str(params.get("provider") or ""), "model": str(params.get("model") or "")}
@@ -5523,6 +5557,10 @@ class AgentGateway:
                 turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
                 client_turn_id=resolved_client_turn_id,
             )
+            if owns_turn and self._desktop.browser_model_invocable() and (
+                turn_raised or not find_current_pending_question(ensure_dict(response_payload).get("steps"))
+            ):
+                self._desktop.release_browser_turn()
             late_steers = self._runtime_session_state.finish_turn(
                 session_id=resolved_session_id,
                 turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
@@ -7931,7 +7969,8 @@ class AgentGateway:
                         provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
-                if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}:
+                browser_click = step_tool == "vrcforge_browser" and step_params.get("operation") == "click"
+                if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL} or browser_click:
                     for key in ("_runtimeTaskLinkAuthority", "_taskSeed", "_runtimeTaskSeed", "_runtimeTaskId", "_runtimeSessionId", "_runtimeClientTurnId"):
                         step_params.pop(key, None)
                     step_params["sessionId"] = session_id
@@ -7940,7 +7979,7 @@ class AgentGateway:
                     if step_tool == PROJECT_SELECTION_TOOL:
                         step_params["chatId"] = chat_id
                         step_params["requestText"] = message
-                if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL} and not goal_delivery_id:
+                if (step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL} or browser_click) and not goal_delivery_id:
                     step_params["_runtimeSessionId"] = session_id
                     step_params["_runtimeClientTurnId"] = client_turn_id
                     step_params["_taskSeed"] = runtime_approval_seed(
@@ -8116,7 +8155,7 @@ class AgentGateway:
                         arguments=requirement_arguments,
                     )
                 action_outcome = ensure_dict(step_payload.get("outcome"))
-                if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL} and str(
+                if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL, "vrcforge_browser"} and str(
                     action_outcome.get("status") or ""
                 ).strip() == "needs_user_action":
                     question_payload = ensure_dict(step_payload.get("result")).get("question")
@@ -8466,7 +8505,7 @@ class AgentGateway:
                     unresolved_completion_action_keys[task_action_id] = action_key
                 requires_direct_user_input = bool(
                     step_waits_for_approval
-                    or step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}
+                    or step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL, "vrcforge_browser"}
                 )
                 safe_failure_recovery = (
                     not requires_direct_user_input
@@ -8612,7 +8651,7 @@ class AgentGateway:
                 # later resumes the task.
                 break
             if (
-                step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}
+                step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL, "vrcforge_browser"}
                 and find_current_pending_question(steps, self.questions) is not None
             ):
                 # The created question is the wait boundary even when its
@@ -9488,6 +9527,8 @@ class AgentGateway:
         if resolved_turn_id and not resolved_client_turn_id:
             resolved_client_turn_id = str((matching_run or {}).get("clientTurnId") or "")
         resolved_session_id = session_id or str((matching_run or {}).get("sessionId") or "")
+        if resolved_session_id and resolved_client_turn_id:
+            self._desktop.browser.cancel_owner(resolved_session_id, resolved_client_turn_id)
         subagent_cancel_result = self._cancel_runtime_subagents(
             session_id=resolved_session_id,
             turn_id=resolved_turn_id,
@@ -10558,6 +10599,8 @@ class AgentGateway:
         """Apply permission visibility without exposing task-internal tools via MCP."""
 
         exposure_layer = normalize_exposure_layer(exposure_layer)
+        if tool.name == "vrcforge_browser":
+            return self._desktop.browser_model_invocable()
         if tool.advanced and not self.roslyn_available(config):
             return False
         if tool.write and not config.allow_write_requests:
@@ -11154,7 +11197,7 @@ def find_current_pending_question(steps: Any, questions: AgentQuestionService | 
     for step in reversed(steps):
         if not isinstance(step, dict) or bool(step.get("historical")):
             continue
-        if str(step.get("tool") or "") not in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}:
+        if str(step.get("tool") or "") not in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL, "vrcforge_browser"}:
             continue
         if questions is None and str(ensure_dict(step.get("outcome")).get("status") or "") != "needs_user_action":
             continue

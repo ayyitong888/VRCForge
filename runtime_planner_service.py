@@ -173,6 +173,7 @@ _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_move_path": ("source:string", "destination:string", "overwrite?:boolean"),
     "vrcforge_apply_patch": ("path:string", "patch:string"),
     "vrcforge_web_fetch": ("url:string", "timeout?:number", "maxBytes?:integer"),
+    "vrcforge_browser": ("operation:string", "url?:string", "browser?:string", "offset?:integer", "target?:string"),
     "vrcforge_web_search": ("query:string", "timeout?:number", "maxResults?:integer", "offset?:integer", "snapshotDigest?:string"),
     "vrcforge_get_goal": (),
     "vrcforge_create_goal": ("objective:string", "summary?:string"),
@@ -1270,7 +1271,7 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
         "truncated": result.get("truncated") is True,
     }
     omitted_chars = 0
-    web_evidence = tool in {"vrcforge_web_fetch", "vrcforge_web_search"}
+    web_evidence = tool in {"vrcforge_web_fetch", "vrcforge_web_search", "vrcforge_browser"}
 
     def content(value: object, limit: int = 4000) -> str:
         original = str(value or "")
@@ -1289,6 +1290,12 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
             return ""
         return safe
 
+    if tool == "vrcforge_browser" and isinstance(result.get("snapshot"), str):
+        evidence["snapshot"] = content(result["snapshot"])
+        if type(result.get("nextOffset")) is int:
+            evidence["nextOffset"] = result["nextOffset"]
+            evidence["truncated"] = True
+        return evidence
     if tool == "vrcforge_web_fetch" and isinstance(result.get("text"), str):
         evidence.update({"url": web_url(result.get("url")), "title": content(result.get("title"), 240),
                          "text": content(result["text"]),
@@ -5159,14 +5166,16 @@ class RuntimePlannerService:
                 )
             web_fetch_name = visible_read_names.get("vrcforge_web_fetch")
             web_search_name = visible_read_names.get("vrcforge_web_search")
+            browser_tool = resolve_catalog_tool(catalog.visible_tools, "vrcforge_browser")
             if web_fetch_name:
                 runtime_scope_instruction += (
                     f"\nPrefer {web_fetch_name} for reading a supplied public URL when its text/HTML/JSON capability fits the task; "
                     "it returns page text and source evidence without shell quoting or HTML extraction commands. "
                     "It reads HTTP source only: it does not execute JavaScript, click controls, or retain a browser session. "
                     "Follow returned links for instructions. If the source is a confirmation/login page or requires interaction, "
-                    "use the available Computer Use tool with action=computer_use to inspect and operate a real browser, "
-                    "then read its current page; repeated HTTP fetches are not browser interaction. "
+                    + (f"use {browser_tool.name} from {browser_tool.block} to open the page, inspect its controls, and read the same tab after any confirmed click. "
+                       if browser_tool else "report the gate and ask the user to start a browser turn with /browser if a live browser is needed. ")
+                    + "Repeated HTTP fetches are not browser interaction. "
                     "Do not treat a successful fetch of a gate page as having read the requested instructions. "
                     "Keep unresolved usage requirements from earlier conversation evidence until actual instructions resolve them. "
                     "Use Shell for an actual command/script requirement or a demonstrated limitation of the available reader, "
