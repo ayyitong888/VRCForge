@@ -405,7 +405,6 @@ Use locks when you want to keep part of a good result. Locked Blendshapes are hi
 | Parameters | Reviews Expression Parameter usage | 参数 | 查看表达参数占用 |
 | Screenshots | Captures and reviews avatar screenshots | 截图 | 捕获并查看 Avatar 截图 |
 | Checkpoints | Lists pre-write checkpoints and requests restore | Checkpoints | 查看写入前快照并申请回退 |
-| Protection | Chooses a protection level and previews its impact before approval | 保护 | 选择保护级别并在确认前查看影响 |
 | Skills | Finds, checks, and configures Agent capabilities | 能力 | 查找、检查和配置 Agent 能力 |
 | Connection diagnostics | Shows connection results and failure reasons | 连接诊断 | 显示连接结果和失败原因 |
 

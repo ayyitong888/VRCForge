@@ -41,7 +41,6 @@ import { LayoutSplitter } from "./components/workspace/layout-splitter";
 import { WorkspaceHeader } from "./components/workspace/workspace-header";
 import { DesktopTitlebar } from "./components/workspace/desktop-titlebar";
 import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
-import { ProtectionWorkspace } from "./components/protection/protection-workspace";
 import { ComputerUseActivitySurface } from "./components/runtime/computer-use-activity-surface";
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
@@ -80,7 +79,6 @@ import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
 import { useBackgroundGoalRuns } from "./hooks/use-background-goal-runs";
 import { parseGoalWakeDirective } from "./hooks/use-goal-wake";
 import { useProjectManagement } from "./hooks/use-project-management";
-import { useProtectionWorkspaceController } from "./hooks/use-protection-workspace-controller";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
 import { projectAgentQuestionContinuation, questionContinuationCancelTarget, questionContinuationDisplay, questionContinuationStatus, type RuntimeTurnEvent, useQuestionContinuationActivity, useRuntimeTurnContinuationDelivery } from "./hooks/use-runtime-turn-continuation";
@@ -646,34 +644,6 @@ export default function App() {
     runtimeConnected,
     healthComponents.vrcForgeUnityTools,
   );
-  const {
-    protectionPlan,
-    protectionProfile,
-    protectionAvatarPath,
-    protectionAvatars,
-    protectionOwnsAssets,
-    loadingProtection,
-    loadingProtectionAvatars,
-    protectionMessage,
-    protectionAvatarMessage,
-    requestingProtectionFamily,
-    openProtection,
-    loadProtectionPlan,
-    loadProtectionAvatars,
-    requestProtectionApply,
-    setProtectionProfile,
-    setProtectionAvatarPath,
-    setProtectionOwnsAssets,
-  } = useProtectionWorkspaceController({
-    endpoint,
-    runtimeConnected,
-    activeView,
-    activeProjectPath,
-    setActiveView,
-    startRuntime,
-    refreshSilently,
-    setError,
-  });
   const hasStartupIssue = startupIssue.trim().length > 0;
   const hasEnvironmentAttention = runtimeConnected && healthErrors > 0;
   const doctorPromptSignature = hasStartupIssue
@@ -4207,7 +4177,6 @@ export default function App() {
             setShowProjectModal(true);
           }}
           onOpenDoctor={() => void openDoctor()}
-          onOpenProtection={() => void openProtection()}
           onOpenSkills={() => void openSkills()}
           onOpenCheckpoints={() => void openCheckpoints()}
           onOpenSettings={() => openSettingsSection("general")}
@@ -4379,26 +4348,6 @@ export default function App() {
               onOverwriteAdjustment={overwriteAdjustment}
               onRenameAdjustment={renameAdjustment}
               onDeleteAdjustment={removeAdjustment}
-            />
-          ) : activeView === "protection" ? (
-            <ProtectionWorkspace
-              plan={protectionPlan}
-              selectedProjectPath={activeProjectPath}
-              avatarPath={protectionAvatarPath}
-              avatars={protectionAvatars}
-              profile={protectionProfile}
-              ownsAssets={protectionOwnsAssets}
-              loading={loadingProtection}
-              loadingAvatars={loadingProtectionAvatars}
-              message={protectionMessage}
-              avatarMessage={protectionAvatarMessage}
-              requestingFamily={requestingProtectionFamily}
-              onAvatarPathChange={setProtectionAvatarPath}
-              onProfileChange={setProtectionProfile}
-              onOwnsAssetsChange={setProtectionOwnsAssets}
-              onRefresh={() => void loadProtectionPlan(endpoint, protectionProfile, true)}
-              onRefreshAvatars={() => void loadProtectionAvatars(endpoint, true)}
-              onRequestApply={(family) => void requestProtectionApply(family)}
             />
           ) : activeView === "settings" ? (
             <SettingsWorkspace
