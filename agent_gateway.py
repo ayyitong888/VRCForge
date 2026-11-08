@@ -1740,6 +1740,20 @@ class AgentGateway:
             "status": "failed", "errorCode": "project_selection_invalid_response", "retryable": False,
         }
 
+    @staticmethod
+    def _question_continuation_client_turn_id(question_id: str, seed: Mapping[str, Any]) -> str:
+        marker = ":question:" + question_id
+        prefix = str(seed.get("clientTurnId") or "")
+        if seed.get("_questionBlocking") is False:
+            prefix = prefix[:240 - len(marker)]
+        try:
+            feedback_revision = int(seed.get("_questionFeedbackRevision") or 0)
+        except (TypeError, ValueError):
+            feedback_revision = 0
+        if feedback_revision > 0 and str(seed.get("_questionKind") or seed.get("requestedKind") or "") == "visual_checkpoint":
+            marker += ":feedback:" + str(feedback_revision)
+        return (prefix + marker)[:240]
+
     def _resume_runtime_task_after_question(
         self,
         question_id: str,
@@ -1753,21 +1767,20 @@ class AgentGateway:
         It opens no listener and never borrows a later turn's scope.
         """
         stable_id = str(question_id or "").strip()
+        client_turn_id = self._question_continuation_client_turn_id(stable_id, task_seed)
         if task_seed.get("_questionBlocking") is False:
             routed = self._route_async_question_answer(stable_id, task_seed, continuation_prompt)
             if routed is not None:
                 return routed
-            marker = ":question:" + stable_id
-            target_cid = str(task_seed.get("clientTurnId") or "")[:240 - len(marker)] + marker
             self.questions.record_runtime_continuation(stable_id, "queued",
-                runtimeContinuationClientTurnId=target_cid, runtimeContinuationTurnId="")
+                runtimeContinuationClientTurnId=client_turn_id, runtimeContinuationTurnId="")
         with self._lock:
             if not self._runtime_continuation_accepting or stable_id in self._question_continuations_inflight:
                 return {"ok": False, "status": "deferred", "questionId": stable_id}
             self._question_continuations_inflight.add(stable_id)
         def run() -> None:
             try:
-                if not self.questions.claim_runtime_continuation(stable_id):
+                if not self.questions.claim_runtime_continuation(stable_id, client_turn_id=client_turn_id):
                     return
                 if self._runtime_session_state.cancel_requested(
                     session_id=str(task_seed.get("sessionId") or ""),
@@ -1822,9 +1835,10 @@ class AgentGateway:
                 self._question_continuations_inflight.discard(stable_id)
                 self._runtime_continuation_condition.notify_all()
             raise
-        return {"ok": True, "status": "queued", "questionId": stable_id,
-                **({"sessionId": str(task_seed.get("sessionId") or ""), "clientTurnId": target_cid, "turnId": ""}
-                   if task_seed.get("_questionBlocking") is False else {})}
+        return {
+            "ok": True, "status": "queued", "questionId": stable_id,
+            "sessionId": str(task_seed.get("sessionId") or ""), "clientTurnId": client_turn_id, "turnId": "",
+        }
 
     def _settle_async_question_steers(self, input_ids: list[str], *, session_id: str, client_turn_id: str, **fields: Any) -> None:
         """Only consumption or a durable queue receipt settles a hot answer."""
@@ -1898,10 +1912,8 @@ class AgentGateway:
         seed = dict(task_seed or {})
         asynchronous = seed.get("_questionBlocking") is False
         feedback_pending = bool(seed.pop("_authenticatedQuestionFeedbackPending", False))
-        try:
-            feedback_revision = int(seed.pop("_questionFeedbackRevision", 0) or 0)
-        except (TypeError, ValueError):
-            feedback_revision = 0
+        client_turn_id = self._question_continuation_client_turn_id(question_id, seed)
+        seed.pop("_questionFeedbackRevision", None)
         task_context = approval_task_context(seed, tool="vrcforge_ask_user", arguments=ensure_dict(seed.get("requestedArguments")))
         if task_context is None:
             return None
@@ -1924,15 +1936,7 @@ class AgentGateway:
         if prepared is None:
             return None
         params = ensure_dict(prepared.get("params"))
-        marker = ":question:" + question_id
-        prefix = str(seed.get("clientTurnId") or "")
-        client_turn_id = prefix[:240 - len(marker)] + marker if asynchronous else prefix + marker
-        # Visual checkpoint feedback can be submitted more than once for the
-        # same durable Question.  Keep ordinary ask_user compatibility while
-        # giving each visual revision a distinct provider turn identity.
-        if feedback_revision > 0 and str(seed.get("_questionKind") or seed.get("requestedKind") or "") == "visual_checkpoint":
-            client_turn_id += ":feedback:" + str(feedback_revision)
-        params["clientTurnId"] = client_turn_id[:240]
+        params["clientTurnId"] = client_turn_id
         if seed.get("followupLaneId"):
             params["followupLaneId"] = str(seed["followupLaneId"])
         params["message"] = str(seed.get("objective") or "") + "\n" + continuation_prompt

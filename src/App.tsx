@@ -975,7 +975,7 @@ export default function App() {
     updateChat,
     onContinuation: (event: RuntimeTurnEvent) => {
       if (event.continuationSource !== "question_answered") return;
-      const questionId = event.clientTurnId?.split(":question:")[1]?.trim();
+      const questionId = event.clientTurnId?.match(/:question:([^:]+)(?::feedback:[1-9]\d*)?$/)?.[1];
       if (!questionId) return;
       const clientTurnId = event.clientTurnId?.trim();
       if (clientTurnId) {
@@ -3455,7 +3455,10 @@ export default function App() {
           sessionId: question.sessionId || sessionId,
           projectRoot: question.projectRoot || activeRuntimeProjectPath || undefined,
         });
-        upsertAgentQuestion(payload.question);
+        upsertAgentQuestion({
+          ...payload.question,
+          runtimeContinuation: payload.runtimeContinuation || payload.question.runtimeContinuation,
+        });
         const answerChat = activeChat && (!question.sessionId || activeChat.sessionId === question.sessionId)
           ? activeChat
           : undefined;

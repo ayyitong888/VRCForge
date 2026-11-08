@@ -558,13 +558,14 @@ class AgentQuestionService:
             **{str(key): value for key, value in fields.items()},
         })
 
-    def claim_runtime_continuation(self, question_id: str) -> bool:
+    def claim_runtime_continuation(self, question_id: str, *, client_turn_id: str = "") -> bool:
         """Only an unanswered dispatch claim can cross into the runtime."""
         with _locked(self._persistence.shared_state_lock):
             question = self._project(include_answered=True).get(question_id, {})
             if question.get("status") not in {"answered", "pending"} or question.get("runtimeContinuationStatus") != "queued":
                 return False
-            self.record_runtime_continuation(question_id, "claimed")
+            identity = {"runtimeContinuationClientTurnId": client_turn_id, "runtimeContinuationTurnId": ""} if client_turn_id else {}
+            self.record_runtime_continuation(question_id, "claimed", **identity)
             return True
 
     def cancel_runtime_questions(self, *, session_id: str = "", turn_id: str = "", client_turn_id: str = "") -> list[dict[str, object]]:

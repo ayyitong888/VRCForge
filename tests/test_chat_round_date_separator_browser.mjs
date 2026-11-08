@@ -31,15 +31,20 @@ const bundled = await build({
 import React, { useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatWorkspace } from "./src/components/chat/chat-workspace";
+import { projectQuestionContinuationActivity } from "./src/hooks/use-runtime-turn-continuation";
 import { initializeI18n } from "./src/i18n";
 const noop = () => {};
 function Fixture() {
   const [conversation, setConversation] = useState([]);
   const [questions, setQuestions] = useState([]);
+  const [runs, setRuns] = useState([]);
   const [draft, setDraft] = useState("");
   const conversationEndRef = useRef(null);
   window.setConversation = setConversation;
   window.setQuestions = setQuestions;
+  window.setRuns = setRuns;
+  const sessionId = "question-replay";
+  const chat = projectQuestionContinuationActivity({ id: "fixture", sessionId, items: conversation }, questions, runs);
   return <ChatWorkspace
     projectPromptTitle="New task welcome"
     conversationPending={false}
@@ -48,7 +53,7 @@ function Fixture() {
     onSubmit={noop} onSwitchMode={noop} commands={[]} actions={[]} onAction={noop} disabledReason=""
     attachments={[]} onAttachFiles={noop} onRemoveAttachment={noop}
     providerLabel="" model="" activeGoal={null} onGoalChanged={noop} goalEndpoint=""
-    projects={[]} onBindProject={noop} conversation={conversation} queued={[]}
+    projects={[]} onBindProject={noop} conversation={chat.items} queued={[]}
     agentQuestions={questions} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
     onBackgroundGoalCatchUpRendered={noop} onBackgroundGoalProviderWarningsRendered={noop}
     onBackgroundGoalCatchUpDismiss={noop} onAnswerQuestion={noop}
@@ -59,7 +64,7 @@ function Fixture() {
     onEditItemRemoveAttachment={noop} onCopyItem={noop} onRetryItem={noop} onEditItem={noop}
     onEditItemSave={noop} onEditItemCancel={noop} scopedPendingApprovals={[]}
     onApprove={noop} onReject={noop} onModifyApproval={noop} onOpenDoctor={noop}
-    runtimeRuns={[]} onSaveOperationAsSkill={noop}
+    runtimeRuns={runs} runtimeSessionId={sessionId} onSaveOperationAsSkill={noop}
     sessionHandoffEndpoint="" sessionHandoffSourceChatId="" sessionHandoffTargetChats={[]}
     handoffSendOpen={false} onHandoffSendOpenChange={noop}
   />;
@@ -119,6 +124,39 @@ try {
   await render([user("first", start), agent("pending", later, "needs_user_action", "first"),
     { id: "answer", type: "question_answer", questionId: "question", text: "continue" }, stream("question-continuation", nextDay)]);
   assert.equal(await separators.count(), 0, "question answer and continuation remain the unfinished task even across dates");
+  const questionAnswer = { id: "visual-answer", type: "question_answer", questionId: "visual-q", text: "The left shoulder still clips." };
+  const visualQuestion = {
+    questionId: "visual-q", kind: "visual_checkpoint", status: "answered", sessionId: "question-replay",
+    questionFeedbackRevision: 2, runtimeContinuationStatus: "claimed",
+  };
+  const visualCid = "original:question:visual-q:feedback:2";
+  const liveVisualRun = { sessionId: visualQuestion.sessionId, clientTurnId: visualCid, turnId: "visual-runtime", status: "running", startedAt: nextDay };
+  const activity = page.locator("[data-chat-current-activity]");
+  await render([questionAnswer]);
+  await page.evaluate(({ question, cid }) => {
+    window.setQuestions([{
+      ...question, runtimeContinuationStatus: "queued",
+      runtimeContinuation: { sessionId: question.sessionId, clientTurnId: cid, status: "queued" },
+    }]);
+  }, { question: visualQuestion, cid: visualCid });
+  await activity.waitFor({ timeout: 3000 });
+  assert.match(await activity.innerText(), /Preparing/i, "an admitted answer shows preparation before the runtime starts");
+  await page.evaluate(({ question, run }) => {
+    window.setQuestions([question]);
+    window.setRuns([run]);
+  }, { question: visualQuestion, run: liveVisualRun });
+  await activity.waitFor({ timeout: 3000 });
+  assert.match(await activity.innerText(), /Waiting for model/i, "a restored visual continuation shows real model activity");
+  assert.equal(await activity.count(), 1, "a question continuation uses one activity row");
+  await page.evaluate(run => window.setRuns([{ ...run, status: "completed", nextStep: "done" }]), liveVisualRun);
+  await activity.waitFor({ state: "detached", timeout: 3000 });
+  await page.evaluate(question => {
+    window.setQuestions([{ ...question, runtimeContinuationStatus: "delivered", runtimeContinuationClientTurnId: "original:question:visual-q:feedback:2" }]);
+    window.setRuns([]);
+  }, visualQuestion);
+  await render([questionAnswer, stream("question-continuation:" + visualCid, nextDay, visualCid)]);
+  assert.equal(await activity.count(), 0, "a stale live row cannot outrank a settled answer when its run leaves the snapshot");
+  await page.evaluate(() => window.setQuestions([]));
   await render([user("first", start), agent("approval", later, "approval", "first"),
     { id: "approval-result", type: "result", approvalId: "approval", createdAt: nextDay }, stream("approval-continuation", nextDay)]);
   assert.equal(await separators.count(), 0, "approval and result do not create a new task boundary");

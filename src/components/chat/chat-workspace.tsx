@@ -671,7 +671,15 @@ export function ChatWorkspace({
             const turnId = item.type === "agent" ? item.response.clientTurnId : item.type === "streaming" ? item.clientTurnId : "";
             const turnSessionId = runtimeSessionId || (item.type === "agent" ? item.response.sessionId || item.response.session_id : "");
             const runtimeActive = turnId && turnSessionId ? runtimeTurnActivityStatus(runtimeRuns, turnSessionId, turnId) : undefined;
-            const itemRuntimeActive = item.type === "streaming" && !isExternalRuntimeStream(item) ? undefined : runtimeActive;
+            const questionRuntime = isExternalRuntimeStream(item)
+              ? projectedAgentQuestions.find((question) => question.blocking !== false
+                && question.runtimeContinuation?.clientTurnId === turnId
+                && (question.runtimeContinuation?.sessionId || question.sessionId) === turnSessionId)
+              : undefined;
+            const itemRuntimeActive = item.type === "streaming" && !isExternalRuntimeStream(item) ? undefined
+              : runtimeActive ?? (questionRuntime && questionContinuationDisplay(questionRuntime) === "active");
+            const questionPreparing = questionRuntime
+              && (runtimeActive === undefined || questionRuntime.runtimeContinuation?.status === "queued");
             const initialUser = turnId ? steeringProjection.initialUsersByTurnId.get(turnId) : undefined;
             const capturedOperation = item.type === "agent"
               ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
@@ -739,7 +747,8 @@ export function ChatWorkspace({
                 onSaveOperationAsSkill={onSaveOperationAsSkill}
                 />
                 {item.type === "streaming" ? (
-                  <StreamingPhaseStatus item={item} nowMs={activityNowMs} showElapsed={false} runtimeActive={itemRuntimeActive} />
+                  <StreamingPhaseStatus item={questionPreparing && !item.phase ? { ...item, phase: "preparing" } : item}
+                    nowMs={activityNowMs} showElapsed={false} runtimeActive={itemRuntimeActive} />
                 ) : null}
               </div>
             );

@@ -534,18 +534,34 @@ def test_goal_question_keeps_goal_owner_and_ignores_model_supplied_task_scope(tm
     assert "runtimeTaskSeed" not in persisted
 
 
-def test_answer_returns_while_continuation_is_running_and_shutdown_owns_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["decision", "visual_checkpoint"])
+def test_answer_returns_while_continuation_is_running_and_shutdown_owns_it(tmp_path: Path, kind: str) -> None:
     entered, release = threading.Event(), threading.Event()
 
     def wait_for_test_release():
         entered.set()
         assert release.wait(5)
 
-    gateway, _, question, _, _, completed = _scripted_question(tmp_path, on_resume=wait_for_test_release)
+    gateway, _, question, _, _, completed = _scripted_question(
+        tmp_path, question_params={"kind": kind}, on_resume=wait_for_test_release,
+    )
+    assert question["kind"] == kind
     try:
-        response = _answer(gateway, question, tmp_path)
+        response = gateway.questions.answer(question["questionId"], {
+            "sessionId": "runtime-session",
+            "projectRoot": str(tmp_path),
+            "answer": "yes",
+            **({"resolution": "pass"} if kind == "visual_checkpoint" else {}),
+        })
         assert response["question"]["status"] == "answered"
+        cid = "runtime-turn:question:" + question["questionId"]
+        if kind == "visual_checkpoint":
+            cid += ":feedback:1"
+        assert response["runtimeContinuation"]["clientTurnId"] == cid
+        assert response["runtimeContinuation"]["sessionId"] == "runtime-session"
         assert entered.wait(5)
+        saved = gateway.questions.list(session_id="runtime-session", include_answered=True)["questions"][0]
+        assert saved["runtimeContinuationClientTurnId"] == cid
         assert not completed.is_set()
         assert gateway.shutdown_runtime_continuations(0)["ok"] is False
         with pytest.raises(RuntimeError, match="work is active"):
