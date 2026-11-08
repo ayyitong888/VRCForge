@@ -14,7 +14,7 @@ import { isInternalRuntimeUrl } from "../../lib/runtime-url";
 import { cn } from "../../lib/utils";
 import { chatFileHref, localChatFilePath, openChatFile } from "../../lib/chat-file-link";
 import { MarkdownCodeBlock } from "./markdown-code-block";
-import type { ChatImageSource } from "./chat-image-preview";
+import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 import { loadChatResourceImage, type ChatResourceImageContext as ChatResourceImageRequestContext } from "../../lib/api/chat-resource-image";
 
 export const ChatResourceImageContext = createContext<ChatResourceImageRequestContext | null>(null);
@@ -272,14 +272,21 @@ export function ChatCaptureThumbnail({ uri, alt, className, onOpen }: { uri: str
   return <AuthenticatedChatResourceImage uri={uri} alt={alt} context={context} className="h-full w-full object-contain" thumbnail={{ className, onOpen }} />;
 }
 
+export function ChatCaptureResourcePreview({ uri, alt, onClose }: { uri: string; alt: string; onClose: () => void }) {
+  const context = useContext(ChatResourceImageContext);
+  if (!context || !isChatResourceImageUri(uri)) return null;
+  return <AuthenticatedChatResourceImage uri={uri} alt={alt} context={context} onClosePreview={onClose} />;
+}
+
 function AuthenticatedChatResourceImage({
-  uri, alt, context, className, thumbnail,
+  uri, alt, context, className, thumbnail, onClosePreview,
 }: {
   uri: string;
   alt: string;
   context: ChatResourceImageRequestContext;
-  className: string;
+  className?: string;
   thumbnail?: { className: string; onOpen: (image: ChatImageSource) => void };
+  onClosePreview?: () => void;
 }) {
   const [src, setSrc] = useState("");
   const [unavailable, setUnavailable] = useState(false);
@@ -302,8 +309,10 @@ function AuthenticatedChatResourceImage({
   }, [context.endpoint, context.chatId, context.projectPath, context.sessionId, context.clientTurnId, uri]);
   if (!src) {
     if (unavailable) return <span role="status">{alt ? `${alt} · ${t("chat.imageUnavailable")}` : t("chat.imageUnavailable")}</span>;
+    if (onClosePreview) return <span role="status">{t("common.loading")}</span>;
     return alt ? <span>{alt}</span> : null;
   }
+  if (onClosePreview) return <ChatImagePreview src={src} alt={alt} onClose={onClosePreview} />;
   const image = <img className={className} src={src} alt={alt} />;
   return thumbnail ? (
     <button

@@ -27,7 +27,7 @@ import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ApprovalRevisionEditor } from "../approvals/approval-revision-editor";
-import { ChatCaptureThumbnail, ChatMarkdown } from "./chat-markdown";
+import { ChatCaptureResourcePreview, ChatCaptureThumbnail, ChatMarkdown } from "./chat-markdown";
 import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 
 type AgentTimelineStep = NonNullable<AgentRuntimeResponse["steps"]>[number] & {
@@ -129,12 +129,11 @@ export function buildAgentTimelineRows({
       <span>{t("chat.cancelled")}</span>
     </div>,
   ] : rows;
-  const finishRows = (rows: ReactNode[]): ReactNode[] => [...finishStatusRows(rows), ...((response.timeline || []).some(event => event.kind === "tool_result" && event.payload?.captures?.length) ? [] : buildCaptureImageRows(
-    [...(response.steps || []), ...(response.timeline || []).filter(event => event.kind === "tool_result" && event.payload?.captures?.length)
-      .map(event => ({ kind: "tool", result: { captures: event.payload?.captures } }))],
-    [response.plan.reply || "", ...(response.timeline || []).filter(event => event.kind === "assistant").map(event => event.payload?.summary || "")].join("\n"),
-  ))];
   const durableTimeline = (response.timeline || []) as ChatTimelineEvent[];
+  const finishRows = (rows: ReactNode[]): ReactNode[] => [
+    ...finishStatusRows(rows),
+    ...buildCaptureImageRows(response.steps, response.plan.reply, durableTimeline),
+  ];
   const durableRows = buildDurableTimelineRows(
     durableTimeline,
     elapsedSeconds,
@@ -150,6 +149,7 @@ export function buildAgentTimelineRows({
       onInterleavedUsersExpandedChange,
       renderInterleavedUserMessage,
       onOpenChatById,
+      captureText: response.plan.reply,
     },
   );
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
@@ -200,7 +200,7 @@ export function buildAgentTimelineRows({
     } else if (!fallbackAnswer && shouldSurfaceModelIdentity && planLabel && hasDurableAssistant) {
       rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t, "assistant-model"));
     }
-    return finishRows(rows);
+    return finishStatusRows(rows);
   }
   const orderedSteps = normalizeAgentSteps(response.steps);
   const legacyFallback = orderedSteps.length === 0;
@@ -294,13 +294,18 @@ export function buildAgentTimelineRows({
   return finishRows(fallbackRows);
 }
 
-/** Tool image activity is grouped by its original result; explicit Markdown remains inline. */
-export function buildCaptureImageRows(steps: AgentRuntimeResponse["steps"] = [], alreadyRendered = "", seen = new Set<string>()): ReactNode[] {
-  const rows: ReactNode[] = [];
-  for (const step of steps || []) {
-    const result = step.result as { captures?: unknown[]; preview?: unknown; angle?: unknown } | undefined;
+/** One gallery per turn, ordered by receipt. Images embedded in the answer stay inline. */
+function buildCaptureImageRows(steps: AgentRuntimeResponse["steps"] = [], alreadyRendered = "", events: ChatTimelineEvent[] = []): ReactNode[] {
+  const images: Array<{ uri: string; label: string }> = [];
+  const seen = new Set<string>();
+  const results = [
+    ...events.filter(event => event.kind === "tool_result" && event.payload.captures?.length)
+      .map(event => ({ captures: event.payload.captures })),
+    ...steps.map(step => step.result),
+  ];
+  for (const value of results) {
+    const result = value as { captures?: unknown[]; preview?: unknown; angle?: unknown } | undefined;
     if (!result || typeof result !== "object") continue;
-    const images: Array<{ uri: string; label: string }> = [];
     for (const capture of Array.isArray(result.captures) ? result.captures : [result]) {
       if (!capture || typeof capture !== "object") continue;
       const { preview, angle } = capture as { preview?: Record<string, unknown>; angle?: unknown };
@@ -311,26 +316,44 @@ export function buildCaptureImageRows(steps: AgentRuntimeResponse["steps"] = [],
       seen.add(uri);
       images.push({ uri, label: typeof angle === "string" ? angle.replace(/[\[\]\r\n]/g, " ") : "" });
     }
-    if (images.length) rows.push(<CaptureImageActivity key={images[0].uri} images={images} />);
   }
-  return rows;
+  return images.length ? [<CaptureImageActivity key={images[0].uri} images={images} />] : [];
 }
 
 function CaptureImageActivity({ images }: { images: Array<{ uri: string; label: string }> }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const [preview, setPreview] = useState<ChatImageSource | null>(null);
+  const [resourcePreview, setResourcePreview] = useState<{ uri: string; label: string; request: number } | null>(null);
+  const labels = images.map(({ label }) => label ? t(`chat.captureAngles.${label}`, label) : t("chat.imagePreview"));
+  const labeledImages = images.map((image, index) => ({
+    uri: image.uri,
+    label: labels.indexOf(labels[index]) !== labels.lastIndexOf(labels[index]) ? `${labels[index]} · ${index + 1}` : labels[index],
+  }));
   return <div data-agent-capture-images className="px-1 text-sm">
-    <button type="button" className="flex items-center gap-2 py-2 text-muted-foreground" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-      <Eye className="h-4 w-4" /><span>{t("vision.images")} · {images.length}</span>
-      {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-    </button>
+    <div className="flex flex-wrap items-center gap-x-3">
+      <button type="button" className="flex items-center gap-2 py-2 text-muted-foreground" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+        <Eye className="h-4 w-4" /><span>{t("vision.images")} · {images.length}</span>
+        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+      </button>
+      {labeledImages.map(image => (
+        <button key={image.uri} type="button" aria-haspopup="dialog" data-agent-capture-link
+          className="text-blue-600 underline-offset-2 hover:underline dark:text-blue-400"
+          onClick={() => setResourcePreview(current => ({ ...image, request: (current?.request ?? 0) + 1 }))}>
+          {image.label}
+        </button>
+      ))}
+    </div>
     {expanded ? <div className="flex gap-3 overflow-x-auto pb-2">
-      {images.map(image => <div key={image.uri} data-agent-capture-image className="w-36 shrink-0">
-        <ChatCaptureThumbnail uri={image.uri} alt={image.label} className="h-24" onOpen={setPreview} />
+      {labeledImages.map(image => <div key={image.uri} data-agent-capture-image className="w-36 shrink-0">
+        <ChatCaptureThumbnail uri={image.uri} alt={image.label} className="h-24" onOpen={image => {
+          setResourcePreview(null);
+          setPreview(image);
+        }} />
       </div>)}
     </div> : null}
     {preview ? <ChatImagePreview {...preview} onClose={() => setPreview(null)} /> : null}
+    {resourcePreview ? <ChatCaptureResourcePreview key={resourcePreview.request} uri={resourcePreview.uri} alt={resourcePreview.label} onClose={() => setResourcePreview(null)} /> : null}
   </div>;
 }
 
@@ -352,21 +375,13 @@ export function buildDurableTimelineRows(
     onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
     renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
     onOpenChatById?: (chatId: string) => void;
+    captureText?: string;
   } = {},
 ): ReactNode[] {
   // Lifecycle evidence stays durable; the right sidebar owns its presentation.
   // A dropped cancellation marker is replaced by the turn's status row.
-  // Older receipts keep capture previews only in full step results. Bind them
-  // to their matching result event, never to the earlier tool invocation.
-  const captureResults = buildRuntimeStepResultQueues(steps);
-  const captureEvents = events.map(event => {
-    if (event.kind !== "tool_result" || !event.payload.actionId) return event;
-    const result = captureResults.get(event.payload.actionId)?.shift() as { captures?: ChatTimelineEvent["payload"]["captures"] } | undefined;
-    return event.payload.captures?.length || !result?.captures?.length ? event
-      : { ...event, payload: { ...event.payload, captures: result.captures } };
-  });
   const presentation = buildTimelinePresentation(
-    captureEvents.filter((event) => event.kind !== "subagent"
+    events.filter((event) => event.kind !== "subagent"
       && !(options.dropCancellationMarkers && (isCancellationMarkerTimelineEvent(event)
         || (event.kind === "assistant" && event.payload?.status === "completion_unverified")))),
     elapsedSeconds,
@@ -379,8 +394,7 @@ export function buildDurableTimelineRows(
     ));
   }
   const resultQueues = buildRuntimeStepResultQueues(steps);
-  const captureSeen = new Set<string>();
-  const publicText = events.filter(event => event.kind === "assistant").map(event => event.payload.summary || "").join("\n");
+  const publicText = [options.captureText || "", ...events.filter(event => event.kind === "assistant").map(event => event.payload.summary || "")].join("\n");
   const takeFullResult = (invocation: TimelineInvocation): unknown => {
     if (!invocation.actionId) return undefined;
     const queue = resultQueues.get(invocation.actionId);
@@ -441,11 +455,6 @@ export function buildDurableTimelineRows(
   ));
   for (const entry of presentation.entries) {
     appendMessagesBefore(entry.startedAt);
-    if (entry.type === "captures") {
-      flushToolCalls();
-      processRows.push(...buildCaptureImageRows([{ kind: "tool", result: { captures: entry.captures } }], publicText, captureSeen));
-      continue;
-    }
     if (entry.type === "assistant") {
       flushToolCalls();
       if (!includeAssistant) continue;
@@ -521,6 +530,7 @@ export function buildDurableTimelineRows(
   if (options.providerLine && finalAssistant) {
     rows.push(<div key="agent-turn-provider" className="mt-2 px-1 text-[10px] leading-relaxed text-muted-foreground/75">{options.providerLine}</div>);
   }
+  rows.push(...buildCaptureImageRows(steps, publicText, events));
   return rows;
 }
 

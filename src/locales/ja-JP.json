@@ -876,6 +876,14 @@
     "closeImagePreview": "画像プレビューを閉じる",
     "zoomIn": "拡大",
     "zoomOut": "縮小",
+    "captureAngles": {
+      "front": "正面",
+      "back": "背面",
+      "side_left": "左側面",
+      "side_right": "右側面",
+      "bottom": "底面",
+      "face": "顔の拡大"
+    },
     "contextMeterUsed": "{{value}} 使用済み",
     "contextMeterPercentUsed": "{{percent}}% 使用済み",
     "contextMeterTokenDetail": "使用済み {{used}}、合計 {{limit}}",

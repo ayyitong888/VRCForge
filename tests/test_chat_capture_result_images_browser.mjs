@@ -7,7 +7,12 @@ import postcss from 'postcss';
 import tailwindcss from 'tailwindcss';
 const uri=`vrcforge://scene-capture-preview/8d886299-9be1-4baf-8e1f-e205f3a8e5fc?context=runtime%3Asession-fixture&revision=1&store=${'1'.repeat(32)}`;
 const preview={schema:'vrcforge.scene_capture_preview.v1',mimeType:'image/png',captureId:'8d886299-9be1-4baf-8e1f-e205f3a8e5fc',resourceUri:uri};
-const response=process.env.VRCFORGE_CAPTURE_RECEIPT?JSON.parse(await readFile(process.env.VRCFORGE_CAPTURE_RECEIPT,'utf8')).response:{sessionId:'session-fixture',clientTurnId:'turn-fixture',plan:{summary:'Captured result',reply:'Review the result.'},steps:[{kind:'tool',result:{captures:[{angle:'front',preview},{angle:'duplicate',preview}]}}]};
+const backId='f75e7e6b-e22e-40c3-af08-1b19ce0d9578';
+const back={...preview,captureId:backId,resourceUri:uri.replace(preview.captureId,backId)};
+const response=process.env.VRCFORGE_CAPTURE_RECEIPT?JSON.parse(await readFile(process.env.VRCFORGE_CAPTURE_RECEIPT,'utf8')).response:{sessionId:'session-fixture',clientTurnId:'turn-fixture',plan:{summary:'Captured result',reply:'Review the result.'},steps:[
+ {kind:'tool',result:{captures:[{angle:'front',preview}]}},
+ {kind:'tool',result:{captures:[{angle:'back',preview:back},{angle:'duplicate',preview}]}},
+]};
 const captures=response.steps.flatMap(step=>step.result?.captures || []).filter(c=>c.preview?.schema==='vrcforge.scene_capture_preview.v1');
 const unique=new Set(captures.map(c=>c.preview.resourceUri));
 assert.ok(unique.size);
@@ -33,9 +38,19 @@ try{
  if(response.timeline?.some(event=>event.kind==='tool_result')) {
    await page.locator('[data-agent-turn-process-group] > div > button').first().click();
  }
- await page.locator('[data-agent-capture-images]').first().waitFor();
+ const groups=page.locator('[data-agent-capture-images]');
+ await groups.first().waitFor();
+ assert.equal(await groups.count(),1,'images from different capture receipts share one gallery');
  assert.equal(await page.locator('[data-agent-capture-image] img').count(),0,'tool image activities start collapsed');
- while(await page.locator('[data-agent-capture-images] > button[aria-expanded=false]').count()) await page.locator('[data-agent-capture-images] > button[aria-expanded=false]').first().click();
+ assert.equal(calls.length,0,'named references do not fetch unopened images');
+ const firstLink=groups.locator('[data-agent-capture-link]').first();
+ if(!process.env.VRCFORGE_CAPTURE_RECEIPT) assert.equal(await firstLink.innerText(),'Front view');
+ await firstLink.click();
+ await page.locator('dialog[open] img').waitFor();
+ assert.equal(calls.length,1,'a named reference opens only the selected capture');
+ await page.keyboard.press('Escape');
+ await page.locator('dialog[open]').waitFor({state:'detached'});
+ await groups.locator('button[aria-expanded=false]').click();
  await page.waitForFunction(count=>document.querySelectorAll('[data-agent-capture-image] img').length===count,unique.size);
  const firstCapture=page.locator('[data-agent-capture-image]').first();
  const thumbnail=firstCapture.locator('img');
@@ -80,18 +95,15 @@ try{
  const markerOnly={...response,timeline:[{id:'marker',sequence:0,kind:'tool_result',timestamp:new Date().toISOString(),payload:{tool:'capture',actionId:'capture',status:'ok'}}]};
  await page.evaluate(({response,context})=>window.mount({id:'marker-only',type:'agent',response},context),{response:markerOnly,context});
  await page.locator('[data-agent-capture-images]').waitFor();
- while(await page.locator('[data-agent-capture-images] > button[aria-expanded=false]').count()) await page.locator('[data-agent-capture-images] > button[aria-expanded=false]').first().click();
+ while(await page.locator('[data-agent-capture-images] button[aria-expanded=false]').count()) await page.locator('[data-agent-capture-images] button[aria-expanded=false]').first().click();
  await page.waitForFunction(count=>document.querySelectorAll('[data-agent-capture-image] img').length===count,unique.size);
  assert.equal(await page.locator('[data-agent-capture-image]').count(),unique.size,'step previews remain visible when a tool-result marker has no captures');
- if(response.timeline?.some(event=>event.kind==='tool_result')) {
-   assert.ok(await page.locator('[data-agent-turn-process-group] [data-agent-capture-images]').count()>0,'capture groups remain at tool activity positions');
-   assert.ok(await page.locator('[data-agent-capture-images]').evaluateAll(groups=>groups.every(group=>group.previousElementSibling?.hasAttribute('data-agent-tool-call-group'))),'each capture group follows its source tool group');
- }
+ assert.equal(await page.locator('[data-agent-turn-process-group] [data-agent-capture-images]').count(),0,'gallery is available outside the folded work log');
  assert.ok(calls.every(c=>c.sessionId===response.sessionId&&c.clientTurnId===response.clientTurnId));
  const live={id:'live',type:'streaming',clientTurnId:response.clientTurnId,text:'Checking the captured result.',timeline:[{id:'capture',sequence:0,kind:'tool_result',timestamp:new Date().toISOString(),payload:{tool:'capture',actionId:'capture',captures}}]};
  await page.evaluate(({live,context})=>window.mount(live,context),{live,context});
  await page.locator('[data-conversation-streaming-turn] [data-agent-capture-images]').first().waitFor();
- while(await page.locator('[data-conversation-streaming-turn] [data-agent-capture-images] > button[aria-expanded=false]').count()) await page.locator('[data-conversation-streaming-turn] [data-agent-capture-images] > button[aria-expanded=false]').first().click();
+ while(await page.locator('[data-conversation-streaming-turn] [data-agent-capture-images] button[aria-expanded=false]').count()) await page.locator('[data-conversation-streaming-turn] [data-agent-capture-images] button[aria-expanded=false]').first().click();
  await page.waitForFunction(count=>document.querySelectorAll('[data-conversation-streaming-turn] [data-agent-capture-image] img').length===count,unique.size);
  assert.equal(await page.locator('[data-agent-capture-image]').count(),unique.size,'live result has a correctly bound image context');
  // Reproduce durable commentary arriving before the live buffer clears.
@@ -110,7 +122,17 @@ try{
  await page.evaluate(({item,context})=>window.mount(item,context),{item:ordered,context});
  await page.locator('[data-agent-capture-images]').waitFor();
  const order=await page.locator('[data-agent-capture-images], [data-chat-quote-content]').allTextContents();
- assert.equal(order[0],preparing,'capture evidence belongs at result time after intervening commentary, not call time');
+ assert.equal(order[0],preparing,'commentary remains above the grouped captures');
  assert.match(order[1],new RegExp(` · ${unique.size}`),'collapsed image activity shows its image count');
+ const consecutive={...ordered,id:'consecutive',timeline:[
+   event('a','tool_call',0,{tool:'capture',actionId:'a',status:'started'}),
+   event('ar','tool_result',1,{tool:'capture',actionId:'a',status:'ok',captures:captures.slice(0,1)}),
+   event('b','tool_call',2,{tool:'capture',actionId:'b',status:'started'}),
+   event('br','tool_result',3,{tool:'capture',actionId:'b',status:'ok',captures:captures.slice(1)}),
+ ]};
+ await page.evaluate(({item,context})=>window.mount(item,context),{item:consecutive,context});
+ await page.locator('[data-agent-capture-images]').waitFor();
+ assert.equal(await page.locator('[data-agent-tool-call-group]').count(),1,'capture receipts do not split a consecutive tool group');
+ assert.equal(await page.locator('[data-agent-capture-images]').count(),1,'consecutive captures have one row');
  assert.deepEqual(errors,[]);console.log(`PASS final/live capture activities, dialog, ${unique.size} previews, exact turn context, commentary dedup and result-time ordering`);
 }finally{await browser?.close();await new Promise(r=>server.close(r));}

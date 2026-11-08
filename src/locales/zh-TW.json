@@ -876,6 +876,14 @@
     "closeImagePreview": "關閉圖片預覽",
     "zoomIn": "放大",
     "zoomOut": "縮小",
+    "captureAngles": {
+      "front": "正面圖",
+      "back": "背面圖",
+      "side_left": "左側圖",
+      "side_right": "右側圖",
+      "bottom": "底部圖",
+      "face": "臉部特寫"
+    },
     "contextMeterUsed": "已用 {{value}}",
     "contextMeterPercentUsed": "{{percent}}% 已用",
     "contextMeterTokenDetail": "已用 {{used}} 標記，共 {{limit}}",
