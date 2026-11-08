@@ -9,7 +9,7 @@ assert.ok(workspace.includes("<details") && workspace.includes("checkpoint.adjus
 assert.ok(workspace.includes("data-vrcforge-checkpoint-list"), "checkpoint list needs a semantic card marker");
 assert.ok(workspace.includes("data-vrcforge-checkpoint-detail"), "checkpoint detail needs a semantic card marker");
 assert.match(workspace, /title=\{checkpoint\.id\}/, "checkpoint IDs should remain available as tooltip metadata");
-assert.match(workspace, /checkpoint\.targetTool \|\| checkpoint\.id/, "checkpoint rows should lead with the operation rather than the checkpoint ID");
+assert.match(workspace, /checkpointTitle\(checkpoint\)/, "checkpoint rows should lead with the operation rather than the checkpoint ID");
 assert.doesNotMatch(workspace, /\{selectedProjectPath \? <div/, "the full project path should not occupy the checkpoint overview");
 assert.ok(workspace.includes("adjustmentPreview ?") && workspace.includes("preview ?") && workspace.includes("recoveryPreview ?"), "detail area must select one preview type");
 assert.ok(workspace.includes("onRestore") && workspace.includes("onRestoreRecovery") && workspace.includes("onApplyAdjustment"), "restore and adjustment actions must remain available");

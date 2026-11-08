@@ -4338,6 +4338,7 @@ export default function App() {
               recoveryMessage={recoveryMessage}
               adjustmentMessage={adjustmentMessage}
               onRefresh={() => void loadCheckpoints(endpoint, { force: true })}
+              onManageStorage={() => openSettingsSection("storage")}
               onPreview={previewCheckpoint}
               onRestore={restoreCheckpoint}
               onPreviewRecovery={previewRecovery}

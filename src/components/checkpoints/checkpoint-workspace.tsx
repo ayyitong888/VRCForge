@@ -25,6 +25,7 @@ export function CheckpointWorkspace({
   recoveryMessage,
   adjustmentMessage,
   onRefresh,
+  onManageStorage,
   onPreview,
   onRestore,
   onPreviewRecovery,
@@ -54,6 +55,7 @@ export function CheckpointWorkspace({
   recoveryMessage: string;
   adjustmentMessage: string;
   onRefresh: () => void;
+  onManageStorage?: () => void;
   onPreview: (checkpointId: string) => void;
   onRestore: (checkpointId: string) => void;
   onPreviewRecovery: (recoveryId: string) => void;
@@ -71,16 +73,10 @@ export function CheckpointWorkspace({
   const selectedId = preview?.checkpoint?.id || "";
   const selectedRecoveryId = recoveryPreview?.recovery?.id || "";
   const selectedAdjustmentId = adjustmentPreview?.adjustmentCheckpoint?.id || "";
-  const changedFiles = preview?.changedFiles || [];
-  const workingTreeStatus = preview?.workingTreeStatus || [];
   const recoveryCheckpointPreview = recoveryPreview?.checkpointPreview || null;
-  const recoveryChangedFiles = recoveryCheckpointPreview?.changedFiles || [];
-  const recoveryWorkingTreeStatus = recoveryCheckpointPreview?.workingTreeStatus || [];
-  const adjustmentChangedFiles = adjustmentPreview?.changedFiles || [];
-  const adjustmentWorkingTreeStatus = adjustmentPreview?.workingTreeStatus || [];
   return (
     <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
-      <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
+      <div className="mx-auto grid max-w-6xl items-start gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
         <div className="grid min-w-0 gap-6">
           {interruptedRecoveries.length > 0 || recoveryPreview ? <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-4 flex items-center gap-2">
@@ -183,6 +179,7 @@ export function CheckpointWorkspace({
                   onRefresh();
                 }}
                 disabled={loading}
+                aria-label={i18n.t("common.refresh")}
               >
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               </Button>
@@ -199,6 +196,7 @@ export function CheckpointWorkspace({
                   key={checkpoint.id}
                   type="button"
                   title={checkpoint.id}
+                  aria-pressed={selectedId === checkpoint.id}
                   onClick={() => onPreview(checkpoint.id)}
                   className={cn(
                     "grid w-full min-w-0 gap-1 rounded-md border px-3 py-2 text-left text-sm transition-colors",
@@ -208,17 +206,28 @@ export function CheckpointWorkspace({
                   )}
                 >
                   <div className="flex min-w-0 items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                      {checkpoint.targetTool || checkpoint.id}
+                    <span className="min-w-0 flex-1 break-words text-sm font-medium">
+                      {checkpointTitle(checkpoint)}
                     </span>
                     <Badge tone={checkpoint.ok ? "ok" : "warn"} className="h-6 shrink-0">
-                      {checkpoint.status || (checkpoint.ok ? i18n.t("connector.ready") : "unavailable")}
+                      {checkpointStatus(checkpoint)}
                     </Badge>
                   </div>
-                  <div className="truncate text-xs text-muted-foreground">{formatCheckpointTime(checkpoint.createdAt)}</div>
+                  <div className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                    <span>{formatCheckpointTime(checkpoint.createdAt)}</span>
+                    {checkpoint.projectRoot ? (
+                      <span className="min-w-0 truncate" title={checkpoint.projectRoot}>{pathName(checkpoint.projectRoot)}</span>
+                    ) : null}
+                  </div>
                 </button>
               ))}
             </div>
+            {onManageStorage ? (
+              <Button type="button" variant="ghost" className="mt-3 h-8 px-2 text-xs" onClick={onManageStorage}>
+                <Archive className="h-3.5 w-3.5" />
+                {i18n.t("checkpoint.manageStorage")}
+              </Button>
+            ) : null}
           </section>
           </details>
 
@@ -382,6 +391,7 @@ export function CheckpointWorkspace({
               </div>
             ) : (
               <div className="grid gap-4">
+                {recoveryCheckpointPreview ? <CheckpointScope preview={recoveryCheckpointPreview} /> : null}
                 <div className="grid gap-3">
                   <DataLine label={i18n.t("recovery.recovery")} value={recoveryPreview.recovery?.id || "-"} mono />
                   <DataLine label={i18n.t("recovery.target")} value={recoveryPreview.recovery?.targetTool || "-"} />
@@ -389,8 +399,6 @@ export function CheckpointWorkspace({
                   <DataLine label={i18n.t("subagent.roles.projectIndexReview")} value={recoveryPreview.recovery?.projectRoot || "-"} />
                   {recoveryPreview.error ? <DataLine label={i18n.t("doctor.error")} value={recoveryPreview.error} /> : null}
                 </div>
-                <OutputBlock label={i18n.t("checkpoint.changedFiles")} value={recoveryChangedFiles.join("\n")} />
-                <OutputBlock label={i18n.t("checkpoint.workingTree")} value={recoveryWorkingTreeStatus.join("\n")} />
                 {recoveryMessage ? <div className="text-sm text-muted-foreground">{recoveryMessage}</div> : null}
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button
@@ -437,15 +445,31 @@ export function CheckpointWorkspace({
               </div>
             ) : (
               <div className="grid gap-4">
-                <div className="grid gap-3">
-                  <DataLine label={i18n.t("recovery.checkpoint")} value={preview.checkpoint?.id || "-"} mono />
-                  <DataLine label={i18n.t("recovery.target")} value={preview.checkpoint?.targetTool || "-"} />
-                  <DataLine label={i18n.t("subagent.roles.projectIndexReview")} value={preview.checkpoint?.projectRoot || "-"} />
-                  <DataLine label={i18n.t("recovery.gitRef")} value={shortRef(preview.checkpoint?.checkpointRef)} mono />
-                  {preview.error ? <DataLine label={i18n.t("doctor.error")} value={preview.error} /> : null}
-                </div>
-                <OutputBlock label={i18n.t("checkpoint.changedFiles")} value={changedFiles.join("\n")} />
-                <OutputBlock label={i18n.t("checkpoint.workingTree")} value={workingTreeStatus.join("\n")} />
+                {preview.checkpoint ? (
+                  <div>
+                    <h2 className="break-words text-base font-semibold">{checkpointTitle(preview.checkpoint)}</h2>
+                    {preview.checkpoint.projectRoot ? (
+                      <p className="mt-1 break-words text-xs text-muted-foreground" title={preview.checkpoint.projectRoot}>
+                        {i18n.t("recovery.project")} · {pathName(preview.checkpoint.projectRoot)}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {preview.error ? <p role="alert" className="break-words text-sm text-destructive">{preview.error}</p> : null}
+                <CheckpointScope preview={preview} />
+                {preview.checkpoint ? (
+                  <details className="min-w-0 border-t border-border pt-2">
+                    <summary className="cursor-pointer rounded-sm text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                      {i18n.t("checkpoint.technicalDetails")}
+                    </summary>
+                    <div className="mt-3 grid gap-2">
+                      <DataLine label={i18n.t("recovery.checkpoint")} value={preview.checkpoint.id} mono />
+                      <DataLine label={i18n.t("recovery.target")} value={preview.checkpoint.targetTool || "-"} mono />
+                      <DataLine label={i18n.t("recovery.project")} value={preview.checkpoint.projectRoot || "-"} mono />
+                      <DataLine label={i18n.t("recovery.gitRef")} value={shortRef(preview.checkpoint.checkpointRef)} mono />
+                    </div>
+                  </details>
+                ) : null}
                 {message ? <div className="text-sm text-muted-foreground">{message}</div> : null}
                 <div className="flex justify-end">
                   <Button
@@ -479,6 +503,7 @@ export function CheckpointWorkspace({
               </div>
             ) : (
               <div className="grid gap-4">
+                <CheckpointScope preview={adjustmentPreview} />
                 <div className="grid gap-3">
                   <DataLine label="Adjustment" value={adjustmentPreview.adjustmentCheckpoint?.label || "-"} />
                   <DataLine label="Kind" value={adjustmentPreview.adjustmentCheckpoint?.kind || "-"} />
@@ -487,8 +512,6 @@ export function CheckpointWorkspace({
                   <DataLine label={i18n.t("recovery.gitRef")} value={shortRef(adjustmentPreview.checkpoint?.checkpointRef)} mono />
                   {adjustmentPreview.error ? <DataLine label={i18n.t("doctor.error")} value={adjustmentPreview.error} /> : null}
                 </div>
-                <OutputBlock label={i18n.t("checkpoint.changedFiles")} value={adjustmentChangedFiles.join("\n")} />
-                <OutputBlock label={i18n.t("checkpoint.workingTree")} value={adjustmentWorkingTreeStatus.join("\n")} />
                 {adjustmentMessage ? <div className="text-sm text-muted-foreground">{adjustmentMessage}</div> : null}
                 <div className="flex justify-end">
                   <Button
@@ -511,8 +534,9 @@ export function CheckpointWorkspace({
             )}
           </section> : null}
           {!recoveryPreview && !preview && !adjustmentPreview ? (
-            <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel" data-vrcforge-checkpoint-detail>
-              <div className="text-sm text-muted-foreground">{i18n.t("checkpoint.selectCheckpoint")}</div>
+            <section className="min-w-0 rounded-xl border border-dashed border-border bg-card px-5 py-7" data-vrcforge-checkpoint-detail>
+              <h2 className="text-sm font-semibold">{i18n.t("checkpoint.restorePreview")}</h2>
+              <p className="mt-1 text-sm text-muted-foreground">{i18n.t("checkpoint.previewGuide")}</p>
             </section>
           ) : null}
         </div>
@@ -521,6 +545,44 @@ export function CheckpointWorkspace({
   );
 }
 
+
+function CheckpointScope({ preview }: { preview: AgentCheckpointPreview }) {
+  const changed = preview.changedFiles;
+  const working = preview.workingTreeStatus;
+  return (
+    <div className="grid gap-3">
+      {changed ? <OutputBlock label={`${i18n.t("checkpoint.changedFiles")} (${changed.length})`} value={changed.join("\n")} /> : null}
+      {working ? (
+        <details className="min-w-0">
+          <summary className="cursor-pointer rounded-sm text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            {i18n.t("checkpoint.workingTree")} ({working.length})
+          </summary>
+          <div className="mt-2">
+            <OutputBlock label={i18n.t("checkpoint.workingTree")} value={working.join("\n")} />
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function pathName(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
+}
+
+function checkpointTitle(checkpoint: AgentCheckpoint) {
+  const tool = checkpoint.targetTool?.replace(/^(?:vrcforge_|unity_)+/, "");
+  const action = tool ? i18n.t(`checkpoint.operation.${tool}`, { defaultValue: tool.replace(/_/g, " ") }) : i18n.t("recovery.checkpoint");
+  const assets = checkpoint.archiveFiles?.filter((file) => !file.endsWith(".meta"));
+  return assets?.length === 1 ? `${action} · ${pathName(assets[0])}` : action;
+}
+
+function checkpointStatus(checkpoint: AgentCheckpoint) {
+  if (checkpoint.status === "ready") return i18n.t("doctor.ready");
+  if (checkpoint.status === "failed") return i18n.t("checkpoint.failed");
+  if (checkpoint.status === "unavailable") return i18n.t("common.unavailable");
+  return checkpoint.status || i18n.t(checkpoint.ok ? "doctor.ready" : "common.unavailable");
+}
 
 function shortRef(ref?: string) {
   return ref ? ref.slice(0, 12) : "-";
@@ -534,5 +596,5 @@ function formatCheckpointTime(value?: string) {
   if (Number.isNaN(time.getTime())) {
     return value;
   }
-  return time.toLocaleString();
+  return time.toLocaleString(i18n.resolvedLanguage, { dateStyle: "medium", timeStyle: "medium" });
 }

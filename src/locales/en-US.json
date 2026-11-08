@@ -1691,6 +1691,15 @@
     "missing": "missing"
   },
   "checkpoint": {
+    "manageStorage": "Manage storage",
+    "technicalDetails": "Technical details",
+    "previewGuide": "Select a checkpoint to see the project, affected files, and whether it can be restored.",
+    "failed": "Failed",
+    "operation": {
+      "set_material_texture": "Change material texture",
+      "scene_save": "Save scene",
+      "instantiate_prefab": "Add prefab"
+    },
     "interruptedWrites": "Interrupted Writes",
     "noInterruptedWrites": "No interrupted writes.",
     "checkpoints": "Checkpoints",

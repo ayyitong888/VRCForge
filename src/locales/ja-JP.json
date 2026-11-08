@@ -1684,6 +1684,15 @@
     "missing": "missing"
   },
   "checkpoint": {
+    "manageStorage": "ストレージを管理",
+    "technicalDetails": "技術情報",
+    "previewGuide": "チェックポイントを選ぶと、対象のプロジェクト、影響するファイル、復元の可否を確認できます。",
+    "failed": "失敗",
+    "operation": {
+      "set_material_texture": "マテリアルのテクスチャを変更",
+      "scene_save": "シーンを保存",
+      "instantiate_prefab": "プレハブを配置"
+    },
     "interruptedWrites": "中断された書き込み",
     "noInterruptedWrites": "中断された書き込みはありません。",
     "checkpoints": "チェックポイント",

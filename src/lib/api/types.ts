@@ -348,6 +348,7 @@ export type AgentCheckpoint = {
   baseCommit?: string;
   createdCommit?: boolean;
   pathspecs?: string[];
+  archiveFiles?: string[];
   statusBefore?: string[];
 };
 

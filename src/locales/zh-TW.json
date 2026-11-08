@@ -1684,6 +1684,15 @@
     "missing": "缺少"
   },
   "checkpoint": {
+    "manageStorage": "管理儲存空間",
+    "technicalDetails": "技術詳細資料",
+    "previewGuide": "選擇檢查點，查看所屬專案、受影響的檔案及是否可還原。",
+    "failed": "失敗",
+    "operation": {
+      "set_material_texture": "更換材質貼圖",
+      "scene_save": "儲存場景",
+      "instantiate_prefab": "放置預製物件"
+    },
     "interruptedWrites": "中斷的寫入",
     "noInterruptedWrites": "無中斷的寫入。",
     "checkpoints": "檢查點",

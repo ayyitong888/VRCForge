@@ -1691,6 +1691,15 @@
     "missing": "缺失"
   },
   "checkpoint": {
+    "manageStorage": "管理存储",
+    "technicalDetails": "技术详情",
+    "previewGuide": "选择检查点，查看所属工程、受影响的文件及是否可恢复。",
+    "failed": "失败",
+    "operation": {
+      "set_material_texture": "更换材质贴图",
+      "scene_save": "保存场景",
+      "instantiate_prefab": "放置预制体"
+    },
     "interruptedWrites": "中断的写入",
     "noInterruptedWrites": "没有中断的写入。",
     "checkpoints": "检查点",
