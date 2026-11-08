@@ -471,6 +471,7 @@ export function buildDurableTimelineRows(
       continue;
     }
     for (const storedInvocation of entry.invocations) {
+      appendMessagesBefore(storedInvocation.startedAt);
       // Stop ends the client observation, not the tool's side effects. Without
       // a result we can say interrupted, never success or still running.
       const invocation = options.dropCancellationMarkers
@@ -518,14 +519,7 @@ export function buildDurableTimelineRows(
         </WorkSegmentRow>
       </div>
     );
-    const collapsedMessages = interleavedMessages.length && !options.interleavedUsersExpanded
-      ? interleavedMessages.map((message) => options.renderInterleavedUserMessage?.(message) || (
-        <div key={`steer-collapsed-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-          <div className="max-w-[78%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">{message.text}</div>
-        </div>
-      ))
-      : [];
-    rows.unshift(group, ...collapsedMessages);
+    rows.unshift(group);
   }
   if (options.providerLine && finalAssistant) {
     rows.push(<div key="agent-turn-provider" className="mt-2 px-1 text-[10px] leading-relaxed text-muted-foreground/75">{options.providerLine}</div>);

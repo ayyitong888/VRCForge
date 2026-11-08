@@ -7,6 +7,7 @@ export type ChatPositionMarker = {
   key: string;
   preview: string;
   getAssistantPreview?: () => string;
+  reveal?: () => void;
 };
 
 type ChatPositionRailProps = {
@@ -33,6 +34,7 @@ export function ChatPositionRail({ markers, scrollContainerRef, scopeKey = "" }:
   const markerListRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const closePreviewTimerRef = useRef<number | null>(null);
+  const navigationFrameRef = useRef<number | null>(null);
   const previewId = useId();
   const visible = markers.length >= 2;
 
@@ -120,6 +122,13 @@ export function ChatPositionRail({ markers, scrollContainerRef, scopeKey = "" }:
 
   useEffect(() => () => clearPreviewCloseTimer(), [clearPreviewCloseTimer]);
 
+  useEffect(() => () => {
+    if (navigationFrameRef.current !== null) {
+      cancelAnimationFrame(navigationFrameRef.current);
+      navigationFrameRef.current = null;
+    }
+  }, [scopeKey]);
+
   useLayoutEffect(() => {
     if (!activePreview) {
       setPreviewPosition(null);
@@ -172,6 +181,17 @@ export function ChatPositionRail({ markers, scrollContainerRef, scopeKey = "" }:
 
   if (!visible) return null;
 
+  function scrollToMarker(key: string): boolean {
+    const container = scrollContainerRef.current;
+    const anchor = container ? findAnchor(container, key) : null;
+    if (!anchor || !container) return false;
+    const top = anchor.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    container.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? "auto" : "smooth" });
+    setCurrentKey(key);
+    return true;
+  }
+
   return (
     <>
       <nav className="pointer-events-none absolute inset-y-0 left-0 z-10 flex w-7 items-center justify-center" aria-label={t("chat.positionNavigation")} data-chat-position-rail>
@@ -197,15 +217,16 @@ export function ChatPositionRail({ markers, scrollContainerRef, scopeKey = "" }:
               }}
               onBlur={() => setFocusedKey(null)}
               onClick={() => {
-                const container = scrollContainerRef.current;
-                const anchor = container ? findAnchor(container, marker.key) : null;
-                if (!anchor || !container) return;
-                const targetTop = anchor.getBoundingClientRect().top
-                  - container.getBoundingClientRect().top
-                  + container.scrollTop;
-                const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-                container.scrollTo({ top: Math.max(0, targetTop), behavior: reduceMotion ? "auto" : "smooth" });
-                setCurrentKey(marker.key);
+                if (navigationFrameRef.current !== null) {
+                  cancelAnimationFrame(navigationFrameRef.current);
+                  navigationFrameRef.current = null;
+                }
+                if (scrollToMarker(marker.key) || !marker.reveal) return;
+                marker.reveal();
+                navigationFrameRef.current = requestAnimationFrame(() => {
+                  navigationFrameRef.current = null;
+                  scrollToMarker(marker.key);
+                });
               }}
             >
               <span

@@ -11,7 +11,7 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
@@ -37,6 +37,8 @@ import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, displayPlanne
 export function ConversationCard({
   item,
   interleavedUserMessages = [],
+  steeringNavAnchorKeys,
+  steeringRevealSequence,
   initialUserContent,
   chatResourceImageContext,
   attachmentPayloads,
@@ -67,6 +69,8 @@ export function ConversationCard({
 }: {
   item: Exclude<ConversationItem, { type: "handoff_card" }>;
   interleavedUserMessages?: Extract<ConversationItem, { type: "user" }>[];
+  steeringNavAnchorKeys?: ReadonlyMap<string, string>;
+  steeringRevealSequence?: number;
   initialUserContent?: ReactNode;
   chatResourceImageContext?: Pick<ChatResourceImageContextValue, "endpoint" | "chatId" | "projectPath">;
   attachmentPayloads?: AttachmentPayloadVault;
@@ -108,6 +112,9 @@ export function ConversationCard({
   const streamingCreatedAt = item.type === "streaming" ? item.createdAt : undefined;
   const [streamingNowMs, setStreamingNowMs] = useState(() => Date.now());
   const [interleavedUsersExpanded, setInterleavedUsersExpanded] = useState(item.type === "streaming");
+  useLayoutEffect(() => {
+    if (steeringRevealSequence !== undefined) setInterleavedUsersExpanded(true);
+  }, [steeringRevealSequence]);
   useEffect(() => {
     if (!streamingCreatedAt) return undefined;
     setStreamingNowMs(Date.now());
@@ -327,7 +334,7 @@ export function ConversationCard({
       interleavedUserMessages,
       interleavedUsersExpanded,
       onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
-      renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads),
+      renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, steeringNavAnchorKeys?.get(message.id)),
       onOpenChatById,
     });
     return (
@@ -457,7 +464,7 @@ export function ConversationCard({
     interleavedUserMessages,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
-    renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads),
+    renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, steeringNavAnchorKeys?.get(message.id)),
     onOpenChatById,
     live: runtimeActive ?? false,
     t,
@@ -493,12 +500,13 @@ export function ConversationCard({
 function renderInterleavedUserMessage(
   message: Extract<ConversationItem, { type: "user" }>,
   attachmentPayloads?: AttachmentPayloadVault,
+  navigationAnchor?: string,
 ) {
   const attachments = resolveAttachmentPayloadReferences(message.attachments || [], attachmentPayloads);
   const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
   const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
   return (
-    <div key={`steering-${message.id}`} className="group flex min-w-0 justify-end" data-chat-steering-message={message.id}>
+    <div key={`steering-${message.id}`} className="group flex min-w-0 justify-end" data-chat-steering-message={message.id} data-chat-nav-anchor={navigationAnchor}>
       <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
         {images.length ? <UserImageAttachments messageId={message.id} attachments={images} /> : null}
         {message.text ? (

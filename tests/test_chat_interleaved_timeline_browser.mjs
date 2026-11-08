@@ -317,9 +317,9 @@ try {
   const steeringExpanded = page.locator("#steering-expanded");
   assert.equal(await steeringExpanded.getAttribute("data-top-level-user-count"), "0", "the initial user belongs to its owning turn");
   assert.equal(await steeringExpanded.locator("[data-turn-initial-user]").count(), 1, "initial user remains visible once while collapsed");
-  assert.equal(await steeringExpanded.locator("[data-chat-steering-message]").count(), 1, "sent steering message is projected into its owning turn");
-  assert.equal((await steeringExpanded.innerText()).includes("Please check the menu too."), true, "collapsed turn retains the steering message");
-  assert.equal((await steeringExpanded.innerText()).includes("public progress"), false, "collapsed turn hides commentary while retaining steering");
+  assert.equal(await steeringExpanded.locator("[data-chat-steering-message]").count(), 0, "collapsed turn hides the mid-turn steering message");
+  assert.equal((await steeringExpanded.innerText()).includes("Please check the menu too."), false, "the original prompt is the only visible user message in the collapsed turn");
+  assert.equal(await steeringExpanded.locator("[data-agent-process-content]").count(), 0, "collapsed turn hides full commentary");
   const steeringGroup = steeringExpanded.locator("[data-agent-turn-process-group]");
   const assertTurnLayout = async (turn) => {
     const header = await turn.locator("[data-agent-turn-process-group] button").first().boundingBox();
@@ -383,7 +383,7 @@ try {
   if (originalChat) {
     const original = page.locator("#original-replay");
     assert.equal(await original.locator("[data-turn-initial-user]").count(), 2, "both original turn triggers render once");
-    assert.equal(await original.locator("[data-chat-steering-message]").count(), 1, "original sent steer stays in its turn; cancelled queue is excluded");
+    assert.equal(await original.locator("[data-chat-steering-message]").count(), 0, "original sent steer stays folded; cancelled queue is excluded");
     const originalTurn = original.locator("[data-original-turn]").first();
     await assertTurnLayout(originalTurn);
     const originalText = await original.innerText();
@@ -391,6 +391,7 @@ try {
       assert.ok(originalText.includes(item.response.plan.reply.slice(-60).replaceAll("`", "")), "original final answer remains visible outside fold");
     }
     await originalTurn.locator("[data-agent-turn-process-group] button").first().click();
+    assert.equal(await originalTurn.locator("[data-chat-steering-message]").count(), 1, "expansion reveals the original consumed steer once");
     await assertTurnLayout(originalTurn);
     if (process.env.VRCFORGE_TURN_EVIDENCE_DIR) {
       await original.screenshot({path: process.env.VRCFORGE_TURN_EVIDENCE_DIR + "/original-expanded.png"});

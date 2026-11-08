@@ -20,6 +20,22 @@ const initial = { id: 'chat', sessionId: 'session', items: [
   { id: 'confirmed', type: 'user', text: 'same text', clientTurnId: 'confirmed-input', queuedFrom: true, queueStatus: 'steering', createdAt: '2026-10-19T12:00:01Z' },
   { id: 'pending', type: 'user', text: 'same text', clientTurnId: 'pending-input', queuedFrom: true, queueStatus: 'steering', createdAt: '2026-10-19T12:00:02Z' },
 ] };
+const questionId = 'question_visual_checkpoint';
+const continuationId = 'origin:question:' + questionId + ':feedback:1';
+const questionItems = [
+  { id: 'question-answer-' + questionId + '-1', type: 'question_answer', questionId, revision: 1, text: 'Continue with the outfit', updatedAt: '2026-11-08T16:01:36Z' },
+  { id: 'question-continuation:' + continuationId, type: 'streaming', clientTurnId: continuationId, text: '', createdAt: '2026-11-08T16:01:37Z', timeline: [
+    { id: 'before-steer', kind: 'assistant', sequence: 0, timestamp: '2026-11-08T16:09:04Z', payload: { phase: 'commentary', summary: 'Reviewing the outfit.' } },
+    { id: 'after-steer', kind: 'assistant', sequence: 1, timestamp: '2026-11-08T16:09:52Z', payload: { phase: 'commentary', summary: 'I will fix the body texture first.' } },
+  ] },
+  { id: 'question-confirmed-steer', type: 'user', clientTurnId: 'question-consumed-input', text: 'Please fix the body texture.', queuedFrom: true, createdAt: '2026-11-08T16:09:10Z' },
+  { id: 'question-pending-steer', type: 'user', clientTurnId: 'question-pending-input', text: 'Another pending steer.', queuedFrom: true, queueStatus: 'steering', createdAt: '2026-11-08T16:09:13Z' },
+];
+const questionProjection = projectConversationSteeringMessages(questionItems);
+function QuestionReplay() {
+  return <section data-question-steer-replay>{questionProjection.items.map(item => <ConversationCard key={item.id} item={item}
+    runtimeActive={item.type === 'streaming'} interleavedUserMessages={questionProjection.messagesByTurnId.get(continuationId)} />)}</section>;
+}
 const questions = []; const runs = []; const settled = new Set();
 function Harness() {
  const latest = useRef(initial); const [chats, setChats] = useState([initial]);
@@ -40,7 +56,7 @@ function Harness() {
  window.projectedSteers = projection.messagesByTurnId.get('active-turn')?.map(item => item.id) || [];
  return <div><section data-real-cards>{chats[0].items.filter(item => item.type === 'user' || item.type === 'streaming').map(item => <div key={item.id} data-real-id={item.id}><ConversationCard item={item} /></div>)}</section>{chats[0].items.map(item => <div key={item.id} data-kind={item.type} data-id={item.id} data-provenance={String(item.queuedFrom === true)} data-status={item.queueStatus || 'ordinary'}>{item.type === 'agent' ? item.response.plan.reply : item.text}</div>)}{chats[0].items.some(item => item.type === 'streaming') && <button data-stop>Stop</button>}</div>;
 }
-void initializeI18n().then(() => createRoot(document.getElementById('root')).render(<Harness />));
+void initializeI18n().then(() => createRoot(document.getElementById('root')).render(<><Harness /><QuestionReplay /></>));
 ` }, bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic",
  plugins: process.env.VRCFORGE_STEER_CALLER_BASELINE ? [{name:'original-callers',setup(build) {
    build.onLoad({filter: /(?:conversation-card\.tsx|chat-steering-projection\.ts)$/}, async args => ({
@@ -84,6 +100,13 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-kind="agent"]')?.textContent === 'Final response');
   assert.equal(await page.locator('[data-kind="agent"]').count(), 1);
   assert.equal(await page.locator('[data-id="confirmed"]').getAttribute('data-provenance'), 'false');
+  const questionReplay = page.locator('[data-question-steer-replay]');
+  const continuation = questionReplay.locator('[data-conversation-streaming-turn]');
+  assert.deepEqual(await continuation.locator('[data-chat-quote-content]').allTextContents(), [
+    'Reviewing the outfit.', 'Please fix the body texture.', 'I will fix the body texture first.',
+  ], 'consumed input belongs between the earlier commentary and its visible response');
+  assert.equal(await questionReplay.locator('[data-chat-steering-message]').count(), 1, 'consumed input appears once inside the continuation');
+  assert.equal(await questionReplay.locator('[data-user-message-status="steering"]').count(), 1, 'pending input stays pending outside the continuation');
   console.log('live consumed-ID delta: pending becomes ordinary; active stream/Stop remain; unconfirmed retained; final still delivered');
 } finally {
   await browser?.close(); await new Promise(resolve => server.close(resolve));

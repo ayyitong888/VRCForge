@@ -34,6 +34,18 @@ function Fixture(){
  window.streaming=()=>setItems([user(1),answer(1),user(2),{id:'stream-2',type:'streaming',clientTurnId:'turn-2',text:'Working',phase:'receiving_response'}]);
  window.settle=()=>setItems([user(1),answer(1),user(2),answer(2)]);
  window.userOnly=()=>setItems([user(1),answer(1),{id:'notification',type:'user',text:'<task-notification-trigger/>'},{id:'chosen-answer',type:'question_answer',questionId:'q-choice',question:'Assistant question should not be the preview',text:'My selected answer'},answer(2)]);
+ window.hiddenSteer=()=>{
+   const cid='turn-6:question:review-outfit:feedback:1';
+   setItems([...history.slice(0,12),
+     {id:'outfit-review',type:'question_answer',questionId:'review-outfit',revision:1,text:'Use the outfit',updatedAt:'2026-10-26T00:01:00Z'},
+     {id:'texture-steer',type:'user',clientTurnId:'texture-input',text:'Fix the body texture first',createdAt:'2026-10-26T00:01:10Z'},
+     {id:'pending-steer',type:'user',clientTurnId:'pending-input',text:'Pending follow-up',queueStatus:'queued',composerQueued:true,createdAt:'2026-10-26T00:01:13Z'},
+     {id:'outfit-reply',type:'agent',response:{ok:true,clientTurnId:cid,continuationSource:'question_answered',consumedSteerInputIds:['texture-input'],completedAt:'2026-10-26T00:01:50Z',plan:{nextStep:'done',reply:'The body texture is fixed.'},timeline:[
+       {id:'before-steer',kind:'assistant',sequence:0,timestamp:'2026-10-26T00:01:05Z',payload:{phase:'commentary',summary:'Checking the outfit.'}},
+       {id:'after-steer',kind:'assistant',sequence:1,timestamp:'2026-10-26T00:01:20Z',payload:{phase:'commentary',summary:'Switching to the body texture.'}},
+       {id:'done',kind:'assistant',sequence:2,timestamp:'2026-10-26T00:01:50Z',payload:{phase:'final_answer',status:'done',summary:'The body texture is fixed.'}},
+     ]}},...history.slice(14,24)]);
+ };
  window.cancelledPreview=(reply=true)=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,status:'cancelled',clientTurnId:'turn-2',plan:{nextStep:'cancelled',summary:'Runtime turn was cancelled by the user.',reply:reply?'继续，只修你确认的这两处。保存后展示静态效果，状态标为待你验收。':''},timeline:[{id:'cancelled-tool',sequence:0,kind:'tool_call',payload:{tool:'unity_preview_add_modular_avatar_component',actionId:'ma-preview',status:'ok'}}]}}]);
  window.commentaryPreview=()=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,status:'cancelled',clientTurnId:'turn-2',plan:{nextStep:'cancelled',summary:'Runtime turn was cancelled by the user.'},timeline:[{id:'spoken',sequence:0,kind:'assistant',payload:{phase:'commentary',status:'progress',summary:'正在检查衣服引用。'}},{id:'cancelled-tool',sequence:1,kind:'tool_result',payload:{tool:'unity_bind_execution_target',actionId:'bind',status:'ok',summary:'UNRELATED TOOL RESULT'}}]}}]);
  window.unacceptedPreview=()=>setItems([user(1),answer(1),user(2),{...answer(2),response:{ok:false,clientTurnId:'turn-2',plan:{reply:'UNACCEPTED FINAL',publicMessages:[{phase:'final_answer',text:'UNACCEPTED FINAL'}]},timeline:[{id:'unaccepted',sequence:0,kind:'assistant',payload:{phase:'final_answer',status:'completion_unverified',summary:'UNACCEPTED FINAL'}}]}}]);
@@ -168,6 +180,36 @@ try {
   assert.ok(await preview.locator('strong').count(), 'public assistant preview renders Markdown emphasis');
   assert.ok(await preview.locator('code').count(), 'public assistant preview renders inline code');
   assert.equal(await preview.locator('img').count(), 0, 'hover preview does not load Markdown images');
+  await page.evaluate(() => window.hiddenSteer());
+  const steerMarker = rail.getByRole('button', { name: /Fix the body texture first/ });
+  await steerMarker.waitFor({ timeout: 3000 });
+  assert.equal(await rail.getByRole('button', { name: /Pending follow-up/ }).count(), 0, 'queued items never masquerade as sent steering markers');
+  const steerTurn = page.locator('[data-conversation-item-id="outfit-reply"]');
+  const steerFold = steerTurn.locator('[data-agent-turn-process-group] button').first();
+  const steerBubble = steerTurn.locator('[data-chat-steering-message="texture-steer"]');
+  assert.equal(await steerFold.getAttribute('aria-expanded'), 'false');
+  assert.equal(await steerBubble.count(), 0, 'collapsed work hides consumed steering');
+  assert.ok(await steerTurn.getByText('The body texture is fixed.', { exact: true }).isVisible(), 'final answer remains visible outside the fold');
+  await steerMarker.hover();
+  await page.waitForFunction(() => document.querySelector('[data-chat-position-preview]')?.textContent?.includes('Fix the body texture first'));
+  assert.equal(await steerBubble.count(), 0, 'hovering does not expand work');
+  await scroller.evaluate(e => { e.scrollTop = 0; });
+  await steerMarker.click();
+  await steerBubble.waitFor();
+  await page.waitForFunction(() => {
+    const bubble = document.querySelector('[data-chat-steering-message="texture-steer"]');
+    const scroll = document.querySelector('[data-chat-history-scroll]');
+    return bubble && scroll && Math.abs(bubble.getBoundingClientRect().top - scroll.getBoundingClientRect().top) <= 2;
+  });
+  assert.equal(await steerFold.getAttribute('aria-expanded'), 'true', 'click expands the owning fold and scrolls to its bubble');
+  assert.deepEqual(await steerTurn.locator('[data-chat-quote-content]').allTextContents(), [
+    'Checking the outfit.', 'Fix the body texture first', 'Switching to the body texture.', 'The body texture is fixed.',
+  ]);
+  await steerFold.click();
+  assert.equal(await steerBubble.count(), 0, 'the owner can collapse again after navigation');
+  await steerMarker.press('Enter');
+  await steerBubble.waitFor();
+  assert.equal(await steerFold.getAttribute('aria-expanded'), 'true', 'the same marker opens the fold again from the keyboard');
   await page.evaluate(() => window.long());
   await page.waitForFunction(() => document.querySelectorAll('[data-chat-position-marker]').length === 260);
   await scroller.evaluate(e => { e.scrollTop = e.scrollHeight; });
