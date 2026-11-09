@@ -24,8 +24,14 @@ AGENT_QUESTION_MAX_ITEMS = 60
 QUESTION_KINDS = frozenset({"decision", "visual_checkpoint"})
 VISUAL_RESOLUTIONS = frozenset({"pass", "fail", "uncertain", "later"})
 RUNTIME_TOOL_LOOP_SOURCE = "runtime_tool_loop"
+ASK_USER_USAGE_INSTRUCTION = (
+    "Use ask_user for a missing fact, preference, or decision only the user can supply and that changes the next step. "
+    "Example: ask which color they prefer before applying a texture. "
+)
 CALL_USER_USAGE_INSTRUCTION = (
-    "Treat call_user as an exceptional human handoff. First inspect current evidence and relevant supported tools, "
+    "Use call_user as an exceptional human handoff for a specific action or judgment the user must perform. "
+    "Example: ask the user to inspect the screenshot and confirm whether the fitted outfit is acceptable. "
+    "First inspect current evidence and relevant supported tools, "
     "and identify the specific capability or permission gap requiring a human action or judgment. "
     "A failed tool call alone does not establish this gap. Do not use call_user for routine technical checks, "
     "untested UI guesses, progress acknowledgments, or work the agent can complete. "
@@ -36,14 +42,18 @@ CALL_USER_USAGE_INSTRUCTION = (
     "Pause edits to that target while the user adjusts it. On handback, read the current transform and bindings, preserve the user adjustment, and finish the remaining approved work and review. "
     "Continue independent work without assuming an answer; existing approval and checkpoint requirements remain authoritative. "
 )
+QUESTION_CONFIRMATION_INSTRUCTION = (
+    "If a tool already created a pending confirmation, reuse the existing confirmation card. "
+    "Use the browser confirmation flow for age checks, cookie choices, or account authorization, and the dedicated approval flow for supervised Unity writes. "
+)
 QUESTION_LANGUAGE_INSTRUCTION = (
     "For both ask_user and call_user, write the heading, question and choices in the user's language, using everyday language. "
-    "Start with what you found and why the user's decision is needed. Ask for one concrete decision or action. "
+    "Start with what you found and why the user's help is needed. Ask for one concrete decision or action. "
     "Say what accepting or declining would do in this situation. Name the website or object and the specific change, permission, or data involved. "
     "For a manual action, use short numbered steps: where to click, what to change, important limits, and how to report the result. "
     "Keep exact visible names needed to find an object, component or button; explain unavoidable technical terms beside them. "
     "Leave API names, internal IDs, diagnostic details and the agent's verification plan out of the question. "
-    "Use short, specific choices such as 'Allow optional cookies' and 'Keep cookies off' instead of a bare 'Yes' or 'No'. Include an unsure choice when relevant. "
+    "Use short, specific choices such as 'Use the green texture' and 'Keep the current texture' instead of a bare 'Yes' or 'No'. Include an unsure choice when relevant. "
     "For visual_checkpoint choices, use option objects with unique IDs and an explicit resolution value (pass, fail, uncertain, or later). "
     "A submitted reply closes that question. Only pass grants visual acceptance; follow up only when there is a new decision to make. "
 )
@@ -55,7 +65,7 @@ QUESTION_INPUT_SCHEMA = {
         "kind": {"type": "string", "enum": ["decision", "visual_checkpoint"]},
         "question": {
             "type": "string", "minLength": 1, "maxLength": 1000,
-            "description": QUESTION_LANGUAGE_INSTRUCTION + CALL_USER_USAGE_INSTRUCTION + "Put alternatives in options, not in a long diagnosis here.",
+            "description": QUESTION_LANGUAGE_INSTRUCTION + "Put alternatives in options, not in a long diagnosis here.",
         },
         "options": {
             "type": "array",

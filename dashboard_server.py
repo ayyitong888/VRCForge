@@ -167,6 +167,8 @@ from external_installed_skill_registry import ExternalInstalledSkillRegistryServ
 from desktop_computer_use_service import DESKTOP_BRIDGE_ACTION_TYPES
 from agent_question_service import (
     AgentQuestionServiceError,
+    ASK_USER_USAGE_INSTRUCTION,
+    QUESTION_CONFIRMATION_INSTRUCTION,
     QUESTION_LANGUAGE_INSTRUCTION,
     CALL_USER_USAGE_INSTRUCTION,
 )
@@ -27710,17 +27712,21 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_ask_user",
-        "When to use: ask the user for a missing decision during the active Agent task; options may be omitted for free text. "
-        + QUESTION_LANGUAGE_INSTRUCTION
-        + "Set blocking=false when independent work can continue while the user answers; the answer joins the same active turn, or resumes the parked task. The default blocking=true pauses for dependent decisions. Never perform actions depending on an unanswered decision. When NOT to use: do not use for ordinary conversation, hypothetical examples, already known decisions, or to bypass approval/checkpoint protection. Negative example: do not ask again for a decision already present in the task.",
+        "When to use: " + ASK_USER_USAGE_INSTRUCTION + QUESTION_LANGUAGE_INSTRUCTION
+        + "Omit options for free text. Set blocking=false when independent work can continue while waiting; use the default blocking=true when the next step needs the answer. "
+        + "When NOT to use: ordinary conversation, hypothetical examples, already known decisions, facts tools can read, or tasks the user must do personally (use call_user). "
+        + QUESTION_CONFIRMATION_INSTRUCTION
+        + "Negative example: if the browser already shows an age confirmation, use that card.",
         "plan/preview",
         AGENT_GATEWAY.create_runtime_question,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_call_user",
-        "When to use: request a specific human action or judgment unavailable to tools. "
-        + CALL_USER_USAGE_INSTRUCTION + QUESTION_LANGUAGE_INSTRUCTION
-        + "Use kind=visual_checkpoint for visual acceptance with pass, fail, uncertain, and later. It blocks until the user replies. Every submitted answer closes the question, and only an explicit pass grants visual acceptance. For an ordinary decision with independent work available, set blocking=false and continue only that independent work; approval and checkpoint requirements remain authoritative. Include the view or location and preserve the task. Consolidate related questions and reuse a pending request. When NOT to use: do not request routine checks, progress acknowledgments, already granted approval, or work available tools can complete. Negative example: do not call after every tool, transfer a single tool failure to the user, invent a component switch, or treat silence, dismissal, or uncertainty as acceptance.",
+        "When to use: " + CALL_USER_USAGE_INSTRUCTION + QUESTION_LANGUAGE_INSTRUCTION
+        + "Use kind=visual_checkpoint for visual acceptance with pass, fail, uncertain, and later. It blocks until the user replies. "
+        + "When NOT to use: routine checks, progress acknowledgments, already granted approval, work available tools can complete, or clarification about the user's preferences (use ask_user). "
+        + QUESTION_CONFIRMATION_INSTRUCTION
+        + "Negative example: a single failed scan does not mean the user needs to inspect Unity manually.",
         "plan/preview",
         AGENT_GATEWAY.call_user,
     )

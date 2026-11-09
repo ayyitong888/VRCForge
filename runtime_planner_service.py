@@ -40,7 +40,12 @@ from agent_tool_result_contract import _views
 from agent_completion_verifier import _normalize_diagnostics
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_TOOL_SCHEMAS
 from agent_scan_result_policy import is_scan_result_policy_message, restored_scan_result_policy
-from agent_question_service import QUESTION_LANGUAGE_INSTRUCTION, CALL_USER_USAGE_INSTRUCTION
+from agent_question_service import (
+    ASK_USER_USAGE_INSTRUCTION,
+    CALL_USER_USAGE_INSTRUCTION,
+    QUESTION_CONFIRMATION_INSTRUCTION,
+    QUESTION_LANGUAGE_INSTRUCTION,
+)
 from native_request_composition import (
     attach_native_request_composition,
     attach_native_request_origin,
@@ -75,7 +80,9 @@ RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
     "Reconcile the list before asking the user to review or giving a final answer. Record unfinished work as pending or blocked according to the evidence. "
     "Group related work; do not narrate every tool call or repeat preparation, reveal private reasoning, or invent progress. "
     "Make the final answer self-contained and complete, so the user need not read earlier progress updates. "
-    + QUESTION_LANGUAGE_INSTRUCTION + CALL_USER_USAGE_INSTRUCTION
+    "When you need a reply, open the applicable question or confirmation card. "
+    + ASK_USER_USAGE_INSTRUCTION + CALL_USER_USAGE_INSTRUCTION
+    + QUESTION_CONFIRMATION_INSTRUCTION + QUESTION_LANGUAGE_INSTRUCTION
 )
 RUNTIME_TROUBLESHOOTING_INSTRUCTION = (
     "When a problem occurs, diagnose it step by step from the actual error and existing evidence. "
