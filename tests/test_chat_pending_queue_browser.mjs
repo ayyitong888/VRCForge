@@ -16,9 +16,12 @@ const bundled = await build({
     import {ChatWorkspace} from './src/components/chat/chat-workspace';
     window.queueCalls=[];
     function Fixture(){
-      const [queued,setQueued]=useState([{id:'queued-turn-1',text:'待发送提示',attachments:[{id:'queued-image',name:'model.png',size:9,type:'image/png'}],queueStatus:'queued',composerQueued:true}]);
+      const pending={id:'queued-turn-1',text:'待发送提示',attachments:[{id:'queued-image',name:'model.png',size:9,type:'image/png',dataUrl:'data:image/png;base64,AA=='}],queueStatus:'queued',composerQueued:true};
+      const [queued,setQueued]=useState([pending]);
       window.queueState=queued;
       window.setQueueText=text=>setQueued(current=>current.map(turn=>({...turn,text})));
+      window.restoreQueue=()=>setQueued([pending]);
+      window.stackQueue=()=>setQueued(Array.from({length:7},(_,index)=>({...pending,id:'stack-'+index,text:'Message '+(index+1)})));
       const [input,setInput]=useState('');
       const edit=id=>{const turn=queued.find(turn=>turn.id===id);window.queueCalls.push({kind:'edit',id,attachments:turn.attachments});setInput(turn.text);setQueued(current=>current.filter(turn=>turn.id!==id));};
       const remove=id=>{window.queueCalls.push({kind:'remove',id});setQueued(current=>current.filter(turn=>turn.id!==id));};
@@ -57,7 +60,7 @@ const bundled = await build({
       plugin.onResolve({filter:/^react-i18next$/},()=>({path:"translation",namespace:"mock"}));
       plugin.onResolve({filter:/^lucide-react$/},()=>({path:"icons",namespace:"mock"}));
       plugin.onLoad({filter:/.*/,namespace:"mock"},args=>({contents:args.path==="icons"
-        ? 'export const HelpCircle=()=>null,Pencil=()=>null;export const AlertTriangle=()=>null,ArrowDown=()=>null,ArrowUp=()=>null,ChevronLeft=()=>null,ChevronRight=()=>null,Loader2=()=>null,MoreHorizontal=()=>null,Pause=()=>null,Play=()=>null,X=()=>null;'
+        ? 'export const HelpCircle=()=>null,Pencil=()=>null;export const AlertTriangle=()=>null,ArrowDown=()=>null,ArrowUp=()=>null,ChevronLeft=()=>null,ChevronRight=()=>null,Loader2=()=>null,Minus=()=>null,MoreHorizontal=()=>null,Paperclip=()=>null,Pause=()=>null,Play=()=>null,Plus=()=>null,X=()=>null;'
         : 'export const useTranslation=()=>({t:key=>key});'}));
       plugin.onResolve({filter:/.*/},args=>args.importer.endsWith("chat-workspace.tsx")&&mocks[args.path]
         ? {path:args.path,namespace:"pending-queue"}:undefined);
@@ -76,9 +79,11 @@ try {
   await page.addScriptTag({ content: bundled.outputFiles[0].text });
   const row = page.locator('[data-chat-pending-turn="queued-turn-1"]');
   await row.waitFor();
+  assert.match(await page.locator("[data-chat-pending-queue]").innerText(), /chat\.queued/);
   assert.equal(await page.locator("[data-chat-history-scroll] [data-history-item='queued-user']").count(), 0, "pending queued user input is hidden from sent history");
   assert.equal(await page.locator("[data-chat-history-scroll] [data-history-item='old']").innerText(), "已发送历史", "ordinary sent history remains visible");
   assert.equal(await row.locator("[data-chat-pending-turn-preview]").innerText(), "待发送提示", "queued message appears as a compact preview above composer");
+  assert.equal(await row.locator("[data-chat-pending-turn-attachments] img").getAttribute("alt"), "model.png");
   for (const width of [1100, 700]) {
     await page.setViewportSize({width,height:900});
     await page.evaluate(()=>window.setQueueText(('很长的引导消息\n').repeat(300)));
@@ -89,17 +94,37 @@ try {
     assert.equal(preview.whiteSpace,'nowrap'); assert.equal(preview.overflow,true);
   }
   await page.evaluate(()=>window.setQueueText('待发送提示'));
-  await row.locator("[data-chat-pending-turn-more]").click();
-  for (const dark of [false,true]) {
-    await page.evaluate(dark=>document.documentElement.classList.toggle('dark',dark),dark);
-    const bg=await row.locator('[role="menu"]').evaluate(el=>getComputedStyle(el).backgroundColor);
-    assert.ok(bg!=='rgba(0, 0, 0, 0)' && bg!=='transparent','menu surface must be opaque in both themes');
-  }
+  assert.equal(await row.locator("[data-chat-pending-turn-steer]").innerText(), "chat.sendQueuedNow");
+  await row.locator("[data-chat-pending-turn-steer]").click();
 
   await row.locator("[data-chat-pending-turn-edit]").click();
   assert.equal(await page.locator('[data-composer]').inputValue(), '待发送提示', 'edit returns the complete message to the main composer');
   assert.equal(await row.count(),0,'editing withdraws the queued row instead of sending again');
-  assert.deepEqual(await page.evaluate(()=>window.queueCalls),[{kind:'edit',id:'queued-turn-1',attachments:[{id:'queued-image',name:'model.png',size:9,type:'image/png'}]}]);
+  await page.evaluate(()=>window.restoreQueue());
+  await row.locator("[data-chat-pending-turn-remove]").click();
+  assert.equal(await row.count(), 0, "cancel removes the pending row");
+  assert.deepEqual(await page.evaluate(()=>window.queueCalls), [
+    {kind:'steer',id:'queued-turn-1'},
+    {kind:'edit',id:'queued-turn-1',attachments:[{id:'queued-image',name:'model.png',size:9,type:'image/png',dataUrl:'data:image/png;base64,AA=='}]},
+    {kind:'remove',id:'queued-turn-1'},
+  ]);
+  await page.evaluate(()=>window.stackQueue());
+  const scroll = page.locator("[data-chat-pending-queue-scroll]");
+  await page.waitForFunction(()=>document.querySelector("[data-chat-pending-queue-scroll]")?.scrollTop>0);
+  assert.equal(await scroll.locator("[data-chat-pending-turn]").count(), 7);
+  const stack = await scroll.evaluate((el) => ({
+    height: el.clientHeight,
+    contentHeight: el.scrollHeight,
+    rowHeight: el.firstElementChild.getBoundingClientRect().height,
+    scrollTop: el.scrollTop,
+  }));
+  assert.equal(stack.height, stack.rowHeight * 5, "only five queued rows fit in the scroll region");
+  assert.equal(stack.scrollTop, stack.contentHeight - stack.height, "new rows reveal the end of the queue");
+  const composerBox = await page.locator("[data-composer]").boundingBox();
+  await scroll.hover();
+  await page.mouse.wheel(0, -300);
+  await page.waitForFunction(()=>document.querySelector("[data-chat-pending-queue-scroll]")?.scrollTop===0);
+  assert.equal((await page.locator("[data-composer]").boundingBox()).y, composerBox.y, "wheel only scrolls queued messages");
   assert.deepEqual(errors, []);
   console.log("chat pending queue: hidden from history, editable, steerable, and removable");
 } finally {

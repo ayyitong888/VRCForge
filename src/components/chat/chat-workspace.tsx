@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowDown, ArrowUp, Loader2, MoreHorizontal, Pause, Play, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Loader2, Paperclip, Pause, Pencil, Play, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { updateAgentGoal } from "../../lib/api";
@@ -47,8 +47,11 @@ export type QueuedChatTurn = {
   text: string;
   attachments: ChatAttachment[];
   queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled";
+  queueTransition?: "enqueue" | "dispatch";
   composerQueued?: boolean;
 };
+
+const QUEUE_VISIBLE_ROWS = 5;
 
 function PendingQueuedTurnCard({
   turn,
@@ -66,33 +69,46 @@ function PendingQueuedTurnCard({
   onResume?: () => void;
 }) {
   const { t } = useTranslation();
-  const [menuOpen, setMenuOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const busy = restoring || Boolean(turn.queueTransition);
+  const firstAttachment = turn.attachments[0];
+  const imagePreview = firstAttachment?.type.startsWith("image/") ? firstAttachment.dataUrl : undefined;
   return (
-    <div className="relative flex items-center gap-2 px-3 py-1" data-chat-pending-turn={turn.id}>
+    <div className="relative flex h-10 items-center gap-2 px-3 py-1" data-chat-pending-turn={turn.id}>
+      {turn.queueTransition ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" aria-label={t("chat.runtimePhase.preparing")} /> : null}
+      {firstAttachment ? (
+        <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground" title={turn.attachments.map((attachment) => attachment.name).join(", ")} data-chat-pending-turn-attachments>
+          {imagePreview ? <img src={imagePreview} alt={firstAttachment.name} className="h-6 w-6 rounded object-contain" /> : <Paperclip className="h-4 w-4" aria-hidden="true" />}
+          {turn.attachments.length > 1 ? <span>{turn.attachments.length}</span> : null}
+        </span>
+      ) : null}
       <div className="min-w-0 flex-1">
         <p className="truncate px-1 py-1 text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
       </div>
         {sending ? (
-          <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={restoring} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
+          <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={busy} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
             <ArrowUp className="mr-1 h-3 w-3" />
-            {t("chat.guideNow")}
+            {t("chat.sendQueuedNow")}
           </Button>
         ) : null}
-        {!sending && onResume ? <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" onClick={onResume} data-chat-resume-followups><Play className="mr-1 h-3 w-3" />{t("chat.resumeFollowups")}</Button> : null}
-        <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("chat.removeQueued")} title={t("chat.removeQueued")} onClick={() => onRemove?.(turn.id)} data-chat-pending-turn-remove={turn.id}>
+        {!sending && !turn.queueTransition && onResume ? <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" onClick={onResume} data-chat-resume-followups><Play className="mr-1 h-3 w-3" />{t("chat.resumeFollowups")}</Button> : null}
+        <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0"
+          aria-label={t("chat.editQueued")} title={t("chat.editQueued")} disabled={busy}
+          onClick={async () => {
+            setRestoring(true);
+            try {
+              await onEdit?.(turn.id);
+            } finally {
+              setRestoring(false);
+            }
+          }}
+          data-chat-pending-turn-edit={turn.id}
+        >
+          <Pencil className="h-4 w-4" />
+        </Button>
+        <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("chat.removeQueued")} title={t("chat.removeQueued")} disabled={busy} onClick={() => onRemove?.(turn.id)} data-chat-pending-turn-remove={turn.id}>
           <X className="h-4 w-4" />
         </Button>
-        <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("chat.moreQueued")} title={t("chat.moreQueued")} aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)} data-chat-pending-turn-more={turn.id}>
-          <MoreHorizontal className="h-4 w-4" />
-        </Button>
-        {menuOpen ? (
-          <div role="menu" className="absolute right-2 bottom-full mb-1 z-20 min-w-36 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md" data-chat-pending-turn-menu={turn.id}>
-            <button type="button" role="menuitem" className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent" disabled={restoring} onClick={() => { setRestoring(true); void Promise.resolve(onEdit?.(turn.id)).finally(() => setRestoring(false)); setMenuOpen(false); }} data-chat-pending-turn-edit={turn.id}>
-              {t("chat.editQueuedMessage")}
-            </button>
-          </div>
-        ) : null}
     </div>
   );
 }
@@ -486,19 +502,39 @@ export function ChatWorkspace({
       onCancelReply={onCancelReply}
     />
   );
+  const pendingQueueScrollRef = useRef<HTMLDivElement>(null);
+  const previousQueueSizeRef = useRef(0);
+  useEffect(() => {
+    const list = pendingQueueScrollRef.current;
+    if (list && queued.length > QUEUE_VISIBLE_ROWS && queued.length > previousQueueSizeRef.current) {
+      list.scrollTop = list.scrollHeight;
+    }
+    previousQueueSizeRef.current = queued.length;
+  }, [queued.length]);
   const pendingQueue = queued.length ? (
     <section className="mx-3 rounded-t-2xl border border-b-0 border-border/70 bg-background" aria-label={t("chat.pendingQueue")} data-chat-pending-queue>
-      {queued.map((turn) => (
-        <PendingQueuedTurnCard
-          key={turn.id}
-          turn={turn}
-          sending={sending}
-          onEdit={onEditQueuedTurn}
-          onRemove={onRemoveQueuedTurn}
-          onSteer={onSteerQueuedTurn}
-          onResume={queued.length === 1 ? onResumeQueue : undefined}
-        />
-      ))}
+      <p className="px-4 pt-2 text-xs text-muted-foreground">
+        {t(composerSending && queued.every((turn) => turn.queueStatus === "queued" && !turn.queueTransition) ? "chat.queued" : "chat.pendingQueue")}
+      </p>
+      <div
+        ref={pendingQueueScrollRef}
+        className="overflow-y-auto overscroll-contain focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+        style={{ maxHeight: `${QUEUE_VISIBLE_ROWS * 2.5}rem` }}
+        tabIndex={queued.length > QUEUE_VISIBLE_ROWS ? 0 : undefined}
+        data-chat-pending-queue-scroll
+      >
+        {queued.map((turn) => (
+          <PendingQueuedTurnCard
+            key={turn.id}
+            turn={turn}
+            sending={composerSending}
+            onEdit={onEditQueuedTurn}
+            onRemove={onRemoveQueuedTurn}
+            onSteer={onSteerQueuedTurn}
+            onResume={queued.length === 1 ? onResumeQueue : undefined}
+          />
+        ))}
+      </div>
     </section>
   ) : null;
   const approvalComposer = scopedPendingApprovals.length ? (

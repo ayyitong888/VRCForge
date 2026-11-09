@@ -30,7 +30,7 @@ assert.match(userBranch, /relative flex min-w-0 w-full max-w-\[78%\] flex-col it
 
 assert.match(composer, /queueAllowed/);
 assert.match(composer, /data-composer-primary-action=\{primaryAction\}/);
-assert.match(composer, /data-composer-steer=\{primaryAction === "steer"/);
+assert.match(composer, /data-composer-queue=\{primaryAction === "queue"/);
 assert.match(composer, /primaryAction === "stop" \? onStop : undefined/);
 assert.match(composer, /primaryAction === "stop" \? "button" : "submit"/);
 assert.match(composer, /primaryAction === "stop" \? stopDisabled : !canSubmit/);

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AgentTurnDeliveryUnconfirmedError, ApiError } from "../lib/api/http";
 import { useTranslation } from "react-i18next";
 import {
@@ -84,6 +84,7 @@ export type QueuedTurn = {
   queueLaneId?: string;
   queueSequence?: number;
   queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled";
+  queueTransition?: "enqueue" | "dispatch";
   questionId?: string;
 };
 
@@ -225,6 +226,15 @@ export function useChatRunController({
   const { t } = useTranslation();
   const [sending, setSending] = useState(false);
   const [queued, setQueued] = useState<QueuedTurn[]>([]);
+  const [queueTransitions, setQueueTransitions] = useState<QueuedTurn[]>([]);
+  const visibleQueue = useMemo(() => {
+    if (!queueTransitions.length) return queued;
+    return [
+      ...queueTransitions.filter((turn) => turn.queueTransition === "dispatch"),
+      ...queued.filter((turn) => !queueTransitions.some((transition) => transition.id === turn.id)),
+      ...queueTransitions.filter((turn) => turn.queueTransition === "enqueue"),
+    ];
+  }, [queued, queueTransitions]);
   const [currentTurn, setCurrentTurn] = useState<CurrentTurn | null>(null);
   const [stopRequested, setStopRequested] = useState(false);
   const queueRef = useRef<QueuedTurn[]>([]);
@@ -902,6 +912,19 @@ export function useChatRunController({
       queueLaneId: ownerChatId,
       queueStatus: "queued",
     };
+    // Show the composer row during persistence and queue admission. The
+    // runnable queue still only receives the result of admission below.
+    setQueueTransitions((current) => [...current, { ...queuedTurn, queueTransition: "enqueue" }]);
+    try {
+      return await persistQueuedFollowup(turn, queuedTurn, ownerChatId, ownerChat);
+    } finally {
+      setQueueTransitions((current) => current.filter((item) => item.id !== turn.id || item.queueTransition !== "enqueue"));
+    }
+  }
+
+  async function persistQueuedFollowup(
+    turn: QueuedTurn, queuedTurn: QueuedTurn, ownerChatId: string, ownerChat?: ChatThread,
+  ): Promise<SubmitTurnResult> {
     const trace = createSteerDeliveryTrace(traceSteerDelivery, {
       chatId: ownerChatId,
       sessionId: queuedTurn.sessionId,
@@ -1158,6 +1181,15 @@ export function useChatRunController({
   async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: InternalRunSingleTurnOptions): Promise<boolean> {
     const startedAt = Date.now();
     const background = options?.background === true;
+    const presentingFollowup = !background && Boolean(turn.queueId) && !turn.questionId;
+    const finishPresentation = () => {
+      if (presentingFollowup) setQueueTransitions((current) => current.filter(
+        (item) => item.id !== turn.id || item.queueTransition !== "dispatch",
+      ));
+    };
+    if (presentingFollowup) {
+      setQueueTransitions((current) => [...current, { ...turn, chatId, queueTransition: "dispatch" }]);
+    }
     const abortController = options?.abortController || new AbortController();
     let userItemId = "";
     let runtimeRequestStarted = false;
@@ -1183,6 +1215,7 @@ export function useChatRunController({
         const readyEndpoint = await startRuntime();
         if (!readyEndpoint) {
           if (background) throw new Error(t("agent.coreDisconnectedSend"));
+          if (turn.queueId) turn.queueStatus = "waiting_for_resources";
           return false;
         }
         targetEndpoint = readyEndpoint;
@@ -1277,6 +1310,7 @@ export function useChatRunController({
             ],
           };
         });
+        finishPresentation();
         // A recovered runtime reply must have a durable owning chat and the
         // complete user message even if the app is killed during this turn.
         savingBeforeDispatch = true;
@@ -1781,6 +1815,7 @@ export function useChatRunController({
         setCurrentTurn(null);
       }
       streamingTurnsRef.current.delete(turn.id);
+      finishPresentation();
     }
   }
 
@@ -1822,7 +1857,7 @@ export function useChatRunController({
 
   return {
     sending,
-    queued,
+    queued: visibleQueue,
     currentTurn,
     stopRequested,
     isRunning,

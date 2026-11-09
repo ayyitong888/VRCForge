@@ -86,30 +86,31 @@ try {
   assert.equal(await page.evaluate(() => window.submitCount), 3, "attachment-only send uses onSubmit");
 
   await page.evaluate(() => window.setComposerState({ input: "follow-up", attachments: [], sending: true, queueAllowed: true }));
-  assert.equal(await primary.getAttribute("data-composer-primary-action"), "steer");
-  assert.equal(await primary.getAttribute("aria-label"), "Steer");
-  assert.equal(await primary.getAttribute("title"), "Steer");
+  assert.equal(await primary.getAttribute("data-composer-primary-action"), "queue");
+  assert.equal(await primary.getAttribute("aria-label"), "Queue");
+  assert.equal(await primary.getAttribute("title"), "Queue");
   assert.match(await primary.locator("svg").getAttribute("class"), /lucide-arrow-up/);
-  assert.equal(await page.locator("[data-composer-send], [data-composer-stop]").count(), 0, "running steer replaces adjacent Send/Stop controls");
+  assert.equal(await page.locator("[data-composer-send], [data-composer-stop]").count(), 0, "the queue action occupies the primary button");
   assert.equal((await primary.locator("svg").count()), 1);
   await primary.click();
-  assert.equal(await page.evaluate(() => window.submitCount), 4, "running follow-up uses the existing submit/steer path");
-  await page.locator("textarea").fill("enter steer");
+  assert.deepEqual(await page.evaluate(() => [window.queueCount, window.submitCount, window.steerCount]), [1, 3, 0],
+    "clicking the running send button queues without submitting to the current turn");
+  await page.locator("textarea").fill("enter queue");
   await page.locator("textarea").press("Enter");
-  assert.equal(await page.evaluate(() => window.queueCount), 1, "Enter queues while a run is active");
-  assert.equal(await page.evaluate(() => window.submitCount), 4, "Enter does not submit or steer while running");
+  assert.equal(await page.evaluate(() => window.queueCount), 2, "Enter queues while a run is active");
+  assert.equal(await page.evaluate(() => window.submitCount), 3, "Enter does not submit or steer while running");
   await page.locator("textarea").press("Control+Enter");
   assert.equal(await page.evaluate(() => window.steerCount), 1, "Ctrl+Enter immediately steers while a run is active");
   await page.locator("textarea").press("Shift+Enter");
-  assert.equal(await page.evaluate(() => window.queueCount), 1, "Shift+Enter remains a newline, not a queue action");
+  assert.equal(await page.evaluate(() => window.queueCount), 2, "Shift+Enter remains a newline, not a queue action");
   assert.equal(await page.evaluate(() => window.steerCount), 1, "Shift+Enter remains a newline, not a steer action");
 
   await page.evaluate(() => window.setComposerState({ input: "", attachments: [{ id: "image", name: "image.png", type: "image/png", size: 8 }] }));
-  assert.equal(await primary.getAttribute("data-composer-primary-action"), "steer", "attachment-only content steers an active run");
+  assert.equal(await primary.getAttribute("data-composer-primary-action"), "queue", "attachment-only content can be queued");
   await primary.click();
-  assert.equal(await page.evaluate(() => window.submitCount), 5, "attachment steer uses onSubmit");
+  assert.equal(await page.evaluate(() => window.queueCount), 3, "attachment-only click queues");
   await page.locator("textarea").press("Enter");
-  assert.equal(await page.evaluate(() => window.queueCount), 2, "attachment-only Enter queues while a run is active");
+  assert.equal(await page.evaluate(() => window.queueCount), 4, "attachment-only Enter queues while a run is active");
 
   await page.evaluate(() => window.setComposerState({ input: "", attachments: [], sending: true, queueAllowed: true }));
   await page.waitForFunction(() => document.querySelector("[data-composer-primary-action]")?.getAttribute("data-composer-primary-action") === "stop");
@@ -124,7 +125,7 @@ try {
 
   await page.evaluate(() => window.setComposerState({ input: "cannot steer while stopping", sending: true, queueAllowed: false }));
   assert.equal(await primary.getAttribute("data-composer-primary-action"), "stop", "a stopping run cannot accept a steer");
-  assert.equal(await page.evaluate(() => window.submitCount), 5);
+  assert.equal(await page.evaluate(() => window.submitCount), 3);
   assert.deepEqual(errors, []);
   console.log("composer primary action and keyboard: idle send, running queue, Ctrl+Enter steer, Shift+Enter newline, attachment content, and stop passed");
 } finally {

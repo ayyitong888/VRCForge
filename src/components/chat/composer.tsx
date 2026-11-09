@@ -158,9 +158,9 @@ export function Composer({
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   const currentModeVisual = permissionVisualState(permission, currentMode);
   const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
-  const primaryAction = sending ? (queueAllowed && canSubmit ? "steer" : "stop") : "send";
-  const primaryActionLabel = primaryAction === "steer"
-    ? t("chat.steer")
+  const primaryAction = sending ? (queueAllowed && canSubmit ? "queue" : "stop") : "send";
+  const primaryActionLabel = primaryAction === "queue"
+    ? t("chat.queue")
     : primaryAction === "stop"
       ? t("chat.stop")
       : t("chat.send");
@@ -311,7 +311,10 @@ export function Composer({
   return (
     <form
       ref={composerRef}
-      onSubmit={onSubmit}
+      onSubmit={primaryAction === "send" ? onSubmit : (event) => {
+        event.preventDefault();
+        if (primaryAction === "queue") onQueue?.();
+      }}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -573,7 +576,7 @@ export function Composer({
                 aria-label={primaryActionLabel}
                 data-composer-primary-action={primaryAction}
                 data-composer-stop={primaryAction === "stop" ? true : undefined}
-                data-composer-steer={primaryAction === "steer" ? true : undefined}
+                data-composer-queue={primaryAction === "queue" ? true : undefined}
                 data-composer-send={primaryAction === "send" ? true : undefined}
               >
                 {primaryAction === "stop" ? <Square className="h-3.5 w-3.5 fill-current" /> : <ArrowUp className="h-4 w-4" />}

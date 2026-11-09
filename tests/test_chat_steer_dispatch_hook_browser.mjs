@@ -53,6 +53,8 @@ import { useChatRunController } from "./src/hooks/use-chat-run-controller";
 
 const chat = { id: "chat-fixture", sessionId: "session-fixture", items: [], title: "Existing chat" };
 let releasePersist;
+let releaseQueuePersist;
+let releaseQueuePreparation;
 let persistCalls = 0;
 let failNextPersist = false;
 const persist = () => {
@@ -62,6 +64,10 @@ const persist = () => {
     return Promise.reject(new Error("fixture chat snapshot save failed"));
   }
   if (persistCalls === 1) return new Promise((resolve) => { releasePersist = resolve; });
+  if (window.__holdQueuePersist) {
+    window.__holdQueuePersist = false;
+    return new Promise((resolve) => { releaseQueuePersist = resolve; });
+  }
   return Promise.resolve();
 };
 function Harness({ initialItems = [] }) {
@@ -77,6 +83,12 @@ function Harness({ initialItems = [] }) {
     refreshRuntimeRuns: async () => {}, refreshBackgroundGoals: () => {},
     handleRuntimeSessionFailure: () => {}, setError: () => {},
     persistChatsNow: persist,
+    prepareTurnContext: async ({ turn }) => {
+      if (turn.id === "edited-resubmitted") {
+        await new Promise((resolve) => { releaseQueuePreparation = resolve; });
+      }
+      return null;
+    },
     reportChatSaveError: () => {},
     traceSteerDelivery: (event) => window.__traceEvents.push(event),
     chats: chatState,
@@ -92,6 +104,8 @@ function Harness({ initialItems = [] }) {
   window.__queuedTurns = () => controller.queued;
   window.__isRunning = () => controller.isRunning();
   window.__releasePersist = () => releasePersist?.();
+  window.__releaseQueuePersist = () => releaseQueuePersist?.();
+  window.__releaseQueuePreparation = () => releaseQueuePreparation?.();
   window.__persistCalls = () => persistCalls;
   window.__failNextPersist = () => { failNextPersist = true; };
   return <div id="hook-mounted" />;
@@ -216,7 +230,14 @@ try {
 
   await page.evaluate(() => window.__startFixture());
   await page.waitForFunction(() => window.__providerRequests.length === 2);
-  const queueResult = await page.evaluate(() => window.__submitFixtureQueued());
+  await page.evaluate(() => {
+    window.__holdQueuePersist = true;
+    window.__queuedSubmission = window.__submitFixtureQueued();
+  });
+  await page.waitForFunction(() => window.__queuedTurns().some(turn => turn.id === "console-queued-fixture" && turn.queueTransition === "enqueue"));
+  assert.equal(await page.evaluate(() => window.__providerRequests.length), 2, "pending persistence must not dispatch into the current turn");
+  await page.evaluate(() => window.__releaseQueuePersist());
+  const queueResult = await page.evaluate(() => window.__queuedSubmission);
   assert.equal(queueResult, "queued");
   let queueState = await page.evaluate(() => ({
     request: window.__queueRequests.at(-1),
@@ -249,6 +270,9 @@ try {
     plan: { reply: "fixture done", summary: "fixture done", nextStep: "done", planner: "fixture", shellNeeded: false },
     timeline: [],
   }));
+  await page.waitForFunction(() => window.__queuedTurns().some(turn => turn.id === "edited-resubmitted" && turn.queueTransition === "dispatch"));
+  assert.equal(await page.evaluate(() => window.__providerRequests.length), 2, "the pending row survives next-turn preparation");
+  await page.evaluate(() => window.__releaseQueuePreparation());
   await page.waitForFunction(() => window.__providerRequests.length === 3);
   const delivered = await page.evaluate((id) => ({
     request: window.__providerRequests.at(-1),
