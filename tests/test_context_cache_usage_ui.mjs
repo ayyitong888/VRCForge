@@ -43,7 +43,7 @@ test("completed compaction immediately displays estimated occupancy until measur
   assert.equal(estimated.cacheHitRatio, undefined);
   const meter = exports.ContextUsageMeter({ usage: estimated });
   assert.equal(meter.props["data-context-percent"], "20");
-  assert.equal(nodes(meter).find((node) => "data-context-value" in node.props).props.children, "≈20%");
+  assert.equal(nodes(meter).find((node) => "data-context-value" in node.props).props.strokeDasharray, "20 100");
   assert.match(meter.props["aria-label"], /Estimated 20% used/);
   assert.match(meter.props["aria-label"], /Used 400, total 2000/);
   assert.match(exports.ContextUsageMeter({ usage: read(undefined, compaction, 0) }).props["aria-label"], /Estimated 400 tokens/);
@@ -69,7 +69,8 @@ test("known capacity remains visible when the provider omits usage", () => {
   assert.equal(usage.exact, false);
   const meter = exports.ContextUsageMeter({ usage });
   assert.match(meter.props["aria-label"], /Known capacity 2000; current usage unavailable/);
-  assert.equal(nodes(meter).find((node) => "data-context-value" in node.props).props.children, "—");
+  assert.equal(meter.props["data-context-percent"], "unknown");
+  assert.equal(nodes(meter).some((node) => "data-context-value" in node.props), false);
 });
 
 test("mismatched usage never leaks old occupancy but retains current capacity", () => {
@@ -85,7 +86,7 @@ test("complete cache uses cumulative input and preserves peak context occupancy"
   assert.equal(usage.cacheHitRatio, 0.25);
   assert.equal(usage.used, 600);
   assert.equal(meter.props["data-context-percent"], "30");
-  assert.equal(nodes(meter).find((node) => "data-context-value" in node.props).props.children, "30%");
+  assert.equal(nodes(meter).find((node) => "data-context-value" in node.props).props.strokeDasharray, "30 100");
   assert.match(meter.props["aria-label"], /Cache hit rate \(all requests\): 25%/);
   assert.equal(meter.props.title, undefined, "custom hover must not also request a native tooltip");
   assert.match(nodes(meter).find((node) => "data-context-cache-hit-rate" in node.props).props.children, /25%/);

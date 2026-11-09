@@ -605,7 +605,8 @@ export function Composer({
 export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsage; className?: string }) {
   const estimated = usage.source === "compaction_estimate";
   const knownRatio = usage.limitKnown && (usage.exact || estimated);
-  const percent = knownRatio ? Math.round(Math.min(1, Math.max(0, usage.ratio)) * 100) : 0;
+  const progress = knownRatio ? Math.min(1, Math.max(0, usage.ratio)) * 100 : 0;
+  const percent = Math.round(progress);
   const usageTone = !knownRatio ? "unknown" : percent >= 90 ? "high" : percent >= 60 ? "medium" : "low";
   const tooltipTitle = estimated
     ? knownRatio ? i18n.t("chat.contextMeterEstimatedPercent", { percent }) : usage.label
@@ -629,20 +630,26 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
   const accessibleLabel = [tooltipTitle, tooltipDetail, cacheDetail].filter(Boolean).join("\n");
   return (
     <div
-      className={cn("group relative flex h-8 min-w-9 shrink-0 items-center justify-center rounded-md px-1 text-xs tabular-nums text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", className)}
+      className={cn("group relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", className)}
       tabIndex={0}
       aria-label={accessibleLabel}
       data-context-meter="true"
       data-context-percent={knownRatio ? String(percent) : "unknown"}
     >
-      <span
+      <svg
         aria-hidden="true"
-        className={cn(usageTone === "high" && "text-destructive", usageTone === "medium" && "text-amber-700 dark:text-amber-400")}
+        className={cn("h-5 w-5", usageTone === "low" && "text-primary", usageTone === "high" && "text-destructive", usageTone === "medium" && "text-amber-700 dark:text-amber-400")}
+        viewBox="0 0 20 20"
+        fill="none"
+        strokeWidth={2.5}
         data-context-segment={usageTone}
-        data-context-value
       >
-        {knownRatio ? `${estimated ? "≈" : ""}${percent}%` : "—"}
-      </span>
+        <circle cx="10" cy="10" r="7.5" className="stroke-muted-foreground/35" strokeDasharray={knownRatio ? undefined : "2 2"} />
+        {progress > 0 ? (
+          <circle cx="10" cy="10" r="7.5" pathLength={100} className="stroke-current"
+            strokeDasharray={`${progress} 100`} strokeLinecap="round" transform="rotate(-90 10 10)" data-context-value />
+        ) : null}
+      </svg>
       <div className="pointer-events-none absolute bottom-full left-1/2 z-40 mb-2 hidden w-52 -translate-x-1/2 rounded-lg border border-border bg-card px-3 py-2 text-center text-xs text-foreground shadow-panel group-hover:block group-focus:block">
         <div className="font-medium">{i18n.t("chat.contextMeterTitle")}</div>
         <div className="mt-1 text-muted-foreground">{tooltipTitle}</div>
