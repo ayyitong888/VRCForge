@@ -106,7 +106,6 @@ class Probe {
 '''.replace("MATERIAL_ID", material_id).replace("STABLE_ID", stable_id).replace("SELECTED", selected).replace("SELECTOR_DIGEST", selector_digest).replace("HASH", hash_method)
     compile_probe(tmp_path, program, 5)
     assert "ReadMaterialSelectionIds(selector)" in source
-    assert "RendererComponentIdentity.Create(scopedRenderer)" in source
     assert "MaterialInventoryIdentity.CreateMaterialId(" in source
     assert "if (MaterialIdSelected(selectedMaterialIds, materialId)) pending.Enqueue(assignedMaterial);" in source
     assert 'property.propertyPath.StartsWith("m_Materials", StringComparison.Ordinal)) continue;' in source

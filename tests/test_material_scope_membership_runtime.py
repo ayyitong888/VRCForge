@@ -117,11 +117,13 @@ def test_material_scope_remeasures_renderer_membership_without_watching_bones(tm
         )
         if signature in journal
     )
+    identity = (editor / "RendererComponentIdentity.cs").read_text(encoding="utf-8-sig")
+    renderer_index = method(identity, "internal static int GetComponentIndex(")
     program = r'''
 using System; using System.Collections; using System.Collections.Generic; using System.IO;
 using System.Linq; using System.Security.Cryptography; using System.Text; using Newtonsoft.Json.Linq;
 class Object { public string id, name; }
-class Scene { public bool isLoaded=true; public bool IsValid()=>true; }
+class Scene { public bool isLoaded=true; public int handle=1; public string path="Assets/Fixture.unity"; public bool IsValid()=>true; }
 class GameObject : Object {
  public Scene scene=new Scene();
  public Transform transform;
@@ -135,6 +137,7 @@ class GameObject : Object {
   var c=new T { id=identity, name=name, transform=transform }; components.Add(c); return c;
  }
  public T[] GetComponents<T>() where T:Component => components.OfType<T>().ToArray();
+ public Component[] GetComponents(Type type)=>components.Where(type.IsInstanceOfType).ToArray();
 }
 class Component : Object {
  public Transform transform;
@@ -169,10 +172,19 @@ static class ShaderMaterialScanner {
  SCANNER_METHODS
  static Type FindType(string name)=>typeof(Descriptor);
 }
+static class AvatarPrimitiveCrudCore {
+ public static string GetTransformPath(Transform transform)=>transform.Path;
+}
 static class RendererComponentIdentity {
- internal sealed class Evidence { public string rendererPath, componentId, scenePath=""; public int sceneHandle; }
- public static Evidence Create(Renderer renderer)=>new Evidence{
-  rendererPath=renderer.transform.Path, componentId=renderer.id+"@"+renderer.transform.Path };
+ public static int Calls;
+ RENDERER_INDEX
+ internal sealed class Evidence { public string rendererPath, componentId, scenePath; public int sceneHandle; }
+ public static Evidence Create(Renderer renderer){
+  Calls++;
+  return new Evidence{rendererPath=renderer.transform.Path, componentId=renderer.id+"@"+renderer.transform.Path
+   +Array.IndexOf(renderer.gameObject.GetComponents(renderer.GetType()),renderer),
+   scenePath=renderer.gameObject.scene.path, sceneHandle=renderer.gameObject.scene.handle};
+ }
 }
 static class MaterialInventoryIdentity {
  public static string CreateMaterialId(string path,int slot,string material,string shader)=>path+":"+slot+":"+material+":"+shader;
@@ -251,14 +263,26 @@ class Probe {
   Check(!Valid(),"reparenting across avatar ownership changes membership");
   body.transform.Reparent(Avatar.transform);
   Save();
+  body.scene.path="Assets/Renamed.unity";
+  Check(!Valid(),"scene rename invalidates otherwise unchanged renderer");
+  Save();
+  body.scene.handle++;
+  Check(!Valid(),"same-path renderer in a different scene instance invalidates the old scope");
+  var sibling=body.Add<Renderer>("body:second-renderer");
+  Save();
+  body.components.Remove(sibling);
+  body.components.Insert(0,sibling);
+  Check(!Valid(),"same-type renderer reorder changes the reported index");
+  Save();
   body.Add<MeshFilter>("body:filter");
   Check(!Valid(),"adding the renderer's mesh filter invalidates the old scope");
   Save();
   for(var i=0;i<2100;i++) new GameObject("bone"+i,Avatar.transform);
   var expanded=Read();
   Check((bool)expanded["valid"],"over 2048 unrelated bone nodes leave the renderer scope valid: "+(string)expanded["reason"]);
+  Check(RendererComponentIdentity.Calls==0,"scope validation does not build a second renderer identity");
   return failures==0?0:1;
  }
 }
-'''.replace("SCANNER_METHODS", scanner_methods).replace("JOURNAL_METHODS", journal_methods)
-    compile_probe(tmp_path, program, 7)
+'''.replace("SCANNER_METHODS", scanner_methods).replace("JOURNAL_METHODS", journal_methods).replace("RENDERER_INDEX", renderer_index)
+    compile_probe(tmp_path, program, 11)

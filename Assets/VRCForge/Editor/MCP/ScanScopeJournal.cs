@@ -403,11 +403,17 @@ namespace VRCForge.Editor
                     watch.hash = hash;
                     watch.dirty = dirty;
                 }
-                var rendererIdentity = materialScope && target is Renderer scopedRenderer
-                    ? RendererComponentIdentity.Create(scopedRenderer) : null;
-                if (rendererIdentity != null)
-                    hash = Hash(hash + "|" + rendererIdentity.componentId + "|" + rendererIdentity.scenePath + "|" + rendererIdentity.sceneHandle);
-                scope.objects[id] = watch.revision + ":" + dirty + ":" + hash;
+                var renderer = materialScope ? target as Renderer : null;
+                var observation = watch.revision + ":" + dirty + ":" + hash;
+                if (renderer != null)
+                {
+                    // The journal key and memory observation already cover the object and hierarchy
+                    // path. Compare the remaining inventory fields directly, without a second ID or digest.
+                    var scene = renderer.gameObject.scene;
+                    observation += ":" + RendererComponentIdentity.GetComponentIndex(renderer)
+                        + ":" + scene.handle + ":" + (scene.path ?? "").Replace("\\", "/");
+                }
+                scope.objects[id] = observation;
                 scope.scene |= !EditorUtility.IsPersistent(target);
                 if (AssetPath(path) && paths.Add(path))
                 {
@@ -432,10 +438,10 @@ namespace VRCForge.Editor
                     }
                     foreach (Transform child in gameObject.transform) pending.Enqueue(child.gameObject);
                 }
-                if (rendererIdentity != null && selectedMaterialIds != null && target is Renderer renderer)
+                if (renderer != null && selectedMaterialIds != null)
                 {
                     // Match ShaderMaterialScanner's renderer path, slot order, and ID algorithm.
-                    var rendererPath = rendererIdentity.rendererPath;
+                    var rendererPath = AvatarPrimitiveCrudCore.GetTransformPath(renderer.transform);
                     var sharedMaterials = renderer.sharedMaterials ?? Array.Empty<Material>();
                     for (var slotIndex = 0; slotIndex < sharedMaterials.Length; slotIndex++)
                     {
@@ -575,12 +581,14 @@ namespace VRCForge.Editor
                 ["changedAssetPaths"] = new JArray() };
         }
 
-        private static JObject DiagnosticObjectState(string value)
+        private static JObject DiagnosticObjectState(string value, out string rendererLocation)
         {
+            rendererLocation = null;
             if (value == null) return null;
-            var parts = value.Split(':');
-            if (parts.Length != 3 || !long.TryParse(parts[0], out var revision) || !int.TryParse(parts[1], out var dirty))
+            var parts = value.Split(new[] { ':' }, 4);
+            if (parts.Length < 3 || !long.TryParse(parts[0], out var revision) || !int.TryParse(parts[1], out var dirty))
                 throw new InvalidDataException("diagnostic_object_state_unavailable");
+            if (parts.Length == 4) rendererLocation = parts[3];
             return new JObject { ["contentHash"] = parts[2], ["dirtyCount"] = dirty, ["revision"] = revision };
         }
 
@@ -591,11 +599,11 @@ namespace VRCForge.Editor
             {
                 saved.objects.TryGetValue(id, out var before);
                 current.objects.TryGetValue(id, out var after);
-                var oldState = DiagnosticObjectState(before);
-                var newState = DiagnosticObjectState(after);
+                var oldState = DiagnosticObjectState(before, out var oldLocation);
+                var newState = DiagnosticObjectState(after, out var newLocation);
                 var target = Resolve(id);
                 var classification = oldState == null ? "added" : newState == null ? "missing"
-                    : !JToken.DeepEquals(oldState["contentHash"], newState["contentHash"]) ? "content_changed"
+                    : oldLocation != newLocation || !JToken.DeepEquals(oldState["contentHash"], newState["contentHash"]) ? "content_changed"
                     : !JToken.DeepEquals(oldState["dirtyCount"], newState["dirtyCount"]) ? "dirty_count_only"
                     : !JToken.DeepEquals(oldState["revision"], newState["revision"]) ? "revision_only" : "unchanged";
                 rows.Add(new JObject { ["objectId"] = id, ["assetPath"] = target == null ? "" : AssetDatabase.GetAssetPath(target),

@@ -24,12 +24,7 @@ namespace VRCForge.Editor
                 ? string.Empty
                 : NormalizeGuid(AssetDatabase.AssetPathToGUID(scenePath));
             var componentType = renderer.GetType().FullName ?? renderer.GetType().Name;
-            var sameTypeComponents = renderer.gameObject.GetComponents(renderer.GetType());
-            var componentIndex = Array.FindIndex(sameTypeComponents, item => ReferenceEquals(item, renderer));
-            if (componentIndex < 0)
-            {
-                throw new InvalidOperationException("Renderer component index is unavailable.");
-            }
+            var componentIndex = GetComponentIndex(renderer);
 
             var rendererPath = GetTransformPath(renderer.transform);
             var identityInput = new StringBuilder();
@@ -64,6 +59,17 @@ namespace VRCForge.Editor
                 componentType = componentType,
                 componentIndex = componentIndex
             };
+        }
+
+        internal static int GetComponentIndex(Renderer renderer)
+        {
+            var sameTypeComponents = renderer.gameObject.GetComponents(renderer.GetType());
+            var componentIndex = Array.FindIndex(sameTypeComponents, item => ReferenceEquals(item, renderer));
+            if (componentIndex < 0)
+            {
+                throw new InvalidOperationException("Renderer component index is unavailable.");
+            }
+            return componentIndex;
         }
 
         private static string NormalizeGuid(string value)

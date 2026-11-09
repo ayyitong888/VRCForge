@@ -35,7 +35,7 @@ class GameObject:Object {
  public Scene scene=new Scene();
  public T[] GetComponents<T>()=>Array.Empty<T>();
 }
-class Scene { public bool IsValid()=>true; }
+class Scene { public int handle; public string path; public bool IsValid()=>true; }
 class AnimatorController:Object { public bool hasClips=true; }
 class AnimationClip:Object {}
 namespace VRC.SDK3.Avatars.Components { class VRCAvatarDescriptor:global::Component { public Transform transform; } }
@@ -53,10 +53,9 @@ static class ShaderMaterialScanner {
 static class AvatarPrimitiveCrudCore { public static string GetTransformPath(Transform transform)=>"Avatar"; }
 class Mesh:Object {} class Shader:Object {} class Texture:Object {} class MonoScript:Object {}
 class Material:Object { public Shader shader; }
-class Renderer:Component { public Material[] sharedMaterials=Array.Empty<Material>(); }
+class Renderer:Component { public Transform transform; public Material[] sharedMaterials=Array.Empty<Material>(); }
 static class RendererComponentIdentity {
- internal sealed class Evidence { public string rendererPath, componentId, scenePath; public int sceneHandle; }
- public static Evidence Create(Renderer renderer)=>throw new Exception("unexpected material scope");
+ public static int GetComponentIndex(Renderer renderer)=>throw new Exception("unexpected material scope");
 }
 static class MaterialInventoryIdentity {
  public static string CreateMaterialId(string path,int slot,string material,string shader)=>throw new Exception("unexpected material scope");
