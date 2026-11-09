@@ -475,11 +475,14 @@ class AgentQuestionService:
                     dispatch_seed["_questionFeedbackRevision"] = revision
                 if str(question_snapshot.get("kind") or "") == "visual_checkpoint":
                     dispatch_seed["_questionKind"] = "visual_checkpoint"
-            payload["runtimeContinuation"] = self._runtime_resolution.resolve(
+            continuation = self._runtime_resolution.resolve(
                 resolved_id,
                 dispatch_seed,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
+            payload["runtimeContinuation"] = continuation
+            if isinstance(question_snapshot, dict) and isinstance(continuation, Mapping) and continuation.get("status") == "settled_without_dispatch":
+                question_snapshot["runtimeContinuationStatus"] = "settled_without_dispatch"
         return payload
 
     def refresh_pending_runtime_tasks(self, *, session_id: str, client_turn_id: str, task_seed: Mapping[str, object]) -> int:

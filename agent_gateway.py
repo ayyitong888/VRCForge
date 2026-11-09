@@ -1783,8 +1783,6 @@ class AgentGateway:
     def _question_continuation_client_turn_id(question_id: str, seed: Mapping[str, Any]) -> str:
         marker = ":question:" + question_id
         prefix = str(seed.get("clientTurnId") or "")
-        if seed.get("_questionBlocking") is False:
-            prefix = prefix[:240 - len(marker)]
         try:
             feedback_revision = int(seed.get("_questionFeedbackRevision") or 0)
         except (TypeError, ValueError):
@@ -1806,13 +1804,11 @@ class AgentGateway:
         It opens no listener and never borrows a later turn's scope.
         """
         stable_id = str(question_id or "").strip()
-        client_turn_id = self._question_continuation_client_turn_id(stable_id, task_seed)
         if task_seed.get("_questionBlocking") is False:
-            routed = self._route_async_question_answer(stable_id, task_seed, continuation_prompt)
-            if routed is not None:
-                return routed
-            self.questions.record_runtime_continuation(stable_id, "queued",
-                runtimeContinuationClientTurnId=client_turn_id, runtimeContinuationTurnId="")
+            return self._route_async_question_answer(stable_id, task_seed, continuation_prompt)
+        if self._blocking_question_turn_closed(task_seed):
+            return self._settle_saved_question_answer(stable_id)
+        client_turn_id = self._question_continuation_client_turn_id(stable_id, task_seed)
         with self._lock:
             if not self._runtime_continuation_accepting or stable_id in self._question_continuations_inflight:
                 return {"ok": False, "status": "deferred", "questionId": stable_id}
@@ -1879,6 +1875,40 @@ class AgentGateway:
             "sessionId": str(task_seed.get("sessionId") or ""), "clientTurnId": client_turn_id, "turnId": "",
         }
 
+    def _settle_saved_question_answer(self, question_id: str) -> dict[str, Any]:
+        status = "settled_without_dispatch"
+        self.questions.record_runtime_continuation(
+            question_id, status, runtimeContinuationClientTurnId="", runtimeContinuationTurnId="",
+        )
+        return {"ok": True, "status": status, "questionId": question_id}
+
+    def _blocking_question_turn_closed(self, seed: Mapping[str, Any]) -> bool:
+        """A genuine wait keeps its continuation. A terminal turn can only save the answer."""
+        session_id = str(seed.get("sessionId") or "")
+        turn_id = str(seed.get("turnId") or "")
+        client_turn_id = str(seed.get("clientTurnId") or "")
+        snapshot = ensure_dict(seed.get("_nativeConversation"))
+        binding = str(snapshot.get("binding") or "")
+        if session_id and binding and seed.get("_toolLoopPause") is not True:
+            current = self._runtime_session_state.native_conversation(session_id, binding=binding)
+            if current is not None:
+                if current["turnId"] != snapshot.get("turnId"):
+                    return True
+                call_id = str(seed.get("_nativeCallId") or "")
+                waiting_calls = self._runtime_session_state._native_pending(current)
+                if call_id and call_id not in waiting_calls:
+                    return True
+                if not call_id and not waiting_calls & self._runtime_session_state._native_pending(snapshot):
+                    return True
+        # Reuse the exact terminal projection, including after a restart.
+        if session_id and turn_id and client_turn_id:
+            state = self.get_runtime_session(session_id, client_turn_id=client_turn_id)
+            response = ensure_dict(state.get("response"))
+            if str(response.get("turnId") or response.get("turn_id") or "") == turn_id:
+                step = ensure_dict(response.get("plan")).get("nextStep")
+                return bool(step) and step not in {"needs_user_action", "paused"}
+        return False
+
     def _settle_async_question_steers(self, input_ids: list[str], *, session_id: str, client_turn_id: str, **fields: Any) -> None:
         """Only consumption or a durable queue receipt settles a hot answer."""
         for input_id in input_ids:
@@ -1897,7 +1927,7 @@ class AgentGateway:
         return question_id if (question.get("blocking", True) is False and question.get("status") == "answered"
             and seed.get("sessionId") == session_id and seed.get("clientTurnId") == client_turn_id) else ""
 
-    def _route_async_question_answer(self, question_id: str, seed: Mapping[str, Any], prompt: str) -> dict[str, Any] | None:
+    def _route_async_question_answer(self, question_id: str, seed: Mapping[str, Any], prompt: str) -> dict[str, Any]:
         session_id = str(seed.get("sessionId") or "")
         origin = str(seed.get("clientTurnId") or "")
         input_id = "question-answer:" + question_id
@@ -1926,20 +1956,7 @@ class AgentGateway:
                     runtimeContinuationClientTurnId=origin, runtimeContinuationTurnId=str(seed.get("turnId") or ""))
                 return {"ok": True, "mode": "steer", "status": "steered", "questionId": question_id,
                         "sessionId": session_id, "clientTurnId": origin, "turnId": seed.get("turnId"), "inputId": input_id}
-            state = self._runtime_session_state.final_response(session_id=session_id, client_turn_id=origin)
-            if state.get("status") == "running" or self._runtime_session_state.session_busy(session_id):
-                queued = self._runtime_followup_queue.enqueue(
-                    session_id=lane, client_turn_id=input_id, target_client_turn_id=origin,
-                    message=prompt, attachments=attachments if isinstance(attachments, list) else [],
-                    envelope={"questionId": question_id, "continuationSource": "question_answered", "runtimeSessionId": session_id, "projectRoot": seed.get("projectRoot"),
-                              "projectPath": seed.get("projectRoot"), "provider": seed.get("provider"),
-                              "providerLabel": seed.get("providerLabel"), "model": seed.get("model"),
-                              "planMode": seed.get("planMode") is True},
-                )
-                if queued.get("accepted") is True:
-                    self._settle_async_question_steers([input_id], session_id=session_id, client_turn_id=origin, deliveryMode="followup", followupQueueId=queued.get("queueId"))
-                return {"ok": queued.get("accepted") is True, **queued, "questionId": question_id}
-        return None
+            return self._settle_saved_question_answer(question_id)
 
     def _dispatch_runtime_task_after_question(
         self,
@@ -1952,7 +1969,6 @@ class AgentGateway:
         browser_open = ensure_dict(seed.pop("_browserOpenRequest", None))
         browser_click_target = str(seed.pop("_browserClickTarget", "") or "")
         browser_approved = seed.pop("_authenticatedBrowserApproved", False) is True
-        asynchronous = seed.get("_questionBlocking") is False
         feedback_pending = bool(seed.pop("_authenticatedQuestionFeedbackPending", False))
         client_turn_id = self._question_continuation_client_turn_id(question_id, seed)
         seed.pop("_questionFeedbackRevision", None)
@@ -2016,8 +2032,8 @@ class AgentGateway:
                 f"The user authorized only browser click target {browser_click_target}. Repeat that exact click once."
                 if browser_approved else "The user did not authorize the click. Continue without it."
             )
-        if asynchronous or seed.get("_toolLoopPause") is True:
-            # These decisions have no pending native call to resume.
+        if seed.get("_toolLoopPause") is True:
+            # Tool-loop decisions have no pending native call to resume.
             # Keep task obligations, but append to the current conversation.
             context = dict(ensure_dict(continuation.get("context")))
             context.pop("_nativeConversation", None)
@@ -5594,26 +5610,24 @@ class AgentGateway:
                 turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
                 client_turn_id=resolved_client_turn_id,
             )
-            # A steer can win the exact-turn CAS after the final model boundary
-            # but before turn ownership is released. It must become a durable
-            # follow-up instead of disappearing with the hot mailbox.
+            # A chat steer that arrives after the final model boundary becomes
+            # a follow-up. Question answers are already persisted and belong
+            # only to the run that asked them.
             deferred: list[dict[str, Any]] = []
             followup_outcomes: list[dict[str, Any]] = []
             for item in late_steers:
                 input_id = str(item.get("inputId") or "")[:180]
                 followup_lane_id = str(item.get("followupLaneId") or resolved_session_id)[:180]
                 question_id = self._async_question_input_owner(input_id, session_id=resolved_session_id, client_turn_id=resolved_client_turn_id)
-                question_seed = ensure_dict(self.questions._project(include_answered=True).get(question_id, {}).get("runtimeTaskSeed")) if question_id else {}
+                if question_id:
+                    self._settle_saved_question_answer(question_id)
+                    continue
                 try:
                     queued = self._runtime_followup_queue.enqueue(
                         session_id=followup_lane_id,
                         client_turn_id=input_id,
                         target_client_turn_id=resolved_client_turn_id,
                         message=str(item.get("message") or ""),
-                        envelope={"questionId": question_id, "continuationSource": "question_answered", "runtimeSessionId": resolved_session_id,
-                                  "projectRoot": question_seed.get("projectRoot"), "projectPath": question_seed.get("projectRoot"),
-                                  "provider": question_seed.get("provider"), "providerLabel": question_seed.get("providerLabel"),
-                                  "model": question_seed.get("model"), "planMode": question_seed.get("planMode") is True} if question_id else None,
                     )
                 except Exception:  # noqa: BLE001 - persistence failure becomes an authoritative bounded outcome.
                     queued = {
@@ -5622,7 +5636,6 @@ class AgentGateway:
                         "reason": "durable_store_unavailable",
                     }
                 if queued.get("accepted") is True:
-                    self._settle_async_question_steers([input_id], session_id=resolved_session_id, client_turn_id=resolved_client_turn_id, deliveryMode="followup", followupQueueId=queued.get("queueId"))
                     deferred.append({
                         "inputId": input_id,
                         "queueId": queued.get("queueId"),
@@ -8678,15 +8691,14 @@ class AgentGateway:
                 # frozen task seed and could replay them when the process
                 # later resumes the task.
                 break
-            if (
-                step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL, "vrcforge_browser"}
-                and find_current_pending_question(steps, self.questions) is not None
-            ):
-                # The created question is the wait boundary even when its
-                # transport receipt says "executed" rather than
-                # needs_user_action. Leave the answer continuation to resume
-                # the task after the user responds.
-                plan["continueLoop"] = False
+            if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL, "vrcforge_browser"}:
+                pending = find_current_pending_question(steps, self.questions)
+                if pending is not None:
+                    question = ensure_dict(ensure_dict(pending.get("result")).get("question"))
+                    if question.get("blocking", True) is not False:
+                        # Only a blocking question parks this turn. Async answers
+                        # can still reach the original loop during independent work.
+                        plan["continueLoop"] = False
             if action_kind == "write" and not plan.get("continueLoop"):
                 break
             if not plan.get("continueLoop"):
