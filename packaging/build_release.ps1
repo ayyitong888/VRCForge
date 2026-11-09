@@ -888,6 +888,7 @@ try {
     Copy-Item -LiteralPath .\execution_target.py -Destination (Join-Path $payloadRoot "execution_target.py") -Force
     Copy-Item -LiteralPath .\mcp_tool_descriptor.py -Destination (Join-Path $payloadRoot "mcp_tool_descriptor.py") -Force
     Copy-Item -LiteralPath .\internal_tool_blocks.py -Destination (Join-Path $payloadRoot "internal_tool_blocks.py") -Force
+    Copy-Item -LiteralPath .\tool_discovery_search.py -Destination (Join-Path $payloadRoot "tool_discovery_search.py") -Force
     Copy-Item -LiteralPath .\agent_memory_tool_contract.py -Destination (Join-Path $payloadRoot "agent_memory_tool_contract.py") -Force
     Copy-Item -LiteralPath .\avatar_composition_workflow_skills.py -Destination (Join-Path $payloadRoot "avatar_composition_workflow_skills.py") -Force
     Copy-Item -LiteralPath .\dashboard_foundation.py -Destination (Join-Path $payloadRoot "dashboard_foundation.py") -Force
