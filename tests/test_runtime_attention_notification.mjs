@@ -37,6 +37,10 @@ try {
   assert.equal(api.runtimeAttentionFromResponse(run, {...response, plan:{nextStep: childWait.nextStep, reason: childWait.reason}}), null);
   assert.ok(api.runtimeAttentionFromRun({...run, nextStep:'needs_user_action', reason:'question_pending'}),
     'a human question still requires attention');
+  assert.equal(api.runtimeAttentionFromRun({...run, agent:'sub-agent', nextStep:'paused'}), null,
+    'a budget-paused child reports partial results in its thread without a critical review toast');
+  assert.ok(api.runtimeAttentionFromRun({...run, agent:'desktop-agent', nextStep:'paused'}),
+    'a foreground pause still uses its own attention policy');
   const attention = api.runtimeAttentionFromResponse(run, response);
   assert.ok(attention);
   const failedRun={...run,status:'failed'};

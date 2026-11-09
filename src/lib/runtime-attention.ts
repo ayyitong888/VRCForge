@@ -12,10 +12,14 @@ function attentionStatus(status: string | undefined): RuntimeAttentionStatus | n
 }
 const STORAGE_KEY = "vrcforge.runtime-attention.notifications.v1";
 
+function runAttentionStatus(run: AgentRuntimeRun): RuntimeAttentionStatus | null {
+  if (isWaitingForSubAgent(run) || (run.agent === "sub-agent" && run.nextStep === "paused")) return null;
+  return attentionStatus(run.status);
+}
+
 /** All watched terminal turns must deliver, even if a newer turn already runs. */
 export function runtimeAttentionCandidates(runs: AgentRuntimeRun[]): AgentRuntimeRun[] {
-  return runs.filter(run => run.sessionId && run.clientTurnId && run.turnId
-    && attentionStatus(run.status) !== null && !isWaitingForSubAgent(run));
+  return runs.filter(run => run.sessionId && run.clientTurnId && run.turnId && runAttentionStatus(run) !== null);
 }
 
 /** A later turn supersedes the earlier turn's attention, including while running. */
@@ -33,16 +37,16 @@ export function latestRuntimeAttentionCandidates(runs: AgentRuntimeRun[]): Agent
 /** Durable runtime ledger state survives backend restarts; notification delivery
  * must not depend on the in-memory response recovery cache. */
 export function runtimeAttentionFromRun(run: AgentRuntimeRun): RuntimeAttention | null {
-  const status = attentionStatus(run.status);
-  if (!status || !run.sessionId || !run.clientTurnId || !run.turnId || isWaitingForSubAgent(run)) return null;
+  const status = runAttentionStatus(run);
+  if (!status || !run.sessionId || !run.clientTurnId || !run.turnId) return null;
   return { sessionId: run.sessionId, clientTurnId: run.clientTurnId, turnId: run.turnId, status };
 }
 
 /** Verify the exact terminal receipt; a tool failure inside an active run is not attention. */
 export function runtimeAttentionFromResponse(run: AgentRuntimeRun, response: AgentRuntimeResponse): RuntimeAttention | null {
-  const status = attentionStatus(run.status);
+  const status = runAttentionStatus(run);
   if (!status || !run.sessionId || !run.clientTurnId || !run.turnId
-    || isWaitingForSubAgent(run) || isWaitingForSubAgent(response.plan)
+    || isWaitingForSubAgent(response.plan)
     || (response.sessionId || response.session_id) !== run.sessionId
     || response.clientTurnId !== run.clientTurnId
     || (response.turnId || response.turn_id) !== run.turnId) return null;
@@ -57,7 +61,7 @@ export function runtimeAttentionFromTurnState(run: AgentRuntimeRun, state: Agent
   if (!state.ok || !["completed", "failed"].includes(state.status)
     || state.sessionId !== run.sessionId || state.clientTurnId !== run.clientTurnId) return null;
   if (state.response) return runtimeAttentionFromResponse(run, state.response);
-  const status = attentionStatus(run.status);
+  const status = runAttentionStatus(run);
   if (state.status !== "failed" || !status || status === "completed" || status === "blocked"
     || !run.sessionId || !run.clientTurnId || !run.turnId) return null;
   return { sessionId: run.sessionId, clientTurnId: run.clientTurnId, turnId: run.turnId, status };
