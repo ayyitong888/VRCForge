@@ -897,6 +897,7 @@ class AgentGateway:
                 interrupt=lambda question_id, seed, summary: self.record_interrupted_runtime_task(
                     task_seed=dict(seed), continuation_source="question_answered", owned_id=question_id, summary=summary,
                 ),
+                settle_skip=lambda seed: NativeRuntimeTurn.cancel_question(self._runtime_session_state, seed, skipped=True),
             ),
         )
         # In-progress approved writes, keyed by approval id. This is a global,

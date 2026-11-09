@@ -397,6 +397,34 @@ def test_answer_to_already_settled_blocking_native_call_does_not_restart_agent(t
     )["runs"]
 
 
+def test_skip_blocking_question_saves_without_resuming_and_allows_next_message(tmp_path):
+    session_id = "native-continuation-session"
+    gateway, model = _write_gateway(tmp_path, [
+        call("question-1", "vrcforge_ask_user", {"question": "Which outfit?"}),
+        {"role": "assistant", "content": "Starting the new request."},
+    ], [])
+    gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", gateway.create_runtime_question)
+    original = _run(gateway, tmp_path)
+    assert original["plan"]["nextStep"] == "needs_user_action"
+    question_id = gateway.questions.list(session_id=session_id)["questions"][0]["questionId"]
+
+    answer = gateway.questions.answer(question_id, {
+        "sessionId": session_id, "selectedOptionId": "skip", "answer": "Skipped",
+    })
+    assert answer["runtimeContinuation"]["status"] == "settled_without_dispatch"
+    assert answer["question"]["selectedOptionId"] == "skip"
+    assert not gateway.questions.list(session_id=session_id)["questions"]
+    assert gateway.questions.reconcile_runtime_continuations()["queued"] == 0
+    assert len(model.requests) == 1
+    assert not gateway.list_runtime_followups(session_id=session_id)
+
+    _run(gateway, tmp_path, message="Start a different request", clientTurnId="manual-next-turn")
+    assert len(model.requests) == 2
+    results = [message for message in model.requests[-1]["messages"] if message.get("tool_call_id") == "question-1"]
+    assert len(results) == 1
+    assert json.loads(results[0]["content"])["status"] == "skipped"
+
+
 def test_async_delivery_receipt_cannot_settle_other_session_question(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     gateway.runtime_sessions.begin_turn(session_id="async-session", client_turn_id="origin-cid", turn_id="origin-turn")

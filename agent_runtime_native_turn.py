@@ -29,6 +29,8 @@ class NativeRuntimeTurn:
     def cancel_question(
         state: "AgentRuntimeSessionState",
         seed: Mapping[str, Any],
+        *,
+        skipped: bool = False,
     ) -> list[str]:
         """Settle only ask-user calls from one validated runtime seed."""
         session_id = str(seed.get("sessionId") or "").strip()
@@ -38,7 +40,10 @@ class NativeRuntimeTurn:
         binding = str(snapshot.get("binding") or "").strip()
         if not binding:
             return []
-        restored = state.restore_native_conversation(
+        current = state.native_conversation(session_id, binding=binding) if skipped else None
+        if current is not None and current["turnId"] != snapshot.get("turnId"):
+            return []
+        restored = current if current is not None else state.restore_native_conversation(
             session_id,
             binding=binding,
             snapshot=copy.deepcopy(dict(snapshot)),
@@ -82,6 +87,11 @@ class NativeRuntimeTurn:
                 call_id = str(tool_call.get("id") or "").strip()
                 if call_id:
                     question_ids.add(call_id)
+        exact_id = str(seed.get("_nativeCallId") or "") if skipped else ""
+        if exact_id:
+            question_ids = {exact_id} & state._native_pending(snapshot)
+        disposition = "skipped" if skipped else "cancelled"
+        summary = "The user skipped this question without an answer." if skipped else "Question cancelled by user stop."
         cancelled: list[str] = []
         for call_id in sorted(question_ids & state._native_pending(restored)):
             state.settle_native_call(
@@ -89,18 +99,18 @@ class NativeRuntimeTurn:
                 binding=binding,
                 call_id=call_id,
                 content=json.dumps(
-                    {"status": "cancelled", "outcome": {"status": "cancelled", "summary": "Question cancelled by user stop."}},
+                    {"status": disposition, "outcome": {"status": disposition, "summary": summary}},
                     ensure_ascii=False,
                 ),
             )
             cancelled.append(call_id)
         if cancelled:
-            # Stopping a waiting question also stops later proposals in its same
+            # Closing a waiting question also stops later proposals in its same
             # receipt, but cannot touch calls from a newer unrelated turn.
             pending = state._native_pending(snapshot) & state._native_pending(restored)
             for call_id in sorted(pending - set(cancelled)):
                 state.settle_native_call(session_id, binding=binding, call_id=call_id,
-                    content=json.dumps({"status": "not_executed", "reason": "question_cancelled", "observations": []}))
+                    content=json.dumps({"status": "not_executed", "reason": f"question_{disposition}", "observations": []}))
                 cancelled.append(call_id)
         return cancelled
 

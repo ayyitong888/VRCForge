@@ -115,6 +115,7 @@ class RuntimeQuestionResolutionPort:
 
     resolve: Callable[[str, Mapping[str, object], str], Mapping[str, object] | None]
     interrupt: Callable[[str, Mapping[str, object], str], object] | None = None
+    settle_skip: Callable[[Mapping[str, object]], object] | None = None
 
 
 class AgentQuestionPersistence:
@@ -392,6 +393,7 @@ class AgentQuestionService:
                         "Choose Continue or Stop for this runtime tool-loop Question.", status_code=400,
                     )
                 tool_loop_stop = tool_loop_pause and selected_option_id == "stop"
+                skip_without_dispatch = selected_option_id == "skip" and not goal_delivery_id
                 # The App submits custom replies and skips as answer-source IDs;
                 # only a declared choice ID must belong to the Question options.
                 if selected_option_id not in {"", "custom", "skip"} and selected_option is None:
@@ -401,7 +403,7 @@ class AgentQuestionService:
                         raise AgentQuestionServiceError("Unsupported visual checkpoint resolution.", status_code=400)
                     if selected_option_id == "skip" and resolution:
                         raise AgentQuestionServiceError("Skipping a Question cannot record a visual resolution.", status_code=400)
-                    option_resolution = _visual_resolution(selected_option, answer_text)
+                    option_resolution = "" if selected_option_id == "skip" else _visual_resolution(selected_option, answer_text)
                     if not resolution:
                         resolution = option_resolution
                     elif selected_option is not None:
@@ -418,7 +420,7 @@ class AgentQuestionService:
                         feedback_revision = int(existing.get("questionFeedbackRevision") or 0) + 1
                     except (TypeError, ValueError):
                         feedback_revision = 1
-                    visual_acceptance_pending = not settle_only and resolution != "pass"
+                    visual_acceptance_pending = not settle_only and not skip_without_dispatch and resolution != "pass"
                 continuation_answer = self._sanitize_answer_for_model(answer_text)
                 event = {
                     "event": "question_answered",
@@ -434,12 +436,14 @@ class AgentQuestionService:
                     event["resolution"] = resolution
                     event["questionFeedbackRevision"] = feedback_revision
                     event["runtimeQuestionFeedbackPending"] = bool(visual_acceptance_pending and runtime_seed and not goal_delivery_id)
-                if settle_only or tool_loop_stop:
+                if settle_only or tool_loop_stop or skip_without_dispatch:
                     event["runtimeContinuationStatus"] = "settled_without_dispatch"
-                if runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop:
+                elif runtime_seed and not goal_delivery_id:
                     # The saved answer and the not-yet-dispatched marker are
                     # one durable event, so a restart cannot lose the handoff.
                     event["runtimeContinuationStatus"] = "queued"
+                if skip_without_dispatch:
+                    self._settle_skipped_runtime_question(existing)
                 self._persistence.append(event)
                 answered = self._project(include_answered=True).get(resolved_id)
                 if answered is None:
@@ -452,7 +456,10 @@ class AgentQuestionService:
                 resolved_id,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
-        if (runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop
+        if (not goal_delivery_id and payload["question"].get("selectedOptionId") == "skip"
+                and payload["question"].get("runtimeContinuationStatus") == "settled_without_dispatch"):
+            payload["runtimeContinuation"] = {"ok": True, "status": "settled_without_dispatch", "questionId": resolved_id}
+        elif (runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop
                 and self._runtime_resolution is not None
                 and not payload.get("idempotent")):
             # This copy is ephemeral: durable Question records keep the stricter
@@ -584,6 +591,13 @@ class AgentQuestionService:
     def _resolve_queued_question(self, question: Mapping[str, object]) -> bool:
         if self._runtime_resolution is None:
             return False
+        if question.get("selectedOptionId") == "skip":
+            # Older builds could persist Skip as queued before they crashed.
+            with _locked(self._persistence.shared_state_lock):
+                self._settle_skipped_runtime_question(question)
+                self.record_runtime_continuation(str(question["questionId"]), "settled_without_dispatch",
+                    runtimeQuestionFeedbackPending=False, runtimeContinuationClientTurnId="", runtimeContinuationTurnId="")
+            return False
         seed = dict(question.get("runtimeTaskSeed") or {})
         seed["_questionBlocking"] = question.get("blocking", True)
         attachments = question.get("attachments")
@@ -599,6 +613,12 @@ class AgentQuestionService:
             str(question["questionId"]), seed, self._continuation_prompt(question),
         )
         return isinstance(result, Mapping) and result.get("status") in {"queued", "ok"}
+
+    def _settle_skipped_runtime_question(self, question: Mapping[str, object]) -> None:
+        seed = question.get("runtimeTaskSeed")
+        if (question.get("blocking", True) is not False and isinstance(seed, Mapping)
+                and self._runtime_resolution is not None and self._runtime_resolution.settle_skip is not None):
+            self._runtime_resolution.settle_skip(seed)
 
     def list(
         self,
