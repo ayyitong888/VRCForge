@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Current version](https://img.shields.io/badge/current-v1.10.10-d9487c?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.10.11-d9487c?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Platform Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
@@ -23,7 +23,7 @@ assistant can inspect your project, suggest a change, and apply it.
 
 > Back up your Unity / VRChat Avatar project before using any asset-writing feature.
 
-Current release: [1.10.10](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.10) · [Release notes](docs/RELEASE_NOTES_1.10.10.md)
+Current release: [1.10.11](https://github.com/ayyitong888/VRCForge/releases/tag/v1.10.11) · [Release notes](docs/RELEASE_NOTES_1.10.11.md)
 
 ## Download: install both the App and the Unity plugin
 
@@ -31,8 +31,8 @@ Current release: [1.10.10](https://github.com/ayyitong888/VRCForge/releases/tag/
 
 | Required download | Where to install |
 | --- | --- |
-| **[App offline installer (.exe)](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.10/VRCForge_Offline_Installer_x64.exe)** | Run on Windows. You may use the [web installer](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.10/VRCForge_Web_Installer_x64.exe) instead; choose one installer. |
-| **[Unity Core plugin (VRCForge.unitypackage)](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.10/VRCForge.unitypackage)** | **Import All** into each Unity project you want to connect. Installing the App alone does not connect Unity. |
+| **[App offline installer (.exe)](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.11/VRCForge_Offline_Installer_x64.exe)** | Run on Windows. You may use the [web installer](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.11/VRCForge_Web_Installer_x64.exe) instead; choose one installer. |
+| **[Unity Core plugin (VRCForge.unitypackage)](https://github.com/ayyitong888/VRCForge/releases/download/v1.10.11/VRCForge.unitypackage)** | **Import All** into each Unity project you want to connect. Installing the App alone does not connect Unity. |
 
 Update both the App and the Unity plugin when upgrading.
 
@@ -64,7 +64,7 @@ The supported environment is Windows x64, Unity 2022.3 LTS and a VRChat SDK3 Ava
 ## Documentation
 
 - [User Manual / 使用手册](USER_MANUAL.md)
-- [1.10.10 release notes](docs/RELEASE_NOTES_1.10.10.md)
+- [1.10.11 release notes](docs/RELEASE_NOTES_1.10.11.md)
 - [Compatibility matrix](docs/COMPATIBILITY_MATRIX.md)
 - [Product regression contract](docs/PRODUCT_REGRESSION_CONTRACT.md)
 - [Optimization strategy](docs/OPTIMIZATION_STRATEGY.md)
