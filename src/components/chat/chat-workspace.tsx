@@ -26,7 +26,7 @@ import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
 import { projectConversationSteeringMessages } from "../../lib/chat-steering-projection";
-import { agentReplyPreviewText, conversationItemRenderKey, copyableAgentDialogueText } from "../../lib/conversation-utils";
+import { agentReplyPreviewText, conversationItemRenderKey, copyableAgentDialogueText, includesQuestionText } from "../../lib/conversation-utils";
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { conversationRoundDateSeparators } from "../../lib/message-time";
 import { projectConversationTasks } from "../../lib/chat-task-projection";
@@ -44,10 +44,8 @@ function formatGoalElapsed(totalSeconds: number): string {
 }
 
 function questionAppearsInTurn(question: string, item: ConversationItem | undefined): boolean {
-  const normalize = (value: string) => value.replace(/\s+/g, "").trim();
-  const prompt = normalize(question);
-  if (!prompt) return false;
-  const includesPrompt = (value: string) => normalize(value).includes(prompt);
+  if (!question.trim()) return false;
+  const includesPrompt = (value: string) => includesQuestionText(value, question);
   if (item?.type === "agent") {
     return includesPrompt(copyableAgentDialogueText(item.response)) || includesPrompt(agentReplyPreviewText(item.response));
   }
@@ -349,6 +347,7 @@ export function ChatWorkspace({
   const pendingReplyQuestion = pendingQuestionPrompts.find((question) => question.questionId === pendingReplyQuestionId);
   const dockQuestions = pendingQuestionPrompts.filter((question) => !dismissedQuestionIds?.has(question.questionId));
   const [questionReveal, setQuestionReveal] = useState<{ questionId: string }>();
+  const [questionCardVisible, setQuestionCardVisible] = useState(false);
   const replyBanner = pendingReplyQuestion ? (
     <div className="mb-2 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2 text-xs" data-question-reply-mode>
       <span className="min-w-0 flex-1 truncate">{t("questionCard.replyInChat")}: {pendingReplyQuestion.header || pendingReplyQuestion.question || pendingReplyQuestion.questionId}</span>
@@ -391,9 +390,9 @@ export function ChatWorkspace({
     questions.push(question);
     pendingQuestionsByOrigin.set(origin, questions);
   }
-  const questionEntries = (origin?: ConversationItem) => pendingQuestionsByOrigin.get(origin)?.map((question) => (
-    <div key={question.questionId} className="mt-3 space-y-2 text-sm" data-chat-question-prompt={question.questionId}>
-      {question.question && !questionAppearsInTurn(question.question, origin) ? (
+  const renderQuestionEntry = (question: AgentQuestion, showPrompt: boolean) => (
+    <div key={question.questionId} className="mt-2 space-y-2 text-sm" data-chat-question-prompt={question.questionId}>
+      {question.question && showPrompt ? (
         <div data-chat-quote-content><ChatMarkdown text={question.question} /></div>
       ) : null}
       <button type="button" className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm hover:bg-muted"
@@ -405,7 +404,8 @@ export function ChatWorkspace({
         {t("questionCard.answerQuestion")}
       </button>
     </div>
-  ));
+  );
+  const unboundQuestionEntries = pendingQuestionsByOrigin.get(undefined)?.map((question) => renderQuestionEntry(question, true));
   const conversationRenderScope = sessionHandoffSourceChatId || "chat";
   const conversationItemKeyOccurrences = new Map<string, number>();
   const [steeringReveal, setSteeringReveal] = useState<{ ownerKey: string; sequence: number }>();
@@ -472,17 +472,16 @@ export function ChatWorkspace({
     };
   };
   const questionDock = dockQuestions.length > 0 && !pendingReplyQuestion ? (
-    <div className="mb-2" data-chat-question-dock>
-      <AgentQuestionCard
-        questions={dockQuestions}
-        reveal={questionReveal}
-        onAnswerQuestion={onAnswerQuestion}
-        onDismissQuestion={onDismissQuestion}
-        onReplyInChat={onReplyInChat}
-        capturePreviewsForQuestion={questionCapturePreviews}
-        resourceImageContextForQuestion={questionResourceImageContext}
-      />
-    </div>
+    <AgentQuestionCard
+      questions={dockQuestions}
+      reveal={questionReveal}
+      onAnswerQuestion={onAnswerQuestion}
+      onDismissQuestion={onDismissQuestion}
+      onVisibilityChange={setQuestionCardVisible}
+      onReplyInChat={onReplyInChat}
+      capturePreviewsForQuestion={questionCapturePreviews}
+      resourceImageContextForQuestion={questionResourceImageContext}
+    />
   ) : null;
   const taskProjection = projectConversationTasks(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions);
   const roundDateSeparators = conversationRoundDateSeparators(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions);
@@ -543,7 +542,7 @@ export function ChatWorkspace({
       actions={actions}
       onAction={onAction}
       compact={compact}
-      questionPromptVisible={dockQuestions.length > 0 && !pendingReplyQuestion}
+      questionPromptVisible={Boolean(questionDock && questionCardVisible)}
       disabledReason={disabledReason}
       attachments={attachments}
       onAttachFiles={onAttachFiles}
@@ -677,7 +676,7 @@ export function ChatWorkspace({
                 onDismiss={onBackgroundGoalCatchUpDismiss}
               />
             </div>
-            {questionEntries()}
+            {unboundQuestionEntries}
           </div>
         </div>
         <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
@@ -801,6 +800,8 @@ export function ChatWorkspace({
                 runtimeActive={itemRuntimeActive}
                 questionAlreadyShown={questionAlreadyShown}
                 questionQuoteInitiallyOpen={questionQuoteInitiallyOpen}
+                pendingQuestions={pendingQuestionsByOrigin.get(item)}
+                renderQuestionEntry={renderQuestionEntry}
                 onOpenChatById={onOpenChatById}
                 interleavedUserMessages={turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined}
                 steeringNavAnchorKeys={steeringAnchorsByOwner.get(renderKey)}
@@ -855,7 +856,6 @@ export function ChatWorkspace({
                 saveOperationTool={capturedOperation?.tool}
                 onSaveOperationAsSkill={onSaveOperationAsSkill}
                 />
-                {questionEntries(item)}
                 {item.type === "streaming" ? (
                   <StreamingPhaseStatus item={questionPreparing && !item.phase ? { ...item, phase: "preparing" } : item}
                     nowMs={activityNowMs} showElapsed={false} runtimeActive={itemRuntimeActive} />
@@ -864,7 +864,7 @@ export function ChatWorkspace({
             );
             });
           })()}
-            {questionEntries()}
+            {unboundQuestionEntries}
             <div ref={conversationEndRef} />
           </div>
         </div>

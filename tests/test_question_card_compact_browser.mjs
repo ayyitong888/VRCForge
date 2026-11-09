@@ -27,6 +27,7 @@ function Fixture() {
   const [lastAction, setLastAction] = useState(null);
   const [replyQuestionId, setReplyQuestionId] = useState("");
   const [failedOnce, setFailedOnce] = useState(false);
+  const [reveal, setReveal] = useState();
 
   async function onAnswerQuestion(questionId, optionId, value) {
     setLastAction({ questionId, optionId, value });
@@ -40,8 +41,10 @@ function Fixture() {
   return React.createElement("main", null,
     React.createElement("output", { "data-action": true }, lastAction ? JSON.stringify(lastAction) : ""),
     React.createElement("output", { "data-reply-question": true }, replyQuestionId),
+    React.createElement("button", { onClick: () => setReveal({ questionId: "q-one" }) }, "Open from conversation"),
     React.createElement(AgentQuestionCard, {
       questions,
+      reveal,
       onAnswerQuestion,
       onReplyInChat: setReplyQuestionId,
     }),
@@ -84,7 +87,8 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.clock.runFor(30_000);
   assert.equal(await page.getByPlaceholder("Type another answer...").count(), 0, "idle question prompt collapses after 30 seconds");
-  await page.locator("[data-question-reopen='q-one']").click();
+  assert.equal(await page.locator("[data-chat-question-dock]").count(), 0, "the collapsed card leaves the dock empty");
+  await page.getByRole("button", { name: "Open from conversation" }).click();
   const custom = page.getByPlaceholder("Type another answer...");
   assert.equal(await custom.evaluate((element) => element.tagName), "INPUT", "custom replies use one line");
   await custom.fill("工程里面有".repeat(200));

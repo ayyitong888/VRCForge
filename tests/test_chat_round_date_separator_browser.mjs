@@ -122,7 +122,14 @@ try {
   await page.waitForFunction(() => typeof window.setConversation === "function");
   if (process.env.VRCFORGE_TASK_REPLAY_ONLY !== "1") {
   const referencePrompt = "示例 Question：查看头像截图时，你想先看哪一部分？";
-  await render([user("first", start), agent(referencePrompt, later, "needs_user_action", "first")]);
+  const referenceTurn = agent(referencePrompt, later, "needs_user_action", "first");
+  referenceTurn.response.model = "fixture-question-model";
+  referenceTurn.response.timeline = [{
+    id: "reference-reply", timestamp: later, sequence: 1, kind: "assistant",
+    payload: { summary: referencePrompt, status: "done", phase: "final_answer" },
+  }];
+  await render([user("first", start), referenceTurn]);
+  await page.clock.install();
   await page.evaluate((prompt) => window.setQuestions([{
     questionId: "reference-q", status: "pending", originClientTurnId: "first", question: prompt,
     options: ["脸部细节", "全身效果", "侧面轮廓"].map((label) => ({ id: label, label })),
@@ -131,7 +138,15 @@ try {
   const questionEntry = page.locator('[data-chat-answer-question="reference-q"]');
   await questionDock.waitFor();
   assert.equal(await questionEntry.locator("xpath=ancestor::*[@data-conversation-item-id]").getAttribute("data-conversation-item-id"), referencePrompt);
+  assert.equal(await questionEntry.evaluate((node) => node.parentElement.previousElementSibling?.textContent), referencePrompt,
+    "the timeline action sits immediately below the question text");
+  const modelLabel = page.getByText("fixture-question-model", { exact: true });
+  assert.ok((await questionEntry.boundingBox()).y < (await modelLabel.boundingBox()).y, "the question action precedes model metadata");
   assert.ok(await questionDock.locator("xpath=following-sibling::*").count(), "question card sits above the independent composer");
+  await page.clock.runFor(30_000);
+  assert.equal(await questionDock.count(), 0, "idle collapse leaves no duplicate entry above the composer");
+  assert.equal(await questionEntry.count(), 1, "the inline action remains available after idle collapse");
+  await questionEntry.click();
   await questionDock.getByRole("button", { name: /close|关闭/i }).click();
   assert.equal(await questionDock.count(), 0, "close hides the dock card");
   await questionEntry.click();

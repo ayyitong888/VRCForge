@@ -64,6 +64,7 @@ export function buildAgentTimelineRows({
   onInterleavedUsersExpandedChange,
   renderInterleavedUserMessage,
   onOpenChatById,
+  renderQuestionActions,
   live = false,
   t,
 }: {
@@ -84,6 +85,7 @@ export function buildAgentTimelineRows({
   onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
   renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
   onOpenChatById?: (chatId: string) => void;
+  renderQuestionActions?: (reply: string) => ReactNode;
   live?: boolean;
   t: typeof i18n.t;
 }): ReactNode[] {
@@ -144,6 +146,7 @@ export function buildAgentTimelineRows({
       onInterleavedUsersExpandedChange,
       renderInterleavedUserMessage,
       onOpenChatById,
+      renderQuestionActions,
       captureText: response.plan.reply,
     },
   );
@@ -171,6 +174,7 @@ export function buildAgentTimelineRows({
         planLabel,
         awaitingApproval,
         elapsedSeconds,
+        renderQuestionActions,
         t,
       }));
     }
@@ -186,7 +190,7 @@ export function buildAgentTimelineRows({
     const hasStepAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
     if (!hasDurableFinalAssistant && !hasStepAnswer) {
       if (fallbackAnswer) {
-        rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
+        rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, renderQuestionActions?.(fallbackAnswer)));
       } else if (missingFinalAnswer) {
         rows.push(renderMissingFinalAnswerNotice(t));
       } else if (shouldSurfaceModelIdentity) {
@@ -213,6 +217,7 @@ export function buildAgentTimelineRows({
       providerLine,
       awaitingApproval,
       elapsedSeconds,
+      renderQuestionActions,
       t,
     });
     if (Number.isFinite(elapsedSeconds) || providerLine) legacyRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
@@ -234,6 +239,7 @@ export function buildAgentTimelineRows({
     planLabel,
     awaitingApproval,
     elapsedSeconds,
+    renderQuestionActions,
     t,
   });
   if (cancelled && rows.length) {
@@ -250,14 +256,14 @@ export function buildAgentTimelineRows({
     rows.push(...buildAgentTimelineRowsFromSteps({
       steps: orderedSteps.filter(({ step }) => isStepKindAnswer(step.kind)),
       response, shell, vision, skill, write, approval, approvalAction,
-      onModifyApproval, providerLine, planLabel, awaitingApproval, elapsedSeconds, t,
+      onModifyApproval, providerLine, planLabel, awaitingApproval, elapsedSeconds, renderQuestionActions, t,
     }));
   }
   const hasAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
   if (!hasAnswer) {
     const fallbackAnswer = response.plan.reply || response.plan.summary;
     if (fallbackAnswer) {
-      rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
+      rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, renderQuestionActions?.(fallbackAnswer)));
     } else if (missingFinalAnswer) {
       rows.push(renderMissingFinalAnswerNotice(t));
     } else if (shouldSurfaceModelIdentity) {
@@ -277,6 +283,7 @@ export function buildAgentTimelineRows({
     providerLine,
     awaitingApproval,
     elapsedSeconds,
+    renderQuestionActions,
     t,
   });
   if (Number.isFinite(elapsedSeconds) && !fallbackRows.some((row) => row && typeof row === "object" && "key" in row && (row as { key?: string }).key === "agent-turn-metadata")) {
@@ -413,6 +420,7 @@ export function buildDurableTimelineRows(
     renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
     onOpenChatById?: (chatId: string) => void;
     captureText?: string;
+    renderQuestionActions?: (reply: string) => ReactNode;
   } = {},
 ): ReactNode[] {
   // Lifecycle evidence stays durable; the right sidebar owns its presentation.
@@ -495,7 +503,7 @@ export function buildDurableTimelineRows(
       flushToolCalls();
       if (!includeAssistant) continue;
       if (entry.id === finalAssistant?.id) {
-        rows.push(renderFinalAssistantRow(entry, terminalFailureCode));
+        rows.push(renderFinalAssistantRow(entry, terminalFailureCode, options.renderQuestionActions?.(entry.text)));
       } else {
         lastPublicUpdate = entry.text.split("\n").find((line) => line.trim())?.trim() || "";
         processRows.push(
@@ -564,7 +572,7 @@ export function buildDurableTimelineRows(
   return rows;
 }
 
-function renderFinalAssistantRow(entry: Extract<TimelinePresentationEntry, { type: "assistant" }>, terminalFailureCode: string): ReactNode {
+function renderFinalAssistantRow(entry: Extract<TimelinePresentationEntry, { type: "assistant" }>, terminalFailureCode: string, questionActions?: ReactNode): ReactNode {
   const terminalStatusKey = runtimeTerminalStatusKey(terminalFailureCode);
   return terminalStatusKey ? (
     <div
@@ -578,6 +586,12 @@ function renderFinalAssistantRow(entry: Extract<TimelinePresentationEntry, { typ
         <span>{i18n.t(terminalStatusKey)}</span>
       </div>
       <p className="text-muted-foreground">{entry.text}</p>
+      {questionActions}
+    </div>
+  ) : questionActions ? (
+    <div key={entry.id} className="px-1 text-sm leading-relaxed">
+      <div data-chat-quote-content><ChatMarkdown text={entry.text} /></div>
+      {questionActions}
     </div>
   ) : (
     <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed" data-chat-quote-content>
@@ -788,6 +802,7 @@ function buildAgentTimelineRowsFromSteps({
   planLabel,
   awaitingApproval,
   elapsedSeconds,
+  renderQuestionActions,
   t,
 }: {
   steps: OrderedAgentStep[];
@@ -803,6 +818,7 @@ function buildAgentTimelineRowsFromSteps({
   planLabel: string;
   awaitingApproval: boolean;
   elapsedSeconds?: number;
+  renderQuestionActions?: (reply: string) => ReactNode;
   t: typeof i18n.t;
 }): ReactNode[] {
   const rows: ReactNode[] = [];
@@ -818,7 +834,7 @@ function buildAgentTimelineRowsFromSteps({
     if (normalizedKind === "assistant") {
       const answer = step.summary || response.plan.reply || response.plan.summary;
       if (answer) {
-        rows.push(renderPlanReplyRow(answer, planLabel, elapsedSeconds, t, rowKey));
+        rows.push(renderPlanReplyRow(answer, planLabel, renderQuestionActions?.(answer), rowKey));
       }
       continue;
     }
@@ -1014,6 +1030,7 @@ function buildLegacyAgentTimelineRows({
   providerLine,
   awaitingApproval,
   elapsedSeconds,
+  renderQuestionActions,
   t,
 }: {
   response: AgentRuntimeResponse;
@@ -1028,18 +1045,14 @@ function buildLegacyAgentTimelineRows({
   providerLine: string;
   awaitingApproval: boolean;
   elapsedSeconds?: number;
+  renderQuestionActions?: (reply: string) => ReactNode;
   t: typeof i18n.t;
 }): ReactNode[] {
   const rows: ReactNode[] = [];
   const shellExecutionResult = shell && isAgentShellResult(shell.result) ? shell.result : undefined;
   const planReply = response.plan.reply || response.plan.summary;
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
-  if (planReply) rows.push(
-    <div key="reply" className="px-1 text-sm">
-      <div data-chat-quote-content><ChatMarkdown text={planReply} /></div>
-      {planLabel ? <div className="mt-2 text-[10px] leading-relaxed text-muted-foreground/75">{planLabel}</div> : null}
-    </div>,
-  );
+  if (planReply) rows.push(renderPlanReplyRow(planReply, planLabel, renderQuestionActions?.(planReply), "reply"));
   if (!planReply && shouldSurfaceModelIdentity && planLabel) {
     rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t, "reply-model"));
   }
@@ -1235,13 +1248,13 @@ function isStepKindError(kind?: string): boolean {
 function renderPlanReplyRow(
   answer: string,
   planLabel: string,
-  elapsedSeconds: number | undefined,
-  t: typeof i18n.t,
+  questionActions?: ReactNode,
   key = "plan-reply",
 ) {
   return (
     <div key={key} className="px-1 text-sm">
       <div data-chat-quote-content><ChatMarkdown text={answer} /></div>
+      {questionActions}
       {planLabel ? <div className="mt-2 text-[10px] leading-relaxed text-muted-foreground/75">{planLabel}</div> : null}
     </div>
   );

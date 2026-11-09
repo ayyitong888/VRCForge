@@ -15,12 +15,12 @@ import {
 import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
-import type { AgentApproval } from "../../lib/api";
+import type { AgentApproval, AgentQuestion } from "../../lib/api";
 import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
 import { elapsedSecondsSince, providerWaitingWindow, type AgentRuntimePhase } from "../../lib/chat-streaming";
-import { copyableAgentDialogueText } from "../../lib/conversation-utils";
+import { copyableAgentDialogueText, includesQuestionText } from "../../lib/conversation-utils";
 import { projectVisionFailureNotice } from "../../lib/vision-failure-notice";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { cn, formatCount } from "../../lib/utils";
@@ -65,6 +65,8 @@ export function ConversationCard({
   onSaveOperationAsSkill,
   questionAlreadyShown,
   questionQuoteInitiallyOpen,
+  pendingQuestions = [],
+  renderQuestionEntry,
   onOpenChatById,
   runtimeActive,
 }: {
@@ -99,12 +101,20 @@ export function ConversationCard({
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
   questionAlreadyShown?: boolean;
   questionQuoteInitiallyOpen?: boolean;
+  pendingQuestions?: AgentQuestion[];
+  renderQuestionEntry?: (question: AgentQuestion, showPrompt: boolean) => ReactNode;
   /** Opens another conversation in this project scope by chat id. */
   onOpenChatById?: (chatId: string) => void;
   /** Exact session/CID activity from the current runtime ledger, when available. */
   runtimeActive?: boolean;
 }) {
   const { t } = useTranslation();
+  const unplacedQuestions = new Set(pendingQuestions);
+  const renderQuestionActions = pendingQuestions.length && renderQuestionEntry ? (reply: string) => {
+    const entries = [...unplacedQuestions].filter((question) => includesQuestionText(reply, question.question || ""));
+    for (const question of entries) unplacedQuestions.delete(question);
+    return entries.length ? entries.map((question) => renderQuestionEntry(question, false)) : null;
+  } : undefined;
   const storedAttachments = item.type === "user" || item.type === "question_answer" ? item.attachments : undefined;
   const restoredAttachments = useMemo(
     () => resolveAttachmentPayloadReferences(storedAttachments || [], attachmentPayloads),
@@ -354,7 +364,7 @@ export function ConversationCard({
     const liveImageContext = chatResourceImageContext && captureSessionId
       ? { ...chatResourceImageContext, sessionId: captureSessionId, clientTurnId: item.clientTurnId } : null;
 
-    if (item.id.startsWith("question-continuation:") && !item.text && !item.timeline?.length) return null;
+    if (item.id.startsWith("question-continuation:") && !item.text && !item.timeline?.length && !pendingQuestions.length) return null;
     const streamingElapsed = elapsedSecondsSince(item.createdAt, streamingNowMs);
     // Keep public assistant updates at their durable timeline position. The
     // live buffer is omitted once the same text has become a durable event.
@@ -371,14 +381,18 @@ export function ConversationCard({
       onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
       renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, steeringNavAnchorKeys?.get(message.id)),
       onOpenChatById,
+      renderQuestionActions,
     });
+    const liveReply = showLiveText ? <div className="leading-relaxed" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null;
+    const liveQuestionActions = showLiveText ? renderQuestionActions?.(item.text) : null;
     return (
       <ChatResourceImageContext.Provider value={liveImageContext}>
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
           {initialUserContent}
           {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
-          {showLiveText ? <div className="leading-relaxed" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null}
+          {liveQuestionActions ? <div>{liveReply}{liveQuestionActions}</div> : liveReply}
+          {[...unplacedQuestions].map((question) => renderQuestionEntry?.(question, true))}
         </div>
       </div>
       </ChatResourceImageContext.Provider>
@@ -497,6 +511,7 @@ export function ConversationCard({
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
     renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, steeringNavAnchorKeys?.get(message.id)),
     onOpenChatById,
+    renderQuestionActions,
     live: runtimeActive ?? false,
     t,
   });
@@ -507,6 +522,7 @@ export function ConversationCard({
         <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
           {initialUserContent}
           {timelineRows}
+          {[...unplacedQuestions].map((question) => renderQuestionEntry?.(question, true))}
           {visionFailure ? (
             <p className="flex items-start gap-1.5 text-xs text-muted-foreground" data-chat-vision-error>
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />

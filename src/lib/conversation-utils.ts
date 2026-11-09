@@ -255,6 +255,11 @@ export function collectCompactionRecovery(items: ConversationItem[]): Compaction
 }
 
 /** Public model text for hover previews, without model-context or execution summaries. */
+export function includesQuestionText(reply: string, question: string): boolean {
+  const prompt = question.replace(/\s+/g, "");
+  return Boolean(prompt && reply.replace(/\s+/g, "").includes(prompt));
+}
+
 export function agentReplyPreviewText(response: AgentRuntimeResponse): string {
   const assistantEntries = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries
     .filter((entry) => entry.type === "assistant");

@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, HelpCircle, Pencil, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentQuestion } from "../../lib/api";
 import { cn, formatCount } from "../../lib/utils";
@@ -14,6 +14,7 @@ export function AgentQuestionCard({
   reveal,
   onAnswerQuestion,
   onDismissQuestion,
+  onVisibilityChange,
   onStopContinuation,
   onReplyInChat,
   capturePreviewsForQuestion,
@@ -23,6 +24,7 @@ export function AgentQuestionCard({
   reveal?: { questionId: string };
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   onDismissQuestion: (questionId: string) => void;
+  onVisibilityChange?: (visible: boolean) => void;
   onStopContinuation?: (question: AgentQuestion) => void | Promise<void>;
   /** Focus the shared composer; the owner should retain this question id and send text/attachments through the normal composer path. */
   onReplyInChat?: (questionId: string) => void;
@@ -60,13 +62,17 @@ export function AgentQuestionCard({
   }, [reveal]);
 
   const question = pendingQuestions[index];
+  const visible = Boolean(question && (collapsedQuestionId !== question.questionId || busyChoice));
+  useLayoutEffect(() => {
+    onVisibilityChange?.(visible);
+  }, [onVisibilityChange, visible]);
   const activeCapturePreview = capturePreview?.questionId === question?.questionId ? capturePreview : null;
   useEffect(() => {
     if (!question || busyChoice || editing || activeCapturePreview) return undefined;
     const timer = window.setTimeout(() => setCollapsedQuestionId(question.questionId), 30_000);
     return () => window.clearTimeout(timer);
   }, [question?.questionId, busyChoice, editing, activeCapturePreview]);
-  if (!question) {
+  if (!question || !visible) {
     return null;
   }
 
@@ -77,13 +83,6 @@ export function AgentQuestionCard({
   const continuationSettled = continuationDisplay === "settled" && Boolean(question.runtimeContinuation);
   const customValue = customValues[question.questionId] || "";
   const runtimeToolLoopPause = question.sourceTool === "runtime_tool_loop";
-  if (collapsedQuestionId === question.questionId && !busyChoice) {
-    return (
-      <button type="button" className="w-full rounded-xl border border-border bg-workspace px-3 py-2 text-left text-sm hover:bg-muted/50" onClick={() => setCollapsedQuestionId("")} data-question-reopen={question.questionId}>
-        {t("questionCard.title")} · {question.question || question.questionId}
-      </button>
-    );
-  }
   const capturePreviews = capturePreviewsForQuestion?.(question) || [];
   const resourceImageContext = resourceImageContextForQuestion?.(question);
   const isVisualCheckpoint = question.kind === "visual_checkpoint";
@@ -117,8 +116,8 @@ export function AgentQuestionCard({
   };
 
   const content = (
-    <section ref={cardRef} tabIndex={-1}
-      className="app-scrollbar max-h-[48vh] overflow-y-auto rounded-[1.25rem] border border-border bg-background px-3 py-3 outline-none"
+    <section ref={cardRef} tabIndex={-1} data-chat-question-dock
+      className="app-scrollbar mb-2 max-h-[48vh] overflow-y-auto rounded-[1.25rem] border border-border bg-background px-3 py-3 outline-none"
       aria-label={t("questionCard.label")}>
       <div className="mb-3 flex min-w-0 items-center gap-2 px-2 text-sm text-muted-foreground">
         <HelpCircle className="h-4 w-4 shrink-0" />
