@@ -398,9 +398,13 @@ export function ChatWorkspace({
       questionOrigins.set(item.clientTurnId, item);
     }
   }
-  const questionOrigin = (question: AgentQuestion | undefined) => question
-    ? questionOrigins.get((question.originClientTurnId || "").split(":question:", 1)[0]) || questionOrigins.get(question.originTurnId || "")
-    : undefined;
+  const questionOrigin = (question: AgentQuestion | undefined) => {
+    if (!question) return undefined;
+    const clientTurnId = question.originClientTurnId || "";
+    return questionOrigins.get(clientTurnId)
+      || questionOrigins.get(question.originTurnId || "")
+      || questionOrigins.get(clientTurnId.split(":question:", 1)[0]);
+  };
   const pendingQuestionsByOrigin = new Map<ConversationItem | undefined, AgentQuestion[]>();
   for (const question of pendingQuestionPrompts) {
     const origin = questionOrigin(question);

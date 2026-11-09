@@ -14,6 +14,8 @@ const overlayPath = process.env.VRCFORGE_ROUND_OVERLAY_PATH;
 const overlay = overlayPath ? JSON.parse(readFileSync(overlayPath, "utf8")) : null;
 const taskReplayPath = process.env.VRCFORGE_TASK_REPLAY_PATH;
 const taskReplay = taskReplayPath ? JSON.parse(readFileSync(taskReplayPath, "utf8")) : null;
+const questionOwnerReplayPath = process.env.VRCFORGE_QUESTION_OWNER_REPLAY_PATH;
+const questionOwnerReplay = questionOwnerReplayPath ? JSON.parse(readFileSync(questionOwnerReplayPath, "utf8")) : null;
 const { chromium } = createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
 const css = (await postcss([tailwindcss(resolve(root, "tailwind.config.ts"))]).process(
   readFileSync(resolve(root, "src/styles.css"), "utf8").replace(
@@ -120,6 +122,23 @@ try {
     await page.waitForTimeout(80);
   };
   await page.waitForFunction(() => typeof window.setConversation === "function");
+  const browserPrompt = "The website asks you to confirm your age.";
+  const browserTurn = agent(browserPrompt, later, "needs_user_action", "original:question:open-website");
+  const questionOwner = questionOwnerReplay || {
+    items: [agent("Open this website?", start, "needs_user_action", "original"),
+      { id: "open-answer", type: "question_answer", questionId: "open-website", text: "Open this page" }, browserTurn],
+    question: { questionId: "confirm-age", status: "pending", sourceTool: "browser", question: browserPrompt,
+      originClientTurnId: browserTurn.response.clientTurnId, options: [{ id: "deny", label: "Leave the page as it is" }] },
+    ownerItemId: browserTurn.id,
+  };
+  await render(questionOwner.items);
+  await page.evaluate((question) => window.setQuestions([question]), questionOwner.question);
+  const browserQuestion = page.locator(`[data-chat-answer-question="${questionOwner.question.questionId}"]`);
+  await browserQuestion.waitFor({ timeout: 3000 });
+  assert.equal(await browserQuestion.locator("xpath=ancestor::*[@data-conversation-item-id]").getAttribute("data-conversation-item-id"),
+    questionOwner.ownerItemId, "a browser question created during a continuation belongs beside that continuation");
+  assert.equal(await browserQuestion.count(), 1, "the pending question has one inline entry");
+  await page.evaluate(() => window.setQuestions([]));
   await render([
     { ...user("markdown-user", start), text: "Inspect **the project** and `Renderer`." },
     {
