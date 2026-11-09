@@ -17,13 +17,22 @@ import React from 'react';
 import {createRoot} from 'react-dom/client';
 import {ConversationCard} from './src/components/chat/conversation-card';
 import {initializeI18n,setLocale} from './src/i18n';
+import {mergeConversationTimelineItems} from './src/lib/chat-timeline-presentation';
 const original = ${JSON.stringify(original)};
 const source = original.length ? original : [{id:'original-unverified',type:'user',text:'最后简单告诉我哪些已经做好，哪些地方还没完成。',queueStatus:'delivery_unverified',queuedFrom:true,createdAt:'2026-10-19T12:00:00Z'}];
 const statuses = ['steering','queued','waiting_for_resources','paused','cancelled'];
+const reply = {
+ id:'reply',type:'agent',
+ response:{ok:true,plan:{reply:'我会先查看脸部细节。',summary:'',planner:'fixture',shellNeeded:false,nextStep:'needs_user_action'},observe:{}},
+ timeline:[
+  {id:'progress',sequence:1,timestamp:'2026-10-19T12:04:00Z',kind:'assistant',payload:{phase:'commentary',summary:'稍等。'}},
+  {id:'final',sequence:2,timestamp:'2026-10-19T12:05:00Z',kind:'assistant',payload:{phase:'final_answer',status:'needs_user_action',summary:'我会先查看脸部细节。'}},
+ ],
+};
 window.originalBefore = JSON.stringify(source);
 window.originalAfter = () => JSON.stringify(source);
 window.locale = setLocale;
-function Card({item,editing=false}) { return <ConversationCard item={item} editing={editing} editingText={item.text}
+function Card({item,editing=false}) { return <ConversationCard item={item.type==='agent' ? mergeConversationTimelineItems([item])[0] : item} editing={editing} editingText={item.text}
  canEdit canRetry onCopyItem={()=>{}} onEditItem={()=>{}} onRetryItem={()=>{}} onEditItemSave={()=>{}} onEditItemCancel={()=>{}} />; }
 void initializeI18n().then(()=>setLocale('zh-CN')).then(()=>createRoot(document.getElementById('root')).render(
  <main className="mx-auto max-w-3xl space-y-6 py-6 text-foreground">
@@ -35,6 +44,10 @@ void initializeI18n().then(()=>setLocale('zh-CN')).then(()=>createRoot(document.
   {statuses.filter(status=>status!=='steering').map(status=><section key={status} data-case={status}><Card item={{id:status,type:'user',text:'补充说明：保留当前任务的范围。',queueStatus:status,queuedFrom:true,createdAt:'2026-10-19T12:00:00Z'}} /></section>)}
   <section data-case="editing-confirmed"><Card editing item={{id:'editing-confirmed',type:'user',text:'编辑已确认送达的输入。',queuedFrom:true}} /></section>
   <section data-case="editing-unverified"><Card editing item={{id:'editing-unverified',type:'user',text:'编辑未确认送达的输入。',queueStatus:'delivery_unverified',queuedFrom:true}} /></section>
+  <section data-case="reply-time"><Card item={reply} /></section>
+  <section data-case="reply-completed"><Card item={{...reply,completedAt:'2026-10-19T12:06:00Z'}} /></section>
+  <section data-case="reply-time-unknown"><Card item={{...reply,timeline:reply.timeline.slice(0,1)}} /></section>
+  <section data-case="reply-time-unrecorded"><Card item={{...reply,timeline:[],response:{...reply.response,timeline:[{...reply.timeline[1],timestamp:undefined}]}}} /></section>
  </main>));
 `},bundle:true,write:false,format:"iife",platform:"browser",jsx:"automatic"});
 const server=createServer((_request,response)=>{
@@ -45,13 +58,26 @@ let browser;
 try {
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  browser=await chromium.launch({channel:'msedge',headless:true});
- const page=await browser.newPage({viewport:{width:1100,height:1100}});
+ const page=await browser.newPage({viewport:{width:1100,height:1100},timezoneId:'America/Los_Angeles'});
  const errors=[];page.on('pageerror',error=>errors.push(error.message));
  await page.goto(`http://127.0.0.1:${server.address().port}`);
  await page.locator('[data-case="steering"] [data-user-message-status]').waitFor();
  assert.equal(await page.locator('[data-case="confirmed"] [data-user-message-status]').count(),0);
  assert.equal(await page.locator('[data-case="editing-confirmed"] [data-user-message-status]').count(),0);
  assert.equal((await page.locator('[data-case="editing-confirmed"]').innerText()).includes('已追加到对话'),false);
+ const replyActions=page.locator('[data-case="reply-time"] [data-chat-message-actions]');
+ const replyTime=replyActions.locator('time');
+ assert.equal(await replyTime.getAttribute('datetime',{timeout:3000}),'2026-10-19T12:05:00.000Z',
+   'a saved final reply supplies the time when the turn has no completedAt');
+ assert.equal(await replyTime.innerText(),'5:05','reply time uses the local hour and minute without leading zero or AM/PM');
+ const timeRect=await replyTime.boundingBox();
+ const lastButton=await replyActions.getByRole('button').last().boundingBox();
+ assert.ok(timeRect.x >= lastButton.x + lastButton.width,'reply time sits after the action buttons');
+ assert.equal(await page.locator('[data-case="reply-completed"] [data-chat-message-actions] time').getAttribute('datetime'),'2026-10-19T12:06:00.000Z');
+ assert.equal(await page.locator('[data-case="reply-time-unknown"] [data-chat-message-actions] time').count(),0,
+   'commentary alone does not provide a reply completion time');
+ assert.equal(await page.locator('[data-case="reply-time-unrecorded"] [data-chat-message-actions] time').count(),0,
+   'opening a reply with no recorded time does not fabricate a timestamp');
  const geometry=[];
  for(const status of ['steering','queued','waiting_for_resources','paused','cancelled','unverified']) {
   const cases=await page.locator(`[data-case="${status}"]`).all();

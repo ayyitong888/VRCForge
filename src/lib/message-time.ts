@@ -1,6 +1,7 @@
 import type { ConversationItem } from "./chat-types";
 import type { AgentQuestion } from "./api/types";
 import { projectConversationTasks } from "./chat-task-projection";
+import { isCancellationMarkerTimelineEvent, isFinalAssistantTimelineEvent } from "./chat-timeline-presentation";
 
 /**
  * Messages are grouped by a human readable time marker after this quiet
@@ -19,10 +20,12 @@ export function parseMessageTimestamp(value?: string): number | undefined {
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
-export function formatLocalMessageTime(value: string | number | undefined, language?: string): string {
+export function formatLocalMessageTime(value: string | number | undefined, language?: string, compact = false): string {
   const timestamp = typeof value === "number" ? value : parseMessageTimestamp(value);
   if (timestamp === undefined || !Number.isFinite(timestamp)) return "";
-  return new Intl.DateTimeFormat(language || undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp));
+  const date = new Date(timestamp);
+  if (compact) return `${date.getHours()}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return new Intl.DateTimeFormat(language || undefined, { hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
 export function formatMessageDateSeparator(value: string | number | undefined, language?: string): string {
@@ -65,6 +68,19 @@ export function conversationItemTimestamp(item: ConversationItem): number | unde
   if (item.type === "timeline_event") return parseMessageTimestamp(item.event.timestamp || item.createdAt);
   if (item.type === "agent") return parseMessageTimestamp(item.completedAt || item.response.completedAt);
   return parseMessageTimestamp("createdAt" in item ? item.createdAt : undefined);
+}
+
+export function assistantReplyTimestamp(item: Extract<ConversationItem, { type: "agent" }>): number | undefined {
+  const completed = parseMessageTimestamp(item.completedAt) ?? parseMessageTimestamp(item.response.completedAt);
+  if (completed !== undefined) return completed;
+
+  let replyTimestamp: number | undefined;
+  for (const event of [...(item.response.timeline || []), ...(item.timeline || [])]) {
+    if (!event.payload?.summary?.trim() || !isFinalAssistantTimelineEvent(event) || isCancellationMarkerTimelineEvent(event)) continue;
+    const timestamp = parseMessageTimestamp(event.timestamp);
+    if (timestamp !== undefined && (replyTimestamp === undefined || timestamp > replyTimestamp)) replyTimestamp = timestamp;
+  }
+  return replyTimestamp;
 }
 
 /** Date markers belong between completed user tasks, never between runtime requests. */

@@ -24,7 +24,7 @@ import { copyableAgentDialogueText, includesQuestionText } from "../../lib/conve
 import { projectVisionFailureNotice } from "../../lib/vision-failure-notice";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { cn, formatCount } from "../../lib/utils";
-import { formatLocalMessageTime, formatMessageDateSeparator } from "../../lib/message-time";
+import { assistantReplyTimestamp, formatLocalMessageTime, formatMessageDateSeparator, parseMessageTimestamp } from "../../lib/message-time";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { ChatImagePreview } from "./chat-image-preview";
@@ -530,7 +530,7 @@ export function ConversationCard({
             </p>
           ) : null}
           <MessageActions
-            createdAt={item.completedAt || response.completedAt}
+            createdAt={assistantReplyTimestamp(item)}
             onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
             onRetry={canRetry && response.continuationSource !== "foreground_interrupted" ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
@@ -740,7 +740,7 @@ function MessageActions({
   saveOperationClientTurnId,
 }: {
   align?: "left" | "right";
-  createdAt?: string;
+  createdAt?: string | number;
   metadata?: ReactNode;
   onCopy?: () => void;
   onRetry?: () => void;
@@ -750,8 +750,12 @@ function MessageActions({
   saveOperationClientTurnId?: string;
 }) {
   const { t } = useTranslation();
-  const timeLabel = formatLocalMessageTime(createdAt, i18n.language);
-  const hasActions = Boolean(metadata || timeLabel || onCopy || onRetry || onEdit || onSaveAsSkill);
+  const timestamp = typeof createdAt === "number" ? createdAt : parseMessageTimestamp(createdAt);
+  const timeLabel = formatLocalMessageTime(timestamp, i18n.language, align === "left");
+  const time = timestamp !== undefined && timeLabel ? (
+    <time dateTime={new Date(timestamp).toISOString()} className="shrink-0 px-1 text-xs text-muted-foreground/80">{timeLabel}</time>
+  ) : null;
+  const hasActions = Boolean(metadata || time || onCopy || onRetry || onEdit || onSaveAsSkill);
   if (!hasActions) {
     return null;
   }
@@ -763,7 +767,7 @@ function MessageActions({
         align === "right" ? "justify-end" : "justify-start",
       )}
     >
-      {timeLabel ? <span className="px-1 text-xs text-muted-foreground/80">{timeLabel}</span> : null}
+      {align === "right" ? time : null}
       {metadata}
       {onCopy ? (
         <button
@@ -812,6 +816,7 @@ function MessageActions({
           <Pencil className="h-3.5 w-3.5" />
         </button>
       ) : null}
+      {align === "left" ? time : null}
     </div>
   );
 }

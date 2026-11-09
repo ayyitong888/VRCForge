@@ -178,7 +178,7 @@ function assistantPhase(value: unknown): "commentary" | "final_answer" | undefin
     : undefined;
 }
 
-export function isFinalAssistantTimelineEvent(event: ChatTimelineEvent): boolean {
+export function isFinalAssistantTimelineEvent(event: { kind?: string; payload?: ChatTimelineEvent["payload"] }): boolean {
   if (event.kind !== "assistant") return false;
   if (event.payload?.status === "completion_unverified") return false;
   const phase = assistantPhase(event.payload?.phase);
@@ -205,7 +205,7 @@ export function isCancellationMarkerAssistantText(text: string): boolean {
 }
 
 /** A terminal cancellation marker event; it is never the model's final answer. */
-export function isCancellationMarkerTimelineEvent(event: ChatTimelineEvent): boolean {
+export function isCancellationMarkerTimelineEvent(event: { kind?: string; payload?: ChatTimelineEvent["payload"] }): boolean {
   if (event.kind !== "assistant") return false;
   const status = String(event.payload?.status || "").toLowerCase();
   if (status === "cancelled" || status === "canceled") return true;
@@ -513,7 +513,9 @@ export function materializeRuntimeTimeline(response: AgentRuntimeResponse, fallb
     return {
       id: typeof raw.id === "string" && raw.id ? raw.id : `timeline-${response.clientTurnId || response.turnId || response.turn_id || "turn"}-${index}`,
       sequence: Number.isFinite(raw.sequence) ? Number(raw.sequence) : index,
-      timestamp: typeof raw.timestamp === "string" && raw.timestamp ? raw.timestamp : fallbackTimestamp,
+      timestamp: typeof raw.timestamp === "string" && raw.timestamp
+        ? raw.timestamp
+        : isFinalAssistantTimelineEvent(raw) ? "" : fallbackTimestamp,
       kind,
       ...(typeof raw.sessionId === "string" && raw.sessionId ? { sessionId: raw.sessionId.slice(0, 180) } : {}),
       ...(typeof raw.turnId === "string" && raw.turnId ? { turnId: raw.turnId.slice(0, 180) } : {}),
