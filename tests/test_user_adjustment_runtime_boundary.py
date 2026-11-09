@@ -60,12 +60,12 @@ def test_handoff_cancels_only_owned_children_and_shell(tmp_path, monkeypatch):
     gateway, calls = scripted_gateway(tmp_path, monkeypatch)
     cancelled = []
     owners = []
-    def tasks():
+    def active_ids(session_id, *, parent_turn_id, parent_client_turn_id):
         context = gateway._runtime_session_state.stream_context()
-        return [{"id": "owned", "status": "running", "sessionId": "s", "parentTurnId": context["turnId"], "parentClientTurnId": "c"},
-                {"id": "foreign", "status": "running", "sessionId": "other", "parentTurnId": context["turnId"], "parentClientTurnId": "c"},
-                {"id": "old", "status": "running", "sessionId": "s", "parentTurnId": "old", "parentClientTurnId": "old"}]
-    gateway.bind_runtime_subagent_control(list_tasks=tasks, cancel_task=lambda task: cancelled.append(task))
+        assert (session_id, parent_turn_id, parent_client_turn_id) == ("s", context["turnId"], "c")
+        return ["owned"]
+
+    gateway.bind_runtime_subagent_control(active_parent_task_ids=active_ids, cancel_task=lambda task: cancelled.append(task))
     monkeypatch.setattr(type(gateway.shell), "cancel_owner", lambda self, owner: owners.append(owner) or [])
     result = gateway.runtime_message({"message": "prepare test", "sessionId": "s", "clientTurnId": "c", "projectRoot": str(tmp_path)})
     assert cancelled == ["owned"]
@@ -142,15 +142,16 @@ def test_foreign_handoff_completion_cannot_bypass_runtime_barrier(tmp_path, monk
 @pytest.mark.parametrize("failure", ["lookup", "cancel"])
 def test_failed_owned_task_stop_must_not_invite_manual_adjustment(tmp_path, monkeypatch, failure):
     gateway, calls = scripted_gateway(tmp_path, monkeypatch)
-    def tasks():
+    def active_ids(session_id, *, parent_turn_id, parent_client_turn_id):
         if failure == "lookup":
             raise RuntimeError("task lookup unavailable")
         context = gateway._runtime_session_state.stream_context()
-        return [{"id": "owned", "status": "running", "sessionId": "s",
-                 "parentTurnId": context["turnId"], "parentClientTurnId": "c"}]
+        assert (session_id, parent_turn_id, parent_client_turn_id) == ("s", context["turnId"], "c")
+        return ["owned"]
+
     def cancel_task(task):
         raise RuntimeError("task cancellation unavailable")
-    gateway.bind_runtime_subagent_control(list_tasks=tasks, cancel_task=cancel_task)
+    gateway.bind_runtime_subagent_control(active_parent_task_ids=active_ids, cancel_task=cancel_task)
     result = gateway.runtime_message({"message": "prepare test", "sessionId": "s", "clientTurnId": "c", "projectRoot": str(tmp_path)})
     assert len(calls) == 1
     assert result["steps"][0]["outcome"]["status"] == "ok"
@@ -214,17 +215,11 @@ def test_approval_handoff_stops_original_resources_without_cancelling_other_turn
     shell_owners = []
     recovered = stop_failure is None
     original_owner = gateway._runtime_shell_owner("prepare-turn", "c", "s")
-    tasks = [
-        {"id": "owned", "status": "running", "sessionId": "s", "parentTurnId": "prepare-turn", "parentClientTurnId": "c"},
-        {"id": "other-turn", "status": "running", "sessionId": "s", "parentTurnId": "unrelated", "parentClientTurnId": "other"},
-        {"id": "foreign-session", "status": "running", "sessionId": "foreign", "parentTurnId": "prepare-turn", "parentClientTurnId": "c"},
-        {"id": "foreign-client", "status": "running", "sessionId": "s", "parentTurnId": "prepare-turn", "parentClientTurnId": "foreign"},
-    ]
-
-    def list_tasks():
+    def active_ids(session_id, *, parent_turn_id, parent_client_turn_id):
+        assert (session_id, parent_turn_id, parent_client_turn_id) == ("s", "prepare-turn", "c")
         if stop_failure == "lookup" and not recovered:
             raise RuntimeError("task lookup unavailable")
-        return tasks
+        return ["owned"]
 
     def cancel_task(task):
         cancelled.append(task)
@@ -232,7 +227,7 @@ def test_approval_handoff_stops_original_resources_without_cancelling_other_turn
             return {"ok": False}
         return {"ok": True}
 
-    gateway.bind_runtime_subagent_control(list_tasks=list_tasks, cancel_task=cancel_task)
+    gateway.bind_runtime_subagent_control(active_parent_task_ids=active_ids, cancel_task=cancel_task)
     monkeypatch.setattr(type(gateway.shell), "cancel_owner", lambda self, owner: shell_owners.append(owner) or [])
     state = gateway._runtime_session_state
     assert state.begin_turn(session_id="s", turn_id="unrelated", client_turn_id="other")

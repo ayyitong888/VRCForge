@@ -2098,7 +2098,7 @@ SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
     )
 )
 AGENT_GATEWAY.bind_runtime_subagent_control(
-    list_tasks=SUB_AGENT_COLLABORATION.list_tasks,
+    active_parent_task_ids=SUB_AGENT_COLLABORATION.active_parent_task_ids,
     cancel_task=SUB_AGENT_COLLABORATION.cancel_task,
     role_catalog=lambda: _SUB_AGENT_ROLES,
 )

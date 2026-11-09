@@ -105,6 +105,13 @@ class SubAgentCollaborationService:
     def list_tasks(self, *, include_events: bool = False, limit: int = 50) -> dict[str, Any]:
         return self._registry.list_tasks(include_events=include_events, limit=limit)
 
+    def active_parent_task_ids(
+        self, parent_session_id: str, *, parent_turn_id: str = "", parent_client_turn_id: str = "",
+    ) -> list[str]:
+        return self._registry.active_parent_task_ids(
+            parent_session_id, parent_turn_id=parent_turn_id, parent_client_turn_id=parent_client_turn_id,
+        )
+
     def get_task(self, task_id: str, *, include_events: bool = True) -> dict[str, Any]:
         return self._registry.get_task(task_id, include_events=include_events)
 

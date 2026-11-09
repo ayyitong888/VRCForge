@@ -333,6 +333,31 @@ class SubAgentTaskRegistry:
                 "runningCount": self._running_count_locked(),
             }
 
+    def active_parent_task_ids(
+        self,
+        parent_session_id: str,
+        *,
+        parent_turn_id: str = "",
+        parent_client_turn_id: str = "",
+    ) -> list[str]:
+        if not parent_session_id:
+            return []
+        with self._lock:
+            active_ids = []
+            for task in self._tasks.values():
+                if task.parent_session_id != parent_session_id or (
+                    task.status not in _RUNNING_STATUSES and task.parent_continuation_status != "pending"
+                ):
+                    continue
+                seed = task.params.get("_taskSeed")
+                seed = seed if isinstance(seed, dict) else {}
+                if parent_turn_id and str(seed.get("turnId") or "") != parent_turn_id:
+                    continue
+                if parent_client_turn_id and str(seed.get("clientTurnId") or "") != parent_client_turn_id:
+                    continue
+                active_ids.append(task.id)
+            return active_ids
+
     def get_task(self, task_id: str, include_events: bool = True) -> dict[str, Any]:
         with self._lock:
             task = self._tasks.get(task_id)

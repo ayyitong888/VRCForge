@@ -740,7 +740,7 @@ class AgentGateway:
         runtime_timeline_changed: Callable[[dict[str, Any]], None] | None = None,
         runtime_progress_changed: Callable[[dict[str, Any]], None] | None = None,
         vision_profile_enabled: Callable[[], bool] | None = None,
-        runtime_subagent_list_tasks: Callable[[], Any] | None = None,
+        runtime_subagent_active_parent_task_ids: Callable[..., list[str]] | None = None,
         runtime_subagent_cancel_task: Callable[[str], Any] | None = None,
         project_selection_request: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         load_mcp_resources: bool = True,
@@ -794,7 +794,7 @@ class AgentGateway:
         self._runtime_continuations_inflight: set[str] = set()
         self._runtime_continuation_condition = threading.Condition(self._lock)
         self._question_continuations_inflight: set[str] = set()
-        self._runtime_subagent_list_tasks = runtime_subagent_list_tasks
+        self._runtime_subagent_active_parent_task_ids = runtime_subagent_active_parent_task_ids
         self._runtime_subagent_role_catalog: Callable[[], Any] | None = None
         self._runtime_subagent_cancel_task = runtime_subagent_cancel_task
         self._tool_agent_context: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -2153,15 +2153,15 @@ class AgentGateway:
     def bind_runtime_subagent_control(
         self,
         *,
-        list_tasks: Callable[[], Any],
+        active_parent_task_ids: Callable[..., list[str]],
         cancel_task: Callable[[str], Any],
         role_catalog: Callable[[], Any] | None = None,
     ) -> None:
         """Bind the app-owned cooperative sub-agent cancellation port."""
 
-        if not callable(list_tasks) or not callable(cancel_task):
+        if not callable(active_parent_task_ids) or not callable(cancel_task):
             raise TypeError("sub-agent control callbacks must be callable")
-        self._runtime_subagent_list_tasks = list_tasks
+        self._runtime_subagent_active_parent_task_ids = active_parent_task_ids
         self._runtime_subagent_cancel_task = cancel_task
         self._runtime_subagent_role_catalog = role_catalog
 
@@ -2172,46 +2172,26 @@ class AgentGateway:
         turn_id: str,
         client_turn_id: str,
     ) -> dict[str, Any]:
-        list_tasks = self._runtime_subagent_list_tasks
+        active_parent_task_ids = self._runtime_subagent_active_parent_task_ids
         cancel_task = self._runtime_subagent_cancel_task
         result: dict[str, Any] = {
             "requestedTaskIds": [],
             "failedTaskIds": [],
             "lookupFailed": False,
         }
-        if not callable(list_tasks) or not callable(cancel_task):
+        if not session_id or not callable(active_parent_task_ids) or not callable(cancel_task):
             return result
         try:
-            listing = list_tasks()
+            task_ids = active_parent_task_ids(
+                session_id, parent_turn_id=turn_id, parent_client_turn_id=client_turn_id,
+            )
         except Exception:
             result["lookupFailed"] = True
             return result
-        items = (
-            (listing.get("items") or listing.get("tasks"))
-            if isinstance(listing, dict)
-            else listing
-        )
-        if not isinstance(items, list):
+        if not isinstance(task_ids, list):
             result["lookupFailed"] = True
             return result
-        for task in items:
-            if not isinstance(task, dict):
-                continue
-            if (str(task.get("status") or "").strip().casefold() not in {"queued", "running"}
-                    and task.get("parentContinuationStatus") != "pending"):
-                continue
-            task_session = str(task.get("sessionId") or task.get("parentSessionId") or "").strip()
-            task_turn = str(task.get("parentTurnId") or "").strip()
-            task_client = str(task.get("parentClientTurnId") or "").strip()
-            if session_id and task_session != session_id:
-                continue
-            if turn_id and task_turn != turn_id:
-                continue
-            if client_turn_id and task_client != client_turn_id:
-                continue
-            task_id = str(task.get("id") or task.get("taskId") or "").strip()
-            if not task_id or (not task_session and not task_turn and not task_client):
-                continue
+        for task_id in task_ids:
             try:
                 cancel_result = cancel_task(task_id)
             except Exception:

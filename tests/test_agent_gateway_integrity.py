@@ -78,32 +78,14 @@ def test_call_user_binds_external_question_to_gateway_authority(tmp_path: Path) 
 
 def test_runtime_cancel_requests_only_matching_active_subagents(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
-    tasks = [
-        {
-            "id": "same-owner",
-            "status": "running",
-            "sessionId": "session-a",
-            "parentTurnId": "turn-a",
-            "parentClientTurnId": "client-a",
-        },
-        {
-            "id": "other-turn",
-            "status": "running",
-            "sessionId": "session-a",
-            "parentTurnId": "turn-b",
-            "parentClientTurnId": "client-b",
-        },
-        {
-            "id": "other-session",
-            "status": "running",
-            "sessionId": "session-b",
-            "parentTurnId": "turn-a",
-            "parentClientTurnId": "client-a",
-        },
-    ]
     cancelled: list[str] = []
+
+    def active_ids(session_id, *, parent_turn_id, parent_client_turn_id):
+        assert (session_id, parent_turn_id, parent_client_turn_id) == ("session-a", "turn-a", "client-a")
+        return ["same-owner"]
+
     gateway.bind_runtime_subagent_control(
-        list_tasks=lambda: {"items": tasks},
+        active_parent_task_ids=active_ids,
         cancel_task=lambda task_id: cancelled.append(task_id) or {"ok": True},
     )
 
@@ -177,7 +159,7 @@ def test_runtime_cancel_stops_only_matching_registry_worker(tmp_path: Path) -> N
     )
     gateway = _gateway(tmp_path / "gateway")
     gateway.bind_runtime_subagent_control(
-        list_tasks=lambda: registry.list_tasks(),
+        active_parent_task_ids=registry.active_parent_task_ids,
         cancel_task=registry.cancel_task,
     )
     same = registry.create_task(
@@ -210,14 +192,14 @@ def test_runtime_cancel_stops_only_matching_registry_worker(tmp_path: Path) -> N
 
 def test_runtime_cancel_by_session_targets_only_that_session(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
-    tasks = [
-        {"id": "session-a-1", "status": "running", "parentSessionId": "session-a", "parentTurnId": "turn-a"},
-        {"id": "session-a-2", "status": "queued", "parentSessionId": "session-a", "parentTurnId": "turn-b"},
-        {"id": "session-b", "status": "running", "parentSessionId": "session-b", "parentTurnId": "turn-a"},
-    ]
     cancelled: list[str] = []
+
+    def active_ids(session_id, *, parent_turn_id, parent_client_turn_id):
+        assert (session_id, parent_turn_id, parent_client_turn_id) == ("session-a", "", "")
+        return ["session-a-1", "session-a-2"]
+
     gateway.bind_runtime_subagent_control(
-        list_tasks=lambda: {"tasks": tasks},
+        active_parent_task_ids=active_ids,
         cancel_task=lambda task_id: cancelled.append(task_id) or {"ok": True},
     )
 
@@ -229,12 +211,6 @@ def test_runtime_cancel_by_session_targets_only_that_session(tmp_path: Path) -> 
 
 def test_runtime_cancel_reports_subagent_partial_failures_without_leaking_errors(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
-    tasks = [
-        {"id": "ok-task", "status": "running", "parentSessionId": "session-a"},
-        {"id": "rejected-task", "status": "running", "parentSessionId": "session-a"},
-        {"id": "raised-task", "status": "running", "parentSessionId": "session-a"},
-    ]
-
     def cancel(task_id: str) -> dict[str, object]:
         if task_id == "rejected-task":
             return {"ok": False, "error": "private detail"}
@@ -243,7 +219,7 @@ def test_runtime_cancel_reports_subagent_partial_failures_without_leaking_errors
         return {"ok": True}
 
     gateway.bind_runtime_subagent_control(
-        list_tasks=lambda: {"tasks": tasks},
+        active_parent_task_ids=lambda *_args, **_kwargs: ["ok-task", "rejected-task", "raised-task"],
         cancel_task=cancel,
     )
 
@@ -259,7 +235,7 @@ def test_runtime_cancel_reports_subagent_partial_failures_without_leaking_errors
 def test_runtime_cancel_reports_subagent_lookup_failure(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     gateway.bind_runtime_subagent_control(
-        list_tasks=lambda: (_ for _ in ()).throw(RuntimeError("private detail")),
+        active_parent_task_ids=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("private detail")),
         cancel_task=lambda _task_id: {"ok": True},
     )
 
