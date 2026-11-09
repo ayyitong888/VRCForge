@@ -461,8 +461,7 @@ class AgentQuestionService:
                 resolved_id,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
-        if (not goal_delivery_id and payload["question"].get("selectedOptionId") == "skip"
-                and payload["question"].get("runtimeContinuationStatus") == "settled_without_dispatch"):
+        if not goal_delivery_id and answered.get("runtimeContinuationStatus") == "settled_without_dispatch":
             payload["runtimeContinuation"] = {"ok": True, "status": "settled_without_dispatch", "questionId": resolved_id}
         elif (runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop
                 and self._runtime_resolution is not None
@@ -470,23 +469,10 @@ class AgentQuestionService:
             # This copy is ephemeral: durable Question records keep the stricter
             # redacted answer, while the trusted runtime handoff can bind an
             # explicit user instruction to the resumed action.
-            dispatch_seed = dict(runtime_seed) if isinstance(runtime_seed, Mapping) else {}
-            dispatch_seed["_questionBlocking"] = existing.get("blocking", True)
+            dispatch_seed = self._runtime_dispatch_seed(answered)
             if continuation_answer:
                 dispatch_seed["_authenticatedUserAnswer"] = continuation_answer
-            if feedback_attachments:
-                dispatch_seed["_authenticatedUserAttachments"] = feedback_attachments
-            if visual_acceptance_pending:
-                dispatch_seed["_authenticatedQuestionFeedbackPending"] = True
             question_snapshot = payload.get("question")
-            if isinstance(question_snapshot, Mapping):
-                if dispatch_seed.get("_browserClickTarget") or dispatch_seed.get("_browserOpenRequest"):
-                    dispatch_seed["_authenticatedBrowserApproved"] = question_snapshot.get("selectedOptionId") == "approve"
-                revision = question_snapshot.get("questionFeedbackRevision")
-                if revision is not None:
-                    dispatch_seed["_questionFeedbackRevision"] = revision
-                if str(question_snapshot.get("kind") or "") == "visual_checkpoint":
-                    dispatch_seed["_questionKind"] = "visual_checkpoint"
             continuation = self._runtime_resolution.resolve(
                 resolved_id,
                 dispatch_seed,
@@ -495,6 +481,8 @@ class AgentQuestionService:
             payload["runtimeContinuation"] = continuation
             if isinstance(question_snapshot, dict) and isinstance(continuation, Mapping) and continuation.get("status") == "settled_without_dispatch":
                 question_snapshot["runtimeContinuationStatus"] = "settled_without_dispatch"
+                if "runtimeQuestionFeedbackPending" in question_snapshot:
+                    question_snapshot["runtimeQuestionFeedbackPending"] = False
         return payload
 
     def refresh_pending_runtime_tasks(self, *, session_id: str, client_turn_id: str, task_seed: Mapping[str, object]) -> int:
@@ -603,7 +591,15 @@ class AgentQuestionService:
                 self.record_runtime_continuation(str(question["questionId"]), "settled_without_dispatch",
                     runtimeQuestionFeedbackPending=False, runtimeContinuationClientTurnId="", runtimeContinuationTurnId="")
             return False
-        seed = dict(question.get("runtimeTaskSeed") or {})
+        result = self._runtime_resolution.resolve(
+            str(question["questionId"]), self._runtime_dispatch_seed(question), self._continuation_prompt(question),
+        )
+        return isinstance(result, Mapping) and result.get("status") in {"queued", "ok"}
+
+    @staticmethod
+    def _runtime_dispatch_seed(question: Mapping[str, object]) -> dict[str, object]:
+        raw_seed = question.get("runtimeTaskSeed")
+        seed = dict(raw_seed) if isinstance(raw_seed, Mapping) else {}
         seed["_questionBlocking"] = question.get("blocking", True)
         attachments = question.get("attachments")
         if isinstance(attachments, list) and attachments:
@@ -614,10 +610,10 @@ class AgentQuestionService:
             seed["_questionFeedbackRevision"] = question.get("questionFeedbackRevision")
         if str(question.get("kind") or "") == "visual_checkpoint":
             seed["_questionKind"] = "visual_checkpoint"
-        result = self._runtime_resolution.resolve(
-            str(question["questionId"]), seed, self._continuation_prompt(question),
-        )
-        return isinstance(result, Mapping) and result.get("status") in {"queued", "ok"}
+            seed["_questionResolution"] = question.get("resolution")
+        if seed.get("_browserClickTarget") or seed.get("_browserOpenRequest"):
+            seed["_authenticatedBrowserApproved"] = question.get("selectedOptionId") == "approve"
+        return seed
 
     def _settle_skipped_runtime_question(self, question: Mapping[str, object]) -> None:
         seed = question.get("runtimeTaskSeed")

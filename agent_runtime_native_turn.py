@@ -31,6 +31,8 @@ class NativeRuntimeTurn:
         seed: Mapping[str, Any],
         *,
         skipped: bool = False,
+        answer_saved: bool = False,
+        settle_following_calls: bool = True,
     ) -> list[str]:
         """Settle only ask-user calls from one validated runtime seed."""
         session_id = str(seed.get("sessionId") or "").strip()
@@ -40,14 +42,20 @@ class NativeRuntimeTurn:
         binding = str(snapshot.get("binding") or "").strip()
         if not binding:
             return []
-        current = state.native_conversation(session_id, binding=binding) if skipped else None
-        if current is not None and current["turnId"] != snapshot.get("turnId"):
-            return []
-        restored = current if current is not None else state.restore_native_conversation(
-            session_id,
-            binding=binding,
-            snapshot=copy.deepcopy(dict(snapshot)),
-        )
+        save_only = skipped or answer_saved
+        if save_only:
+            if state.session_busy(session_id) and not state.owns_turn(
+                session_id=session_id, turn_id=str(seed.get("turnId") or ""),
+                client_turn_id=str(seed.get("clientTurnId") or ""),
+            ):
+                return []
+            restored = state.native_conversation(session_id, binding=binding)
+            if restored is None or restored["turnId"] != snapshot.get("turnId"):
+                return []
+        else:
+            restored = state.restore_native_conversation(
+                session_id, binding=binding, snapshot=copy.deepcopy(dict(snapshot)),
+            )
         question_ids: set[str] = set()
         for message in snapshot.get("messages", []):
             if not isinstance(message, Mapping) or message.get("role") != "assistant":
@@ -87,11 +95,18 @@ class NativeRuntimeTurn:
                 call_id = str(tool_call.get("id") or "").strip()
                 if call_id:
                     question_ids.add(call_id)
-        exact_id = str(seed.get("_nativeCallId") or "") if skipped else ""
+        exact_id = str(seed.get("_nativeCallId") or "") if save_only else ""
         if exact_id:
             question_ids = {exact_id} & state._native_pending(snapshot)
-        disposition = "skipped" if skipped else "cancelled"
-        summary = "The user skipped this question without an answer." if skipped else "Question cancelled by user stop."
+        if answer_saved:
+            disposition = "answered"
+            summary = "The answer was saved without restarting the original turn."
+        elif skipped:
+            disposition = "skipped"
+            summary = "The user skipped this question without an answer."
+        else:
+            disposition = "cancelled"
+            summary = "Question cancelled by user stop."
         cancelled: list[str] = []
         for call_id in sorted(question_ids & state._native_pending(restored)):
             state.settle_native_call(
@@ -104,7 +119,7 @@ class NativeRuntimeTurn:
                 ),
             )
             cancelled.append(call_id)
-        if cancelled:
+        if cancelled and settle_following_calls:
             # Closing a waiting question also stops later proposals in its same
             # receipt, but cannot touch calls from a newer unrelated turn.
             pending = state._native_pending(snapshot) & state._native_pending(restored)
@@ -482,8 +497,14 @@ class NativeRuntimeTurn:
                     and str(terminal_gate.get("reason") or "") == "restore_failure_turn_stop"
                 )
             )
+            settled_externally = False
             if waiting and terminal_map.get("nextStep") not in {"cancelled", "interrupted"} and not restore_terminal:
-                return
+                call_ids = self._native_decision["ids"]
+                if not call_ids or set(call_ids) & self._state._native_pending(self.snapshot()):
+                    return
+                # An authenticated answer may settle this wait while the tool
+                # returns. Keep its receipt and flush any steer in this turn.
+                settled_externally = True
             retained_definitions = self._retained_tool_definitions(self.snapshot().get("messages", []))
             result: dict[str, Any] = {
                 "observations": [
@@ -504,7 +525,7 @@ class NativeRuntimeTurn:
                 }
             if not observations:
                 result["status"] = str((terminal or {}).get("nextStep") or "not_executed")
-            for call_id in self._native_decision["ids"]:
+            for call_id in (() if settled_externally else self._native_decision["ids"]):
                 self._state.settle_native_call(
                     self._session_id,
                     binding=self._binding,

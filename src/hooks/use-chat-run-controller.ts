@@ -85,7 +85,6 @@ export type QueuedTurn = {
   queueSequence?: number;
   queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled";
   queueTransition?: "enqueue" | "dispatch";
-  questionId?: string;
 };
 
 export type CurrentTurn = {
@@ -306,6 +305,8 @@ export function useChatRunController({
         // already owns the UI; re-syncing it would resurrect a ghost copy.
         if (!initialRestore && entry.status === "claimed") continue;
         const existingTurn = next.find((candidate) => candidate.id === entry.clientTurnId);
+        if (entry.questionId || entry.continuationSource === "question_answered"
+          || entry.clientTurnId.startsWith("question-answer:")) continue;
         const laneId = entry.sessionId;
         const owner = resolveFollowupRestoreOwner(entry, chats || [], existingTurn?.chatId);
         let chat = owner.chat;
@@ -320,16 +321,9 @@ export function useChatRunController({
         const savedItem = chat.items.find((item): item is Extract<ConversationItem, { type: "user" }> => (
           item.type === "user" && item.clientTurnId === entry.clientTurnId
         ));
-        const questionId = entry.questionId || (entry.clientTurnId.startsWith("question-answer:")
-          ? entry.clientTurnId.slice("question-answer:".length) : undefined);
-        const savedAnswer = questionId ? chat.items.find((item): item is Extract<ConversationItem, { type: "question_answer" }> => item.type === "question_answer" && item.questionId === questionId) : undefined;
-        if ((!entry.questionId && questionId && !savedAnswer) || (entry.continuationSource === "question_answered" && !questionId)) {
-          setError("The queued reply could not be matched to its saved question answer.");
-          continue;
-        }
-        const attachments = savedItem?.attachments || savedAnswer?.attachments || (entry.attachments || []) as ChatAttachment[];
+        const attachments = savedItem?.attachments || (entry.attachments || []) as ChatAttachment[];
         const unresolvedAttachment = attachments.some((attachment) => (
-          !savedItem && !savedAnswer && attachment.payloadKind !== "vault_file"
+          !savedItem && attachment.payloadKind !== "vault_file"
         ));
         const pending = entry.status === "pending";
         const status: QueuedTurn["queueStatus"] = pending
@@ -352,7 +346,6 @@ export function useChatRunController({
           queueLaneId: laneId,
           queueSequence: entry.sequence,
           queueStatus: status,
-          questionId: entry.questionId || (savedAnswer ? questionId : undefined),
         };
         const oldIndex = next.findIndex((candidate) => candidate.id === turn.id);
         if (oldIndex >= 0) next.splice(oldIndex, 1);
@@ -364,7 +357,7 @@ export function useChatRunController({
               ? { ...item, composerQueued: true }
               : item),
           }));
-        } else if (!savedItem && !turn.questionId) {
+        } else if (!savedItem) {
           updateChat(chat.id, (current) => ({
             ...touchChat(current),
             sessionId: turn.sessionId || current.sessionId,
@@ -656,7 +649,7 @@ export function useChatRunController({
       const existing = ownerChat?.items.some(
         (item) => item.type === "user" && item.clientTurnId === turn.id,
       );
-      if (!existing && !turn.questionId) {
+      if (!existing) {
         updateChat(ownerChatId, (current) => {
           const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
           const storedAttachments = turn.attachments.map((attachment) => (
@@ -902,7 +895,7 @@ export function useChatRunController({
       }
       if (initialTurnSucceeded) return "started";
       const inputRetained = getChatById(chatId)?.items.some((item) => item.type === "user" && item.clientTurnId === turn.id);
-      return turn.questionId || inputRetained ? "failed" : "not_accepted";
+      return inputRetained ? "failed" : "not_accepted";
     } finally {
       setQueued([...queueRef.current]);
       sendingRef.current = false;
@@ -945,7 +938,7 @@ export function useChatRunController({
     });
     trace("submit_received", { pendingDispatches: queueDispatchPendingRef.current, requestedDeliveryMode: "queue" });
     const existing = ownerChat?.items.some((item) => item.type === "user" && item.clientTurnId === turn.id);
-    if (!existing && !turn.questionId) {
+    if (!existing) {
       updateChat(ownerChatId, (current) => {
         const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
         const storedAttachments = turn.attachments.map((attachment) => persistAttachmentReference(attachment, attachmentPayloads));
@@ -1194,7 +1187,7 @@ export function useChatRunController({
   async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: InternalRunSingleTurnOptions): Promise<boolean> {
     const startedAt = Date.now();
     const background = options?.background === true;
-    const presentingFollowup = !background && Boolean(turn.queueId) && !turn.questionId;
+    const presentingFollowup = !background && Boolean(turn.queueId);
     const finishPresentation = () => {
       if (presentingFollowup) setQueueTransitions((current) => current.filter(
         (item) => item.id !== turn.id || item.queueTransition !== "dispatch",
@@ -1318,7 +1311,7 @@ export function useChatRunController({
               ...stripTransientConversationItems(options?.baseItems ?? current.items).filter(
                 (item) => item.id !== userItem.id && item.id !== turn.goalDelivery?.agentItemId,
               ),
-              ...(turn.questionId ? [] : [storedUserItem]),
+              storedUserItem,
               streamingItem,
             ],
           };
@@ -1452,7 +1445,6 @@ export function useChatRunController({
       const durableResponse = {
         ...response,
         ...(response.timeline ? { timeline: durableTimeline } : {}),
-        ...(turn.questionId ? { continuationSource: "question_answered" } : {}),
       };
       if (background) {
         const responseItemId = turn.goalDelivery?.agentItemId || response.turnId || response.turn_id;
@@ -1481,7 +1473,7 @@ export function useChatRunController({
                   && item.id !== responseItemId
                   && !(item.type === "streaming" && item.clientTurnId === turn.id),
               ),
-              ...(turn.questionId ? [] : [storedUserItem]),
+              storedUserItem,
               {
                 id: responseItemId,
                 type: "agent",

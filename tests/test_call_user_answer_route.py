@@ -51,7 +51,7 @@ def test_question_answer_route_preserves_visual_verdict_and_attachment(tmp_path,
     ("later", "later"), ("uncertain", "uncertain"), ("skip", ""),
     ("fail", "fail"), ("custom", ""), ("pass", "pass"),
 ])
-def test_visual_answer_route_closes_question_and_delivers_exact_choice(tmp_path, monkeypatch, choice, resolution):
+def test_visual_answer_route_saves_exact_choice_after_origin_returns(tmp_path, monkeypatch, choice, resolution):
     from tests.test_agent_question_runtime_continuation import _scripted_question
     gateway, first, question, prompts, results, completed = _scripted_question(
         tmp_path, question_params={
@@ -66,6 +66,12 @@ def test_visual_answer_route_closes_question_and_delivers_exact_choice(tmp_path,
         pass
 
     monkeypatch.setattr(server.EVENT_BUS, "broadcast", ignore_broadcast)
+    gateway.replace_agent_progress({
+        "sessionId": "runtime-session", "projectRoot": str(tmp_path),
+        "items": [{"id": "review", "title": "Confirm appearance", "completionChecks": [{
+            "tool": "vrcforge_ask_user", "result": {"question": question["question"], "resolution": "pass"},
+        }]}],
+    })
     text = "Please inspect the shoes" if choice == "custom" else "" if choice == "skip" else choice.title()
     request = AgentQuestionAnswerRequest.model_validate({
         "answer": text, "selectedOptionId": choice, "sessionId": "runtime-session",
@@ -76,17 +82,16 @@ def test_visual_answer_route_closes_question_and_delivers_exact_choice(tmp_path,
         assert result["question"]["status"] == "answered"
         assert result["question"]["resolution"] == resolution
         assert result["question"]["selectedOptionId"] == choice
-        assert completed.wait(5), "the visual answer must reach the model even without a pass verdict"
-        assert len(prompts) == 2
-        assert (text or "skip") in prompts[-1]
-        if choice != "pass":
-            assert "It does not approve the preview." in prompts[-1]
-            assert results[-1]["plan"]["nextStep"] == "needs_user_action"
-            assert results[-1]["task"]["status"] != "completed"
+        assert result["runtimeContinuation"]["status"] == "settled_without_dispatch"
+        assert result["question"]["answer"] == text
+        assert not completed.is_set()
+        assert results == []
         assert gateway.questions.list(session_id="runtime-session")["questions"] == []
-        assert results[-1]["task"]["taskId"] == first["task"]["taskId"]
+        [todo] = gateway.list_agent_progress(session_id="runtime-session")["items"]
+        assert todo["status"] == ("completed" if choice == "pass" else "pending")
         repeated = asyncio.run(server.app_answer_agent_question(question["questionId"], request))
         assert repeated["idempotent"] is True
+        assert repeated["runtimeContinuation"]["status"] == "settled_without_dispatch"
     finally:
         assert gateway.shutdown_runtime_continuations(5)["ok"]
-    assert len(prompts) == 2, "a retry must not dispatch the answer again"
+    assert len(prompts) == 1, "the saved answer and its retry must not start another request"
