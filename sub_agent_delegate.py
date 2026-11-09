@@ -443,13 +443,19 @@ def run_readonly_llm_agent(gateway: RuntimeSkillGateway, payload: dict[str, Any]
         for key in ("provider", "model")
         if isinstance(raw_route, dict) and isinstance(raw_route.get(key), str)
     }
+    pause = {
+        key: response[key]
+        for key in ("status", "reason", "partialEvidence", "remainingTask")
+        if response.get("status") == "paused" and key in response
+    }
     return {
         "ok": bool(response.get("ok", True)),
         "schema": "vrcforge.sub_agent.llm_readonly.v1",
+        **pause,
         "role": role_id,
         "readOnly": True,
         "childSessionId": child_session_id,
-        "summaryText": response["finalReport"][:1000],
+        "summaryText": str(response.get("summaryText") or response["finalReport"])[:1000],
         "finalReport": response["finalReport"],
         "plannerEvidence": {"role": role_id, "childSessionId": child_session_id,
                             "stepCount": int(response.get("stepCount") or 0)},

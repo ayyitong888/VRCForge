@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
 from agent_command_safety import normalize_filesystem_path
+from agent_subagent_runtime import project_child_budget_pause
 from background_goal_runtime import RuntimeLaneBudget
 from runtime_planner_service import public_runtime_payload
 
@@ -27,8 +28,8 @@ _RECOVERY_BOUNDARY_BYTES = 64
 SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT = 5
 
 _RUNNING_STATUSES = {"queued", "running", "cancelling"}
-_RETRYABLE_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
-_PARENT_CONTINUATION_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+_RETRYABLE_STATUSES = {"completed", "paused", "failed", "cancelled", "interrupted"}
+_PARENT_CONTINUATION_TERMINAL_STATUSES = _RETRYABLE_STATUSES
 # Handler watchdog: a hung sub-agent must eventually produce a terminal event
 # so the parent's waiting_for_tool turn is never parked forever.
 # Established CLI agents bound sub-agent waits at a hard 1h max; VRCForge
@@ -86,6 +87,7 @@ class SubAgentTask:
     summary: str = ""
     error: str = ""
     error_code: str = ""
+    reason: str = ""
     cancel_requested: bool = False
     event_count: int = 0
     revision: int = 0
@@ -665,8 +667,8 @@ class SubAgentTaskRegistry:
                 return {"ok": True, "task": self._serialize_task(task), "message": "task already merged"}
             if expected_revision is not None and expected_revision != task.revision:
                 return self._revision_conflict(task)
-            if task.status not in {"completed", "failed"}:
-                return {"ok": False, "error": "only completed or failed sub-agent tasks can be merged."}
+            if task.status not in {"completed", "paused", "failed"}:
+                return {"ok": False, "error": "only completed, paused, or failed sub-agent tasks can be merged."}
             if decision_id == "adopted" and task.status != "completed":
                 return {"ok": False, "error": "only completed sub-agent tasks can be adopted."}
             if not task.parent_chat_id:
@@ -978,12 +980,14 @@ class SubAgentTaskRegistry:
         if result.get("ok") is not False:
             return cls._freeze_runtime_metadata(cls._completed_task(task, result, summary), result)
         next_task = copy.deepcopy(task)
-        next_task.status = "failed"
+        paused = result.get("status") == "paused"
+        next_task.status = "paused" if paused else "failed"
+        next_task.reason = str(result.get("reason") or "") if paused else ""
         next_task.result = copy.deepcopy(result)
         next_task.result_available = True
         next_task.result_unavailable = False
         next_task.summary = summary
-        next_task.error = str(result.get("error") or summary or "Sub-agent task reported failure.")[:1000]
+        next_task.error = "" if paused else str(result.get("error") or summary or "Sub-agent task reported failure.")[:1000]
         next_task.cancel_requested = False
         next_task.stopped_at = utc_now()
         next_task.handoff_status = "handoff_pending"
@@ -1157,6 +1161,7 @@ class SubAgentTaskRegistry:
             "summary": task.summary,
             "error": task.error,
             "errorCode": task.error_code,
+            "reason": task.reason,
             "timeoutSeconds": task.timeout_seconds,
             "eventCount": task.event_count,
             "revision": task.revision,
@@ -1212,6 +1217,7 @@ class SubAgentTaskRegistry:
             summary=str(snapshot.get("summary") or ""),
             error=str(snapshot.get("error") or ""),
             error_code=str(snapshot.get("errorCode") or ""),
+            reason=str(snapshot.get("reason") or ""),
             timeout_seconds=max(1.0, min(float(snapshot.get("timeoutSeconds") or DEFAULT_SUB_AGENT_TIMEOUT_SECONDS), MAX_SUB_AGENT_TIMEOUT_SECONDS)),
             cancel_requested=bool(snapshot.get("cancelRequested")),
             event_count=int(snapshot.get("eventCount") or 0),
@@ -1308,6 +1314,18 @@ class SubAgentTaskRegistry:
             return
         try:
             result, _summary = self._load_result_sidecar_locked(task.id)
+            raw = result.get("rawResult")
+            if task.status in {"failed", "paused"} and "status" not in result and isinstance(raw, dict):
+                # Older budget pauses were persisted as failures. Reproject
+                # their receipt without replaying the parent continuation.
+                pause = project_child_budget_pause(raw, task.task)
+                if pause:
+                    result.update(pause)
+                    task.status = "paused"
+                    task.reason = pause["reason"]
+                    task.summary = summarize_worker_result(result)
+                    task.error = ""
+                    task.error_code = ""
             task.result = result
             task.result_unavailable = False
         except FileNotFoundError:

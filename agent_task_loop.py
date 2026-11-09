@@ -568,6 +568,7 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         "completed",
         "failed",
         "needs_user_action",
+        "paused",
         "running",
         "superseded",
     }:
@@ -1379,15 +1380,21 @@ def prepare_sub_agent_task_continuation(
     result_payload = event.get("result")
     result_payload = result_payload if isinstance(result_payload, Mapping) else {}
     cancelled = task_status == "cancelled"
+    paused = task_status == "paused"
     success = task_status == "completed" and result_payload.get("ok") is not False
     raw_result = {
         "ok": success,
-        "status": "executed" if success else "cancelled" if cancelled else "failed",
+        "status": "executed" if success else task_status if (cancelled or paused) else "failed",
         "subAgentTaskId": _bounded_text(event.get("subAgentTaskId"), 100),
         "subAgentStatus": task_status,
         "summary": _bounded_text(event.get("summary") or event.get("error"), 600),
     }
-    if not success:
+    if paused:
+        raw_result.update({
+            "reason": _bounded_text(event.get("reason") or result_payload.get("reason"), 80),
+            "resumable": result_payload.get("resumable") is True,
+        })
+    elif not success:
         raw_result["error"] = result_payload.get("error") or event.get("error") or (
             "The delegated sub-agent task did not complete successfully."
         )
@@ -1403,6 +1410,12 @@ def prepare_sub_agent_task_continuation(
     completion = approval_completion(context, raw_result=raw_result, outcome=outcome)
     if completion is None:
         return None
+    if paused:
+        completion = {**completion, "status": "paused", "outcome": {
+            "status": "paused",
+            "summary": raw_result["summary"] or "The sub-agent paused before completing its task.",
+            "verification": {"state": "not_run", "checks": []},
+        }}
     if cancelled:
         completion = {
             **completion,
@@ -1425,7 +1438,7 @@ def prepare_sub_agent_task_continuation(
             "taskContext": context,
         },
         {
-            "status": "applied" if success else "needs_user_action" if cancelled else "failed",
+            "status": "applied" if success else "needs_user_action" if (cancelled or paused) else "failed",
             "result": raw_result,
             "taskCompletion": completion,
         },

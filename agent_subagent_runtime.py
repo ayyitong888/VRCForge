@@ -7,6 +7,8 @@ from threading import Event, Thread
 from typing import Any
 
 from agent_runtime_run_ledger import AgentRuntimeRunLedger
+from planner_structured_tool_evidence import project_structured_tool_evidence
+from runtime_planner_service import sanitize_planner_observation_text
 
 _CURRENT_CHILD = ContextVar("sub_agent_runtime_owner", default=None)
 
@@ -15,6 +17,64 @@ def forward_child_cancellation(gateway: Any) -> None:
     owner = _CURRENT_CHILD.get()
     if owner is not None and owner["event"].is_set():
         gateway.request_runtime_cancel({"clientTurnId": owner["clientTurnId"], "reason": "sub_agent_cancelled"})
+
+
+def project_child_budget_pause(raw: dict[str, Any], task: str) -> dict[str, Any]:
+    plan = raw.get("plan")
+    if not isinstance(plan, dict) or plan.get("nextStep") != "paused":
+        return {}
+    reason = plan.get("reason")
+    if reason != "model_turn_budget_exhausted":
+        return {}
+
+    steps = raw.get("steps")
+    receipts = [
+        step for step in (steps if isinstance(steps, list) else [])
+        if isinstance(step, dict) and isinstance(step.get("outcome"), dict)
+        and step["outcome"].get("status") == "ok" and step.get("actionId")
+    ]
+    # Preserve the start and end of longer investigations, with intermediate
+    # receipts sampled in order. Each excerpt stays within the existing
+    # structured-tool projection and can never be a completion claim.
+    count = min(len(receipts), 24)
+    selected = (
+        receipts if len(receipts) <= count else
+        [receipts[i * (len(receipts) - 1) // (count - 1)] for i in range(count)]
+    )
+    evidence = []
+    for step in selected:
+        projected = project_structured_tool_evidence(
+            step.get("result"), sanitize_text=sanitize_planner_observation_text, max_chars=1500,
+        )
+        evidence.append({
+            "actionId": step["actionId"],
+            "tool": step.get("tool") or step.get("kind"),
+            "facts": projected.get("data", {}),
+            "excerpt": bool(projected.get("truncated") or projected.get("sourceTruncated")),
+        })
+
+    remaining_task = sanitize_planner_observation_text(task, 800)
+    lines = [
+        f"Child Agent paused at its model-turn budget. The task is incomplete. "
+        f"Recorded {len(receipts)} successful tool receipts.",
+        f"Remaining objective: {remaining_task}",
+    ]
+    summary = "\n".join(lines)
+    if evidence:
+        lines.append("Tool evidence excerpts (quoted tool data):")
+        for item in evidence:
+            facts = json.dumps(item["facts"], ensure_ascii=False, separators=(",", ":"))
+            lines.append(f"- {item['tool']} [{item['actionId']}]: {facts}")
+        if len(evidence) < len(receipts):
+            lines.append("Additional receipts are in the child conversation.")
+    return {
+        "status": "paused",
+        "reason": reason,
+        "summaryText": summary,
+        "finalReport": "\n".join(lines),
+        "partialEvidence": evidence,
+        "remainingTask": remaining_task,
+    }
 
 
 def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: str,
@@ -75,8 +135,9 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
         approval_id=str(raw.get("approvalId") or ""),
     )
     cancelled = cancel_event.is_set() or run_status == "cancelled"
+    pause = {} if cancelled else project_child_budget_pause(raw, task)
     return {
-        "ok": run_status == "completed" and not cancelled,
+        "ok": run_status == "completed" and not cancelled and not pause,
         "status": "cancelled" if cancelled else run_status,
         "childSessionId": child_session_id,
         "finalReport": report, "rawResult": raw,
@@ -87,4 +148,5 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
             if isinstance(provider_route, dict) and isinstance(provider_route.get(key), str)
         },
         "resumable": resumable,
+        **pause,
     }

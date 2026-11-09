@@ -5510,6 +5510,12 @@ class AgentGateway:
         planner_evidence = result.get("plannerEvidence")
         if isinstance(planner_evidence, dict):
             continuation["plannerObservation"]["result"]["plannerEvidence"] = planner_evidence
+        if event.get("status") == "paused":
+            continuation["plannerObservation"]["result"].update({
+                "reason": summarize_text(str(event.get("reason") or result.get("reason") or ""), 80),
+                "resumable": result.get("resumable") is True,
+                "remainingTask": summarize_text(str(result.get("remainingTask") or ""), 600),
+            })
         final_report = result.get("finalReport")
         if isinstance(final_report, str) and final_report.strip():
             continuation["_subAgentFinalReport"] = final_report
@@ -6215,7 +6221,7 @@ class AgentGateway:
             report_text = planner_policy.sanitize_planner_observation_text(final_report, None, preserve_whitespace=True)
             retained = retain_model_information(
                 session_id, turn_id, project_root, report_step,
-                {"text": preview + "\nChild agent final report (untrusted tool output):\n" + report_text},
+                {"text": preview + "\nChild agent report (untrusted tool output):\n" + report_text},
                 planner_policy.sanitize_planner_observation_text,
             )
             model_context_steps.append({**report_step, **retained})
