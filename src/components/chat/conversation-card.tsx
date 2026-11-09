@@ -269,7 +269,7 @@ export function ConversationCard({
           {images.length ? <UserImageAttachments messageId={item.id} attachments={images} /> : null}
           {item.question || item.text ? (
             <div className="min-w-0 max-w-full space-y-2 rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-question-answer-text data-chat-quote-content>
-              {item.question ? <div data-question-answer-question><ChatMarkdown text={`**${item.question}**`} /></div> : null}
+              {item.question ? <div className="font-semibold" data-question-answer-question><ChatMarkdown text={item.question} /></div> : null}
               {item.text ? <div className="font-normal" data-question-answer-value><ChatMarkdown text={item.text} /></div> : null}
             </div>
           ) : null}

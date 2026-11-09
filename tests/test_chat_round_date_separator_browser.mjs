@@ -111,6 +111,27 @@ try {
     await page.waitForTimeout(80);
   };
   await page.waitForFunction(() => typeof window.setConversation === "function");
+  await render([
+    { ...user("markdown-user", start), text: "Inspect **the project** and `Renderer`." },
+    {
+      id: "markdown-answer", type: "question_answer", questionId: "markdown-question",
+      question: "Review **this project**.\n\n1. Check the editor.\n2. Verify `Renderer`.",
+      text: "I checked `Renderer`.\n\n- The editor is open.",
+    },
+  ]);
+  const userMarkdown = page.locator('[data-conversation-item-id="markdown-user"] [data-user-message-bubble]');
+  assert.equal(await userMarkdown.locator("strong").innerText(), "the project");
+  assert.equal(await userMarkdown.locator("code").innerText(), "Renderer");
+  const answerQuestion = page.locator("[data-question-answer-question]");
+  assert.doesNotMatch(await answerQuestion.innerText(), /\*\*/, "the question does not expose synthetic emphasis delimiters");
+  assert.equal(await answerQuestion.locator("strong").innerText(), "this project");
+  assert.equal(await answerQuestion.locator("ol > li").count(), 2, "the quoted question retains its ordered list");
+  assert.equal(await answerQuestion.locator("ol code").innerText(), "Renderer");
+  assert.ok(await answerQuestion.locator("ol > li").first().evaluate((node) => Number(getComputedStyle(node).fontWeight) >= 600));
+  const answerValue = page.locator("[data-question-answer-value]");
+  assert.equal(await answerValue.locator("code").innerText(), "Renderer");
+  assert.equal(await answerValue.locator("ul > li").innerText(), "The editor is open.");
+  assert.ok(await answerValue.locator("ul > li").evaluate((node) => Number(getComputedStyle(node).fontWeight) < 600));
   if (process.env.VRCFORGE_TASK_REPLAY_ONLY !== "1") {
   for (const phase of ["preparing", "waiting_for_model", "running_tool", "waiting_for_approval", "verifying"]) {
     await render([{ ...stream("status-spacing", start), phase, text: "Complete the requested editor action, then reply so the inspection can continue." }]);
@@ -208,8 +229,8 @@ try {
     await render(taskReplay.items);
     const humanAnswer = page.locator("[data-question-answer]");
     assert.equal(await humanAnswer.locator("[data-user-message-bubble]").count(), 1, "human answer is one user bubble within the existing task");
-    const fullQuestion = humanAnswer.locator("[data-question-answer-question] strong");
-    assert.equal(await fullQuestion.count(), 1, "the complete original question is bold on the first line of the answer bubble");
+    const fullQuestion = humanAnswer.locator("[data-question-answer-question]");
+    assert.equal(await fullQuestion.count(), 1, "the complete original question is grouped above the answer");
     assert.equal(await fullQuestion.innerText(), taskReplay.questions[0].question, "legacy answer uses the full exact-qid question without truncating to its header");
     assert.equal(await humanAnswer.locator("[data-question-answer-value] strong").count(), 0, "the answer's ordinary text is not made bold with the question");
     assert.ok(await fullQuestion.evaluate((node) => Number(getComputedStyle(node).fontWeight) >= 600), "the question is visibly bold");
