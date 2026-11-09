@@ -8,10 +8,13 @@ function drawBadge(label: string): ImageData {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = 32;
   const context = canvas.getContext("2d")!;
-  context.fillStyle = "#c92235";
+  context.fillStyle = "#be185d";
   context.beginPath();
-  context.arc(16, 16, 15, 0, Math.PI * 2);
+  context.arc(16, 16, 14.5, 0, Math.PI * 2);
   context.fill();
+  context.lineWidth = 2;
+  context.strokeStyle = "#fff";
+  context.stroke();
   context.fillStyle = "#fff";
   context.font = `bold ${label.length === 1 ? 24 : label.length === 2 ? 19 : 14}px "Segoe UI", sans-serif`;
   context.textAlign = "center";
