@@ -489,6 +489,11 @@ class Mcp2026Router:
         *,
         server_name: str = "VRCForge",
         server_version: str = read_vrcforge_version(),
+        server_instructions: str = (
+            "Use VRCForge as a tool server for avatar work; the external client owns "
+            "its Agent loop. Low/medium writes execute through checkpoint safety, while "
+            "high-risk or destructive calls first return user_confirmation_required."
+        ),
         tool_list_revision: ToolListRevisionCallback | None = None,
         tool_name_resolver: ToolNameResolver | None = None,
         tool_call_catalogue: ToolCallCatalogueCallback | None = None,
@@ -506,6 +511,7 @@ class Mcp2026Router:
         self._tool_call = tool_call
         self.server_name = server_name
         self.server_version = server_version
+        self.server_instructions = server_instructions
         self._tool_list_revision = tool_list_revision
         self._tool_name_resolver = tool_name_resolver
         self._tool_call_catalogue = tool_call_catalogue
@@ -558,11 +564,7 @@ class Mcp2026Router:
                                 else {}
                             ),
                         },
-                        "instructions": (
-                            "Use VRCForge as a tool server for avatar work; the external client owns "
-                            "its Agent loop. Low/medium writes execute through checkpoint safety, while "
-                            "high-risk or destructive calls first return user_confirmation_required."
-                        ),
+                        "instructions": self.server_instructions,
                     },
                     server_name=self.server_name,
                     server_version=self.server_version,

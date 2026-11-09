@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 from websockets.sync.client import connect as connect_websocket
@@ -37,10 +38,19 @@ from internal_tool_blocks import (
     canonical_external_block,
     canonical_tool_owner,
 )
+from tool_discovery_search import QUERY_MAX_CHARS, search_tool_leaves
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8757"
 DEFAULT_SERVER_NAME = "VRCForge Agent Bridge"
+STDIO_SERVER_INSTRUCTIONS = (
+    "For an unfamiliar task, search with vrcforge_list_tool_blocks and a short query naming the "
+    "target and operation, or omit arguments to browse the catalogue. Follow the returned loadCall "
+    "for the relevant leaf and reuse already loaded definitions. A load returns selected schemas and "
+    "an activationHandle for hosts that cannot refresh tools/list. Use the read bridge for previews. "
+    "Supply the exact projectPath for Unity calls. Before a write, read current state and preview the "
+    "exact change. Follow the returned approval or checkpoint guidance and verify the result."
+)
 DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 360.0
 DEFAULT_DISCOVERY_TOOLS = frozenset({
     "vrcforge_bridge_preflight", "vrcforge_list_tool_blocks", "vrcforge_load_tool_block",
@@ -1021,6 +1031,10 @@ def run_stdio_server(
             str(item.get("name") or "").strip(),
         )
 
+    def is_write_tool(item: Mapping[str, Any]) -> bool:
+        meta = item.get("_meta") if isinstance(item.get("_meta"), Mapping) else {}
+        return bool(item.get("write")) or str(meta.get("permission") or "").casefold() == "write"
+
     def resolve_block_selector(value: Any) -> str:
         selector = str(value or "").strip().lower()
         indexed = EXTERNAL_TOOL_BLOCK_INDEXES.get(
@@ -1042,14 +1056,26 @@ def run_stdio_server(
             {
                 "name": "vrcforge_list_tool_blocks",
                 "description": (
-                    "When to use: See available and loaded blocks.\n"
-                    "When NOT to use: Inspect or change Unity.\n"
-                    "Negative example: Treating visibility as write approval."
+                    'When to use: Search available tools by task, for example {"query":"preview material scalar propertyChanges"}. '
+                    'Copy a match\'s loadCall or reuse the already loaded tools. Pass {"block":"appearance"} to browse one directory '
+                    "or {} to browse the root. Search uses the current exposure layer and does not load tools.\n"
+                    "When NOT to use: Inspect or change Unity, or assume a search match authorizes a write.\n"
+                    "Negative example: Do not use it to check a material value. Find and call the material reader."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "additionalProperties": False,
-                    "properties": {"block": {"type": "string", "enum": block_enum}},
+                    "properties": {
+                        "block": {
+                            "type": "string", "enum": block_enum,
+                            "description": "Browse or search within this exact category or leaf.",
+                        },
+                        "query": {
+                            "type": "string", "minLength": 1,
+                            "description": f"Search by target and operation, a schema field, or an exact tool name. "
+                            f"The matcher uses up to {QUERY_MAX_CHARS} characters.",
+                        },
+                    },
                 },
             },
             {
@@ -1199,7 +1225,19 @@ def run_stdio_server(
             ))
         return tools
 
-    def block_inventory(selector: Any = "") -> dict[str, Any]:
+    def manifest_items(layer: str) -> list[Mapping[str, Any]]:
+        manifest = bridge.manifest(layer, ["*"])
+        if not isinstance(manifest, Mapping) or not isinstance(manifest.get("tools"), list):
+            raise ValueError("Backend tool inventory is unavailable.")
+        return [
+            item for item in manifest["tools"]
+            if isinstance(item, Mapping)
+            and (name := str(item.get("name") or "").strip())
+            and name not in HIDDEN_EXTERNAL_TOOLS
+            and (layer == "execution" or not is_write_tool(item))
+        ]
+
+    def block_inventory(selector: Any = "", query: str | None = None) -> dict[str, Any]:
         selected_block = resolve_block_selector(selector)
         if str(selector or "").strip() and not selected_block:
             return external_rejection(
@@ -1212,23 +1250,15 @@ def run_stdio_server(
                 details={"selector": str(selector).strip()},
                 loadedBlocks=sorted(loaded_blocks),
             )
+        if query is not None:
+            return search_blocks(query, selected_block)
         manifests: dict[str, list[Mapping[str, Any]]] = {"planning": [], "execution": []}
         unavailable_layers: list[str] = []
         for layer in manifests:
             try:
-                manifest = bridge.manifest(layer, ["*"])
+                manifests[layer] = manifest_items(layer)
             except Exception:
                 unavailable_layers.append(layer)
-                continue
-            if not isinstance(manifest, Mapping) or not isinstance(manifest.get("tools"), list):
-                unavailable_layers.append(layer)
-                continue
-            manifests[layer] = [
-                item
-                for item in (manifest.get("tools", []) if isinstance(manifest, Mapping) else [])
-                if isinstance(item, Mapping)
-                and str(item.get("name") or "").strip() not in HIDDEN_EXTERNAL_TOOLS
-            ]
 
         counts = {
             leaf_id: {
@@ -1253,7 +1283,7 @@ def run_stdio_server(
 
         def leaf_node(leaf_id: str, *, expanded: bool) -> dict[str, Any]:
             tools = sorted(
-                (item for item in manifests["execution"] if item_owner(item) == leaf_id),
+                (item for item in manifests[requested_layer["value"]] if item_owner(item) == leaf_id),
                 key=lambda item: str(item.get("name") or ""),
             )
             node: dict[str, Any] = {
@@ -1270,7 +1300,7 @@ def run_stdio_server(
                     {
                         "index": f"{node['index']}.{position}",
                         "name": str(item.get("name") or ""),
-                        "mode": "write" if bool(item.get("write")) or str((item.get("_meta") or {}).get("permission") or "").casefold() == "write" else "read",
+                        "mode": "write" if is_write_tool(item) else "read",
                     }
                     for position, item in enumerate(tools, start=1)
                 ]
@@ -1311,12 +1341,61 @@ def run_stdio_server(
                 if unavailable_layers else "Both backend exposure inventories were read successfully."
             ),
             "loadedBlocks": sorted(loaded_blocks),
+            "exposureLayer": requested_layer["value"],
             "catalogGeneration": tool_list_revision,
             "selectedBlock": selected_block,
             "selectionHint": (
-                'Default tools/list shows startup controls and displayed leaf tools. Browse one directory with load_tool_block {"block":"avatar_structure/mesh_shape_data"} or toolNames:[]. Use tree.tools[].name for exact named loads. Omit toolNames or pass [] to browse directory and tool names only; this does not load tool definitions. Set allTools:true only to load every Tool in one leaf. It never expands a whole directory tree. Selected full schemas and activationHandle support hosts without tools/list refresh. Existing direct calls retain their original permissions. tools/list _meta io.vrcforge/toolNames or resultMode=full also remain available.'
+                'Search by task with vrcforge_list_tool_blocks {"query":"preview material scalar propertyChanges"}. '
+                'For directory browsing, use tree.tools[].name for exact named loads in the current exposure layer. '
+                'Call vrcforge_load_tool_block with a leaf and a non-empty toolNames array to get selected schemas and an '
+                'activationHandle. Omit toolNames or pass [] to browse names only. allTools:true loads all tools in one leaf. '
+                'Loading does not grant write approval. tools/list _meta io.vrcforge/toolNames or resultMode=full also remain available.'
             ),
             "tree": tree,
+        }
+
+    def search_blocks(query: str, selected_block: str) -> dict[str, Any]:
+        layer = requested_layer["value"]
+        try:
+            items = manifest_items(layer)
+        except Exception:
+            return external_rejection(
+                status="tool_catalog_unavailable",
+                error="The current tool catalogue is unavailable. Call vrcforge_bridge_preflight and retry search.",
+                error_code="external_tool_catalog_unavailable",
+                failure_layer="external_tool_discovery",
+                failure_phase="block_search",
+                operation_kind="discovery",
+            )
+        tools = []
+        for item in items:
+            owner = item_owner(item)
+            if selected_block and owner != selected_block and not owner.startswith(selected_block + "/"):
+                continue
+            tools.append(SimpleNamespace(
+                name=item["name"], runtime_name=item["name"], block=owner,
+                description=str(item.get("description") or ""),
+                input_schema=item.get("inputSchema") or {}, write=is_write_tool(item),
+            ))
+        result = search_tool_leaves(query, tools, displayed_tools)
+        for match in result["matches"]:
+            match.pop("sameLeafToolNames", None)
+            load = match["loadCall"]
+            if load:
+                match["loadCall"] = {
+                    "name": "vrcforge_load_tool_block",
+                    "arguments": {"block": load["block"], "toolNames": load["tools"][:32]},
+                }
+                if len(load["tools"]) > 32:
+                    result["hasMore"] = True
+        return {
+            **result,
+            "schema": "vrcforge.external_tool_search.v1",
+            "exposureLayer": layer,
+            "fallbackCall": {
+                "name": "vrcforge_list_tool_blocks",
+                "arguments": {"block": selected_block} if selected_block else {},
+            },
         }
 
     def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1396,7 +1475,7 @@ def run_stdio_server(
                     if isinstance(item.get("inputSchema"), dict)
                     else {"type": "object", "additionalProperties": True},
                 },
-                write=bool(item.get("write")) or str((item.get("_meta") or {}).get("permission") or "").casefold() == "write",
+                write=is_write_tool(item),
                 block=block,
                 exposure_layer=requested_exposure,
                 catalog_generation=tool_list_revision,
@@ -1572,7 +1651,10 @@ def run_stdio_server(
                 # must still reach tool hosts as structured payloads.
                 return gateway_rejection(exc, operation="get_prompt")
         if tool_name == "vrcforge_list_tool_blocks":
-            return block_inventory(arguments.get("block"))
+            query = arguments.get("query")
+            if "query" in arguments and (not isinstance(query, str) or not query.strip()):
+                raise ValueError("query must be a non-empty string")
+            return block_inventory(arguments.get("block"), query)
         if tool_name == "vrcforge_invoke_loaded_read_tool":
             return invoke_activated_tool(arguments, write=False)
         if tool_name == "vrcforge_invoke_loaded_write_tool":
@@ -1825,6 +1907,7 @@ def run_stdio_server(
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
         server_version=read_vrcforge_version(),
+        server_instructions=STDIO_SERVER_INSTRUCTIONS,
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         tool_call_catalogue_for_call=lambda name, params: list_tools({
@@ -1848,6 +1931,7 @@ def run_stdio_server(
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
         server_version=read_vrcforge_version(),
+        server_instructions=STDIO_SERVER_INSTRUCTIONS,
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda params: list_tools({"exposureLayer": requested_layer["value"], "_lookupToolNames": [str(params.get("name") or "")]}) if isinstance(params, Mapping) and params.get("name") else list_tools({"exposureLayer": requested_layer["value"]}),
         resource_list=list_resources,
