@@ -360,6 +360,16 @@ class SubAgentTaskRegistry:
                 active_ids.append(task.id)
             return active_ids
 
+    def parent_delivery_pending(self, session_id: str) -> bool:
+        with self._lock:
+            return any(
+                task.parent_session_id == session_id
+                and isinstance(task.params.get("_taskSeed"), dict)
+                and (task.status in _RUNNING_STATUSES
+                     or task.parent_continuation_status in {"pending", "dispatching"})
+                for task in self._tasks.values()
+            )
+
     def get_task(self, task_id: str, include_events: bool = True) -> dict[str, Any]:
         with self._lock:
             task = self._tasks.get(task_id)

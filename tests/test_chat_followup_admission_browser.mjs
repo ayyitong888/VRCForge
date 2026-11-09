@@ -16,6 +16,7 @@ const scenarios=[
  {name:'recovered',chats:[{...owner,items:[...owner.items,restoredUser]},other],entries:[]},
  {name:'questions-race',chats:[withNext,other],entries:[]},
  {name:'queue-race',chats:[withNext,other],entries:[]},
+ {name:'waiting-child',chats:[owner,other],entries:[pending]},
 ];
 const api=`
 export const listAgentRunFollowups=async()=>({ok:true,items:window.fixture.entries});
@@ -37,14 +38,14 @@ export const recordAgentRunQueued=async()=>{
 export const sendAgentMessage=async(_e,_m,sessionId,_h,_a,options)=>{
   window.sends.push({sessionId,clientTurnId:options.clientTurnId});
   if(window.fixture.name==='unknown')throw new Error('Transport response lost');
-  if(window.sends.length===1)throw new window.ApiError('HTTP 409',409,{code:'followup_admission_rejected',message:'not admitted'});
+  if(window.sends.length===1&&window.fixture.name!=='waiting-child')throw new window.ApiError('HTTP 409',409,{code:'followup_admission_rejected',message:'not admitted'});
   return {ok:true,sessionId,clientTurnId:options.clientTurnId,turnId:'successful-retry',startedAt:new Date().toISOString(),observe:{},plan:{reply:'done',summary:'done',nextStep:'done',planner:'fixture',shellNeeded:false},timeline:[]};
 };`;
 const bundle=await build({stdin:{resolveDir:process.cwd(),loader:'tsx',contents:`
 import {ApiError} from './src/lib/api/http';window.ApiError=ApiError;
 import React,{useRef,useState,useCallback}from'react';import{createRoot}from'react-dom/client';import{useChatRunController}from'./src/hooks/use-chat-run-controller';
 const cases=${JSON.stringify(scenarios)};window.fixture=structuredClone(cases.find(c=>c.name===new URL(location.href).searchParams.get('case')));window.ensureCalls=0;window.sends=[];window.errors=[];
-function Harness(){const[chats,setChats]=useState(window.fixture.chats);const latest=useRef(chats);latest.current=chats;const updateChat=useCallback((id,fn)=>{latest.current=latest.current.map(c=>c.id===id?fn(c):c);setChats(latest.current);window.chats=latest.current;},[]);const c=useChatRunController({endpoint:'http://isolated-fixture',runtimeConnected:true,sessionId:'runtime-other',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=>{window.ensureCalls++;return'active-other';},updateChat,appendToChat:(id,item)=>updateChat(id,c=>({...c,items:[...c.items,item]})),touchChat:c=>c,startRuntime:async()=>'',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),persistChatsNow:async()=>{},chats,chatStorageReady:true});window.controller=c;window.chats=chats;return <div id='mounted'/>;}createRoot(document.getElementById('root')).render(<Harness/>);
+function Harness(){const[chats,setChats]=useState(window.fixture.chats);const latest=useRef(chats);latest.current=chats;const updateChat=useCallback((id,fn)=>{latest.current=latest.current.map(c=>c.id===id?fn(c):c);setChats(latest.current);window.chats=latest.current;},[]);const c=useChatRunController({endpoint:'http://isolated-fixture',runtimeConnected:true,sessionId:'runtime-other',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=>{window.ensureCalls++;return'active-other';},updateChat,appendToChat:(id,item)=>updateChat(id,c=>({...c,items:[...c.items,item]})),touchChat:c=>c,startRuntime:async()=>'',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),persistChatsNow:async()=>{},chats,chatStorageReady:true,hasPendingChildDelivery:id=>id==='runtime-owner'&&window.fixture.name==='waiting-child'&&!window.childDelivered});window.controller=c;window.chats=chats;return <div id='mounted'/>;}createRoot(document.getElementById('root')).render(<Harness/>);
 `},bundle:true,write:false,format:'iife',platform:'browser',jsx:'automatic',plugins:[{name:'restore-api-stub',setup(b){b.onResolve({filter:/^react-i18next$/},()=>({path:'i18n',namespace:'fixture'}));b.onResolve({filter:/^\.\.\/lib\/api$/},a=>a.importer.endsWith('use-chat-run-controller.ts')?{path:'api',namespace:'fixture'}:undefined);b.onResolve({filter:/^\.\.\/lib\/api\/agent-runtime$/},a=>a.importer.endsWith('use-chat-run-controller.ts')?{path:'constants',namespace:'fixture'}:undefined);b.onLoad({filter:/.*/,namespace:'fixture'},a=>({loader:'js',contents:a.path==='i18n'?"export const useTranslation=()=>({t:k=>k});":a.path==='constants'?'export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS=12;':api}));}}]});
 const server=createServer((_q,r)=>{r.setHeader('Content-Type','text/html');r.end(`<div id='root'></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`);});const{chromium}=createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH||'playwright');let browser;
 try {
@@ -62,6 +63,14 @@ try {
  await page.waitForFunction(()=>window.sends.length===2&&window.chats.some(c=>c.items.some(i=>i.type==='agent')));
  assert.equal(await page.evaluate(()=>window.controller.queued.length),0);
  assert.equal(await page.evaluate(()=>window.sends[1].clientTurnId),'input');
+ await page.goto(`http://127.0.0.1:${server.address().port}/?case=waiting-child`);
+ await page.waitForFunction(()=>window.controller?.queued.length===1);
+ await page.evaluate(()=>window.controller.resumeQueuedTurns());
+ assert.equal(await page.evaluate(()=>window.sends.length),0,'the owning child report must precede queued input');
+ await page.evaluate(()=>{window.childDelivered=true;return window.controller.resumeQueuedTurns();});
+ await page.waitForFunction(()=>window.sends.length===1&&window.chats.some(c=>c.items.some(i=>i.type==='agent')));
+ assert.equal(await page.evaluate(()=>window.controller.queued.length),0);
+
  for(const name of ['unknown','recovered']) {
    await page.goto(`http://127.0.0.1:${server.address().port}/?case=${name}`);
    await page.waitForFunction(()=>window.controller?.queued[0]?.queueStatus==='delivery_unverified'&&!window.controller.isRunning());

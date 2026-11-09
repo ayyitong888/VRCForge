@@ -194,6 +194,7 @@ type UseChatRunControllerParams = {
   chats?: ChatThread[];
   chatStorageReady?: boolean;
   runtimeQueueVersion?: number;
+  hasPendingChildDelivery?: (sessionId: string) => boolean;
   bindRuntimeProviderConnection?: (endpoint: string, provider: string, model: string) => (() => void) | undefined;
 };
 
@@ -223,6 +224,7 @@ export function useChatRunController({
   chats,
   chatStorageReady = true,
   runtimeQueueVersion = 0,
+  hasPendingChildDelivery,
   bindRuntimeProviderConnection,
 }: UseChatRunControllerParams) {
   const { t } = useTranslation();
@@ -476,7 +478,7 @@ export function useChatRunController({
     try {
       const head = queueRef.current[0];
       if (!head || (!manual && (head.queueStatus === "paused" || head.queueStatus === "delivery_unverified"))
-        || await hasPendingQuestionForTurn(head)) return;
+        || await hasPendingParentWorkForTurn(head)) return;
       if (queueRef.current[0]?.id !== head.id) return;
       if (head.queueStatus === "waiting_for_resources" || head.queueStatus === "delivery_unverified" || !head.queueId) {
         const result = await recordAgentRunQueued(endpoint, {
@@ -535,9 +537,10 @@ export function useChatRunController({
     }
   }
 
-  async function hasPendingQuestionForTurn(turn: QueuedTurn): Promise<boolean> {
+  async function hasPendingParentWorkForTurn(turn: QueuedTurn): Promise<boolean> {
     const targetSessionId = turn.sessionId || getChatById(turn.chatId || "")?.sessionId;
     if (!targetSessionId) return false;
+    if (hasPendingChildDelivery?.(targetSessionId)) return true;
     try {
       const result = await fetchAgentQuestions(endpoint, {
         sessionId: targetSessionId,
@@ -665,6 +668,10 @@ export function useChatRunController({
     if (options.deliveryMode === "queue") return enqueueFollowupTurn(turn);
     const visibleOwnerChatId = turn.chatId && getChatById(turn.chatId) ? turn.chatId : ensureActiveChat();
     const visibleOwnerChat = getChatById(visibleOwnerChatId);
+    const targetSessionId = turn.sessionId || visibleOwnerChat?.sessionId;
+    if (!turn.queueId && targetSessionId && hasPendingChildDelivery?.(targetSessionId)) {
+      return enqueueFollowupTurn(turn);
+    }
     const continuedTurn = [...(visibleOwnerChat?.items || [])].reverse().find(
       (item): item is Extract<ConversationItem, { type: "streaming" }> => item.type === "streaming" && Boolean(item.clientTurnId),
     );
@@ -937,7 +944,7 @@ export function useChatRunController({
           break;
         }
         const queuedCandidate = queueRef.current[0];
-        if (queuedCandidate?.queueStatus === "queued" && await hasPendingQuestionForTurn(queuedCandidate)) {
+        if (queuedCandidate?.queueStatus === "queued" && await hasPendingParentWorkForTurn(queuedCandidate)) {
           break;
         }
         next = takeNextRunnableQueuedTurn(queueRef.current);

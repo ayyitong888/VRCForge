@@ -795,6 +795,7 @@ class AgentGateway:
         self._runtime_continuation_condition = threading.Condition(self._lock)
         self._question_continuations_inflight: set[str] = set()
         self._runtime_subagent_active_parent_task_ids = runtime_subagent_active_parent_task_ids
+        self._runtime_subagent_parent_delivery_pending: Callable[[str], bool] | None = None
         self._runtime_subagent_role_catalog: Callable[[], Any] | None = None
         self._runtime_subagent_adopted_task: Callable[[str], dict[str, Any]] | None = None
         self._runtime_subagent_cancel_task = runtime_subagent_cancel_task
@@ -2157,6 +2158,7 @@ class AgentGateway:
         active_parent_task_ids: Callable[..., list[str]],
         cancel_task: Callable[[str], Any],
         role_catalog: Callable[[], Any] | None = None,
+        parent_delivery_pending: Callable[[str], bool] | None = None,
     ) -> None:
         """Bind the app-owned cooperative sub-agent cancellation port."""
 
@@ -2165,6 +2167,7 @@ class AgentGateway:
         self._runtime_subagent_active_parent_task_ids = active_parent_task_ids
         self._runtime_subagent_cancel_task = cancel_task
         self._runtime_subagent_role_catalog = role_catalog
+        self._runtime_subagent_parent_delivery_pending = parent_delivery_pending
 
     def _cancel_runtime_subagents(
         self,
@@ -5867,7 +5870,9 @@ class AgentGateway:
                 self._runtime_continuation_condition.wait(0.1 if cancelled else None)
             return self._runtime_continuation_accepting and not (cancelled and cancelled())
 
-    def _admit_runtime_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> None:
+    def _admit_runtime_turn(
+        self, *, session_id: str, turn_id: str, client_turn_id: str, is_continuation: bool = False,
+    ) -> None:
         """Serialize native conversation owners while keeping each caller's response."""
         with self._runtime_continuation_condition:
             waiting_cancelled = self._runtime_session_state.queue_turn(
@@ -5879,6 +5884,12 @@ class AgentGateway:
                 while True:
                     if waiting_cancelled.is_set() or not self._runtime_continuation_accepting:
                         raise AgentGatewayError("The runtime turn was stopped before execution.", status_code=409)
+                    pending_child = self._runtime_subagent_parent_delivery_pending
+                    if not is_continuation and pending_child is not None and pending_child(session_id):
+                        raise AgentGatewayError(
+                            "This conversation is waiting for its sub-agent result.", status_code=409,
+                            cause_code="sub_agent_parent_delivery_pending", retryable=True,
+                        )
                     if self._runtime_session_state.begin_turn(
                         session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id, exclusive=True,
                     ):
@@ -5962,7 +5973,10 @@ class AgentGateway:
         params["_resolvedRuntimeSessionId"] = session_id
         params["_resolvedRuntimeTurnId"] = turn_id
         params["_resolvedRuntimeClientTurnId"] = client_turn_id
-        self._admit_runtime_turn(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id)
+        self._admit_runtime_turn(
+            session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+            is_continuation=task_continuation is not None,
+        )
         params["_runtimeAdmitted"] = True
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
         self._mcp_resource_context.set(f"runtime:{session_id}")
@@ -9473,8 +9487,12 @@ class AgentGateway:
         return bool(item.get("questionId") or item.get("continuationSource") == "question_answered"
                     or str(item.get("clientTurnId") or "").startswith("question-answer:"))
 
-    def release_runtime_followup(self, queue_id: str, session_id: str = "", claim_token: str = "") -> bool:
-        return self._runtime_followup_queue.release(queue_id=queue_id, session_id=session_id, claim_token=claim_token)
+    def release_runtime_followup(
+        self, queue_id: str, session_id: str = "", claim_token: str = "", *, keep_pending: bool = False,
+    ) -> bool:
+        return self._runtime_followup_queue.release(
+            queue_id=queue_id, session_id=session_id, claim_token=claim_token, keep_pending=keep_pending,
+        )
 
     def ack_runtime_followup(self, queue_id: str, session_id: str = "", claim_token: str = "") -> bool:
         return self._runtime_followup_queue.ack(queue_id=queue_id, session_id=session_id, claim_token=claim_token)

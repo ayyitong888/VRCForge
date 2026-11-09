@@ -1676,8 +1676,8 @@ RUNTIME_QUEUE_PORT = runtime_queue_ports.CallbackRuntimeQueueAdapter(
                 queue_id=queue_id,
             )
         ),
-        release_runtime_followup=lambda queue_id, session_id="", claim_token="": (
-            AGENT_GATEWAY.release_runtime_followup(queue_id, session_id, claim_token)
+        release_runtime_followup=lambda queue_id, session_id="", claim_token="", **options: (
+            AGENT_GATEWAY.release_runtime_followup(queue_id, session_id, claim_token, **options)
         ),
         ack_runtime_followup=lambda queue_id, session_id="", claim_token="": (
             AGENT_GATEWAY.ack_runtime_followup(
@@ -2105,6 +2105,7 @@ AGENT_GATEWAY.bind_runtime_subagent_control(
     active_parent_task_ids=SUB_AGENT_COLLABORATION.active_parent_task_ids,
     cancel_task=SUB_AGENT_COLLABORATION.cancel_task,
     role_catalog=lambda: _SUB_AGENT_ROLES,
+    parent_delivery_pending=SUB_AGENT_COLLABORATION.parent_delivery_pending,
 )
 AGENT_GATEWAY.bind_runtime_subagent_adoption(
     lambda task_id: SUB_AGENT_COLLABORATION.get_task(task_id, include_events=False)
@@ -3298,6 +3299,7 @@ async def _execute_app_agent_runtime_message(
     followup_claim_token = ""
     runtime_returned = False
     admission_rejected = False
+    deferred_for_child = False
     if runtime_request.followup_queue_id:
         followup_lane_id = runtime_request.followup_lane_id or runtime_request.session_id
         if not followup_lane_id or not runtime_request.client_turn_id:
@@ -3351,7 +3353,11 @@ async def _execute_app_agent_runtime_message(
         raise HTTPException(status_code=exc.status_code, detail=http_error_detail(exc)) from exc
     except AgentGatewayError as exc:
         admission_rejected = getattr(exc, "runtime_admitted", None) is False
-        detail = {"code": "followup_admission_rejected", "message": str(exc)} if admission_rejected and followup_claim_token else str(exc)
+        deferred_for_child = admission_rejected and exc.cause_code == "sub_agent_parent_delivery_pending"
+        detail: str | dict[str, str] = str(exc)
+        if admission_rejected and followup_claim_token:
+            code = "followup_queue_not_ready" if deferred_for_child else "followup_admission_rejected"
+            detail = {"code": code, "message": str(exc)}
         raise HTTPException(status_code=exc.status_code, detail=detail) from exc
     except Exception as exc:
         admission_rejected = getattr(exc, "runtime_admitted", None) is False
@@ -3365,7 +3371,11 @@ async def _execute_app_agent_runtime_message(
                 if runtime_returned:
                     await asyncio.to_thread(RUNTIME_QUEUE_PORT.ack_runtime_followup, runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
                 elif admission_rejected:
-                    await asyncio.to_thread(RUNTIME_QUEUE_PORT.release_runtime_followup, runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
+                    await asyncio.to_thread(
+                        RUNTIME_QUEUE_PORT.release_runtime_followup, runtime_request.followup_queue_id,
+                        followup_lane_id, followup_claim_token,
+                        **({"keep_pending": True} if deferred_for_child else {}),
+                    )
                 else:
                     recovery = await asyncio.to_thread(
                         AGENT_GATEWAY.get_runtime_session,

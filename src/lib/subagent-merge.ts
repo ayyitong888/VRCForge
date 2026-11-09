@@ -1,6 +1,12 @@
 import type { SubAgentTask } from "./api/sub-agents";
 import type { ConversationItem } from "./chat-types";
 
+export function isParentDeliveryPending(task: SubAgentTask): boolean {
+  return task.parentContinuationStatus === "pending" || task.parentContinuationStatus === "dispatching"
+    || Boolean((task.parentTurnId || task.parentClientTurnId)
+      && ["queued", "running", "cancelling"].includes(task.status));
+}
+
 // A task already routed to the parent runtime has its own delivery lifecycle.
 export function canAdoptSubAgentResult(task: SubAgentTask): boolean {
   return task.status === "completed" && !task.mergeDecision && !task.parentContinuationStatus;

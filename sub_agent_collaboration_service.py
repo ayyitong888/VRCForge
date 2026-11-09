@@ -113,6 +113,9 @@ class SubAgentCollaborationService:
             parent_session_id, parent_turn_id=parent_turn_id, parent_client_turn_id=parent_client_turn_id,
         )
 
+    def parent_delivery_pending(self, session_id: str) -> bool:
+        return self._registry.parent_delivery_pending(session_id)
+
     def get_task(self, task_id: str, *, include_events: bool = True) -> dict[str, Any]:
         return self._registry.get_task(task_id, include_events=include_events)
 

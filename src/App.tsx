@@ -164,7 +164,7 @@ import {
   isMarkdownSmokeMode,
 } from "./lib/markdown-smoke";
 import { parseDelegateCommand } from "./lib/subagent-delegate";
-import { isAwaitingMergeReview, isMergedAdopted, subAgentAdoptedHistoryItem, subAgentProposedNextAction } from "./lib/subagent-merge";
+import { isAwaitingMergeReview, isMergedAdopted, isParentDeliveryPending, subAgentAdoptedHistoryItem, subAgentProposedNextAction } from "./lib/subagent-merge";
 import {
   AGENT_QUESTION_NOTIFICATION_ACTION_EVENT,
   parseAgentQuestionNotificationAction,
@@ -1054,6 +1054,9 @@ export default function App() {
     chats,
     chatStorageReady,
     runtimeQueueVersion,
+    hasPendingChildDelivery: (ownerSessionId) => subAgentTasksRef.current.some(
+      (task) => task.parentSessionId === ownerSessionId && isParentDeliveryPending(task),
+    ),
     bindRuntimeProviderConnection,
   });
   const localActivitySending = chatRunSending || compacting;
@@ -1139,29 +1142,34 @@ export default function App() {
     endpoint, runtimeConnected, chats, runs: runtimeRuns, updateChat,
     deliver: deliverRuntimeTurnContinuation, recoverySignal: bootstrap,
   });
-  const queuedQuestionSessionIds = useMemo(() => new Set(queued.map((turn) => (
+  const queuedFollowupSessionIds = useMemo(() => new Set(queued.map((turn) => (
     turn.sessionId || chats.find((chat) => chat.id === turn.chatId)?.sessionId || ""
   )).filter(Boolean)), [chats, queued]);
-  const pendingQuestionSessionIds = useMemo(() => new Set(agentQuestions.flatMap((question) => {
-    const projected = projectAgentQuestionContinuation(question, runtimeRuns);
-    const status = questionContinuationDisplay(projected);
-    const questionSessionId = projected.runtimeContinuation?.sessionId || projected.sessionId || "";
-    return questionSessionId && status !== "settled" ? [questionSessionId] : [];
-  })), [agentQuestions, runtimeRuns]);
-  const previousPendingQuestionSessionIdsRef = useRef(new Set<string>());
+  const pendingParentWorkSessionIds = useMemo(() => new Set([
+    ...(subAgentList?.tasks || []).flatMap((task) => (
+      task.parentSessionId && isParentDeliveryPending(task) ? [task.parentSessionId] : []
+    )),
+    ...agentQuestions.flatMap((question) => {
+      const projected = projectAgentQuestionContinuation(question, runtimeRuns);
+      const status = questionContinuationDisplay(projected);
+      const questionSessionId = projected.runtimeContinuation?.sessionId || projected.sessionId || "";
+      return questionSessionId && status !== "settled" ? [questionSessionId] : [];
+    }),
+  ]), [agentQuestions, runtimeRuns, subAgentList]);
+  const previousPendingParentWorkSessionIdsRef = useRef(new Set<string>());
   const resumeQueuedTurnsRef = useRef(resumeQueuedTurns);
   resumeQueuedTurnsRef.current = resumeQueuedTurns;
-  const queuedQuestionSessionKey = [...queuedQuestionSessionIds].sort().join("|");
-  const pendingQuestionSessionKey = [...pendingQuestionSessionIds].sort().join("|");
+  const queuedFollowupSessionKey = [...queuedFollowupSessionIds].sort().join("|");
+  const pendingParentWorkSessionKey = [...pendingParentWorkSessionIds].sort().join("|");
   useEffect(() => {
-    const wasPending = previousPendingQuestionSessionIdsRef.current;
-    const settledQueuedQuestion = [...wasPending].some((targetSessionId) => (
-      queuedQuestionSessionIds.has(targetSessionId)
-      && !pendingQuestionSessionIds.has(targetSessionId)
+    const wasPending = previousPendingParentWorkSessionIdsRef.current;
+    const settledParentWork = [...wasPending].some((targetSessionId) => (
+      queuedFollowupSessionIds.has(targetSessionId)
+      && !pendingParentWorkSessionIds.has(targetSessionId)
     ));
-    previousPendingQuestionSessionIdsRef.current = new Set(pendingQuestionSessionIds);
-    if (settledQueuedQuestion) void resumeQueuedTurnsRef.current();
-  }, [pendingQuestionSessionKey, queuedQuestionSessionKey]);
+    previousPendingParentWorkSessionIdsRef.current = new Set(pendingParentWorkSessionIds);
+    if (settledParentWork) void resumeQueuedTurnsRef.current();
+  }, [pendingParentWorkSessionKey, queuedFollowupSessionKey]);
   const activeAgentGoal = useMemo(() => {
     const currentSessionId = activeChat?.sessionId || sessionId;
     return agentGoals.find((goal) => {
@@ -1815,7 +1823,8 @@ export default function App() {
   useEffect(() => {
     subAgentSelectionIntentRef.current = selectedSubAgent?.id || "";
   }, [selectedSubAgent?.id]);
-  const hasRunningSubAgents = subAgentTasks.some((task) => ["queued", "running", "cancelling"].includes(task.status));
+  const hasRunningSubAgents = subAgentTasks.some((task) =>
+    ["queued", "running", "cancelling"].includes(task.status) || isParentDeliveryPending(task));
   const activeProjectName =
     projectDisplayLabel(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
@@ -4500,7 +4509,7 @@ export default function App() {
               input={input}
               setInput={setInput}
               sending={sending}
-              queueAllowed={(chatRunSending || pendingQuestionSessionIds.has(activeChat?.sessionId || "")) && !stopRequested}
+              queueAllowed={(chatRunSending || pendingParentWorkSessionIds.has(activeChat?.sessionId || "")) && !stopRequested}
               runningEnterAction={runningEnterAction}
               permission={permission}
               onSubmit={submitMessage}

@@ -178,15 +178,15 @@ class AgentRuntimeFollowupQueue:
                     return True
             return False
 
-    def release(self, *, queue_id: str, session_id: str, claim_token: str) -> bool:
-        """Retain rejected input paused for explicit retry, releasing its lease."""
+    def release(self, *, queue_id: str, session_id: str, claim_token: str, keep_pending: bool = False) -> bool:
+        """Release a lease and retain input for automatic or explicit retry."""
         with self._ports.lock:
             for item in self._entries:
                 if (item.get("queueId") == queue_id and item.get("sessionId") == session_id
                         and item.get("status") == "claimed"
                         and secrets.compare_digest(str(item.get("claimToken", "")), claim_token)):
                     previous = copy.deepcopy(item)
-                    item["status"] = "paused"
+                    item["status"] = "pending" if keep_pending else "paused"
                     for field in ("claimToken", "claimOwner", "leaseUntil"):
                         item.pop(field, None)
                     try:
