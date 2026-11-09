@@ -105,3 +105,94 @@ def test_mixed_valid_replacement_keeps_existing_filtering(tmp_path):
 def test_create_schema_does_not_advertise_caller_selected_identity():
     schema = canonical_unity_read_tool_input_schema("vrcforge_progress_create")
     assert "progressId" not in schema["properties"] and "id" not in schema["properties"]
+
+
+def test_native_todo_uses_earlier_receipts_and_completes_before_next_model_request(tmp_path):
+    from tests.test_native_runtime_gateway import call, run, setup_gateway
+
+    read = "vrcforge_read_text_file"
+    checks = [
+        {"tool": read, "arguments": {"path": "README.txt"}, "result": {"truncated": False}},
+        {"tool": read, "arguments": {"path": "scene.txt"}, "result": {"truncated": False}},
+    ]
+    snapshots = []
+
+    def after_plan(_request):
+        item = gateway.list_agent_progress(session_id="native-session")["items"][0]
+        assert item["status"] == "in_progress"
+        assert set(item["completionEvidence"]) == {"0"}
+        return call("scene", read, {"path": "scene.txt"})
+
+    def after_scene(_request):
+        assert snapshots[-1]["items"][0]["status"] == "completed"
+        return {"role": "assistant", "content": "Both sources checked."}
+
+    gateway, model, _ = setup_gateway(tmp_path, [
+        call("readme", read, {"path": "README.txt"}),
+        call("todo", "vrcforge_progress_replace", {
+            "items": [{"id": "inspect", "title": "Check both sources", "status": "in_progress",
+                       "completionChecks": checks}],
+        }),
+        after_plan,
+        after_scene,
+    ])
+    gateway.register_tool(read, "When to use: read. When NOT to use: write.", "plan/preview",
+                          lambda p: {"text": p["path"], "truncated": False})
+    gateway.register_tool("vrcforge_progress_replace", "When to use: plan. When NOT to use: write assets.",
+                          "plan/preview", gateway.replace_agent_progress)
+    gateway._runtime_progress_changed = snapshots.append
+
+    run(gateway, tmp_path)
+    assert len(model.requests) == 4
+    assert [snapshot["items"][0]["status"] for snapshot in snapshots] == ["in_progress", "completed"]
+    reopened = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    assert reopened.list_agent_progress(session_id="native-session")["items"][0]["status"] == "completed"
+    renamed = reopened.update_agent_progress("inspect", {
+        "sessionId": "native-session", "projectRoot": str(tmp_path), "title": "Inspect a different scene",
+    })["progress"]
+    assert renamed["status"] == "in_progress"
+    assert renamed["completionEvidence"] == {}
+
+
+def test_todo_only_counts_committed_verified_writes_and_explicit_visual_pass(tmp_path):
+    from agent_progress_evidence import accepted_receipt
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    scope = {"projectRoot": str(tmp_path), "sessionId": "owner"}
+    tool = "vrcforge_apply_blendshapes"
+    checks = [
+        {"tool": tool, "result": {"target": "face"}},
+        {"tool": tool, "result": {"target": "body"}},
+        {"tool": "vrcforge_ask_user", "result": {"question": "Appearance accepted?", "resolution": "pass"}},
+    ]
+    item = {"id": "inspect", "title": "Apply and accept the result", "completionChecks": checks}
+    gateway.replace_agent_progress({**scope, "items": [item]})
+    gateway.replace_agent_progress({**scope, "sessionId": "other", "items": [item]})
+    verified = {"status": "ok", "readbackState": "verified"}
+    for receipt in [
+        accepted_receipt(tool, "write", "preview", {}, {"target": "face", "preview": True}, verified, status="executed"),
+        accepted_receipt(tool, "write", "pending", {}, {"target": "face"}, {"status": "needs_user_action"}, status="executed"),
+        accepted_receipt(tool, "write", "partial", {}, {"target": "face", "committed": True, "partial": True}, verified, status="executed"),
+        accepted_receipt(tool, "write", "unverified", {}, {"target": "face", "committed": True}, {"status": "ok"}, status="executed"),
+    ]:
+        assert receipt is None
+    face = accepted_receipt(tool, "write", "face", {}, {"target": "face", "committed": True}, verified, status="executed")
+    gateway._advance_runtime_todos("owner", str(tmp_path), [face])
+    assert gateway.update_agent_progress("inspect", {**scope, "status": "completed"})["progress"]["status"] == "in_progress"
+
+    approval = {"id": "approval", "taskContext": {**scope, "actionId": "body", "tool": tool}}
+    gateway.resume_runtime_task_after_approval(approval, {"status": "approved", "outcome": verified})
+    assert set(gateway.list_agent_progress(session_id="owner")["items"][0]["completionEvidence"]) == {"0"}
+    gateway.resume_runtime_task_after_approval(approval, {
+        "status": "applied", "outcome": verified, "result": {"target": "body", "committed": True},
+    })
+    assert set(gateway.list_agent_progress(session_id="owner")["items"][0]["completionEvidence"]) == {"0", "1"}
+    for resolution in ("fail", "pass"):
+        question = gateway.questions.create({
+            **scope, "kind": "visual_checkpoint", "question": "Appearance accepted?",
+            "_runtimeTaskSeed": {"requestedTool": "vrcforge_ask_user", "requestedArguments": {}},
+        })["question"]
+        gateway.questions.answer(question["questionId"], {**scope, "answer": resolution, "resolution": resolution, "settleOnly": True})
+        status = gateway.list_agent_progress(session_id="owner")["items"][0]["status"]
+        assert status == ("completed" if resolution == "pass" else "in_progress")
+    assert gateway.list_agent_progress(session_id="other")["items"][0]["status"] == "pending"

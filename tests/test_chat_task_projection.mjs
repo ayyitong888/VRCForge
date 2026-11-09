@@ -31,4 +31,10 @@ assert.equal(projected.runtimeContinuation.clientTurnId,'original-cid','explicit
 assert.equal(projected.runtimeContinuation.status,'running','answer receipt does not mark the running Agent complete');
 assert.equal(questionContinuationDisplay({status:'answered',runtimeContinuation:{status:'queued'}}),'settled','an answered question without an admitted runtime identity cannot create phantom active work');
 assert.equal(questionContinuationDisplay(projected),'active','an exact original-CID answer remains visibly active until the actual runtime finishes');
+const savedOnly=questionProjection({
+  questionId:'q',sessionId:'s',status:'answered',runtimeContinuationStatus:'settled_without_dispatch',
+  runtimeContinuation:{clientTurnId:'old:question:q',status:'running'},
+},[{sessionId:'s',clientTurnId:'old:question:q',turnId:'stale-turn',status:'running'}]);
+assert.equal(questionContinuationDisplay(savedOnly),'settled','a saved-only answer must not revive a stale continuation');
+assert.equal(savedOnly.runtimeContinuation.clientTurnId,undefined);
 console.log('PASS logical tasks: call_user blocking, nonblocking independent work, explicit opaque question identity, late answers, taskCompletion receipt, Stop, exact active CID');

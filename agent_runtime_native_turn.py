@@ -29,6 +29,10 @@ class NativeRuntimeTurn:
     def cancel_question(
         state: "AgentRuntimeSessionState",
         seed: Mapping[str, Any],
+        *,
+        skipped: bool = False,
+        answer_saved: bool = False,
+        settle_following_calls: bool = True,
     ) -> list[str]:
         """Settle only ask-user calls from one validated runtime seed."""
         session_id = str(seed.get("sessionId") or "").strip()
@@ -38,11 +42,20 @@ class NativeRuntimeTurn:
         binding = str(snapshot.get("binding") or "").strip()
         if not binding:
             return []
-        restored = state.restore_native_conversation(
-            session_id,
-            binding=binding,
-            snapshot=copy.deepcopy(dict(snapshot)),
-        )
+        save_only = skipped or answer_saved
+        if save_only:
+            if state.session_busy(session_id) and not state.owns_turn(
+                session_id=session_id, turn_id=str(seed.get("turnId") or ""),
+                client_turn_id=str(seed.get("clientTurnId") or ""),
+            ):
+                return []
+            restored = state.native_conversation(session_id, binding=binding)
+            if restored is None or restored["turnId"] != snapshot.get("turnId"):
+                return []
+        else:
+            restored = state.restore_native_conversation(
+                session_id, binding=binding, snapshot=copy.deepcopy(dict(snapshot)),
+            )
         question_ids: set[str] = set()
         for message in snapshot.get("messages", []):
             if not isinstance(message, Mapping) or message.get("role") != "assistant":
@@ -63,15 +76,37 @@ class NativeRuntimeTurn:
                     name = args.get("tool") if isinstance(args, dict) else None
                 if name in {"vrcforge_browser", "browser"}:
                     browser_args = args.get("arguments") if isinstance(args, Mapping) else None
-                    if not isinstance(browser_args, Mapping) or not seed.get("_browserClickTarget") or (
-                        browser_args.get("operation"), browser_args.get("target")
-                    ) != ("click", seed["_browserClickTarget"]):
+                    if not isinstance(browser_args, Mapping):
+                        continue
+                    open_request = seed.get("_browserOpenRequest")
+                    if isinstance(open_request, Mapping):
+                        matches = browser_args.get("operation") == "open" and (
+                            browser_args.get("url"), browser_args.get("browser", "")
+                        ) == (open_request.get("url"), open_request.get("browser", ""))
+                    else:
+                        target = seed.get("_browserClickTarget")
+                        matches = bool(target) and (
+                            browser_args.get("operation"), browser_args.get("target")
+                        ) == ("click", target)
+                    if not matches:
                         continue
                 elif name not in {"vrcforge_ask_user", "vrcforge_call_user", "ask_user", "call_user"}:
                     continue
                 call_id = str(tool_call.get("id") or "").strip()
                 if call_id:
                     question_ids.add(call_id)
+        exact_id = str(seed.get("_nativeCallId") or "") if save_only else ""
+        if exact_id:
+            question_ids = {exact_id} & state._native_pending(snapshot)
+        if answer_saved:
+            disposition = "answered"
+            summary = "The answer was saved without restarting the original turn."
+        elif skipped:
+            disposition = "skipped"
+            summary = "The user skipped this question without an answer."
+        else:
+            disposition = "cancelled"
+            summary = "Question cancelled by user stop."
         cancelled: list[str] = []
         for call_id in sorted(question_ids & state._native_pending(restored)):
             state.settle_native_call(
@@ -79,18 +114,18 @@ class NativeRuntimeTurn:
                 binding=binding,
                 call_id=call_id,
                 content=json.dumps(
-                    {"status": "cancelled", "outcome": {"status": "cancelled", "summary": "Question cancelled by user stop."}},
+                    {"status": disposition, "outcome": {"status": disposition, "summary": summary}},
                     ensure_ascii=False,
                 ),
             )
             cancelled.append(call_id)
-        if cancelled:
-            # Stopping a waiting question also stops later proposals in its same
+        if cancelled and settle_following_calls:
+            # Closing a waiting question also stops later proposals in its same
             # receipt, but cannot touch calls from a newer unrelated turn.
             pending = state._native_pending(snapshot) & state._native_pending(restored)
             for call_id in sorted(pending - set(cancelled)):
                 state.settle_native_call(session_id, binding=binding, call_id=call_id,
-                    content=json.dumps({"status": "not_executed", "reason": "question_cancelled", "observations": []}))
+                    content=json.dumps({"status": "not_executed", "reason": f"question_{disposition}", "observations": []}))
                 cancelled.append(call_id)
         return cancelled
 
@@ -462,8 +497,14 @@ class NativeRuntimeTurn:
                     and str(terminal_gate.get("reason") or "") == "restore_failure_turn_stop"
                 )
             )
+            settled_externally = False
             if waiting and terminal_map.get("nextStep") not in {"cancelled", "interrupted"} and not restore_terminal:
-                return
+                call_ids = self._native_decision["ids"]
+                if not call_ids or set(call_ids) & self._state._native_pending(self.snapshot()):
+                    return
+                # An authenticated answer may settle this wait while the tool
+                # returns. Keep its receipt and flush any steer in this turn.
+                settled_externally = True
             retained_definitions = self._retained_tool_definitions(self.snapshot().get("messages", []))
             result: dict[str, Any] = {
                 "observations": [
@@ -484,7 +525,7 @@ class NativeRuntimeTurn:
                 }
             if not observations:
                 result["status"] = str((terminal or {}).get("nextStep") or "not_executed")
-            for call_id in self._native_decision["ids"]:
+            for call_id in (() if settled_externally else self._native_decision["ids"]):
                 self._state.settle_native_call(
                     self._session_id,
                     binding=self._binding,

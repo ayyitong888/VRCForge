@@ -129,11 +129,12 @@ async def _worker(root):
     assert snapshot["sourceRevisions"] == snapshot["sources"]
     assert isinstance(snapshot["sourceRevisions"], list)
     observed = []
-    async def capture_validated_request(request):
+    async def capture_validated_request(request, *, human_user_message, browser_available=False):
         assert isinstance(request, AgentRuntimeMessageRequest)
+        assert human_user_message is True and browser_available is False
         observed.append(request)
         return {"ok": True, "response": "isolated wiring response", "status": "completed"}
-    server.app_agent_runtime_message = capture_validated_request
+    server._execute_app_agent_runtime_message = capture_validated_request
     runtime = server.TELEGRAM_SERVICE.runtime_factory(lambda _event: None)
     try:
         chat = await runtime.create_session(str(project), "Wiring smoke")

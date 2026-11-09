@@ -135,6 +135,12 @@ export function projectAgentQuestionContinuation(
 ): AgentQuestion {
   const raw = String(question.runtimeContinuationStatus || question.runtimeContinuation?.status || "").toLowerCase();
   if (!raw) return question;
+  if (raw === "settled_without_dispatch") {
+    return {
+      ...question,
+      runtimeContinuation: { questionId: question.questionId, sessionId: question.sessionId, status: raw },
+    };
+  }
   const revision = question.questionFeedbackRevision || 0;
   const feedback = question.kind === "visual_checkpoint" && revision > 0 ? `:feedback:${revision}` : "";
   const marker = `:question:${question.questionId}${feedback}`;

@@ -179,6 +179,7 @@ class DesktopComputerUseService:
     def runtime_turn_context(
         self, params: dict[str, Any], *, browser_requested: bool = False, browser_parent_turn_id: str = "",
         browser_adult_confirmed: bool = False, browser_click_target: str = "", browser_click_approved: bool = False,
+        browser_available: bool = False, browser_open_decision: tuple[str, str, bool] | None = None,
     ) -> Iterator[None]:
         context = self._runtime_computer_use_context
         previous = {
@@ -190,6 +191,8 @@ class DesktopComputerUseService:
             "client_turn_id": str(getattr(context, "client_turn_id", "")),
             "project_root": str(getattr(context, "project_root", "")),
             "browser_requested": bool(getattr(context, "browser_requested", False)),
+            "browser_available": bool(getattr(context, "browser_available", False)),
+            "browser_open_decision": getattr(context, "browser_open_decision", None),
             "browser_parent_turn_id": str(getattr(context, "browser_parent_turn_id", "")),
             "browser_adult_confirmed": bool(getattr(context, "browser_adult_confirmed", False)),
             "browser_click_target": str(getattr(context, "browser_click_target", "")),
@@ -210,6 +213,8 @@ class DesktopComputerUseService:
             )
         context.enabled = computer_use_requested
         context.browser_requested = browser_requested
+        context.browser_available = browser_available
+        context.browser_open_decision = browser_open_decision
         context.browser_parent_turn_id = browser_parent_turn_id
         context.browser_adult_confirmed = browser_adult_confirmed
         context.browser_click_target = browser_click_target
@@ -583,14 +588,38 @@ class DesktopComputerUseService:
         parent_turn_id = getattr(context, "browser_parent_turn_id", "")
         return bool(session_id and client_turn_id and (
             getattr(context, "browser_requested", False)
+            or getattr(context, "browser_available", False)
+            or getattr(context, "browser_open_decision", None)
             or (parent_turn_id and self.browser.can_resume(session_id, client_turn_id, parent_turn_id))
         ))
 
     def run_browser_tool(self, params: dict[str, Any]) -> dict[str, Any]:
         if not self.browser_model_invocable():
-            raise self._error("Start a browser turn with /browser in the App to authorize browser access.", 403)
+            raise self._error("Browser access is available in a foreground App conversation.", 403)
         context = self._runtime_computer_use_context
         session_id, turn_id, client_turn_id = context.session_id, context.turn_id, context.client_turn_id
+        parent_turn_id = context.browser_parent_turn_id
+        if params.get("operation") == "open" and not context.browser_requested:
+            site = self.browser.open_site(params)
+            if not site:
+                return {"ok": False, "status": "failed", "summary": "Choose an HTTP(S) page and, optionally, Edge or Chrome."}
+            url, browser = params["url"], params.get("browser", "")
+            decision = context.browser_open_decision
+            if decision is not None and decision[:2] == (url, browser):
+                if not decision[2]:
+                    return {"ok": False, "status": "denied", "summary": "The user did not allow opening this page."}
+                # Consume the approved URL once. The new tab belongs to this
+                # continuation, since no browser existed when the question was asked.
+                context.browser_open_decision = (url, browser, False)
+                context.browser_parent_turn_id = parent_turn_id = ""
+                context.browser_available = True
+            elif context.browser_available and not self.browser.has_tab(session_id, client_turn_id):
+                return {
+                    "ok": False, "status": "needs_user_action", "code": "browser_open_confirmation_required",
+                    "site": site, "summary": "Ask the user before opening this website.",
+                }
+            else:
+                return {"ok": False, "status": "failed", "summary": "Opening another page is unavailable. Use the current tab if one is open."}
         click_authority = ""
         if (params.get("operation") == "click" and context.browser_click_target
                 and context.browser_click_target == params.get("target")):
@@ -602,7 +631,7 @@ class DesktopComputerUseService:
             params,
             session_id=session_id,
             client_turn_id=client_turn_id,
-            parent_turn_id=context.browser_parent_turn_id,
+            parent_turn_id=parent_turn_id,
             adult_confirmed=context.browser_adult_confirmed,
             click_authority=click_authority,
             cancelled=lambda: self._ports.runtime_cancel_requested(

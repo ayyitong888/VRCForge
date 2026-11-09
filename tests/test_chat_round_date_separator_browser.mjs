@@ -120,6 +120,28 @@ try {
     await page.waitForTimeout(80);
   };
   await page.waitForFunction(() => typeof window.setConversation === "function");
+  await render([
+    { ...user("markdown-user", start), text: "Inspect **the project** and `Renderer`." },
+    {
+      id: "markdown-answer", type: "question_answer", questionId: "markdown-question",
+      question: "Review **this project**.\n\n1. Check the editor.\n2. Verify `Renderer`.",
+      text: "I checked `Renderer`.\n\n- The editor is open.",
+    },
+  ]);
+  const userMarkdown = page.locator('[data-conversation-item-id="markdown-user"] [data-user-message-bubble]');
+  assert.equal(await userMarkdown.locator("strong").innerText(), "the project");
+  assert.equal(await userMarkdown.locator("code").innerText(), "Renderer");
+  const answerQuestion = page.locator("[data-question-answer-question]");
+  assert.equal(await answerQuestion.isVisible(), false, "a question after an earlier message starts folded");
+  await page.locator("[data-question-answer-quote] summary").click();
+  assert.doesNotMatch(await answerQuestion.innerText(), /\*\*/, "the question does not expose synthetic emphasis delimiters");
+  assert.equal(await answerQuestion.locator("strong").innerText(), "this project");
+  assert.equal(await answerQuestion.locator("ol > li").count(), 2, "the quoted question retains its ordered list");
+  assert.equal(await answerQuestion.locator("ol code").innerText(), "Renderer");
+  const answerValue = page.locator("[data-question-answer-value]");
+  assert.equal(await answerValue.locator("code").innerText(), "Renderer");
+  assert.equal(await answerValue.locator("ul > li").innerText(), "The editor is open.");
+  assert.ok(await answerValue.locator("ul > li").evaluate((node) => Number(getComputedStyle(node).fontWeight) < 600));
   if (process.env.VRCFORGE_TASK_REPLAY_ONLY !== "1") {
   const referencePrompt = "示例 Question：查看头像截图时，你想先看哪一部分？";
   const referenceTurn = agent(referencePrompt, later, "needs_user_action", "first");

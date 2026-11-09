@@ -18,6 +18,15 @@
   .chat-composer-frame textarea {
     background-color: transparent;
   }
+
+  [data-chat-composer-has-queue] .chat-composer-shell {
+    background-color: transparent;
+    box-shadow: none;
+  }
+
+  [data-chat-composer-has-queue] .chat-composer-frame {
+    background-color: hsl(var(--card));
+  }
 }
 
 

@@ -1482,7 +1482,9 @@ KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
         selected_project_path=lambda: DASHBOARD_STATE.selected_project_path,
         unity_editor_path=lambda: DASHBOARD_STATE.unity_editor_path,
         parse_editor_version=lambda version_file: parse_editor_version(version_file),
-        list_running_unity_processes_strict=lambda: list_running_unity_processes(require_discovery_evidence=True),
+        list_running_unity_processes_strict=lambda: list_running_unity_processes(
+            require_discovery_evidence=True, exclude_asset_import_workers=True
+        ),
         process_matches_project=lambda process, project_root: unity_process_exactly_matches_project(process, project_root),
         read_compile_errors=lambda params: read_agent_compile_errors(params),
         normalize_path=lambda value: normalize_path_string(value),
@@ -1645,6 +1647,7 @@ AGENT_GATEWAY = AgentGateway(
     runtime_turn_completed=broadcast_runtime_turn_completed,
     runtime_status_changed=broadcast_runtime_status,
     runtime_timeline_changed=broadcast_runtime_status,
+    runtime_progress_changed=lambda payload: EVENT_BUS.broadcast_from_sync("agentProgress", payload),
     vision_profile_enabled=lambda: bool(PROVIDER_CONFIGURATION.current_vision_config().enabled),
     load_mcp_resources=not AGENT_MCP_STDIO_MODE,
 )
@@ -3250,13 +3253,14 @@ async def app_chat_title(request: ChatTitleRequest) -> dict[str, Any]:
 
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
-    return await _execute_app_agent_runtime_message(runtime_request, human_user_message=True)
+    return await _execute_app_agent_runtime_message(runtime_request, human_user_message=True, browser_available=True)
 
 
 async def _execute_app_agent_runtime_message(
     runtime_request: AgentRuntimeMessageRequest,
     *,
     human_user_message: bool,
+    browser_available: bool = False,
 ) -> dict[str, Any]:
     runtime_params = agent_runtime_request_payload(runtime_request)
     browser_requested = False
@@ -3321,12 +3325,16 @@ async def _execute_app_agent_runtime_message(
                 base_url=base_url,
             )
         else:
+            browser_options = {}
+            if browser_requested:
+                browser_options = {"browser_requested": True, "browser_adult_confirmed": browser_adult_confirmed}
+            elif browser_available:
+                browser_options = {"browser_available": True}
             payload = await asyncio.to_thread(
                 AGENT_GATEWAY.runtime_message,
                 runtime_params,
                 agent_name=runtime_request.agent_name,
-                **({"browser_requested": True, "browser_adult_confirmed": browser_adult_confirmed}
-                   if browser_requested else {}),
+                **browser_options,
             )
         runtime_returned = True
         payload = attach_agent_harness_journey_receipt(payload)
@@ -3392,7 +3400,7 @@ async def issue_agent_harness_journey(
 ) -> dict[str, Any]:
     """Run one explicit App-owned task and return only a short-lived safe receipt."""
 
-    payload = await app_agent_runtime_message(runtime_request)
+    payload = await _execute_app_agent_runtime_message(runtime_request, human_user_message=True)
     receipt = payload.get("harnessJourneyReceipt")
     if not isinstance(receipt, dict):
         raise HTTPException(
@@ -10359,7 +10367,7 @@ async def _telegram_runtime_message(params: dict) -> dict:
     # The authenticated channel composition owns this capability for one turn.
     # asyncio.to_thread preserves it without a global flag or a model-supplied field.
     with bind_channel_project_selection():
-        return await app_agent_runtime_message(AgentRuntimeMessageRequest(**params))
+        return await _execute_app_agent_runtime_message(AgentRuntimeMessageRequest(**params), human_user_message=True)
 
 
 async def _telegram_model_catalog(_project_root: str) -> list[dict[str, Any]]:
@@ -19004,7 +19012,9 @@ def _iter_processes(*, require_discovery_evidence: bool = False) -> list[Any]:
 def list_running_unity_processes(
     *,
     require_discovery_evidence: bool = False,
+    exclude_asset_import_workers: bool = False,
 ) -> list[dict[str, Any]]:
+    """Keep all Unity processes by default for callers that need offline proof."""
     if os.name != "nt":
         if require_discovery_evidence:
             raise UnityProcessDiscoveryUnavailable(
@@ -19045,6 +19055,15 @@ def list_running_unity_processes(
             process,
             require_discovery_evidence=require_discovery_evidence,
         )
+        if exclude_asset_import_workers:
+            raw_args = process.info.get("cmdline")
+            if isinstance(raw_args, (list, tuple)):
+                args = [str(arg).casefold() for arg in raw_args[1:]]
+                if "-adb2" in args and "-batchmode" in args and any(
+                    flag == "-name" and re.fullmatch(r"assetimportworker[0-9]*", value)
+                    for flag, value in zip(args, args[1:])
+                ):
+                    continue
         processes.append(
             {
                 "processId": process_id,
@@ -19068,7 +19087,7 @@ def extract_unity_project_path_from_command_line(command_line: str) -> str:
 def discover_running_unity_projects() -> list[dict[str, str]]:
     projects: list[dict[str, str]] = []
     seen: set[str] = set()
-    for process in list_running_unity_processes():
+    for process in list_running_unity_processes(exclude_asset_import_workers=True):
         path = extract_unity_project_path_from_command_line(str(process.get("commandLine") or ""))
         if not path:
             continue
@@ -27628,7 +27647,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
     AGENT_GATEWAY.register_tool(
         "vrcforge_browser",
-        "when-to-use: In a user-authorized /browser turn, use operation=open with an HTTP(S) URL in a visible app-owned Edge or Chrome window. Use operation=read to refresh the current tab, or pass nextOffset as offset to continue its snapshot. To click a current page control, use operation=click with its exact target ref. An adult age check may proceed when the user affirmed 18+ in this task. Other clicks, including cookies and account authorization, raise an App confirmation. If approved, repeat that exact click once. Ask the user to handle any credential entry in the same tab, then read again. Use operation=disconnect when finished. when-NOT-to-use: Do not use this for background work, credentials, CAPTCHA, or desktop actions. Negative example: do not present a confirmation page as the requested document.",
+        "when-to-use: In an App conversation, use the built-in browser when the user's task requires a rendered page, JavaScript, or interacting with a website. Open an HTTP(S) URL with operation=open. The App handles site access confirmation and returns the exact request to repeat if approved. Use operation=read to refresh the same tab, or pass nextOffset as offset. Use operation=click with the exact target ref for a visible control. Cookie choices, account authorization, and age confirmation go through the App. If approved, repeat only that exact click once. Ask the user to handle credential entry in the same tab, then read again. Use operation=disconnect when finished. when-NOT-to-use: Do not use this for background work, entering credentials, solving CAPTCHA, or desktop actions. For plain HTTP documents, use web_fetch. Negative example: do not present a confirmation page as the requested document.",
         "read/debug",
         AGENT_GATEWAY.run_browser_tool,
     )

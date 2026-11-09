@@ -115,6 +115,8 @@ class RuntimeQuestionResolutionPort:
 
     resolve: Callable[[str, Mapping[str, object], str], Mapping[str, object] | None]
     interrupt: Callable[[str, Mapping[str, object], str], object] | None = None
+    settle_skip: Callable[[Mapping[str, object]], object] | None = None
+    accept_visual: Callable[[Mapping[str, object]], object] | None = None
 
 
 class AgentQuestionPersistence:
@@ -362,6 +364,7 @@ class AgentQuestionService:
                 if explicit_resolution not in {"pass", "fail"}:
                     raise AgentQuestionServiceError("settleOnly requires an explicit pass or fail resolution.", status_code=400)
             if str(existing.get("status") or "") == "answered":
+                answered = existing
                 payload: dict[str, object] = {"ok": True, "question": self._redact(existing), "idempotent": True}
             else:
                 selected_option_id = _question_text(
@@ -392,6 +395,7 @@ class AgentQuestionService:
                         "Choose Continue or Stop for this runtime tool-loop Question.", status_code=400,
                     )
                 tool_loop_stop = tool_loop_pause and selected_option_id == "stop"
+                skip_without_dispatch = selected_option_id == "skip" and not goal_delivery_id
                 # The App submits custom replies and skips as answer-source IDs;
                 # only a declared choice ID must belong to the Question options.
                 if selected_option_id not in {"", "custom", "skip"} and selected_option is None:
@@ -401,7 +405,7 @@ class AgentQuestionService:
                         raise AgentQuestionServiceError("Unsupported visual checkpoint resolution.", status_code=400)
                     if selected_option_id == "skip" and resolution:
                         raise AgentQuestionServiceError("Skipping a Question cannot record a visual resolution.", status_code=400)
-                    option_resolution = _visual_resolution(selected_option, answer_text)
+                    option_resolution = "" if selected_option_id == "skip" else _visual_resolution(selected_option, answer_text)
                     if not resolution:
                         resolution = option_resolution
                     elif selected_option is not None:
@@ -418,7 +422,7 @@ class AgentQuestionService:
                         feedback_revision = int(existing.get("questionFeedbackRevision") or 0) + 1
                     except (TypeError, ValueError):
                         feedback_revision = 1
-                    visual_acceptance_pending = not settle_only and resolution != "pass"
+                    visual_acceptance_pending = not settle_only and not skip_without_dispatch and resolution != "pass"
                 continuation_answer = self._sanitize_answer_for_model(answer_text)
                 event = {
                     "event": "question_answered",
@@ -434,17 +438,22 @@ class AgentQuestionService:
                     event["resolution"] = resolution
                     event["questionFeedbackRevision"] = feedback_revision
                     event["runtimeQuestionFeedbackPending"] = bool(visual_acceptance_pending and runtime_seed and not goal_delivery_id)
-                if settle_only or tool_loop_stop:
+                if settle_only or tool_loop_stop or skip_without_dispatch:
                     event["runtimeContinuationStatus"] = "settled_without_dispatch"
-                if runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop:
+                elif runtime_seed and not goal_delivery_id:
                     # The saved answer and the not-yet-dispatched marker are
                     # one durable event, so a restart cannot lose the handoff.
                     event["runtimeContinuationStatus"] = "queued"
+                if skip_without_dispatch:
+                    self._settle_skipped_runtime_question(existing)
                 self._persistence.append(event)
                 answered = self._project(include_answered=True).get(resolved_id)
                 if answered is None:
                     raise OSError("Question storage did not preserve the answer.")
                 payload = {"ok": True, "question": self._redact(answered)}
+        if (answered.get("kind") == "visual_checkpoint" and answered.get("resolution") == "pass"
+                and self._runtime_resolution is not None and self._runtime_resolution.accept_visual is not None):
+            self._runtime_resolution.accept_visual(answered)
         # A persisted answer can precede an interrupted Goal projection. Its
         # resolver is idempotent, so retries must finish that durable handoff.
         if goal_delivery_id:
@@ -452,34 +461,28 @@ class AgentQuestionService:
                 resolved_id,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
-        if (runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop
+        if not goal_delivery_id and answered.get("runtimeContinuationStatus") == "settled_without_dispatch":
+            payload["runtimeContinuation"] = {"ok": True, "status": "settled_without_dispatch", "questionId": resolved_id}
+        elif (runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop
                 and self._runtime_resolution is not None
                 and not payload.get("idempotent")):
             # This copy is ephemeral: durable Question records keep the stricter
             # redacted answer, while the trusted runtime handoff can bind an
             # explicit user instruction to the resumed action.
-            dispatch_seed = dict(runtime_seed) if isinstance(runtime_seed, Mapping) else {}
-            dispatch_seed["_questionBlocking"] = existing.get("blocking", True)
+            dispatch_seed = self._runtime_dispatch_seed(answered)
             if continuation_answer:
                 dispatch_seed["_authenticatedUserAnswer"] = continuation_answer
-            if feedback_attachments:
-                dispatch_seed["_authenticatedUserAttachments"] = feedback_attachments
-            if visual_acceptance_pending:
-                dispatch_seed["_authenticatedQuestionFeedbackPending"] = True
             question_snapshot = payload.get("question")
-            if isinstance(question_snapshot, Mapping):
-                if dispatch_seed.get("_browserClickTarget"):
-                    dispatch_seed["_authenticatedBrowserClickApproved"] = question_snapshot.get("selectedOptionId") == "approve"
-                revision = question_snapshot.get("questionFeedbackRevision")
-                if revision is not None:
-                    dispatch_seed["_questionFeedbackRevision"] = revision
-                if str(question_snapshot.get("kind") or "") == "visual_checkpoint":
-                    dispatch_seed["_questionKind"] = "visual_checkpoint"
-            payload["runtimeContinuation"] = self._runtime_resolution.resolve(
+            continuation = self._runtime_resolution.resolve(
                 resolved_id,
                 dispatch_seed,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
+            payload["runtimeContinuation"] = continuation
+            if isinstance(question_snapshot, dict) and isinstance(continuation, Mapping) and continuation.get("status") == "settled_without_dispatch":
+                question_snapshot["runtimeContinuationStatus"] = "settled_without_dispatch"
+                if "runtimeQuestionFeedbackPending" in question_snapshot:
+                    question_snapshot["runtimeQuestionFeedbackPending"] = False
         return payload
 
     def refresh_pending_runtime_tasks(self, *, session_id: str, client_turn_id: str, task_seed: Mapping[str, object]) -> int:
@@ -581,7 +584,22 @@ class AgentQuestionService:
     def _resolve_queued_question(self, question: Mapping[str, object]) -> bool:
         if self._runtime_resolution is None:
             return False
-        seed = dict(question.get("runtimeTaskSeed") or {})
+        if question.get("selectedOptionId") == "skip":
+            # Older builds could persist Skip as queued before they crashed.
+            with _locked(self._persistence.shared_state_lock):
+                self._settle_skipped_runtime_question(question)
+                self.record_runtime_continuation(str(question["questionId"]), "settled_without_dispatch",
+                    runtimeQuestionFeedbackPending=False, runtimeContinuationClientTurnId="", runtimeContinuationTurnId="")
+            return False
+        result = self._runtime_resolution.resolve(
+            str(question["questionId"]), self._runtime_dispatch_seed(question), self._continuation_prompt(question),
+        )
+        return isinstance(result, Mapping) and result.get("status") in {"queued", "ok"}
+
+    @staticmethod
+    def _runtime_dispatch_seed(question: Mapping[str, object]) -> dict[str, object]:
+        raw_seed = question.get("runtimeTaskSeed")
+        seed = dict(raw_seed) if isinstance(raw_seed, Mapping) else {}
         seed["_questionBlocking"] = question.get("blocking", True)
         attachments = question.get("attachments")
         if isinstance(attachments, list) and attachments:
@@ -592,10 +610,16 @@ class AgentQuestionService:
             seed["_questionFeedbackRevision"] = question.get("questionFeedbackRevision")
         if str(question.get("kind") or "") == "visual_checkpoint":
             seed["_questionKind"] = "visual_checkpoint"
-        result = self._runtime_resolution.resolve(
-            str(question["questionId"]), seed, self._continuation_prompt(question),
-        )
-        return isinstance(result, Mapping) and result.get("status") in {"queued", "ok"}
+            seed["_questionResolution"] = question.get("resolution")
+        if seed.get("_browserClickTarget") or seed.get("_browserOpenRequest"):
+            seed["_authenticatedBrowserApproved"] = question.get("selectedOptionId") == "approve"
+        return seed
+
+    def _settle_skipped_runtime_question(self, question: Mapping[str, object]) -> None:
+        seed = question.get("runtimeTaskSeed")
+        if (question.get("blocking", True) is not False and isinstance(seed, Mapping)
+                and self._runtime_resolution is not None and self._runtime_resolution.settle_skip is not None):
+            self._runtime_resolution.settle_skip(seed)
 
     def list(
         self,

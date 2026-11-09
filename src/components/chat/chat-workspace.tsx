@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowDown, ArrowUp, HelpCircle, Loader2, MoreHorizontal, Pause, Play, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, HelpCircle, ListEnd, Loader2, MoreHorizontal, Paperclip, Pause, Pencil, Play, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { updateAgentGoal } from "../../lib/api";
@@ -59,8 +59,11 @@ export type QueuedChatTurn = {
   text: string;
   attachments: ChatAttachment[];
   queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled";
+  queueTransition?: "enqueue" | "dispatch";
   composerQueued?: boolean;
 };
+
+const QUEUE_VISIBLE_ROWS = 5;
 
 function PendingQueuedTurnCard({
   turn,
@@ -78,33 +81,45 @@ function PendingQueuedTurnCard({
   onResume?: () => void;
 }) {
   const { t } = useTranslation();
-  const [menuOpen, setMenuOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const busy = restoring || Boolean(turn.queueTransition);
+  const firstAttachment = turn.attachments[0];
+  const imagePreview = firstAttachment?.type.startsWith("image/") ? firstAttachment.dataUrl : undefined;
   return (
-    <div className="relative flex items-center gap-2 px-3 py-1" data-chat-pending-turn={turn.id}>
-      <div className="min-w-0 flex-1">
-        <p className="truncate px-1 py-1 text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
-      </div>
+    <div className="group flex h-9 items-center gap-2 px-3" data-chat-pending-turn={turn.id}>
+      <ListEnd className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden="true" />
+      {firstAttachment ? (
+        <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground" title={turn.attachments.map((attachment) => attachment.name).join(", ")} data-chat-pending-turn-attachments>
+          {imagePreview ? <img src={imagePreview} alt={firstAttachment.name} className="h-6 w-6 rounded object-contain" /> : <Paperclip className="h-4 w-4" aria-hidden="true" />}
+          {turn.attachments.length > 1 ? <span>{turn.attachments.length}</span> : null}
+        </span>
+      ) : null}
+      <p className="min-w-0 flex-1 truncate text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
+      <div className="flex shrink-0 items-center gap-0.5 text-muted-foreground/70 group-hover:text-muted-foreground group-focus-within:text-muted-foreground">
         {sending ? (
-          <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={restoring} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
-            <ArrowUp className="mr-1 h-3 w-3" />
-            {t("chat.guideNow")}
+          <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.sendQueuedNow")} aria-label={t("chat.sendQueuedNow")} disabled={busy} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
+            <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
           </Button>
         ) : null}
-        {!sending && onResume ? <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" onClick={onResume} data-chat-resume-followups><Play className="mr-1 h-3 w-3" />{t("chat.resumeFollowups")}</Button> : null}
-        <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("chat.removeQueued")} title={t("chat.removeQueued")} onClick={() => onRemove?.(turn.id)} data-chat-pending-turn-remove={turn.id}>
-          <X className="h-4 w-4" />
+        {!sending && !turn.queueTransition && onResume ? <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.resumeFollowups")} aria-label={t("chat.resumeFollowups")} onClick={onResume} data-chat-resume-followups><Play className="h-3.5 w-3.5" aria-hidden="true" /></Button> : null}
+        <Button type="button" variant="ghost" className="h-7 w-7 p-0"
+          aria-label={t("chat.editQueued")} title={t("chat.editQueued")} disabled={busy}
+          onClick={async () => {
+            setRestoring(true);
+            try {
+              await onEdit?.(turn.id);
+            } finally {
+              setRestoring(false);
+            }
+          }}
+          data-chat-pending-turn-edit={turn.id}
+        >
+          <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
         </Button>
-        <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("chat.moreQueued")} title={t("chat.moreQueued")} aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)} data-chat-pending-turn-more={turn.id}>
-          <MoreHorizontal className="h-4 w-4" />
+        <Button type="button" variant="ghost" className="h-7 w-7 p-0" aria-label={t("chat.removeQueued")} title={t("chat.removeQueued")} disabled={busy} onClick={() => onRemove?.(turn.id)} data-chat-pending-turn-remove={turn.id}>
+          <X className="h-3.5 w-3.5" aria-hidden="true" />
         </Button>
-        {menuOpen ? (
-          <div role="menu" className="absolute right-2 bottom-full mb-1 z-20 min-w-36 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md" data-chat-pending-turn-menu={turn.id}>
-            <button type="button" role="menuitem" className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent" disabled={restoring} onClick={() => { setRestoring(true); void Promise.resolve(onEdit?.(turn.id)).finally(() => setRestoring(false)); setMenuOpen(false); }} data-chat-pending-turn-edit={turn.id}>
-              {t("chat.editQueuedMessage")}
-            </button>
-          </div>
-        ) : null}
+      </div>
     </div>
   );
 }
@@ -355,7 +370,10 @@ export function ChatWorkspace({
     </div>
   ) : null;
   const steeringProjection = projectConversationSteeringMessages(mergeConversationTimelineItems(conversation.filter(
-    (item) => item.type !== "user" || item.composerQueued !== true,
+    (item) => item.type !== "user" || !(item.composerQueued || (
+      item.queuedFrom && (item.queueStatus === "queued" || item.queueStatus === "waiting_for_resources"
+        || item.queueStatus === "paused" || item.queueStatus === "cancelled")
+    )),
   )));
   const conversationItems = steeringProjection.items.map((item) => {
     if (item.type !== "question_answer") return item;
@@ -561,19 +579,46 @@ export function ChatWorkspace({
       onCancelReply={onCancelReply}
     />
   );
+  const pendingQueueScrollRef = useRef<HTMLDivElement>(null);
+  const previousQueueSizeRef = useRef(0);
+  useEffect(() => {
+    const list = pendingQueueScrollRef.current;
+    if (list && queued.length > QUEUE_VISIBLE_ROWS && queued.length > previousQueueSizeRef.current) {
+      list.scrollTop = list.scrollHeight;
+    }
+    previousQueueSizeRef.current = queued.length;
+  }, [queued.length]);
   const pendingQueue = queued.length ? (
-    <section className="mx-3 rounded-t-2xl border border-b-0 border-border/70 bg-background" aria-label={t("chat.pendingQueue")} data-chat-pending-queue>
-      {queued.map((turn) => (
-        <PendingQueuedTurnCard
-          key={turn.id}
-          turn={turn}
-          sending={sending}
-          onEdit={onEditQueuedTurn}
-          onRemove={onRemoveQueuedTurn}
-          onSteer={onSteerQueuedTurn}
-          onResume={queued.length === 1 ? onResumeQueue : undefined}
-        />
-      ))}
+    <section className="mx-4 -mb-2 rounded-t-xl border border-b-0 border-border/70 bg-card pb-2" aria-label={t("chat.pendingQueue")} data-chat-pending-queue>
+      <div
+        ref={pendingQueueScrollRef}
+        className="overflow-y-auto overscroll-contain focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+        style={{ maxHeight: `${QUEUE_VISIBLE_ROWS * 2.25}rem` }}
+        tabIndex={queued.length > QUEUE_VISIBLE_ROWS ? 0 : undefined}
+        data-chat-pending-queue-scroll
+      >
+        {queued.map((turn) => (
+          <PendingQueuedTurnCard
+            key={turn.id}
+            turn={turn}
+            sending={composerSending}
+            onEdit={onEditQueuedTurn}
+            onRemove={onRemoveQueuedTurn}
+            onSteer={onSteerQueuedTurn}
+            onResume={queued.length === 1 ? onResumeQueue : undefined}
+          />
+        ))}
+      </div>
+      {queued.length > 1 && !composerSending && queued.every((turn) => !turn.queueTransition) ? (
+        <div className="flex justify-end gap-1 px-2 pb-1 text-muted-foreground" data-chat-followup-controls>
+          <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.resumeFollowups")} aria-label={t("chat.resumeFollowups")} onClick={onResumeQueue} data-chat-resume-followups>
+            <Play className="h-3.5 w-3.5" aria-hidden="true" />
+          </Button>
+          <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.cancelFollowups")} aria-label={t("chat.cancelFollowups")} onClick={onCancelQueue} data-chat-cancel-followups>
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+          </Button>
+        </div>
+      ) : null}
     </section>
   ) : null;
   const approvalComposer = scopedPendingApprovals.length ? (
@@ -586,23 +631,6 @@ export function ChatWorkspace({
       onReject={onReject}
       onModifyApproval={onModifyApproval}
     />
-  ) : null;
-  const queueControls = queued.length > 1 && !sending ? (
-    <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-xs" data-chat-followup-controls>
-      <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
-        <Pause className="h-3.5 w-3.5 shrink-0" />
-        <span className="truncate">{t("chat.followupsPaused", { count: queued.length })}</span>
-      </div>
-      <div className="flex shrink-0 items-center gap-1.5">
-        <Button type="button" variant="outline" className="h-7 px-2 text-xs" onClick={onResumeQueue} data-chat-resume-followups>
-          <Play className="mr-1 h-3 w-3" />
-          {t("chat.resumeFollowups")}
-        </Button>
-        <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onCancelQueue} data-chat-cancel-followups>
-          {t("chat.cancelFollowups")}
-        </Button>
-      </div>
-    </div>
   ) : null;
   const activeGoalBar = activeGoal ? (
     <div
@@ -679,14 +707,13 @@ export function ChatWorkspace({
             {unboundQuestionEntries}
           </div>
         </div>
-        <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
+        <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock data-chat-composer-has-queue={queued.length ? "" : undefined}>
           <div className="mx-auto max-w-3xl">
             {replyBanner}
-            {pendingQueue}
-            {queueControls}
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
             {activeGoalBar}
             {questionDock}
+            {pendingQueue}
             {pendingReplyQuestion ? composer(false) : approvalComposer || composer(false)}
           </div>
         </div>
@@ -882,11 +909,9 @@ export function ChatWorkspace({
           </Button>
         ) : null}
       </div>
-      <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
+      <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock data-chat-composer-has-queue={queued.length ? "" : undefined}>
         <div className="mx-auto max-w-3xl">
           {replyBanner}
-          {pendingQueue}
-          {queueControls}
           <CompactionStatus state={compaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
           {handoffSendOpen ? (
             <div className="mb-2">
@@ -901,6 +926,7 @@ export function ChatWorkspace({
           ) : null}
           {activeGoalBar}
           {questionDock}
+          {pendingQueue}
           {pendingReplyQuestion ? composer(true) : approvalComposer || composer(true)}
         </div>
       </div>

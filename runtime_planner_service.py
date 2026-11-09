@@ -66,8 +66,11 @@ RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
     "For a task requiring tools, give a brief opening before the first tool call explaining the immediate work. "
     "When you have meaningful findings, state the finding and next step; give brief updates for a changed approach, a blocker, or a long wait. "
     "During longer tasks, after tool results return, give a concise progress update if about a minute has passed since your last update. "
-    "If you maintain a user-visible TODO list, update its status before moving to the next item: "
-    "use vrcforge_progress_update to mark the verified item completed and the item you start in_progress. "
+    "If you maintain a user-visible TODO list, update its status before moving to the next item. "
+    "Set completionChecks on every item that can be verified by tools: list every required tool and its exact target arguments or expected result fields. "
+    "The runtime completes the item when all checks match accepted receipts, including receipts already obtained in this turn. "
+    "Use exact result resolution=pass and the checkpoint question text or ID for a human visual review. "
+    "For work without a tool receipt, explicitly update the item only after verifying the result. "
     "When continuing a task and the TODO item IDs are missing from context, read the existing list with vrcforge_progress_list before updating it. "
     "Reconcile the list before asking the user to review or giving a final answer. Record unfinished work as pending or blocked according to the evidence. "
     "Group related work; do not narrate every tool call or repeat preparation, reveal private reasoning, or invent progress. "
@@ -5174,7 +5177,7 @@ class RuntimePlannerService:
                     "It reads HTTP source only: it does not execute JavaScript, click controls, or retain a browser session. "
                     "Follow returned links for instructions. If the source is a confirmation/login page or requires interaction, "
                     + (f"use {browser_tool.name} from {browser_tool.block} to open the page, inspect its controls, and read the same tab after any confirmed click. "
-                       if browser_tool else "report the gate and ask the user to start a browser turn with /browser if a live browser is needed. ")
+                       if browser_tool else "report the gate and explain that a live browser is unavailable for this turn. ")
                     + "Repeated HTTP fetches are not browser interaction. "
                     "Do not treat a successful fetch of a gate page as having read the requested instructions. "
                     "Keep unresolved usage requirements from earlier conversation evidence until actual instructions resolve them. "

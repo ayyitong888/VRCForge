@@ -59,6 +59,7 @@
     --workspace: 0 0% 100%;
     --primary: 221 83% 53%;
     --primary-foreground: 0 0% 100%;
+    --user-message-accent-mix: 20%;
     --secondary: 220 14% 96%;
     --secondary-foreground: 223 26% 13%;
     --muted: 220 14% 96%;
@@ -82,6 +83,7 @@
     --workspace: 228 23% 7%;
     --primary: 221 83% 62%;
     --primary-foreground: 0 0% 100%;
+    --user-message-accent-mix: 28%;
     --secondary: 225 18% 22%;
     --secondary-foreground: 220 35% 96%;
     --muted: 226 18% 18%;
@@ -399,6 +401,10 @@
   select {
     font: inherit;
   }
+}
+
+:root [data-user-message-bubble] {
+  background-color: color-mix(in srgb, hsl(var(--primary)) var(--user-message-accent-mix), hsl(var(--workspace)));
 }
 
 @layer utilities {
