@@ -1028,6 +1028,7 @@ export default function App() {
     resumeQueuedTurns,
     cancelQueuedTurns,
     applyRuntimeDelta,
+    applyFollowupReceipt,
   } = useChatRunController({
     endpoint,
     runtimeConnected,
@@ -1107,6 +1108,11 @@ export default function App() {
     chatIdForSessionId: (ownerSessionId) =>
       chats.find((chat) => chat.sessionId === ownerSessionId)?.id || "",
   });
+  const applyFollowupReceiptRef = useRef(applyFollowupReceipt);
+  applyFollowupReceiptRef.current = applyFollowupReceipt;
+  useEffect(() => {
+    for (const run of runtimeRuns) applyFollowupReceiptRef.current(run);
+  }, [runtimeRuns, queued]);
   const activeRuntimeCancelTarget = runtimeActivityCancelTarget(chats, activeChat || undefined, runtimeRuns);
   const scopedAgentQuestions = hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : [];
   const dismissedAgentQuestion = scopedAgentQuestions.find((question) => question.status === "pending" && dismissedQuestionIds.has(question.questionId));
@@ -2321,7 +2327,9 @@ export default function App() {
         return;
       }
       if (eventType === "agentRuntimeTurn") {
-        deliverRuntimeTurnContinuation(event.payload?.payload);
+        const receipt = event.payload?.payload as RuntimeTurnEvent | undefined;
+        if (receipt) applyFollowupReceiptRef.current(receipt);
+        deliverRuntimeTurnContinuation(receipt);
       }
       if (eventType === "chatStorageChanged") {
         notifyChatStorageChanged(event.payload?.originId);

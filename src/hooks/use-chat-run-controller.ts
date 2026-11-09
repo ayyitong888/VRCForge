@@ -197,6 +197,9 @@ type UseChatRunControllerParams = {
   bindRuntimeProviderConnection?: (endpoint: string, provider: string, model: string) => (() => void) | undefined;
 };
 
+type FollowupReceipt = Pick<AgentRuntimeDeltaEvent, "sessionId" | "clientTurnId" | "turnId" | "startedAt">;
+type FollowupAdmission = { sessionId: string; admitted: boolean };
+
 export function useChatRunController({
   endpoint,
   runtimeConnected,
@@ -248,7 +251,11 @@ export function useChatRunController({
   const queueCancellationGenerationRef = useRef(0);
   const queueCancellationInFlightRef = useRef(false);
   const steerIntentRef = useRef(new Map<string, QueuedTurn>());
-  const streamingTurnsRef = useRef(new Map<string, { chatId: string; confirmProviderConnection?: () => void }>());
+  const streamingTurnsRef = useRef(new Map<string, {
+    chatId: string;
+    confirmProviderConnection?: () => void;
+    followup?: FollowupAdmission;
+  }>());
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const dispatchedTurnAbortRef = useRef<AbortController | null>(null);
   const backgroundTurnAbortRefs = useRef(new Map<string, AbortController>());
@@ -286,8 +293,9 @@ export function useChatRunController({
         }));
         continue;
       }
-      if (item.queueStatus === "delivery_unverified") continue;
-      if (!["queued", "waiting_for_resources", "paused"].includes(item.queueStatus || "")) continue;
+      const unconfirmedFollowup = item.queueStatus === "delivery_unverified"
+        && item.composerQueued === true && Boolean(item.queueEnvelope.queueId);
+      if (!unconfirmedFollowup && !["queued", "waiting_for_resources", "paused"].includes(item.queueStatus || "")) continue;
       const env = item.queueEnvelope;
       restored.push({ planMode: item.planMode === true, id: item.clientTurnId, text: item.text, attachments: item.attachments || [], provider: env.provider || "", providerLabel: env.providerLabel || env.provider || "", model: env.model || "", contextLimit: env.contextLimit, chatId: chat.id, sessionId: env.sessionId || chat.sessionId, projectPath: env.projectPath || chat.projectPath, projectType: env.projectType || chat.projectType, computerUseRequested: env.computerUseRequested, computerUseVisualTheme: env.computerUseVisualTheme, computerUseVisualAccent: env.computerUseVisualAccent, queuedFrom: true, queueId: env.queueId, queueLaneId: env.laneId || chat.id, queueSequence: env.sequence, queueStatus: item.queueStatus as QueuedTurn["queueStatus"] });
     }
@@ -303,7 +311,8 @@ export function useChatRunController({
         if (!entry.queueId || !entry.clientTurnId || !entry.sessionId) continue;
         // A live claim belongs to an in-flight dispatch whose turn stream
         // already owns the UI; re-syncing it would resurrect a ghost copy.
-        if (!initialRestore && entry.status === "claimed") continue;
+        if (!initialRestore && (entry.status === "claimed"
+          || currentTurnRef.current?.clientTurnId === entry.clientTurnId)) continue;
         const existingTurn = next.find((candidate) => candidate.id === entry.clientTurnId);
         if (entry.questionId || entry.continuationSource === "question_answered"
           || entry.clientTurnId.startsWith("question-answer:")) continue;
@@ -350,11 +359,25 @@ export function useChatRunController({
         const oldIndex = next.findIndex((candidate) => candidate.id === turn.id);
         if (oldIndex >= 0) next.splice(oldIndex, 1);
         next.push(turn);
-        if (savedItem && pending && savedItem.composerQueued !== true) {
+        const queueEnvelope = {
+          ...savedItem?.queueEnvelope,
+          planMode: turn.planMode === true,
+          provider: turn.provider,
+          providerLabel: turn.providerLabel,
+          model: turn.model,
+          projectPath: turn.projectPath,
+          projectType: turn.projectType,
+          sessionId: turn.sessionId,
+          laneId,
+          queueId: turn.queueId,
+          sequence: turn.queueSequence,
+        };
+        if (savedItem && (savedItem.composerQueued !== true || savedItem.queueStatus !== status
+          || savedItem.queueEnvelope?.queueId !== entry.queueId)) {
           updateChat(chat.id, (current) => ({
             ...touchChat(current),
             items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id
-              ? { ...item, composerQueued: true }
+              ? { ...item, queuedFrom: true, composerQueued: true, queueStatus: status, queueEnvelope }
               : item),
           }));
         } else if (!savedItem) {
@@ -368,21 +391,10 @@ export function useChatRunController({
               planMode: turn.planMode === true,
               attachments,
               queuedFrom: true,
-              composerQueued: pending,
+              composerQueued: true,
               queueStatus: status,
               clientTurnId: turn.id,
-              queueEnvelope: {
-                planMode: turn.planMode === true,
-                provider: turn.provider,
-                providerLabel: turn.providerLabel,
-                model: turn.model,
-                projectPath: turn.projectPath,
-                projectType: turn.projectType,
-                sessionId: turn.sessionId,
-                laneId,
-                queueId: turn.queueId,
-                sequence: turn.queueSequence,
-              },
+              queueEnvelope,
               createdAt: new Date().toISOString(),
             }],
           }));
@@ -463,7 +475,9 @@ export function useChatRunController({
     queueResumeInFlightRef.current = true;
     try {
       const head = queueRef.current[0];
-      if (!head || (head.queueStatus === "paused" && !manual) || await hasPendingQuestionForTurn(head)) return;
+      if (!head || (!manual && (head.queueStatus === "paused" || head.queueStatus === "delivery_unverified"))
+        || await hasPendingQuestionForTurn(head)) return;
+      if (queueRef.current[0]?.id !== head.id) return;
       if (head.queueStatus === "waiting_for_resources" || head.queueStatus === "delivery_unverified" || !head.queueId) {
         const result = await recordAgentRunQueued(endpoint, {
           sessionId: head.sessionId,
@@ -479,11 +493,16 @@ export function useChatRunController({
           projectRoot: head.projectPath,
           projectType: head.projectType,
         }).catch(() => null);
+        if (queueRef.current[0]?.id !== head.id) return;
         if (!result?.accepted || result.mode !== "followup" || !result.queueId) {
           markQueuedTurnStatus(head.id, "waiting_for_resources");
           return;
         }
         if (result.status === "acked") {
+          if (head.queueStatus === "delivery_unverified") {
+            await refreshRuntimeRuns(false);
+            return;
+          }
           queueRef.current.shift();
           markQueuedTurnStatus(head.id, "delivery_unverified");
           setQueued([...queueRef.current]);
@@ -497,6 +516,7 @@ export function useChatRunController({
           if (queueRef.current[0]?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
           return;
         }
+        if (result.status === "claimed") return;
         head.queueId = result.queueId;
         head.queueSequence = result.sequence;
       }
@@ -561,7 +581,37 @@ export function useChatRunController({
     }
   }
 
+  function applyFollowupReceipt(receipt: FollowupReceipt) {
+    const { clientTurnId, sessionId, startedAt, turnId } = receipt;
+    if (!clientTurnId || !sessionId || !startedAt || !turnId) return;
+    const owner = streamingTurnsRef.current.get(clientTurnId);
+    const queued = queueRef.current.find((turn) => turn.id === clientTurnId && turn.sessionId === sessionId && turn.queueId);
+    const chatId = owner?.followup?.sessionId === sessionId ? owner.chatId : queued?.chatId;
+    const chat = chatId ? getChatById(chatId) : undefined;
+    if (!chat || chat.sessionId !== sessionId) return;
+    const item = chat.items.find((candidate) => candidate.type === "user"
+      && candidate.clientTurnId === clientTurnId && candidate.composerQueued && candidate.queueEnvelope?.queueId);
+    if (!item) return;
+    if (owner?.followup?.sessionId === sessionId) owner.followup.admitted = true;
+    updateChat(chat.id, (current) => ({
+      ...touchChat(current),
+      items: current.items.map((candidate) => candidate.type === "user" && candidate.id === item.id
+        ? { ...candidate, createdAt: startedAt, queuedFrom: false, composerQueued: undefined, queueStatus: undefined, queueEnvelope: undefined }
+        : candidate.type === "streaming" && candidate.clientTurnId === clientTurnId
+          ? { ...candidate, createdAt: startedAt }
+          : candidate),
+    }));
+    if (queued) {
+      queueRef.current = queueRef.current.filter((turn) => turn !== queued);
+      setQueued([...queueRef.current]);
+    }
+    setQueueTransitions((current) => current.filter((turn) => turn.id !== clientTurnId || turn.queueTransition !== "dispatch"));
+    void persistChatsNow().catch(reportChatSaveError);
+    if (queued && queueRef.current[0]?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
+  }
+
   function applyRuntimeDelta(delta: AgentRuntimeDeltaEvent) {
+    if (delta.phase === "preparing") applyFollowupReceipt(delta);
     const clientTurnId = String(delta.clientTurnId || "").trim();
     const phase = normalizeAgentRuntimePhase(delta.phase);
     const timelineEvent = normalizeAgentRuntimeTimelineEvent(delta.timelineEvent);
@@ -569,7 +619,7 @@ export function useChatRunController({
       return;
     }
     const owner = streamingTurnsRef.current.get(clientTurnId);
-    if (!owner) {
+    if (!owner || (owner.followup && delta.sessionId !== owner.followup.sessionId)) {
       return;
     }
     // The backend's provider activity or an accepted model message proves the
@@ -1200,6 +1250,7 @@ export function useChatRunController({
     let userItemId = "";
     let runtimeRequestStarted = false;
     let savingBeforeDispatch = false;
+    let followup: FollowupAdmission | undefined;
     if (!background) {
       activeTurnAbortRef.current = abortController;
       const activeTurn = {
@@ -1241,6 +1292,7 @@ export function useChatRunController({
       );
       const shouldGenerateTitle = shouldGenerateChatTitle(chat, baseItems.length, background);
       const chatSessionId = (prepared?.sessionId ?? options?.sessionId ?? chat?.sessionId) || `session-${turn.id}`;
+      if (presentingFollowup) followup = { sessionId: chatSessionId, admitted: false };
       const chatAgentName = chat?.agentName || "desktop-agent";
       const history = baseItems.length > 0 ? buildChatHistory(baseItems, t) : [];
       const currentAttachments = resolveAttachmentPayloadReferences(turn.attachments, chat?.attachmentPayloads);
@@ -1273,6 +1325,27 @@ export function useChatRunController({
         attachments: turn.attachments,
         clientTurnId: turn.queueId ? turn.id : undefined,
         createdAt: new Date(startedAt).toISOString(),
+        ...(presentingFollowup ? {
+          queuedFrom: true,
+          composerQueued: true,
+          queueStatus: "delivery_unverified",
+          queueEnvelope: {
+            planMode: turn.planMode === true,
+            provider: turn.provider,
+            providerLabel: turn.providerLabel,
+            model: turn.model,
+            contextLimit: turn.contextLimit,
+            projectPath: turn.projectPath,
+            projectType: turn.projectType,
+            sessionId: chatSessionId,
+            laneId: turn.queueLaneId || chatId,
+            computerUseRequested: turn.computerUseRequested,
+            computerUseVisualTheme: turn.computerUseVisualTheme,
+            computerUseVisualAccent: turn.computerUseVisualAccent,
+            queueId: turn.queueId,
+            sequence: turn.queueSequence,
+          },
+        } : {}),
       };
       userItemId = userItem.id;
       const streamingItem: ConversationItem = {
@@ -1316,7 +1389,6 @@ export function useChatRunController({
             ],
           };
         });
-        finishPresentation();
         // A recovered runtime reply must have a durable owning chat and the
         // complete user message even if the app is killed during this turn.
         savingBeforeDispatch = true;
@@ -1335,7 +1407,7 @@ export function useChatRunController({
       const confirmProviderConnection = bindRuntimeProviderConnection?.(targetEndpoint, turn.provider, turn.model);
       if (!background) {
         dispatchedTurnAbortRef.current = abortController;
-        streamingTurnsRef.current.set(turn.id, { chatId, confirmProviderConnection });
+        streamingTurnsRef.current.set(turn.id, { chatId, confirmProviderConnection, followup });
       }
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
@@ -1359,6 +1431,15 @@ export function useChatRunController({
          followupLaneId: turn.queueLaneId || turn.chatId,
          compactionRecovery: collectCompactionRecovery(baseItems),
         });
+      if (followup && !followup.admitted) {
+        applyFollowupReceipt({
+          sessionId: response.sessionId || response.session_id,
+          clientTurnId: response.clientTurnId,
+          turnId: response.turnId || response.turn_id,
+          startedAt: response.startedAt,
+        });
+        if (!followup.admitted) throw new AgentTurnDeliveryUnconfirmedError("Follow-up delivery could not be confirmed.");
+      }
       if (response.ok && response.plan?.planner === "llm" && !response.plan.plannerFailure) {
         confirmProviderConnection?.();
       }
@@ -1682,28 +1763,23 @@ export function useChatRunController({
         || abortController.signal.aborted || text.toLowerCase().includes("cancel");
       const queueFailure = cause instanceof ApiError && cause.detail && typeof cause.detail === "object"
         ? cause.detail as { code?: string; message?: string } : null;
-      if (!background && turn.queueId && queueFailure?.code === "followup_admission_rejected") {
-        if (!queueRef.current.some((item) => item.id === turn.id)) queueRef.current.unshift({ ...turn, queueStatus: "paused" });
-        markQueuedTurnStatus(turn.id, "paused");
+      if (presentingFollowup && !followup?.admitted) {
+        const rejected = queueFailure?.code === "followup_admission_rejected";
+        const notReady = queueFailure?.code === "followup_queue_not_ready" || text.includes("followup_queue_not_ready");
+        const status = rejected || (!runtimeRequestStarted && abortController.signal.aborted) ? "paused"
+          : !runtimeRequestStarted || notReady ? "waiting_for_resources" : "delivery_unverified";
+        turn.queueStatus = status;
+        queueRef.current = [{ ...turn, chatId }, ...queueRef.current.filter((item) => item.id !== turn.id)];
+        setQueued([...queueRef.current]);
         updateChat(chatId, (current) => ({
           ...touchChat(current),
           items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id
-            ? { ...item, queuedFrom: true, composerQueued: true, queueStatus: "paused", queueEnvelope: {
-                planMode: turn.planMode === true, provider: turn.provider, providerLabel: turn.providerLabel,
-                model: turn.model, projectPath: turn.projectPath, projectType: turn.projectType,
-                sessionId: turn.sessionId, laneId: turn.queueLaneId || turn.chatId,
-                queueId: turn.queueId, sequence: turn.queueSequence,
-              } }
+            ? { ...item, queuedFrom: true, composerQueued: true, queueStatus: status }
             : item),
         }));
-        await persistChatsNow?.().catch(() => undefined);
-        setError(queueFailure.message || text);
-        return false;
-      }
-      if (!background && turn.queueId && (!runtimeRequestStarted || text.includes("followup_queue_not_ready"))) {
-        turn.queueStatus = "waiting_for_resources";
-        markQueuedTurnStatus(turn.id, "waiting_for_resources");
         if (savingBeforeDispatch) reportChatSaveError(cause);
+        else if (!abortController.signal.aborted && !notReady) setError(queueFailure?.message || text);
+        void persistChatsNow().catch(reportChatSaveError);
         return false;
       }
       if (!background) {
@@ -1723,14 +1799,6 @@ export function useChatRunController({
           }));
           if (persistChatsNow) await persistChatsNow().catch(() => undefined);
         }
-      }
-      if (!background && turn.queueId) {
-        updateChat(chatId, (current) => ({
-          ...touchChat(current),
-          items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id
-            ? { ...item, queuedFrom: false, queueStatus: undefined, queueEnvelope: undefined }
-            : item),
-        }));
       }
       if (background) {
         const transientRemoved = clearTurnTransientItems(chatId, turn.id, userItemId);
@@ -1878,6 +1946,7 @@ export function useChatRunController({
     resumeQueuedTurns,
     cancelQueuedTurns,
     applyRuntimeDelta,
+    applyFollowupReceipt,
   };
 }
 

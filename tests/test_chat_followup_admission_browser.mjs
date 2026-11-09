@@ -6,8 +6,40 @@ const user=(id)=>({id:'user-'+id,type:'user',clientTurnId:id,text:id});
 const owner={id:'opaque-owner',sessionId:'runtime-owner',title:'Existing owner',projectPath:'',items:[user('parent')]};
 const other={id:'active-other',sessionId:'runtime-other',title:'Other visible chat',projectPath:'',items:[]};
 const entry={queueId:'queued-answer',sequence:1,sessionId:'runtime-owner',runtimeSessionId:'runtime-owner',targetClientTurnId:'parent',clientTurnId:'opaque-input',message:'Original full task prompt',status:'claimed'};
-const scenarios=[{name:'rejection',chats:[owner,other],entries:[{...entry,sessionId:'opaque-owner',clientTurnId:'input',status:'pending'}]}];
-const api=`export const listAgentRunFollowups=async()=>({ok:true,items:window.fixture.entries});export const fetchAgentQuestions=async()=>({ok:true,questions:[]});export const cancelAgentRunFollowup=async()=>({ok:true,status:'cancelled'});export const issueComputerUseTurnGrant=async()=>null;export const requestAgentRunCancel=async()=>({ok:true});export const requestChatTitle=async()=>({title:'Existing owner'});export const recordAgentRunQueued=async()=>({ok:true,accepted:true,mode:'followup',queueId:'queued-answer'});export const sendAgentMessage=async(_e,_m,sessionId,_h,_a,options)=>{window.sends.push({sessionId,clientTurnId:options.clientTurnId});if(window.sends.length===1)throw new window.ApiError('HTTP 409',409,{code:'followup_admission_rejected',message:'not admitted'});return {ok:true,sessionId,clientTurnId:options.clientTurnId,turnId:'successful-retry',observe:{},plan:{reply:'done',summary:'done',nextStep:'done',planner:'fixture',shellNeeded:false},timeline:[]};};`;
+const pending={...entry,sessionId:'opaque-owner',clientTurnId:'input',status:'pending'};
+const restoredUser={...user('input'),queuedFrom:true,composerQueued:true,queueStatus:'delivery_unverified',queueEnvelope:{queueId:pending.queueId,sessionId:owner.sessionId,laneId:owner.id}};
+const nextUser={...user('next'),queuedFrom:true,composerQueued:true,queueStatus:'paused',queueEnvelope:{...restoredUser.queueEnvelope,queueId:'next-queue'}};
+const withNext={...owner,items:[...owner.items,restoredUser,nextUser]};
+const scenarios=[
+ {name:'rejection',chats:[owner,other],entries:[pending]},
+ {name:'unknown',chats:[owner,other],entries:[pending]},
+ {name:'recovered',chats:[{...owner,items:[...owner.items,restoredUser]},other],entries:[]},
+ {name:'questions-race',chats:[withNext,other],entries:[]},
+ {name:'queue-race',chats:[withNext,other],entries:[]},
+];
+const api=`
+export const listAgentRunFollowups=async()=>({ok:true,items:window.fixture.entries});
+const holdBoundary=async(name)=>{
+  if(window.fixture.name===name)await new Promise(resolve=>{window.releaseBoundary=resolve;});
+};
+export const fetchAgentQuestions=async()=>{
+  await holdBoundary('questions-race');
+  return {ok:true,questions:[]};
+};
+export const cancelAgentRunFollowup=async()=>({ok:true,status:'cancelled'});
+export const issueComputerUseTurnGrant=async()=>null;
+export const requestAgentRunCancel=async()=>({ok:true});
+export const requestChatTitle=async()=>({title:'Existing owner'});
+export const recordAgentRunQueued=async()=>{
+  await holdBoundary('queue-race');
+  return {ok:true,accepted:true,mode:'followup',queueId:'queued-answer'};
+};
+export const sendAgentMessage=async(_e,_m,sessionId,_h,_a,options)=>{
+  window.sends.push({sessionId,clientTurnId:options.clientTurnId});
+  if(window.fixture.name==='unknown')throw new Error('Transport response lost');
+  if(window.sends.length===1)throw new window.ApiError('HTTP 409',409,{code:'followup_admission_rejected',message:'not admitted'});
+  return {ok:true,sessionId,clientTurnId:options.clientTurnId,turnId:'successful-retry',startedAt:new Date().toISOString(),observe:{},plan:{reply:'done',summary:'done',nextStep:'done',planner:'fixture',shellNeeded:false},timeline:[]};
+};`;
 const bundle=await build({stdin:{resolveDir:process.cwd(),loader:'tsx',contents:`
 import {ApiError} from './src/lib/api/http';window.ApiError=ApiError;
 import React,{useRef,useState,useCallback}from'react';import{createRoot}from'react-dom/client';import{useChatRunController}from'./src/hooks/use-chat-run-controller';
@@ -30,6 +62,37 @@ try {
  await page.waitForFunction(()=>window.sends.length===2&&window.chats.some(c=>c.items.some(i=>i.type==='agent')));
  assert.equal(await page.evaluate(()=>window.controller.queued.length),0);
  assert.equal(await page.evaluate(()=>window.sends[1].clientTurnId),'input');
+ for(const name of ['unknown','recovered']) {
+   await page.goto(`http://127.0.0.1:${server.address().port}/?case=${name}`);
+   await page.waitForFunction(()=>window.controller?.queued[0]?.queueStatus==='delivery_unverified'&&!window.controller.isRunning());
+   const presentation=()=>page.evaluate(()=>({
+     queued:window.controller.queued.length,
+     sent:window.chats.find(c=>c.id==='opaque-owner').items.filter(i=>i.clientTurnId==='input'&&!i.composerQueued).length,
+     sends:window.sends.length,
+   }));
+   const sends=name==='unknown'?1:0;
+   assert.deepEqual(await presentation(),{queued:1,sent:0,sends});
+   await page.evaluate(()=>window.controller.resumeQueuedTurns());
+   const receipt={sessionId:'runtime-owner',clientTurnId:'input',turnId:'exact-run',startedAt:new Date().toISOString()};
+   await page.evaluate(value=>window.controller.applyFollowupReceipt({...value,sessionId:'runtime-other'}),receipt);
+   assert.deepEqual(await presentation(),{queued:1,sent:0,sends});
+   await page.evaluate(value=>window.controller.applyFollowupReceipt(value),receipt);
+   await page.waitForFunction(()=>window.controller.queued.length===0);
+   assert.deepEqual(await presentation(),{queued:0,sent:1,sends});
+ }
+ for(const name of ['questions-race','queue-race']) {
+   await page.goto(`http://127.0.0.1:${server.address().port}/?case=${name}`);
+   await page.waitForFunction(()=>window.controller?.queued.length===2);
+   await page.evaluate(()=>{window.retry=window.controller.resumeQueuedTurns(true);});
+   await page.waitForFunction(()=>typeof window.releaseBoundary==='function');
+   await page.evaluate(()=>window.controller.applyFollowupReceipt({
+     sessionId:'runtime-owner',clientTurnId:'input',turnId:'exact-run',startedAt:new Date().toISOString(),
+   }));
+   await page.waitForFunction(()=>window.controller.queued[0]?.id==='next');
+   await page.evaluate(()=>{window.releaseBoundary();return window.retry;});
+   assert.deepEqual(await page.evaluate(()=>window.controller.queued.map(turn=>turn.id)),['next'],name+' must preserve the following item');
+   assert.equal(await page.evaluate(()=>window.sends.length),0,name+' must not replay the just-confirmed input');
+ }
  assert.deepEqual(errors,[]);
- console.log('PASS rejection retains queued input; automatic drain stays paused; manual retry succeeds');
+ console.log('PASS rejected, unconfirmed and recovered follow-up delivery');
 } finally {await browser?.close();await new Promise(r=>server.close(r));}

@@ -32,12 +32,12 @@ try{
   await page.evaluate(entry=>{window.fixture.entries=[entry];window.bump();},externalEntry);
   await page.waitForFunction(()=>window.sends.length===1);
   const queuedBubble=await page.evaluate(()=>window.chats.find(c=>c.id==='chat-lane').items.find(i=>i.type==='user'&&i.clientTurnId==='author-instructions-36f5'));
-  assert.ok(queuedBubble,'externally queued followup becomes visible in its lane chat');
+  assert.equal(queuedBubble?.composerQueued,true,'externally queued follow-up stays above the composer during dispatch');
   const send=await page.evaluate(()=>window.sends[0]);
   assert.equal(send.followupQueueId,'followup_00000005','dispatch claims the durable queue entry');
   assert.equal(await page.evaluate(()=>window.ensureCalls),0,'resync never fabricates a new chat for a matching lane');
   // An in-flight claimed entry must not resurrect as a ghost during a re-sync.
-  await page.evaluate(()=>{window.resolveSend({ok:true,sessionId:'runtime-owner',clientTurnId:window.sends[0].clientTurnId,turnId:'t1',observe:{},plan:{reply:'done',summary:'done',nextStep:'needs_user_action',planner:'fixture',shellNeeded:false},timeline:[]});});
+  await page.evaluate(()=>{window.resolveSend({ok:true,sessionId:'runtime-owner',clientTurnId:window.sends[0].clientTurnId,turnId:'t1',startedAt:new Date().toISOString(),observe:{},plan:{reply:'done',summary:'done',nextStep:'needs_user_action',planner:'fixture',shellNeeded:false},timeline:[]});});
   await page.waitForFunction(()=>window.controller.queued.length===0);
   await page.evaluate(entry=>{window.fixture.entries=[{...entry,status:'claimed'}];window.bump();});
   await page.waitForTimeout(120);

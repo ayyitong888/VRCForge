@@ -201,6 +201,12 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
                     | "verifying"
             ) {
                 event["phase"] = serde_json::Value::String(value.to_string());
+                if value == "preparing" {
+                    let started_at = bounded_event_text(runtime_delta.get("startedAt"), 80);
+                    if !started_at.is_empty() {
+                        event["startedAt"] = serde_json::Value::String(started_at);
+                    }
+                }
             }
         }
         if let Some(timeline_event) = runtime_delta
@@ -666,6 +672,10 @@ fn sanitize_runtime_turn_event(payload: &serde_json::Value) -> Option<serde_json
             }
         }
     });
+    let started_at = bounded_event_text(payload.get("startedAt"), 80);
+    if !started_at.is_empty() {
+        result["startedAt"] = serde_json::Value::String(started_at);
+    }
     if let Some(reason) = bounded_safe_identifier(plan.and_then(|item| item.get("reason"))) {
         result["plan"]["reason"] = serde_json::Value::String(reason);
     }
@@ -1279,6 +1289,40 @@ mod tests {
         assert!(sanitized["payload"]["plan"]["plannerFailure"]
             .get("providerError")
             .is_none());
+    }
+
+    #[test]
+    fn runtime_preparing_delta_preserves_durable_started_at() {
+        let started_at = "2026-11-09T03:44:23.812682+00:00";
+        let event = |phase| {
+            sanitize_backend_event(serde_json::json!({
+                "type": "agentRuntimeDelta",
+                "payload": {
+                    "sessionId": "session-live",
+                    "turnId": "turn-live",
+                    "clientTurnId": "client-live",
+                    "phase": phase,
+                    "startedAt": started_at
+                }
+            }))
+            .expect("runtime delta should be forwarded")
+        };
+
+        assert_eq!(event("preparing")["startedAt"], started_at);
+        assert!(event("waiting_for_model").get("startedAt").is_none());
+        let terminal = sanitize_backend_event(serde_json::json!({
+            "type": "agentRuntimeTurn",
+            "payload": {
+                "schema": "vrcforge.runtime_turn_event.v1",
+                "continuationSource": "foreground_completed",
+                "sessionId": "session-live",
+                "turnId": "turn-live",
+                "clientTurnId": "client-live",
+                "startedAt": started_at
+            }
+        }))
+        .expect("runtime terminal should be forwarded");
+        assert_eq!(terminal["payload"]["startedAt"], started_at);
     }
 
     #[test]

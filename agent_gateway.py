@@ -1588,6 +1588,7 @@ class AgentGateway:
         turn_id: str,
         client_turn_id: str,
         provider_retry: dict[str, Any] | None = None,
+        started_at: str = "",
     ) -> None:
         allowed_phases = {
             "preparing",
@@ -1604,6 +1605,8 @@ class AgentGateway:
             "clientTurnId": summarize_text(client_turn_id, 160),
             "phase": phase,
         }
+        if started_at:
+            payload["startedAt"] = started_at
         if isinstance(provider_retry, dict):
             payload["providerRetry"] = {
                 key: provider_retry[key]
@@ -6141,13 +6144,7 @@ class AgentGateway:
                 "clientTurnId": client_turn_id,
             }
         )
-        self._emit_runtime_status(
-            "preparing",
-            session_id=session_id,
-            turn_id=turn_id,
-            client_turn_id=client_turn_id,
-        )
-        self._runtime_run_ledger.append(
+        started = self._runtime_run_ledger.append(
             {
                 "event": "runtime_turn_started",
                 "status": "running",
@@ -6171,6 +6168,13 @@ class AgentGateway:
         )
 
         params["_runtimeTurnStarted"] = True
+        self._emit_runtime_status(
+            "preparing",
+            session_id=session_id,
+            turn_id=turn_id,
+            client_turn_id=client_turn_id,
+            started_at=str(started.get("startedAt") or ""),
+        )
         # --- Bounded agentic loop ------------------------------------------------
         # 真正的多步循环：每步规划一个动作 → 执行 → 把结果回灌 loop_state → 再规划，
         # 直到拿到终止答复 / 发起写入审批 / 命中步数上限。读类技能直接执行；写类意图

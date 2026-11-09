@@ -24,7 +24,11 @@ export const sendAgentMessage = (_endpoint, message, _session, history, _agent, 
     return;
   }
   window.__providerSignal = options?.signal;
-  window.__resolveProvider = resolve;
+  window.__resolveProvider = (response) => resolve({
+    clientTurnId: options?.clientTurnId,
+    startedAt: new Date().toISOString(),
+    ...response,
+  });
   window.__providerStarted = true;
 });
 export const recordAgentRunQueued = async (endpoint, payload) => {
@@ -272,20 +276,45 @@ try {
   }));
   await page.waitForFunction(() => window.__queuedTurns().some(turn => turn.id === "edited-resubmitted" && turn.queueTransition === "dispatch"));
   assert.equal(await page.evaluate(() => window.__providerRequests.length), 2, "the pending row survives next-turn preparation");
-  await page.evaluate(() => window.__releaseQueuePreparation());
+  await page.evaluate(() => {
+    window.__holdQueuePersist = true;
+    window.__releaseQueuePreparation();
+  });
+  await page.waitForFunction(() => window.__holdQueuePersist === false);
+  const followupPresentation = (id) => page.evaluate((turnId) => ({
+    queuedRows: window.__queuedTurns().filter((turn) => turn.id === turnId).length,
+    messages: window.__chat.items.filter((item) => item.type === "user" && item.clientTurnId === turnId && !item.composerQueued).length,
+  }), id);
+  assert.deepEqual(await followupPresentation(edited.id), { queuedRows: 1, messages: 0 }, "pre-dispatch transcript save must not publish the user message");
+  assert.equal(await page.evaluate(() => window.__providerRequests.length), 2);
+  await page.evaluate(() => window.__releaseQueuePersist());
   await page.waitForFunction(() => window.__providerRequests.length === 3);
   const delivered = await page.evaluate((id) => ({
     request: window.__providerRequests.at(-1),
     item: window.__chat.items.find((item) => item.clientTurnId === id),
   }), edited.id);
   assert.equal(delivered.request.followupQueueId, `queue-${edited.id}`, "the existing durable follow-up id is claimed by the normal runtime delivery path");
-  assert.equal(delivered.item.composerQueued, undefined, "delivery converts the pending card to a normal transcript bubble");
+  assert.equal(delivered.item.composerQueued, true, "request submission is not a delivery receipt");
+  assert.deepEqual(await followupPresentation(edited.id), { queuedRows: 1, messages: 0 });
+  await page.evaluate((clientTurnId) => {
+    const preparing = { type: "agentRuntimeDelta", phase: "preparing", clientTurnId, turnId: "queued-turn", sessionId: "session-fixture" };
+    window.__controller.applyRuntimeDelta(preparing);
+    window.__controller.applyRuntimeDelta({ ...preparing, startedAt: new Date().toISOString(), sessionId: "wrong-session" });
+    window.__controller.applyRuntimeDelta({ ...preparing, startedAt: new Date().toISOString(), clientTurnId: "wrong-turn" });
+  }, edited.id);
+  assert.deepEqual(await followupPresentation(edited.id), { queuedRows: 1, messages: 0 }, "an unverified or differently owned event must not publish the message");
+  await page.evaluate((clientTurnId) => window.__controller.applyRuntimeDelta({
+    type: "agentRuntimeDelta", phase: "preparing", clientTurnId, turnId: "queued-turn", sessionId: "session-fixture", startedAt: new Date().toISOString(),
+  }), edited.id);
+  await page.waitForFunction((id) => !window.__queuedTurns().some((turn) => turn.id === id), edited.id);
+  assert.deepEqual(await followupPresentation(edited.id), { queuedRows: 0, messages: 1 }, "only the matching durable start converts the pending row to one user message");
   await page.evaluate(() => window.__resolveProvider({
     ok: true, status: "completed", sessionId: "session-fixture", turnId: "queued-turn",
     plan: { reply: "queued fixture done", summary: "queued fixture done", nextStep: "done", planner: "fixture", shellNeeded: false },
     timeline: [],
   }));
   await page.evaluate(() => window.__activeRunPromise);
+  assert.deepEqual(await followupPresentation(edited.id), { queuedRows: 0, messages: 1 }, "terminal settlement must not duplicate the admitted user message");
   await page.evaluate(() => window.__startFixture());
   await page.waitForFunction(() => window.__providerRequests.length === 4);
   assert.equal(await page.evaluate(() => window.__queueFixture("console-guide-fixture", "guide fixture text")), "queued");
@@ -445,6 +474,12 @@ try {
     plan: { reply: "finished", nextStep: "done", planner: "fixture", shellNeeded: false }, timeline: [],
   }));
   await page.waitForFunction(() => window.__providerRequests.length === 9);
+  assert.deepEqual(await followupPresentation(fallback.id), { queuedRows: 1, messages: 0 }, "deferred Send now also waits for admission");
+  await page.evaluate(() => window.__resolveProvider({
+    ok: true, sessionId: "session-fixture", turnId: "fallback-followup",
+    plan: { reply: "finished", nextStep: "done", planner: "fixture", shellNeeded: false }, timeline: [],
+  }));
+  await page.waitForFunction(() => !window.__isRunning());
   const sentFallback = await page.evaluate((id) => ({
     request: window.__providerRequests.at(-1),
     queue: window.__queuedTurns().filter((item) => item.id === id),

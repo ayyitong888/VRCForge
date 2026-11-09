@@ -5,6 +5,7 @@ export type AgentRuntimeDeltaEvent = {
   sessionId?: string;
   turnId?: string;
   clientTurnId?: string;
+  startedAt?: string;
   textDelta?: string;
   phase?: string;
   timelineEvent?: unknown;

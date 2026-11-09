@@ -81,6 +81,13 @@ def test_gateway_http_terminal_and_replay_share_one_time(tmp_path, cancel):
         return {"role": "assistant", "content": "Finished"}
 
     gateway, _, _ = setup_gateway(tmp_path, [reply])
+    preparing = []
+
+    def observe_status(payload):
+        if payload.get("phase") == "preparing":
+            preparing.append((payload, gateway.runtime_runs.read_events(limit=0)))
+
+    gateway._runtime_status_changed = observe_status
     result = run(gateway, tmp_path)
     terminal = next(row for row in gateway.runtime_runs.read_events(limit=0)
                     if row.get("event") == "runtime_turn_completed")
@@ -91,6 +98,9 @@ def test_gateway_http_terminal_and_replay_share_one_time(tmp_path, cancel):
     assert frozen["response"]["completedAt"] == result["completedAt"]
     started = next(row for row in gateway.runtime_runs.read_events(limit=0)
                    if row.get("event") == "runtime_turn_started")
+    assert len(preparing) == 1
+    assert preparing[0][0]["startedAt"] == started["createdAt"]
+    assert started in preparing[0][1]
     assert result["startedAt"] == started["createdAt"]
     assert gateway.runtime_runs.list_runs()["runs"][0]["startedAt"] == started["createdAt"]
     assert gateway.runtime_runs.list_runtime_continuations()[0]["startedAt"] == started["createdAt"]
