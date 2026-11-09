@@ -98,8 +98,12 @@ try {
   assert.equal(left, "VRCForge (left/VRCForge)");
   assert.equal(right, "VRCForge (right/VRCForge)");
   assert.notEqual(left, right, "same-name projects must remain distinguishable");
-  assert.equal(await page.getByTestId("left").locator("[data-project-path-detail]").innerText(), "left/VRCForge");
-  assert.equal(await page.getByTestId("right").locator("[data-project-path-detail]").innerText(), "right/VRCForge");
+  const leftProject = page.getByTestId("left").getByRole("button");
+  const rightProject = page.getByTestId("right").getByRole("button");
+  assert.equal(await leftProject.innerText(), "VRCForge");
+  assert.equal(await rightProject.innerText(), "VRCForge");
+  assert.match(await leftProject.getAttribute("title"), /left\/VRCForge/);
+  assert.match(await rightProject.getAttribute("title"), /right\/VRCForge/);
   assert.doesNotMatch(await page.getByTestId("right").innerText(), /6000/);
   assert.match(await page.getByTestId("right").getByRole("button").getAttribute("title"), /6000/);
   assert.equal(await page.locator('[aria-current="page"]').innerText(), "A");
