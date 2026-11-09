@@ -184,6 +184,7 @@ export function ChatWorkspace({
   onAnswerQuestion,
   onDismissQuestion,
   onReopenQuestion,
+  reviewQuestionReveal,
   onReplyInChat,
   onOpenChatById,
   focusInput = false,
@@ -289,6 +290,7 @@ export function ChatWorkspace({
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   onDismissQuestion: (questionId: string) => void;
   onReopenQuestion?: (questionId: string) => void;
+  reviewQuestionReveal?: { questionId: string } | null;
   onReplyInChat?: (questionId: string) => void;
   /** Opens another conversation in this project scope by chat id. */
   onOpenChatById?: (chatId: string) => void;
@@ -362,6 +364,9 @@ export function ChatWorkspace({
   const pendingReplyQuestion = pendingQuestionPrompts.find((question) => question.questionId === pendingReplyQuestionId);
   const dockQuestions = pendingQuestionPrompts.filter((question) => !dismissedQuestionIds?.has(question.questionId));
   const [questionReveal, setQuestionReveal] = useState<{ questionId: string }>();
+  useEffect(() => {
+    if (reviewQuestionReveal) setQuestionReveal(reviewQuestionReveal);
+  }, [reviewQuestionReveal]);
   const [questionCardVisible, setQuestionCardVisible] = useState(false);
   const replyBanner = pendingReplyQuestion ? (
     <div className="mb-2 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2 text-xs" data-question-reply-mode>

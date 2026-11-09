@@ -8,7 +8,7 @@ import { runtimeAuthorizationLabelKey, runtimeAuthorizationMessageKey, type Runt
 import { cn } from "../../lib/utils";
 import { AgentTodoPanel } from "./agent-todo-panel";
 import { CoreVersionNotice } from "./core-version-notice";
-import { RuntimeInfoRow, StatusDot } from "./runtime-sidebar-ui";
+import { RuntimeInfoRow, RuntimeReviewButton, StatusDot } from "./runtime-sidebar-ui";
 import { ProjectWorkbenchSections, type UserAttachmentSource } from "./project-workbench-sections";
 
 type ComponentStatus = { status: string; message?: string; detail?: unknown } | null | undefined;
@@ -49,6 +49,7 @@ export function RightRuntimeSidebar({
   hasExternalPendingApprovals,
   approvalPanel,
   runtimeReviewCount = 0,
+  onOpenRuntimeReview,
   dismissedQuestion,
   workspaceSummary,
   activeDesktopActions,
@@ -86,6 +87,7 @@ export function RightRuntimeSidebar({
   hasExternalPendingApprovals?: boolean;
   approvalPanel?: ReactNode;
   runtimeReviewCount?: number;
+  onOpenRuntimeReview?: () => void;
   dismissedQuestion?: { label: string; onReopen: () => void };
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
@@ -189,6 +191,7 @@ export function RightRuntimeSidebar({
             pendingApprovals={pendingApprovals}
             hasExternalPendingApprovals={hasExternalPendingApprovals}
             runtimeReviewCount={runtimeReviewCount}
+            onOpenRuntimeReview={onOpenRuntimeReview}
             workspaceSummary={workspaceSummary}
             activeDesktopActions={activeDesktopActions}
             onTestAgentConnection={onTestAgentConnection}
@@ -271,16 +274,7 @@ export function RightRuntimeSidebar({
                   </div>
                 </>
               ) : null}
-              {runtimeReviewCount > 0 ? (
-                <div data-vrcforge-status="runtime-attention">
-                  <RuntimeInfoRow
-                    icon={<ListChecks className="h-4 w-4" />}
-                    label={t("workspace.runtimeReviewTitle")}
-                    value={t("workspace.runtimeReviewCount", { count: runtimeReviewCount })}
-                    suffix={<StatusDot status="warning" />}
-                  />
-                </div>
-              ) : null}
+              <RuntimeReviewButton count={runtimeReviewCount} onOpen={onOpenRuntimeReview} />
               <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
                 <RuntimeInfoRow
                   icon={<ListChecks className="h-4 w-4" />}

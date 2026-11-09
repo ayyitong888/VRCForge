@@ -8,7 +8,7 @@ import type { AgentDesktopAction, AgentProgress, WorkspaceDiffSummary } from "..
 import type { ChatAttachment, ProjectType } from "../../lib/chat-types";
 import { runtimeAuthorizationLabelKey, runtimeAuthorizationMessageKey, type RuntimeAuthorizationStatus } from "../../lib/runtime-authorization-status";
 import { AgentTodoPanelEmbedded } from "./agent-todo-panel";
-import { RuntimeDiffFileRow, RuntimeInfoRow, RuntimeSection, StatusDot } from "./runtime-sidebar-ui";
+import { RuntimeDiffFileRow, RuntimeInfoRow, RuntimeReviewButton, RuntimeSection, StatusDot } from "./runtime-sidebar-ui";
 import {
   Box,
   Bot,
@@ -138,6 +138,7 @@ export function ProjectWorkbenchSections({
   pendingApprovals,
   hasExternalPendingApprovals = false,
   runtimeReviewCount = 0,
+  onOpenRuntimeReview,
   workspaceSummary,
   activeDesktopActions,
   onTestAgentConnection,
@@ -167,6 +168,7 @@ export function ProjectWorkbenchSections({
   pendingApprovals: number;
   hasExternalPendingApprovals?: boolean;
   runtimeReviewCount?: number;
+  onOpenRuntimeReview?: () => void;
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
   onTestAgentConnection?: () => void | Promise<void>;
@@ -268,16 +270,7 @@ export function ProjectWorkbenchSections({
           />
         </button>
       ) : null}
-      {isUnityProject && runtimeReviewCount > 0 ? (
-        <div data-vrcforge-status="runtime-attention" className="border-b border-border px-1">
-          <RuntimeInfoRow
-            icon={<ListChecks className="h-4 w-4" />}
-            label={t("workspace.runtimeReviewTitle")}
-            value={t("workspace.runtimeReviewCount", { count: runtimeReviewCount })}
-            suffix={<StatusDot status="warning" />}
-          />
-        </div>
-      ) : null}
+      <RuntimeReviewButton count={runtimeReviewCount} onOpen={onOpenRuntimeReview} />
       <RuntimeSection
         title={isUnityProject ? t("workspace.todo") : t("workspace.progress")}
         collapsed={Boolean(collapsedSections.todo)}
@@ -500,16 +493,6 @@ export function ProjectWorkbenchSections({
                 )}
               </>
             )}
-            {!isUnityProject && runtimeReviewCount > 0 ? (
-              <div data-vrcforge-status="runtime-attention">
-                <RuntimeInfoRow
-                  icon={<ListChecks className="h-4 w-4" />}
-                  label={t("workspace.runtimeReviewTitle")}
-                  value={t("workspace.runtimeReviewCount", { count: runtimeReviewCount })}
-                  suffix={<StatusDot status="warning" />}
-                />
-              </div>
-            ) : null}
           </div>
         </div>
       </RuntimeSection>

@@ -90,7 +90,7 @@ import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice"
 import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
-import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, questionBelongsToRuntimeScope } from "./lib/runtime-scope";
+import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, pendingQuestionReviewTargets, questionBelongsToRuntimeScope } from "./lib/runtime-scope";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import { flushChatsBeforeQuit } from "./lib/app-quit";
 import {
@@ -337,6 +337,7 @@ export default function App() {
   const [pendingApprovalPanelOpen, setPendingApprovalPanelOpen] = useState(false);
   const revealedExternalApprovalIds = useRef(new Set<string>());
   const [approvalReveal, setApprovalReveal] = useState<{ chatId: string; approvalId: string } | null>(null);
+  const [reviewQuestionReveal, setReviewQuestionReveal] = useState<{ chatId: string; questionId: string } | null>(null);
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
@@ -1125,6 +1126,13 @@ export default function App() {
   const activeRuntimeCancelTarget = runtimeActivityCancelTarget(chats, activeChat || undefined, runtimeRuns);
   const scopedAgentQuestions = hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : [];
   const dismissedAgentQuestion = scopedAgentQuestions.find((question) => question.status === "pending" && dismissedQuestionIds.has(question.questionId));
+  const questionReview = useMemo(
+    () => pendingQuestionReviewTargets(chats, runtimeConnected ? agentQuestions : [], activeChatId),
+    [chats, runtimeConnected, agentQuestions, activeChatId],
+  );
+  const runtimeReviewItem = activeChat?.items.find((item) => item.type === "agent" && runtimeAttention.some((run) =>
+    item.response.clientTurnId === run.clientTurnId
+      || (item.response.turnId || item.response.turn_id) === run.turnId));
   const sending = localActivitySending || Boolean(activeRuntimeCancelTarget);
   const runtimeAwareChatSidebar = useMemo(() => {
     const visibleChatId = activeView === "chat" ? activeChatId : "";
@@ -1611,8 +1619,11 @@ export default function App() {
           if (!chat) setActiveView("chat");
           return;
         }
-        setActiveChatId(chat.id);
-        setActiveView("chat");
+        if (question.status === "pending") {
+          openChat(chat);
+          reopenAgentQuestion(question.questionId);
+          setReviewQuestionReveal({ chatId: chat.id, questionId: question.questionId });
+        }
       })().catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)));
     })
       .then((unlisten) => {
@@ -1627,7 +1638,7 @@ export default function App() {
       active = false;
       unlistenQuestionAction?.();
     };
-  }, [agentQuestions, chats, endpoint, setActiveChatId, setActiveView, setError]);
+  }, [agentQuestions, chats, endpoint, openChat, setActiveView, setError]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -4601,6 +4612,7 @@ export default function App() {
               onAnswerQuestion={answerRuntimeQuestion}
               onDismissQuestion={(questionId) => setDismissedQuestionIds((current) => new Set(current).add(questionId))}
               onReopenQuestion={reopenAgentQuestion}
+              reviewQuestionReveal={reviewQuestionReveal?.chatId === displayChat?.id ? reviewQuestionReveal : null}
               onReplyInChat={replyToAgentQuestionInComposer}
               focusInput={Boolean(pendingReplyQuestionId)}
               pendingReplyQuestionId={pendingReplyQuestionId}
@@ -4717,7 +4729,18 @@ export default function App() {
                   onClose={() => setPendingApprovalPanelOpen(false)}
                 />
               ) : undefined}
-              runtimeReviewCount={runtimeAttention.length}
+              runtimeReviewCount={questionReview.count || (runtimeReviewItem ? 1 : 0)}
+              onOpenRuntimeReview={() => {
+                const target = questionReview.target;
+                if (target) {
+                  openChat(target.chat);
+                  reopenAgentQuestion(target.question.questionId);
+                  setReviewQuestionReveal({ chatId: target.chat.id, questionId: target.question.questionId });
+                } else if (runtimeReviewItem) {
+                  document.querySelector(`[data-conversation-item-id="${CSS.escape(runtimeReviewItem.id)}"]`)
+                    ?.scrollIntoView({ block: "center" });
+                }
+              }}
               dismissedQuestion={dismissedAgentQuestion ? {
                 label: dismissedAgentQuestion.header || dismissedAgentQuestion.question || dismissedAgentQuestion.questionId,
                 onReopen: () => reopenAgentQuestion(dismissedAgentQuestion.questionId),

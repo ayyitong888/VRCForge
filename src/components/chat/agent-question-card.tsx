@@ -51,15 +51,14 @@ export function AgentQuestionCard({
     setIndex((current) => Math.min(current, Math.max(0, pendingQuestions.length - 1)));
   }, [pendingQuestions.length]);
 
+  const revealIndex = reveal ? pendingQuestions.findIndex((candidate) => candidate.questionId === reveal.questionId) : -1;
   useEffect(() => {
-    if (!reveal) return;
-    const nextIndex = pendingQuestions.findIndex((candidate) => candidate.questionId === reveal.questionId);
-    if (nextIndex < 0) return;
-    setIndex(nextIndex);
+    if (revealIndex < 0) return;
+    setIndex(revealIndex);
     setCollapsedQuestionId("");
     const frame = window.requestAnimationFrame(() => cardRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
-  }, [reveal]);
+  }, [reveal, revealIndex]);
 
   const question = pendingQuestions[index];
   const visible = Boolean(question && (collapsedQuestionId !== question.questionId || busyChoice));

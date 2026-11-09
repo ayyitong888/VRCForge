@@ -1,5 +1,6 @@
 import { Archive, ChevronDown, ChevronRight, FilePlus2, FileText, History, ListChecks } from "lucide-react";
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentRuntimeRun, WorkspaceDiffSummary } from "../../lib/api";
 import {
@@ -40,6 +41,22 @@ export function StatusDot({ status }: { status: "ok" | "warning" | "error" | "un
               : "bg-muted-foreground/40",
       )}
     />
+  );
+}
+
+export function RuntimeReviewButton({ count, onOpen }: { count: number; onOpen?: () => void }) {
+  const { t } = useTranslation();
+  if (!count || !onOpen) return null;
+  return (
+    <button type="button" data-vrcforge-status="runtime-attention" onClick={onOpen}
+      className="w-full rounded-md px-1 text-left hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      <RuntimeInfoRow
+        icon={<ListChecks className="h-4 w-4" />}
+        label={t("workspace.runtimeReviewTitle")}
+        value={t("workspace.runtimeReviewCount", { count })}
+        suffix={<StatusDot status="warning" />}
+      />
+    </button>
   );
 }
 

@@ -1,22 +1,31 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
 
 const bundle = await build({
   stdin: { resolveDir: process.cwd(), loader: "tsx", contents: `
-    import React from "react";
+    import React, { useState } from "react";
     import { createRoot } from "react-dom/client";
     import { RightRuntimeSidebar } from "./src/components/runtime/runtime-sidebar";
+    import { AgentQuestionCard } from "./src/components/chat/agent-question-card";
+    import { pendingQuestionReviewTargets, filterQuestionsForRuntimeScope } from "./src/lib/runtime-scope";
     import { initializeI18n } from "./src/i18n";
     const root = createRoot(document.getElementById("root"));
     const ready = initializeI18n();
-    window.showSidebar = async (state, pendingApprovals = 0, projectType = "unity", hasExternalPendingApprovals = false) => {
+    window.showSidebar = async (state, pendingApprovals = 0, projectType = "unity", hasExternalPendingApprovals = false, reviewFixture) => {
       await ready;
       window.approvalsOpened = false;
       const bridge = state === "offline" ? "warning" : state === "checking" ? "unknown" : "ok";
       const tools = state === "ready" ? "ok" : state === "checking" ? "unknown" : "warning";
-      root.render(<RightRuntimeSidebar
+      function Sidebar() {
+        const [active, setActive] = useState(reviewFixture?.activeChatId || "");
+        const [reveal, setReveal] = useState();
+        const { chats = [], questions = [] } = reviewFixture || {};
+        const review = pendingQuestionReviewTargets(chats, questions, active);
+        const currentChat = chats.find((chat) => chat.id === active);
+        return <><RightRuntimeSidebar
         runtimeConnected loadingUnityStatus={state === "checking"} workspaceProjectLabel="VRCForge"
         workspaceProjectType={projectType} projectWorkspace
         selectedProjectComponent={{status:"ok"}} backendComponent={{status:"ok"}} mcpPackageComponent={{status:"ok"}}
@@ -28,9 +37,21 @@ const bundle = await build({
         subAgentTaskCount={0} subAgentRunningTaskCount={0} subAgentCompletedTaskCount={0}
         userAttachmentSources={[]} approvalsLoaded pendingApprovals={pendingApprovals} workspaceSummary={null}
         hasExternalPendingApprovals={hasExternalPendingApprovals}
+        runtimeReviewCount={review.count}
+        onOpenRuntimeReview={() => {
+          setActive(review.target.chat.id);
+          setReveal({ questionId: review.target.question.questionId });
+        }}
         activeDesktopActions={[]} refreshUnityStatus={() => {}} providerTestAttempted={false}
         onHideSidebar={() => {}} onOpenPendingApprovals={() => window.approvalsOpened = true}
-        localizeHealthMessage={() => ""} />);
+        localizeHealthMessage={() => ""} />
+        <output data-review-owner>{active}</output>
+        {reveal && currentChat && <AgentQuestionCard
+          questions={filterQuestionsForRuntimeScope(questions, {sessionId: currentChat.sessionId, projectRoot: currentChat.projectPath || ""})}
+          reveal={reveal} onAnswerQuestion={() => { throw new Error("Navigation must not answer the question"); }} onDismissQuestion={() => {}} />}
+        </>;
+      }
+      root.render(<Sidebar />);
     };
   ` },
   bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic",
@@ -78,6 +99,30 @@ try {
   assert.equal(await page.evaluate(() => window.approvalsOpened), true);
   await show("ready", 1, "general", false);
   await approval.waitFor({ state: "detached" });
+  const fixture = process.env.VRCFORGE_REVIEW_REPLAY
+    ? JSON.parse(readFileSync(process.env.VRCFORGE_REVIEW_REPLAY, "utf8"))
+    : {
+      activeChatId: "unity",
+      chats: [
+        { id: "unity", sessionId: "unity-session", projectPath: "D:/Fixture", items: [{ type: "question_answer", questionId: "answered" }] },
+        { id: "other", sessionId: "other-session", projectPath: "", items: [] },
+      ],
+      questions: [
+        { questionId: "answered", sessionId: "unity-session", projectRoot: "D:/Fixture", status: "pending", needsUserAction: true },
+        { questionId: "pending", sessionId: "other-session", status: "pending", needsUserAction: true, question: "Which view should we look at first?", options: [{ id: "face", label: "Face" }] },
+      ],
+    };
+  const pending = fixture.questions.at(-1);
+  const owner = fixture.chats.find((chat) => chat.sessionId === pending.sessionId);
+  await show("ready", 0, "unity", false, fixture);
+  const review = page.getByRole("button", { name: /Task needs review/ });
+  assert.match(await review.innerText(), /1 task check/);
+  await review.click();
+  const card = page.locator("[data-chat-question-dock]");
+  await card.waitFor();
+  assert.equal(await page.locator("[data-review-owner]").textContent(), owner.id);
+  assert.ok((await card.innerText()).includes(pending.question));
+  assert.ok((await card.innerText()).includes(pending.options[0].label));
   console.log("Unity readiness, environment disclosure and external approval access in general workspaces passed");
 } finally {
   await browser?.close();

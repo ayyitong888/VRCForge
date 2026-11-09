@@ -2,6 +2,7 @@ import type { AgentApproval, AgentQuestion } from "./api";
 import type { ChatThread } from "./chat-types";
 import { normalizeProjectPathKey } from "./project-path";
 import { approvalIdFromResponse } from "./runtime-parsing";
+import { isBlockingAgentQuestion } from "./agent-question-notifications";
 
 export type RuntimeScope = {
   sessionId: string;
@@ -61,4 +62,15 @@ export function filterQuestionsForRuntimeScope(
 ): AgentQuestion[] {
   if (!scope.sessionId.trim()) return [];
   return questions.filter((question) => questionBelongsToRuntimeScope(question, scope, { requireSession: true }));
+}
+
+export function pendingQuestionReviewTargets(chats: ChatThread[], questions: AgentQuestion[], activeChatId: string) {
+  const targets = questions.filter(isBlockingAgentQuestion).flatMap((question) => {
+    const chat = chats.find((item) => !item.archived && questionBelongsToRuntimeScope(
+      question, { sessionId: item.sessionId, projectRoot: item.projectPath }, { requireSession: true },
+    ));
+    if (!chat || chat.items.some((item) => item.type === "question_answer" && item.questionId === question.questionId)) return [];
+    return [{ chat, question }];
+  });
+  return { count: targets.length, target: targets.find(({ chat }) => chat.id === activeChatId) || targets[0] };
 }
