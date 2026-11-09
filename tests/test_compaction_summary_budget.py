@@ -31,7 +31,21 @@ def test_native_no_room_for_minimum_summary_never_calls_compactor():
     plan(planner, turn)
     assert compactor.calls == []
     assert turn.compaction["applied"] is False
+    assert turn.compaction["failureClass"] == "insufficient_summary_budget"
     assert turn.snapshot()["messages"][:len(before["messages"])] == before["messages"]
+
+
+def test_native_small_window_uses_space_below_trigger_when_preferred_target_is_too_small():
+    compactor = Compactor()
+    state, planner, model, turn = fixture(compactor, current="retained current data " * 300, limit=8000)
+
+    result = plan(planner, turn)
+
+    assert result["nextStep"] == "done"
+    assert turn.compaction["applied"] is True
+    assert turn.compaction["targetAfterTokens"] < turn.compaction["afterTokens"] < turn.compaction["triggerTokens"]
+    assert len(compactor.calls) == len(model.requests) == 1
+    assert state._native_pending(turn.snapshot()) == set()
 
 
 @pytest.mark.parametrize("requested,effective", [(1,64),(64,64),(100,100)])

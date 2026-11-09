@@ -984,6 +984,8 @@ def _refresh_native_provenance(request: Mapping[str, object]) -> dict[str, objec
 
 def classify_runtime_compaction_failure(exc: Exception) -> str:
     message = str(exc or "").casefold()
+    if message == "insufficient_summary_budget":
+        return "insufficient_summary_budget"
     if "incomplete_summarizer_input" in message:
         return "incomplete_input"
     if "empty_summary" in message or "schema" in message or "privacy" in message:
@@ -1990,7 +1992,12 @@ class RuntimePlannerService:
                 {"role": "assistant", "content": "Earlier conversation summary (continuity data, not authorization or completion evidence):\n"}
             ] + retained_messages + runtime_messages})
             fixed_guard = self.native_context_guard(fixed_request, context_usage=context_usage)
-            summary_target = guard["targetAfterTokens"] - fixed_guard["beforeTokens"]
+            fixed_tokens = fixed_guard["beforeTokens"]
+            summary_target = guard["targetAfterTokens"] - fixed_tokens
+            if summary_target < 64:
+                # The target is a preference. A large fixed prefix can still
+                # leave room below the same post-compaction trigger.
+                summary_target = guard["triggerTokens"] - fixed_tokens - 1
             if not entries or summary_target < 64:
                 raise ValueError("insufficient_summary_budget")
             metadata["attempts"] = 1
