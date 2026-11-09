@@ -31,7 +31,8 @@ def resolve_unity_project_process_id(project_root: Path) -> int | None:
     # registration has loaded this module.
     from dashboard_server import list_running_unity_processes, unity_process_exactly_matches_project
 
-    matches = [process for process in list_running_unity_processes(require_discovery_evidence=True)
+    processes = list_running_unity_processes(require_discovery_evidence=True, exclude_asset_import_workers=True)
+    matches = [process for process in processes
                if unity_process_exactly_matches_project(process, project_root)]
     if not matches:
         return None

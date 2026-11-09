@@ -1482,7 +1482,9 @@ KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
         selected_project_path=lambda: DASHBOARD_STATE.selected_project_path,
         unity_editor_path=lambda: DASHBOARD_STATE.unity_editor_path,
         parse_editor_version=lambda version_file: parse_editor_version(version_file),
-        list_running_unity_processes_strict=lambda: list_running_unity_processes(require_discovery_evidence=True),
+        list_running_unity_processes_strict=lambda: list_running_unity_processes(
+            require_discovery_evidence=True, exclude_asset_import_workers=True
+        ),
         process_matches_project=lambda process, project_root: unity_process_exactly_matches_project(process, project_root),
         read_compile_errors=lambda params: read_agent_compile_errors(params),
         normalize_path=lambda value: normalize_path_string(value),
@@ -19009,7 +19011,9 @@ def _iter_processes(*, require_discovery_evidence: bool = False) -> list[Any]:
 def list_running_unity_processes(
     *,
     require_discovery_evidence: bool = False,
+    exclude_asset_import_workers: bool = False,
 ) -> list[dict[str, Any]]:
+    """Keep all Unity processes by default for callers that need offline proof."""
     if os.name != "nt":
         if require_discovery_evidence:
             raise UnityProcessDiscoveryUnavailable(
@@ -19050,6 +19054,15 @@ def list_running_unity_processes(
             process,
             require_discovery_evidence=require_discovery_evidence,
         )
+        if exclude_asset_import_workers:
+            raw_args = process.info.get("cmdline")
+            if isinstance(raw_args, (list, tuple)):
+                args = [str(arg).casefold() for arg in raw_args[1:]]
+                if "-adb2" in args and "-batchmode" in args and any(
+                    flag == "-name" and re.fullmatch(r"assetimportworker[0-9]*", value)
+                    for flag, value in zip(args, args[1:])
+                ):
+                    continue
         processes.append(
             {
                 "processId": process_id,
@@ -19073,7 +19086,7 @@ def extract_unity_project_path_from_command_line(command_line: str) -> str:
 def discover_running_unity_projects() -> list[dict[str, str]]:
     projects: list[dict[str, str]] = []
     seen: set[str] = set()
-    for process in list_running_unity_processes():
+    for process in list_running_unity_processes(exclude_asset_import_workers=True):
         path = extract_unity_project_path_from_command_line(str(process.get("commandLine") or ""))
         if not path:
             continue
