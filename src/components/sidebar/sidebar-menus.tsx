@@ -119,18 +119,18 @@ export function SidebarMenus({
           <button
             type="button"
             className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
-            onClick={() => onAskInNewSession(selectionMenu.text)}
-          >
-            <Bot className="h-3.5 w-3.5 shrink-0" />
-            {t("contextMenu.askInNewSession")}
-          </button>
-          <button
-            type="button"
-            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
             onClick={() => onAddSelectionToComposer(selectionMenu.text)}
           >
             <MessageSquare className="h-3.5 w-3.5 shrink-0" />
             {t("contextMenu.addToChat")}
+          </button>
+          <button
+            type="button"
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
+            onClick={() => onAskInNewSession(selectionMenu.text)}
+          >
+            <Bot className="h-3.5 w-3.5 shrink-0" />
+            {t("contextMenu.askInNewSession")}
           </button>
         </div>
       ) : null}
