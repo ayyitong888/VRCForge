@@ -1271,7 +1271,13 @@ export default function App() {
       return "persisted";
     },
   });
-  useTaskbarUnreadBadge(chats, backgroundGoalState?.unread);
+  useTaskbarUnreadBadge({
+    chats,
+    runs: runtimeRuns,
+    deliveries: backgroundGoalState?.unread,
+    approvals: runtimeConnected && bootstrap?.approvalsState?.ok !== false ? bootstrap?.approvals : undefined,
+    questions: runtimeConnected ? agentQuestions : undefined,
+  });
   useEffect(() => {
     if (!editingMessage || editingMessage.chatId === activeChatId) {
       return;

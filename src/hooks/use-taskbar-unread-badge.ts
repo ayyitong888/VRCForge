@@ -2,9 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Image } from "@tauri-apps/api/image";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauriRuntime } from "../lib/app-runtime";
-import type { AgentGoalDelivery } from "../lib/api/types";
-import type { ChatThread } from "../lib/chat-types";
-import { countUnreadChatReplies } from "../lib/chat-unread";
+import { countTaskbarAttention, type TaskbarAttention } from "../lib/taskbar-attention";
 
 function drawBadge(label: string): ImageData {
   const canvas = document.createElement("canvas");
@@ -22,13 +20,13 @@ function drawBadge(label: string): ImageData {
   return context.getImageData(0, 0, 32, 32);
 }
 
-export function useTaskbarUnreadBadge(chats: ChatThread[], deliveries?: AgentGoalDelivery[]) {
+export function useTaskbarUnreadBadge({ chats, deliveries, approvals, questions, runs }: TaskbarAttention) {
   const supported = isTauriRuntime() && navigator.userAgent.includes("Windows");
   const label = useMemo(() => {
     if (!supported) return "";
-    const count = countUnreadChatReplies(chats, deliveries);
+    const count = countTaskbarAttention({ chats, deliveries, approvals, questions, runs });
     return count > 99 ? "99+" : count ? String(count) : "";
-  }, [chats, deliveries, supported]);
+  }, [chats, deliveries, approvals, questions, runs, supported]);
   const pending = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {

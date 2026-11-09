@@ -49,6 +49,11 @@ type UseRuntimeWorkspaceParams = {
   chatIdForSessionId?: (sessionId: string) => string;
 };
 
+function retainRecentAgentQuestions(questions: AgentQuestion[]) {
+  let history = 0;
+  return questions.filter((question) => isBlockingAgentQuestion(question) || history++ < 8);
+}
+
 export function useRuntimeWorkspace({
   endpoint,
   runtimeConnected,
@@ -214,7 +219,7 @@ export function useRuntimeWorkspace({
     }
   }
 
-  function clearScopedRuntimeProjection() {
+  function clearScopedRuntimeProjection(keepBlockingQuestions = false) {
     if (isProjectWorkbenchSmokeMode()) {
       return;
     }
@@ -224,7 +229,7 @@ export function useRuntimeWorkspace({
     setDesktopBridge(null);
     setAgentGoals([]);
     setAgentProgress([]);
-    setAgentQuestions([]);
+    setAgentQuestions((items) => keepBlockingQuestions ? items.filter(isBlockingAgentQuestion) : []);
     setAgentMemory([]);
     setMemoryReviewUnreadCount(0);
     setMemoryReviewNeedsAttention(false);
@@ -242,6 +247,7 @@ export function useRuntimeWorkspace({
     // Project/session changes must invalidate the visible runtime projection
     // before the next paint. Otherwise a failed or slow snapshot can leave a
     // previous project's Save-as-Skill source actionable in the new project.
+    const keepBlockingQuestions = runtimeConnected && runtimeScopeRef.current.endpoint === endpoint;
     runtimeScopeRef.current = {
       token: runtimeScopeToken,
       endpoint,
@@ -250,7 +256,7 @@ export function useRuntimeWorkspace({
       projectRoot: activeRuntimeProjectPath || "",
     };
     runtimeRefreshSeqRef.current += 1;
-    clearScopedRuntimeProjection();
+    clearScopedRuntimeProjection(keepBlockingQuestions);
     if (!runtimeConnected) {
       activeDesktopRefreshSeqRef.current += 1;
       setActiveDesktopActions([]);
@@ -401,7 +407,7 @@ export function useRuntimeWorkspace({
       return;
     }
     if (!requestSessionId.trim()) {
-      clearScopedRuntimeProjection();
+      clearScopedRuntimeProjection(true);
       await refreshActiveDesktopActionState(showError, target);
       return;
     }
@@ -433,7 +439,7 @@ export function useRuntimeWorkspace({
       const scopedSessionId = requestSessionId.trim();
       const normalizeScopedRoot = (value?: string) => normalizeProjectPathKey(value).replace(/[\\]+$/, "");
       const scopedProjectRoot = normalizeScopedRoot(requestProjectRoot);
-      setAgentQuestions((current) => [
+      setAgentQuestions((current) => retainRecentAgentQuestions([
         ...nextQuestions,
         ...current.filter((question) => {
           const questionSessionId = String(question.sessionId || "").trim();
@@ -443,7 +449,7 @@ export function useRuntimeWorkspace({
             || (scopedProjectRoot && questionProjectRoot !== scopedProjectRoot)
             || (!scopedProjectRoot && questionProjectRoot);
         }),
-      ].slice(0, 8));
+      ]));
       notifyCallUserQuestions(nextQuestions);
       setAgentMemory(snapshot.memory?.memories ?? []);
       setMemoryReviewUnreadCount(Math.max(0, Number(snapshot.memoryReview?.unreadCount) || 0));
@@ -514,7 +520,7 @@ export function useRuntimeWorkspace({
 
   function upsertAgentQuestion(question: AgentQuestion, allowOutOfScope = false) {
     if (allowOutOfScope) {
-      setAgentQuestions((items) => [question, ...items.filter((item) => item.questionId !== question.questionId)].slice(0, 8));
+      setAgentQuestions((items) => retainRecentAgentQuestions([question, ...items.filter((item) => item.questionId !== question.questionId)]));
       return;
     }
     const scope = runtimeScopeRef.current;
@@ -529,7 +535,7 @@ export function useRuntimeWorkspace({
     if ((scopedProjectRoot && questionProjectRoot !== scopedProjectRoot) || (!scopedProjectRoot && questionProjectRoot)) {
       return;
     }
-    setAgentQuestions((items) => [question, ...items.filter((item) => item.questionId !== question.questionId)].slice(0, 8));
+    setAgentQuestions((items) => retainRecentAgentQuestions([question, ...items.filter((item) => item.questionId !== question.questionId)]));
   }
 
   function updateAgentQuestionContinuation(

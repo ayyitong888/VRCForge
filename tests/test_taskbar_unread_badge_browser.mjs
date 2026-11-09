@@ -36,17 +36,19 @@ let focused = false;
 document.hasFocus = () => focused;
 window.focusChatWindow = () => { focused = true; window.dispatchEvent(new Event('focus')); };
 const noop = () => {}, paths = [];
-const chat = (id) => ({id, sessionId:id, projectPath:'', projectType:'general', revision:0, items:[]});
-const reply = (id) => ({id, type:'agent', response:{plan:{reply:id}}});
+const chat = (id) => ({id, sessionId:id, projectPath:'', projectType:'general', revision:0, items:[{id:id+'-user',type:'user',text:'start'}]});
+const reply = (id) => ({id, type:'agent', response:{plan:{reply:id,nextStep:'done'}}});
 function Fixture() {
   const [activeView, setActiveView] = useState('chat');
   const [deliveries, setDeliveries] = useState([]);
+  const [approvals, setApprovals] = useState([]);
+  const [questions, setQuestions] = useState([]);
   const sessions = useChatSessions({endpoint:location.origin, activeView, runtimeConnected:false,
     projectPrefsReady:true, projectPaths:paths, customProjectPaths:paths, activeProjectPath:'',
     setActiveProjectPath:noop, setActiveView, setError:noop, expandProjectGroup:noop,
     initialChatState:{chats:[chat('a'),chat('b')],activeChatId:'a'}});
-  useTaskbarUnreadBadge(sessions.chats, deliveries);
-  window.fixture = {sessions, setActiveView, setDeliveries, reply};
+  useTaskbarUnreadBadge({ chats:sessions.chats, deliveries, approvals, questions });
+  window.fixture = {sessions, setActiveView, setDeliveries, setApprovals, setQuestions, reply};
   return null;
 }
 createRoot(document.getElementById('root')).render(<Fixture/>);
@@ -67,17 +69,16 @@ try {
     sessions.appendToChat('a', reply('a2'));
     sessions.appendToChat('b', reply('b1'));
     sessions.appendToChat('b', reply('b2'));
-    sessions.appendToChat('b', { id:'stream', type:'streaming' });
     const delivery = { deliveryId:'delivery-b2', chatId:'b', agentItemId:'b2' };
     setDeliveries([delivery, { ...delivery }]); // Overlap while acknowledging a different chat.
   });
-  await expectBadge('4');
+  await expectBadge('2');
   assert.deepEqual(await page.evaluate(() => window.fixture.sessions.chats.map((chat) => chat.lastViewedAt ?? null)), [null, null]);
   await page.evaluate(() => window.focusChatWindow());
-  await expectBadge('2');
+  await expectBadge('1');
   await page.evaluate(() => window.fixture.setActiveView('settings'));
   await page.evaluate(() => window.fixture.sessions.appendToChat('a', window.fixture.reply('a3')));
-  await expectBadge('3');
+  await expectBadge('2');
   await page.evaluate(() => {
     const { sessions, setDeliveries } = window.fixture;
     sessions.openChat(sessions.chats[1]);
@@ -86,6 +87,25 @@ try {
   await expectBadge('1');
   assert.deepEqual(await page.evaluate(() => window.fixture.sessions.chats.map((chat) => chat.lastViewedAt)), ['a2', 'b2']);
   await page.evaluate(() => window.fixture.sessions.openChat(window.fixture.sessions.chats[0]));
+  await expectBadge('');
+
+  await page.evaluate(() => {
+    const { setApprovals, setDeliveries, setQuestions } = window.fixture;
+    const external = { id:'mcp-approval', status:'pending', approvalChannel:'external_mcp', projectRoot:'another-project' };
+    setApprovals([external, {...external}, { id:'old', status:'rejected' }]);
+    setQuestions([
+      { questionId:'blocking', sessionId:'b', status:'pending', needsUserAction:true },
+      { questionId:'optional', sessionId:'a', status:'pending', needsUserAction:false },
+    ]);
+    setDeliveries([{ deliveryId:'waiting', chatId:'b', approvalId:external.id }]);
+  });
+  await expectBadge('2');
+  await page.evaluate(() => {
+    window.fixture.setApprovals([{ id:'mcp-approval', status:'approved' }]);
+    window.fixture.setDeliveries([]);
+  });
+  await expectBadge('1');
+  await page.evaluate(() => window.fixture.setQuestions([{ questionId:'blocking', status:'answered' }]));
   await expectBadge('');
 } finally {
   await browser.close();
