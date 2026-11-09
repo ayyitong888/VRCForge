@@ -15,10 +15,11 @@ from tests.test_native_runtime_gateway import NativeModel, NativeTurn, call, run
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Edge/Chrome acceptance")
-@pytest.mark.parametrize("decision", ["manual", "age", "approve", "deny"])
+@pytest.mark.parametrize("decision", ["manual", "age", "natural_age", "approve", "deny", "deny_open", "stop_open"])
 def test_native_browser_turn_honors_user_click_decision(tmp_path, monkeypatch, decision):
     acknowledged = Event()
     rendered = Event()
+    visited = Event()
     completed = Event()
     continuations = []
 
@@ -27,6 +28,7 @@ def test_native_browser_turn_honors_user_click_decision(tmp_path, monkeypatch, d
             if self.path == "/state":
                 body = b"ready" if acknowledged.is_set() else b"waiting"
             elif self.path == "/":
+                visited.set()
                 body = b"""<!doctype html><title>Reading fixture</title><main><h1>Verification needed</h1></main>
                 <script>const timer = setInterval(async () => {
                   if (await (await fetch('/state')).text() !== 'ready') return;
@@ -35,8 +37,8 @@ def test_native_browser_turn_honors_user_click_decision(tmp_path, monkeypatch, d
                   await fetch('/rendered', {method: 'POST'});
                 }, 50);</script>"""
                 if decision != "manual":
-                    gate = "Are you 18 or older?" if decision == "age" else "Cookie settings"
-                    label = "Yes" if decision == "age" else "Accept all cookies"
+                    gate = "Are you 18 or older?" if decision in ("age", "natural_age") else "Cookie settings"
+                    label = "Yes" if decision in ("age", "natural_age") else "Accept all cookies"
                     body = f"""<!doctype html><title>Reading fixture</title><main><h1>{gate}</h1>
                     <button onclick="document.querySelector('main').innerHTML='<p>Readback token lavender-934</p>';fetch('/rendered',{{method:'POST'}})">{label}</button>
                     </main>""".encode()
@@ -95,14 +97,15 @@ def test_native_browser_turn_honors_user_click_decision(tmp_path, monkeypatch, d
 
             def click_from_snapshot(request):
                 nonlocal target
-                receipt = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == "open")
-                label = "Yes" if decision == "age" else "Accept all cookies"
+                open_call = "open-approved" if decision == "natural_age" else "open"
+                receipt = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == open_call)
+                label = "Yes" if decision in ("age", "natural_age") else "Accept all cookies"
                 target = re.search(r"\[button (b[^\]]+)\] " + label, receipt)[1]
                 return call("click", "browser", {"operation": "click", "target": target})
 
             def repeat_exact_click(request):
                 receipt = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == "click")
-                if decision == "approve":
+                if decision in ("approve", "natural_age"):
                     assert f"authorized only browser click target {target}" in receipt
                 else:
                     assert "did not authorize the click" in receipt
@@ -120,20 +123,36 @@ def test_native_browser_turn_honors_user_click_decision(tmp_path, monkeypatch, d
             actions = {
                 "manual": [request_user, read_current_tab],
                 "age": [click_from_snapshot],
+                "natural_age": [click_from_snapshot, repeat_exact_click],
                 "approve": [click_from_snapshot, repeat_exact_click],
                 "deny": [click_from_snapshot, repeat_exact_click],
             }
+            natural = decision in ("natural_age", "deny_open", "stop_open")
+
+            def repeat_open(request):
+                receipt = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == "open")
+                assert ("authorized only this browser open request" if decision == "natural_age" else "did not allow opening the page") in receipt
+                return call("open-approved", "browser", {"operation": "open", "url": url})
+
+            def reply_after_denial(request):
+                receipt = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == "open-approved")
+                assert "did not allow opening this page" in receipt
+                return {"role": "assistant", "content": "Site access denied."}
+
             model = NativeModel([
                 call("load", "load_internal_tool_block", {"block": "research/web_research", "tools": ["browser"]}),
                 call("open", "browser", {"operation": "open", "url": url}),
-                *actions[decision],
-                reply_from_receipt,
+                *([repeat_open] if natural else []),
+                *actions.get(decision, []),
+                reply_after_denial if decision in ("deny_open", "stop_open") else reply_from_receipt,
             ])
             gateway.bind_runtime_planner(RuntimePlannerService(
                 catalog=catalog, desktop=dashboard._RuntimePlannerDesktopObservation(), model=model, turn=NativeTurn(),
             ))
             request = AgentRuntimeMessageRequest.model_validate({
-                "message": "/browser " + ("--18-plus " if decision != "manual" else "") + "Read the author instructions from the test page.",
+                "message": (f"Open {url} and read the author instructions."
+                            if natural else "/browser " + ("--18-plus " if decision != "manual" else "")
+                            + "Read the author instructions from the test page."),
                 "session_id": "browser-session", "clientTurnId": "browser-turn",
             })
             initial = asyncio.run(dashboard.app_agent_runtime_message(request))
@@ -143,14 +162,39 @@ def test_native_browser_turn_honors_user_click_decision(tmp_path, monkeypatch, d
                 return
             assert initial["plan"]["nextStep"] == "needs_user_action", initial["plan"]
             question = gateway.questions.list(session_id="browser-session")["questions"][0]
+            if natural:
+                assert question["header"] == "Open a website"
+                assert url.rstrip("/") in question["question"]
+                assert not visited.is_set()
+                if decision == "stop_open":
+                    gateway.request_runtime_cancel({"sessionId": "browser-session", "clientTurnId": "browser-turn"})
+                    assert not gateway.questions.list(session_id="browser-session")["questions"]
+                    assert not visited.is_set()
+                    return
+                gateway.questions.answer(question["questionId"], {
+                    "sessionId": "browser-session", "selectedOptionId": "deny" if decision == "deny_open" else "approve",
+                })
+                assert completed.wait(10), "The site decision did not resume the browser task"
+                if decision == "deny_open":
+                    assert "Site access denied." in continuations[0]["plan"]["reply"]
+                    assert not visited.is_set()
+                    return
+                assert visited.is_set() and not rendered.is_set()
+                completed.clear()
+                continuations.clear()
+                question = gateway.questions.list(session_id="browser-session")["questions"][0]
+                assert question["header"] == "Confirm your age"
+                assert "I am 18 or older" in question["options"][0]["label"]
             if decision == "manual":
                 acknowledged.set()
                 assert rendered.wait(8), "The original browser tab did not render the confirmed page"
                 answer = {"answer": "Completed in the open tab."}
-            else:
+            elif decision != "natural_age":
                 assert "Accept all cookies" in question["question"]
                 assert not rendered.is_set(), "Adult attestation cannot authorize a cookie click"
                 answer = {"selectedOptionId": decision}
+            else:
+                answer = {"selectedOptionId": "approve"}
             gateway.questions.answer(question["questionId"], {"sessionId": "browser-session", **answer})
             assert completed.wait(10), "The user answer did not resume the browser task"
             expected = "Click denied." if decision == "deny" else "Readback token lavender-934"

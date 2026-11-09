@@ -93,7 +93,8 @@ def _http_url(value: Any) -> bool:
         return False
     try:
         url = urlsplit(value)
-        return bool(url.scheme in {"http", "https"} and url.hostname and url.username is None and url.password is None)
+        return bool(url.scheme in {"http", "https"} and url.hostname and url.username is None
+                    and url.password is None and (url.port is None or url.port > 0))
     except ValueError:
         return False
 
@@ -307,10 +308,20 @@ class BrowserService:
         self._janitor: threading.Thread | None = None
 
     @staticmethod
+    def open_site(params: dict[str, Any]) -> str:
+        url = params.get("url")
+        return _site_origin(url) if _http_url(url) and params.get("browser", "") in ("", "edge", "chrome") else ""
+
+    @staticmethod
     def _allows(browser: _Browser, client_turn_id: str, parent_turn_id: str) -> bool:
         if browser.client_turn_id == client_turn_id:
             return not parent_turn_id or browser.parent_turn_id == parent_turn_id
         return bool(parent_turn_id and browser.client_turn_id == parent_turn_id)
+
+    def has_tab(self, session_id: str, client_turn_id: str) -> bool:
+        with self._lock:
+            browser = self._browsers.get(session_id)
+            return browser is not None and browser.client_turn_id == client_turn_id
 
     def can_resume(self, session_id: str, client_turn_id: str, parent_turn_id: str) -> bool:
         if not session_id or not client_turn_id or not parent_turn_id:
@@ -515,11 +526,12 @@ class BrowserService:
             raise _StaleTarget(stale)
 
         site = _site_origin(frame["url"])
+        age_confirmation = _is_age_confirmation(nodes, current)
         age_only = (authority != "approved" and browser.adult_confirmed and site not in browser.age_click_sites
-                    and _is_age_confirmation(nodes, current))
+                    and age_confirmation)
         if authority != "approved" and not age_only:
             return {"ok": False, "status": "needs_user_action", "code": "browser_click_confirmation_required",
-                    "target": target_ref, "label": target.label, "site": site,
+                    "target": target_ref, "label": target.label, "site": site, "ageConfirmation": age_confirmation,
                     "summary": "This browser control requires user approval before clicking."}
 
         fresh_frame = self._page_frame(browser, cancelled)

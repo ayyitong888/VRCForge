@@ -5174,7 +5174,7 @@ class RuntimePlannerService:
                     "It reads HTTP source only: it does not execute JavaScript, click controls, or retain a browser session. "
                     "Follow returned links for instructions. If the source is a confirmation/login page or requires interaction, "
                     + (f"use {browser_tool.name} from {browser_tool.block} to open the page, inspect its controls, and read the same tab after any confirmed click. "
-                       if browser_tool else "report the gate and ask the user to start a browser turn with /browser if a live browser is needed. ")
+                       if browser_tool else "report the gate and explain that a live browser is unavailable for this turn. ")
                     + "Repeated HTTP fetches are not browser interaction. "
                     "Do not treat a successful fetch of a gate page as having read the requested instructions. "
                     "Keep unresolved usage requirements from earlier conversation evidence until actual instructions resolve them. "

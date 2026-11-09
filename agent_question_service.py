@@ -468,8 +468,8 @@ class AgentQuestionService:
                 dispatch_seed["_authenticatedQuestionFeedbackPending"] = True
             question_snapshot = payload.get("question")
             if isinstance(question_snapshot, Mapping):
-                if dispatch_seed.get("_browserClickTarget"):
-                    dispatch_seed["_authenticatedBrowserClickApproved"] = question_snapshot.get("selectedOptionId") == "approve"
+                if dispatch_seed.get("_browserClickTarget") or dispatch_seed.get("_browserOpenRequest"):
+                    dispatch_seed["_authenticatedBrowserApproved"] = question_snapshot.get("selectedOptionId") == "approve"
                 revision = question_snapshot.get("questionFeedbackRevision")
                 if revision is not None:
                     dispatch_seed["_questionFeedbackRevision"] = revision

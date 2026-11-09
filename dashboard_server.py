@@ -3250,13 +3250,14 @@ async def app_chat_title(request: ChatTitleRequest) -> dict[str, Any]:
 
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
-    return await _execute_app_agent_runtime_message(runtime_request, human_user_message=True)
+    return await _execute_app_agent_runtime_message(runtime_request, human_user_message=True, browser_available=True)
 
 
 async def _execute_app_agent_runtime_message(
     runtime_request: AgentRuntimeMessageRequest,
     *,
     human_user_message: bool,
+    browser_available: bool = False,
 ) -> dict[str, Any]:
     runtime_params = agent_runtime_request_payload(runtime_request)
     browser_requested = False
@@ -3321,12 +3322,16 @@ async def _execute_app_agent_runtime_message(
                 base_url=base_url,
             )
         else:
+            browser_options = {}
+            if browser_requested:
+                browser_options = {"browser_requested": True, "browser_adult_confirmed": browser_adult_confirmed}
+            elif browser_available:
+                browser_options = {"browser_available": True}
             payload = await asyncio.to_thread(
                 AGENT_GATEWAY.runtime_message,
                 runtime_params,
                 agent_name=runtime_request.agent_name,
-                **({"browser_requested": True, "browser_adult_confirmed": browser_adult_confirmed}
-                   if browser_requested else {}),
+                **browser_options,
             )
         runtime_returned = True
         payload = attach_agent_harness_journey_receipt(payload)
@@ -3392,7 +3397,7 @@ async def issue_agent_harness_journey(
 ) -> dict[str, Any]:
     """Run one explicit App-owned task and return only a short-lived safe receipt."""
 
-    payload = await app_agent_runtime_message(runtime_request)
+    payload = await _execute_app_agent_runtime_message(runtime_request, human_user_message=True)
     receipt = payload.get("harnessJourneyReceipt")
     if not isinstance(receipt, dict):
         raise HTTPException(
@@ -10359,7 +10364,7 @@ async def _telegram_runtime_message(params: dict) -> dict:
     # The authenticated channel composition owns this capability for one turn.
     # asyncio.to_thread preserves it without a global flag or a model-supplied field.
     with bind_channel_project_selection():
-        return await app_agent_runtime_message(AgentRuntimeMessageRequest(**params))
+        return await _execute_app_agent_runtime_message(AgentRuntimeMessageRequest(**params), human_user_message=True)
 
 
 async def _telegram_model_catalog(_project_root: str) -> list[dict[str, Any]]:
@@ -27628,7 +27633,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
     AGENT_GATEWAY.register_tool(
         "vrcforge_browser",
-        "when-to-use: In a user-authorized /browser turn, use operation=open with an HTTP(S) URL in a visible app-owned Edge or Chrome window. Use operation=read to refresh the current tab, or pass nextOffset as offset to continue its snapshot. To click a current page control, use operation=click with its exact target ref. An adult age check may proceed when the user affirmed 18+ in this task. Other clicks, including cookies and account authorization, raise an App confirmation. If approved, repeat that exact click once. Ask the user to handle any credential entry in the same tab, then read again. Use operation=disconnect when finished. when-NOT-to-use: Do not use this for background work, credentials, CAPTCHA, or desktop actions. Negative example: do not present a confirmation page as the requested document.",
+        "when-to-use: In an App conversation, use the built-in browser when the user's task requires a rendered page, JavaScript, or interacting with a website. Open an HTTP(S) URL with operation=open. The App handles site access confirmation and returns the exact request to repeat if approved. Use operation=read to refresh the same tab, or pass nextOffset as offset. Use operation=click with the exact target ref for a visible control. Cookie choices, account authorization, and age confirmation go through the App. If approved, repeat only that exact click once. Ask the user to handle credential entry in the same tab, then read again. Use operation=disconnect when finished. when-NOT-to-use: Do not use this for background work, entering credentials, solving CAPTCHA, or desktop actions. For plain HTTP documents, use web_fetch. Negative example: do not present a confirmation page as the requested document.",
         "read/debug",
         AGENT_GATEWAY.run_browser_tool,
     )

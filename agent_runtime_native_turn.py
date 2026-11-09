@@ -63,9 +63,19 @@ class NativeRuntimeTurn:
                     name = args.get("tool") if isinstance(args, dict) else None
                 if name in {"vrcforge_browser", "browser"}:
                     browser_args = args.get("arguments") if isinstance(args, Mapping) else None
-                    if not isinstance(browser_args, Mapping) or not seed.get("_browserClickTarget") or (
-                        browser_args.get("operation"), browser_args.get("target")
-                    ) != ("click", seed["_browserClickTarget"]):
+                    if not isinstance(browser_args, Mapping):
+                        continue
+                    open_request = seed.get("_browserOpenRequest")
+                    if isinstance(open_request, Mapping):
+                        matches = browser_args.get("operation") == "open" and (
+                            browser_args.get("url"), browser_args.get("browser", "")
+                        ) == (open_request.get("url"), open_request.get("browser", ""))
+                    else:
+                        target = seed.get("_browserClickTarget")
+                        matches = bool(target) and (
+                            browser_args.get("operation"), browser_args.get("target")
+                        ) == ("click", target)
+                    if not matches:
                         continue
                 elif name not in {"vrcforge_ask_user", "vrcforge_call_user", "ask_user", "call_user"}:
                     continue
