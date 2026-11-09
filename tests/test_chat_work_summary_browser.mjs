@@ -103,11 +103,11 @@ try {
   assert.equal(await interrupted.locator('[data-agent-turn-cancelled]').count(),0,'transport interruption does not claim backend cancellation');
   const history=page.locator('#history'); const processFold=history.locator('[data-agent-turn-process-group]');
   await processFold.waitFor();
-  assert.equal(await processFold.locator('[data-agent-turn-process-summary]').innerText(),'Inspecting outfit bindings.','collapsed process retains the public action summary');
+  const summaryButton=processFold.locator('button').first();
+  assert.doesNotMatch(await summaryButton.innerText(), /Called \d+ tools|Inspecting outfit bindings/, 'process header omits the tool total and progress preview');
   assert.match(await processFold.locator('[data-agent-operation-summary-status]').innerText(),/1/,'collapsed process discloses historical failures');
   assert.ok((await history.innerText()).includes('The follow-up inspection completed.'),'history failure does not hide the final result');
   assert.equal(await history.locator('[role="alert"]').count(),0,'historical failure does not declare a new current blocker');
-  const summaryButton=processFold.locator('button').first();
   const colors=(button)=>button.evaluate(async element=>{
     const style=getComputedStyle(element);
     void style.color;
@@ -124,6 +124,7 @@ try {
   };
   await checkTextHover(summaryButton);
   await summaryButton.click();
+  assert.match(await processFold.innerText(), /Inspecting outfit bindings/, 'expanding the process reveals the original progress update');
   const group=processFold.locator('[data-agent-tool-call-group]');
   const title=await group.locator('[data-agent-tool-group-title]').innerText();
   assert.doesNotMatch(title,/Called 2 tools|调用了 2 个工具/,'group heading describes operations rather than only count');

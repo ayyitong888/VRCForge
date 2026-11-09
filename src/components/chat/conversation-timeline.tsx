@@ -468,7 +468,6 @@ export function buildDurableTimelineRows(
     }
   };
   const processInvocations: TimelineInvocation[] = [];
-  let lastPublicUpdate = "";
   let pendingCalls: Array<{ invocation: TimelineInvocation; detail: unknown }> = [];
   const flushToolCalls = () => {
     if (!pendingCalls.length) return;
@@ -505,7 +504,6 @@ export function buildDurableTimelineRows(
       if (entry.id === finalAssistant?.id) {
         rows.push(renderFinalAssistantRow(entry, terminalFailureCode, options.renderQuestionActions?.(entry.text)));
       } else {
-        lastPublicUpdate = entry.text.split("\n").find((line) => line.trim())?.trim() || "";
         processRows.push(
           <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed" data-chat-quote-content>
             <ChatMarkdown text={entry.text} />
@@ -542,14 +540,11 @@ export function buildDurableTimelineRows(
     ));
   }
   if (processRows.length) {
-    const toolCallCount = processInvocations.filter((invocation) => !["process", "subagent"].includes(invocation.kind)).length;
     const group = (
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow
           kind="process"
           title={turnProcessDisplayTitle(turnElapsed, i18n.t)}
-          summaryMeta={toolCallCount ? i18n.t("agent.timeline.callTools", { count: toolCallCount }) : undefined}
-          summary={lastPublicUpdate}
           statusLabel={historicalFailureLabel(processInvocations)}
           showStatus={processInvocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
@@ -1347,7 +1342,6 @@ function WorkSegmentRow({
   kind,
   title,
   summaryMeta,
-  summary,
   statusLabel,
   statusTone,
   showStatus = false,
@@ -1362,7 +1356,6 @@ function WorkSegmentRow({
   kind: TimelineBatchKind;
   title: string;
   summaryMeta?: string;
-  summary?: string;
   statusLabel: string;
   statusTone: "danger" | "warn" | "muted";
   showStatus?: boolean;
@@ -1397,7 +1390,6 @@ function WorkSegmentRow({
               <span className="truncate" data-agent-turn-process-title>{title}</span>
               {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
             </span>
-            {summaryMeta ? <span className="min-w-0 truncate text-xs opacity-70" data-agent-turn-tool-count>{summaryMeta}</span> : null}
             {showStatus ? <span data-agent-operation-summary-status className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
           </>
         ) : (
@@ -1411,7 +1403,6 @@ function WorkSegmentRow({
             </span>
           </>
         )}
-        {summary ? <span className="basis-full truncate text-xs font-normal opacity-80" title={summary} data-agent-turn-process-summary>{summary}</span> : null}
       </button>
       {open ? (
         <div

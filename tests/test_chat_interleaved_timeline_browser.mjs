@@ -237,9 +237,7 @@ try {
       if (await header.getAttribute("aria-expanded") === "true") await header.click();
       await checkOrder();
       const title = (await header.locator("[data-agent-turn-process-title]").innerText()).trim();
-      const metadata = header.locator("[data-agent-turn-tool-count]");
-      assert.equal(await metadata.count(), 1, "real tool total is visible as secondary metadata");
-      assert.notEqual(title, (await metadata.innerText()).trim(), "real runtime tool count does not replace the process title");
+      assert.doesNotMatch(await header.innerText(), /Called \d+ tools/, "real process header omits the tool total");
       const events = item.type === "agent" ? item.response.timeline || [] : item.timeline || [];
       const pendingActions = new Map();
       let invocations = 0;
@@ -256,8 +254,6 @@ try {
           else invocations += 1;
         }
       }
-      const displayedCount = Number((await metadata.innerText()).match(/[0-9]+/)?.[0]);
-      assert.equal(displayedCount, invocations, "real owning-turn tool count matches original call/result occurrences without duplicate prepared-write events");
       receipts.push({ turnId, invocations, title, initialUserBeforeProcessHeader: true });
     }
     if (process.env.VRCFORGE_TURN_EVIDENCE_DIR) {
@@ -286,7 +282,7 @@ try {
       await writeFile(process.env.VRCFORGE_TURN_EVIDENCE_DIR + "/current-browser-validation.json", JSON.stringify({ replayId: currentReplay.id, receipts, errors }, null, 2));
     }
     assert.deepEqual(errors, [], "actual current runtime data renders without browser errors");
-    console.log("current runtime replay: initial user order, semantic process titles, tool ownership counts, collapsed and expanded passed");
+    console.log("current runtime replay: initial user order, compact process titles, collapsed and expanded passed");
   } else {
   const live = page.locator("#live");
   const restored = page.locator("#restored");
@@ -345,13 +341,10 @@ try {
   await assertTurnLayout(noElapsed);
   const noElapsedHeader = noElapsed.locator("[data-agent-turn-process-group] button").first();
   const processTitle = noElapsedHeader.locator("[data-agent-turn-process-title]");
-  const toolCount = noElapsedHeader.locator("[data-agent-turn-tool-count]");
   assert.equal(await processTitle.count(), 1, "process has one semantic primary title when elapsed time is unavailable");
-  assert.equal(await toolCount.count(), 1, "tool count remains available as secondary process metadata");
   assert.ok((await processTitle.innerText()).trim(), "the semantic process title is not empty");
   assert.doesNotMatch(await processTitle.innerText(), /1|工具|tools?\b|calls?\b/i, "tool count is not the primary process title");
-  assert.match(await toolCount.innerText(), /1/, "secondary tool metadata retains the actual invocation count");
-  assert.ok(await toolCount.evaluate((node) => !node.closest("[data-agent-turn-process-title]")), "tool count is separate from the primary title");
+  assert.doesNotMatch(await noElapsedHeader.innerText(), /Called \d+ tools/, "process header omits the tool count even when duration is unavailable");
   await assertTurnLayout(steeringExpanded);
   await steeringGroup.locator("button").first().click();
   const steeringRows = await steeringGroup.locator("[data-agent-process-content] > div").evaluateAll((rows) => rows.map((row) => (
