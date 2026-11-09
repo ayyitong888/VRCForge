@@ -46,6 +46,7 @@ export function RightRuntimeSidebar({
   onOpenUserAttachmentSource,
   approvalsLoaded,
   pendingApprovals,
+  hasExternalPendingApprovals,
   approvalPanel,
   runtimeReviewCount = 0,
   dismissedQuestion,
@@ -82,6 +83,7 @@ export function RightRuntimeSidebar({
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
   approvalsLoaded: boolean;
   pendingApprovals: number;
+  hasExternalPendingApprovals?: boolean;
   approvalPanel?: ReactNode;
   runtimeReviewCount?: number;
   dismissedQuestion?: { label: string; onReopen: () => void };
@@ -185,6 +187,7 @@ export function RightRuntimeSidebar({
             onLocateUserAttachmentSource={onLocateUserAttachmentSource}
             onOpenUserAttachmentSource={onOpenUserAttachmentSource}
             pendingApprovals={pendingApprovals}
+            hasExternalPendingApprovals={hasExternalPendingApprovals}
             runtimeReviewCount={runtimeReviewCount}
             workspaceSummary={workspaceSummary}
             activeDesktopActions={activeDesktopActions}

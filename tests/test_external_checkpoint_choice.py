@@ -9,6 +9,7 @@ import pytest
 
 from agent_approval_transactions import AgentApprovalTransactionService
 from agent_gateway import AgentGateway, AgentGatewayError
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 TOOL = "vrcforge_checkpoint_choice_fixture"
@@ -137,7 +138,7 @@ def test_external_confirmation_shows_quote_rejects_other_session_and_consumes_on
     assert "No restore point" in proposal["message"] and QUOTE in proposal["message"]
     assert proposal["taskContext"]["checkpointUserPolicy"]["sourceQuote"] == QUOTE
     assert proposal["rollbackAvailable"] is False
-    confirmation = {**proposal["confirmation"], "decision": "approve"}
+    confirmation = review_external_proposal(gateway, proposal)
     confirmed_args = {**args, "confirmation": confirmation}
     assert call(gateway, confirmed_args, "external:other")["ok"] is False
     assert calls == []
@@ -205,7 +206,7 @@ def test_reenable_invalidates_pending_skip_confirmation(tmp_path):
     off = call(gateway, off_args)
     on = call(gateway, arguments(project, checkpointChoice={"mode": "require", "quote": "Enable checkpoints"}))
     assert on["status"] == "user_confirmation_required"
-    result = call(gateway, {**off_args, "confirmation": {**off["confirmation"], "decision": "approve"}})
+    result = call(gateway, {**off_args, "confirmation": review_external_proposal(gateway, off)})
     assert result["ok"] is False
     assert "re-enabled" in str(result)
     assert calls == []

@@ -76,9 +76,7 @@ def test_external_write_schema_accepts_returned_confirmation(mode: str) -> None:
         "planDigest": "c" * 64,
         "toolDefinitionDigest": "d" * 64,
         "expiresAt": "2026-11-04T10:00:00+00:00",
-        "requiredDecision": ["approve", "reject"],
-        "decisionPlacement": "arguments.confirmation.decision",
-        "decision": "approve",
+        "decisionSurface": "vrcforge_app",
     }
 
     Draft202012Validator(tool["inputSchema"]).validate({"value": 1, "confirmation": confirmation})
@@ -137,9 +135,7 @@ def test_reported_write_workflows_accept_confirmation_in_external_manifest(catal
         "planDigest": "c" * 64,
         "toolDefinitionDigest": "d" * 64,
         "expiresAt": "2026-11-04T10:00:00+00:00",
-        "requiredDecision": ["approve", "reject"],
-        "decisionPlacement": "arguments.confirmation.decision",
-        "decision": "approve",
+        "decisionSurface": "vrcforge_app",
     }
 
     assert descriptor["_meta"]["permission"] == "Write"

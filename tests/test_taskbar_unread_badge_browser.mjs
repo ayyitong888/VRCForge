@@ -43,12 +43,13 @@ function Fixture() {
   const [deliveries, setDeliveries] = useState([]);
   const [approvals, setApprovals] = useState([]);
   const [questions, setQuestions] = useState([]);
+  const [externalConfirmationCount, setExternalConfirmationCount] = useState(0);
   const sessions = useChatSessions({endpoint:location.origin, activeView, runtimeConnected:false,
     projectPrefsReady:true, projectPaths:paths, customProjectPaths:paths, activeProjectPath:'',
     setActiveProjectPath:noop, setActiveView, setError:noop, expandProjectGroup:noop,
     initialChatState:{chats:[chat('a'),chat('b')],activeChatId:'a'}});
-  useTaskbarUnreadBadge({ chats:sessions.chats, deliveries, approvals, questions });
-  window.fixture = {sessions, setActiveView, setDeliveries, setApprovals, setQuestions, reply};
+  useTaskbarUnreadBadge({ chats:sessions.chats, deliveries, approvals, questions, externalConfirmationCount });
+  window.fixture = {sessions, setActiveView, setDeliveries, setApprovals, setQuestions, setExternalConfirmationCount, reply};
   return null;
 }
 createRoot(document.getElementById('root')).render(<Fixture/>);
@@ -106,6 +107,10 @@ try {
   });
   await expectBadge('1');
   await page.evaluate(() => window.fixture.setQuestions([{ questionId:'blocking', status:'answered' }]));
+  await expectBadge('');
+  await page.evaluate(() => window.fixture.setExternalConfirmationCount(1));
+  await expectBadge('1');
+  await page.evaluate(() => window.fixture.setExternalConfirmationCount(0));
   await expectBadge('');
 } finally {
   await browser.close();

@@ -3,6 +3,7 @@ import pytest
 import dashboard_server as ds
 from agent_gateway import AgentGateway
 from test_agent_gateway_apply_lifecycle import create_project, approved_write
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 def payload():
@@ -65,7 +66,7 @@ def test_external_call_cleanup_state_uses_proven_rollback(tmp_path,proven):
         pre_write_checkpoint_required=False)
     gateway.register_external_mcp_unity_tool(name,"avatar")
     proposal=gateway.call_external_mcp_tool(name,{})
-    result=gateway.call_external_mcp_tool(name,{"confirmation":{**proposal["confirmation"],"decision":"approve"}})
+    result=gateway.call_external_mcp_tool(name,{"confirmation":review_external_proposal(gateway, proposal)})
     assert result["ok"] is False
     assert result["cleanupState"]==("complete" if proven else "unknown")
     assert result["commitState"]==("rolled_back" if proven else "unknown")

@@ -487,13 +487,13 @@ class ExternalAgentBridgeSmoke:
         if not rollback_operation_id:
             raise RuntimeError("Rollback request did not produce a user confirmation operation.")
 
-        rollback = self.mcp_call_tool(
+        rollback = self.wait_for_app_confirmation(
             "vrcforge_restore_checkpoint",
             {
                 "checkpointId": self.checkpoint_id,
                 "confirmRestore": True,
                 "projectRoot": project_root,
-                "confirmation": {**rollback_confirmation, "decision": "approve"},
+                "confirmation": rollback_confirmation,
             },
         )
         self.rollback_done = bool(rollback.get("ok")) and rollback.get("status") == "executed"
@@ -658,13 +658,13 @@ class ExternalAgentBridgeSmoke:
             )
             confirmation = ensure_dict(request.get("confirmation"))
             if confirmation.get("operationId"):
-                applied = self.mcp_call_tool(
+                applied = self.wait_for_app_confirmation(
                     "vrcforge_restore_checkpoint",
                     {
                         "checkpointId": self.checkpoint_id,
                         "confirmRestore": True,
                         "projectRoot": project_root,
-                        "confirmation": {**confirmation, "decision": "approve"},
+                        "confirmation": confirmation,
                     },
                 )
                 self.rollback_done = bool(applied.get("ok")) and applied.get("status") == "executed"
@@ -701,6 +701,17 @@ class ExternalAgentBridgeSmoke:
                 self.step("cleanup.gateway_restore", {"ok": True, **payload})
             except Exception as exc:  # noqa: BLE001
                 self.step("cleanup.gateway_restore", {"ok": False, "error": str(exc)})
+
+    def wait_for_app_confirmation(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        operation_id = ensure_dict(params.get("confirmation")).get("operationId")
+        print(f"Review {name} ({operation_id}) under Needs Your Confirmation in VRCForge.", file=sys.stderr, flush=True)
+        deadline = time.monotonic() + self.args.timeout
+        while time.monotonic() < deadline:
+            result = self.mcp_call_tool(name, params)
+            if result.get("status") != "user_confirmation_required":
+                return result
+            time.sleep(1)
+        raise RuntimeError(f"Timed out waiting for VRCForge to review {operation_id}.")
 
     def mcp_call_tool(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
         payload = self.mcp_rpc(

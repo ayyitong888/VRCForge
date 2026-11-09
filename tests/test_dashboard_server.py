@@ -4284,6 +4284,46 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(event_name, "agentApprovals")
         self.assertIn("approvals", payload)
 
+    def test_external_confirmation_is_reviewed_only_through_app_session(self) -> None:
+        gateway = dashboard_server.AGENT_GATEWAY
+        config = gateway.ensure_config()
+        config.enabled = True
+        config.allow_write_requests = True
+        gateway.save_config(config)
+        name = "vrcforge_external_app_approval_probe"
+        executed = []
+        gateway.approval_transactions.register_write_handler(
+            name, "Propose a disposable write.", "medium", lambda args: executed.append(args) or {"ok": True}
+        )
+        gateway.register_external_mcp_unity_tool(name, "avatar")
+        proposal = gateway.call_external_mcp_tool(name, {"value": 1})
+        confirmation = proposal["confirmation"]
+        operation_id = confirmation["operationId"]
+        route = f"/api/app/agent/approvals/{operation_id}/approve"
+        mcp_headers = {"Authorization": f"Bearer {config.token}"}
+        app_headers = {"Authorization": "Bearer disposable-app-session"}
+        with (
+            patch.object(dashboard_server, "APP_AUTH_REQUIRED", True),
+            patch.object(dashboard_server, "APP_SESSION_TOKEN", "disposable-app-session"),
+            patch.object(dashboard_server, "build_bootstrap_app_health", return_value={}),
+            TestClient(dashboard_server.app) as client,
+        ):
+            before = client.get("/api/app/bootstrap?deferAgentCatalog=true", headers=app_headers).json()
+            self.assertEqual([item["id"] for item in before["externalMcpConfirmations"]], [operation_id])
+            self.assertEqual(client.post(route, json={}, headers=mcp_headers).status_code, 401)
+            wrong = client.post(route, json={"expectedProjectRoot": str(Path(self.tuning_store_dir.name)), "globalOnly": False}, headers=app_headers)
+            self.assertEqual(wrong.status_code, 409)
+            decision = client.post(route, json={"globalOnly": True}, headers=app_headers)
+            self.assertEqual(decision.status_code, 200)
+            self.assertEqual(decision.json()["approval"]["status"], "approved")
+            self.assertEqual(client.post(route, json={"globalOnly": True}, headers=app_headers).status_code, 409)
+            after = client.get("/api/app/bootstrap?deferAgentCatalog=true", headers=app_headers).json()
+            self.assertEqual(after["externalMcpConfirmations"], [])
+        self.assertEqual(executed, [])
+        result = gateway.call_external_mcp_tool(name, {"value": 1, "confirmation": confirmation})
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(executed, [{"value": 1}])
+
     def test_agent_approval_scope_checks_project_aliases_on_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

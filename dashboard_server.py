@@ -2886,6 +2886,7 @@ def build_agentic_app_bootstrap_payload(
         # the approval's own exact projectRoot before execution.
         "approvals": approvals,
         "approvalsState": approval_snapshot["state"],
+        "externalMcpConfirmations": AGENT_GATEWAY.list_external_mcp_pending_confirmations(),
         "runtimeContinuations": AGENT_GATEWAY.runtime_runs.list_runtime_continuations(
             limit=64
         ),
@@ -4668,11 +4669,32 @@ def public_approval_http_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return dict(projected) if isinstance(projected, Mapping) else {}
 
 
+async def record_external_mcp_app_decision(
+    approval_id: str, decision: str, request: AgentApprovalScopeRequest | None,
+) -> dict[str, Any]:
+    if request and request.allow_future_category:
+        raise HTTPException(status_code=400, detail="External MCP approvals apply to this request only.")
+    try:
+        result = await asyncio.to_thread(
+            AGENT_GATEWAY.decide_external_mcp_confirmation,
+            approval_id,
+            decision,
+            expected_project_root=(request.expected_project_root if request else "") or "",
+            global_only=bool(request.global_only if request else True),
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    _notify_mcp_pending_approval(result)
+    return result
+
+
 @app.post("/api/app/agent/approvals/{approval_id}/approve")
 async def app_agent_approve_and_execute(
     approval_id: str,
     request: AgentApprovalScopeRequest | None = None,
 ) -> dict[str, Any]:
+    if approval_id.startswith("mcpop_"):
+        return await record_external_mcp_app_decision(approval_id, "approve", request)
     expected_project_root = (request.expected_project_root if request else "") or ""
     global_only = bool(request.global_only if request else True)
 
@@ -4789,6 +4811,8 @@ async def app_agent_reject(
     approval_id: str,
     request: AgentApprovalScopeRequest | None = None,
 ) -> dict[str, Any]:
+    if approval_id.startswith("mcpop_"):
+        return await record_external_mcp_app_decision(approval_id, "reject", request)
     def reject_and_resume() -> dict[str, Any]:
         result = AGENT_GATEWAY.approval_transactions.reject(
             approval_id,

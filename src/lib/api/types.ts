@@ -296,6 +296,7 @@ export type SupportBundlePreview = {
 export type AgentApproval = {
   id: string;
   status: string;
+  approvalChannel?: string;
   /** Present only for a background Goal delivery; interactive revision stays unavailable. */
   goalDeliveryId?: string;
   projectRoot?: string;
@@ -1290,6 +1291,7 @@ export type AppBootstrap = {
   permission: PermissionState;
   advancedSettings?: AdvancedSettingsState;
   approvals: AgentApproval[];
+  externalMcpConfirmations?: AgentApproval[];
   approvalsState?: {
     ok: boolean;
     error?: string;

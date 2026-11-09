@@ -8,6 +8,7 @@ import subprocess
 import hashlib
 
 import pytest
+from tests.external_mcp_approval_support import review_external_proposal
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE_ROOT = Path(os.environ["VRCFORGE_REGRESSION_ARCHIVE_ROOT"]) if os.environ.get("VRCFORGE_REGRESSION_ARCHIVE_ROOT") else ROOT / ".tmp" / "regression-archives"
@@ -59,7 +60,7 @@ def test_actual_finalizer_and_resource_keep_observation_frames(tmp_path, monkeyp
         verification_finalize_handler=ds.runtime_observation_finalize, pre_write_checkpoint_required=False)
     gateway.register_external_mcp_unity_tool(name, "avatar")
     proposal = gateway.call_external_mcp_tool(name, request)
-    result = gateway.call_external_mcp_tool(name, {**request, "confirmation": {**proposal["confirmation"], "decision": "approve"}})
+    result = gateway.call_external_mcp_tool(name, {**request, "confirmation": review_external_proposal(gateway, proposal)})
     assert triggers == polls == [request["jobId"]]
     assert result["ok"] is True, result
     actual = result["result"]["completionVerification"]

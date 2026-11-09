@@ -23,15 +23,16 @@ export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, 
   const visibleApprovals = approvals.filter(
     (approval) => approval.status === "pending" && !["approve", "reject"].includes(actions[approval.id] || ""),
   );
+  const hasPendingExternalApproval = visibleApprovals.some((approval) => approval.approvalChannel === "external_mcp_confirmation");
   useEffect(() => {
-    if (loading || Object.values(actions).some(Boolean)) return undefined;
+    if (hasPendingExternalApproval || loading || Object.values(actions).some(Boolean)) return undefined;
     const timer = window.setTimeout(() => setCollapsed(true), 30_000);
     return () => window.clearTimeout(timer);
-  }, [loading, actions, visibleApprovals.length]);
+  }, [hasPendingExternalApproval, loading, actions, visibleApprovals.length]);
   if (visibleApprovals.length === 0) {
     return null;
   }
-  if (collapsed) {
+  if (collapsed && !hasPendingExternalApproval) {
     return <div className="shrink-0 border-t border-amber-500/20 bg-amber-500/5 px-6 py-2"><div className="mx-auto max-w-4xl"><Button variant="ghost" onClick={() => setCollapsed(false)} data-approval-reopen>{t("approval.requestTitle")} · {visibleApprovals.length}</Button></div></div>;
   }
 
@@ -68,6 +69,9 @@ function ApprovalCard({
         <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
         <div className="truncate text-sm font-semibold">{presentation.title}</div>
       </div>
+      {approval.approvalChannel === "external_mcp_confirmation" ? (
+        <div className="mt-1 text-xs text-muted-foreground">{t("workspace.externalAgent")}</div>
+      ) : null}
       <div className="mt-4 grid gap-3">
         <p className="text-sm text-muted-foreground">{presentation.summary}</p>
         {typeof approval.taskContext?.objective === "string" && approval.taskContext.objective.trim() ? (

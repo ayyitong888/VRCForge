@@ -1,5 +1,6 @@
 import dashboard_server as ds
 import pytest
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 def test_gm_completion_has_independent_receipt(monkeypatch):
@@ -165,7 +166,7 @@ def test_verified_editor_receipt_passes_external_completion(tmp_path):
         pre_write_checkpoint_required=False)
     gateway.register_external_mcp_unity_tool(name, "avatar")
     proposal = gateway.call_external_mcp_tool(name, {})
-    result = gateway.call_external_mcp_tool(name, {"confirmation": {**proposal["confirmation"], "decision": "approve"}})
+    result = gateway.call_external_mcp_tool(name, {"confirmation": review_external_proposal(gateway, proposal)})
     assert result["ok"] is True
     assert result["readbackState"] == "verified"
     assert result["commitState"] == "runtime_state_verified"

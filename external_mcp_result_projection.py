@@ -484,8 +484,8 @@ def project_tool(tool: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
             properties["confirmation"] = {
                 "type": "object",
                 "description": (
-                    "The exact confirmation object returned by the first external write call, "
-                    "plus decision set to approve or reject. Preserve the returned fields unchanged."
+                    "The exact object returned by the first write call. After the user reviews "
+                    "the request in VRCForge, resend it unchanged with the original tool arguments."
                 ),
                 "properties": {
                     "schema": {"type": "string"},
@@ -496,9 +496,7 @@ def project_tool(tool: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
                     "planDigest": {"type": "string"},
                     "toolDefinitionDigest": {"type": "string"},
                     "expiresAt": {"type": "string"},
-                    "requiredDecision": {"type": "array", "items": {"type": "string"}},
-                    "decisionPlacement": {"type": "string"},
-                    "decision": {"type": "string"},
+                    "decisionSurface": {"type": "string"},
                 },
             }
             input_schema["properties"] = properties

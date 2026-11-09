@@ -32,6 +32,7 @@ from external_mcp_tool_blocks import EXTERNAL_MCP_TOOL_BLOCK_BRANCHES
 from external_mcp_result_projection import project_result
 from execution_target import canonical_namespace, process_start_time, project_identity
 from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 def _gateway(tmp_path: Path) -> AgentGateway:
@@ -1825,14 +1826,25 @@ def test_external_high_risk_confirmation_executes_once_and_rejects_replay(tmp_pa
         {"name": "vrcforge_external_high_once", "arguments": arguments},
         bearer=gateway.ensure_config().token,
     )["result"]["structuredContent"]
-    confirmation = {**proposed["confirmation"], "decision": "approve"}
-    assert proposed["confirmation"]["decisionPlacement"] == "arguments.confirmation.decision"
+    assert proposed["confirmation"]["decisionSurface"] == "vrcforge_app"
     assert proposed["resubmit"] == {
         "placement": "arguments.confirmation",
-        "decisionField": "arguments.confirmation.decision",
         "preserveOtherArgumentsExactly": True,
     }
-    assert "arguments.confirmation.decision" in proposed["message"]
+    assert "VRCForge App" in proposed["message"]
+    forged = _external_mcp_call(
+        app,
+        "tools/call",
+        {
+            "name": "vrcforge_external_high_once",
+            "arguments": {**arguments, "confirmation": {**proposed["confirmation"], "decision": "approve"}},
+        },
+        bearer=gateway.ensure_config().token,
+        request_id=2,
+    )["result"]["structuredContent"]
+    assert forged["status"] == "user_confirmation_required"
+    assert executed == []
+    confirmation = review_external_proposal(gateway, proposed)
 
     applied = _external_mcp_call(
         app,
@@ -1842,7 +1854,7 @@ def test_external_high_risk_confirmation_executes_once_and_rejects_replay(tmp_pa
             "arguments": {**arguments, "confirmation": confirmation},
         },
         bearer=gateway.ensure_config().token,
-        request_id=2,
+        request_id=3,
     )["result"]["structuredContent"]
     assert applied["ok"] is True
     assert applied["status"] == "executed"
@@ -1861,7 +1873,7 @@ def test_external_high_risk_confirmation_executes_once_and_rejects_replay(tmp_pa
             "arguments": {**arguments, "confirmation": confirmation},
         },
         bearer=gateway.ensure_config().token,
-        request_id=3,
+        request_id=4,
     )["result"]["structuredContent"]
     assert replay["ok"] is False
     assert replay["status"] == "invalid_confirmation"
@@ -2046,7 +2058,7 @@ def test_external_confirmation_reuses_frozen_nondeterministic_preparation(tmp_pa
         {"name": "vrcforge_external_nondeterministic_prepare", "arguments": arguments},
         bearer=gateway.ensure_config().token,
     )["result"]["structuredContent"]
-    confirmation = {**proposed["confirmation"], "decision": "approve"}
+    confirmation = review_external_proposal(gateway, proposed)
 
     applied = _external_mcp_call(
         app,
@@ -2082,7 +2094,7 @@ def test_external_high_risk_reject_and_expiry_never_execute(tmp_path: Path) -> N
         {"name": "vrcforge_external_high_reject", "arguments": {"value": "reject"}},
         bearer=gateway.ensure_config().token,
     )["result"]["structuredContent"]
-    rejected_confirmation = {**first["confirmation"], "decision": "reject"}
+    rejected_confirmation = review_external_proposal(gateway, first, "reject")
     rejected = _external_mcp_call(
         app,
         "tools/call",
@@ -2105,7 +2117,7 @@ def test_external_high_risk_reject_and_expiry_never_execute(tmp_path: Path) -> N
     )["result"]["structuredContent"]
     operation_id = second["confirmation"]["operationId"]
     gateway._external_mcp_write_confirmations[operation_id]["expiresEpoch"] = 0
-    expired_confirmation = {**second["confirmation"], "decision": "approve"}
+    expired_confirmation = second["confirmation"]
     expired = _external_mcp_call(
         app,
         "tools/call",
@@ -2142,7 +2154,7 @@ def test_external_restore_requires_external_user_confirmation_then_executes(tmp_
     assert executed == []
     assert gateway.approval_transactions.list_approvals(include_expired=False) == []
 
-    confirmation = {**first["confirmation"], "decision": "approve"}
+    confirmation = review_external_proposal(gateway, first)
     applied = _external_mcp_call(
         app,
         "tools/call",

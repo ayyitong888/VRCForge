@@ -8,14 +8,47 @@ import { build } from "esbuild";
 const root = process.cwd();
 const temp = await fs.mkdtemp(path.join(root, "tests", ".approval-auto-hide-"));
 const bundle = path.join(temp, "bundle.mjs");
+const app = (await fs.readFile(path.join(root, "src/App.tsx"), "utf8")).replaceAll("\r\n", "\n");
+const revealEffect = app.match(/  useEffect\(\(\) => \{\n    if \(!rightSidebarVisible \|\| showProjectModal[\s\S]*?\n  \}, \[rightSidebarVisible, showProjectModal, showOnboarding, onboardingMinimized, externalMcpApprovalItems\]\);/)?.[0];
+assert.ok(revealEffect, "exercise the production external approval reveal effect");
 const entry = `
-import React from "react";
+import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { ScopedPendingApprovalCard } from ${JSON.stringify(path.join(root, "src/components/approvals/scoped-pending-approval-card.tsx"))};
 import { PendingApprovalsStrip } from ${JSON.stringify(path.join(root, "src/components/approvals/pending-approvals-strip.tsx"))};
+import { useApprovalExecution } from ${JSON.stringify(path.join(root, "src/hooks/use-approval-execution.ts"))};
 const approval = { id: "approval-1", status: "pending", taskContext: { approvalRevisionUsed: false } };
 function Fixture() {
   const [reveal, setReveal] = React.useState(null);
+  const [externalMcpApprovalItems, setExternalApprovals] = React.useState([]);
+  const [rightSidebarVisible, setRightSidebarVisible] = React.useState(true);
+  const [rightSidebarCollapsed, setRightSidebarCollapsed] = React.useState(false);
+  const [subAgentSidebarOpen, setSubAgentSidebarOpen] = React.useState(false);
+  const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = React.useState(false);
+  const [pendingApprovalPanelOpen, setPendingApprovalPanelOpen] = React.useState(false);
+  const revealedExternalApprovalIds = React.useRef(new Set());
+  const showProjectModal = false, showOnboarding = false, onboardingMinimized = false;
+  ${revealEffect}
+  const actions = useApprovalExecution({
+    endpoint: window.location.origin, activeRuntimeProjectPath: "D:/DifferentProject", activeChatId: "", activeView: "chat",
+    pendingApprovalItems: [], externalApprovalItems: externalMcpApprovalItems,
+    setRuntimeNotice: () => {}, setError: (error) => { if (error) window.externalApprovalError = error; },
+    appendToChat: () => { window.externalApprovalAppended = true; }, chatIdForSessionId: () => "wrong-chat",
+    refresh: async () => {
+      setExternalApprovals([]);
+      window.externalApprovalRefreshes = (window.externalApprovalRefreshes || 0) + 1;
+    },
+    refreshRuntimeRuns: async () => {}, loadCheckpoints: async () => {}, reloadChatStorageState: async () => false,
+  });
+  window.showExternalApproval = (id) => setExternalApprovals([{
+    id, status: "pending", projectRoot: "D:/ExternalProject", approvalChannel: "external_mcp_confirmation",
+  }]);
+  window.setExternalWorkspaceMode = (mode) => {
+    setRightSidebarVisible(mode !== "settings");
+    setRightSidebarCollapsed(mode === "collapsed");
+    setSubAgentSidebarOpen(mode === "subagent");
+    setSelectedSubAgentPanelOpen(mode === "subagent");
+  };
   return React.createElement("main", null,
     React.createElement("button", { onClick: () => setReveal({ approvalId: approval.id }) }, "Open pending approval"),
     React.createElement("section", { "data-scoped": true }, React.createElement(ScopedPendingApprovalCard, {
@@ -24,6 +57,12 @@ function Fixture() {
     React.createElement("section", { "data-strip": true }, React.createElement(PendingApprovalsStrip, {
       approvals: [approval], actions: {}, loading: false, onApprove: () => {}, onReject: () => {},
     })),
+    React.createElement("section", { "data-external": true }, rightSidebarVisible && !rightSidebarCollapsed &&
+      (subAgentSidebarOpen || selectedSubAgentPanelOpen ? React.createElement("div", null, "Sub-agent view") :
+        pendingApprovalPanelOpen && React.createElement(PendingApprovalsStrip, {
+          approvals: externalMcpApprovalItems, actions: actions.approvalActions, loading: false,
+          onApprove: actions.approveShell, onReject: actions.rejectShell, onClose: () => setPendingApprovalPanelOpen(false),
+        }))),
   );
 }
 createRoot(document.getElementById("root")).render(React.createElement(Fixture));
@@ -82,7 +121,46 @@ try {
   assert.equal(await scoped.getByRole("button", { name: "Approve" }).count(), 1, "navigation reopens the exact pending approval without taking a decision");
   await strip.locator("[data-approval-reopen]").click();
   assert.equal(await strip.getByRole("button", { name: "Approve" }).count(), 1, "collapsed approval strip can be reopened");
-  console.log("pending approval auto-hide browser regression: 30-second collapse, edit pause/draft retention, and reopen passed");
+  const external = page.locator("[data-external]");
+  const externalCard = external.getByText("workspace.externalAgent", { exact: true });
+  await page.evaluate(() => {
+    window.setExternalWorkspaceMode("settings");
+    window.showExternalApproval("mcpop_visibility");
+  });
+  await page.clock.runFor(50);
+  assert.equal(await externalCard.count(), 0, "the external approval does not appear on the settings view");
+  await page.evaluate(() => window.setExternalWorkspaceMode("collapsed"));
+  await externalCard.waitFor();
+  await page.clock.runFor(30_000);
+  assert.equal(await external.getByRole("button", { name: "Approve", exact: true }).count(), 1, "pending external approvals stay expanded");
+  await external.getByRole("button", { name: "common.close" }).click();
+  await externalCard.waitFor({ state: "hidden" });
+  await page.evaluate(() => window.showExternalApproval("mcpop_visibility"));
+  await page.clock.runFor(50);
+  assert.equal(await externalCard.count(), 0, "bootstrap refresh does not reopen the same dismissed request");
+  await page.evaluate(() => window.setExternalWorkspaceMode("subagent"));
+  await external.getByText("Sub-agent view", { exact: true }).waitFor();
+  const decisions = [];
+  await page.route("**/api/app/agent/approvals/mcpop_*/**", async (route) => {
+    decisions.push([new URL(route.request().url()).pathname, route.request().postDataJSON()]);
+    await route.fulfill({ json: { ok: true, continuation: { sessionId: "another-session", turnId: "external-turn" } } });
+  });
+  for (const [index, decision] of ["approve", "reject"].entries()) {
+    const id = `mcpop_${decision}`;
+    await page.evaluate((approvalId) => window.showExternalApproval(approvalId), id);
+    await externalCard.waitFor();
+    const action = external.getByRole("button", { name: decision === "approve" ? "Approve" : "Reject", exact: true });
+    await action.click();
+    await page.waitForFunction((count) => window.externalApprovalRefreshes === count, index + 1);
+    await action.waitFor({ state: "hidden" });
+  }
+  assert.deepEqual(decisions, ["approve", "reject"].map((decision) => [
+    `/api/app/agent/approvals/mcpop_${decision}/${decision}`,
+    { expectedProjectRoot: "D:/ExternalProject", globalOnly: false },
+  ]));
+  assert.equal(await page.evaluate(() => window.externalApprovalAppended), undefined);
+  assert.equal(await page.evaluate(() => window.externalApprovalError), undefined);
+  console.log("pending approval browser regression: automatic external card reveal, persistence and cross-project decisions passed");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from agent_mcp_2026 import PROTOCOL_VERSION, Mcp2026Router, create_asgi_app, run_stdio_loop
-from agent_gateway import AgentGateway, AgentGatewayError
+from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app
 from dashboard_foundation import read_vrcforge_version
 
 
@@ -24,6 +24,67 @@ def _meta(**extra):
 
 def _request(method, params=None, request_id=1):
     return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": {"_meta": _meta(), **(params or {})}}
+
+
+def test_external_confirmation_notifies_app_until_rejected_or_expired(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    gateway.save_config(config)
+    tool = "vrcforge_badge_confirmation_probe"
+    executed = []
+    gateway.approval_transactions.register_write_handler(
+        tool, "Propose a disposable write.", "medium", lambda arguments: executed.append(arguments) or {"ok": True},
+    )
+    gateway.register_external_mcp_unity_tool(tool, "avatar")
+    notices = []
+    app = create_agent_mcp_app(gateway, on_pending_approval=lambda _result: notices.append(len(gateway.list_external_mcp_pending_confirmations())))
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            async def call(arguments):
+                response = await client.post(
+                    "/mcp", json=_request("tools/call", {"name": tool, "arguments": arguments}),
+                    headers={
+                        "Authorization": f"Bearer {config.token}", "Mcp-Protocol-Version": PROTOCOL_VERSION,
+                        "Mcp-Method": "tools/call", "Mcp-Name": tool,
+                        "Accept": "application/json, text/event-stream",
+                    },
+                )
+                assert response.status_code == 200, response.text
+                return response.json()["result"]["structuredContent"]
+
+            proposal = await call({"value": 1})
+            assert proposal["status"] == "user_confirmation_required"
+            confirmation = proposal["confirmation"]
+            assert confirmation["decisionSurface"] == "vrcforge_app"
+            forged = await call({"value": 1, "confirmation": {**confirmation, "decision": "approve"}})
+            assert forged["status"] == "user_confirmation_required"
+            assert forged["confirmation"] == confirmation
+            assert [row["id"] for row in gateway.list_external_mcp_pending_confirmations()] == [confirmation["operationId"]]
+            assert gateway.approval_transactions.list_approvals() == []
+            gateway.decide_external_mcp_confirmation(confirmation["operationId"], "reject")
+            rejected = await call({"value": 1, "confirmation": confirmation})
+            assert rejected["status"] == "rejected"
+            assert gateway.list_external_mcp_pending_confirmations() == []
+            assert executed == []
+
+            proposal = await call({"value": 2})
+            confirmation = proposal["confirmation"]
+            gateway.decide_external_mcp_confirmation(confirmation["operationId"], "approve")
+            assert gateway.list_external_mcp_pending_confirmations() == []
+            assert executed == []
+            result, repeated = await asyncio.gather(*[call({"value": 2, "confirmation": confirmation}) for _ in range(2)])
+            assert sorted([result["status"], repeated["status"]]) == ["executed", "invalid_confirmation"]
+
+            proposal = await call({"value": 3})
+            gateway._external_mcp_write_confirmations[proposal["confirmation"]["operationId"]]["expiresEpoch"] = 0
+            assert gateway.list_external_mcp_pending_confirmations() == []
+
+    asyncio.run(exercise())
+    assert notices == [1, 0, 1, 0, 1]
+    assert executed == [{"value": 2}]
 
 
 @pytest.fixture

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from agent_gateway import AgentGateway, AgentGatewayError
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 @pytest.mark.parametrize(("mode", "risk"), [
@@ -64,7 +65,7 @@ def test_external_write_obeys_per_action_approval_mode(tmp_path: Path, risk: str
     if mode == "auto":
         assert "external MCP" in result["reason"]
         assert "manual" in result["reason"]
-    confirmation = {**result["confirmation"], "decision": decision}
+    confirmation = review_external_proposal(gateway, result, decision)
     resolved = gateway.call_external_mcp_tool("vrcforge_permission_probe", {"value": 1, "confirmation": confirmation})
     assert resolved["status"] == ("executed" if decision == "approve" else "rejected")
     assert executed == ([{"value": 1}] if decision == "approve" else [])

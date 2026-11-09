@@ -335,6 +335,7 @@ export default function App() {
   const [activeProjectType, setActiveProjectType] = useState<ProjectType>("general");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [pendingApprovalPanelOpen, setPendingApprovalPanelOpen] = useState(false);
+  const revealedExternalApprovalIds = useRef(new Set<string>());
   const [approvalReveal, setApprovalReveal] = useState<{ chatId: string; approvalId: string } | null>(null);
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
@@ -965,6 +966,8 @@ export default function App() {
     (item) => displayChat && pendingApprovalOwner(item, chats)?.id === displayChat.id,
   );
   const pendingApprovals = projectPendingApprovalItems.length;
+  const externalMcpApprovalItems = runtimeConnected ? bootstrap?.externalMcpConfirmations ?? [] : [];
+  const pendingApprovalInbox = [...projectPendingApprovalItems, ...externalMcpApprovalItems];
   const openPendingApprovalOwner = useCallback((approval: AgentApproval) => {
     const owner = pendingApprovalOwner(approval, chats);
     if (!owner) return false;
@@ -1276,6 +1279,7 @@ export default function App() {
     runs: runtimeRuns,
     deliveries: backgroundGoalState?.unread,
     approvals: runtimeConnected && bootstrap?.approvalsState?.ok !== false ? bootstrap?.approvals : undefined,
+    externalConfirmationCount: externalMcpApprovalItems.length,
     questions: runtimeConnected ? agentQuestions : undefined,
   });
   useEffect(() => {
@@ -1338,6 +1342,7 @@ export default function App() {
     activeChatId,
     activeView,
     pendingApprovalItems: projectPendingApprovalItems,
+    externalApprovalItems: externalMcpApprovalItems,
     setRuntimeNotice,
     setError,
     appendToChat,
@@ -1854,6 +1859,16 @@ export default function App() {
     return () => window.removeEventListener("resize", fitPane);
   }, [subAgentSidebarActive, effectiveLeftPaneWidth]);
   const rightSidebarVisible = sidebarsVisible && activeView === "chat";
+  useEffect(() => {
+    if (!rightSidebarVisible || showProjectModal || (showOnboarding && !onboardingMinimized)) return;
+    const newApprovals = externalMcpApprovalItems.filter(({ id }) => !revealedExternalApprovalIds.current.has(id));
+    if (newApprovals.length === 0) return;
+    for (const { id } of newApprovals) revealedExternalApprovalIds.current.add(id);
+    setSubAgentSidebarOpen(false);
+    setSelectedSubAgentPanelOpen(false);
+    setRightSidebarCollapsed(false);
+    setPendingApprovalPanelOpen(true);
+  }, [rightSidebarVisible, showProjectModal, showOnboarding, onboardingMinimized, externalMcpApprovalItems]);
   const workspaceGridColumnsWithRightSidebar = `${effectiveLeftPaneWidth}px ${RESIZE_HANDLE_WIDTH}px minmax(0,1fr) ${RESIZE_HANDLE_WIDTH}px ${effectiveRightPaneWidth}px`;
   const workspaceGridColumnsWithoutRightSidebar = `${effectiveLeftPaneWidth}px ${RESIZE_HANDLE_WIDTH}px minmax(0,1fr)`;
   const workspaceGridColumns = rightSidebarVisible ? workspaceGridColumnsWithRightSidebar : workspaceGridColumnsWithoutRightSidebar;
@@ -4689,11 +4704,12 @@ export default function App() {
               userAttachmentSources={userAttachmentSources}
               onLocateUserAttachmentSource={locateUserAttachmentSource}
               onOpenUserAttachmentSource={openUserAttachmentSource}
-              approvalsLoaded={agentApprovals !== null}
-              pendingApprovals={pendingApprovals}
+              approvalsLoaded={agentApprovals !== null || externalMcpApprovalItems.length > 0}
+              pendingApprovals={pendingApprovalInbox.length}
+              hasExternalPendingApprovals={externalMcpApprovalItems.length > 0}
               approvalPanel={pendingApprovalPanelOpen ? (
                 <PendingApprovalsStrip
-                  approvals={projectPendingApprovalItems}
+                  approvals={pendingApprovalInbox}
                   actions={approvalActions}
                   loading={loading}
                   onApprove={approveShell}
@@ -4713,7 +4729,7 @@ export default function App() {
               providerTestAttempted={Boolean(providerTestMessage.trim())}
               onHideSidebar={() => setRightSidebarCollapsed(true)}
               onOpenPendingApprovals={() => {
-                const target = projectPendingApprovalItems.length === 1 ? projectPendingApprovalItems[0] : undefined;
+                const target = pendingApprovalInbox.length === 1 ? projectPendingApprovalItems[0] : undefined;
                 if (target && openPendingApprovalOwner(target)) return;
                 setPendingApprovalPanelOpen((current) => !current);
               }}

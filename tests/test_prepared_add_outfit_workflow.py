@@ -16,6 +16,7 @@ from prepared_unity_execution import (
 )
 from unity_execution_plans_workflows import build_workflow_execution_plan
 from vrchat_blendshape_agent import UnityMcpError
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 GUID = "a" * 32
@@ -299,7 +300,7 @@ def test_add_outfit_receipt_completes_internal_and_external_transactions(
             "vrcforge_add_outfit",
             {
                 **arguments,
-                "confirmation": {**proposal["confirmation"], "decision": "approve"},
+                "confirmation": review_external_proposal(gateway, proposal),
             },
         )
     else:
@@ -370,7 +371,7 @@ def test_add_outfit_transaction_keeps_missing_object_and_core_failure_failed(
             "vrcforge_add_outfit",
             {
                 **arguments,
-                "confirmation": {**proposal["confirmation"], "decision": "approve"},
+                "confirmation": review_external_proposal(gateway, proposal),
             },
         )
     else:

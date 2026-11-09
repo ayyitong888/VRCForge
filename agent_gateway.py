@@ -4355,11 +4355,6 @@ class AgentGateway:
             or ""
         )
         tool_definition_digest = str(prepared.get("toolDefinitionDigest") or "")
-        checkpoint_policy = ensure_dict(prepared.get("checkpointUserPolicy"))
-        checkpoint_warning = (
-            "No restore point for this write. User instruction: " + str(checkpoint_policy["sourceQuote"])
-            if checkpoint_policy else ""
-        )
         record = {
             "operationId": operation_id,
             "targetTool": str(prepared.get("targetTool") or ""),
@@ -4382,31 +4377,38 @@ class AgentGateway:
                     status_code=429,
                 )
             self._external_mcp_write_confirmations[operation_id] = record
+        response = self._external_mcp_confirmation_response(record)
+        self.append_audit({
+            "event": "external_mcp_confirmation_proposed",
+            "operation": response["confirmation"],
+            "riskLevel": str(prepared.get("riskLevel") or ""),
+        })
+        return response
+
+    def _external_mcp_confirmation_response(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        prepared = ensure_dict(record.get("prepared"))
+        checkpoint_policy = ensure_dict(prepared.get("checkpointUserPolicy"))
+        checkpoint_warning = (
+            "No restore point for this write. User instruction: " + str(checkpoint_policy["sourceQuote"])
+            if checkpoint_policy else ""
+        )
         confirmation = {
             "schema": "vrcforge.external_write_confirmation.v1",
-            "operationId": operation_id,
+            "operationId": record["operationId"],
             "targetTool": record["targetTool"],
             "argumentsDigest": record["argumentsDigest"],
             "executionTargetDigest": record["executionTargetDigest"],
             "planDigest": record["planDigest"],
             "toolDefinitionDigest": record["toolDefinitionDigest"],
             "expiresAt": record["expiresAt"],
-            "requiredDecision": ["approve", "reject"],
-            "decisionPlacement": "arguments.confirmation.decision",
+            "decisionSurface": "vrcforge_app",
         }
-        self.append_audit(
-            {
-                "event": "external_mcp_confirmation_proposed",
-                "operation": confirmation,
-                "riskLevel": str(prepared.get("riskLevel") or ""),
-            }
-        )
         return {
             "ok": True,
             "status": "user_confirmation_required",
             "tool": record["targetTool"],
             **(
-                {"executionTargetDigest": bound_execution_target_digest}
+                {"executionTargetDigest": record["executionTargetDigest"]}
                 if isinstance(ensure_dict(prepared.get("arguments")).get("executionTarget"), Mapping)
                 else {}
             ),
@@ -4422,7 +4424,6 @@ class AgentGateway:
             "confirmation": confirmation,
             "resubmit": {
                 "placement": "arguments.confirmation",
-                "decisionField": "arguments.confirmation.decision",
                 "preserveOtherArgumentsExactly": True,
             },
             "mutationStarted": False,
@@ -4430,10 +4431,10 @@ class AgentGateway:
             "commitState": "not_started",
             "message": (
                 (checkpoint_warning + " " if checkpoint_warning else "")
-                + "No write has started. The external Agent must show this risk to the user and "
-                "repeat the same tool call with all original arguments unchanged, add the returned "
-                "confirmation object at arguments.confirmation, and set "
-                "arguments.confirmation.decision to approve or reject."
+                + "No write has started. Ask the user to review this request under Needs Your Confirmation "
+                "in the VRCForge App. After they decide there, repeat this tool call with the original "
+                "arguments unchanged and the returned object at arguments.confirmation. "
+                "A decision sent by the MCP client cannot authorize the write."
             ),
         }
 
@@ -4447,11 +4448,6 @@ class AgentGateway:
     ) -> dict[str, Any]:
         operation_id = str(confirmation.get("operationId") or "").strip()
         supplied_digest = str(confirmation.get("argumentsDigest") or "").strip()
-        decision = str(
-            confirmation.get("decision")
-            or confirmation.get("userDecision")
-            or ""
-        ).strip().casefold()
         now_epoch = datetime.now(timezone.utc).timestamp()
         with self._lock:
             self._prune_external_mcp_confirmations_locked(now_epoch)
@@ -4522,11 +4518,9 @@ class AgentGateway:
                     actual_target,
                     "The confirmation is not bound to these exact tool arguments.",
                 )
-            if decision not in {"approve", "reject"}:
-                return self._invalid_external_mcp_confirmation(
-                    actual_target,
-                    "The external Agent must return the user's decision as approve or reject.",
-                )
+            decision = str(record.get("desktopDecision") or "")
+            if not decision:
+                return self._external_mcp_confirmation_response(record)
             if expected_tool_definition_digest:
                 current_definition_digest = str(
                     self.shared_agent_tool_descriptor(
@@ -4607,6 +4601,58 @@ class AgentGateway:
                     "executionTargetDigest": result["executionTargetDigest"],
                 }
         return result
+
+    @staticmethod
+    def _external_mcp_approval_view(record: Mapping[str, Any]) -> dict[str, Any]:
+        prepared = ensure_dict(record.get("prepared"))
+        arguments = ensure_dict(prepared.get("arguments"))
+        root = extract_project_root(arguments)
+        checkpoint_policy = prepared.get("checkpointUserPolicy")
+        return redact_sensitive({
+            "id": record["operationId"],
+            "status": {"approve": "approved", "reject": "rejected"}.get(record.get("desktopDecision"), "pending"),
+            "approvalChannel": "external_mcp_confirmation",
+            "targetTool": record["targetTool"],
+            "projectRoot": str(root) if root else "",
+            "riskLevel": prepared.get("riskLevel"),
+            "reason": prepared.get("confirmationReason"),
+            "arguments": arguments,
+            "preview": prepared.get("preview"),
+            **({"taskContext": {"checkpointUserPolicy": checkpoint_policy}} if checkpoint_policy else {}),
+            "createdAt": record["createdAt"],
+            "expiresAt": record["expiresAt"],
+        })
+
+    def list_external_mcp_pending_confirmations(self) -> list[dict[str, Any]]:
+        with self._lock:
+            self._prune_external_mcp_confirmations_locked(datetime.now(timezone.utc).timestamp())
+            return [
+                self._external_mcp_approval_view(record)
+                for record in self._external_mcp_write_confirmations.values()
+                if not record.get("desktopDecision")
+            ]
+
+    def decide_external_mcp_confirmation(
+        self, operation_id: str, decision: str, *, expected_project_root: str = "", global_only: bool = True,
+    ) -> dict[str, Any]:
+        if decision not in {"approve", "reject"}:
+            raise AgentGatewayError("An external request can only be approved or rejected.", status_code=400)
+        with self._lock:
+            self._prune_external_mcp_confirmations_locked(datetime.now(timezone.utc).timestamp())
+            record = self._external_mcp_write_confirmations.get(operation_id)
+            if record is None or record.get("desktopDecision"):
+                raise AgentGatewayError("This external request expired or was already reviewed.", status_code=409)
+            approval = self._external_mcp_approval_view(record)
+            actual_project_root = approval["projectRoot"]
+            normalize = command_safety.normalize_filesystem_path
+            actual_key = normalize(actual_project_root) if actual_project_root else ""
+            expected_key = normalize(expected_project_root) if expected_project_root else ""
+            if (actual_key and global_only) or actual_key != expected_key:
+                raise AgentGatewayError("This approval belongs to a different project.", status_code=409)
+            record["desktopDecision"] = decision
+            approval = self._external_mcp_approval_view(record)
+        self.append_audit({"event": "external_mcp_desktop_decision", "operationId": operation_id, "decision": decision})
+        return {"ok": True, "approval": approval}
 
     def _prune_external_mcp_confirmations_locked(self, now_epoch: float) -> None:
         expired = [
@@ -10993,6 +11039,11 @@ def create_agent_mcp_app(
             arguments,
             agent_name="mcp-agent",
         )
+        if on_pending_approval and (
+            (result.get("status") == "user_confirmation_required" and "confirmation" not in arguments)
+            or ("confirmation" in arguments and result.get("operationId"))
+        ):
+            on_pending_approval(result)
         await asyncio.to_thread(
             gateway.publish_mcp_tool_result_resource,
             name,

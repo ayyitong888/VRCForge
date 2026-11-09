@@ -7,11 +7,14 @@ export type TaskbarAttention = {
   chats: ChatThread[];
   deliveries?: AgentGoalDelivery[];
   approvals?: AgentApproval[];
+  externalConfirmationCount?: number;
   questions?: AgentQuestion[];
   runs?: AgentRuntimeRun[];
 };
 
-export function countTaskbarAttention({ chats, deliveries = [], approvals = [], questions = [], runs }: TaskbarAttention): number {
+export function countTaskbarAttention({
+  chats, deliveries = [], approvals = [], questions = [], runs, externalConfirmationCount = 0,
+}: TaskbarAttention): number {
   const pendingApprovals = new Set(approvals.filter((item) => item.status === "pending").map((item) => item.id));
   const pendingQuestions = new Set(questions.filter(isBlockingAgentQuestion).map((item) => item.questionId));
   const unreadGoalChats = new Set(deliveries
@@ -19,5 +22,5 @@ export function countTaskbarAttention({ chats, deliveries = [], approvals = [], 
     .map((item) => item.chatId));
   const unreadChats = chats.filter((chat) => !chat.archived
     && (unreadGoalChats.has(chat.id) || chatSidebarActivity(chat, "", runs) === "completed"));
-  return unreadChats.length + pendingApprovals.size + pendingQuestions.size;
+  return unreadChats.length + pendingApprovals.size + pendingQuestions.size + externalConfirmationCount;
 }

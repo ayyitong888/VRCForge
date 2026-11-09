@@ -9,6 +9,7 @@ import pytest
 import dashboard_server
 from agent_gateway import AgentGateway, EXPOSURE_LAYER_EXECUTION, EXPOSURE_LAYER_PLANNING
 from session_store_integrity import SessionStoreTarget, verify_session_store_repair
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 @pytest.mark.parametrize("partial", [False, True])
@@ -89,13 +90,12 @@ def test_external_chat_repair_is_execution_only_and_keeps_real_approval_boundary
         }
         pending = gateway.call_external_mcp_tool(name, arguments, agent_name="external-test")
         assert pending["status"] == "user_confirmation_required"
-        assert pending["confirmation"]["requiredDecision"] == ["approve", "reject"]
+        assert pending["confirmation"]["decisionSurface"] == "vrcforge_app"
         assert pending["mutationStarted"] is False
         assert store.read_bytes() == original
         assert list(project.glob(".vrcforge/chat-transcripts.json.vrcforge-backup-*")) == []
 
-        confirmation = dict(pending["confirmation"])
-        confirmation["decision"] = "approve"
+        confirmation = review_external_proposal(gateway, pending)
         applied = gateway.call_external_mcp_tool(
             name,
             {**arguments, "confirmation": confirmation},

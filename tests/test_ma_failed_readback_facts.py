@@ -4,6 +4,7 @@ import pytest
 
 from agent_tool_result_contract import normalize_agent_tool_result
 from wardrobe_outfit_workflow_service import finalize_add_modular_avatar_component_verification
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 def report_case():
@@ -80,7 +81,7 @@ def test_saved_ma_readback_failure_reaches_internal_and_external_agent(tmp_path,
         gateway.register_external_mcp_unity_tool(tool, "avatar")
         proposal = gateway.call_external_mcp_tool(tool, args)
         result = gateway.call_external_mcp_tool(tool, {
-            **args, "confirmation": {**proposal["confirmation"], "decision": "approve"}})
+            **args, "confirmation": review_external_proposal(gateway, proposal)})
     else:
         request = gateway.approval_transactions.create_apply_request({"target_tool": tool, "arguments": args})
         gateway.approval_transactions.approve(request["approval"]["id"])

@@ -518,7 +518,7 @@ def test_live_write_rollback_binds_explicit_parent_and_scene_hashes(monkeypatch:
     assert "confirmation" not in restore_calls[0]
     assert restore_calls[1]["confirmation"]["operationId"] == "restore-operation"
     assert restore_calls[1]["confirmation"]["argumentsDigest"] == "restore-digest"
-    assert restore_calls[1]["confirmation"]["decision"] == "approve"
+    assert "decision" not in restore_calls[1]["confirmation"]
     assert evidence["write.parent_preflight"]["ok"] is True
     assert evidence["write.verify_persisted_create"]["ok"] is True
     assert evidence["write.verify_persisted_create"]["sceneChangedAfterApply"] is True

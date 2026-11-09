@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 
 import pytest
+from tests.external_mcp_approval_support import review_external_proposal
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
@@ -25,7 +26,7 @@ def execute(tmp_path):
     gateway.register_external_mcp_unity_tool(name, "avatar")
     proposal = gateway.call_external_mcp_tool(name, {})
     result = gateway.call_external_mcp_tool(name, {
-        "confirmation": {**proposal["confirmation"], "decision": "approve"}
+        "confirmation": review_external_proposal(gateway, proposal)
     })
     assert result["ok"] is True and result["readbackState"] == "verified"
     assert result["commitState"] == "runtime_state_verified"
@@ -228,5 +229,5 @@ def test_unrelated_finalizer_schema_is_not_given_editor_completion_projection(tm
     )
     gateway.register_external_mcp_unity_tool(name, "avatar")
     proposal = gateway.call_external_mcp_tool(name, {})
-    result = gateway.call_external_mcp_tool(name, {"confirmation": {**proposal["confirmation"], "decision": "approve"}})
+    result = gateway.call_external_mcp_tool(name, {"confirmation": review_external_proposal(gateway, proposal)})
     assert "completionVerification" not in result

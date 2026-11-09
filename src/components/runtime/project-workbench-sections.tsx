@@ -136,6 +136,7 @@ export function ProjectWorkbenchSections({
   onLocateUserAttachmentSource,
   onOpenUserAttachmentSource,
   pendingApprovals,
+  hasExternalPendingApprovals = false,
   runtimeReviewCount = 0,
   workspaceSummary,
   activeDesktopActions,
@@ -164,6 +165,7 @@ export function ProjectWorkbenchSections({
   onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
   pendingApprovals: number;
+  hasExternalPendingApprovals?: boolean;
   runtimeReviewCount?: number;
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
@@ -255,7 +257,7 @@ export function ProjectWorkbenchSections({
 
   return (
     <>
-      {isUnityProject && pendingApprovals > 0 ? (
+      {(isUnityProject || hasExternalPendingApprovals) && pendingApprovals > 0 ? (
         <button type="button" className="mb-1 w-full rounded-lg border border-amber-500/35 bg-amber-500/10 px-2 text-left hover:bg-amber-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           data-vrcforge-status="approval" onClick={onOpenPendingApprovals}>
           <RuntimeInfoRow

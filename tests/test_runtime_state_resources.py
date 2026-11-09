@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 import pytest
 from mcp_resource_registry import McpResourceRegistry
+from tests.external_mcp_approval_support import review_external_proposal
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE_ROOT = Path(os.environ["VRCFORGE_REGRESSION_ARCHIVE_ROOT"]) if os.environ.get("VRCFORGE_REGRESSION_ARCHIVE_ROOT") else ROOT / ".tmp" / "regression-archives"
@@ -157,7 +158,7 @@ def test_actual_gateway_finalizer_default_is_compact_and_complete(tmp_path,monke
         verification_finalize_handler=ds.runtime_observation_finalize,pre_write_checkpoint_required=False)
     gateway.register_external_mcp_unity_tool(name,"avatar")
     proposal=gateway.call_external_mcp_tool(name,args)
-    result=gateway.call_external_mcp_tool(name,{**args,"confirmation":{**proposal["confirmation"],"decision":"approve"}})
+    result=gateway.call_external_mcp_tool(name,{**args,"confirmation":review_external_proposal(gateway, proposal)})
     assert result["ok"] is True,result
     assert len(json.dumps(result,ensure_ascii=False).encode())<35000
     evidence=result["result"]["completionVerification"]

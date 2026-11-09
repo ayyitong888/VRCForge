@@ -17,6 +17,7 @@ type UseApprovalExecutionParams = {
   activeChatId: string;
   activeView: ActiveView;
   pendingApprovalItems: AgentApproval[];
+  externalApprovalItems: AgentApproval[];
   setRuntimeNotice: (message: string) => void;
   setError: (message: string) => void;
   appendToChat: (chatId: string, item: ConversationItem) => void;
@@ -33,6 +34,7 @@ export function useApprovalExecution({
   activeChatId,
   activeView,
   pendingApprovalItems,
+  externalApprovalItems,
   setRuntimeNotice,
   setError,
   appendToChat,
@@ -151,6 +153,13 @@ export function useApprovalExecution({
     const resultChatId = taskSessionId ? ownerChatId : "";
     try {
       const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
+      if (externalApprovalItems.some((item) => item.id === approvalId)) {
+        if (!payload.ok) {
+          throw new Error(t("approval.notificationFailed"));
+        }
+        await refresh();
+        return;
+      }
       if (payload.continuationError) {
         setRuntimeNotice(payload.continuationError);
       }
@@ -209,6 +218,10 @@ export function useApprovalExecution({
       if (!payload.ok) {
         throw new Error(payload.message || `Approval ${approvalId} could not be rejected.`);
       }
+      if (externalApprovalItems.some((item) => item.id === approvalId)) {
+        await refresh();
+        return;
+      }
       if (payload.continuationError) {
         setRuntimeNotice(payload.continuationError);
       }
@@ -243,14 +256,15 @@ export function useApprovalExecution({
   }
 
   function scopeForApproval(approvalId: string, allowFutureCategory = false) {
-    const approval = pendingApprovalItems.find((item) => item.id === approvalId);
+    const externalApproval = externalApprovalItems.find((item) => item.id === approvalId);
+    const approval = externalApproval || pendingApprovalItems.find((item) => item.id === approvalId);
     const projectRoot = approval
       ? approval.projectRoot?.trim() || ""
       : activeRuntimeProjectPath.trim();
     return {
       expectedProjectRoot: projectRoot || undefined,
       globalOnly: !projectRoot,
-      ...(allowFutureCategory ? { allowFutureCategory: true } : {}),
+      ...(allowFutureCategory && !externalApproval ? { allowFutureCategory: true } : {}),
     };
   }
 

@@ -11,13 +11,14 @@ const bundle = await build({
     import { initializeI18n } from "./src/i18n";
     const root = createRoot(document.getElementById("root"));
     const ready = initializeI18n();
-    window.showSidebar = async (state, pendingApprovals = 0) => {
+    window.showSidebar = async (state, pendingApprovals = 0, projectType = "unity", hasExternalPendingApprovals = false) => {
       await ready;
+      window.approvalsOpened = false;
       const bridge = state === "offline" ? "warning" : state === "checking" ? "unknown" : "ok";
       const tools = state === "ready" ? "ok" : state === "checking" ? "unknown" : "warning";
       root.render(<RightRuntimeSidebar
         runtimeConnected loadingUnityStatus={state === "checking"} workspaceProjectLabel="VRCForge"
-        workspaceProjectType="unity" projectWorkspace
+        workspaceProjectType={projectType} projectWorkspace
         selectedProjectComponent={{status:"ok"}} backendComponent={{status:"ok"}} mcpPackageComponent={{status:"ok"}}
         unityBridgeComponent={{status:bridge}} unityInstanceComponent={{status:bridge}}
         unityToolsComponent={{status:tools, detail:state === "checking" ? undefined : {readiness:{
@@ -26,6 +27,7 @@ const bundle = await build({
         authorizationStatus={{source:"none",status:"unknown"}} agentProgress={[]}
         subAgentTaskCount={0} subAgentRunningTaskCount={0} subAgentCompletedTaskCount={0}
         userAttachmentSources={[]} approvalsLoaded pendingApprovals={pendingApprovals} workspaceSummary={null}
+        hasExternalPendingApprovals={hasExternalPendingApprovals}
         activeDesktopActions={[]} refreshUnityStatus={() => {}} providerTestAttempted={false}
         onHideSidebar={() => {}} onOpenPendingApprovals={() => window.approvalsOpened = true}
         localizeHealthMessage={() => ""} />);
@@ -45,7 +47,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 300, height: 600 } });
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.addScriptTag({ content: bundle.outputFiles[0].text });
-  const show = (state, approvals) => page.evaluate(([state, approvals]) => window.showSidebar(state, approvals), [state, approvals]);
+  const show = (...args) => page.evaluate((sidebarArgs) => window.showSidebar(...sidebarArgs), args);
   await show("blocked", 1);
   const blocked = page.locator('[data-unity-readiness="blocked"]');
   await blocked.waitFor({ timeout: 4000 });
@@ -71,7 +73,12 @@ try {
   await show("checking", 0);
   await page.locator('[data-unity-readiness="checking"]').waitFor();
   assert.equal(await page.getByRole("alert").count(), 0);
-  console.log("Unity readiness, environment disclosure and pending approval priority passed");
+  await show("ready", 1, "general", true);
+  await approval.click();
+  assert.equal(await page.evaluate(() => window.approvalsOpened), true);
+  await show("ready", 1, "general", false);
+  await approval.waitFor({ state: "detached" });
+  console.log("Unity readiness, environment disclosure and external approval access in general workspaces passed");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

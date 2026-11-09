@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -8,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from agent_gateway import AgentGateway
+from execution_target import execution_target_digest
 from operation_context import current_operation_context
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 ROOT = Path(__file__).parents[1]
@@ -158,7 +159,6 @@ def test_external_proposal_confirmation_core_readback_and_receipt_share_operatio
     tampered = {
         **proposal["confirmation"],
         "toolDefinitionDigest": "0" * 64,
-        "decision": "approve",
     }
     rejected = gateway.call_external_mcp_tool(
         "vrcforge_contract_external_write",
@@ -166,7 +166,7 @@ def test_external_proposal_confirmation_core_readback_and_receipt_share_operatio
     )
     assert rejected["status"] == "invalid_confirmation"
     assert observed == {}
-    confirmation = {**proposal["confirmation"], "decision": "approve"}
+    confirmation = review_external_proposal(gateway, proposal)
     result = gateway.call_external_mcp_tool(
         "vrcforge_contract_external_write",
         {"value": "same", "confirmation": confirmation},
@@ -220,7 +220,7 @@ def test_nested_core_persisted_receipt_projects_same_success_facts_to_external_a
     proposal = gateway.call_external_mcp_tool(
         "vrcforge_contract_nested_core_write", {"value": "same"}
     )
-    confirmation = {**proposal["confirmation"], "decision": "approve"}
+    confirmation = review_external_proposal(gateway, proposal)
     result = gateway.call_external_mcp_tool(
         "vrcforge_contract_nested_core_write",
         {"value": "same", "confirmation": confirmation},
@@ -274,7 +274,7 @@ def test_external_recovery_uses_shared_completion_facts_without_generic_verified
     proposal = gateway.call_external_mcp_tool(tool, {"projectRoot": str(project)})
     result = gateway.call_external_mcp_tool(tool, {
         "projectRoot": str(project),
-        "confirmation": {**proposal["confirmation"], "decision": "approve"},
+        "confirmation": review_external_proposal(gateway, proposal),
     })
 
     assert result["ok"] is True
@@ -309,7 +309,7 @@ def test_explicit_failed_console_verification_still_rejects_external_recovery(tm
     proposal = gateway.call_external_mcp_tool(tool, {"projectRoot": str(project)})
     result = gateway.call_external_mcp_tool(tool, {
         "projectRoot": str(project),
-        "confirmation": {**proposal["confirmation"], "decision": "approve"},
+        "confirmation": review_external_proposal(gateway, proposal),
     })
 
     assert result["ok"] is False
@@ -337,7 +337,7 @@ def test_explicit_failed_readback_still_rejects_external_recovery(tmp_path: Path
     proposal = gateway.call_external_mcp_tool(tool, {"projectRoot": str(project)})
     result = gateway.call_external_mcp_tool(tool, {
         "projectRoot": str(project),
-        "confirmation": {**proposal["confirmation"], "decision": "approve"},
+        "confirmation": review_external_proposal(gateway, proposal),
     })
 
     assert result["ok"] is False
@@ -370,7 +370,7 @@ def test_legacy_saved_scene_receipt_reaches_both_agents_without_unknown_commit(t
         gateway.register_external_mcp_unity_tool(tool, "avatar")
         proposal = gateway.call_external_mcp_tool(tool, arguments)
         result = gateway.call_external_mcp_tool(tool, {
-            **arguments, "confirmation": {**proposal["confirmation"], "decision": "approve"},
+            **arguments, "confirmation": review_external_proposal(gateway, proposal),
         })
         assert result["mutationStarted"] is True
         assert result["mutationApplied"] is True
@@ -388,16 +388,36 @@ def test_legacy_saved_scene_receipt_reaches_both_agents_without_unknown_commit(t
     assert result["result"] == core
 
 
-def test_confirmation_binds_execution_target_digest() -> None:
-    source = (ROOT / "agent_gateway.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    proposal = next(
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_propose_external_mcp_write"
+def test_confirmation_binds_execution_target_digest(tmp_path: Path) -> None:
+    from tests.test_execution_target import _live_runtime_target
+
+    gateway = _gateway(tmp_path)
+    project = tmp_path / "UnityProject"
+    project.mkdir()
+    target = _live_runtime_target(project)
+    (project / "Packages").mkdir()
+    (project / "ProjectSettings").mkdir()
+    tool = "vrcforge_contract_target_bound_write"
+    executed = []
+    gateway.approval_transactions.register_write_handler(
+        tool, "Confirm the bound target.", "high",
+        lambda arguments: executed.append(arguments) or {"ok": True, "changed": True},
+        pre_write_checkpoint_required=False,
     )
-    body = ast.get_source_segment(source, proposal) or ""
-    confirmation_block = body.split("confirmation =", 1)[1].split("self.append_audit", 1)[0]
-    assert '"executionTargetDigest"' in confirmation_block
+    gateway.register_external_mcp_unity_tool(tool, "avatar")
+    arguments = {"projectPath": str(project), "executionTarget": target}
+
+    proposal = gateway.call_external_mcp_tool(tool, arguments)
+    confirmation = review_external_proposal(gateway, proposal)
+    assert confirmation["executionTargetDigest"] == execution_target_digest(target)
+    invalid_confirmation = {**confirmation, "executionTargetDigest": "0" * 64}
+    invalid = gateway.call_external_mcp_tool(tool, {**arguments, "confirmation": invalid_confirmation})
+    assert invalid["status"] == "invalid_confirmation"
+    assert executed == []
+
+    applied = gateway.call_external_mcp_tool(tool, {**arguments, "confirmation": confirmation})
+    assert applied["status"] == "executed"
+    assert len(executed) == 1
 
 
 def test_multi_file_writes_are_one_modular_patch_set_with_one_receipt_registry(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ from agent_gateway import AgentGateway
 from external_mcp_tool_blocks import EXTERNAL_MCP_WRITE_TOOL_BLOCKS
 from mcp_tool_descriptor import write_runtime_identity_required
 from unity_tool_schema_projection import canonical_unity_write_tool_input_schema
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 def test_manual_checkpoint_archives_and_restores_project_files_including_packages(tmp_path: Path) -> None:
@@ -62,7 +63,7 @@ def test_manual_checkpoint_archives_and_restores_project_files_including_package
         assert proposal["status"] == "user_confirmation_required", proposal
         receipt = gateway.call_external_mcp_tool(tool, {
             **request,
-            "confirmation": {**proposal["confirmation"], "decision": "approve"},
+            "confirmation": review_external_proposal(gateway, proposal),
         })
     assert receipt["ok"] is True and receipt["status"] == "executed"
     assert "checkpointSkipped" not in receipt
