@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentRuntimeResponse, AgentRuntimeRun, AgentTurnResponseRecovery } from "./api/types";
 import { playNotificationSoundOnce } from "./notification-sound-delivery";
+import { isWaitingForSubAgent } from "./runtime-run-status";
 
 export type RuntimeAttentionStatus = "completed" | "blocked" | "failed" | "cancelled" | "stopped";
 export type RuntimeAttention = { sessionId: string; clientTurnId: string; turnId: string; status: RuntimeAttentionStatus };
@@ -13,7 +14,8 @@ const STORAGE_KEY = "vrcforge.runtime-attention.notifications.v1";
 
 /** All watched terminal turns must deliver, even if a newer turn already runs. */
 export function runtimeAttentionCandidates(runs: AgentRuntimeRun[]): AgentRuntimeRun[] {
-  return runs.filter(run => run.sessionId && run.clientTurnId && run.turnId && attentionStatus(run.status) !== null);
+  return runs.filter(run => run.sessionId && run.clientTurnId && run.turnId
+    && attentionStatus(run.status) !== null && !isWaitingForSubAgent(run));
 }
 
 /** A later turn supersedes the earlier turn's attention, including while running. */
@@ -32,7 +34,7 @@ export function latestRuntimeAttentionCandidates(runs: AgentRuntimeRun[]): Agent
  * must not depend on the in-memory response recovery cache. */
 export function runtimeAttentionFromRun(run: AgentRuntimeRun): RuntimeAttention | null {
   const status = attentionStatus(run.status);
-  if (!status || !run.sessionId || !run.clientTurnId || !run.turnId) return null;
+  if (!status || !run.sessionId || !run.clientTurnId || !run.turnId || isWaitingForSubAgent(run)) return null;
   return { sessionId: run.sessionId, clientTurnId: run.clientTurnId, turnId: run.turnId, status };
 }
 
@@ -40,6 +42,7 @@ export function runtimeAttentionFromRun(run: AgentRuntimeRun): RuntimeAttention 
 export function runtimeAttentionFromResponse(run: AgentRuntimeRun, response: AgentRuntimeResponse): RuntimeAttention | null {
   const status = attentionStatus(run.status);
   if (!status || !run.sessionId || !run.clientTurnId || !run.turnId
+    || isWaitingForSubAgent(run) || isWaitingForSubAgent(response.plan)
     || (response.sessionId || response.session_id) !== run.sessionId
     || response.clientTurnId !== run.clientTurnId
     || (response.turnId || response.turn_id) !== run.turnId) return null;

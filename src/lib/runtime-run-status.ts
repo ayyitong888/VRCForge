@@ -8,6 +8,10 @@ export function isActiveRuntimeRunStatus(status?: string): boolean {
   return ACTIVE_RUNTIME_RUN_STATUSES.has(String(status || "").trim().toLowerCase());
 }
 
+export function isWaitingForSubAgent(state: { nextStep?: string; reason?: string }): boolean {
+  return state.nextStep === "waiting_for_tool" && state.reason === "sub_agent_pending";
+}
+
 /** Resolve activity only when this session/CID identifies one ledger run. */
 export function runtimeTurnActivityStatus(
   runs: ReadonlyArray<{ sessionId?: string; clientTurnId?: string; status?: string }>,

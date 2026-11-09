@@ -6750,12 +6750,16 @@ class AgentGateway:
         recoverable_failure_refeeds = 0
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
+        continued_execution = ensure_dict(ensure_dict(task_continuation).get("execution"))
         write_payload: dict[str, Any] | None = (
-            ensure_dict(ensure_dict(task_continuation).get("execution")) or None
+            (continued_execution or None) if continuation_context.get("requestedKind") == "write" else None
         )
-        resumed_approval_id = str(ensure_dict(task_continuation).get("approvalId") or "").strip()
+        resumed_approval_id = (
+            str(ensure_dict(task_continuation).get("approvalId") or "").strip()
+            if continuation_source in {"approval_finished", "approval_revision_requested"} else ""
+        )
         approval_id = resumed_approval_id
-        if continuation_context and write_payload is not None:
+        if continuation_context and continued_execution:
             completed_action_id = str(
                 continuation_context.get("requestedActionId") or ""
             ).strip()
@@ -6770,15 +6774,15 @@ class AgentGateway:
                 None,
             )
             if completed_step is not None:
-                if write_payload.get("result") is not None:
-                    completed_step["result"] = write_payload.get("result")
+                if continued_execution.get("result") is not None:
+                    completed_step["result"] = continued_execution.get("result")
                 completion_outcome = ensure_dict(
                     continuation_completion.get("outcome")
                 )
                 if completion_outcome:
                     completed_step["outcome"] = completion_outcome
-                if write_payload.get("error"):
-                    completed_step["error"] = str(write_payload.get("error"))
+                if continued_execution.get("error"):
+                    completed_step["error"] = str(continued_execution["error"])
         first_plan: dict[str, Any] | None = None
         todo_receipts: list[dict[str, Any]] = []
         todo_tools = self._runtime_todo_tools(session_id, project_root)
@@ -10369,6 +10373,7 @@ class AgentGateway:
         "cancelled": "cancelled", "canceled": "cancelled",
         "interrupted": "interrupted",
         "needs_user_action": "waiting_user", "paused": "waiting_user",
+        "waiting_for_tool": "running",
         "output_length_limit": "waiting_user",
     }
 

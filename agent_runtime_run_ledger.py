@@ -1078,6 +1078,8 @@ class AgentRuntimeRunLedger:
         }
         if context_usage:
             record["contextUsage"] = context_usage
+        if top_plan.get("reason") == "sub_agent_pending":
+            record["reason"] = "sub_agent_pending"
         if usage_reconciliation:
             record["usageReconciliation"] = usage_reconciliation
         if context_compaction:
@@ -1098,6 +1100,8 @@ class AgentRuntimeRunLedger:
         plan_outcome, _plan_label = classify_runtime_plan_outcome(top_plan)
         if plan_outcome == "cancelled":
             return "cancelled"
+        if top_plan.get("nextStep") == "waiting_for_tool" and top_plan.get("reason") == "sub_agent_pending":
+            return "blocked"
         # A live ask-user boundary is the current turn terminal even when an
         # earlier diagnostic/write step in the same turn failed.  Keep this
         # narrow: only the explicit question_pending plan reason and a real

@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, ChevronRight, CircleStop, ExternalLink, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, CircleStop, Clock, ExternalLink, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
 import { ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
@@ -21,6 +21,7 @@ import {
 import type { ApprovalActionState, ChatTimelineEvent, ConversationItem } from "../../lib/chat-types";
 import { cancelledAgentReplyText, isCancelledRuntimeResponse } from "../../lib/conversation-utils";
 import { isAgentShellResult } from "../../lib/runtime-parsing";
+import { isWaitingForSubAgent } from "../../lib/runtime-run-status";
 import { formatLocalMessageTime } from "../../lib/message-time";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -124,6 +125,11 @@ export function buildAgentTimelineRows({
     <div key="turn-cancelled" data-agent-turn-cancelled role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t("chat.cancelled")}</span>
+    </div>,
+  ] : isWaitingForSubAgent(response.plan) ? [...rows,
+    <div key="waiting-for-subagent" data-agent-waiting-for-subagent role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+      <Clock className="h-3.5 w-3.5" aria-hidden="true" />
+      <span>{t("subagent.parentWaiting")}</span>
     </div>,
   ] : rows;
   const durableTimeline = (response.timeline || []) as ChatTimelineEvent[];

@@ -20,7 +20,7 @@ export type SubAgentTask = {
   parentClientTurnId?: string;
   projectPath?: string;
   toolProfile?: string;
-  status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted" | string;
+  status: "queued" | "running" | "cancelling" | "completed" | "paused" | "failed" | "cancelled" | "interrupted" | string;
   createdAt?: string;
   startedAt?: string;
   stoppedAt?: string;
@@ -29,6 +29,7 @@ export type SubAgentTask = {
   summary?: string;
   error?: string;
   errorCode?: string;
+  reason?: string;
   eventCount?: number;
   revision?: number;
   retryOf?: string;

@@ -105,49 +105,63 @@ def test_subagent_terminal_projection_preserves_private_native_snapshot(tmp_path
     assert "private-fixture-replay" not in json.dumps(prepared["params"])
 
 
-def test_subagent_parent_resume_settles_original_native_call_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    gateway, model, _ = setup_gateway(
-        tmp_path,
-        [
-            call("phase", "vrcforge_runtime_action", {"action": "enter_execution"}),
-            call("shell-call", "vrcforge_runtime_action", {
-                "action": "shell",
-                "shell_command": "Get-ChildItem",
-            }),
-            finish,
-        ],
-    )
-    calls, shell_seed = _start_background_shell(gateway, tmp_path, monkeypatch)
-    seed = deepcopy(shell_seed)
-    seed.update(
-        {
-            "requestedTool": "vrcforge_delegate_subagent",
-            "requestedKind": "skill",
-            "requestedArguments": {"objective": "Inspect the background result."},
-            "requestedActionId": "subagent-action-1",
+@pytest.mark.parametrize("child_status", ["failed", "paused"])
+def test_child_result_then_second_delegation_preserves_wait_without_fabricating_write(tmp_path, child_status):
+    gateway, model, _ = setup_gateway(tmp_path, [
+        call("delegate-first", "vrcforge_delegate_subagent", {"task": "Read the first fixture."}),
+        call("delegate-second", "vrcforge_delegate_subagent", {"task": "Read the second fixture."}),
+    ])
+    seeds = []
+
+    def delegate(params):
+        seeds.append(params["_taskSeed"])
+        return {"ok": True, "status": "running", "subAgentTaskId": f"child-{len(seeds)}"}
+
+    gateway.register_tool("vrcforge_delegate_subagent",
+                          "When to use: read with a specialist. When NOT to use: write files.",
+                          "plan/preview", delegate)
+    parent = {"sessionId": "parent", "clientTurnId": "client", "projectRoot": str(tmp_path)}
+    first = gateway.runtime_message({**parent, "message": "Ask the specialists to read two fixtures."})
+    assert first["plan"]["nextStep"] == "waiting_for_tool", first
+    assert first["plan"]["reason"] == "sub_agent_pending"
+    assert first["plan"]["reply"] == ""
+    assert len(seeds) == 1
+    child = {
+        "subAgentTaskId": "child-1",
+        "parentSessionId": "parent",
+        "status": child_status,
+        "summary": "The first inspection stopped.",
+        "taskSeed": seeds[0],
+        "result": {"ok": False, "error": "Fixture error"},
+    }
+    if child_status == "paused":
+        child["result"] = {
+            "ok": False, "status": "paused", "reason": "model_turn_budget_exhausted", "resumable": True,
+            "remainingTask": "Read back the unverified binding.",
+            "finalReport": "Verified before pause: fixture-evidence-marker.",
         }
-    )
-    resumed = gateway.resume_runtime_task_after_sub_agent(
-        {
-            "subAgentTaskId": "subagent-1",
-            "parentSessionId": seed["sessionId"],
-            "status": "completed",
-            "summary": "Sub-agent completed.",
-            "result": {"ok": True},
-            "taskSeed": seed,
-        }
-    )
+    resumed = gateway.resume_runtime_task_after_sub_agent(child)
     assert resumed is not None
-    snapshot = next(iter(gateway._runtime_session_state._native_conversations.values()))
-    assert not gateway._runtime_session_state._native_pending(snapshot)
-    assert len(calls) == 1
-    assert len(model.requests) == 3
-    shell_results = [
-        item for item in snapshot["messages"]
-        if item.get("role") == "tool" and item.get("tool_call_id") == "shell-call"
-    ]
-    assert len(shell_results) == 1
-    assert "private-fixture-replay" not in json.dumps(resumed)
+    assert resumed["plan"]["nextStep"] == "waiting_for_tool"
+    assert resumed["plan"]["reason"] == "sub_agent_pending"
+    assert resumed["turnStatus"]["status"] == "running"
+    assert resumed["plan"]["reply"] == ""
+    assert "write" not in resumed
+    assert "resumedApprovalId" not in resumed
+    assert len(seeds) == 2
+    assert len(model.requests) == 2
+    assert gateway.resume_runtime_task_after_sub_agent(child) is None
+    snapshot = gateway.runtime_sessions.native_conversation("parent", binding=seeds[0]["_nativeConversation"]["binding"])
+    assert len([item for item in snapshot["messages"]
+                if item.get("role") == "tool" and item.get("tool_call_id") == "delegate-first"]) == 1
+    assert "delegate-first" not in gateway.runtime_sessions._native_pending(snapshot)
+    if child_status == "paused":
+        assert "model_turn_budget_exhausted" in json.dumps(model.requests[1], default=str)
+        assert "Read back the unverified binding" in json.dumps(model.requests[1], default=str)
+    run = gateway.runtime_runs.list_runs(session_id="parent", client_turn_id=resumed["clientTurnId"])["runs"][0]
+    assert run["status"] == "blocked"
+    assert run["writeStatus"] == "none"
+    assert run["reason"] == "sub_agent_pending"
 
 
 def test_native_shell_completion_resumes_same_call_once_and_keeps_snapshot_private(

@@ -31,6 +31,12 @@ try {
     response = {...response, sessionId:run.sessionId,clientTurnId:run.clientTurnId,turnId:run.turnId,plan:{...response.plan,reply:final.payload.summary}};
   }
   assert.deepEqual(api.latestRuntimeAttentionCandidates([run]), [run]);
+  const childWait = { ...run, nextStep: 'waiting_for_tool', reason: 'sub_agent_pending' };
+  assert.deepEqual(api.latestRuntimeAttentionCandidates([childWait]), []);
+  assert.equal(api.runtimeAttentionFromRun(childWait), null, 'automatic child waits never notify the user');
+  assert.equal(api.runtimeAttentionFromResponse(run, {...response, plan:{nextStep: childWait.nextStep, reason: childWait.reason}}), null);
+  assert.ok(api.runtimeAttentionFromRun({...run, nextStep:'needs_user_action', reason:'question_pending'}),
+    'a human question still requires attention');
   const attention = api.runtimeAttentionFromResponse(run, response);
   assert.ok(attention);
   const failedRun={...run,status:'failed'};

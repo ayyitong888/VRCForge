@@ -59,6 +59,8 @@ export function displaySubAgentStatus(status: string): string {
       return i18n.t("subagent.statusCancelling");
     case "completed":
       return i18n.t("subagent.statusCompleted");
+    case "paused":
+      return i18n.t("subagent.statusPaused");
     case "failed":
       return i18n.t("subagent.statusFailed");
     case "cancelled":

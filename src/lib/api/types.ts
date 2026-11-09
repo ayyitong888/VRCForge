@@ -783,6 +783,7 @@ export type AgentRuntimeRun = {
   planSummary?: string;
   planner?: string;
   nextStep?: string;
+  reason?: string;
   stepCount?: number;
   eventCount?: number;
   attachmentCount?: number;

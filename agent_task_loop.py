@@ -2268,6 +2268,17 @@ class AgentTaskLoop:
                     return replacement
 
         if running:
+            if any(str(action.get("tool") or "") in SUB_AGENT_TASK_TOOLS for action in running):
+                return {
+                    **gated,
+                    "summary": "",
+                    "reply": "",
+                    "continueLoop": False,
+                    "nextStep": "waiting_for_tool",
+                    "reason": "sub_agent_pending",
+                    "completionGate": {"status": "running", "reason": "sub_agent_pending"},
+                    "task": self.snapshot(),
+                }
             label = _bounded_text(running[0].get("tool"), 160) or "background action"
             gated.update(
                 {

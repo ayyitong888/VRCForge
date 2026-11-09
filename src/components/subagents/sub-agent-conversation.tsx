@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { fetchAgentRunTimeline, type SubAgentTask } from "../../lib/api";
 import type { ChatTimelineEvent } from "../../lib/chat-types";
 import { mergeRuntimeTimelines } from "../../lib/chat-timeline-presentation";
+import { displaySubAgentStatus } from "../../lib/subagent-ui";
 import { buildDurableTimelineRows } from "../chat/conversation-timeline";
 import { ChatMarkdown } from "../chat/chat-markdown";
 import { Button } from "../ui/button";
@@ -66,6 +67,9 @@ export function SubAgentConversation({ endpoint, turns }: { endpoint: string; tu
         const rows = buildDurableTimelineRows(events, undefined, turn.status === "failed" ? turn.error || "failed" : "", [], {
           live: RUNNING.has(turn.status),
         });
+        const pausedReport = turn.status === "paused"
+          ? (typeof turn.result?.finalReport === "string" ? turn.result.finalReport : turn.summary)
+          : undefined;
         return (
           <section key={turn.id} className="space-y-3" data-subagent-conversation-turn={turn.id}>
             <div className="flex justify-end">
@@ -74,9 +78,17 @@ export function SubAgentConversation({ endpoint, turns }: { endpoint: string; tu
               </div>
             </div>
             <div className="space-y-4 px-1 text-sm [&_.chat-markdown]:leading-7" data-subagent-assistant-messages>
-              {rows.length ? rows : turn.summary ? <ChatMarkdown text={turn.summary} /> : (
+              {rows.length ? rows : pausedReport ? null : turn.summary ? <ChatMarkdown text={turn.summary} /> : (
                 <p className="text-xs text-muted-foreground">{t("subagent.noConversation")}</p>
               )}
+              {turn.status === "paused" ? (
+                <div className="space-y-2" data-subagent-paused-report>
+                  <p className="text-xs font-medium text-muted-foreground">
+                    {turn.reason === "model_turn_budget_exhausted" ? t("subagent.budgetPaused") : displaySubAgentStatus(turn.status)}
+                  </p>
+                  {pausedReport ? <ChatMarkdown text={pausedReport} /> : null}
+                </div>
+              ) : null}
               {turn.error ? <p className="break-words text-xs text-muted-foreground">{turn.error}</p> : null}
             </div>
           </section>
