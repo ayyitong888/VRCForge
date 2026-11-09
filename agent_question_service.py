@@ -116,6 +116,7 @@ class RuntimeQuestionResolutionPort:
     resolve: Callable[[str, Mapping[str, object], str], Mapping[str, object] | None]
     interrupt: Callable[[str, Mapping[str, object], str], object] | None = None
     settle_skip: Callable[[Mapping[str, object]], object] | None = None
+    accept_visual: Callable[[Mapping[str, object]], object] | None = None
 
 
 class AgentQuestionPersistence:
@@ -363,6 +364,7 @@ class AgentQuestionService:
                 if explicit_resolution not in {"pass", "fail"}:
                     raise AgentQuestionServiceError("settleOnly requires an explicit pass or fail resolution.", status_code=400)
             if str(existing.get("status") or "") == "answered":
+                answered = existing
                 payload: dict[str, object] = {"ok": True, "question": self._redact(existing), "idempotent": True}
             else:
                 selected_option_id = _question_text(
@@ -449,6 +451,9 @@ class AgentQuestionService:
                 if answered is None:
                     raise OSError("Question storage did not preserve the answer.")
                 payload = {"ok": True, "question": self._redact(answered)}
+        if (answered.get("kind") == "visual_checkpoint" and answered.get("resolution") == "pass"
+                and self._runtime_resolution is not None and self._runtime_resolution.accept_visual is not None):
+            self._runtime_resolution.accept_visual(answered)
         # A persisted answer can precede an interrupted Goal projection. Its
         # resolver is idempotent, so retries must finish that durable handoff.
         if goal_delivery_id:

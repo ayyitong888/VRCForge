@@ -1151,6 +1151,19 @@ _PROGRESS_ITEM_PROPERTIES = {
     "status": {"type": "string", "enum": ["pending", "in_progress", "running", "completed", "cancelled", "blocked", "deleted"]},
     "order": {"type": "integer", "description": "Display order of the item."},
     "owner": {"type": "string", "description": "Display owner label; does not grant authority."},
+    "completionChecks": {
+        "type": "array", "minItems": 1, "maxItems": 16,
+        "description": "All required acceptance receipts. The runtime completes the item once every check matches.",
+        "items": {
+            "type": "object", "additionalProperties": False, "required": ["tool"],
+            "properties": {
+                "tool": {"type": "string", "minLength": 1, "description": "Exact runtime tool name."},
+                "arguments": {"type": "object", "description": "Expected call arguments, matched by exact values for the fields provided."},
+                "result": {"type": "object", "description": "Expected receipt fields, matched by exact values for the fields provided."},
+            },
+            "anyOf": [{"required": ["arguments"]}, {"required": ["result"]}],
+        },
+    },
 }
 _PROGRESS_ITEM_SCHEMA = {
     "type": "object", "additionalProperties": True, "properties": _PROGRESS_ITEM_PROPERTIES,

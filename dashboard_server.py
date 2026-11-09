@@ -1647,6 +1647,7 @@ AGENT_GATEWAY = AgentGateway(
     runtime_turn_completed=broadcast_runtime_turn_completed,
     runtime_status_changed=broadcast_runtime_status,
     runtime_timeline_changed=broadcast_runtime_status,
+    runtime_progress_changed=lambda payload: EVENT_BUS.broadcast_from_sync("agentProgress", payload),
     vision_profile_enabled=lambda: bool(PROVIDER_CONFIGURATION.current_vision_config().enabled),
     load_mcp_resources=not AGENT_MCP_STDIO_MODE,
 )

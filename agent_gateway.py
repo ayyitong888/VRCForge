@@ -107,6 +107,7 @@ from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from agent_native_history_store import NativeHistoryStore
 from agent_runtime_native_turn import NativeRuntimeTurn
+from agent_progress_evidence import accepted_receipt, completion_checks, matched_checks
 from channel_project_selection import TOOL_NAME as PROJECT_SELECTION_TOOL, register_channel_project_selection
 from agent_runtime_followup_queue import AgentRuntimeFollowupQueue, FollowupQueuePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
@@ -724,6 +725,7 @@ class AgentGateway:
         runtime_turn_completed: Callable[[dict[str, Any]], None] | None = None,
         runtime_status_changed: Callable[[dict[str, Any]], None] | None = None,
         runtime_timeline_changed: Callable[[dict[str, Any]], None] | None = None,
+        runtime_progress_changed: Callable[[dict[str, Any]], None] | None = None,
         vision_profile_enabled: Callable[[], bool] | None = None,
         runtime_subagent_list_tasks: Callable[[], Any] | None = None,
         runtime_subagent_cancel_task: Callable[[str], Any] | None = None,
@@ -734,6 +736,7 @@ class AgentGateway:
         self.audit_dir = audit_dir
         self.public_base_url = public_base_url.rstrip("/")
         self._project_selection_request = project_selection_request
+        self._runtime_progress_changed = runtime_progress_changed or (lambda _payload: None)
         self._tools: dict[str, AgentTool] = {}
         self._write_handlers: dict[str, AgentWriteHandler] = {}
         # Explicit per-instance additions are used only when a host registers a
@@ -898,6 +901,7 @@ class AgentGateway:
                     task_seed=dict(seed), continuation_source="question_answered", owned_id=question_id, summary=summary,
                 ),
                 settle_skip=lambda seed: NativeRuntimeTurn.cancel_question(self._runtime_session_state, seed, skipped=True),
+                accept_visual=self._accept_todo_visual_receipt,
             ),
         )
         # In-progress approved writes, keyed by approval id. This is a global,
@@ -5143,6 +5147,18 @@ class AgentGateway:
             rejected=rejected,
             revision_requested=revision_requested,
         )
+        if not rejected and not revision_requested:
+            context = ensure_dict(approval.get("taskContext"))
+            applied = ensure_dict(execution)
+            receipt = accepted_receipt(
+                str(context.get("tool") or ""), "write", str(context.get("actionId") or ""),
+                ensure_dict(context.get("requestedArguments")), applied.get("result"),
+                ensure_dict(applied.get("outcome")), status=str(applied.get("status") or ""),
+            )
+            if receipt:
+                self._advance_runtime_todos(
+                    str(context.get("sessionId") or ""), str(context.get("projectRoot") or ""), [receipt],
+                )
         if prepared is None:
             return None
         params = ensure_dict(prepared.get("params"))
@@ -6689,6 +6705,8 @@ class AgentGateway:
                 if write_payload.get("error"):
                     completed_step["error"] = str(write_payload.get("error"))
         first_plan: dict[str, Any] | None = None
+        todo_receipts: list[dict[str, Any]] = []
+        todo_tools = self._runtime_todo_tools(session_id, project_root)
         last_plan: dict[str, Any] = {}
         iterations = 0
         cap_reached = False
@@ -8064,6 +8082,9 @@ class AgentGateway:
                     step_params["chatId"] = chat_id
                     step_params["projectRoot"] = project_root
                     step_params["turnId"] = turn_id
+                if step_tool.startswith("vrcforge_progress_"):
+                    step_params["sessionId"] = session_id
+                    step_params["projectRoot"] = project_root
                 if step_tool == "vrcforge_agent_desktop_action":
                     step_params.setdefault("clientTurnId", client_turn_id)
                 if step_tool in CONVERSATION_TOOL_NAMES:
@@ -8261,6 +8282,20 @@ class AgentGateway:
                 steps[-1]["outcome"] = step_timeline_outcome
             if step_payload.get("error"):
                 steps[-1]["error"] = str(step_payload.get("error"))
+
+            receipt = accepted_receipt(
+                step_tool, action_kind, task_action["actionId"], action_arguments,
+                step_payload.get("result"), step_timeline_outcome, status=str(step_payload.get("status") or ""),
+            )
+            if receipt:
+                todo_receipts.append(receipt)
+                if step_tool in todo_tools:
+                    self._advance_runtime_todos(session_id, project_root, [receipt])
+            if (step_tool in {"vrcforge_progress_replace", "vrcforge_progress_create",
+                              "vrcforge_progress_update", "vrcforge_progress_delete"}
+                    and step_timeline_outcome.get("status") == "ok"):
+                self._advance_runtime_todos(session_id, project_root, todo_receipts, publish=True)
+                todo_tools = self._runtime_todo_tools(session_id, project_root)
 
             # Retain the owner's complete model projection in the existing turn,
             # independently of raw-result eligibility. Both planner paths receive
@@ -9733,6 +9768,10 @@ class AgentGateway:
         return {"ok": True, "schema": "vrcforge.advanced_settings.v1", "settings": updated}
 
     def replace_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            return self._replace_agent_progress_locked(params)
+
+    def _replace_agent_progress_locked(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         raw_items = params.get("items") or params.get("plan")
         if raw_items is None and params.get("items") == []:
@@ -9741,6 +9780,9 @@ class AgentGateway:
             raise AgentGatewayError("Progress replacement requires an items or plan array; use [] to clear explicitly.", status_code=400)
         project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
         session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
+        existing = {
+            item["progressId"]: item for item in self._scoped_runtime_todos(session_id, project_root)
+        }
         normalized_items: list[dict[str, Any]] = []
         for index, item in enumerate(raw_items):
             if not isinstance(item, dict):
@@ -9751,16 +9793,17 @@ class AgentGateway:
             status = str(item.get("status") or "pending").strip().lower()
             if status not in {"pending", "in_progress", "running", "completed", "cancelled", "blocked", "deleted"}:
                 status = "pending"
-            normalized_items.append(
-                {
-                    "progressId": summarize_text(str(item.get("progressId") or item.get("id") or f"progress-{index + 1}"), 120),
-                    "title": title,
-                    "summary": summarize_text(str(item.get("summary") or item.get("description") or ""), 1000),
-                    "status": status,
-                    "order": int(item.get("order") if isinstance(item.get("order"), int) else index),
-                    "owner": summarize_text(str(item.get("owner") or "agent"), 80),
-                }
-            )
+            entry = {
+                "progressId": summarize_text(str(item.get("progressId") or item.get("id") or f"progress-{index + 1}"), 120),
+                "title": title,
+                "summary": summarize_text(str(item.get("summary") or item.get("description") or ""), 1000),
+                "status": status,
+                "order": int(item.get("order") if isinstance(item.get("order"), int) else index),
+                "owner": summarize_text(str(item.get("owner") or "agent"), 80),
+            }
+            previous = existing.get(entry["progressId"], {})
+            self._bind_todo_completion(entry, item, previous)
+            normalized_items.append(entry)
         if raw_items and not normalized_items:
             raise AgentGatewayError("Nonempty progress replacement must contain at least one titled item; use [] to clear explicitly.", status_code=400)
         event = {
@@ -9789,6 +9832,7 @@ class AgentGateway:
             "owner": summarize_text(str(params.get("owner") or "agent"), 80),
             "order": int(params.get("order")) if isinstance(params.get("order"), int) else 0,
         }
+        self._bind_todo_completion(event, params, {})
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
         return {"ok": True, "progress": self._find_agent_progress(progress_id, event)}
 
@@ -9806,6 +9850,10 @@ class AgentGateway:
             raise AgentGatewayError(f"{label} does not belong to this project.", status_code=404)
 
     def update_agent_progress(self, progress_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            return self._update_agent_progress_locked(progress_id, params)
+
+    def _update_agent_progress_locked(self, progress_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         progress_id = str(progress_id or "").strip()
         if not progress_id:
@@ -9826,8 +9874,93 @@ class AgentGateway:
             "owner": summarize_text(str(params.get("owner") or existing.get("owner") or "agent"), 80),
             "order": int(params.get("order")) if isinstance(params.get("order"), int) else int(existing.get("order") or 0),
         }
+        self._bind_todo_completion(event, params, existing)
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
         return {"ok": True, "progress": self._find_agent_progress(progress_id, event)}
+
+    @staticmethod
+    def _bind_todo_completion(entry: dict[str, Any], values: dict[str, Any], previous: dict[str, Any]) -> None:
+        checks = previous.get("completionChecks")
+        if checks and entry["title"] != previous["title"] and "completionChecks" not in values:
+            # A reused item ID can describe different work after a replan.
+            entry.update(completionChecks=[], completionEvidence={})
+            if entry["status"] == "completed":
+                entry["status"] = "in_progress"
+            return
+        if "completionChecks" in values:
+            try:
+                checks = completion_checks(values["completionChecks"])
+            except ValueError as exc:
+                raise AgentGatewayError(str(exc), status_code=400) from exc
+        if not checks:
+            return
+        evidence = dict(previous.get("completionEvidence") or {}) if checks == previous.get("completionChecks") else {}
+        entry.update(completionChecks=checks, completionEvidence=evidence)
+        if entry["status"] == "completed" and len(evidence) < len(checks):
+            entry["status"] = "in_progress"
+
+    def _scoped_runtime_todos(self, session_id: str, project_root: str) -> list[dict[str, Any]]:
+        def project_key(path: str) -> str:
+            return command_safety.normalize_filesystem_path(path) if path else ""
+
+        normalized_root = project_key(project_root)
+        return [
+            item for item in self._project_agent_progress().values()
+            if item.get("sessionId") == session_id
+            and project_key(str(item.get("projectRoot") or "")) == normalized_root
+        ]
+
+    def _runtime_todo_tools(self, session_id: str, project_root: str) -> set[str]:
+        return {
+            check["tool"] for item in self._scoped_runtime_todos(session_id, project_root)
+            if item.get("status") in {"pending", "in_progress", "running", "blocked"}
+            for check in item.get("completionChecks", [])
+        }
+
+    def _advance_runtime_todos(
+        self, session_id: str, project_root: str, receipts: list[dict[str, Any]], *, publish: bool = False,
+    ) -> None:
+        if not session_id:
+            return
+        with self._lock:
+            for item in self._scoped_runtime_todos(session_id, project_root):
+                checks = item.get("completionChecks")
+                if not checks or item.get("status") not in {"pending", "in_progress", "running", "blocked"}:
+                    continue
+                previous = ensure_dict(item.get("completionEvidence"))
+                evidence = matched_checks(checks, previous, receipts)
+                if evidence == previous:
+                    continue
+                self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", {
+                    "event": "progress_updated",
+                    "progressId": item["progressId"],
+                    "sessionId": session_id,
+                    "projectRoot": item["projectRoot"],
+                    "status": "completed" if len(evidence) == len(checks) else item["status"],
+                    "completionEvidence": evidence,
+                })
+                publish = True
+        if publish:
+            try:
+                self._runtime_progress_changed(self.list_agent_progress(session_id=session_id, project_root=project_root))
+            except Exception:
+                # The existing progress endpoint can recover the durable update.
+                pass
+
+    def _accept_todo_visual_receipt(self, question: Mapping[str, Any]) -> None:
+        seed = ensure_dict(question.get("runtimeTaskSeed"))
+        question_id = str(question.get("questionId") or "")
+        tool = str(seed.get("requestedTool") or "")
+        if not question_id or not tool:
+            return
+        self._advance_runtime_todos(
+            str(question.get("sessionId") or ""), str(question.get("projectRoot") or ""), [{
+                "id": question_id,
+                "tool": tool,
+                "arguments": ensure_dict(seed.get("requestedArguments")),
+                "result": {"questionId": question_id, "resolution": "pass", "question": question.get("question")},
+            }],
+        )
 
     def _find_agent_progress(self, progress_id: str, params: dict[str, Any]) -> dict[str, Any]:
         matches = [
