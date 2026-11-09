@@ -35,7 +35,8 @@ def test_avatar_visual_feedback_and_author_material_guidance_are_scoped():
     by_name = {item["name"]: item for item in catalog.BUILTIN_SKILL_GROUPS}
     face = by_name["face-tuning-workflow"]
     assert "vrcforge_call_user" in face["allowedTools"]
-    assert "only an explicit pass or fail" in face["instructions"]
+    assert "kind=visual_checkpoint" in face["instructions"]
+    assert "Only explicit user approval passes" in face["instructions"]
     assert "awaiting GM confirmation" in face["instructions"]
 
     material = by_name["shader-material-workflow"]
