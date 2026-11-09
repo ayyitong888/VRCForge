@@ -520,6 +520,8 @@ class SubAgentTaskRegistry:
                 return {"ok": False, "error": "sub-agent task was not found."}
             if task.status not in _RETRYABLE_STATUSES:
                 return {"ok": False, "error": "only stopped sub-agent tasks can be retried."}
+            # A manual retry starts a new task, without replaying a settled parent call.
+            params = {key: value for key, value in task.params.items() if key not in {"_taskSeed", "taskSeed"}}
             return self.create_task(
                 role=task.role,
                 task=task.task,
@@ -527,7 +529,7 @@ class SubAgentTaskRegistry:
                 parent_chat_id=task.parent_chat_id,
                 parent_session_id=task.parent_session_id,
                 project_path=task.project_path,
-                params=copy.deepcopy(task.params),
+                params=params,
                 general_read_roots=task.general_read_roots,
                 retry_of=task.id,
             )
