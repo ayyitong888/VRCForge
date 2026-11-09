@@ -1,6 +1,7 @@
 import type { TFunction } from "i18next";
 import type { AgentRuntimeRun } from "./api/types";
 import type { ChatThread, ConversationItem } from "./chat-types";
+import { chatReplyMarker } from "./chat-unread";
 import { formatChatSidebarTime, groupSidebarChats, type ChatSidebarGroups } from "./chat-thread";
 import { isExternalRuntimeStream } from "./runtime-stream-owner";
 import { runtimeTurnActivityStatus } from "./runtime-run-status";
@@ -47,7 +48,7 @@ export function chatLatestAgentMarker(chat: ChatThread): string | undefined {
   if (latestUserIndex < 0) return undefined;
   for (let index = chat.items.length - 1; index > latestUserIndex; index -= 1) {
     const item = chat.items[index];
-    if (item?.type === "agent") return item.completedAt || item.response.completedAt || item.id;
+    if (item?.type === "agent") return chatReplyMarker(item);
   }
   return undefined;
 }

@@ -46,7 +46,8 @@ import {
 } from "../lib/chat-thread";
 import type { ChatThread, ConversationItem, ProjectType } from "../lib/chat-types";
 import { normalizeProjectPathKey } from "../lib/project-path";
-import { chatLatestAgentMarker, chatSidebarActivity, type SidebarChatActivity } from "../lib/sidebar-view";
+import { chatSidebarActivity, type SidebarChatActivity } from "../lib/sidebar-view";
+import { latestChatReplyMarker } from "../lib/chat-unread";
 
 type InitialChatState = {
   chats: ChatThread[];
@@ -102,6 +103,7 @@ function isStableChatSaveRejection(cause: unknown): cause is ApiError {
 
 type UseChatSessionsParams = {
   activeView: ActiveView;
+  chatContentVisible?: boolean;
   endpoint: string;
   runtimeConnected: boolean;
   projectPrefsReady: boolean;
@@ -119,6 +121,7 @@ type UseChatSessionsParams = {
 
 export function useChatSessions({
   activeView,
+  chatContentVisible = true,
   endpoint,
   runtimeConnected,
   projectPrefsReady,
@@ -251,12 +254,23 @@ export function useChatSessions({
   }, [activeChatId, activeView, chatSidebarBase, chatSidebarTimes]);
 
   useEffect(() => {
-    if (activeView !== "chat" || !activeChatId) return;
-    const chat = chatsRef.current.find((candidate) => candidate.id === activeChatId);
-    const marker = chat ? chatLatestAgentMarker(chat) : undefined;
-    if (!chat || !marker || chat.lastViewedAt === marker) return;
-    updateChat(activeChatId, (current) => ({ ...current, lastViewedAt: marker }));
-  }, [activeChatId, activeView, chats]);
+    if (activeView !== "chat" || !chatContentVisible || !activeChat) return;
+    const markViewed = () => {
+      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+      const chat = chatsRef.current.find((candidate) => candidate.id === activeChat.id);
+      const marker = chat && latestChatReplyMarker(chat);
+      if (chat && marker && chat.lastViewedAt !== marker) {
+        updateChat(chat.id, (current) => ({ ...current, lastViewedAt: marker }));
+      }
+    };
+    markViewed();
+    window.addEventListener("focus", markViewed);
+    document.addEventListener("visibilitychange", markViewed);
+    return () => {
+      window.removeEventListener("focus", markViewed);
+      document.removeEventListener("visibilitychange", markViewed);
+    };
+  }, [activeView, activeChat, chatContentVisible]);
 
   useEffect(() => {
     if (chatStorageLoadSucceeded) {

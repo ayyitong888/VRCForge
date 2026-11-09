@@ -77,6 +77,7 @@ import { useConversationScroll } from "./hooks/use-conversation-scroll";
 import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
 import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
 import { useBackgroundGoalRuns } from "./hooks/use-background-goal-runs";
+import { useTaskbarUnreadBadge } from "./hooks/use-taskbar-unread-badge";
 import { parseGoalWakeDirective } from "./hooks/use-goal-wake";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useProviderSettings } from "./hooks/use-provider-settings";
@@ -781,6 +782,7 @@ export default function App() {
     },
   });
   const chatSessionProjectPaths = useMemo(() => projectItems.map((project) => projectKey(project)).filter(Boolean), [projectItems]);
+  const chatContentVisible = !selectedSubAgentPanelOpen && !showProjectModal && (!showOnboarding || onboardingMinimized);
   const {
     chats,
     chatStorageReady,
@@ -825,6 +827,7 @@ export default function App() {
     selectProject,
   } = useChatSessions({
     activeView,
+    chatContentVisible,
     endpoint,
     runtimeConnected,
     projectPrefsReady,
@@ -1189,10 +1192,7 @@ export default function App() {
     endpoint,
     runtimeConnected,
     chatAvailable,
-    ownerChatVisible:
-      activeView === "chat"
-      && Boolean(activeChatId)
-      && (!showOnboarding || onboardingMinimized),
+    ownerChatVisible: activeView === "chat" && Boolean(activeChatId) && chatContentVisible,
     activeChatId,
     refreshSignal: backgroundGoalRefreshSignal,
     notificationsEnabled: backgroundGoalNotificationsEnabled,
@@ -1271,6 +1271,7 @@ export default function App() {
       return "persisted";
     },
   });
+  useTaskbarUnreadBadge(chats, backgroundGoalState?.unread);
   useEffect(() => {
     if (!editingMessage || editingMessage.chatId === activeChatId) {
       return;
