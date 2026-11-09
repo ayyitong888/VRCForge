@@ -27318,7 +27318,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_list_user_unity_tools",
-        "when-to-use: discover compiled user tools and their effective availability after VRCForge package checks. disabledBy=vrcforge_package_store identifies the App's package enablement switch; coreEnabled/coreReason retain the original Unity Core state. when-NOT-to-use: listing ordinary Skills or treating compilation as permission to invoke a disabled package.",
+        "when-to-use: discover compiled user Unity tools available for the current project and their effective execution readiness after VRCForge package checks. disabledBy=vrcforge_package_store identifies the App's package enablement switch; coreEnabled/coreReason retain the original Unity Core state. when-NOT-to-use: listing ordinary Skills or treating compilation as permission to invoke a disabled package.",
         "read/debug",
         lambda args: list_user_tools(args, user_tool_service(), lambda name, payload: extract_tool_result_payload(invoke_user_core(args, name, payload))),
     )
@@ -27842,7 +27842,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_list_execution_targets",
-        "When to use: Enumerate exact project, Scene, Avatar, object, or component identities from the currently running project-scoped Unity Core before binding work. When NOT to use: Do not use hierarchy names as identity or treat candidates as write approval. Negative example: Choose one of two same-named Avatars without an exact GlobalObjectId.",
+        "When to use: List current Unity execution targets to inspect the exact identity of the running project, Scene, Avatar, object or component before binding. When NOT to use: Do not use hierarchy names as identity or treat candidates as write approval. Negative example: Choose one of two same-named Avatars without an exact GlobalObjectId.",
         "read/debug",
         list_execution_targets_sync,
     )
@@ -28184,10 +28184,10 @@ def register_agent_gateway_tools() -> None:
         "plan/preview",
         preview_unity_constraint_conversion_sync,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_get_property", f"When to use: {component_configuration_guidance} read a bound component using propertyPath for a direct field/property, or serializedPropertyPath for a nested serialized leaf or Array.data[n] element; object references retain exact identities. Use queries for one sample of simple properties across bound components. When NOT to use: do not write, mix scalar and batch arguments, or use nested paths inside queries. Negative example: assigning a renderer value requires the approved setter.", "read/debug", read_component_property_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_get_property", f"When to use: {component_configuration_guidance} read a bound component using propertyPath for a direct field/property, including Transform localPosition, localRotation, localScale and lossyScale for position, rotation, scale and bone proportions; or serializedPropertyPath for a nested serialized leaf or Array.data[n] element; object references retain exact identities. Use queries for one sample of simple properties across bound components. When NOT to use: do not write, mix scalar and batch arguments, or use nested paths inside queries. Negative example: assigning a renderer value requires the approved setter.", "read/debug", read_component_property_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_diagnostic_fix", "When to use: resolve one autoFix.action from the current NDMF or SDK report without invoking it; retain its original message and actual targets. Native callback scope is opaque. When NOT to use: do not guess actions or treat a retained NDMF report as a fresh build. Negative example: availability does not prove the action will resolve the issue.", "plan/preview", lambda params: diagnostic_fix_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_inspect_editor_capabilities", "When to use: discover loaded Unity plugin MenuItem metadata or open Editor windows before selecting an exact entry point. When NOT to use: do not invoke callbacks or treat discovery as completed setup. Negative example: triggering a listed setup menu requires approval.", "read/debug", inspect_editor_capabilities_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_inspect_material_properties", "When to use: inspect one exact Assets/*.mat: Shader properties and Stencil values, shader.assetPath, shader.defaultRenderQueue, renderQueue.effective, and renderQueue.materialOverride (-1 follows the Shader queue). Queue values describe current Editor material state; use search and offset/limit to narrow property rows. When NOT to use: do not assign values, infer fields from plugin names, or claim GPU/rendered state. Negative example: to check a material's stencil reference, inspect its exact .mat and follow the returned page; do not infer it from the shader or material name.", "read/debug", inspect_material_properties_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_inspect_material_properties", "When to use: inspect one exact Assets/*.mat: Shader properties and Stencil values, shader.assetPath, shader.defaultRenderQueue, renderQueue.effective, and renderQueue.materialOverride (-1 follows the Shader queue). Queue values describe current Editor material state; use search and offset/limit to narrow property rows. For lilToon second or third main texture layers, inspect the existing base texture, overlay texture slot and scalar enable switch before binding or enabling the layer. When NOT to use: do not assign values, infer fields from plugin names, or claim GPU/rendered state. Negative example: to check a material's stencil reference, inspect its exact .mat and follow the returned page; do not infer it from the shader or material name.", "read/debug", inspect_material_properties_sync)
     AGENT_GATEWAY.register_tool(
         "vrcforge_scan_inbound_reference_closure",
         "When to use: prove which serialized object references, animation binding paths, framework paths, and PhysBone/Contact parameter consumers still point into exact scene roots or components before cleanup. "
@@ -28219,7 +28219,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", SHADER_VISION_PROTECTION.preview_shader_apply)
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_material_shader_assignment",
-        "When to use: preview one persistent material selector or up to 128 pure asset shader assignments and their shared impact without writing; or preview keywordChanges or propertyChanges with optional renderQueue on one saved independent material without changing its shader. When NOT to use: do not mix these modes, edit undeclared/non-scalar properties through propertyChanges, batch renderer selectors, or treat preview as a write. Negative example: do not change every shader to fix one missing texture.",
+        "When to use: preview one persistent material selector or up to 128 pure asset shader assignments and their shared impact without writing; or preview keywordChanges or propertyChanges with optional renderQueue on one saved independent material without changing its shader. For a lilToon second or third main texture layer, preview its declared scalar enable switch in propertyChanges (e.g. _UseMain2ndTex=1) and apply via vrcforge_set_material_shader. Preview the overlay texture binding separately. When NOT to use: do not mix these modes, edit undeclared/non-scalar properties through propertyChanges, batch renderer selectors, or treat preview as a write. Negative example: do not change every shader to fix one missing texture.",
         "plan/preview",
         SHADER_VISION_PROTECTION.preview_material_shader_assignment,
     )
@@ -28230,7 +28230,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_material_texture_assignment",
-        "When to use: inspect one existing project Material texture assignment or 1..128 assignments, each binding an exact persistent Material, an installed shader Texture property, and an existing Texture2D, without writing. When NOT to use: do not mix assignments with single-target fields, edit pixels, create textures, change shader parameters, or treat a preview as an applied assignment. Negative example: do not call it to repaint a face texture.",
+        "When to use: preview one existing project Material texture binding or 1..128 assignments, each binding an exact persistent Material, an installed shader Texture property, and an existing Texture2D, without writing. For a transparent PNG overlay, preview binding it to a verified second or third main texture layer (e.g. lilToon _Main2ndTex), keeping the base texture. This can show the overlay on the material without baking or merging image files. Apply via vrcforge_set_material_texture. For a separate enable switch, use vrcforge_preview_material_shader_assignment. When NOT to use: do not use for PNG alpha compositing to a new file, mix assignments with single-target fields, edit pixels, create textures, change shader parameters, or treat a preview as an applied assignment. Negative example: do not call it to repaint a face texture.",
         "plan/preview",
         preview_material_texture_assignment_sync,
     )
@@ -28531,7 +28531,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_set_material_shader",
-        "When to use: assign an exact installed shader to one preview-bound persistent material slot or up to 128 pure material asset assignments with one checkpoint after inspecting shared renderer and asset impact; or edit declared keywordChanges or scalar propertyChanges with optional renderQueue on one saved independent material while retaining its shader and untouched values. When NOT to use: do not mix modes, infer rendering settings, edit undeclared/non-scalar properties, batch renderer selectors, replace a material asset, or guess a shader name. Negative example: do not call it to make every material use lilToon.",
+        "When to use: assign an exact installed shader to one preview-bound persistent material slot or up to 128 pure material asset assignments with one checkpoint after inspecting shared renderer and asset impact; or edit declared keywordChanges or scalar propertyChanges with optional renderQueue on one saved independent material while retaining its shader and untouched values. For a lilToon second or third main texture layer, use a declared scalar propertyChanges entry for its enable switch (e.g. _UseMain2ndTex), after vrcforge_preview_material_shader_assignment. When NOT to use: do not mix modes, infer rendering settings, edit undeclared/non-scalar properties, batch renderer selectors, replace a material asset, or guess a shader name. Negative example: do not call it to make every material use lilToon.",
         "medium",
         unity_mcp_write_sync,
         request_preparer=prepare_material_shader_assignment_request,
@@ -28548,7 +28548,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_set_material_texture",
-        "When to use: apply one preview-bound persistent Material texture assignment or 1..128 assignments under one checkpoint, then save and read back every affected material. Each assignment binds an existing Assets Texture2D and a Texture property exposed by the installed shader. When NOT to use: do not mix assignments with single-target fields, edit pixels, create assets, change shaders, or bypass the checkpoint. Negative example: do not rewrite every material merely because one face texture needs a localized repair.",
+        "When to use: apply one preview-bound persistent Material texture assignment or 1..128 assignments under one checkpoint, then save and read back every affected material. Each assignment binds an existing Assets Texture2D and a Texture property exposed by the installed shader. A transparent overlay can be assigned to a declared secondary texture slot without replacing the base; this does not toggle the layer. When NOT to use: do not mix assignments with single-target fields, edit pixels, create assets, change shaders, or bypass the checkpoint. Negative example: do not rewrite every material merely because one face texture needs a localized repair.",
         "medium",
         unity_mcp_write_sync,
         request_preparer=prepare_material_texture_assignment_request,
@@ -28627,7 +28627,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_apply_blendshapes",
-        "Apply validated Blendshape adjustments through VRCForge.",
+        "When to use: apply a previewed Blendshape weight change to the exact mesh and renderer after requesting approval. Use vrcforge_preview_blendshape_apply to read the current and proposed weight first. When NOT to use: do not change animation curves, guess the mesh, or treat a preview as a write. Negative example: a request to inspect weights does not authorize applying them.",
         "medium",
         AVATAR_TUNING_APPROVED_WRITES.execute_manual_apply,
         request_preparer=AVATAR_TUNING_APPROVED_WRITES.prepare_manual_apply,
@@ -29111,7 +29111,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_texture_patch",
-        "When to use: create a new PNG by applying one bounded local pixel patch to an exact source texture, preserving all pixels outside the patch and protected regions. When NOT to use: do not inpaint, generate imagery, overwrite a source/output, edit non-PNG assets, or bind a material. Negative example: do not use this to redesign a whole texture or replace vrcforge_set_material_texture.",
+        "When to use: create a new PNG by applying a uniform color to one bounded region or mask of an exact source texture, preserving pixels outside the patch and in protected regions. When NOT to use: do not alpha composite two color images, bake material layers, inpaint, generate imagery, overwrite a source/output, edit non-PNG assets, or bind a material. Negative example: do not use this to redesign a whole texture or replace vrcforge_set_material_texture.",
         "medium",
         unity_mcp_write_sync,
         request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, TEXTURE_PATCH_TOOL),

@@ -100,7 +100,9 @@ def _search_relevance(records, tokens, query):
     frequencies = defaultdict(int)
     for tool in records:
         name = _terms(tool.name + " " + tool.runtime_name)
-        description = _terms(tool.description)
+        # Exclusions explain limits to the caller; they are not capabilities.
+        positive_description = re.split(r"when not to use:|negative example:", tool.description, maxsplit=1, flags=re.I)[0]
+        description = _terms(positive_description)
         schema = _schema_terms(tool.input_schema)
         block = _terms(tool.block)
         documents[tool.name] = (name, description, schema, block)
@@ -198,11 +200,9 @@ def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
         # query score ``readiness`` and other unrelated words, which can route
         # broad inspection requests to the wrong leaf.
         name_terms = _terms(tool.name + " " + tool.runtime_name)
-        text_terms = _terms(tool.block + " " + tool.description)
         name_hits = len(tokens & name_terms)
-        text_hits = len(tokens & text_terms)
         schema_hits = len((tokens - _WRITE_INTENT - _READ_INTENT) & _schema_terms(tool.input_schema))
-        scores[tool.name] = (name_hits, schema_hits, text_hits)
+        scores[tool.name] = (name_hits, schema_hits)
     if preview_command:
         search_records = [tool for tool in records
                           if not tool.write and tool.runtime_name.startswith("vrcforge_preview_")]

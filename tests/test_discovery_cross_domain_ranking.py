@@ -111,6 +111,7 @@ def test_dashboard_search_uses_host_runtime_availability_not_model_claims():
 
         inactive = dashboard_server.load_internal_tool_block({
             **params,
+            "query": "list user Unity tools",
             "projectContextActive": False,
             "availableToolNames": ["list_user_unity_tools"],
         })
@@ -151,3 +152,29 @@ def test_multiple_description_and_schema_subject_hits_beat_a_generic_tool_name()
     result = search_tool_leaves("inspect avatar shader family dissolve", tools, {})
 
     assert result["matches"][0]["toolNames"] == ["read_target_details"]
+
+def test_original_overlay_search_surfaces_layer_binding_and_the_exact_enable_preview():
+    # The original tool call searched for a baked PNG and missed the supported
+    # material-layer operation. Replay that query through the real catalog.
+    result = dashboard_server.load_internal_tool_block({
+        "query": "PNG texture alpha composite layers bake merge source overlay",
+        "tools": [],
+        "exposureLayer": "execution",
+        "projectContextActive": True,
+    })
+    match = result["matches"][0]
+    assert "unity_preview_material_texture_assignment" in match["toolNames"]
+    assert match["loadCall"]["block"] == "appearance/textures_visual_properties"
+
+    planning = dashboard_server._RuntimePlannerCatalog().read(
+        "planning", project_context_active=True
+    )
+    queries = (
+        ("inspect lilToon second main texture layer", "unity_inspect_material_properties"),
+        ("preview enable lilToon second main texture layer", "unity_preview_material_shader_assignment"),
+        ("preview bind transparent PNG overlay second main texture layer", "unity_preview_material_texture_assignment"),
+    )
+    for query, expected in queries:
+        matches = search_tool_leaves(query, planning.visible_tools, {})["matches"]
+        assert any(expected in row["toolNames"] for row in matches[:2]), query
+        assert not any(row["requiredTools"] for row in matches)

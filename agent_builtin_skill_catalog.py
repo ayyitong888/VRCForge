@@ -1021,6 +1021,11 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_web_fetch",
             "vrcforge_read_local_image",
             "vrcforge_scan_materials",
+            "vrcforge_inspect_material_properties",
+            "vrcforge_preview_material_texture_assignment",
+            "vrcforge_set_material_texture",
+            "vrcforge_preview_material_shader_assignment",
+            "vrcforge_set_material_shader",
             "vrcforge_plan_shader_tuning",
             "vrcforge_preview_shader_apply",
             "vrcforge_request_apply",
@@ -1049,8 +1054,13 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "Read the source image pixels and classify each texture as base, overlay, decal, alpha, or mask before "
             "assignment. A PNG filename, matching resolution or successful reference preview does not prove it is a "
             "complete base texture. Never replace a complete face/body base with a partial transparent supplement. "
-            "If author instructions require compositing, propose that exact separate step rather than inventing a "
-            "shader slot or silently compositing. After approval, verify the actual face/body appearance and preserved "
+            "For an overlay, distinguish showing the layers on the material from baking a new PNG. If the instructions "
+            "allow a layered material, inspect the exact material for a compatible unused texture slot and its scalar "
+            "enable switch. For example, lilToon can expose _Main2ndTex and _UseMain2ndTex. Keep the base texture, "
+            "preview the overlay binding and any enable change separately, then use the corresponding approved writes. "
+            "Do not overwrite an occupied layer or guess that a field is present. If a merged PNG is required, explain "
+            "that as a separate operation; texture_patch cannot merge two color images. After approval, verify the "
+            "actual face/body appearance and preserved "
             "features as well as saved references; failed or missing visual evidence remains unverified. "
             "Do not require author-document research for a simple color or "
             "shader-parameter adjustment when no author-specific assignment is involved. "
