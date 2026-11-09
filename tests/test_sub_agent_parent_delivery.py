@@ -14,6 +14,7 @@ from runtime_planner_service import PlannerModelResult
 from sub_agent_collaboration_service import (
     SubAgentCollaborationPorts,
     SubAgentCollaborationService,
+    SubAgentExecutionPorts,
 )
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
 from tests.test_native_runtime_gateway import call, setup_gateway
@@ -125,7 +126,11 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
 
     service = SubAgentCollaborationService(SubAgentCollaborationPorts(
         artifact_dir=tmp_path / "sub-agents",
-        gateway=gateway,
+        gateway=SubAgentExecutionPorts(
+            execute=gateway.runtime_skills.execute,
+            run_sub_agent_llm=gateway.run_sub_agent_llm,
+            wait_runtime_session_idle=gateway.wait_runtime_session_idle,
+        ),
         lane_budget=RuntimeLaneBudget(),
         build_roles=build_sub_agent_roles,
         build_handlers=build_sub_agent_role_handlers,

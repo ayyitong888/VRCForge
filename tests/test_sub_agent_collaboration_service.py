@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import threading
 
+from agent_gateway import AgentGateway
 from background_goal_runtime import RuntimeLaneBudget
-from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService
+from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService, SubAgentExecutionPorts
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
-from sub_agent_tasks import SubAgentTaskRegistry
+from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 
 
 class _Gateway:
@@ -57,6 +59,51 @@ def test_service_forwards_bounded_registry_shutdown(tmp_path: Path) -> None:
         "timedOutContinuationTaskIds": [],
         "cancellationErrors": [],
     }
+
+
+def test_parent_stop_while_report_is_pending_delivers_cancel_instead_of_report(tmp_path: Path) -> None:
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    wait_entered = threading.Event()
+    deliveries = []
+    role = SubAgentRole("fixture", "Fixture", "Read-only fixture.")
+
+    def wait_parent_idle(session_id, *, cancelled):
+        wait_entered.set()
+        return gateway.wait_runtime_session_idle(session_id, cancelled=cancelled)
+
+    service = SubAgentCollaborationService(SubAgentCollaborationPorts(
+        artifact_dir=tmp_path / "sub-agents",
+        gateway=SubAgentExecutionPorts(gateway.runtime_skills.execute, gateway.run_sub_agent_llm, wait_parent_idle),
+        lane_budget=RuntimeLaneBudget(),
+        build_roles=lambda: [role],
+        build_handlers=lambda _: {"fixture": lambda _payload, _cancel: {"ok": True, "summaryText": "Finished report"}},
+        task_finished=deliveries.append,
+    ))
+    gateway.bind_runtime_subagent_control(active_parent_task_ids=service.active_parent_task_ids, cancel_task=service.cancel_task)
+    session = {"session_id": "parent", "turn_id": "turn", "client_turn_id": "client"}
+    assert gateway.runtime_sessions.begin_turn(**session)
+    task = service.create_task(
+        role="fixture", task="Read receipt", display_name="Child", parent_session_id="parent",
+        params={"_taskSeed": {"sessionId": "parent", "turnId": "turn", "clientTurnId": "client"}},
+    )["task"]
+    try:
+        assert wait_entered.wait(3)
+        assert service.get_task(task["id"])["task"]["parentContinuationStatus"] == "pending"
+        stopped = gateway.request_runtime_cancel({"sessionId": "parent", "turnId": "turn", "clientTurnId": "client"})
+        assert stopped["cancelledSubAgentTaskIds"] == [task["id"]]
+        assert deliveries == []
+    finally:
+        with gateway._runtime_continuation_condition:
+            gateway.runtime_sessions.finish_turn(**session)
+            gateway.runtime_sessions.clear_finalizing_turn(session_id="parent", client_turn_id="client")
+            gateway._runtime_continuation_condition.notify_all()
+    worker = service._registry._threads[task["id"]]
+    worker.join(3)
+    assert not worker.is_alive()
+    assert len(deliveries) == 1
+    assert deliveries[0]["status"] == "cancelled"
+    assert deliveries[0]["result"] is None
+    assert service.get_task(task["id"])["task"]["summary"] == "Finished report"
 
 
 def test_service_has_no_dashboard_host_or_dynamic_lookup_seam() -> None:

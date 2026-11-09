@@ -21,6 +21,7 @@ class SubAgentExecutionPorts:
 
     execute: Callable[..., dict[str, Any]]
     run_sub_agent_llm: Callable[..., dict[str, Any]]
+    wait_runtime_session_idle: Callable[..., bool] | None = None
 
 
 @dataclass(frozen=True)

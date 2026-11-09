@@ -524,11 +524,8 @@ class SubAgentTaskRegistry:
             if task.status not in _RUNNING_STATUSES:
                 if task.parent_continuation_status == "pending":
                     next_task = copy.deepcopy(task)
-                    next_task.parent_continuation_status = "interrupted"
-                    task = self._commit_task_event_locked(task, next_task, "parent_continuation_interrupted", {"reason": "user_stop"})
-                    event = self._cancel_events.get(task_id)
-                    if event:
-                        event.set()
+                    next_task.cancel_requested = True
+                    task = self._commit_task_event_locked(task, next_task, "cancel_requested", {"reason": "user_stop"})
                 return {"ok": True, "task": self._serialize_task(task), "message": "task already stopped"}
             next_task = copy.deepcopy(task)
             next_task.cancel_requested = True
@@ -743,9 +740,14 @@ class SubAgentTaskRegistry:
             if task is None or task.parent_continuation_status != "pending":
                 return
             session_id = task.parent_session_id
-            cancel_event = self._cancel_events.get(task_id)
         if self._wait_parent_idle is not None and session_id:
-            if not self._wait_parent_idle(session_id, cancelled=lambda: self._shutdown or bool(cancel_event and cancel_event.is_set())):
+            def delivery_stopped() -> bool:
+                # The gateway calls this while holding its own lock. Read the
+                # published task snapshot without taking the registry lock.
+                current = self._tasks.get(task_id)
+                return self._shutdown or current is None or current.parent_continuation_status != "pending"
+
+            if not self._wait_parent_idle(session_id, cancelled=delivery_stopped):
                 return
         with self._lock:
             task = self._tasks.get(task_id)
@@ -772,15 +774,19 @@ class SubAgentTaskRegistry:
                 self._clear_parent_continuation_inflight_locked(task_id)
                 raise
             seed = task.params.get("_taskSeed")
+            # Stop may arrive after the worker finished but before the result
+            # was delivered. Keep its report, and settle the parent's pending
+            # tool as cancelled so it does not request the model again.
+            cancelled = task.cancel_requested or task.status == "cancelled"
             event = {
                 "schema": "vrcforge.sub_agent_terminal.v1",
                 "subAgentTaskId": task.id,
-                "status": task.status,
+                "status": "cancelled" if cancelled else task.status,
                 "parentSessionId": task.parent_session_id,
                 "taskSeed": copy.deepcopy(seed) if isinstance(seed, dict) else None,
-                "summary": task.summary,
-                "error": task.error,
-                "result": copy.deepcopy(task.result) if isinstance(task.result, dict) else None,
+                "summary": "Sub-agent task was cancelled." if cancelled else task.summary,
+                "error": "Sub-agent task was cancelled." if cancelled else task.error,
+                "result": copy.deepcopy(task.result) if not cancelled and isinstance(task.result, dict) else None,
             }
         try:
             self._task_finished(event)

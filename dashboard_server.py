@@ -2089,7 +2089,11 @@ _SUB_AGENT_ROLES = build_sub_agent_roles()
 SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
     SubAgentCollaborationPorts(
         artifact_dir=SUB_AGENT_TASK_DIR,
-        gateway=SubAgentExecutionPorts(execute=AGENT_GATEWAY.runtime_skills.execute, run_sub_agent_llm=AGENT_GATEWAY.run_sub_agent_llm),
+        gateway=SubAgentExecutionPorts(
+            execute=AGENT_GATEWAY.runtime_skills.execute,
+            run_sub_agent_llm=AGENT_GATEWAY.run_sub_agent_llm,
+            wait_runtime_session_idle=AGENT_GATEWAY.wait_runtime_session_idle,
+        ),
         lane_budget=RUNTIME_LANE_BUDGET,
         build_roles=lambda: _SUB_AGENT_ROLES,
         build_handlers=lambda gateway: build_sub_agent_role_handlers(gateway, _SUB_AGENT_ROLES),
