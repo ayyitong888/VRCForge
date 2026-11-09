@@ -128,7 +128,7 @@ class SubAgentTaskRegistry:
         self._tasks: dict[str, SubAgentTask] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
-        self._active_child_sessions: set[str] = set()
+        self._active_child_sessions: dict[str, str] = {}
         self._parent_continuations_inflight: set[str] = set()
         self._lock = threading.RLock()
         self._parent_continuation_condition = threading.Condition(self._lock)
@@ -437,7 +437,27 @@ class SubAgentTaskRegistry:
                 retry_of=str(retry_of or "").strip(),
                 resume_of=str(_resume_of or "").strip(),
             )
+            child_session_id = sub_task.child_session_id
+            if child_session_id in self._active_child_sessions:
+                if lane_acquired and self._lane_budget is not None:
+                    self._lane_budget.release(task_id)
+                raise RuntimeError("Child session already has an active runtime owner.")
+            if child_session_id:
+                self._active_child_sessions[child_session_id] = task_id
+            worker_started = False
             try:
+                self._cancel_events[task_id] = threading.Event()
+                worker = threading.Thread(
+                    target=self._run_task,
+                    args=(task_id, child_session_id),
+                    daemon=True,
+                    name=f"vrcforge-sub-agent-{task_id}",
+                )
+                self._threads[task_id] = worker
+                # The worker acquires this lock before execution. A launch
+                # failure therefore cannot leave a durable task stuck queued.
+                worker.start()
+                worker_started = True
                 sub_task = self._commit_task_event_locked(
                     None,
                     sub_task,
@@ -445,21 +465,15 @@ class SubAgentTaskRegistry:
                     {"role": role_id, "task": task_text, "retryOf": sub_task.retry_of,
                      "resumeOf": sub_task.resume_of},
                 )
-                event = threading.Event()
-                self._cancel_events[task_id] = event
-                worker = threading.Thread(
-                    target=self._run_task,
-                    args=(task_id,),
-                    daemon=True,
-                    name=f"vrcforge-sub-agent-{task_id}",
-                )
-                self._threads[task_id] = worker
-                worker.start()
-                return {"ok": True, "task": self._serialize_task(sub_task)}
             except Exception:
-                if self._lane_budget is not None:
+                self._cancel_events.pop(task_id, None)
+                self._threads.pop(task_id, None)
+                if child_session_id:
+                    self._active_child_sessions.pop(child_session_id, None)
+                if lane_acquired and not worker_started and self._lane_budget is not None:
                     self._lane_budget.release(task_id)
                 raise
+            return {"ok": True, "task": self._serialize_task(sub_task)}
 
     @staticmethod
     def _normalize_tool_allowlist(value: Any) -> tuple[str, ...] | None:
@@ -663,10 +677,26 @@ class SubAgentTaskRegistry:
                 events.append(public_payload)
         return events
 
-    def _run_task(self, task_id: str) -> None:
+    def _run_task(self, task_id: str, child_session_id: str) -> None:
+        handler_done = threading.Event()
+        handler_done.set()
+        lifecycle_done = threading.Event()
+
+        def release_child_session() -> None:
+            if not child_session_id or not (lifecycle_done.is_set() and handler_done.is_set()):
+                return
+            with self._lock:
+                if self._active_child_sessions.get(child_session_id) == task_id:
+                    self._active_child_sessions.pop(child_session_id)
+
+        def finish_lifecycle() -> None:
+            lifecycle_done.set()
+            release_child_session()
+
         try:
-            self._run_task_body(task_id)
+            self._run_task_body(task_id, handler_done, release_child_session, finish_lifecycle)
         finally:
+            finish_lifecycle()
             if self._lane_budget is not None:
                 self._lane_budget.release(task_id)
         self._notify_task_finished(task_id)
@@ -764,13 +794,17 @@ class SubAgentTaskRegistry:
         self._parent_continuations_inflight.discard(task_id)
         self._parent_continuation_condition.notify_all()
 
-    def _run_task_body(self, task_id: str) -> None:
+    def _run_task_body(
+        self, task_id: str, handler_done: threading.Event,
+        release_child_session: Callable[[], None], finish_lifecycle: Callable[[], None],
+    ) -> None:
         with self._lock:
             task = self._tasks.get(task_id)
             cancel_event = self._cancel_events.get(task_id)
             if not task or not cancel_event:
                 return
             if task.cancel_requested or cancel_event.is_set():
+                finish_lifecycle()
                 self._commit_cancelled_locked(task, "Sub-agent task was cancelled before execution.")
                 return
             next_task = copy.deepcopy(task)
@@ -786,17 +820,9 @@ class SubAgentTaskRegistry:
             if cancel_event.is_set():
                 raise CancelledError("Sub-agent task was cancelled before execution.")
             handler = self.handlers[task.role]
-            child_session_id = task.child_session_id
-            if child_session_id:
-                with self._lock:
-                    if child_session_id in self._active_child_sessions:
-                        raise RuntimeError("Child session already has an active runtime owner.")
-                    self._active_child_sessions.add(child_session_id)
-
             timeout_seconds = max(1.0, min(float(task.timeout_seconds or DEFAULT_SUB_AGENT_TIMEOUT_SECONDS), MAX_SUB_AGENT_TIMEOUT_SECONDS))
             result_box: list[dict[str, Any]] = []
             handler_error: list[BaseException] = []
-            handler_done = threading.Event()
 
             def _run_handler() -> None:
                 try:
@@ -805,9 +831,15 @@ class SubAgentTaskRegistry:
                     handler_error.append(exc)
                 finally:
                     handler_done.set()
+                    release_child_session()
 
             worker = threading.Thread(target=_run_handler, daemon=True, name=f"subagent-{task_id[:12]}")
-            worker.start()
+            handler_done.clear()
+            try:
+                worker.start()
+            except Exception:
+                handler_done.set()
+                raise
             timed_out = not handler_done.wait(timeout=timeout_seconds)
             if timed_out:
                 cancel_event.set()
@@ -817,18 +849,17 @@ class SubAgentTaskRegistry:
             if handler_error:
                 raise handler_error[0]
             result = result_box[0] if result_box else {}
-            if child_session_id:
-                with self._lock:
-                    self._active_child_sessions.discard(child_session_id)
             summary = summarize_worker_result(result)
         except CancelledError as exc:
             with self._lock:
+                finish_lifecycle()
                 current = self._tasks.get(task_id)
                 if current and current.status in _RUNNING_STATUSES:
                     self._commit_cancelled_locked(current, str(exc))
             return
         except Exception as exc:  # noqa: BLE001 - task failures should be visible to users.
             with self._lock:
+                finish_lifecycle()
                 current = self._tasks.get(task_id)
                 if not current or current.status not in _RUNNING_STATUSES:
                     return
@@ -854,6 +885,7 @@ class SubAgentTaskRegistry:
             return
 
         with self._lock:
+            finish_lifecycle()
             current = self._tasks.get(task_id)
             if not current or current.status not in _RUNNING_STATUSES:
                 return
