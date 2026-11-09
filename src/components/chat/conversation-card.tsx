@@ -18,6 +18,7 @@ import type { AgentApproval } from "../../lib/api";
 import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
+import { SELECTED_TEXT_ATTACHMENT_NAME } from "../../lib/chat-types";
 import { elapsedSecondsSince, providerWaitingWindow, type AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText } from "../../lib/conversation-utils";
 import { projectVisionFailureNotice } from "../../lib/vision-failure-notice";
@@ -127,6 +128,7 @@ export function ConversationCard({
     const draftAttachments = editing ? editingAttachments || attachments : attachments;
     const imageAttachments = draftAttachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
     const otherAttachments = draftAttachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
+    const files = otherAttachments.filter((attachment) => attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME);
     const hasEditingState = Boolean(editing);
     const deliveryLabel = item.queueStatus === "steering" ? t("chat.steering")
       : item.queueStatus === "waiting_for_resources" ? t("chat.waitingForResources")
@@ -236,14 +238,15 @@ export function ConversationCard({
             </div>
           ) : null}
           {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} /> : null}
+          <UserSelectedTextAttachments attachments={otherAttachments} />
           {item.text ? (
             <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
               <UserMessageText text={item.text} />
             </div>
           ) : null}
-          {otherAttachments.length ? (
+          {files.length ? (
             <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm">
-              <AttachmentStrip attachments={otherAttachments} compact />
+              <AttachmentStrip attachments={files} compact />
             </div>
           ) : null}
           <MessageActions
@@ -501,24 +504,35 @@ function renderInterleavedUserMessage(
   const attachments = resolveAttachmentPayloadReferences(message.attachments || [], attachmentPayloads);
   const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
   const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
+  const files = otherAttachments.filter((attachment) => attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME);
   return (
     <div key={`steering-${message.id}`} className="group flex min-w-0 justify-end" data-chat-steering-message={message.id} data-chat-nav-anchor={navigationAnchor}>
       <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
         {images.length ? <UserImageAttachments messageId={message.id} attachments={images} /> : null}
+        <UserSelectedTextAttachments attachments={otherAttachments} />
         {message.text ? (
           <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
             <UserMessageText text={message.text} />
           </div>
         ) : null}
-        {otherAttachments.length ? (
+        {files.length ? (
           <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm">
-            <AttachmentStrip attachments={otherAttachments} compact />
+            <AttachmentStrip attachments={files} compact />
           </div>
         ) : null}
         <MessageActions createdAt={message.createdAt} />
       </div>
     </div>
   );
+}
+
+function UserSelectedTextAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+  const selected = attachments.filter((attachment) => attachment.name === SELECTED_TEXT_ATTACHMENT_NAME);
+  return selected.length ? (
+    <div className="max-w-full [&>div]:mt-0" data-user-message-selected-text>
+      <AttachmentStrip attachments={selected} compact />
+    </div>
+  ) : null;
 }
 
 export function UserImageAttachments({

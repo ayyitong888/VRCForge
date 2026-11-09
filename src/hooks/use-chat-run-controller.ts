@@ -357,7 +357,14 @@ export function useChatRunController({
         const oldIndex = next.findIndex((candidate) => candidate.id === turn.id);
         if (oldIndex >= 0) next.splice(oldIndex, 1);
         next.push(turn);
-        if (!savedItem && !turn.questionId) {
+        if (savedItem && pending && savedItem.composerQueued !== true) {
+          updateChat(chat.id, (current) => ({
+            ...touchChat(current),
+            items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id
+              ? { ...item, composerQueued: true }
+              : item),
+          }));
+        } else if (!savedItem && !turn.questionId) {
           updateChat(chat.id, (current) => ({
             ...touchChat(current),
             sessionId: turn.sessionId || current.sessionId,
@@ -774,7 +781,7 @@ export function useChatRunController({
          updateChat(ownerChatId, (current) => ({
            ...touchChat(current),
            items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id
-             ? { ...item, queueStatus: confirmed ? "cancelled" : queuedTurn.queueStatus,
+             ? { ...item, composerQueued: Boolean(confirmed || queuedTurn.queueId), queueStatus: confirmed ? "cancelled" : queuedTurn.queueStatus,
                  queueEnvelope: { ...item.queueEnvelope, queueId: queuedTurn.queueId, sequence: queuedTurn.queueSequence } }
              : item),
          }));
@@ -833,9 +840,15 @@ export function useChatRunController({
        steerIntentRef.current.delete(turn.id);
        queueRef.current.push(durableTurn);
        queueRef.current.sort((a, b) => (a.queueSequence ?? Number.MAX_SAFE_INTEGER) - (b.queueSequence ?? Number.MAX_SAFE_INTEGER));
-       updateChat(ownerChatId, (current) => ({ ...touchChat(current), items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id ? { ...item, queueStatus: durableTurn.queueStatus, queueEnvelope: { ...item.queueEnvelope, queueId: durableTurn.queueId, sequence: durableTurn.queueSequence } } : item) }));
+       updateChat(ownerChatId, (current) => ({
+         ...touchChat(current),
+         items: current.items.map((item) => item.type === "user" && item.clientTurnId === turn.id
+           ? { ...item, composerQueued: true, queueStatus: durableTurn.queueStatus,
+               queueEnvelope: { ...item.queueEnvelope, queueId: durableTurn.queueId, sequence: durableTurn.queueSequence } }
+           : item),
+       }));
+       setQueued([...queueRef.current]);
        await persistChatsNow?.().catch(reportChatSaveError);
-      setQueued([...queueRef.current]);
       void refreshRuntimeRuns(false).catch(() => undefined);
       // The active run may have reached its finally block while the queue
       // request was in flight. In that race, take ownership of this queued
@@ -1521,6 +1534,7 @@ export function useChatRunController({
             return {
               ...item,
               queuedFrom: true,
+              composerQueued: true,
               queueStatus: "queued" as const,
               queueEnvelope: {
                 ...item.queueEnvelope,
@@ -1533,6 +1547,7 @@ export function useChatRunController({
             return {
               ...item,
               queuedFrom: true,
+              composerQueued: true,
               queueStatus: "waiting_for_resources" as const,
             };
           }
@@ -1544,7 +1559,7 @@ export function useChatRunController({
             };
           }
           return item.clientTurnId === turn.id || consumedSteerInputIds.has(item.clientTurnId || "")
-            ? { ...item, queuedFrom: false, queueStatus: undefined, queueEnvelope: undefined }
+            ? { ...item, queuedFrom: false, composerQueued: undefined, queueStatus: undefined, queueEnvelope: undefined }
             : item;
         });
         let compaction = current.compaction;

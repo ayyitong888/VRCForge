@@ -30,7 +30,7 @@ export const sendAgentMessage = (_endpoint, message, _session, history, _agent, 
 export const recordAgentRunQueued = async (endpoint, payload) => {
   window.__queueRequests.push(payload);
   window.__queueObserved = { sessionId: payload.sessionId, clientTurnId: payload.clientTurnId, targetClientTurnId: payload.targetClientTurnId };
-  const result = payload.targetClientTurnId
+  const result = payload.targetClientTurnId && !window.__sendNowBecomesFollowup
     ? { ok: true, accepted: true, mode: "steer" }
     : { ok: true, accepted: true, mode: "followup", queueId: "queue-" + payload.clientTurnId, sequence: window.__queueRequests.length };
   if (result.mode === "followup") window.__durableQueue.push({
@@ -146,8 +146,8 @@ window.__submitFixtureQueued = () => window.__controller.submitTurn({
   providerLabel: "Fixture", model: "fixture", sessionId: "session-fixture", planMode: false,
 }, { deliveryMode: "queue" });
 window.__editFixtureQueued = () => window.__controller.editQueuedTurn("console-queued-fixture");
-window.__queueFixture = (id, text) => window.__controller.submitTurn({
-  id, text, attachments: [], provider: "fixture", providerLabel: "Fixture", model: "fixture",
+window.__queueFixture = (id, text, attachments = []) => window.__controller.submitTurn({
+  id, text, attachments, provider: "fixture", providerLabel: "Fixture", model: "fixture",
   sessionId: "session-fixture", planMode: false,
 }, { deliveryMode: "queue" });
 window.__removeFixtureQueued = (id) => window.__controller.removeQueuedTurn(id);
@@ -426,6 +426,35 @@ try {
     plan: { reply: "Restored queue resumed", summary: "resumed", nextStep: "done", planner: "fixture", shellNeeded: false },
     timeline: [],
   }));
+  await page.waitForFunction(() => !window.__isRunning());
+  await page.evaluate(() => window.__startFixture());
+  await page.waitForFunction(() => window.__providerRequests.length === 8);
+  const selectedText = { id: "selected-text", name: "Selected text", type: "text/plain", size: 14, text: "Source excerpt" };
+  assert.equal(await page.evaluate((attachment) => window.__queueFixture("send-now-fallback", "Fix this", [attachment]), selectedText), "queued");
+  await page.evaluate(() => { window.__sendNowBecomesFollowup = true; });
+  assert.equal(await page.evaluate(() => window.__steerFixtureQueued("send-now-fallback")), "queued");
+  const fallback = await page.evaluate(() => {
+    const turn = window.__queuedTurns().find((item) => item.text === "Fix this");
+    return { id: turn.id, queueId: turn.queueId, item: window.__chat.items.find((item) => item.clientTurnId === turn.id) };
+  });
+  assert.equal(fallback.item.queueStatus, "queued");
+  assert.equal(fallback.item.composerQueued, true, "Send now that is deferred by the runtime stays in the composer, not the timeline");
+  assert.equal(await page.evaluate(() => window.__providerRequests.length), 8, "a queued fallback is not yet sent");
+  await page.evaluate(() => window.__resolveProvider({
+    ok: true, sessionId: "session-fixture", turnId: "fallback-parent",
+    plan: { reply: "finished", nextStep: "done", planner: "fixture", shellNeeded: false }, timeline: [],
+  }));
+  await page.waitForFunction(() => window.__providerRequests.length === 9);
+  const sentFallback = await page.evaluate((id) => ({
+    request: window.__providerRequests.at(-1),
+    queue: window.__queuedTurns().filter((item) => item.id === id),
+    items: window.__chat.items.filter((item) => item.type === "user" && item.clientTurnId === id),
+  }), fallback.id);
+  assert.equal(sentFallback.request.followupQueueId, fallback.queueId);
+  assert.equal(sentFallback.queue.length, 0);
+  assert.equal(sentFallback.items.length, 1);
+  assert.equal(sentFallback.items[0].composerQueued, undefined);
+  assert.equal(sentFallback.items[0].attachments[0].name, selectedText.name);
   console.log("steer dispatch hook promise-boundary replay: ok");
 } finally {
   await browser?.close();
