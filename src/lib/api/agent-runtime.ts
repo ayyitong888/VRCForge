@@ -10,6 +10,7 @@ export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS = 25;
 export type ChatHistoryEntry = {
   role: "user" | "agent";
   text: string;
+  subAgentTaskId?: string;
 };
 
 export type AgentHistoryContextBudget = {

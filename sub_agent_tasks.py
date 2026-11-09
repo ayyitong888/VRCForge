@@ -665,6 +665,8 @@ class SubAgentTaskRegistry:
                 if task.merge_decision != decision_id:
                     return {"ok": False, "error": f"task was already {task.merge_decision}."}
                 return {"ok": True, "task": self._serialize_task(task), "message": "task already merged"}
+            if task.parent_continuation_status:
+                return {"ok": False, "error": "This sub-agent report is delivered by the parent continuation."}
             if expected_revision is not None and expected_revision != task.revision:
                 return self._revision_conflict(task)
             if task.status not in {"completed", "paused", "failed"}:

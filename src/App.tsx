@@ -164,7 +164,7 @@ import {
   isMarkdownSmokeMode,
 } from "./lib/markdown-smoke";
 import { parseDelegateCommand } from "./lib/subagent-delegate";
-import { isAwaitingMergeReview, subAgentProposedNextAction } from "./lib/subagent-merge";
+import { isAwaitingMergeReview, isMergedAdopted, subAgentAdoptedHistoryItem, subAgentProposedNextAction } from "./lib/subagent-merge";
 import {
   AGENT_QUESTION_NOTIFICATION_ACTION_EVENT,
   parseAgentQuestionNotificationAction,
@@ -3625,8 +3625,10 @@ export default function App() {
       });
       const knownIds = new Set(parentChat.items.map((item) => item.id));
       const newEventItems = eventItems.filter((item) => !knownIds.has(item.id));
+      const adoptedItem = subAgentAdoptedHistoryItem(task);
+      const existingHandoff = parentChat.items.find((item) => item.id === `subagent-${task.id}`);
       const needsTimelineUpdate = newEventItems.length > 0
-        || parentChat.items.some((item) => item.id === `subagent-${task.id}`);
+        || (adoptedItem ? existingHandoff?.type !== "subagent" || !isMergedAdopted(existingHandoff.task) : Boolean(existingHandoff));
       if (!needsTimelineUpdate && task.handoffStatus !== "handoff_pending") {
         continue;
       }
@@ -3636,10 +3638,10 @@ export default function App() {
           updateChat(parentChat.id, (chat) => {
             const items = chat.items
               .filter((item) => item.id !== `subagent-${task.id}`)
-              .concat(newEventItems)
+              .concat(newEventItems, adoptedItem ? [adoptedItem] : [])
               .sort((left, right) => {
-                const leftCreatedAt = "createdAt" in left ? left.createdAt : left.type === "subagent" ? left.task.updatedAt : "";
-                const rightCreatedAt = "createdAt" in right ? right.createdAt : right.type === "subagent" ? right.task.updatedAt : "";
+                const leftCreatedAt = "createdAt" in left ? left.createdAt : left.type === "subagent" ? left.task.mergedAt || left.task.updatedAt : "";
+                const rightCreatedAt = "createdAt" in right ? right.createdAt : right.type === "subagent" ? right.task.mergedAt || right.task.updatedAt : "";
                 const leftTime = Date.parse(leftCreatedAt || "");
                 const rightTime = Date.parse(rightCreatedAt || "");
                 if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
@@ -3876,6 +3878,7 @@ export default function App() {
       });
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
       setSelectedSubAgent((current) => (current && current.id === payload.task.id ? payload.task : current));
+      await reconcileSubAgentHandoffs([payload.task]);
       await loadSubAgents(true);
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
       setActiveView("chat");

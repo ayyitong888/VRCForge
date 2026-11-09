@@ -401,7 +401,7 @@ class AgentRuntimeSessionState:
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
         required = {"binding", "turnId", "messages", "activeTurnStart"}
-        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition", "humanUserMessageIndices", "activeDispatchCallId"}:
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition", "humanUserMessageIndices", "activeDispatchCallId", "adoptedSubAgentTaskIds"}:
             raise ValueError("native snapshot fields are invalid")
         if "activeDispatchCallId" in snapshot and not isinstance(snapshot["activeDispatchCallId"], str):
             raise ValueError("native dispatch marker must be a string")
@@ -417,6 +417,10 @@ class AgentRuntimeSessionState:
             ids = snapshot["toolBlockIds"]
             if not isinstance(ids, list) or not ids or any(not isinstance(x, str) or not x for x in ids) or len(ids) != len(set(ids)):
                 raise ValueError("native tool block snapshot is invalid")
+        if "adoptedSubAgentTaskIds" in snapshot:
+            ids = snapshot["adoptedSubAgentTaskIds"]
+            if not isinstance(ids, list) or any(not isinstance(item, str) or not item for item in ids) or len(ids) != len(set(ids)):
+                raise ValueError("native adopted sub-agent task IDs are invalid")
         if "toolOrder" in snapshot:
             order = snapshot["toolOrder"]
             if not isinstance(order, list) or any(not isinstance(name, str) or not name.strip() for name in order) or len(set(order)) != len(order):
@@ -503,6 +507,8 @@ class AgentRuntimeSessionState:
             normalized["toolOrder"] = list(snapshot["toolOrder"])
         if "toolBlockIds" in snapshot:
             normalized["toolBlockIds"] = list(snapshot["toolBlockIds"])
+        if "adoptedSubAgentTaskIds" in snapshot:
+            normalized["adoptedSubAgentTaskIds"] = list(snapshot["adoptedSubAgentTaskIds"])
         if "compactionRecovery" in snapshot:
             normalized["compactionRecovery"] = cls._merge_native_recoveries([], snapshot["compactionRecovery"])
         if "activeDispatchCallId" in snapshot:
@@ -531,6 +537,16 @@ class AgentRuntimeSessionState:
             candidate = {**current, "compactionRecovery": self._merge_native_recoveries(current.get("compactionRecovery", []), recoveries)}
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
+
+    @staticmethod
+    def _new_adopted_subagent_message(entry: dict[str, Any], adopted_ids: list[str]) -> dict[str, Any] | None:
+        task_id = entry.get("subAgentTaskId")
+        text = entry.get("text")
+        if (entry.get("role") != "agent" or not isinstance(task_id, str) or not task_id
+                or task_id in adopted_ids or not isinstance(text, str) or not text.strip()):
+            return None
+        adopted_ids.append(task_id)
+        return {"role": "assistant", "content": text}
 
     def begin_native_turn(
         self, session_id: str, *, binding: str, turn_id: str, message: str,
@@ -569,6 +585,12 @@ class AgentRuntimeSessionState:
                         candidate["messages"].extend(missing_tail)
                         human_indices.extend(range(tail_start, tail_start + len(missing_tail)))
                     candidate["humanUserMessageIndices"] = sorted([*range(offset), *human_indices])
+                    adopted_ids = candidate.get("adoptedSubAgentTaskIds", [])
+                    for item in initial_history or []:
+                        if isinstance(item, dict) and (report := self._new_adopted_subagent_message(item, adopted_ids)):
+                            candidate["messages"].append(report)
+                    if adopted_ids:
+                        candidate["adoptedSubAgentTaskIds"] = adopted_ids
                     candidate["turnId"] = turn_id
                     candidate["activeTurnStart"] = len(candidate["messages"])
                     candidate["humanUserMessageIndices"].append(len(candidate["messages"]))
@@ -577,9 +599,14 @@ class AgentRuntimeSessionState:
                     self._save_native(session_id, candidate)
                     return copy.deepcopy(candidate)
             history_messages: list[dict[str, Any]] = []
+            adopted_ids: list[str] = []
             for item in initial_history or []:
                 if not isinstance(item, dict):
                     raise ValueError("native initial history item is invalid")
+                if "subAgentTaskId" in item:
+                    if report := self._new_adopted_subagent_message(item, adopted_ids):
+                        history_messages.append(report)
+                    continue
                 text = item.get("text")
                 if not isinstance(text, str) or not text.strip():
                     continue
@@ -598,6 +625,8 @@ class AgentRuntimeSessionState:
                 "humanUserMessageIndices": [index for index, item in enumerate(history_messages)
                                             if item["role"] == "user"] + [len(history_messages)],
             }
+            if adopted_ids:
+                candidate["adoptedSubAgentTaskIds"] = adopted_ids
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
             return copy.deepcopy(candidate)
@@ -734,7 +763,7 @@ class AgentRuntimeSessionState:
                 "humanUserMessageIndices": [index + 1 for index, item in enumerate(retained_messages)
                                             if item["role"] == "user"],
             }
-            for key in ("toolOrder", "toolBlockIds", "bindingToolDefinition"):
+            for key in ("toolOrder", "toolBlockIds", "bindingToolDefinition", "adoptedSubAgentTaskIds"):
                 if key in current:
                     candidate[key] = copy.deepcopy(current[key])
             if recovery is not None or "compactionRecovery" in current:

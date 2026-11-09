@@ -240,7 +240,7 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatH
     } else if (item.type === "subagent") {
       const text = subAgentAdoptedHistoryText(item.task).trim();
       if (text) {
-        history.push({ role: "agent", text });
+        history.push({ role: "agent", text, subAgentTaskId: item.task.id });
       }
     }
   }

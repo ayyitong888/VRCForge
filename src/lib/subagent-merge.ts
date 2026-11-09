@@ -1,14 +1,14 @@
 import type { SubAgentTask } from "./api/sub-agents";
+import type { ConversationItem } from "./chat-types";
 
-// Review actions mirror SubAgentTaskRegistry.merge_task. The persisted
-// handoff can already be materialized into chat while its user decision is
-// still pending, so mergeDecision—not handoffStatus—is the decision source.
+// A task already routed to the parent runtime has its own delivery lifecycle.
 export function canAdoptSubAgentResult(task: SubAgentTask): boolean {
-  return task.status === "completed" && !task.mergeDecision;
+  return task.status === "completed" && !task.mergeDecision && !task.parentContinuationStatus;
 }
 
 export function canDismissSubAgentResult(task: SubAgentTask): boolean {
-  return (task.status === "completed" || task.status === "failed") && !task.mergeDecision;
+  return (task.status === "completed" || task.status === "failed" || task.status === "paused")
+    && !task.mergeDecision && !task.parentContinuationStatus;
 }
 
 export function canCancelSubAgentTask(task: SubAgentTask): boolean {
@@ -24,11 +24,11 @@ export function canResumeSubAgentTask(task: SubAgentTask): boolean {
 }
 
 export function isAwaitingMergeReview(task: SubAgentTask): boolean {
-  return canAdoptSubAgentResult(task) || canDismissSubAgentResult(task);
+  return task.status !== "paused" && (canAdoptSubAgentResult(task) || canDismissSubAgentResult(task));
 }
 
 export function isMergedAdopted(task: SubAgentTask): boolean {
-  return task.mergeDecision === "adopted";
+  return task.mergeDecision === "adopted" && !task.parentContinuationStatus;
 }
 
 export function isMergedDismissed(task: SubAgentTask): boolean {
@@ -55,6 +55,10 @@ export function subAgentResultSummaryText(task: SubAgentTask): string {
 
 const ADOPTED_HISTORY_MAX_CHARS = 8_000;
 
+export function subAgentAdoptedHistoryItem(task: SubAgentTask): Extract<ConversationItem, { type: "subagent" }> | undefined {
+  return isMergedAdopted(task) ? { id: `subagent-${task.id}`, type: "subagent", task } : undefined;
+}
+
 export function subAgentAdoptedHistoryText(task: SubAgentTask): string {
   if (!isMergedAdopted(task)) {
     return "";
@@ -62,8 +66,8 @@ export function subAgentAdoptedHistoryText(task: SubAgentTask): string {
   const identity = task.displayName || task.role || task.id;
   const summary = subAgentResultSummaryText(task);
   const proposedNextAction = subAgentProposedNextAction(task);
-  let result = "";
-  if (task.result) {
+  let result = resultText(task, "finalReport");
+  if (!result && task.result) {
     try {
       result = JSON.stringify(task.result, null, 2);
     } catch {
@@ -74,7 +78,7 @@ export function subAgentAdoptedHistoryText(task: SubAgentTask): string {
     `[Adopted sub-agent result: ${identity}]`,
     task.task ? `Delegated task:\n${task.task}` : "",
     summary ? `Reviewed summary:\n${summary}` : "",
-    result ? `Result payload:\n${result}` : "",
+    result ? `Result:\n${result}` : "",
     proposedNextAction ? `Proposed next action:\n${proposedNextAction}` : "",
   ]
     .filter(Boolean)

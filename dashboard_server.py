@@ -2106,6 +2106,9 @@ AGENT_GATEWAY.bind_runtime_subagent_control(
     cancel_task=SUB_AGENT_COLLABORATION.cancel_task,
     role_catalog=lambda: _SUB_AGENT_ROLES,
 )
+AGENT_GATEWAY.bind_runtime_subagent_adoption(
+    lambda task_id: SUB_AGENT_COLLABORATION.get_task(task_id, include_events=False)
+)
 AGENT_MCP_MOUNT = AgentMcpMount()
 AGENT_MCP_APP = None
 AGENT_MCP_CONTEXT = None
