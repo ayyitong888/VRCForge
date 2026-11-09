@@ -406,7 +406,7 @@ export function SidebarChat({
         "group relative flex h-9 w-full min-w-0 items-center rounded-md text-sm transition-colors",
         indent ? "pl-6" : "",
         active
-          ? "bg-primary/10 font-medium text-foreground before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
+          ? "bg-primary/10 font-medium text-foreground"
           : "text-muted-foreground hover:bg-muted hover:text-foreground",
       )}
     >
