@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 import sub_agent_delegate
+from agent_gateway import AgentGateway
+from general_agent_tools import read_text_file
 from sub_agent_delegate import (
     build_sub_agent_role_handlers,
     build_sub_agent_roles,
@@ -40,6 +44,8 @@ class FakeGateway:
         tool_name: str,
         params: dict[str, object],
         agent_name: str,
+        *,
+        read_scope=None,
     ) -> dict[str, object]:
         self.calls.append((tool_name, dict(params), agent_name))
         if self._blocked:
@@ -54,6 +60,63 @@ class FakeGateway:
 
 def _idle_event() -> threading.Event:
     return threading.Event()
+
+
+def test_skill_delegate_reads_only_parent_granted_fixture_files(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    granted_file = parent / "readable.txt"
+    granted_file.write_text("parent evidence", encoding="utf-8")
+    outside_file = tmp_path / "separate-fixture.txt"
+    outside_file.write_text("outside test fixture", encoding="utf-8")
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    read_results = []
+
+    def read_fixture(arguments):
+        result = read_text_file(arguments["path"], allowed_roots=arguments.get("_generalAllowedRoots", []))
+        read_results.append(result["text"])
+        return result
+
+    gateway.register_tool("vrcforge_read_text_file", "Read test files.", "read/debug", read_fixture)
+    payload = {"toolName": "vrcforge_read_text_file", "projectPath": str(parent),
+               "_generalReadRoots": (str(parent),)}
+    result = run_skill_delegate(gateway.runtime_skills, {
+        **payload, "skillParams": {"path": str(granted_file)},
+    }, _idle_event())
+    assert result["result"]["text"] == "parent evidence"
+    with pytest.raises(RuntimeError, match="authorized root"):
+        run_skill_delegate(gateway.runtime_skills, {
+            **payload,
+            "skillParams": {"path": str(outside_file), "_generalAllowedRoots": [str(tmp_path)]},
+        }, _idle_event())
+    assert read_results == ["parent evidence"]
+
+
+@pytest.mark.parametrize("tool_name,wrapped", [
+    ("vrcforge_resume_subagent", False),
+    ("vrcforge_resume_subagent", True),
+    ("vrcforge_progress_replace", False),
+])
+def test_skill_delegate_does_not_dispatch_runtime_controls(tmp_path, tool_name, wrapped):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    dispatched = []
+    gateway.register_tool(tool_name, "Fixture control.", "plan/preview",
+                          lambda params: dispatched.append(params) or {"ok": True})
+    requested_tool = tool_name
+    if wrapped:
+        requested_tool = "read-only-wrapper"
+        snapshot = SimpleNamespace(
+            skill={"name": requested_tool, "entrypointTool": tool_name, "allowedTools": [tool_name]},
+            package_audit_context={},
+            validation={},
+            loaded=True,
+            support_files=[],
+        )
+        executor = gateway.runtime_skills
+        executor._ports = replace(executor._ports, prepare_runtime_skill=lambda *_args: snapshot)
+    with pytest.raises(RuntimeError, match="Runtime control tools"):
+        run_skill_delegate(gateway.runtime_skills, {"toolName": requested_tool}, _idle_event())
+    assert not dispatched
 
 
 def test_project_index_review_dispatches_through_gateway_and_keeps_envelope():

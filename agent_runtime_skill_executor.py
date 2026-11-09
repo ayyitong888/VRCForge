@@ -35,6 +35,9 @@ class RuntimeSkillTool(Protocol):
     handler: Callable[[dict[str, Any]], Any]
 
 
+ReadScope = Callable[[RuntimeSkillTool, dict[str, Any]], dict[str, Any]]
+
+
 @dataclass(frozen=True)
 class AgentRuntimeSkillExecutorPorts:
     """Least-authority ports for runtime-direct Skill execution.
@@ -83,8 +86,10 @@ class AgentRuntimeSkillExecutor:
         params: dict[str, Any],
         agent_name: str,
         owner_id: str = "",
+        *,
+        read_scope: ReadScope | None = None,
     ) -> dict[str, Any]:
-        payload = self._execute(tool_name, params, agent_name, owner_id)
+        payload = self._execute(tool_name, params, agent_name, owner_id, read_scope)
         if not isinstance(payload.get("outcome"), dict):
             outcome = normalize_agent_tool_result(
                 payload,
@@ -144,6 +149,7 @@ class AgentRuntimeSkillExecutor:
         params: dict[str, Any],
         agent_name: str,
         owner_id: str,
+        read_scope: ReadScope | None,
     ) -> dict[str, Any]:
         config = self._ports.ensure_config()
         tool = self._ports.tool_for_name(tool_name)
@@ -155,7 +161,7 @@ class AgentRuntimeSkillExecutor:
                     self._ports.package_audit_context,
                 )
             if snapshot:
-                return self._execute_skill_package(snapshot, params, agent_name, config, owner_id)
+                return self._execute_skill_package(snapshot, params, agent_name, config, owner_id, read_scope)
             payload = {
                 "ok": False,
                 "status": "blocked",
@@ -169,6 +175,7 @@ class AgentRuntimeSkillExecutor:
         direct_write_tool = tool.name in self._ports.direct_write_tools
         if (
             tool.name in self._ports.blocked_skills
+            or (read_scope is not None and (tool.write or tool.requires_user_activation or direct_write_tool))
             or (tool.write and not user_activated_tool and not direct_write_tool)
             or (
                 tool.category not in self._ports.direct_categories
@@ -200,6 +207,8 @@ class AgentRuntimeSkillExecutor:
         user_constraints = self._ports.read_user_constraints()
         tool_params = self._ports.inject_user_constraints(params, tool, user_constraints)
         try:
+            if read_scope is not None:
+                tool_params = read_scope(tool, tool_params)
             result = self._ports.redact_runtime_result(
                 self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
             )
@@ -293,6 +302,7 @@ class AgentRuntimeSkillExecutor:
         agent_name: str,
         config: Any,
         owner_id: str,
+        read_scope: ReadScope | None,
     ) -> dict[str, Any]:
         skill = snapshot.skill
         package_audit_context = snapshot.package_audit_context
@@ -346,6 +356,7 @@ class AgentRuntimeSkillExecutor:
                 owner_id,
                 payload,
                 package_audit_context,
+                read_scope,
             )
         if skill.get("packageId") and not package_audit_context:
             payload.update(
@@ -367,6 +378,7 @@ class AgentRuntimeSkillExecutor:
                 config,
                 owner_id,
                 package_audit_context=package_audit_context,
+                read_scope=read_scope,
             )
             payload["entrypointTool"] = entrypoint
             payload["entrypoint"] = entrypoint_result
@@ -410,6 +422,7 @@ class AgentRuntimeSkillExecutor:
         owner_id: str,
         payload: dict[str, Any],
         package_audit_context: dict[str, Any],
+        read_scope: ReadScope | None,
     ) -> dict[str, Any]:
         steps = package_audit_context.get("workflowSteps")
         digest = str(package_audit_context.get("workflowDigest") or "")
@@ -472,6 +485,7 @@ class AgentRuntimeSkillExecutor:
                 disallowed_tools = self._ports.ensure_string_list(skill.get("disallowedTools"))
                 if (
                     request_write is None
+                    or read_scope is not None
                     or tool_name in disallowed_tools
                     or (allowed_tools and tool_name not in allowed_tools)
                 ):
@@ -538,6 +552,7 @@ class AgentRuntimeSkillExecutor:
                 config,
                 owner_id,
                 package_audit_context=audit_context,
+                read_scope=read_scope,
             )
             completed.append({"index": index, "tool": tool_name, "result": step_result})
             if step_result.get("status") != "executed":
@@ -579,6 +594,7 @@ class AgentRuntimeSkillExecutor:
         owner_id: str,
         *,
         package_audit_context: dict[str, Any] | None = None,
+        read_scope: ReadScope | None = None,
     ) -> dict[str, Any]:
         allowed_tools = self._ports.ensure_string_list(skill.get("allowedTools") or skill.get("tools"))
         disallowed_tools = self._ports.ensure_string_list(skill.get("disallowedTools"))
@@ -607,6 +623,7 @@ class AgentRuntimeSkillExecutor:
         if (
             tool.name in self._ports.blocked_skills
             or tool.write
+            or (read_scope is not None and (tool.requires_user_activation or tool.name in self._ports.direct_write_tools))
             or tool.category not in self._ports.direct_categories
         ):
             return {
@@ -630,6 +647,8 @@ class AgentRuntimeSkillExecutor:
         user_constraints = self._ports.read_user_constraints()
         tool_params = self._ports.inject_user_constraints(tool_params, tool, user_constraints)
         try:
+            if read_scope is not None:
+                tool_params = read_scope(tool, tool_params)
             result = self._ports.redact_runtime_result(
                 self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
             )

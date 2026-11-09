@@ -11,8 +11,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from agent_command_safety import normalize_filesystem_path
+from agent_runtime_skill_executor import ReadScope, RuntimeSkillTool
+from agent_task_loop import SUB_AGENT_TASK_TOOLS
+from general_agent_tools import _authorized_path
+from internal_tool_blocks import CONVERSATION_TOOL_NAMES
 from sub_agent_tasks import CancelledError, SubAgentRole
 from sub_agent_roles import load_sub_agent_roles
+from unity_tool_schema_projection import canonical_unity_read_tool_input_schema
 
 
 class RuntimeSkillGateway(Protocol):
@@ -23,6 +29,8 @@ class RuntimeSkillGateway(Protocol):
         tool_name: str,
         params: dict[str, Any],
         agent_name: str,
+        *,
+        read_scope: ReadScope | None = None,
     ) -> dict[str, Any]: ...
 
     def run_sub_agent_llm(self, *, task: str, child_session_id: str, provider: str, model: str,
@@ -37,18 +45,62 @@ def _checkpoint(cancel_event: Any) -> None:
         raise CancelledError("Sub-agent task was cancelled.")
 
 
+_PROJECT_PATH_KEYS = ("projectPath", "projectRoot", "project_path", "project_root")
+_GENERAL_READ_TOOLS = frozenset({
+    "vrcforge_list_directory", "vrcforge_read_text_file", "vrcforge_read_local_image",
+    "vrcforge_find_files", "vrcforge_search_text",
+})
+_RUNTIME_CONTROL_TOOLS = SUB_AGENT_TASK_TOOLS | CONVERSATION_TOOL_NAMES | frozenset({
+    "vrcforge_ask_user", "vrcforge_call_user", "vrcforge_browser", "vrcforge_request_project_selection",
+    "vrcforge_vision_audit_multi", "vrcforge_create_goal", "vrcforge_update_goal",
+    "vrcforge_progress_replace", "vrcforge_progress_create", "vrcforge_progress_update", "vrcforge_progress_delete",
+})
+
+
+def _delegated_read_scope(project_path: str, read_roots: tuple[str, ...]) -> ReadScope:
+    def bind(tool: RuntimeSkillTool, arguments: dict[str, Any]) -> dict[str, Any]:
+        if tool.name in _RUNTIME_CONTROL_TOOLS:
+            raise PermissionError("Runtime control tools cannot run through a read-only sub-agent skill.")
+        params = {key: value for key, value in arguments.items() if not key.startswith("_")}
+        if tool.name in _GENERAL_READ_TOOLS:
+            source_root = str(params.get("projectPath") or "").strip()
+            source_path = str(params.get("path") or "").strip()
+            if source_root and source_path and not Path(source_path).is_absolute():
+                params["path"] = str(Path(source_root) / source_path)
+            params["_generalAllowedRoots"] = list(read_roots)
+        else:
+            supplied = [str(params.pop(key, "") or "").strip() for key in _PROJECT_PATH_KEYS]
+            if any(value and (not project_path or normalize_filesystem_path(value) != normalize_filesystem_path(project_path))
+                   for value in supplied):
+                raise PermissionError("The delegated tool must use the project attached to its parent.")
+            declares_project = "projectPath" in canonical_unity_read_tool_input_schema(tool.name).get("properties", {})
+            if declares_project or any(supplied):
+                if not project_path:
+                    raise PermissionError("This delegated tool requires a project attached to its parent.")
+                params["projectPath"] = project_path
+        for key in ("packagePath", "package_path"):
+            if params.get(key):
+                params[key] = str(_authorized_path(str(params[key]), read_roots))
+        return params
+
+    return bind
+
+
 def _dispatch(
-    gateway: RuntimeSkillExecutor,
+    gateway: RuntimeSkillGateway,
     tool_name: str,
     params: dict[str, Any],
     agent_name: str,
+    task_payload: dict[str, Any],
 ) -> dict[str, Any]:
     """经 runtime allowlist 执行一个技能并取回工具结果本体。
 
     blocked / unknown / failed 都转成 RuntimeError，由注册表落成
     failed 状态；这里绝不绕过 gateway 的策略闸另起炉灶。
     """
-    envelope = gateway.execute(tool_name, dict(params or {}), agent_name)
+    arguments = {key: value for key, value in params.items() if not key.startswith("_")}
+    scope = _delegated_read_scope(str(task_payload.get("projectPath") or ""), task_payload.get("_generalReadRoots", ()))
+    envelope = gateway.execute(tool_name, arguments, agent_name, read_scope=scope)
     status = str(envelope.get("status") or "")
     if status == "blocked" or not envelope.get("ok"):
         raise RuntimeError(str(envelope.get("error") or f"Skill was not executable: {tool_name}"))
@@ -70,6 +122,7 @@ def run_project_index_review(
         "vrcforge_scan_project_index",
         {"projectPath": project_path, "maxFiles": payload.get("maxFiles") or 100000},
         "sub-agent:project_index_review",
+        payload,
     )
     summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
     changed = bool(summary.get("changed"))
@@ -113,6 +166,7 @@ def run_outfit_package_inspection(
         "vrcforge_inspect_outfit_package",
         {"packagePath": package_path, "maxEntries": payload.get("maxEntries") or 5000},
         "sub-agent:outfit_package_inspection",
+        payload,
     )
     summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
     summary_text = (
@@ -154,6 +208,7 @@ def run_validation_triage(
             "maxErrors": payload.get("maxErrors") or 50,
         },
         "sub-agent:validation_triage",
+        payload,
     )
     summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
     severity_counts = summary.get("severityCounts") if isinstance(summary.get("severityCounts"), dict) else {}
@@ -223,6 +278,7 @@ def run_package_install_diagnosis(
         "vrcforge_diagnose_package_install_errors",
         dict(payload or {}),
         "sub-agent:package_install_diagnosis",
+        payload,
     )
     symptoms = result.get("symptoms") if isinstance(result.get("symptoms"), list) else []
     titles = [str(item.get("title") or item.get("code") or "") for item in symptoms if isinstance(item, dict)]
@@ -259,6 +315,7 @@ def run_outfit_import_plan_review(
         "vrcforge_plan_outfit_import",
         dict(payload or {}),
         "sub-agent:outfit_import_plan_review",
+        payload,
     )
     plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
     ready = bool(plan.get("readyToApply"))
@@ -324,7 +381,7 @@ def run_skill_delegate(
         # Registry skills resolve $ARGUMENTS from this semantic field. Direct
         # tools only receive it when an API caller explicitly supplied it.
         tool_params.setdefault("arguments", skill_arguments)
-    result = _dispatch(gateway, tool_name, tool_params, "sub-agent:skill_delegate")
+    result = _dispatch(gateway, tool_name, tool_params, "sub-agent:skill_delegate", payload)
     _checkpoint(cancel_event)
     ok = bool(result.get("ok")) if "ok" in result else True
     summary_source = result.get("summary") if isinstance(result.get("summary"), dict) else {}
@@ -429,7 +486,10 @@ def build_sub_agent_input_schema(roles: list[SubAgentRole] | None = None) -> dic
             "systemPrompt": {"type": "string", "description": "Optional role instructions for this child session."},
             "maxSteps": {"type": "integer", "minimum": 1, "maximum": 12,
                          "description": "Maximum provider model requests; queued tool calls in one response do not add model turns."},
-            "selectedMaterials": {"type": "array", "items": {"type": "object"}},
+            "selectedMaterials": {
+                "type": "array", "items": {"type": "object"},
+                "description": "Small excerpts or verified facts already read by the parent. Include a label or source where useful. Do not pass resultRef values from the parent: the child cannot open another session's retained results.",
+            },
             "prompt": {"type": "string", "description": "Alias for task."},
             "displayName": {"type": "string"},
             "display_name": {"type": "string"},

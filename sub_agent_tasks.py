@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
+from agent_command_safety import normalize_filesystem_path
 from background_goal_runtime import RuntimeLaneBudget
 from runtime_planner_service import public_runtime_payload
 
@@ -565,6 +566,12 @@ class SubAgentTaskRegistry:
             seed_session_id = str((task_seed or {}).get("sessionId") or "").strip()
             if seed_session_id and seed_session_id != source.parent_session_id:
                 return {"ok": False, "error": "resume task seed belongs to a different parent session."}
+            if task_seed is not None and "projectRoot" in task_seed:
+                seed_project = str(task_seed["projectRoot"] or "")
+                if (bool(seed_project) != bool(source.project_path)
+                    or (seed_project and normalize_filesystem_path(seed_project) != normalize_filesystem_path(source.project_path))
+                ):
+                    return {"ok": False, "error": "This sub-agent belongs to a different parent project."}
             role = self.roles.get(source.role)
             if role is None or role.handler != "llm_readonly" or source.role not in self.handlers:
                 return {"ok": False, "error": "the original read-only child role is unavailable."}
@@ -1013,9 +1020,14 @@ class SubAgentTaskRegistry:
         payload = copy.deepcopy(task.params)
         payload.setdefault("taskId", task.id)
         payload.setdefault("task", task.task)
-        payload.setdefault("projectPath", task.project_path)
-        payload.setdefault("parentChatId", task.parent_chat_id)
-        payload.setdefault("parentSessionId", task.parent_session_id)
+        for alias in ("projectRoot", "project_path", "project_root"):
+            payload.pop(alias, None)
+        payload.update(
+            projectPath=task.project_path,
+            parentChatId=task.parent_chat_id,
+            parentSessionId=task.parent_session_id,
+            _generalReadRoots=task.general_read_roots,
+        )
         seed = task.params.get("_taskSeed")
         if isinstance(seed, dict):
             payload.setdefault("parentTurnId", str(seed.get("turnId") or "")[:180])
@@ -1037,7 +1049,6 @@ class SubAgentTaskRegistry:
                 clientTurnId=task.id,
                 resumeOf=task.resume_of,
                 isResume=bool(task.resume_of),
-                _generalReadRoots=task.general_read_roots,
             )
         else:
             # Preserve the seven fixed handler contracts; their arguments can

@@ -72,6 +72,46 @@ def test_child_uses_real_runtime_loop_for_two_readonly_tools_then_final(tmp_path
     assert result["stepCount"] <= 4
 
 
+@pytest.mark.parametrize("has_project", [True, False])
+def test_native_child_project_read_rejects_foreign_alias_or_missing_parent_project(tmp_path, has_project):
+    from agent_gateway import AgentGatewayError
+
+    selected_project = tmp_path / "owning-project"
+    selected_project.mkdir()
+    tool_name = "vrcforge_scan_modular_avatar"
+    arguments = {"project_path": str(tmp_path / "ungranted-project")} if has_project else {}
+    gateway, _model, _ = _child_gateway(tmp_path, [
+        call("scan", tool_name, arguments),
+        {"role": "assistant", "content": "Finished the fixture read."},
+    ])
+    scans = []
+    gateway.register_tool(tool_name, "Inspect a fixture project.", "read/debug",
+                          lambda params: scans.append(params) or {"ok": True})
+
+    with pytest.raises(AgentGatewayError, match="runtime-bound projectRoot|parent project"):
+        _run(gateway, tmp_path, project_path=str(selected_project) if has_project else "")
+    assert not scans
+
+
+@pytest.mark.parametrize("tool_name,has_project", [
+    ("vrcforge_scan_modular_avatar", True),
+    ("vrcforge_project_catalog_registration_status", False),
+])
+def test_native_child_can_inspect_own_project_or_global_catalog(tmp_path, tool_name, has_project):
+    arguments = {"project_path": str(tmp_path)} if has_project else {}
+    gateway, _model, _ = _child_gateway(tmp_path, [
+        call("scan", tool_name, arguments),
+        {"role": "assistant", "content": "Finished the fixture read."},
+    ])
+    scans = []
+    gateway.register_tool(tool_name, "Inspect project facts.", "read/debug",
+                          lambda params: scans.append(params) or {"ok": True})
+    assert _run(gateway, tmp_path, project_path=str(tmp_path) if has_project else "")["ok"]
+    assert len(scans) == 1
+    assert "project_path" not in scans[0]
+    assert scans[0].get("projectPath") == (str(tmp_path) if has_project else None)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="explicit path grants use Windows paths")
 @pytest.mark.parametrize("granted", [True, False])
 def test_delegated_child_uses_parent_general_read_scope_not_model_text(tmp_path, monkeypatch, granted):
@@ -86,7 +126,8 @@ def test_delegated_child_uses_parent_general_read_scope_not_model_text(tmp_path,
         call("read", "vrcforge_read_text_file", {"path": str(target)}),
         _finish,
     ])
-    _set_mode(child, "auto")
+    _set_mode(child, "roslyn_full_auto")
+    assert child.approval_transactions.permission_audit_context()["fullPermission"]
 
     def scoped_read(arguments):
         result = read_text_file(arguments["path"], allowed_roots=arguments["_generalAllowedRoots"])
@@ -104,6 +145,7 @@ def test_delegated_child_uses_parent_general_read_scope_not_model_text(tmp_path,
             "projectPath": str(project if granted else outside),
             "selectedMaterials": [] if granted else [{"text": str(target)}],
             "params": {
+                "projectPath": str(outside),
                 "_generalReadRoots": [str(outside)],
                 "_taskSeed": {"_generalReadRoots": [str(outside)]},
             },
@@ -125,6 +167,8 @@ def test_delegated_child_uses_parent_general_read_scope_not_model_text(tmp_path,
         service._registry._threads[task_id].join(5)
         assert not service._registry._threads[task_id].is_alive()
         task = service.get_task(task_id)["task"]
+        assert task["projectPath"] == str(project)
+        assert child.runtime_planner._turn.requests[0]["projectRoot"] == str(project)
         assert "generalReadRoots" not in task
         if granted:
             assert task["status"] == "completed" and reads[0]["text"] == "source bytes"

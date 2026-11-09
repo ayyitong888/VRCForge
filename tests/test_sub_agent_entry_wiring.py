@@ -57,6 +57,19 @@ def test_http_entry_runs_durable_child_with_selected_model_and_materials(tmp_pat
         service.shutdown()
 
 
+def test_parent_delegate_entry_requires_runtime_link(monkeypatch):
+    class RejectUnexpectedDispatch:
+        def create_task(self, **kwargs):
+            raise AssertionError("unowned dispatch must stop before creating a worker")
+
+        def resume_task(self, *args, **kwargs):
+            raise AssertionError("unowned resume must stop before selecting a worker")
+
+    monkeypatch.setattr(server, "SUB_AGENT_COLLABORATION", RejectUnexpectedDispatch())
+    assert server.delegate_sub_agent_runtime({"task": "Review."})["ok"] is False
+    assert server.resume_sub_agent_runtime({"taskId": "missing", "task": "Review."})["ok"] is False
+
+
 def test_parent_delegate_entry_forwards_only_declared_llm_options(monkeypatch):
     class Capture:
         def create_task(self, **kwargs):
@@ -64,10 +77,14 @@ def test_parent_delegate_entry_forwards_only_declared_llm_options(monkeypatch):
             return {"task": {"id": "child-task"}}
     capture = Capture()
     monkeypatch.setattr(server, "SUB_AGENT_COLLABORATION", capture)
+    seed = {"projectRoot": "parent-project", "parentChatId": "parent-chat"}
+    monkeypatch.setattr(server.AGENT_GATEWAY, "consume_runtime_task_link",
+                        lambda arguments: (seed, "parent-session"))
     server.delegate_sub_agent_runtime({
         "role": "llm_readonly", "task": "Review.", "model": "fixture-model",
         "systemPrompt": "Check evidence.", "maxSteps": 2,
-        "selectedMaterials": [{"text": "selected"}], "parentSessionId": "parent-session",
+        "selectedMaterials": [{"text": "selected"}], "parentSessionId": "model-session",
+        "projectPath": "model-project",
         "_generalReadRoots": ["forged-argument"],
         "_taskSeed": {"_generalReadRoots": ["forged-seed"]},
         "params": {
@@ -78,5 +95,8 @@ def test_parent_delegate_entry_forwards_only_declared_llm_options(monkeypatch):
     assert capture.arguments["params"] == {
         "model": "fixture-model", "systemPrompt": "Check evidence.", "maxSteps": 2,
         "selectedMaterials": [{"text": "selected"}],
+        "_taskSeed": seed,
     }
     assert capture.arguments["general_read_roots"] == ()
+    assert capture.arguments["project_path"] == "parent-project"
+    assert capture.arguments["parent_session_id"] == "parent-session"

@@ -565,15 +565,25 @@ def bind_runtime_unity_project(
     schema: Mapping[str, Any],
     arguments: Mapping[str, Any],
     project_root: str,
+    *,
+    child_scope: bool = False,
+    allow_projectless: bool = False,
 ) -> dict[str, Any]:
-    """Bind every Unity schema that exposes projectPath to its runtime scope."""
+    """Bind a Unity project's tool arguments to the owning runtime."""
 
     bound = dict(arguments)
     root = str(project_root or "").strip()
-    if not root or "projectPath" not in ensure_dict(schema.get("properties")):
+    properties = ensure_dict(schema.get("properties"))
+    project_keys = _EXTERNAL_PROJECT_PATH_KEYS if child_scope else ("projectPath",)
+    project_key = next((key for key in project_keys if key in properties), "")
+    if not project_key:
         return bound
-    submitted = str(bound.get("projectPath") or "").strip()
-    if submitted:
+    submitted_paths = [str(bound.get(key) or "").strip() for key in project_keys]
+    if not root:
+        if child_scope and (not allow_projectless or any(submitted_paths)):
+            raise AgentGatewayError("This tool requires a parent project scope.", status_code=409)
+        return bound
+    for submitted in filter(None, submitted_paths):
         try:
             submitted_key = command_safety.normalize_filesystem_path(submitted)
             bound_key = command_safety.normalize_filesystem_path(root)
@@ -585,7 +595,10 @@ def bind_runtime_unity_project(
                 "projectPath does not match the runtime-bound projectRoot.",
                 status_code=409,
             )
-    bound.setdefault("projectPath", root)
+    if child_scope:
+        for key in project_keys:
+            bound.pop(key, None)
+    bound.setdefault(project_key, root)
     return bound
 
 
@@ -1353,8 +1366,6 @@ class AgentGateway:
             tool_owner_id: str,
         ) -> Any:
             if tool.name in {
-                "vrcforge_delegate_subagent",
-                "vrcforge_resume_subagent",
                 "vrcforge_vision_audit_multi",
                 "vrcforge_ask_user",
                 "vrcforge_call_user",
@@ -5984,7 +5995,7 @@ class AgentGateway:
             self.ensure_config()
         )["fullPermission"]
         scoped_general_roots = tuple(general_allowed_roots)
-        if full_permission:
+        if full_permission and agent_name != "sub-agent":
             general_allowed_roots = host_scope_roots()
         continuation_context = ensure_dict(ensure_dict(task_continuation).get("context"))
         continuation_completion = ensure_dict(ensure_dict(task_continuation).get("completion"))
@@ -7705,7 +7716,7 @@ class AgentGateway:
                 source_path = str(execution_arguments.get("path") or "").strip()
                 if source_root and source_path and not Path(source_path).is_absolute():
                     execution_arguments["path"] = str(Path(source_root) / source_path)
-            elif action_kind in {"write", "skill"} and project_root:
+            elif action_kind in {"write", "skill"} and (project_root or agent_name == "sub-agent"):
                 schema_tool = (
                     planned_tool
                     if planned_tool.startswith("vrcforge_")
@@ -7720,6 +7731,8 @@ class AgentGateway:
                     schema,
                     execution_arguments,
                     project_root,
+                    child_scope=agent_name == "sub-agent",
+                    allow_projectless=schema_tool == "vrcforge_project_catalog_registration_status",
                 )
             if action_kind in {"skill", "write"}:
                 execution_argument_validation = self.runtime_planner.validate_tool_arguments(
@@ -8088,6 +8101,7 @@ class AgentGateway:
                     )
                     step_params["_runtimeSessionId"] = session_id
                     step_params["_runtimeClientTurnId"] = client_turn_id
+                    step_params["_runtimeTaskLinkAuthority"] = _RUNTIME_TASK_LINK_AUTHORITY
                     step_params["_taskSeed"] = runtime_approval_seed(
                         tool_calls_used=tool_calls_used,
                         exposure_layer=runtime_exposure_layer,
@@ -9801,6 +9815,8 @@ class AgentGateway:
     def _tool_params_audit(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
         if tool_name in MEMORY_TOOL_NAMES:
             return {"memoryId": str(params.get("memoryId") or "")[:200], "textLength": len(str(params.get("text") or ""))}
+        if tool_name in SUB_AGENT_TASK_TOOLS:
+            params = {key: value for key, value in params.items() if key != "_runtimeTaskLinkAuthority"}
         if tool_name != "vrcforge_agent_desktop_action":
             return summarize_params(params)
         desktop_params = ensure_dict(params.get("params"))

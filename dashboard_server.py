@@ -7925,6 +7925,7 @@ async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]
         include={"model", "system_prompt", "max_steps", "selected_materials"},
         by_alias=True, exclude_unset=True)}
     worker_params.pop("_taskSeed", None)
+    explicit_package = str(worker_params.get("packagePath") or worker_params.get("package_path") or "").strip()
     try:
         payload = SUB_AGENT_COLLABORATION.create_task(
             role=request.role,
@@ -7934,7 +7935,10 @@ async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]
             parent_session_id=request.parent_session_id,
             project_path=request.project_path,
             params=worker_params,
-            general_read_roots=(request.project_path, *extract_explicit_local_roots(request.task)),
+            general_read_roots=tuple(
+                root for root in (request.project_path, *extract_explicit_local_roots(request.task), explicit_package)
+                if root
+            ),
         )
     except (RuntimeError, ValueError) as exc:
         raise runtime_http_error("sub_agent_request_failed", 400, exc) from exc
@@ -27141,11 +27145,13 @@ def _expected_prefab_assets(plan_payload: dict[str, Any]) -> list[str]:
 
 def resume_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str, Any]:
     arguments = dict(params or {})
-    task_seed, _session_id = AGENT_GATEWAY.consume_runtime_task_link(arguments)
+    task_seed, runtime_session_id = AGENT_GATEWAY.consume_runtime_task_link(arguments)
+    if not task_seed or not runtime_session_id:
+        return {"ok": False, "status": "failed", "error": "Resuming a sub-agent requires its owning Agent turn."}
     read_roots = AGENT_GATEWAY.runtime_subagent_read_roots()
     result = SUB_AGENT_COLLABORATION.resume_task(
         str(arguments.get("taskId") or ""), task=str(arguments.get("task") or ""),
-        display_name=arguments.get("displayName"), task_seed=task_seed or None,
+        display_name=arguments.get("displayName"), task_seed=task_seed,
         general_read_roots=read_roots)
     if not result.get("ok"):
         return result
@@ -27159,31 +27165,22 @@ def delegate_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str
 
     arguments = dict(params or {})
     task_seed, runtime_session_id = AGENT_GATEWAY.consume_runtime_task_link(arguments)
+    if not task_seed or not runtime_session_id:
+        return {"ok": False, "status": "failed", "error": "Delegating a sub-agent requires an active Agent turn."}
     read_roots = AGENT_GATEWAY.runtime_subagent_read_roots()
-    worker_params = ensure_dict(arguments.pop("params", None))
-    worker_params.pop("_taskSeed", None)
-    worker_params.pop("_generalReadRoots", None)
+    worker_params = {key: value for key, value in ensure_dict(arguments.get("params")).items()
+                     if not key.startswith("_")}
     for key in ("model", "systemPrompt", "maxSteps", "selectedMaterials"):
         if key in arguments:
             worker_params[key] = arguments[key]
-    if isinstance(task_seed, dict) and task_seed:
-        worker_params["_taskSeed"] = dict(task_seed)
+    worker_params["_taskSeed"] = task_seed
     created = SUB_AGENT_COLLABORATION.create_task(
         role=str(arguments.get("role") or "project_index_review"),
         task=str(arguments.get("task") or arguments.get("prompt") or "Review the selected scope."),
         display_name=str(arguments.get("displayName") or arguments.get("display_name") or "Manuka"),
-        parent_chat_id=str((task_seed or {}).get("parentChatId") or ""),
-        parent_session_id=(
-            runtime_session_id
-            or str(arguments.get("parentSessionId") or arguments.get("parent_session_id") or "")
-        ),
-        project_path=str(
-            arguments.get("projectPath")
-            or arguments.get("projectRoot")
-            or arguments.get("project_path")
-            or (task_seed or {}).get("projectRoot")
-            or ""
-        ),
+        parent_chat_id=str(task_seed.get("parentChatId") or ""),
+        parent_session_id=runtime_session_id,
+        project_path=str(task_seed.get("projectRoot") or ""),
         params=worker_params,
         general_read_roots=read_roots,
     )
@@ -27732,7 +27729,8 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_delegate_subagent",
-        "When to use: delegate one bounded read-only review or inspection task to a named VRCForge sub-agent role when parallel specialist work materially helps the current task. When NOT to use: do not delegate a trivial one-step read, any direct Unity write, or work whose result is not needed by the current task.",
+        "When to use: delegate one bounded read-only review or inspection task to a named VRCForge sub-agent role when parallel specialist work materially helps. The child uses the current turn's project and read scope. Provide small verified excerpts in selectedMaterials when needed. "
+        "When NOT to use: trivial one-step reads, direct Unity writes, work outside the current scope, or parent resultRef values the child cannot read.",
         "plan/preview",
         delegate_sub_agent_runtime,
     )

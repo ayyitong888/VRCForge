@@ -164,10 +164,17 @@ def test_native_resume_tool_uses_trusted_parent_seed_and_delivers_continuation(t
     source = service.create_task(
         role="llm_readonly", task="Original child task", display_name="Manuka",
         parent_session_id="parent-session",
+        project_path=str(tmp_path),
         params={"model": "fixture-child-model", "provider": "fixture-provider"},
     )["task"]
     source_task = _wait_completed(service, source["id"])
     assert source_task["status"] == "completed"
+    foreign_project_resume = service.resume_task(
+        source["id"], task="Continue in a separate fixture project.",
+        task_seed={"sessionId": "parent-session", "projectRoot": str(tmp_path / "other-project")},
+    )
+    assert foreign_project_resume["ok"] is False
+    assert "different parent project" in foreign_project_resume["error"]
 
     model = NativeResumeToolModel(source["id"])
     gateway.runtime_planner._model = model
