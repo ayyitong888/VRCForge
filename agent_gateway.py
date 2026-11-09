@@ -7163,6 +7163,8 @@ class AgentGateway:
                         "nextStep": "cancelled",
                     }
                     break
+                if compaction_result and compaction_result.get("applied") is True:
+                    append_timeline_event("context_compaction", status="completed")
                 if compaction_blocked:
                     last_plan = {
                         "summary": "Context compaction could not create enough safe headroom.",
@@ -7267,7 +7269,12 @@ class AgentGateway:
             # preserve it before cancellation or a subsequent tool can fail.
             if str(plan.get("model") or "").strip():
                 params["_runtimeFailureProgress"]["model"] = str(plan["model"]).strip()
+            native_compaction_applied = False
             if native_binding and native_turn.compaction is not None:
+                native_compaction_applied = (
+                    native_turn.compaction is not runtime_compaction
+                    and native_turn.compaction.get("applied") is True
+                )
                 runtime_compaction = native_turn.compaction
             if not queued_native_action:
                 task_loop.model_turns_used += 1
@@ -7297,6 +7304,8 @@ class AgentGateway:
                 }
                 break
             if native_binding:
+                if native_compaction_applied:
+                    append_timeline_event("context_compaction", status="completed")
                 for issue in native_turn.output_truncation.notices:
                     append_timeline_event("tool_result", label=issue["name"], tool=issue["name"], status=issue.get("status", "not_executed"),
                         summary=f"工具：{summarize_text(issue['name'], 80)}；参数：{summarize_text(issue['arguments'], 400)}；原因：{summarize_text(issue['reason'], 180)}建议：{summarize_text(issue['suggestion'], 180)}")

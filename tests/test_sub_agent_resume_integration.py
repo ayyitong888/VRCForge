@@ -12,11 +12,15 @@ from tests.test_sub_agent_runtime_integration import _child_gateway, _finish
 
 
 class RoutedTurn:
+    def __init__(self, context_limit=None):
+        self.context_limit = context_limit
+
     def bind(self, request):
         provider = str(request.get("provider") or "fixture-provider")
         model = str(request.get("model") or "fixture-child-model")
         return nullcontext(PlannerTurnMetadata(
             native_binding=f"{provider}:{model}", provider=provider, model=model,
+            verified_context_limit=self.context_limit,
         ))
 
 
@@ -122,3 +126,29 @@ def test_fresh_gateway_reloads_native_history_and_resumes_same_child(tmp_path):
     assert "Persisted child question" in history
     assert "Resume after Gateway restart" in history
     assert "fixture-body" in history
+
+
+def test_small_window_compaction_emits_one_durable_child_timeline_marker(tmp_path):
+    from tests.test_native_context_compaction import Compactor
+
+    old_report = "Earlier child evidence: " + " historical observation excerpt" * 6400
+    gateway, _, invoked = _child_gateway(tmp_path, [{"role": "assistant", "content": old_report}])
+    gateway.runtime_planner._turn = RoutedTurn()
+    assert _run(gateway, tmp_path, task="Inspect the old evidence", turn_id="first")["ok"]
+
+    reopened, model, new_calls = _child_gateway(tmp_path, [
+        {"role": "assistant", "content": "Continued with the summary after compaction."},
+    ])
+    reopened.runtime_planner._turn = RoutedTurn(8000)
+    compactor = Compactor("Verified historical observation, retained for the child.")
+    reopened.runtime_planner._compactor = compactor
+    resumed = _run(reopened, tmp_path, task="Continue from the old evidence", turn_id="second", is_resume=True)
+    assert resumed["ok"], resumed.get("error")
+    assert len(compactor.calls) == len(model.requests) == 1
+    assert not invoked and not new_calls
+    assert "Verified historical observation" in json.dumps(model.requests[0]["messages"])
+    timeline = reopened.runtime_runs.read_timeline(session_id="resumable-child", client_turn_id="second")["events"]
+    markers = [event for event in timeline if event["kind"] == "context_compaction"]
+    assert len(markers) == 1
+    assert markers[0]["payload"] == {"status": "completed"}
+    assert timeline[-1]["kind"] == "assistant"

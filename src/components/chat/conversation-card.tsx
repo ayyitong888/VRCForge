@@ -445,6 +445,7 @@ export function ConversationCard({
   }
 
   if (item.type === "compact") {
+    if (item.timelineEventId) return null;
     const running = item.status === "running";
     const usageChange = typeof item.beforeTokens === "number" && typeof item.afterTokens === "number"
       ? t("compact.usageChange", { before: formatCount(item.beforeTokens), after: formatCount(item.afterTokens) })

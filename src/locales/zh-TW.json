@@ -1362,6 +1362,7 @@
     "preparing": "正在準備壓縮上下文",
     "running": "正在壓縮上下文",
     "completed": "已壓縮上下文",
+    "autoCompleted": "已自動壓縮上下文",
     "usageChange": "{{before}} → {{after}} Token",
     "failed": "上下文壓縮失敗，原對話已保留。",
     "cancelled": "已取消上下文壓縮，原對話已保留。",

@@ -498,6 +498,16 @@ export function buildDurableTimelineRows(
   ));
   for (const entry of presentation.entries) {
     appendMessagesBefore(entry.startedAt);
+    if (entry.type === "context_compaction") {
+      flushToolCalls();
+      processRows.push(
+        <div key={entry.id} data-agent-context-compaction className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+          <Check className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>{i18n.t("compact.autoCompleted")}</span>
+        </div>,
+      );
+      continue;
+    }
     if (entry.type === "assistant") {
       flushToolCalls();
       if (!includeAssistant) continue;

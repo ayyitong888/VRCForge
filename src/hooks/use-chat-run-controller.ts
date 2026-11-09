@@ -1650,6 +1650,7 @@ export function useChatRunController({
             text: t("compact.completed"),
             detail: summary,
             status: "completed",
+            timelineEventId: durableTimeline.find((event) => event.kind === "context_compaction" && event.payload.status === "completed")?.id,
             entryCount: runtimeCompaction.entryCount ?? history.length,
             beforeTokens: runtimeCompaction.beforeTokens,
             afterTokens: runtimeCompaction.afterTokens,

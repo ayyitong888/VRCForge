@@ -23,6 +23,11 @@ export type TimelinePresentationEntry =
       invocations: TimelineInvocation[];
     }
   | {
+      type: "context_compaction";
+      id: string;
+      startedAt: string;
+    }
+  | {
       type: "assistant";
       id: string;
       messageId?: string;
@@ -304,6 +309,7 @@ const TIMELINE_KINDS = new Set<ChatTimelineEvent["kind"]>([
   "file_edit",
   "command",
   "subagent",
+  "context_compaction",
   "assistant",
 ]);
 
@@ -366,7 +372,7 @@ function materializeInvocations(events: ChatTimelineEvent[]): TimelineInvocation
     // Transport lifecycle phases belong to the single live status row. Once a
     // turn is durable they are neither Agent commentary nor user-meaningful
     // work, so do not replay them as four plain-text conversation messages.
-    if (event.kind === "assistant" || event.kind === "phase") continue;
+    if (event.kind === "assistant" || event.kind === "phase" || event.kind === "context_compaction") continue;
     const identity = invocationIdentity(event);
 
     // Older supervised request records used file_edit/command before the
@@ -433,6 +439,13 @@ function interleavedTimelineEntries(
     currentBatch = undefined;
   };
   for (const event of ordered) {
+    if (event.kind === "context_compaction") {
+      if (event.payload.status === "completed") {
+        flushBatch();
+        entries.push({ type: "context_compaction", id: event.id, startedAt: event.timestamp });
+      }
+      continue;
+    }
       if (event.kind === "assistant" && event.payload?.summary) {
         flushBatch();
       const phase = assistantPhase(event.payload?.phase);
@@ -477,7 +490,7 @@ export function buildTimelinePresentation(events: ChatTimelineEvent[] = [], elap
   const invocations = materializeInvocations(ordered);
   const entries = interleavedTimelineEntries(ordered, invocations);
   const hasProcess = invocations.length > 0 || entries.some((entry) => (
-    entry.type === "assistant" && entry.phase === "commentary"
+    entry.type === "context_compaction" || (entry.type === "assistant" && entry.phase === "commentary")
   ));
   const firstTime = timestampValue(ordered[0].timestamp);
   const lastTime = timestampValue(ordered.at(-1)?.timestamp || "");

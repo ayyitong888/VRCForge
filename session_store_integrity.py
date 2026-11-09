@@ -1110,7 +1110,7 @@ def _is_valid_chat_timeline_event(value: Any) -> bool:
     if not _is_safe_nonnegative_integer(value.get("sequence")):
         return False
     kind = value.get("kind")
-    if kind not in ("phase", "planner", "tool_call", "tool_result", "file_edit", "command", "subagent", "assistant"):
+    if kind not in ("phase", "planner", "tool_call", "tool_result", "file_edit", "command", "subagent", "assistant", "context_compaction"):
         return False
     payload = value.get("payload")
     limits = {"label": 160, "summary": 32_000 if kind == "assistant" else 1000,

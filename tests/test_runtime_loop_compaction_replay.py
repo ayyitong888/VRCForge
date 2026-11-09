@@ -120,6 +120,10 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
 
         assert result["plan"]["reply"] == "All three fixture actions completed."
         assert result["contextCompaction"]["compactedLoopStepCount"] == 1
+        markers = [item for item in result["timeline"] if item["kind"] == "context_compaction"]
+        assert len(markers) == 1
+        assert markers[0]["payload"] == {"status": "completed"}
+        assert result["timeline"][markers[0]["sequence"] - 1]["kind"] == "tool_result"
         assert len(result["steps"]) == 3
         assert all(step.get("status") == "executed" for step in result["steps"])
         completed = [event for event in gateway.runtime_runs.read_events(

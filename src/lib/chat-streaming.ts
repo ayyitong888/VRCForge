@@ -55,6 +55,7 @@ const AGENT_RUNTIME_TIMELINE_KINDS = new Set<ChatTimelineEventKind>([
   "file_edit",
   "command",
   "subagent",
+  "context_compaction",
   "assistant",
 ]);
 
