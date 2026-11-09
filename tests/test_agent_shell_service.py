@@ -435,11 +435,67 @@ def test_shared_command_and_path_safety_are_conservative(tmp_path: Path) -> None
     assert not is_path_within(tmp_path.parent / "outside.txt", tmp_path)
 
 
+@pytest.mark.parametrize("command", [
+    'Remove-Item -Recurse -Force .',
+    'Get-ChildItem; Remove-Item -LiteralPath ProjectSettings/ProjectVersion.txt',
+    'cmd /c "rd /s /q Assets"',
+    'Set-Content -Value empty -Path Packages/manifest.json',
+    'Write-Output empty > Assets/Main.unity',
+    'Copy-Item incoming.txt -Destination Packages/manifest.json -Force',
+    'Set-Location Assets; Remove-Item -Recurse -Force .',
+    'taskkill /F /IM Unity.exe',
+    'git --no-pager clean -fdx',
+    'robocopy empty Assets /MIR',
+])
+def test_catastrophic_shell_commands_never_reach_approval_or_spawn(tmp_path: Path, command: str) -> None:
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True)
+    shell, approvals, processes, audits = service(tmp_path)
+    shell.bind_project_path_guard(lambda: UnityPathGuard([project], current_root=project))
+
+    result = shell.execute({"command": command, "cwd": str(project)}, unity_project_access=True)
+
+    assert result["status"] == "rejected"
+    assert result["classification"]["errorCode"] == "shell_destructive_command_blocked"
+    assert result["error"]
+    assert approvals.requests == []
+    assert processes.spawn_calls == []
+    assert audits[-1]["event"] == "shell_rejected"
+
+
+def test_host_shell_blocks_deleting_parent_of_registered_project(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProjects" / "Project"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True)
+    shell, approvals, processes, _audits = service(tmp_path)
+    shell.bind_project_path_guard(lambda: UnityPathGuard([project], current_root=project))
+
+    result = shell.execute({"command": "Remove-Item -Recurse -Force UnityProjects"})
+
+    assert result["status"] == "rejected"
+    assert approvals.requests == []
+    assert processes.spawn_calls == []
+
+
+def test_stored_approval_does_not_bypass_shell_denial(tmp_path: Path) -> None:
+    shell, _approvals, processes, _audits = service(tmp_path)
+    payload = approved_payload(tmp_path, command="Remove-Item -Recurse -Force Assets")
+
+    with pytest.raises(AgentShellError, match="protected project directory or file"):
+        shell.execute_payload(payload)
+
+    assert processes.spawn_calls == []
+
+
 def test_classification_preserves_plan_vs_execute_and_workspace_boundaries(tmp_path: Path) -> None:
     shell, _approvals, _processes, _audits = service(tmp_path)
 
     assert shell.classify({"command": "Get-ChildItem"})["risk"] == "low"
     assert shell.classify({"command": "git --no-pager status --short"})["risk"] == "low"
+    assert shell.classify({"command": "git --no-pager clean -nd"})["risk"] == "low"
+    assert shell.classify({"command": 'git log -- clean'})["risk"] == "low"
+    assert shell.classify({"command": 'Write-Output "taskkill /F /IM Unity.exe"'})["risk"] == "low"
     assert shell.classify({"command": "Remove-Item file.txt"})["risk"] == "low"
     assert shell.classify({"command": "Get-ChildItem; Remove-Item file.txt"})["risk"] == "low"
     assert shell.classify({"command": "Get-ChildItem ../outside"})["risk"] == "low"

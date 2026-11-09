@@ -23,6 +23,7 @@ from agent_command_safety import (
     strip_quotes,
     tokenize_command,
 )
+from agent_shell_deny import destructive_shell_reason
 from approval_auto_review import ShellAutoReview
 from agent_shell_process_supervisor import (
     ManagedShellProcess,
@@ -320,9 +321,24 @@ class AgentShellService:
             or params.get("project_path")
             or ""
         ).strip()
+        guard = None
         if self._project_path_guard is not None:
             try:
                 guard = self._project_path_guard()
+            except Exception as exc:  # noqa: BLE001 - path policy errors fail closed.
+                return self._classification(
+                    command, cwd, workspace_root, "reject", [f"Registered Unity project path guard failed: {exc}"],
+                )
+        denial = destructive_shell_reason(
+            command, cwd, workspace_root, guard.registered_roots if guard is not None else (),
+            self._find_unity_project_root,
+        )
+        if denial:
+            classification = self._classification(command, cwd, workspace_root, "reject", [denial])
+            classification["errorCode"] = "shell_destructive_command_blocked"
+            return classification
+        if guard is not None:
+            try:
                 capability = "unity_project_access" if unity_project_access else None
                 allowed = guard.is_shell_allowed(command, cwd=cwd, capability=capability)
                 # A selected project supplies chat context, not a host command
@@ -464,6 +480,8 @@ class AgentShellService:
                     "classification": classification,
                     "error": "; ".join(classification["reasons"]),
                 }
+                if classification.get("errorCode"):
+                    response["errorCode"] = classification["errorCode"]
                 recovery = classification.get("recovery")
                 if isinstance(recovery, dict):
                     response["errorDetails"] = {
@@ -981,6 +999,8 @@ class AgentShellService:
                     "projectRoot": params.get("projectRoot") or params.get("project_root") or "",
                 }
             )
+            if classification.get("errorCode") == "shell_destructive_command_blocked":
+                self._raise("; ".join(classification["reasons"]), 409)
             if classification.get("risk") in {"high", "reject"}:
                 self._raise(
                     "Shell process input may target a Unity project. Run it as a new Shell command so approval, checkpoint, and rollback can be applied.",

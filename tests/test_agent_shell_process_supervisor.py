@@ -967,7 +967,8 @@ def test_root_exit_does_not_finish_session_while_owned_child_is_alive(tmp_path: 
     )
 
 
-def test_process_send_keys_cannot_bypass_unity_approval(tmp_path: Path) -> None:
+@pytest.mark.parametrize("hard_denial", [False, True])
+def test_process_send_keys_cannot_bypass_unity_approval_or_hard_denial(tmp_path: Path, hard_denial: bool) -> None:
     process = FakeManagedProcess(pid=4311)
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
@@ -988,12 +989,16 @@ def test_process_send_keys_cannot_bypass_unity_approval(tmp_path: Path) -> None:
             "_trusted_owner_id": "turn-a",
         }
     )
-    with pytest.raises(AgentGatewayError, match="approval") as blocked:
+    command = (
+        f'Remove-Item -Recurse -Force "{project / "Assets"}"'
+        if hard_denial else f"Set-Content {project / 'Assets' / 'blocked.txt'} value"
+    )
+    with pytest.raises(AgentGatewayError, match="protected project directory or file" if hard_denial else "approval") as blocked:
         gateway.shell.process(
             {
                 "action": "send_keys",
                 "sessionId": started["sessionId"],
-                "keys": [f"Set-Content {project / 'Assets' / 'blocked.txt'} value", "enter"],
+                "keys": [command, "enter"],
                 "_trusted_owner_id": "turn-a",
             }
         )
