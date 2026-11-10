@@ -2,6 +2,7 @@
 from copy import deepcopy
 from agent_scan_result_policy import is_scan_result_policy_message
 from agent_runtime_session_state import AgentRuntimeSessionState
+from agent_output_truncation import OutputTruncation
 
 
 class NativePlannerFixture:
@@ -10,6 +11,7 @@ class NativePlannerFixture:
         self._sink = sink
         self.compaction = None
         self.compaction_attempted_snapshot = None
+        self.output_truncation = OutputTruncation()
         self._tool_order = []
         self._queued_calls = []
         self.admitted_tool_names = set()
@@ -36,6 +38,9 @@ class NativePlannerFixture:
 
     def messages(self):
         return deepcopy(self._messages)
+
+    def request_history(self):
+        return self.messages(), 0
 
     def persist_request_context(self, messages):
         assert messages[:len(self._messages)] == self._messages

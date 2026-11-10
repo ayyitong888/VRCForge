@@ -2509,7 +2509,9 @@ class RuntimePlannerService:
                 persist_scan_policy = getattr(native_turn, "persist_scan_result_policy", None) if native else None
                 if queued_receipt is None and callable(persist_scan_policy):
                     persist_scan_policy()
-                native_history_messages = native_turn.messages() if native and queued_receipt is None else []
+                native_history_messages, active_turn_start = (
+                    native_turn.request_history() if native and queued_receipt is None else ([], 0)
+                )
                 tool_block_ids = ["core", *(row["id"] for row in canonical_tool_tree()["roots"])]
                 binding_tool_definition = self._binding_tool_definition(project_context_active) if queued_receipt is None else None
                 if native and queued_receipt is None:
@@ -2558,12 +2560,18 @@ class RuntimePlannerService:
                     native_request = self._native_recovery_request(native_request, native_turn)
                     from native_tool_images import collect_tool_images, bind_tool_images
                     tool_image_content = collect_tool_images(loop_state or [], self._tool_image_reader, project_path)
-                    native_request = bind_tool_images(native_request, tool_image_content)
+                    if tool_image_content:
+                        native_request = bind_tool_images(native_request, tool_image_content, active_turn_start=active_turn_start)
+                    original_projection = native_request
                     native_request, native_guard = self.maybe_compact_native_context(
                         native_request, native_turn, context_usage=context_usage,
                     )
-                    native_request = _bind_native_image_blocks(native_request, observe, message)
-                    native_request = bind_tool_images(native_request, tool_image_content)
+                    if native_request is not original_projection:
+                        native_request = _bind_native_image_blocks(native_request, observe, message)
+                        if tool_image_content:
+                            _, active_turn_start = native_turn.request_history()
+                            native_request = bind_tool_images(native_request, tool_image_content, active_turn_start=active_turn_start)
+                        native_guard = self.native_context_guard(native_request, context_usage=context_usage)
                     # Refresh only the private diagnostic provenance after
                     # recovery/compaction/image projection.  The provider sees
                     # instructions/messages/tools only; the sidecar is removed
@@ -2574,8 +2582,6 @@ class RuntimePlannerService:
                         origin=origin,
                     )
                     native_request._provider_turn_state = getattr(native_turn, "provider_turn_state", None)
-                    if tool_image_content or (native_guard is not None and ensure_dict(native_turn.compaction).get("applied") is True):
-                        native_guard = self.native_context_guard(native_request, context_usage=context_usage)
                     if native_guard is not None and context_usage is not None:
                         context_usage["nativeContextGuard"] = native_guard
                     if native_turn.cancelled() or native_guard is not None and native_guard.get("blocked"):

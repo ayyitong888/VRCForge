@@ -652,17 +652,20 @@ class NativeRuntimeTurn:
         return seed
 
     def messages(self) -> list[dict[str, Any]]:
-        """Return a copy suitable for the next native provider request.
+        return self.request_history()[0]
+
+    def request_history(self) -> tuple[list[dict[str, Any]], int]:
+        """Return copied provider history and the current turn's starting index.
 
         Assembly-time normalization runs first: any orphaned tool call (crash,
         legacy session, other interruption) settles idempotently so the
         outgoing request always carries paired tool results.
         """
         if not self._binding:
-            return []
+            return [], 0
         self._state.normalize_native_pending(self._session_id, binding=self._binding)
         snapshot = self._state.native_conversation(
             self._session_id,
             binding=self._binding,
         )
-        return copy.deepcopy(snapshot.get("messages", [])) if snapshot else []
+        return (snapshot["messages"], snapshot["activeTurnStart"]) if snapshot else ([], 0)

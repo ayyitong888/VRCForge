@@ -111,13 +111,10 @@ def collect_tool_images(
 def bind_tool_images(
     request: Mapping[str, Any],
     content: Sequence[Mapping[str, Any]],
+    *,
+    active_turn_start: int | None = None,
 ) -> Mapping[str, Any]:
-    """Insert ephemeral tool-image content into a copied native request.
-
-    The overlay is placed immediately before the trailing runtime-state system
-    message. Request-copy helpers preserve the native diagnostics sidecar, and
-    no caller-owned request or history message is mutated.
-    """
+    """Project images once at their tool batch's position in provider history."""
 
     if not isinstance(request, Mapping):
         return copy_native_request(request if isinstance(request, Mapping) else {}, {})
@@ -125,20 +122,55 @@ def bind_tool_images(
     messages_value = request.get("messages")
     if not isinstance(messages_value, list):
         return copy_native_request(request, {})
-    messages = deepcopy(messages_value)
-
     # Rebinding a compacted or already-bound request replaces the previous
-    # transport overlay instead of duplicating its image.
-    messages = [message for message in messages if not _is_transport_message(message)]
+    # transport messages without modifying any caller-owned history.
+    messages = [message for message in deepcopy(messages_value) if not _is_transport_message(message)]
     if not isinstance(content, Sequence) or isinstance(content, (str, bytes)) or not content:
         return copy_native_request(request, {"messages": messages})
-    image_message = {
-        "role": "user",
-        "content": deepcopy(list(content)),
-    }
-    index = len(messages) - 1 if messages and isinstance(messages[-1], Mapping) and messages[-1].get("role") == "system" else len(messages)
-    messages.insert(index, image_message)
-    return copy_native_request(request, {"messages": messages})
+
+    observations: dict[str, list[Mapping[str, Any]]] = {}
+    action_id = ""
+    for part in content:
+        label = str(part.get("text") or "")
+        if label.startswith(_MESSAGE_MARKER + " "):
+            action_id = str(json.loads(label[len(_MESSAGE_MARKER) + 1:]).get("actionId") or "")
+        observations.setdefault(action_id, []).append(part)
+
+    projected = []
+    batch = []
+    fallback_start = active_turn_start if active_turn_start is not None else len(messages) - 1
+    fallback_position = None
+    for index, message in enumerate(messages):
+        role = message.get("role") if isinstance(message, Mapping) else None
+        if role == "tool":
+            raw = message.get("content")
+            if isinstance(raw, str) and any(key and key in raw for key in observations):
+                try:
+                    receipt = json.loads(raw)
+                except ValueError:
+                    receipt = None
+                if isinstance(receipt, dict) and isinstance(receipt.get("observations"), list):
+                    for observation in receipt["observations"]:
+                        if isinstance(observation, dict) and isinstance(observation.get("actionId"), str):
+                            batch.extend(observations.pop(observation["actionId"], []))
+        elif batch:
+            projected.append({"role": "user", "content": deepcopy(batch)})
+            batch = []
+        if fallback_position is None and index >= fallback_start and role == "system" and (
+            active_turn_start is None or str(message.get("content") or "").startswith("Current runtime state (data): ")
+        ):
+            fallback_position = len(projected)
+        projected.append(message)
+    if batch:
+        projected.append({"role": "user", "content": deepcopy(batch)})
+
+    if observations:
+        # Bootstrap and compacted-away receipts have no tool batch. Keep their
+        # images before this turn's first retained state so later results can append.
+        remaining = [part for group in observations.values() for part in group]
+        projected.insert(fallback_position if fallback_position is not None else len(projected),
+                         {"role": "user", "content": deepcopy(remaining)})
+    return copy_native_request(request, {"messages": projected})
 
 
 def _step_succeeded(step: Mapping[str, Any]) -> bool:
