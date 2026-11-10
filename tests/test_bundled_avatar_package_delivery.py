@@ -63,6 +63,10 @@ def test_ten_real_packages_start_disabled_and_share_internal_external_activation
     app, gateway, service, resources = profile
     assert len(SOURCES) == 10
     rows = publish(service, resources, SOURCES)
+    assert all(
+        service.inspect_package(resources / row["file"]).manifest.get("author_display_name") == "ayyitong888"
+        for row in rows
+    )
     assert_ten_package_activation(app, gateway, service, rows)
 
 
