@@ -52,6 +52,46 @@ def test_question_service_is_a_narrow_independent_owner(tmp_path: Path) -> None:
     assert service.log_path == tmp_path / "agent-questions.jsonl"
 
 
+def test_question_projection_only_replays_new_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock = threading.RLock()
+    writer = _service(tmp_path, lock, [])
+    reader = _service(tmp_path, lock, [])
+    first = writer.create({"question": "First", "options": ["One", "Two"]})["question"]
+    original_loads = json.loads
+    parsed = []
+
+    def counted_loads(source, *args, **kwargs):
+        event = original_loads(source, *args, **kwargs)
+        parsed.append(event["event"])
+        return event
+
+    monkeypatch.setattr(json, "loads", counted_loads)
+    reader.list()["questions"][0]["options"][0]["label"] = "Changed by caller"
+    assert reader.list()["questions"][0]["options"][0]["label"] == "One"
+    assert parsed == ["question_created"]
+
+    writer.answer(first["questionId"], {"answer": "One"})
+    parsed.clear()
+    assert reader.list()["questions"] == []
+    assert reader.list(include_answered=True)["questions"][0]["answer"] == "One"
+    assert parsed == ["question_answered"]
+
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_text(
+        '{"event":"question_created","questionId":"replacement","status":"pending","question":"New file"}',
+        encoding="utf-8",
+    )
+    replacement.replace(reader.log_path)
+    assert [row["questionId"] for row in reader.list(include_answered=True)["questions"]] == ["replacement"]
+    assert reader.list()["questions"][0]["question"] == "New file"
+    with reader.log_path.open("ab") as stream:
+        stream.write(b'\n{"event":"question_created","questionId":"torn"')
+    assert [row["questionId"] for row in reader.list()["questions"]] == ["replacement"]
+    with reader.log_path.open("ab") as stream:
+        stream.write(b',"status":"pending","question":"Complete after restart"}\n')
+    assert {row["questionId"] for row in reader.list()["questions"]} == {"replacement", "torn"}
+
+
 def test_question_notification_urgency_comes_from_runtime_wait_not_caller_label(tmp_path: Path) -> None:
     service = _service(tmp_path, threading.RLock(), [])
     ordinary = service.create({

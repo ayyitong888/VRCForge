@@ -22,6 +22,7 @@ from typing import Callable, Mapping, Protocol
 AGENT_QUESTION_SCHEMA = "vrcforge.agent_question.v1"
 AGENT_QUESTION_MAX_ITEMS = 60
 QUESTION_KINDS = frozenset({"decision", "visual_checkpoint"})
+_PRIVATE_QUESTION_FIELDS = frozenset({"runtimeTaskSeed", "runtimeSessionId", "runtimeClientTurnId", "runtimeTaskId"})
 VISUAL_RESOLUTIONS = frozenset({"pass", "fail", "uncertain", "later"})
 RUNTIME_TOOL_LOOP_SOURCE = "runtime_tool_loop"
 ASK_USER_USAGE_INSTRUCTION = (
@@ -137,6 +138,11 @@ class AgentQuestionPersistence:
 
     def __init__(self, ports: AgentQuestionPersistencePorts) -> None:
         self._ports = ports
+        self._projection_file: tuple[Path, int, int, int, int] | None = None
+        self._projection_offset = 0
+        self._questions: dict[str, dict[str, object]] = {}
+        self._answered: set[str] = set()
+        self._uncommitted_tail: dict[str, object] | None = None
 
     @property
     def log_path(self) -> Path:
@@ -195,6 +201,86 @@ class AgentQuestionPersistence:
             if isinstance(payload, dict):
                 events.append(payload)
         return events
+
+    def project(self, *, include_answered: bool) -> dict[str, dict[str, object]]:
+        """Fold only new durable records into the latest state of each question."""
+        with _locked(self._ports.shared_state_lock):
+            path = self.log_path
+            try:
+                stat = path.stat()
+                file_state = (path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                if self._projection_file != file_state:
+                    self._advance_projection(path, file_state)
+            except OSError:
+                self._projection_file = None
+                self._projection_offset = 0
+                self._questions = {}
+                self._answered = set()
+                self._uncommitted_tail = None
+                return {}
+            questions = self._questions.copy()
+            answered = self._answered
+            if self._uncommitted_tail is not None:
+                answered = answered.copy()
+                self._apply_event(self._uncommitted_tail, questions, answered)
+            if include_answered:
+                return questions
+            return {
+                question_id: item for question_id, item in questions.items()
+                if question_id not in answered and str(item.get("status") or "") == "pending"
+            }
+
+    def _advance_projection(self, path: Path, file_state: tuple[Path, int, int, int, int]) -> None:
+        previous = self._projection_file
+        size = file_state[3]
+        appended = previous is not None and file_state[:3] == previous[:3] and size > previous[3]
+        questions = self._questions.copy() if appended else {}
+        answered = self._answered.copy() if appended else set()
+        tail = None
+        with path.open("rb") as source:
+            source.seek(self._projection_offset if appended else 0)
+            offset = source.tell()
+            while offset < size and (raw_line := source.readline(size - offset)):
+                # Older logs can end with a valid record lacking a newline.
+                # Show it now but retry that byte range when more data arrives.
+                for line in raw_line.splitlines(keepends=True):
+                    complete = line.endswith((b"\n", b"\r"))
+                    try:
+                        event = json.loads(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        event = None
+                    if isinstance(event, dict):
+                        if complete:
+                            self._apply_event(event, questions, answered)
+                        else:
+                            tail = event
+                    if complete:
+                        offset += len(line)
+        self._questions, self._answered = questions, answered
+        self._uncommitted_tail = tail
+        self._projection_offset = offset
+        self._projection_file = file_state
+
+    @staticmethod
+    def _apply_event(event: dict[str, object], questions: dict[str, dict[str, object]], answered: set[str]) -> None:
+        question_id = str(event.get("questionId") or "").strip()
+        if not question_id:
+            return
+        if str(event.get("status") or "") in {"answered", "cancelled"} or event.get("event") == "question_answered":
+            answered.add(question_id)
+        previous = questions.get(question_id, {})
+        merged = {
+            **previous,
+            **event,
+            "id": question_id,
+            "questionId": question_id,
+            "createdAt": previous.get("createdAt") or event.get("createdAt"),
+            "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
+        }
+        for field in ("options", "question", "header"):
+            if not event.get(field) and previous.get(field):
+                merged[field] = previous[field]
+        questions[question_id] = merged
 
     @staticmethod
     def _ensure_append_boundary_locked(path: Path) -> None:
@@ -466,7 +552,7 @@ class AgentQuestionService:
                 payload = {"ok": True, "question": self._redact(answered)}
         if (answered.get("kind") == "visual_checkpoint" and answered.get("resolution") == "pass"
                 and self._runtime_resolution is not None and self._runtime_resolution.accept_visual is not None):
-            self._runtime_resolution.accept_visual(answered)
+            self._runtime_resolution.accept_visual(deepcopy(answered))
         # A persisted answer can precede an interrupted Goal projection. Its
         # resolver is idempotent, so retries must finish that durable handoff.
         if goal_delivery_id:
@@ -579,7 +665,7 @@ class AgentQuestionService:
             if self._runtime_resolution.interrupt is not None:
                 for question in interrupted:
                     self._runtime_resolution.interrupt(
-                        str(question["questionId"]), dict(question.get("runtimeTaskSeed") or {}),
+                        str(question["questionId"]), deepcopy(dict(question.get("runtimeTaskSeed") or {})),
                         "Your answer was saved. VRCForge restarted after continuation began; inspect the current task before continuing.",
                     )
             for question in queued:
@@ -612,7 +698,7 @@ class AgentQuestionService:
     @staticmethod
     def _runtime_dispatch_seed(question: Mapping[str, object]) -> dict[str, object]:
         raw_seed = question.get("runtimeTaskSeed")
-        seed = dict(raw_seed) if isinstance(raw_seed, Mapping) else {}
+        seed = deepcopy(dict(raw_seed)) if isinstance(raw_seed, Mapping) else {}
         seed["_questionBlocking"] = question.get("blocking", True)
         attachments = question.get("attachments")
         if isinstance(attachments, list) and attachments:
@@ -632,7 +718,7 @@ class AgentQuestionService:
         seed = question.get("runtimeTaskSeed")
         if (question.get("blocking", True) is not False and isinstance(seed, Mapping)
                 and self._runtime_resolution is not None and self._runtime_resolution.settle_skip is not None):
-            self._runtime_resolution.settle_skip(seed)
+            self._runtime_resolution.settle_skip(deepcopy(seed))
 
     def list(
         self,
@@ -667,34 +753,7 @@ class AgentQuestionService:
         }
 
     def _project(self, *, include_answered: bool = False) -> dict[str, dict[str, object]]:
-        questions: dict[str, dict[str, object]] = {}
-        answered: set[str] = set()
-        for event in self._persistence.read():
-            question_id = str(event.get("questionId") or "").strip()
-            if not question_id:
-                continue
-            if str(event.get("status") or "") in {"answered", "cancelled"} or str(event.get("event") or "") == "question_answered":
-                answered.add(question_id)
-            previous = questions.get(question_id, {})
-            merged = {
-                **previous,
-                **event,
-                "id": question_id,
-                "questionId": question_id,
-                "createdAt": previous.get("createdAt") or event.get("createdAt"),
-                "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
-            }
-            for field in ("options", "question", "header"):
-                if not event.get(field) and previous.get(field):
-                    merged[field] = previous[field]
-            questions[question_id] = merged
-        if include_answered:
-            return questions
-        return {
-            question_id: item
-            for question_id, item in questions.items()
-            if question_id not in answered and str(item.get("status") or "") == "pending"
-        }
+        return self._persistence.project(include_answered=include_answered)
 
     def _require_scope(self, existing: Mapping[str, object], values: Mapping[str, object]) -> None:
         requested_session = self._scope_text(values, "sessionId", "session_id")
@@ -745,19 +804,18 @@ class AgentQuestionService:
         return self._scope.summarize(str(value or "").strip(), limit)
 
     def _redact(self, value: object) -> dict[str, object]:
-        redacted = self._persistence.redact(value)
+        source = value if isinstance(value, Mapping) else {}
+        public = deepcopy({key: item for key, item in source.items() if key not in _PRIVATE_QUESTION_FIELDS})
+        redacted = self._persistence.redact(public)
         result = dict(redacted) if isinstance(redacted, Mapping) else {}
         # Publish only whether this question holds an owned task for a human.
         # Caller-supplied urgency cannot turn an ordinary question into an alert.
-        source = value if isinstance(value, Mapping) else {}
         result["blocking"] = source.get("blocking", True) is not False
         result["needsUserAction"] = bool(
             source.get("status") == "pending"
             and (source.get("runtimeTaskSeed") or source.get("goalDeliveryId"))
             and source.get("runtimeContinuationStatus") not in {"queued", "claimed", "running"}
         )
-        for key in ("runtimeTaskSeed", "runtimeSessionId", "runtimeClientTurnId", "runtimeTaskId"):
-            result.pop(key, None)
         return result
 
 
