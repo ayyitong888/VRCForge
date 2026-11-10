@@ -118,6 +118,7 @@ import {
   type ThemeMode,
 } from "./lib/app-preferences";
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
+import { dismissStartupSplash } from "./lib/startup-splash";
 import { useDashboardProjectSelection } from "./hooks/use-dashboard-project-selection";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import { isUnstartedChat } from "./lib/chat-thread";
@@ -2223,6 +2224,12 @@ export default function App() {
     }
   }, [showOnboarding, onboardingMinimized, onboardingStep, onboardingSelectedProjectReady, onboardingUnityToolsReady, activeProjectType, providerReadyForOnboarding, externalAgentVerified, providerSetupGuide, activeView, showProjectModal]);
 
+  useLayoutEffect(() => {
+    if (!isTauriRuntime() || backgroundRuntimeReady || startupIssue) {
+      dismissStartupSplash();
+    }
+  }, [backgroundRuntimeReady, startupIssue]);
+
   useEffect(() => {
     if (!isTauriRuntime()) {
       void startRuntime({ waitForBootstrap: false });
@@ -2245,7 +2252,10 @@ export default function App() {
         }
       })
       .catch(() => {
-        void startRuntime({ waitForBootstrap: false });
+        if (active) {
+          dismissStartupSplash();
+          void startRuntime({ waitForBootstrap: false });
+        }
       });
     return () => {
       active = false;
@@ -2696,7 +2706,6 @@ export default function App() {
         setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
         if (result.mode === "starting") {
-          setStartupIssue("");
           if (waitForBootstrap) {
             await waitForBackendReady(targetEndpoint);
             await refreshStartupWithMetrics(targetEndpoint, { refreshProjects: true });

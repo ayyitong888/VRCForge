@@ -1,3 +1,5 @@
+import { dismissStartupSplash } from "./lib/startup-splash";
+
 async function main() {
   const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
   metrics.mainModuleStartedMs ??= Math.round(performance.now());
@@ -27,6 +29,7 @@ async function main() {
 }
 
 void main().catch(() => {
+  dismissStartupSplash();
   document.documentElement.dataset.vrcforgeStartupShell = "error";
   const root = document.getElementById("root");
   if (root) {

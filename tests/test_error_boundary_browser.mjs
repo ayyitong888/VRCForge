@@ -10,7 +10,7 @@ createRoot(document.getElementById('root')).render(
   React.createElement(RootErrorBoundary,null,React.createElement(Bomb)),
 );
 `},bundle:true,write:false,format:'iife',platform:'browser',jsx:'automatic'});
-const server=createServer((_q,r)=>{r.setHeader('Content-Type','text/html');r.end(`<div id='root'></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`);});const{chromium}=createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH||'playwright');let browser;
+const server=createServer((_q,r)=>{r.setHeader('Content-Type','text/html');r.end(`<html data-vrcforge-startup-shell="ready"><main data-vrcforge-startup-shell>VRCForge</main><div id='root' inert></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`);});const{chromium}=createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH||'playwright');let browser;
 try{
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   browser=await chromium.launch({headless:true,channel:'msedge'});
@@ -19,6 +19,8 @@ try{
   page.on('console',m=>{if(m.type()==='error')consoleErrors.push(m.text());});
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForSelector('[data-error-boundary-reload]');
+  assert.equal(await page.locator('main[data-vrcforge-startup-shell], #root[inert]').count(),0,'a render crash releases the startup splash and workspace');
+  assert.equal(await page.locator('html').getAttribute('data-vrcforge-startup-shell'),'ready');
   assert.match(await page.textContent('main'),/VRCForge could not continue/,'crash renders a visible failure card instead of a blank window');
   assert.match(await page.textContent('main'),/render exploded/,'failure card carries the underlying error message');
   assert.ok(consoleErrors.some(text=>text.includes('render exploded')),'crash is logged for diagnosis');

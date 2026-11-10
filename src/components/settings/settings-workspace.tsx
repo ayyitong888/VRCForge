@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SUPPORTED_LOCALES } from "../../i18n";
 import type { SettingsSection } from "../../lib/app-view";
-import type { RunningEnterAction } from "../../lib/app-preferences";
+import { loadStartupAnimationEnabled, persistStartupAnimationEnabled, type RunningEnterAction } from "../../lib/app-preferences";
 import type {
   DiagnosticsStatus,
   DiagnosticLogLevel,
@@ -251,6 +251,7 @@ export function SettingsWorkspace({
   onSaveNotes,
 }: SettingsWorkspaceProps) {
   const { t } = useTranslation();
+  const [startupAnimationEnabled, setStartupAnimationEnabled] = useState(loadStartupAnimationEnabled);
   const [providerPanel, setProviderPanel] = useState<"subscription" | "api" | null>(null);
   const visibleProvider = providerPanel ?? (apiProvider === "chatgpt" ? "subscription" : "api");
   useEffect(() => setProviderPanel(null), [apiProvider]);
@@ -270,6 +271,36 @@ export function SettingsWorkspace({
         {visibleSection === "general" ? (
           <>
             <h1 className="text-xl font-semibold text-foreground">{t("settings.navGeneral")}</h1>
+
+            <section className="mt-6">
+              <label className="flex items-center justify-between gap-5">
+                <span className="min-w-0">
+                  <span id="settings-startup-animation-label" className="block text-base font-semibold">
+                    {t("settings.startupAnimation")}
+                  </span>
+                  <span id="settings-startup-animation-description" className="mt-1 block text-sm text-muted-foreground">
+                    {t("settings.startupAnimationDesc")}
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  aria-labelledby="settings-startup-animation-label"
+                  aria-describedby="settings-startup-animation-description"
+                  checked={startupAnimationEnabled}
+                  onChange={(event) => {
+                    const enabled = event.currentTarget.checked;
+                    setStartupAnimationEnabled(enabled);
+                    persistStartupAnimationEnabled(enabled);
+                  }}
+                  className="peer sr-only"
+                />
+                <span
+                  aria-hidden="true"
+                  className="relative h-7 w-12 shrink-0 rounded-full border border-border bg-muted after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm peer-checked:border-primary peer-checked:bg-primary peer-checked:after:translate-x-5 peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2"
+                />
+              </label>
+            </section>
 
             <section className="mt-6">
               <ThemeCustomizationPanel

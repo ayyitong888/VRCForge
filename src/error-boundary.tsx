@@ -1,4 +1,5 @@
 import React from "react";
+import { dismissStartupSplash } from "./lib/startup-splash";
 
 type ErrorBoundaryProps = { children: React.ReactNode };
 type ErrorBoundaryState = { error: Error | null };
@@ -17,6 +18,7 @@ export class RootErrorBoundary extends React.Component<ErrorBoundaryProps, Error
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
+    dismissStartupSplash();
     console.error("[vrcforge:render-crash]", error, info.componentStack);
   }
 

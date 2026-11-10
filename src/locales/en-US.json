@@ -346,6 +346,8 @@
     "providerDesc": "After connecting a provider, click \"Refresh model list\" to select from available models.",
     "language": "Display Language",
     "languageDesc": "Switch the desktop UI language. This does not affect agent communication or tool interfaces.",
+    "startupAnimation": "Startup animation",
+    "startupAnimationDesc": "Show the opening animation when VRCForge launches.",
     "runningEnterAction": "Message shortcuts during a run",
     "runningEnterQueue": "Enter queues · Ctrl/⌘+Enter steers",
     "runningEnterSteer": "Enter steers · Ctrl/⌘+Enter queues",

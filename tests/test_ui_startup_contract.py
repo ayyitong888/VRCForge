@@ -280,14 +280,14 @@ def test_startup_loads_the_app_while_showing_a_real_noninteractive_shell() -> No
     assert 'appStyles["./styles.css"]()' in main_source
     assert "data-vrcforge-startup-shell" in index_source
     assert 'aria-hidden="true"' in index_source
-    assert 'data-vrcforge-startup-frame="header"' in index_source
-    assert 'data-vrcforge-startup-frame="navigation"' in index_source
-    assert 'data-vrcforge-startup-frame="workspace"' in index_source
-    assert 'data-vrcforge-startup-frame="details"' in index_source
+    assert '<main data-vrcforge-startup-shell hidden>' in index_source
+    assert index_source.index("</main>") < index_source.index('<div id="root">')
+    assert "startup-portrait" in index_source
+    assert "startup-wordmark" in index_source
     assert "<button" not in index_source
     assert "<input" not in index_source
     assert "prefers-reduced-motion: reduce" in index_source
-    assert "vrcforge-startup-breathe" in index_source
+    assert "startup-camera 5s" in index_source
     assert index_source.index("window.requestAnimationFrame") < index_source.index('src="/src/main.tsx"')
     assert "startupShellPaintedMs" in index_source
     assert 'src="/src/main.tsx"' in index_source

@@ -22,6 +22,7 @@ export const LAYOUT_PANE_WIDTHS_KEY = "vrcforge_layout_pane_widths";
 export const RIGHT_RUNTIME_SECTION_COLLAPSED_KEY = "vrcforge_right_runtime_sections_collapsed";
 export const DEVELOPER_OPTIONS_ENABLED_KEY = "vrcforge_developer_options_enabled";
 export const AUTOMATIC_UPDATE_CHECK_DISABLED_KEY = "vrcforge_automatic_update_check_disabled";
+const STARTUP_ANIMATION_KEY = "vrcforge_startup_animation";
 const RUNNING_ENTER_ACTION_KEY = "vrcforge_running_enter_action";
 
 export const DEFAULT_LEFT_PANE_WIDTH = 280;
@@ -95,6 +96,22 @@ export function persistAutomaticUpdateCheckEnabled(enabled: boolean): void {
     }
   } catch {
     // A blocked preference store must not prevent update checks or dismissal.
+  }
+}
+
+export function loadStartupAnimationEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(STARTUP_ANIMATION_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+export function persistStartupAnimationEnabled(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(STARTUP_ANIMATION_KEY, String(enabled));
+  } catch {
+    // A blocked preference store must not prevent using Settings.
   }
 }
 
