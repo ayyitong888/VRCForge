@@ -92,6 +92,7 @@ class SubAgentTask:
     cancel_requested: bool = False
     event_count: int = 0
     revision: int = 0
+    seed_revision: int = 0
     retry_of: str = ""
     resume_of: str = ""
     handoff_status: str = ""
@@ -105,9 +106,9 @@ class SubAgentTask:
 class SubAgentTaskRegistry:
     """Durable sub-agent lifecycle registry.
 
-    Lifecycle transitions are appended as full v2 task projections before the
-    in-memory projection changes. Worker results live in atomic sidecars so a
-    large result never has to be duplicated in every JSONL event.
+    Lifecycle transitions are appended before the in-memory projection changes.
+    Unchanged parent seeds can refer to an earlier revision of the same task.
+    Worker results live in atomic sidecars.
     """
 
     def __init__(
@@ -1142,7 +1143,7 @@ class SubAgentTaskRegistry:
         }
 
     def _serialize_task(self, task: SubAgentTask, include_events: bool = False) -> dict[str, Any]:
-        payload = self._task_snapshot(task)
+        payload = self._task_snapshot(task, params={})
         payload["schema"] = SUB_AGENT_SCHEMA
         payload["result"] = copy.deepcopy(task.result)
         payload["paramsSummary"] = summarize_params(public_runtime_payload(task.params))
@@ -1160,7 +1161,7 @@ class SubAgentTaskRegistry:
             payload["events"] = [event for event in self.recent_events(limit=500) if event.get("taskId") == task.id]
         return payload
 
-    def _task_snapshot(self, task: SubAgentTask) -> dict[str, Any]:
+    def _task_snapshot(self, task: SubAgentTask, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         seed = task.params.get("_taskSeed")
         parent_turn_id = str(seed.get("turnId") or "")[:180] if isinstance(seed, dict) else ""
         parent_client_turn_id = str(seed.get("clientTurnId") or "")[:240] if isinstance(seed, dict) else ""
@@ -1206,7 +1207,7 @@ class SubAgentTaskRegistry:
             "parentContinuationStatus": task.parent_continuation_status,
             "resultAvailable": task.result_available,
             "resultUnavailable": task.result_unavailable,
-            "params": redact_for_storage(task.params),
+            "params": redact_for_storage(task.params if params is None else params),
             "generalReadRoots": list(task.general_read_roots),
         }
 
@@ -1253,6 +1254,7 @@ class SubAgentTaskRegistry:
             cancel_requested=bool(snapshot.get("cancelRequested")),
             event_count=int(snapshot.get("eventCount") or 0),
             revision=int(snapshot.get("revision") or 0),
+            seed_revision=int(snapshot.get("taskSeedRevision") or snapshot.get("revision") or 0),
             retry_of=str(snapshot.get("retryOf") or ""),
             resume_of=str(snapshot.get("resumeOf") or ""),
             handoff_status=str(snapshot.get("handoffStatus") or ""),
@@ -1296,6 +1298,21 @@ class SubAgentTaskRegistry:
             self._write_result_sidecar_locked(next_task.id, result, next_task.summary)
             next_task.result_available = True
             next_task.result_unavailable = False
+        seed = next_task.params.get("_taskSeed")
+        reuse_seed = bool(
+            current is not None
+            and current.seed_revision
+            and isinstance(seed, dict)
+            and isinstance(seed.get("_nativeConversation"), dict)
+            and seed == current.params.get("_taskSeed")
+            # Keep the dispatchable state self-contained on disk.
+            and next_task.parent_continuation_status != "pending"
+        )
+        next_task.seed_revision = current.seed_revision if current is not None and reuse_seed else next_task.revision
+        params = {key: value for key, value in next_task.params.items() if key != "_taskSeed"} if reuse_seed else None
+        snapshot = self._task_snapshot(next_task, params=params)
+        if reuse_seed:
+            snapshot["taskSeedRevision"] = next_task.seed_revision
         entry = {
             "schema": SUB_AGENT_LOG_SCHEMA,
             "timestamp": timestamp,
@@ -1303,7 +1320,7 @@ class SubAgentTaskRegistry:
             "event": event,
             "revision": next_task.revision,
             "data": summarize_params(data),
-            "task": self._task_snapshot(next_task),
+            "task": snapshot,
         }
         self._append_event_locked(entry)
         self._tasks[next_task.id] = next_task
@@ -1482,6 +1499,24 @@ class SubAgentTaskRegistry:
             return
         snapshot = entry.get("task")
         if isinstance(snapshot, dict):
+            if "taskSeedRevision" in snapshot:
+                prior = tasks.get(str(snapshot.get("id") or "").strip())
+                prior_seed = prior.params.get("_taskSeed") if prior is not None else None
+                params = snapshot.get("params")
+                if (
+                    prior is not None
+                    and prior.seed_revision == snapshot["taskSeedRevision"]
+                    and isinstance(prior_seed, dict)
+                    and isinstance(params, dict)
+                ):
+                    # Checkpoints receive the complete projection so their
+                    # cursor can advance beyond the seed's original row.
+                    params["_taskSeed"] = prior_seed
+                else:
+                    snapshot.pop("taskSeedRevision")
+                    if snapshot.get("parentContinuationStatus") != "delivered":
+                        # A missing seed cannot safely resume its parent.
+                        snapshot["parentContinuationStatus"] = "interrupted"
             task = self._task_from_snapshot(snapshot)
             if task:
                 snapshots[task.id] = snapshot

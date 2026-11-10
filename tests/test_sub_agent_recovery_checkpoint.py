@@ -25,12 +25,15 @@ def _registry(path, callback=None, *, defer=False):
     )
 
 
-def _write_task(registry, task_id, status, *, result=None):
+def _write_task(registry, task_id, status, *, result=None, native_conversation=None):
+    seed = {"schema": "vrcforge.agent_task_loop.v2", "taskId": f"owner-{task_id}"}
+    if native_conversation is not None:
+        seed["_nativeConversation"] = native_conversation
     task = SubAgentTask(
         id=task_id, role=ROLES[0].id, display_name=task_id, task="scan",
         status=status, parent_chat_id="chat-owner", parent_session_id="session-owner",
         created_at=STAMP, started_at=STAMP, updated_at=STAMP,
-        params={"_taskSeed": {"schema": "vrcforge.agent_task_loop.v2", "taskId": f"owner-{task_id}"}},
+        params={"_taskSeed": seed},
     )
     with registry._lock:
         registry._commit_task_event_locked(None, task, status, {}, result=result)
@@ -74,6 +77,40 @@ def test_lifecycle_list_reads_event_log_once_until_it_changes(tmp_path, monkeypa
     assert registry.get_task("third")["task"]["events"][0]["event"] == "completed"
     # One separator check at append and one fresh read after the file changed.
     assert len(reads) == 3
+
+
+def test_parent_continuation_reuses_native_conversation_after_restart(tmp_path):
+    native = {"turnId": "parent-turn", "compactionRecovery": [{"sourceEntries": ["dialogue " * 10000]}]}
+    incremental = tmp_path / "incremental"
+    full = tmp_path / "full"
+    log = incremental / LOG_NAME
+    _write_task(_registry(incremental), "pending", "completed", native_conversation=native)
+    initial_bytes = log.read_bytes()
+
+    calls = []
+    registry = _registry(incremental, calls.append, defer=True)
+    assert registry.reconcile_startup(refresh_from_disk=True, replay_parent_continuations=False)
+    assert registry.replay_parent_continuations() == 1
+    assert calls[0]["taskSeed"]["_nativeConversation"] == native
+    appended = log.read_bytes()[len(initial_bytes):]
+    assert len(appended) < len(initial_bytes) // 10
+    assert b'"_nativeConversation"' not in appended
+    shutil.copytree(incremental, full, ignore=shutil.ignore_patterns(CHECKPOINT_NAME))
+
+    for path in (incremental, full):
+        reopened = _registry(path, calls.append, defer=True)
+        assert reopened.reconcile_startup(refresh_from_disk=True)
+        assert reopened._tasks["pending"].params["_taskSeed"] == calls[0]["taskSeed"]
+        assert reopened.get_task("pending")["task"]["parentContinuationStatus"] == "delivered"
+
+    missing_seed = tmp_path / "missing-seed"
+    missing_seed.mkdir()
+    dispatching_row = appended.splitlines(keepends=True)[0]
+    (missing_seed / LOG_NAME).write_bytes(dispatching_row)
+    reopened = _registry(missing_seed, calls.append, defer=True)
+    assert reopened.reconcile_startup(refresh_from_disk=True)
+    assert reopened.get_task("pending")["task"]["parentContinuationStatus"] == "interrupted"
+    assert len(calls) == 1
 
 
 def _make_crashed_log(path):
