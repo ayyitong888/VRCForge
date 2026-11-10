@@ -35,7 +35,7 @@ import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { useChatRunController } from "./src/hooks/use-chat-run-controller";
 
-const chat = { id: "chat-fixture", sessionId: "session-fixture", items: [], title: "Existing chat" };
+const chat = { id: "chat-fixture", sessionId: "session-fixture", projectPath: "", items: [], title: "Existing chat" };
 let persistCalls = 0;
 let releasePersist;
 let failNextPersist = false;
@@ -119,24 +119,24 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator("#hook-mounted").waitFor({ state: "attached" });
 
-  const firstTurn = page.evaluate(() => window.__submit("foreground-first", "first foreground message"));
+  await page.evaluate(() => {
+    void window.__submit("foreground-first", "first foreground message").then(result => { window.__firstResult = result; });
+  });
   await page.waitForFunction(() => window.__events.includes("persist_started"));
-  await page.waitForTimeout(40);
-  assert.deepEqual(await page.evaluate(() => window.__providerRequests), [], "foreground runtime admission waits for the chat snapshot");
-  await page.evaluate(() => window.__releasePersist());
-  await page.waitForFunction(() => window.__providerRequests.length === 1);
-  await firstTurn;
+  await page.waitForFunction(() => window.__firstResult === "started", null, { timeout: 3000 });
   assert.deepEqual(await page.evaluate(() => window.__providerRequests[0]), { clientTurnId: "foreground-first" });
 
   await page.evaluate(() => window.__failNextPersist());
-  await page.evaluate(() => window.__submit("foreground-failed", "must remain local"));
+  assert.equal(await page.evaluate(() => window.__submit("foreground-conflict", "continue despite the save conflict")), "started");
   await page.waitForFunction(() => window.__storageErrors.length === 1);
   assert.deepEqual(await page.evaluate(() => window.__errors), [], "saving failure does not create a generic action error");
   assert.equal(await page.evaluate(() => window.__items().filter(item => item.type === "error").length), 0, "saving failure does not become a chat send error");
-  assert.equal(await page.evaluate(() => window.__providerRequests.length), 1, "a failed foreground save prevents runtime admission");
+  assert.deepEqual(await page.evaluate(() => window.__providerRequests.map(r => r.clientTurnId)), ["foreground-first", "foreground-conflict"]);
+  assert.ok(await page.evaluate(() => window.__items().some(item => item.type === "user" && item.clientTurnId === "foreground-conflict")));
   assert.equal(await page.evaluate(() => window.__events.filter((event) => event === "persist_started").length), 2);
+  await page.evaluate(() => window.__releasePersist());
   assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
-  console.log("foreground chat persistence before runtime admission: ok");
+  console.log("foreground dispatch proceeds through a delayed or rejected transcript save: ok");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

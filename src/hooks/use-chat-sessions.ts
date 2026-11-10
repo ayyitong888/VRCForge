@@ -25,6 +25,7 @@ import {
 import { expandChatRefresh } from "../lib/chat-refresh-snapshot";
 import { buildChatStoragePatches } from "../lib/chat-storage-delta";
 import { chatStorageOriginId } from "../lib/chat-storage-origin";
+import { acknowledgeLocalChatInputs, readLocalChatInputs, removeLocalChatInputs, restoreLocalChatInputs } from "../lib/chat-local-inputs";
 import {
   loadChatSidebarCache,
   removeChatFromSidebarCache,
@@ -425,6 +426,7 @@ export function useChatSessions({
     payload: StoredChats<unknown>,
     shouldCommit: () => boolean = () => true,
   ): Promise<ChatStorageLoadOutcome> {
+    const localInputs = await readLocalChatInputs(endpoint).catch(() => []);
     if (!shouldCommit()) {
       return { status: "cancelled", chats: chatsRef.current, shouldPersist: false };
     }
@@ -467,13 +469,14 @@ export function useChatSessions({
       throw new Error("Chat storage response omitted chat metadata shape after it was established.");
     }
     chatSourceRevisionsRef.current = sourceRevisions;
+    if (localInputs.length && !blocked) void acknowledgeLocalChatInputs(endpoint, remoteChats).catch(() => undefined);
     if (blocked) {
       const current = chatsRef.current;
       const currentIds = new Set(current.map((chat) => chat.id));
       const additions = remoteChats.filter(
         (chat) => !currentIds.has(chat.id) && chatBaselineFingerprintsRef.current[chat.id] === undefined,
       );
-      const safeChats = additions.length ? [...current, ...additions] : current;
+      const safeChats = restoreLocalChatInputs(additions.length ? [...current, ...additions] : current, localInputs, chatDeletedIdsRef.current);
       chatsRef.current = safeChats;
       setChats(safeChats);
       chatPersistenceBlockedRef.current = true;
@@ -486,9 +489,22 @@ export function useChatSessions({
     const reconciliationBaseline = recoveringFromDamagedSource
       ? {}
       : chatBaselineFingerprintsRef.current;
+    let localChats = chatsRef.current;
+    if (recoveringFromDamagedSource && localInputs.length) {
+      // A blocked read may have shown the journal over a healthy transcript.
+      // Undo that exact display overlay for reconciliation and restore it below.
+      const projected = new Map(restoreLocalChatInputs(remoteChats, localInputs, chatDeletedIdsRef.current)
+        .map((chat) => [chat.id, chat]));
+      const remoteById = new Map(remoteChats.map((chat) => [chat.id, chat]));
+      localChats = localChats.map((chat) => {
+        const remote = remoteById.get(chat.id);
+        const recovered = projected.get(chat.id);
+        return remote && recovered !== remote && chatStorageValuesEqual(chat, recovered) ? remote : chat;
+      });
+    }
     const reconciled = reconcileChatStorage(
       reconciliationBaseline,
-      chatsRef.current,
+      localChats,
       remoteChats,
       projectDurableChatFingerprint,
       !recoveringFromDamagedSource && remoteDigests && chatServerDigestsRef.current
@@ -506,15 +522,16 @@ export function useChatSessions({
       return { status: "conflict", chats: chatsRef.current, shouldPersist: false };
     }
     const remoteFingerprints = reconciled.baselineFingerprints;
-    const mergedDiffersFromRemote = reconciled.chats.length !== Object.keys(remoteFingerprints).length
-      || reconciled.chats.some(chat => !chatStorageValuesEqual(projectDurableChatFingerprint(chat), remoteFingerprints[chat.id]));
+    const restoredChats = restoreLocalChatInputs(reconciled.chats, localInputs, chatDeletedIdsRef.current);
+    const mergedDiffersFromRemote = restoredChats.length !== Object.keys(remoteFingerprints).length
+      || restoredChats.some(chat => !chatStorageValuesEqual(projectDurableChatFingerprint(chat), remoteFingerprints[chat.id]));
     chatBaselineFingerprintsRef.current = remoteFingerprints;
     chatServerDigestsRef.current = remoteDigests;
     chatServerMetadataShapesRef.current = remoteShapes;
-    chatsRef.current = reconciled.chats;
-    setChats(reconciled.chats);
+    chatsRef.current = restoredChats;
+    setChats(restoredChats);
     for (const chatId of pendingCachedDeletesRef.current) {
-      if (reconciled.chats.some((chat) => chat.id === chatId)) {
+      if (restoredChats.some((chat) => chat.id === chatId)) {
         pendingCachedDeletesRef.current.delete(chatId);
         void deleteChatPermanently(chatId);
       }
@@ -532,7 +549,7 @@ export function useChatSessions({
     }
     return {
       status: "ready",
-      chats: reconciled.chats,
+      chats: restoredChats,
       shouldPersist: shouldPersist || recoveringFromDamagedSource || mergedDiffersFromRemote,
     };
   }
@@ -590,6 +607,7 @@ export function useChatSessions({
     chatBaselineFingerprintsRef.current = snapshotChatFingerprints(snapshot, projectDurableChatFingerprint);
     chatServerDigestsRef.current = nextServerDigests;
     chatServerMetadataShapesRef.current = nextServerShapes;
+    if (result.ok === true) void acknowledgeLocalChatInputs(endpoint, snapshot).catch(() => undefined);
     if (chatsSaveVersionRef.current === saveVersion) {
       if (clearDirty) {
         chatsDirtyRef.current = false;
@@ -1085,6 +1103,9 @@ export function useChatSessions({
     const deleteSaveVersion = chatsSaveVersionRef.current;
     let durableDeletionCommitted = false;
     try {
+      // The user explicitly deleted this conversation. Discard its pending
+      // local inputs first so a crash after server deletion cannot recreate it.
+      await removeLocalChatInputs(endpoint, chatId).catch(() => undefined);
       await persistChatsNow();
       durableDeletionCommitted = true;
       await removeChatTranscriptCache(endpoint, chatId, removedSnapshot.projectPath);

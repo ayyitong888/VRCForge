@@ -16,10 +16,9 @@ for (const stage of [
 ]) {
   assert.ok(submit.includes(`trace("${stage}"`), `submitTurn must record ${stage}`);
 }
-assert.ok(submit.indexOf('trace("persist_started")') < submit.indexOf("await persistChatsNow?.()"));
-assert.ok(submit.indexOf("await persistChatsNow?.()") < submit.indexOf('trace("persist_resolved"'));
-assert.ok(submit.indexOf('trace("persist_resolved"') < submit.indexOf('trace("dispatch_wait_started"'));
+assert.ok(submit.indexOf("await preserveLocalInput(endpoint, ownerChatId, turn.id)") < submit.indexOf('trace("dispatch_wait_started"'));
 assert.ok(submit.indexOf('trace("dispatch_wait_resolved"') < submit.indexOf('trace("rpc_started"'));
+assert.ok(submit.indexOf('trace("rpc_started"') < submit.indexOf('trace("persist_started")'));
 
 const events = [];
 const trace = createSteerDeliveryTrace((event) => events.push(event), {

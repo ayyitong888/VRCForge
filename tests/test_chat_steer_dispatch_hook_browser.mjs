@@ -32,6 +32,10 @@ export const sendAgentMessage = (_endpoint, message, _session, history, _agent, 
   window.__providerStarted = true;
 });
 export const recordAgentRunQueued = async (endpoint, payload) => {
+  if (window.__holdQueueAdmission) {
+    window.__holdQueueAdmission = false;
+    await new Promise(resolve => { window.__releaseQueueAdmission = resolve; });
+  }
   window.__queueRequests.push(payload);
   window.__queueObserved = { sessionId: payload.sessionId, clientTurnId: payload.clientTurnId, targetClientTurnId: payload.targetClientTurnId };
   const result = payload.targetClientTurnId && !window.__sendNowBecomesFollowup
@@ -55,7 +59,7 @@ import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { useChatRunController } from "./src/hooks/use-chat-run-controller";
 
-const chat = { id: "chat-fixture", sessionId: "session-fixture", items: [], title: "Existing chat" };
+const chat = { id: "chat-fixture", sessionId: "session-fixture", projectPath: "", items: [], title: "Existing chat" };
 let releasePersist;
 let releaseQueuePersist;
 let releaseQueuePreparation;
@@ -197,17 +201,15 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator("#hook-mounted").waitFor({ state: "attached" });
   await page.evaluate(() => window.__startFixture());
-  await page.waitForTimeout(60);
-  await page.evaluate(() => window.__releasePersist());
   await page.waitForFunction(() => window.__providerRequests.length === 1);
+  await page.evaluate(() => window.__failNextPersist());
   await page.evaluate(() => window.__submitFixtureSteer());
-  await page.waitForFunction(() => window.__traceEvents.some((event) => event.stage === "persist_started"));
-  await page.waitForTimeout(40);
+  await page.waitForFunction(() => window.__traceEvents.some((event) => event.stage === "persist_rejected"));
   let state = await page.evaluate(() => ({
     stages: window.__traceEvents.map((event) => event.stage),
     rpcCalls: window.__queueObserved ? 1 : 0,
   }));
-  assert.ok(state.stages.includes("persist_started"), "hook reports the exact save boundary before waiting");
+  assert.ok(state.stages.includes("persist_started"), "the archive attempt is tracked independently");
   assert.equal(state.rpcCalls, 1, "text steer reaches the running turn while the unrelated full transcript save remains unresolved");
   assert.equal(state.stages.includes("rpc_started"), true);
 
@@ -219,8 +221,8 @@ try {
     clientTurnId: "console-steer-fixture",
     targetClientTurnId: "active-turn-fixture",
   }, "the native RPC receives the submitted ID and current active target separately");
-  assert.ok(state.events.findIndex((event) => event.stage === "persist_resolved")
-    < state.events.findIndex((event) => event.stage === "rpc_started"), "runtime admission waits for the durable transcript snapshot");
+  assert.ok(state.events.findIndex((event) => event.stage === "rpc_ack")
+    < state.events.findIndex((event) => event.stage === "persist_rejected"), "an archive conflict cannot retract the admitted steer");
   const traceJson = JSON.stringify(state.events);
   assert.equal(traceJson.includes("sensitive fixture text"), false, "diagnostics never retain message text");
   assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
@@ -236,13 +238,16 @@ try {
   await page.waitForFunction(() => window.__providerRequests.length === 2);
   await page.evaluate(() => {
     window.__holdQueuePersist = true;
+    window.__holdQueueAdmission = true;
     window.__queuedSubmission = window.__submitFixtureQueued();
   });
   await page.waitForFunction(() => window.__queuedTurns().some(turn => turn.id === "console-queued-fixture" && turn.queueTransition === "enqueue"));
-  assert.equal(await page.evaluate(() => window.__providerRequests.length), 2, "pending persistence must not dispatch into the current turn");
-  await page.evaluate(() => window.__releaseQueuePersist());
+  assert.equal(await page.evaluate(() => window.__providerRequests.length), 2, "pending queue admission must not dispatch into the current turn");
+  await page.waitForFunction(() => typeof window.__releaseQueueAdmission === "function");
+  await page.evaluate(() => window.__releaseQueueAdmission());
   const queueResult = await page.evaluate(() => window.__queuedSubmission);
   assert.equal(queueResult, "queued");
+  await page.evaluate(() => window.__releaseQueuePersist());
   let queueState = await page.evaluate(() => ({
     request: window.__queueRequests.at(-1),
     queued: window.__queuedTurns().map((turn) => ({ id: turn.id, queueId: turn.queueId, status: turn.queueStatus })),
@@ -286,9 +291,8 @@ try {
     messages: window.__chat.items.filter((item) => item.type === "user" && item.clientTurnId === turnId && !item.composerQueued).length,
   }), id);
   assert.deepEqual(await followupPresentation(edited.id), { queuedRows: 1, messages: 0 }, "pre-dispatch transcript save must not publish the user message");
-  assert.equal(await page.evaluate(() => window.__providerRequests.length), 2);
-  await page.evaluate(() => window.__releaseQueuePersist());
   await page.waitForFunction(() => window.__providerRequests.length === 3);
+  await page.evaluate(() => window.__releaseQueuePersist());
   const delivered = await page.evaluate((id) => ({
     request: window.__providerRequests.at(-1),
     item: window.__chat.items.find((item) => item.clientTurnId === id),
@@ -384,16 +388,16 @@ try {
     window.__setQuestionActivity(true);
     window.__failNextPersist();
   });
-  assert.equal(await page.evaluate(() => window.__queueFixture("idle-question-queue", "idle wait for answer")), "not_accepted", "a failed transcript snapshot blocks durable queue admission");
+  assert.equal(await page.evaluate(() => window.__queueFixture("idle-question-queue", "idle wait for answer")), "queued", "a failed transcript snapshot does not block durable queue admission");
   await page.waitForFunction(() => window.__traceEvents.some((event) => event.stage === "persist_rejected" && event.requestedDeliveryMode === "queue"));
   const failedSnapshotQueue = await page.evaluate(() => ({
     queued: window.__queuedTurns().find((turn) => turn.id === "idle-question-queue"),
     item: window.__chat.items.find((item) => item.clientTurnId === "idle-question-queue"),
     stages: window.__traceEvents.filter((event) => event.requestedDeliveryMode === "queue" && event.clientTurnId === "idle-question-queue").map((event) => event.stage),
   }));
-  assert.equal(failedSnapshotQueue.queued, undefined, "failed snapshot leaves no durable queue entry");
-  assert.equal(failedSnapshotQueue.item, undefined, "failed snapshot removes the unsent queue bubble");
-  assert.equal(failedSnapshotQueue.stages.includes("rpc_ack"), false, "runtime admission is skipped after a failed transcript snapshot");
+  assert.equal(failedSnapshotQueue.queued?.queueId, "queue-idle-question-queue");
+  assert.equal(failedSnapshotQueue.item?.composerQueued, true);
+  assert.equal(failedSnapshotQueue.stages.includes("rpc_ack"), true);
   await page.waitForTimeout(80);
   assert.equal(await page.evaluate(() => window.__providerRequests.length), 6, "idle enqueue also waits for a same-session pending question");
 
@@ -424,7 +428,7 @@ try {
   await page.waitForFunction(() => window.__queuedTurns().some((turn) => turn.id === "idle-question-queue"));
   await page.waitForTimeout(80);
   assert.equal(await page.evaluate(() => window.__providerRequests.length), 6, "reload recovery keeps a durable follow-up parked while its question is pending");
-  assert.equal(await page.evaluate(() => window.__queueRequests.filter((request) => request.clientTurnId === "idle-question-queue").length), 0, "refresh recovery does not dispatch the parked clientTurnId while its question is pending");
+  assert.equal(await page.evaluate(() => window.__queueRequests.filter((request) => request.clientTurnId === "idle-question-queue").length), 1, "refresh recovery does not re-enqueue the parked clientTurnId");
   assert.equal(await page.evaluate(() => window.__chat.items.filter((item) => item.clientTurnId === "idle-question-queue").length), 1, "recovery recreates one visible queued item when the transcript snapshot missed it");
   await page.evaluate(() => window.__mountRestoredController([
     window.__chat.items.find((item) => item.clientTurnId === "idle-question-queue"),

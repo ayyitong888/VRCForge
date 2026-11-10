@@ -7,7 +7,6 @@ export type SteerDeliveryTraceStage =
   | "reservation_acquired"
   | "steer_context_resolved"
   | "persist_started"
-  | "persist_skipped_existing"
   | "persist_resolved"
   | "persist_rejected"
   | "dispatch_wait_started"

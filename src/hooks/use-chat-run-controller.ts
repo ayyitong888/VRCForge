@@ -10,6 +10,7 @@ import {
   type AgentRuntimeDeltaEvent,
 } from "../lib/chat-streaming";
 import type { ChatAttachment, ChatThread, ConversationItem } from "../lib/chat-types";
+import { recordLocalChatInput } from "../lib/chat-local-inputs";
 import {
   materializeRuntimeTimeline,
   mergeRuntimeTimelines,
@@ -696,15 +697,13 @@ export function useChatRunController({
         ...turn,
         queuedFrom: true,
         chatId: ownerChatId,
-        sessionId: turn.sessionId || ownerChat?.sessionId || sessionId || undefined,
+        sessionId: turn.sessionId || ownerChat?.sessionId || sessionId || `session-${turn.id}`,
         projectPath: turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
         projectType: turn.projectType || ownerChat?.projectType || ((turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath) ? "unity" : "general"),
         queueLaneId: ownerChatId,
       };
       trace("reservation_acquired", { chatId: ownerChatId, sessionId: queuedTurn.sessionId });
       trace("steer_context_resolved", { chatId: ownerChatId, sessionId: queuedTurn.sessionId });
-      // The transcript owns the full visible input and its chat/session binding.
-      // Make it durable before any runtime delivery can produce a response.
       const existing = ownerChat?.items.some(
         (item) => item.type === "user" && item.clientTurnId === turn.id,
       );
@@ -732,31 +731,8 @@ export function useChatRunController({
             }],
           };
         });
-        const persistStartedAt = performance.now();
-        try {
-          trace("persist_started");
-          await persistChatsNow();
-          trace("persist_resolved", { waitMs: performance.now() - persistStartedAt });
-        } catch (cause) {
-          trace("persist_rejected", {
-            waitMs: performance.now() - persistStartedAt,
-            errorType: cause instanceof Error ? cause.name : typeof cause,
-          });
-          reportChatSaveError(cause);
-          queueArbitratorRef.current.settle(turn.id, {
-            acceptedSteer: false,
-            stopRequested: false,
-            cancelled: true,
-          }, sendingRef.current || queueRef.current.length > 0);
-          updateChat(ownerChatId, (current) => ({
-            ...touchChat(current),
-            items: current.items.filter((item) => item.type !== "user" || item.clientTurnId !== turn.id),
-          }));
-          return "not_accepted";
-        }
-      } else {
-        trace("persist_skipped_existing", { chatId: ownerChatId, sessionId: queuedTurn.sessionId });
       }
+      await preserveLocalInput(endpoint, ownerChatId, turn.id);
       steerIntentRef.current.set(turn.id, queuedTurn);
       const activeTurn = sendingRef.current ? currentTurnRef.current : continuedTurn;
       const targetClientTurnId = activeTurn
@@ -900,7 +876,7 @@ export function useChatRunController({
            : item),
        }));
        setQueued([...queueRef.current]);
-       await persistChatsNow?.().catch(reportChatSaveError);
+       void persistChatsNow?.().catch(reportChatSaveError);
       void refreshRuntimeRuns(false).catch(() => undefined);
       // The active run may have reached its finally block while the queue
       // request was in flight. In that race, take ownership of this queued
@@ -971,7 +947,7 @@ export function useChatRunController({
       ...turn,
       queuedFrom: true,
       chatId: ownerChatId,
-      sessionId: turn.sessionId || ownerChat?.sessionId || sessionId || undefined,
+      sessionId: turn.sessionId || ownerChat?.sessionId || sessionId || `session-${turn.id}`,
       projectPath: turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
       projectType: turn.projectType || ownerChat?.projectType || ((turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath) ? "unity" : "general"),
       queueLaneId: ownerChatId,
@@ -1013,7 +989,7 @@ export function useChatRunController({
             attachments: storedAttachments,
             queuedFrom: true,
             composerQueued: true,
-            queueStatus: "queued",
+            queueStatus: "delivery_unverified",
             clientTurnId: turn.id,
             queueEnvelope: {
               planMode: turn.planMode === true,
@@ -1033,28 +1009,9 @@ export function useChatRunController({
           }],
         };
       });
-      {
-        const persistStartedAt = performance.now();
-        try {
-          trace("persist_started", { requestedDeliveryMode: "queue" });
-          await persistChatsNow();
-          trace("persist_resolved", { requestedDeliveryMode: "queue", waitMs: performance.now() - persistStartedAt });
-        } catch (cause) {
-          trace("persist_rejected", {
-            requestedDeliveryMode: "queue",
-            waitMs: performance.now() - persistStartedAt,
-            errorType: cause instanceof Error ? cause.name : typeof cause,
-          });
-          updateChat(ownerChatId, (current) => ({
-            ...touchChat(current),
-            items: current.items.filter((item) => item.type !== "user" || item.clientTurnId !== turn.id),
-          }));
-          reportChatSaveError(cause);
-          return "not_accepted";
-        }
-      }
     }
 
+    await preserveLocalInput(endpoint, ownerChatId, turn.id);
     trace("rpc_started", { requestedDeliveryMode: "queue" });
     const rpcStartedAt = performance.now();
     const result = await recordAgentRunQueued(endpoint, {
@@ -1133,6 +1090,11 @@ export function useChatRunController({
     return result?.accepted === true && result.mode === "followup" && Boolean(result.queueId) ? "queued" : "not_accepted";
   }
 
+  async function preserveLocalInput(targetEndpoint: string, chatId: string, clientTurnId: string) {
+    const owner = getChatById(chatId);
+    if (owner) await recordLocalChatInput(targetEndpoint, owner, clientTurnId).catch(reportChatSaveError);
+  }
+
   async function removeQueuedTurn(turnId: string): Promise<boolean> {
     const turn = queueRef.current.find((candidate) => candidate.id === turnId);
     if (!turn) return false;
@@ -1153,7 +1115,8 @@ export function useChatRunController({
           ? { ...item, queueStatus: "cancelled" }
           : item),
       }));
-      await persistChatsNow?.().catch(() => undefined);
+      await preserveLocalInput(endpoint, chatId, turnId);
+      void persistChatsNow?.().catch(reportChatSaveError);
     }
     return true;
   }
@@ -1297,7 +1260,8 @@ export function useChatRunController({
       const chat = getChatById(chatId);
       const baseItems = (prepared?.baseItems ?? options?.baseItems ?? chat?.items ?? []).filter(
         (item) => (item.type !== "user" || item.clientTurnId !== turn.id)
-          && !(item.type === "user" && item.composerQueued),
+          && !(item.type === "user" && (item.composerQueued
+            || (item.queuedFrom && item.queueStatus === "delivery_unverified"))),
       );
       const shouldGenerateTitle = shouldGenerateChatTitle(chat, baseItems.length, background);
       const chatSessionId = (prepared?.sessionId ?? options?.sessionId ?? chat?.sessionId) || `session-${turn.id}`;
@@ -1332,7 +1296,7 @@ export function useChatRunController({
         text: turn.text,
         planMode: turn.planMode === true,
         attachments: turn.attachments,
-        clientTurnId: turn.queueId ? turn.id : undefined,
+        clientTurnId: turn.id,
         createdAt: new Date(startedAt).toISOString(),
         ...(presentingFollowup ? {
           queuedFrom: true,
@@ -1398,11 +1362,15 @@ export function useChatRunController({
             ],
           };
         });
-        // A recovered runtime reply must have a durable owning chat and the
-        // complete user message even if the app is killed during this turn.
-        savingBeforeDispatch = true;
-        await persistChatsNow();
-        savingBeforeDispatch = false;
+        if (options?.baseItems) {
+          // A historical edit or retry replaces the chat branch.
+          savingBeforeDispatch = true;
+          await persistChatsNow();
+          savingBeforeDispatch = false;
+        } else {
+          await preserveLocalInput(targetEndpoint, chatId, turn.id);
+          void persistChatsNow().catch(reportChatSaveError);
+        }
       }
       const computerUseGrant = !background && turn.computerUseRequested
         ? await issueComputerUseTurnGrant(targetEndpoint, {
@@ -1593,7 +1561,7 @@ export function useChatRunController({
         void maybeGenerateChatTitle(chatId, message, turn.provider, turn.model, fallbackTitle);
       }
       if (midTurnCompactionApplied && persistChatsNow) {
-        await persistChatsNow();
+        void persistChatsNow().catch(reportChatSaveError);
       }
       await refresh(targetEndpoint);
       await refreshRuntimeRuns(false, targetEndpoint);
