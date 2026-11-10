@@ -5,10 +5,10 @@ import ts from "typescript";
 
 // Execute the production App handlers against controlled runtime receipts.
 const source = readFileSync("src/App.tsx", "utf8");
-const handlers = source.slice(source.indexOf("  function editConversationMessage("), source.indexOf("  function retryConversationItem("));
+const handlers = source.slice(source.indexOf("  function editConversationMessage("), source.indexOf("  async function runExplicitWorkspaceAction("));
 const compiled = ts.transpileModule(handlers, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function fixture() {
-  const chat = { id: "chat", sessionId: "session", title: "title", items: [
+  const chat = { id: "chat", sessionId: "session", title: "title", updatedAt: "2026-01-01T00:00:00Z", items: [
     { id: "old", type: "user", text: "old" },
     { id: "user", type: "user", text: "有没有简短向的命中", clientTurnId: "turn" },
     { id: "tool", type: "timeline_event", event: { kind: "tool", status: "done" } },
@@ -21,6 +21,7 @@ function fixture() {
     hasUnresolvedRuntimeState: () => scope.unresolved,
     getChatById: (id) => id === chat.id ? chat : null,
     latestConversationItemId: (items, predicate) => [...items].reverse().find(predicate)?.id,
+    isRetryableConversationItem: (item) => item.type === "user",
     cloneChatAttachments: (items) => structuredClone(items),
     setEditingMessage: (value) => { scope.editingMessage = typeof value === "function" ? value(scope.editingMessage) : value; sync(); },
     setInput: (value) => { scope.input = value; }, setAttachments: (value) => { scope.attachments = value; },
@@ -33,9 +34,19 @@ function fixture() {
   };
   function sync() { scope.messageEditSnapshotRef.current = { draft: scope.editingMessage, chatId: scope.activeChatId, busy: scope.running || scope.compacting || scope.visibleQueued.length > 0 || scope.unresolved }; }
   sync();
-  const handlers = new Function("scope", `with(scope) { ${compiled}; return {editConversationMessage, saveMessageEdit, cancelMessageEdit}; }`)(scope);
+  const handlers = new Function("scope", `with(scope) { ${compiled}; return {editConversationMessage, saveMessageEdit, cancelMessageEdit, retryConversationItem}; }`)(scope);
   return { scope, handlers, sync };
 }
+
+test("retry retains the original history and session if its replacement fails", () => {
+  const { scope, handlers } = fixture();
+  const { items, sessionId, title, updatedAt } = scope.chat;
+  handlers.retryConversationItem("user");
+  assert.equal(scope.sent.length, 1);
+  const [, , options] = scope.sent[0];
+  assert.deepEqual(options.baseItems, items.slice(0, 1));
+  assert.deepEqual(options.restoreOnFailure, { items, sessionId, title, updatedAt });
+});
 
 test("running latest message opens only a local draft and keeps executed history", () => {
   const { scope, handlers, sync } = fixture(); scope.running = true; sync();

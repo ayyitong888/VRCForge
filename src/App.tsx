@@ -3186,6 +3186,12 @@ export default function App() {
     void runTurnNow(chat.id, turn, {
       baseItems: chat.items.slice(0, userIndex),
       sessionId: "",
+      restoreOnFailure: {
+        items: chat.items,
+        sessionId: chat.sessionId,
+        title: chat.title,
+        updatedAt: chat.updatedAt,
+      },
     });
   }
 
