@@ -66,15 +66,15 @@ function ToggleRow({
         disabled={disabled || busy}
         onClick={() => onChange(!checked)}
         className={cn(
-          "relative h-7 w-12 shrink-0 rounded-full border transition-colors",
+          "inline-flex h-7 w-12 shrink-0 items-center rounded-full border px-[calc(0.25rem-1px)] transition-colors",
           checked ? "border-primary bg-primary" : "border-border bg-muted",
           (disabled || busy) && "cursor-not-allowed opacity-50",
         )}
       >
         <span
           className={cn(
-            "absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
-            checked ? "translate-x-5" : "translate-x-0.5",
+            "h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
+            checked && "translate-x-5",
           )}
         />
       </button>

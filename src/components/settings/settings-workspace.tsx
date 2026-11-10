@@ -297,7 +297,7 @@ export function SettingsWorkspace({
                 />
                 <span
                   aria-hidden="true"
-                  className="relative h-7 w-12 shrink-0 rounded-full border border-border bg-muted after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm peer-checked:border-primary peer-checked:bg-primary peer-checked:after:translate-x-5 peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2"
+                  className="inline-flex h-7 w-12 shrink-0 items-center rounded-full border border-border bg-muted px-[calc(0.25rem-1px)] after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm peer-checked:border-primary peer-checked:bg-primary peer-checked:after:translate-x-5 peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2"
                 />
               </label>
             </section>
