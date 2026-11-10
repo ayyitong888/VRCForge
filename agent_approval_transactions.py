@@ -5575,23 +5575,37 @@ class AgentApprovalTransactionService:
 
         if not pending:
             return {}
+        # Prefilter the JSON writer's UTF-8 and ASCII-escaped string spellings
+        # before decoding multi-megabyte audit rows. Verify parsed fields below.
+        binding, turn_id = snapshot["binding"], snapshot["turnId"]
+        owner_tokens = [
+            {json.dumps(value, ensure_ascii=ascii_only).encode("utf-8") for ascii_only in (False, True)}
+            for value in (session_id, binding, turn_id)
+        ]
         recovered: dict[str, str] = {}
         for path in iter_jsonl_generations(self._ports.audit_log_path()):
-            if not path.exists():
+            try:
+                handle = path.open("rb")
+            except FileNotFoundError:
                 continue
-            with path.open(encoding="utf-8") as handle:
+            with handle:
                 for line in handle:
+                    if b'"nativeResult"' not in line or not all(
+                        any(token in line for token in tokens) for tokens in owner_tokens
+                    ):
+                        continue
                     try:
                         event = json.loads(line)
-                    except (ValueError, UnicodeError):
+                    except ValueError:
+                        continue
+                    if not isinstance(event, dict) or event.get("event") != "approval_applied":
                         continue
                     result = event.get("nativeResult")
-                    if event.get("event") != "approval_applied" or not isinstance(result, dict):
+                    if not isinstance(result, dict):
                         continue
                     call_id = result.get("callId")
-                    if (call_id in pending and result.get("sessionId") == session_id
-                            and result.get("binding") == snapshot["binding"]
-                            and result.get("turnId") == snapshot["turnId"]
+                    if (isinstance(call_id, str) and call_id in pending and result.get("sessionId") == session_id
+                            and result.get("binding") == binding and result.get("turnId") == turn_id
                             and isinstance(result.get("content"), dict)):
                         recovered[call_id] = json.dumps(result["content"], ensure_ascii=False)
         return recovered

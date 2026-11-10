@@ -41,3 +41,42 @@ def test_append_audit_rotates_and_recent_logs_span_generations() -> None:
         assert [entry["index"] for entry in recent] == [7, 8, 9, 10, 11], (
             "tail read must return the newest entries across generations in order"
         )
+
+
+def test_native_result_recovery_decodes_only_candidate_audit_rows(tmp_path: Path) -> None:
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    active, rotated, empty = iter_jsonl_generations(gateway.audit_log_path)
+    active.parent.mkdir(parents=True, exist_ok=True)
+    result = {
+        "sessionId": "session-日本語",
+        "binding": "binding",
+        "turnId": "turn",
+        "callId": "pending",
+        "content": {"observations": ["active"]},
+    }
+    active.write_text("\n".join(json.dumps(row) for row in [
+        {"event": "unrelated", "padding": "x" * (1024 * 1024)},
+        {"event": "approval_applied", "nativeResult": {**result, "sessionId": "another"}},
+        {"event": "approval_applied", "nativeResult": result},
+    ]) + "\n", encoding="utf-8")
+    older = {"observations": ["rotated"]}
+    rotated.write_text(json.dumps(
+        {"event": "approval_applied", "nativeResult": {**result, "content": older}},
+        ensure_ascii=False,
+    ), encoding="utf-8")
+    empty.touch()
+
+    with patch("agent_approval_transactions.json.loads", wraps=json.loads) as decode:
+        recovered = gateway.approval_transactions.recover_native_results(
+            result["sessionId"], {"binding": result["binding"], "turnId": result["turnId"]}, {"pending"},
+        )
+    assert decode.call_count == 2
+    assert recovered == {"pending": json.dumps(older, ensure_ascii=False)}
+
+    # A damaged row in a rotated ledger cannot hide other applied receipts.
+    damaged = json.dumps({"event": "approval_applied", "nativeResult": result}).encode("utf-8")
+    with rotated.open("ab") as handle:
+        handle.write(b"\n" + damaged.replace(b'"active"', b'"\xff"'))
+    assert gateway.approval_transactions.recover_native_results(
+        result["sessionId"], {"binding": result["binding"], "turnId": result["turnId"]}, {"pending"},
+    ) == recovered
