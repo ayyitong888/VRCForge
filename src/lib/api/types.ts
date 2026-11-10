@@ -785,6 +785,7 @@ export type AgentRuntimeRun = {
   planner?: string;
   nextStep?: string;
   reason?: string;
+  cancellationReason?: string;
   stepCount?: number;
   eventCount?: number;
   attachmentCount?: number;

@@ -62,6 +62,16 @@ try {
     assert.deepEqual(api.latestRuntimeAttentionCandidates([terminalRun]),[terminalRun]);
     assert.equal(api.runtimeAttentionFromResponse(terminalRun,response)?.status,status==='denied'?'failed':status);
   }
+  for (const stopped of [
+    {...run,status:'cancelled',reason:'user_stop'},
+    {...run,status:'stopped',cancellationReason:'user_stop_question_continuation'},
+  ]) {
+    assert.deepEqual(api.runtimeAttentionCandidates([stopped]),[], 'manual stop has no notification candidate');
+    assert.equal(api.runtimeAttentionFromRun(stopped),null);
+    assert.equal(api.runtimeAttentionFromResponse(stopped,response),null);
+  }
+  assert.equal(api.runtimeAttentionFromRun({...run,status:'cancelled',cancellationReason:'provider_cancelled',reason:'user_stop'})?.status,
+    'cancelled','the terminal cancellation reason takes precedence over older ledger metadata');
   if (process.env.VRCFORGE_ATTENTION_RECEIPT && process.env.VRCFORGE_ATTENTION_SNAPSHOT) {
     const receipt=JSON.parse(await readFile(process.env.VRCFORGE_ATTENTION_RECEIPT,'utf8'));
     const snapshot=JSON.parse(await readFile(process.env.VRCFORGE_ATTENTION_SNAPSHOT,'utf8'));

@@ -86,6 +86,19 @@ try {
     assert.equal(state.toasts.at(-1).args.request.title,`workspace.notification${status==='failed'?'Failed':'Stopped'}Title`);
   }
   await page.close();
+  const manual = process.env.VRCFORGE_MANUAL_STOP_REPLAY
+    ? JSON.parse(await readFile(process.env.VRCFORGE_MANUAL_STOP_REPLAY,'utf8'))
+    : {...identity,status:'cancelled',cancellationReason:'user_stop'};
+  // A fresh window has never seen the click. The durable reason still suppresses both deliveries.
+  const reopened = await open({sessionId:manual.sessionId,snapshot:{runs:{runs:[manual,{
+    ...identity,clientTurnId:'independent-failure',turnId:'failure',status:'failed',
+  }]}},receipt:{ok:true,status:'missing'}});
+  await reopened.waitForFunction(()=>window.calls.some(c=>c.command==='show_background_goal_notification'));
+  const stoppedCalls = await reopened.evaluate(()=>window.calls);
+  assert.deepEqual(stoppedCalls.filter(c=>c.command==='show_background_goal_notification').map(c=>c.args.request.title),
+    ['workspace.notificationFailedTitle']);
+  assert.equal(stoppedCalls.filter(c=>c.sound).length,1,'only the independent failure plays a sound');
+  await reopened.close();
   const empty=await open({sessionId:identity.sessionId,selectedSessionId:'',snapshot:{runs:{runs:[run]}},receipt:{...identity,ok:true,status:'missing'}});
   await empty.waitForFunction(()=>window.calls.some(c=>c.command==='show_background_goal_notification'));
   assert.equal(await empty.evaluate(()=>window.state.runtimeAttention.length),0,'empty new-task view still notifies without a sidebar review for another chat');

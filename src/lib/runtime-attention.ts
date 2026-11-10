@@ -14,7 +14,11 @@ const STORAGE_KEY = "vrcforge.runtime-attention.notifications.v1";
 
 function runAttentionStatus(run: AgentRuntimeRun): RuntimeAttentionStatus | null {
   if (isWaitingForSubAgent(run) || (run.agent === "sub-agent" && run.nextStep === "paused")) return null;
-  return attentionStatus(run.status);
+  const status = attentionStatus(run.status);
+  const cancellationReason = run.cancellationReason || run.reason;
+  if ((status === "cancelled" || status === "stopped")
+    && (cancellationReason === "user_stop" || cancellationReason === "user_stop_question_continuation")) return null;
+  return status;
 }
 
 /** All watched terminal turns must deliver, even if a newer turn already runs. */
