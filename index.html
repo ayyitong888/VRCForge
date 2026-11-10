@@ -28,14 +28,26 @@
         transform-origin: 72% 37%;
         animation: startup-camera 5s cubic-bezier(.2, .72, .29, 1) both;
       }
-      .startup-wordmark {
+      .startup-bloom {
         position: absolute;
-        left: 8%;
+        left: 22%;
         top: 50%;
-        margin: 0;
-        transform: translateY(-50%);
-        font: 400 clamp(3rem, 7.5vw, 8rem)/1 Georgia, serif;
-        letter-spacing: -.065em;
+        width: clamp(6rem, 16vw, 12rem);
+        transform: translate(-50%, -50%);
+      }
+      .startup-bloom > g {
+        transform-origin: 60px 60px;
+        animation: startup-bloom-open 1.9s cubic-bezier(.2, .72, .3, 1) both;
+      }
+      .startup-bloom-outline {
+        fill: #efa8c3;
+        fill-opacity: .18;
+        stroke: #b54a75;
+        stroke-width: 1.25;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-dasharray: 1;
+        animation: startup-bloom-ink 1.55s ease-out both;
       }
       .startup-petals { position: absolute; inset: 0; pointer-events: none; }
       .startup-petals > span {
@@ -55,6 +67,15 @@
         from { transform: translate3d(1.5%, .5%, 0) scale(1); }
         to { transform: translate3d(-2.5%, -1%, 0) scale(1.095); }
       }
+      @keyframes startup-bloom-open {
+        from { opacity: .52; transform: rotate(-12deg) scale(.83); }
+        to { opacity: 1; transform: rotate(0) scale(1); }
+      }
+      @keyframes startup-bloom-ink {
+        from { fill-opacity: .04; stroke-dashoffset: .9; }
+        70% { fill-opacity: .08; }
+        to { fill-opacity: .18; stroke-dashoffset: 0; }
+      }
       @keyframes startup-petal {
         0% { opacity: 0; transform: translate3d(0, 0, 0) rotate(14deg) scaleX(.75); }
         14% { opacity: .84; }
@@ -65,10 +86,10 @@
       @media (orientation: portrait) {
         .startup-portrait { inset: 0; mask-image: linear-gradient(0deg, transparent 12%, #000 58%); }
         .startup-portrait::before { background-position: 62% 44%; }
-        .startup-wordmark { top: auto; bottom: 10%; transform: none; font-size: clamp(3rem, 13vw, 6rem); }
+        .startup-bloom { top: auto; left: 50%; bottom: 5%; transform: translateX(-50%); }
       }
       @media (prefers-reduced-motion: reduce) {
-        .startup-portrait::before { animation: none; }
+        .startup-portrait::before, .startup-bloom > g, .startup-bloom-outline { animation: none; }
         .startup-petals { display: none; }
       }
       @media (prefers-color-scheme: dark) {
@@ -77,9 +98,21 @@
     </style>
   </head>
   <body>
-    <main data-vrcforge-startup-shell hidden>
+    <main data-vrcforge-startup-shell aria-label="VRCForge" hidden>
       <div class="startup-portrait" aria-hidden="true"></div>
-      <h1 class="startup-wordmark">VRCForge</h1>
+      <svg class="startup-bloom" viewBox="0 0 120 120" aria-hidden="true">
+        <g>
+          <path class="startup-bloom-outline" pathLength="1"
+            d="M49.4 45.4 C38 37 41 20 55 17 Q57 17 60 23 Q63 17 65 17 C79 20 82 37 70.6 45.4
+               C75.1 32 92.2 29.6 99.4 42 Q100 43.9 95.2 48.6 Q101.8 49.6 102.4 51.5 C103.9 65.7 88.7 73.8 77.1 65.6
+               C91.3 65.7 98.9 81.2 89.3 91.8 Q87.7 93 81.7 89.9 Q82.8 96.6 81.2 97.7 C68.1 103.5 55.7 91.5 60 78
+               C64.3 91.5 51.9 103.5 38.8 97.7 Q37.2 96.6 38.3 89.9 Q32.3 93 30.7 91.8 C21.1 81.2 28.7 65.7 42.9 65.6
+               C31.3 73.8 16.1 65.7 17.6 51.5 Q18.2 49.6 24.8 48.6 Q20 43.9 20.6 42 C27.8 29.6 44.9 32 49.4 45.4 Z" />
+          <path d="M60 54V43 M66 58L76 55 M64 65L70 73 M56 65L50 73 M54 58L44 55"
+            fill="none" stroke="#bd6385" stroke-width="1" stroke-linecap="round" />
+          <circle cx="60" cy="60" r="2.15" fill="#9f3f67" />
+        </g>
+      </svg>
       <div class="startup-petals" aria-hidden="true"><span></span><span></span><span></span></div>
     </main>
     <div id="root"></div>
