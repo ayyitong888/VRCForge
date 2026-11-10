@@ -73,6 +73,7 @@ import type { AppUpdatePromptState, AppUpdateResult } from "./lib/api/app-update
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useChatSessions } from "./hooks/use-chat-sessions";
+import { useComposerDraft } from "./hooks/use-composer-draft";
 import { useConversationScroll } from "./hooks/use-conversation-scroll";
 import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
 import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
@@ -119,6 +120,7 @@ import {
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
 import { useDashboardProjectSelection } from "./hooks/use-dashboard-project-selection";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
+import { isUnstartedChat } from "./lib/chat-thread";
 import { runtimeActivityCancelTarget, runtimeActivityOwner, useRuntimeTurnActivity } from "./hooks/use-runtime-turn-activity";
 import { isExternalRuntimeStream, markRuntimeStreamStopping } from "./lib/runtime-stream-owner";
 import {
@@ -330,7 +332,6 @@ export default function App() {
   } = useTransientFailureNotice();
   const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
   const { themeCustomization, backgroundError: themeBackgroundError, updateThemeCustomization, resetThemeCustomization } = useThemeCustomization();
-  const [input, setInput] = useState("");
   const [activeProjectPath, setActiveProjectPath] = useState("");
   const [activeProjectType, setActiveProjectType] = useState<ProjectType>("general");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
@@ -403,7 +404,6 @@ export default function App() {
   const [subAgentSidebarOpen, setSubAgentSidebarOpen] = useState(() => Boolean(initialSubAgentTask));
   const [subAgentPaneWidth, setSubAgentPaneWidth] = useState(() => Math.min(1000, Math.max(520, window.innerWidth * 0.6)));
   const [subAgentActionBusyTaskIds, setSubAgentActionBusyTaskIds] = useState<Set<string>>(() => new Set());
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [pendingReplyQuestionId, setPendingReplyQuestionId] = useState("");
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
@@ -844,6 +844,11 @@ export default function App() {
     expandProjectGroup,
     initialChatState,
   });
+  const { input, setInput, attachments, setAttachments, beginSubmission } = useComposerDraft(
+    activeChatId,
+    activeProjectPath,
+    !activeChat || !isUnstartedChat(activeChat),
+  );
   persistChatsNowRef.current = persistChatsNow;
   const openChatById = (chatId: string) => {
     const chat = getChatById(chatId);
@@ -1294,8 +1299,6 @@ export default function App() {
     if (!editingMessage || editingMessage.chatId === activeChatId) {
       return;
     }
-    setInput(editingMessage.priorInput);
-    setAttachments(cloneChatAttachments(editingMessage.priorAttachments));
     setEditingMessage(null);
     setRuntimeNotice("");
   }, [activeChatId, editingMessage, setRuntimeNotice]);
@@ -3501,12 +3504,14 @@ export default function App() {
       computerUseRequested = true;
     }
     const nextClientTurnId = `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const ownerChatId = ensureActiveChat();
+    const finishSubmission = beginSubmission();
     try {
-      const handoff = await sessionHandoff.consume(nextClientTurnId);
+      const handoff = activeChatId ? await sessionHandoff.consume(nextClientTurnId) : null;
       // The backend owns the framing: a harness-authored header marks the
       // transferred payload as data with no authority, and neutralizes
       // channel imitation inside it.
-      const promptPrefix = handoff.context?.promptPrefix;
+      const promptPrefix = handoff?.context?.promptPrefix;
       if (promptPrefix) message = `${promptPrefix}\n\n${message}`;
     } catch {
       // A failed consume leaves the durable queue untouched for a later turn.
@@ -3514,6 +3519,7 @@ export default function App() {
     const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
     const turn: QueuedTurn = {
       id: nextClientTurnId,
+      chatId: ownerChatId,
       planMode: activeChat?.planMode === true,
       text: message,
       attachments,
@@ -3525,12 +3531,15 @@ export default function App() {
       computerUseVisualTheme: computerUseRequested ? theme : undefined,
       computerUseVisualAccent: computerUseRequested ? resolveComputerUseAccentHex() || undefined : undefined,
     };
-    setInput("");
-    setAttachments([]);
-    const result = await submitTurn(turn, { deliveryMode });
-    if (result === "not_accepted") {
-      setInput(composerMessage);
-      setAttachments(turn.attachments);
+    let accepted = false;
+    try {
+      const result = await submitTurn(turn, { deliveryMode });
+      accepted = result === "started" || result === "steered" || result === "queued";
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      const owner = getChatById(ownerChatId);
+      finishSubmission(accepted, owner && !isUnstartedChat(owner) ? ownerChatId : undefined);
     }
   }
 

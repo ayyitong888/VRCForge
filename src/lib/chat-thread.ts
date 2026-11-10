@@ -156,7 +156,7 @@ export function normalizeChatContextUsage(value: unknown): AgentContextUsage | u
   return hasTokenCount ? usage : undefined;
 }
 
-function isUnstartedChat(chat: ChatThread): boolean {
+export function isUnstartedChat(chat: ChatThread): boolean {
   return (
     chat.items.length === 0 &&
     !(chat.title || "").trim() &&
