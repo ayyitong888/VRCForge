@@ -69,7 +69,7 @@ export function snapshotChatFingerprints(
  * Three-way reconcile a fresh server snapshot with in-memory edits.
  *
  * `baseline` is the last server state observed by this window. A chat changed
- * on only one side wins; independent append-only item additions can merge.
+ * on only one side wins; local appends can rebase onto remote item updates.
  * Divergent edits to existing content fail closed so a
  * refreshed source digest can never be paired with a stale whole-store write.
  */
@@ -104,7 +104,7 @@ export function reconcileChatStorage(
     if (nextFingerprint !== undefined) nextBaseline.set(id, remoteChanged
       ? snapshotChatValue(nextFingerprint) as ChatThread | null : baseFingerprint);
 
-    if (localChanged && remoteChanged && (versions || !chatStorageValuesEqual(localFingerprint, remoteFingerprint))) {
+    if (localChanged && remoteChanged && !chatStorageValuesEqual(localFingerprint, remoteFingerprint)) {
       const appended = mergeChatAppends(baseFingerprint, localChat, remoteChat, project);
       if (appended) {
         selected.set(id, appended);
@@ -135,7 +135,7 @@ export function reconcileChatStorage(
   return { status: "merged", chats, conflictIds: [], baselineFingerprints: Object.fromEntries(nextBaseline) };
 }
 
-/** Merge proven appends, never guess whether existing content was edited. */
+/** Rebase local appends while retaining existing records from the server. */
 function mergeChatAppends(
   baseline: ChatThread | null | undefined,
   local: ChatThread | undefined,
@@ -167,13 +167,20 @@ function mergeChatAppends(
     const source = localChanged ? local : remote;
     if (Object.prototype.hasOwnProperty.call(source, key)) mergedMetadata[key] = source[key as keyof ChatThread];
   }
-  const prefix = (chat: ChatThread) => chat.items.length >= base.items.length
-    && base.items.every((item, index) => chatStorageValuesEqual(chat.items[index], item));
-  if (!prefix(left) || !prefix(right)) return null;
-  // A metadata display difference can be redaction rather than the mutation
-  // behind an opaque server version. Require the proven remote append before
-  // merging concurrent edits; metadata alone cannot establish that evidence.
-  if (right.items.length === base.items.length) return null;
+  const existingIds = new Set<string>();
+  let remoteItemsChanged = right.items.length > base.items.length;
+  for (const [index, original] of base.items.entries()) {
+    const localItem = left.items[index];
+    const remoteItem = right.items[index];
+    if (localItem?.id !== original.id || remoteItem?.id !== original.id) return null;
+    // If both sides already share the same update, keep the server copy.
+    // Unmatched local edits still require the original conflict review.
+    if (!chatStorageValuesEqual(localItem, original) && !chatStorageValuesEqual(localItem, remoteItem)) return null;
+    remoteItemsChanged ||= !chatStorageValuesEqual(remoteItem, original);
+    existingIds.add(original.id);
+  }
+  // Metadata alone cannot explain an otherwise opaque remote version change.
+  if (!remoteItemsChanged) return null;
   const all = new Map<string, ChatThread["items"][number]>();
   const edges = new Map<string, Set<string>>();
   const incoming = new Map<string, number>();
@@ -184,7 +191,7 @@ function mergeChatAppends(
       if (!item.id || seen.has(item.id)) return null;
       seen.add(item.id);
       const other = all.get(item.id);
-      if (other && !chatStorageValuesEqual(other, item)) return null;
+      if (other && !existingIds.has(item.id) && !chatStorageValuesEqual(other, item)) return null;
       if (!other) {
         all.set(item.id, item);
         incoming.set(item.id, 0);

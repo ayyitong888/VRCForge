@@ -39,6 +39,17 @@ assert.ok(result.chats[0].items.some((value) => value.id === "live"), "keep the 
 assert.equal(run({ ...left, title: "user edit" }).chats[0].title, "user edit", "a unilateral metadata edit merges with independent appends");
 assert.equal(run({ ...left, title: "local edit" }, { ...right, title: "remote edit" }).status, "conflict");
 assert.equal(run({ ...left, items: [item("original", "edited"), item("local")] }).status, "conflict");
+const finalized = item("original", "finalized by the earlier save");
+const afterSave = { ...base, revision: 3, items: [finalized] };
+assert.equal(run(afterSave, afterSave).status, "merged", "the same visible save must not become a conflict");
+result = run({ ...left, items: [finalized, item("local")] }, afterSave);
+assert.equal(result.status, "merged", "a previously saved update shared by both sides can precede a new local append");
+assert.deepEqual(result.chats[0].items, [finalized, item("local")]);
+result = run(left, { ...right, items: [finalized, item("remote")] });
+assert.equal(result.status, "merged", "a local append must preserve a server update to an untouched earlier item");
+assert.deepEqual(result.chats[0].items, [finalized, item("remote"), item("local")]);
+assert.equal(run({ ...left, items: [item("original", "local edit"), item("local")] },
+  { ...right, items: [finalized, item("remote")] }).status, "conflict", "divergent edits still require review");
 assert.equal(run({ ...left, items: [] }).status, "conflict");
 assert.equal(run({ ...left, items: [...base.items, item("remote", "different")] }).status, "conflict");
 assert.equal(run({ ...left, items: [...base.items, item("same"), item("same")] }).status, "conflict");
