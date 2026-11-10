@@ -44,6 +44,38 @@ def _write_legacy(registry, task_id, event):
         })
 
 
+def test_lifecycle_list_reads_event_log_once_until_it_changes(tmp_path, monkeypatch):
+    registry = _registry(tmp_path)
+    _write_task(registry, "first", "running")
+    _write_task(registry, "second", "completed")
+    log = tmp_path / LOG_NAME
+    with log.open("ab") as stream:
+        stream.write(TORN_ROW)
+    original_open = Path.open
+    reads = []
+
+    def tracked_open(path, mode="r", *args, **kwargs):
+        if path == log and mode in {"r", "rb"}:
+            reads.append(mode)
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+    first = registry.list_tasks(include_events=True)
+    assert {task["id"]: [event["event"] for event in task["events"]] for task in first["tasks"]} == {
+        "first": ["running"], "second": ["completed"],
+    }
+    assert registry.recent_events(limit=1) == []
+    first["tasks"][0]["events"][0]["data"]["changed"] = True
+    assert all("changed" not in event["data"] for event in registry.recent_events())
+    assert len(reads) == 1
+
+    _write_task(registry, "third", "completed")
+    assert registry.recent_events(limit=1)[0]["taskId"] == "third"
+    assert registry.get_task("third")["task"]["events"][0]["event"] == "completed"
+    # One separator check at append and one fresh read after the file changed.
+    assert len(reads) == 3
+
+
 def _make_crashed_log(path):
     log = path / LOG_NAME
 

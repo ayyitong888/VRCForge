@@ -6,6 +6,7 @@ import os
 import secrets
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from runtime_error_schema import runtime_error_from_exception
@@ -133,6 +134,8 @@ class SubAgentTaskRegistry:
         self._threads: dict[str, threading.Thread] = {}
         self._active_child_sessions: dict[str, str] = {}
         self._parent_continuations_inflight: set[str] = set()
+        self._recent_event_log_state: tuple[int, int, int, int] | None = None
+        self._recent_event_rows: list[dict[str, Any] | None] = []
         self._lock = threading.RLock()
         self._parent_continuation_condition = threading.Condition(self._lock)
         self._startup_reconciled = False
@@ -325,10 +328,19 @@ class SubAgentTaskRegistry:
         with self._lock:
             tasks = sorted(self._tasks.values(), key=lambda item: item.created_at, reverse=True)
             tasks = tasks[: max(1, min(int(limit), 200))]
+            payloads = [self._serialize_task(task) for task in tasks]
+            if include_events and payloads:
+                events_by_task: dict[str, list[dict[str, Any]]] = {task.id: [] for task in tasks}
+                for event in self.recent_events(limit=500):
+                    task_id = event.get("taskId")
+                    if isinstance(task_id, str) and task_id in events_by_task:
+                        events_by_task[task_id].append(event)
+                for payload in payloads:
+                    payload["events"] = events_by_task[payload["id"]]
             return {
                 "ok": True,
                 "schema": SUB_AGENT_LIST_SCHEMA,
-                "tasks": [self._serialize_task(task, include_events=include_events) for task in tasks],
+                "tasks": payloads,
                 "count": len(tasks),
                 "roles": self.list_roles(),
                 "maxConcurrent": self.max_concurrent,
@@ -703,24 +715,31 @@ class SubAgentTaskRegistry:
             return {"ok": True, "task": self._serialize_task(next_task)}
 
     def recent_events(self, limit: int = 200) -> list[dict[str, Any]]:
-        path = self._event_log_path()
-        if not path.exists():
-            return []
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()[-max(1, min(int(limit), 1000)) :]
-        except OSError:
-            return []
-        events: list[dict[str, Any]] = []
-        for line in lines:
+        limit = max(1, min(int(limit), 1000))
+        with self._lock:
+            path = self._event_log_path()
             try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                public_payload = dict(payload)
-                public_payload.pop("task", None)
-                events.append(public_payload)
-        return events
+                log_state = _log_state(path.stat())
+                if self._recent_event_log_state != log_state:
+                    with path.open("rb") as source:
+                        rows = deque(maxlen=1000)
+                        for line in source:
+                            try:
+                                event = json.loads(line)
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                event = None
+                            if isinstance(event, dict):
+                                event.pop("task", None)
+                                rows.append(event)
+                            else:
+                                rows.append(None)
+                    self._recent_event_rows = list(rows)
+                    self._recent_event_log_state = log_state
+            except OSError:
+                self._recent_event_log_state = None
+                self._recent_event_rows = []
+                return []
+            return copy.deepcopy([row for row in self._recent_event_rows[-limit:] if row is not None])
 
     def _run_task(self, task_id: str, child_session_id: str) -> None:
         handler_done = threading.Event()
