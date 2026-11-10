@@ -121,6 +121,26 @@ def test_runtime_cancel_rejects_mixed_identity_tuple(tmp_path: Path) -> None:
     ) is False
 
 
+def test_runtime_cancel_signals_active_shell_without_waiting_for_browser_teardown(tmp_path, monkeypatch):
+    gateway = _gateway(tmp_path)
+    gateway.runtime_sessions.begin_turn(session_id="s", turn_id="t", client_turn_id="c")
+    shell_stops = []
+
+    def browser_teardown(session_id, client_turn_id):
+        assert (session_id, client_turn_id) == ("s", "c")
+        assert shell_stops == [gateway._runtime_shell_owner("t", "c", "s")]
+
+    def shell_cancel(owner):
+        shell_stops.append(owner)
+        return ["shell-fixture"]
+
+    monkeypatch.setattr(gateway.desktop.browser, "cancel_owner", browser_teardown)
+    monkeypatch.setattr(gateway.shell, "cancel_owner", shell_cancel)
+    stop = gateway.request_runtime_cancel({"sessionId": "s", "clientTurnId": "c"})
+    assert stop["event"]["turnId"] == "t"
+    assert stop["cancelledShellSessionIds"] == ["shell-fixture"]
+
+
 def test_runtime_cancel_by_session_keeps_full_session_stop_behavior(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     gateway.runtime_sessions.begin_turn(

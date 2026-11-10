@@ -14,7 +14,10 @@ export const fetchAgentQuestions = async (_endpoint, params = {}) => ({
   questions: window.__agentQuestions.filter((question) => !params.sessionId || question.sessionId === params.sessionId),
 });
 export const issueComputerUseTurnGrant = async () => null;
-export const requestAgentRunCancel = async () => ({ ok: true });
+export const requestAgentRunCancel = (_endpoint, target) => new Promise((resolve) => {
+  window.__stopCalls.push(target);
+  window.__resolveStop = resolve;
+});
 export const requestChatTitle = async () => ({ title: "Fixture" });
 export const sendAgentMessage = (_endpoint, message, _session, history, _agent, options) => new Promise((resolve, reject) => {
   window.__providerRequests.push({ message, history, followupQueueId: options?.followupQueueId, clientTurnId: options?.clientTurnId });
@@ -107,6 +110,7 @@ window.__mountRestoredController = (items) => {
 window.__traceEvents = []; window.__cancelCalls=[]; window.__cancelFailure=false;
 window.__providerStarted = false;
 window.__providerRequests = [];
+window.__stopCalls = [];
 window.__agentQuestions = [];
 window.__questionBlockedDispatches = [];
 window.__queueObserved = null;
@@ -187,5 +191,27 @@ try {
   await page.evaluate(async()=>{window.__cancelStatus='cancelled';await window.__controller.cancelQueuedTurns();});
   assert.equal(await page.evaluate(()=>window.__controller.queued.length),0,'confirmed cancellation removes only acknowledged message');
   assert.equal(await page.evaluate(()=>window.__providerRequests.length),1,'cancellation never dispatches another writer');
+  const stoppedStream = await page.evaluate(() => {
+    const runtime = window.__controller;
+    const target = { sessionId: 'session-fixture', clientTurnId: 'active-turn-fixture' };
+    runtime.applyRuntimeDelta({ ...target, textDelta: 'already visible' });
+    runtime.stopCurrentRun();
+    runtime.applyRuntimeDelta({ ...target, textDelta: 'late provider output', phase: 'running_tool' });
+    runtime.stopCurrentRun();
+    return {
+      stream: window.__chat.items.find(item => item.type === 'streaming'),
+      stopCalls: window.__stopCalls,
+      responseChannelAborted: window.__providerSignal.aborted,
+    };
+  });
+  assert.equal(stoppedStream.stream.text, 'already visible', 'Stop freezes the stream before the cancel endpoint replies');
+  assert.equal(stoppedStream.stream.stopRequested, true, 'Stop replaces live model activity immediately');
+  assert.deepEqual(stoppedStream.stopCalls, [{sessionId:'session-fixture',clientTurnId:'active-turn-fixture',reason:'user_stop'}]);
+  assert.equal(stoppedStream.responseChannelAborted, false, 'authoritative terminal receipt can still settle the run');
+  await page.evaluate(() => {
+    window.__resolveStop({ok:true});
+    window.__resolveProvider({ok:true,sessionId:'session-fixture',turnId:'fixture-stopped',clientTurnId:'active-turn-fixture',plan:{nextStep:'cancelled'}});
+  });
+  await page.waitForFunction(() => !window.__chat.items.some(item => item.type === 'streaming'));
   console.log('PASS failed and claimed cancel receipts preserve queue; confirmed cancel removes; no extra dispatch');
 } finally {await browser?.close();await new Promise(r=>server.close(r));}

@@ -16,7 +16,7 @@ const bundled = await build({
       import messages from './src/locales/en-US.json';
       import { Composer } from './src/components/chat/composer';
       import { ConversationCard, StreamingPhaseStatus } from './src/components/chat/conversation-card';
-      import { runtimeActivityCancelTarget } from './src/hooks/use-runtime-turn-activity';
+      import { applyRuntimeActivityDelta, projectRuntimeTurnActivity, runtimeActivityCancelTarget } from './src/hooks/use-runtime-turn-activity';
       import { runtimeTurnActivityStatus } from './src/lib/runtime-run-status';
       import { chatSidebarActivity } from './src/lib/sidebar-view';
       i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: messages } }, interpolation: { escapeValue: false } });
@@ -33,7 +33,11 @@ const bundled = await build({
         const [chat, setChat] = useState(activeChat);
         const cancelTarget = runtimeActivityCancelTarget([chat], chat, runs);
         const runtimeActive = runtimeTurnActivityStatus(runs, activeChat.sessionId, 'external-cid');
-        const transcript = { ...chat, items: [...chat.items, externalStream] };
+        const transcript = applyRuntimeActivityDelta(
+          projectRuntimeTurnActivity({ ...chat, items: [...chat.items, externalStream] }, runs[0]),
+          { ...currentRun, textDelta: runs[0].status === 'cancel_requested' ? 'late text must be dropped' : '' },
+        );
+        const stream = transcript.items.find(item => item.id === externalStream.id);
         window.setRunStatus = status => setRuns([{ ...currentRun, status }]);
         window.setLegacyPlaceholder = () => setChat({ ...activeChat, items: [...activeChat.items, {
           id: 'legacy-placeholder', type: 'agent', response: { sessionId: activeChat.sessionId, clientTurnId: 'external-cid',
@@ -49,10 +53,10 @@ const bundled = await build({
           <div data-testid='user-transcript'>{chat.items.filter(item => item.type === 'user').map(item => item.text).join('\\n')}</div>
           <div data-testid='agent-replies'>{chat.items.filter(item => item.type === 'agent').length}</div>
           <div data-testid='sidebar-activity'>{chatSidebarActivity(transcript, '', runs) || 'none'}</div>
-          <ConversationCard item={externalStream} runtimeActive={runtimeActive} initialUserContent={<div>Keep this accepted user message</div>} />
-          <StreamingPhaseStatus item={externalStream} nowMs={Date.now()} showElapsed={false} runtimeActive={runtimeActive} />
+          <ConversationCard item={stream} runtimeActive={runtimeActive} initialUserContent={<div>Keep this accepted user message</div>} />
+          <StreamingPhaseStatus item={stream} nowMs={Date.now()} showElapsed={false} runtimeActive={runtimeActive} />
           <Composer
-            input='' setInput={() => {}} sending={Boolean(cancelTarget)} queueAllowed={false}
+            input='' setInput={() => {}} sending={Boolean(cancelTarget)} queueAllowed={false} stopDisabled={stream.stopRequested}
             onSubmit={event => event?.preventDefault()} onStop={() => {
               if (cancelTarget) window.mockRequestAgentRunCancel('http://fixture', { ...cancelTarget, reason: 'user_stop' });
             }}
@@ -114,6 +118,13 @@ try {
     sessionId: "external-session", clientTurnId: "external-cid", turnId: "backend-turn", reason: "user_stop",
   } }, "a legacy placeholder receipt cannot hide cancellation for the active backend turn");
   await page.evaluate(() => window.clearLegacyPlaceholder());
+
+  await page.evaluate(() => window.setRunStatus("cancel_requested"));
+  const stopping = page.locator('[data-vrcforge-streaming-phase="stopping"]');
+  await stopping.waitFor();
+  assert.equal(await stopping.textContent(), "Stopping");
+  assert.equal(await primary.isDisabled(), true);
+  assert.doesNotMatch(await page.locator("#root").innerText(), /late text must be dropped/);
 
   await page.evaluate(() => window.setRunStatus("blocked"));
   await page.waitForFunction(() => document.querySelector("[data-composer-primary-action]")?.getAttribute("data-composer-primary-action") === "send");

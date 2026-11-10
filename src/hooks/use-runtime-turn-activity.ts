@@ -6,7 +6,7 @@ import { applyAgentRuntimeDeltaToStreamingItem, type AgentRuntimeDeltaEvent } fr
 import { mergeRuntimeTimelines, materializeRuntimeTimeline } from "../lib/chat-timeline-presentation";
 import { normalizeAgentRuntimeTimelineEvent } from "../lib/chat-streaming";
 import { type RuntimeTurnEvent } from "./use-runtime-turn-continuation";
-import { coalesceRuntimeTurnStreams, isExternalRuntimeStream, RUNTIME_ACTIVITY_STREAM_PREFIX } from "../lib/runtime-stream-owner";
+import { coalesceRuntimeTurnStreams, isExternalRuntimeStream, markRuntimeStreamStopping, RUNTIME_ACTIVITY_STREAM_PREFIX } from "../lib/runtime-stream-owner";
 import { isActiveRuntimeRunStatus } from "../lib/runtime-run-status";
 
 type Identity = { sessionId: string; clientTurnId: string; turnId?: string };
@@ -103,11 +103,15 @@ export function projectRuntimeTurnActivity(chat: ChatThread, run: AgentRuntimeRu
   const sessionId = String(run.sessionId || "").trim();
   const clientTurnId = String(run.clientTurnId || "").trim();
   if (!sessionId || !clientTurnId || chat.sessionId !== sessionId || hasReply(chat, { sessionId, clientTurnId, turnId: run.turnId })) return chat;
-  if (chat.items.some((item) => item.type === "streaming" && item.clientTurnId === clientTurnId)) return coalesceRuntimeTurnStreams(chat, clientTurnId);
+  const stopping = run.status === "cancelling" || run.status === "cancel_requested";
+  if (chat.items.some((item) => item.type === "streaming" && item.clientTurnId === clientTurnId)) {
+    const streamChat = coalesceRuntimeTurnStreams(chat, clientTurnId);
+    return stopping ? markRuntimeStreamStopping(streamChat, clientTurnId, true) : streamChat;
+  }
   if (!isActiveRuntimeRunStatus(run.status)) return chat;
   return { ...chat, items: [...chat.items, {
     id: `${RUNTIME_ACTIVITY_STREAM_PREFIX}${clientTurnId}`, type: "streaming", clientTurnId,
-    text: "", createdAt: run.startedAt, model: run.model, providerLabel: run.providerLabel,
+    text: "", stopRequested: stopping, createdAt: run.startedAt, model: run.model, providerLabel: run.providerLabel,
   }] };
 }
 
@@ -125,7 +129,7 @@ export function applyRuntimeActivityDelta(chat: ChatThread, delta: AgentRuntimeD
       return { ...item, timeline: mergeRuntimeTimelines(materializeRuntimeTimeline(item.response), item.timeline || [], [event]) };
     }
     if (item.type !== "streaming" || item.clientTurnId !== delta.clientTurnId
-      || !isExternalRuntimeStream(item)) return item;
+      || !isExternalRuntimeStream(item) || item.stopRequested) return item;
     changed = true;
     return applyAgentRuntimeDeltaToStreamingItem(item, delta);
   });
@@ -238,6 +242,8 @@ export function useRuntimeTurnActivity(params: Params) {
       activity = { ...identity, chatId: owner.id, nextSequence: 0, stamp: "", controller: new AbortController(), reading: false, caughtUp: false };
       activities.current.set(key, activity);
       latest.current.updateChat(owner.id, (chat) => projectRuntimeTurnActivity(chat, run));
+    } else if (run.status === "cancelling" || run.status === "cancel_requested") {
+      latest.current.updateChat(owner.id, (chat) => markRuntimeStreamStopping(chat, identity.clientTurnId, true));
     }
     const stamp = JSON.stringify([run.turnId, run.status, run.updatedAt, run.eventCount]);
     // The ledger can settle before the response is durable. Existing runtime

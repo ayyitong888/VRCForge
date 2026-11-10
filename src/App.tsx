@@ -119,8 +119,8 @@ import {
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
 import { useDashboardProjectSelection } from "./hooks/use-dashboard-project-selection";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
-import { runtimeActivityCancelTarget, useRuntimeTurnActivity } from "./hooks/use-runtime-turn-activity";
-import { isExternalRuntimeStream } from "./lib/runtime-stream-owner";
+import { runtimeActivityCancelTarget, runtimeActivityOwner, useRuntimeTurnActivity } from "./hooks/use-runtime-turn-activity";
+import { isExternalRuntimeStream, markRuntimeStreamStopping } from "./lib/runtime-stream-owner";
 import {
   buildChatHistory,
   buildChatContextUsage,
@@ -2030,12 +2030,9 @@ export default function App() {
     if (!continuation || !["queued", "running"].includes(String(continuation.status || "").toLowerCase())) return;
     const target = questionContinuationCancelTarget(question);
     if (!target) return;
-    await requestAgentRunCancel(endpoint, {
-      ...target,
-      reason: "user_stop_question_continuation",
-    });
-    updateAgentQuestionContinuation(question.questionId, { status: "cancelling" });
-    void refreshRuntimeRuns(false);
+    if (await stopObservedRuntimeTurn(target, "user_stop_question_continuation")) {
+      updateAgentQuestionContinuation(question.questionId, { status: "cancelling" });
+    }
   };
   const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(
@@ -3537,17 +3534,7 @@ export default function App() {
       return;
     }
     if (activeRuntimeCancelTarget) {
-      void requestAgentRunCancel(endpoint, {
-        ...activeRuntimeCancelTarget,
-        reason: "user_stop",
-      })
-        .then((result) => {
-          if (!result.ok) {
-            setError(result.status || "Agent cancellation was not accepted.");
-          }
-          return refreshRuntimeRuns(false);
-        })
-        .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+      void stopObservedRuntimeTurn(activeRuntimeCancelTarget, "user_stop");
       return;
     }
     if (compacting && activeChatId) {
@@ -3557,6 +3544,23 @@ export default function App() {
     if (actionId) {
       void cancelDesktopAction(actionId);
     }
+  }
+
+  async function stopObservedRuntimeTurn(target: { sessionId?: string; clientTurnId?: string; turnId?: string }, reason: string) {
+    const { sessionId, clientTurnId, turnId } = target;
+    const owner = sessionId && clientTurnId ? runtimeActivityOwner(chats, { sessionId, clientTurnId, turnId }) : undefined;
+    if (owner?.items.some((item) => item.type === "streaming" && item.clientTurnId === clientTurnId && item.stopRequested)) return false;
+    if (owner && clientTurnId) updateChat(owner.id, (chat) => markRuntimeStreamStopping(chat, clientTurnId, true));
+    try {
+      const result = await requestAgentRunCancel(endpoint, { ...target, reason });
+      if (!result.ok) throw new Error(result.status || "Agent cancellation was not accepted.");
+    } catch (cause) {
+      if (owner && clientTurnId) updateChat(owner.id, (chat) => markRuntimeStreamStopping(chat, clientTurnId, false));
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+    void refreshRuntimeRuns(false);
+    return true;
   }
 
   async function addComposerFiles(files: FileList | File[] | null) {
@@ -4542,6 +4546,7 @@ export default function App() {
               input={input}
               setInput={setInput}
               sending={sending}
+              stopRequested={stopRequested || activeChat?.items.some((item) => item.type === "streaming" && item.stopRequested)}
               queueAllowed={(chatRunSending || pendingParentWorkSessionIds.has(activeChat?.sessionId || "")) && !stopRequested}
               runningEnterAction={runningEnterAction}
               permission={permission}

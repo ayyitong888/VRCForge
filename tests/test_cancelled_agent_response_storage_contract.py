@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -16,12 +17,12 @@ def cancelled_response(tmp_path, monkeypatch, boundary):
         finish,
     ])
     state = gateway.runtime_sessions
-    consume = type(state).consume_cancel_request
+    consume = type(state).consume_cancel_reason
     consumed_boundaries = 0
 
     def stop_at_boundary(owner, **identity):
         nonlocal consumed_boundaries
-        if owner is not state:
+        if owner is not state or not state.owns_turn(**identity):
             return consume(owner, **identity)
         consumed_boundaries += 1
         if consumed_boundaries == boundary:
@@ -30,7 +31,7 @@ def cancelled_response(tmp_path, monkeypatch, boundary):
 
     # Inject Stop at an existing cancellation seam, then use real ownership and
     # cancellation consumption through the complete native Gateway loop.
-    monkeypatch.setattr(type(state), "consume_cancel_request", stop_at_boundary)
+    monkeypatch.setattr(type(state), "consume_cancel_reason", stop_at_boundary)
     response = run(gateway, tmp_path)
     assert consumed_boundaries == boundary
     assert response["plan"]["nextStep"] == "cancelled"
@@ -41,7 +42,7 @@ def cancelled_response(tmp_path, monkeypatch, boundary):
 @pytest.mark.parametrize("boundary,model_calls,tool_calls", [
     pytest.param(1, 0, 0, id="before-model"),
     pytest.param(2, 1, 0, id="after-model-before-dispatch"),
-    pytest.param(4, 1, 1, id="between-iterations-after-compaction-check"),
+    pytest.param(5, 1, 1, id="between-iterations-after-compaction-check"),
 ])
 def test_cancelled_native_response_is_valid_for_saved_chat(
     tmp_path, monkeypatch, boundary, model_calls, tool_calls,
@@ -71,19 +72,19 @@ def test_cancelled_after_model_reply_preserves_model_text(tmp_path, monkeypatch)
         }),
     ])
     state = gateway.runtime_sessions
-    consume = type(state).consume_cancel_request
+    consume = type(state).consume_cancel_reason
     consumed_boundaries = 0
 
     def stop_at_boundary(owner, **identity):
         nonlocal consumed_boundaries
-        if owner is not state:
+        if owner is not state or not state.owns_turn(**identity):
             return consume(owner, **identity)
         consumed_boundaries += 1
         if consumed_boundaries == 2:
             assert state.mark_cancel_requested(**identity)
         return consume(owner, **identity)
 
-    monkeypatch.setattr(type(state), "consume_cancel_request", stop_at_boundary)
+    monkeypatch.setattr(type(state), "consume_cancel_reason", stop_at_boundary)
     response = run(gateway, tmp_path)
     assert consumed_boundaries == 2
     assert response["plan"]["nextStep"] == "cancelled"
@@ -95,6 +96,53 @@ def test_cancelled_after_model_reply_preserves_model_text(tmp_path, monkeypatch)
         "id": "cancelled-replied-chat", "sessionId": "native-session",
         "items": [{"id": "cancelled-replied-agent", "type": "agent", "response": response}],
     })
+
+
+def test_stop_at_tool_dispatch_stops_work_and_survives_delayed_cleanup(tmp_path, monkeypatch):
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("read-before-stop", "vrcforge_read_text_file", {"path": "fixture.txt"}), finish,
+    ])
+    cleanup_entered = Event()
+    release_cleanup = Event()
+    cleanup = gateway._cancel_runtime_owned_work
+    cancellation = {}
+    cancel_worker = None
+    phases = []
+
+    def delayed_cleanup(**identity):
+        cleanup_entered.set()
+        assert release_cleanup.wait(5)
+        return cleanup(**identity)
+
+    def observe_phase(payload):
+        nonlocal cancel_worker
+        phases.append(payload["phase"])
+        if payload["phase"] == "running_tool" and cancel_worker is None:
+            cancel_worker = Thread(target=lambda: cancellation.update(gateway.request_runtime_cancel({
+                "sessionId": payload["sessionId"], "turnId": payload["turnId"],
+                "clientTurnId": payload["clientTurnId"], "reason": "user_stop",
+            })))
+            cancel_worker.start()
+            assert cleanup_entered.wait(5)
+
+    monkeypatch.setattr(gateway, "_cancel_runtime_owned_work", delayed_cleanup)
+    monkeypatch.setattr(gateway, "_runtime_status_changed", observe_phase)
+    try:
+        response = run(gateway, tmp_path)
+        assert len(model.requests) == 1
+        assert not invoked, "Stop was accepted before the tool was dispatched"
+        assert response["plan"]["nextStep"] == "cancelled"
+        assert phases[-1] == "running_tool", "a stopped turn cannot return to a running phase"
+        # The terminal row is consumed independently from the Stop HTTP reply.
+        terminal = gateway.runtime_runs.list_runs(session_id="native-session")["runs"][0]
+        assert terminal["status"] == "cancelled"
+        assert terminal["cancellationReason"] == "user_stop"
+        assert not cancellation, "terminal row must have the reason before cleanup completes"
+    finally:
+        release_cleanup.set()
+        if cancel_worker:
+            cancel_worker.join(5)
+    assert cancellation.get("ok") is True
 
 
 def test_original_cancelled_response_replays_with_producer_contract_only(tmp_path, monkeypatch):

@@ -150,6 +150,7 @@ export function applyAgentRuntimeDeltaToStreamingItem(
   delta: AgentRuntimeDeltaEvent,
   nowIso = new Date().toISOString(),
 ): StreamingConversationItem {
+  if (item.stopRequested) return item;
   const phase = normalizeAgentRuntimePhase(delta.phase);
   const timelineEvent = normalizeAgentRuntimeTimelineEvent(delta.timelineEvent);
   const timeline = [...(item.timeline || [])];

@@ -5,6 +5,13 @@ export const RUNTIME_ACTIVITY_STREAM_PREFIX = "runtime-activity:";
 export const QUESTION_CONTINUATION_STREAM_PREFIX = "question-continuation:";
 type Stream = Extract<ConversationItem, { type: "streaming" }>;
 
+export function markRuntimeStreamStopping(chat: ChatThread, clientTurnId: string, stopRequested: boolean): ChatThread {
+  const changes = (item: ConversationItem): item is Stream => item.type === "streaming"
+    && item.clientTurnId === clientTurnId && Boolean(item.stopRequested) !== stopRequested;
+  if (!chat.items.some(changes)) return chat;
+  return { ...chat, items: chat.items.map((item) => changes(item) ? { ...item, stopRequested } : item) };
+}
+
 export function isExternalRuntimeStream(item: ConversationItem): item is Stream {
   return item.type === "streaming" && (item.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX)
     || item.id.startsWith(QUESTION_CONTINUATION_STREAM_PREFIX));
@@ -16,6 +23,7 @@ export function coalesceRuntimeTurnStreams(chat: ChatThread, clientTurnId: strin
   if (streams.length < 2) return chat;
   // Foreground sends keep their HTTP lifecycle; observers never take it over.
   const owner = streams.find((item) => !isExternalRuntimeStream(item)) || streams[0];
+  const stopping = streams.find((item) => item.stopRequested);
   let merged = owner;
   for (const item of streams) {
     if (item === owner) continue;
@@ -27,6 +35,7 @@ export function coalesceRuntimeTurnStreams(chat: ChatThread, clientTurnId: strin
       providerRetry: merged.providerRetry || item.providerRetry,
       providerLabel: merged.providerLabel || item.providerLabel, model: merged.model || item.model };
   }
+  if (stopping) merged = { ...merged, stopRequested: true, text: stopping.text, timeline: stopping.timeline };
   return { ...chat, items: chat.items.flatMap((item) => item.type === "streaming" && item.clientTurnId === clientTurnId
     ? item === owner ? [merged] : [] : [item]) };
 }

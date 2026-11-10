@@ -653,9 +653,11 @@ def test_four_cancelled_provider_workers_release_capacity_and_fifth_enters() -> 
     binding = dashboard_server._RuntimePlannerProviderTurnBinding()
     config = fixture_config()
     calls = 0
+    stop_requested = False
     def request(_settings, _prompt, *, stream_callback=None, cancel_event=None, **_kwargs):
-        nonlocal calls
+        nonlocal calls, stop_requested
         calls += 1
+        stop_requested = True
         while not cancel_event.is_set():
             time.sleep(0.001)
         raise RuntimeError("cancelled")
@@ -664,14 +666,46 @@ def test_four_cancelled_provider_workers_release_capacity_and_fifth_enters() -> 
          patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()), \
          patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request), \
          patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_sessions), "stream_context", return_value=context), \
-         patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_sessions), "cancel_requested", return_value=True):
+         patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_sessions), "cancel_requested", side_effect=lambda **_: stop_requested):
         with binding.bind({"provider":"custom", "model":"fixture-model"}):
             model = dashboard_server._RuntimePlannerModel(binding)
             for _ in range(5):
+                stop_requested = False
                 with pytest.raises(dashboard_server.RuntimePlannerProviderCancelledError):
                     model.plan("cancel")
                 assert model.active_call_count() == 0
     assert calls == 5
+
+
+def test_provider_activity_stops_publishing_on_accepted_runtime_cancel() -> None:
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    config = fixture_config()
+    context = {"sessionId": "s", "turnId": "t", "clientTurnId": "c"}
+    stop_requested = False
+
+    def request(_settings, _prompt, *, stream_activity_callback, cancel_event, **_kwargs):
+        nonlocal stop_requested
+        stream_activity_callback({"kind": "reasoning_activity"})
+        stop_requested = True
+        with pytest.raises(dashboard_server.RuntimePlannerProviderCancelledError):
+            stream_activity_callback({"kind": "reasoning_activity"})
+        assert cancel_event.is_set()
+        raise dashboard_server.RuntimePlannerProviderCancelledError("transport stopped")
+
+    with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=config), \
+         patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()), \
+         patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request) as request_model, \
+         patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync") as broadcast, \
+         patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_sessions), "stream_context", return_value=context), \
+         patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_sessions), "cancel_requested", side_effect=lambda **_: stop_requested):
+        with binding.bind({"provider": "custom", "model": "fixture-model"}):
+            model = dashboard_server._RuntimePlannerModel(binding)
+            with pytest.raises(dashboard_server.RuntimePlannerProviderCancelledError):
+                model.plan("stop during a stream")
+            with pytest.raises(dashboard_server.RuntimePlannerProviderCancelledError):
+                model.plan("no next model request")
+        assert request_model.call_count == 1
+    assert sum(call.args[1].get("activity") is True for call in broadcast.call_args_list) == 1
 
 
 @pytest.mark.parametrize("phase,activity", [("first_byte", False), ("idle", True), ("overall", True)])

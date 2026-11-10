@@ -132,6 +132,7 @@ export function ChatWorkspace({
   setInput,
   sending,
   queueAllowed,
+  stopRequested,
   runningEnterAction,
   permission,
   onSubmit,
@@ -238,6 +239,7 @@ export function ChatWorkspace({
   setInput: (value: string) => void;
   sending: boolean;
   queueAllowed: boolean;
+  stopRequested?: boolean;
   runningEnterAction?: RunningEnterAction;
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
@@ -351,10 +353,10 @@ export function ChatWorkspace({
   );
   const questionContinuationCanStop = Boolean(activeQuestionContinuation && onStopQuestionContinuation);
   const composerSending = sending || questionContinuationCanStop;
-  const composerStopDisabled = Boolean(!sending && activeQuestionContinuation && (
+  const composerStopDisabled = Boolean(stopRequested || (!sending && activeQuestionContinuation && (
     String(activeQuestionContinuation.runtimeContinuation?.status || "").toLowerCase() === "cancelling"
     || !questionContinuationCancelTarget(activeQuestionContinuation)
-  ));
+  )));
   const composerStop = !sending && activeQuestionContinuation && onStopQuestionContinuation
     ? () => void onStopQuestionContinuation(activeQuestionContinuation)
     : onStop;

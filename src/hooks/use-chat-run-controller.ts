@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AgentTurnDeliveryUnconfirmedError, ApiError } from "../lib/api/http";
 import { useTranslation } from "react-i18next";
+import { markRuntimeStreamStopping } from "../lib/runtime-stream-owner";
 import {
   applyAgentRuntimeDeltaToStreamingItem,
   finalizeCancelledStreamingTurn,
@@ -622,7 +623,8 @@ export function useChatRunController({
       return;
     }
     const owner = streamingTurnsRef.current.get(clientTurnId);
-    if (!owner || (owner.followup && delta.sessionId !== owner.followup.sessionId)) {
+    if (!owner || (owner.followup && delta.sessionId !== owner.followup.sessionId)
+      || (stopRequestedRef.current && currentTurnRef.current?.clientTurnId === clientTurnId)) {
       return;
     }
     // The backend's provider activity or an accepted model message proves the
@@ -1903,6 +1905,7 @@ export function useChatRunController({
   }
 
   function stopCurrentRun() {
+    if (stopRequestedRef.current) return;
     stopRequestedRef.current = true;
     setStopRequested(true);
     for (const turn of queueRef.current) {
@@ -1920,19 +1923,28 @@ export function useChatRunController({
       controller.abort();
       return;
     }
-    if (current?.clientTurnId) {
+    const clientTurnId = current?.clientTurnId;
+    if (clientTurnId) {
+      const owner = streamingTurnsRef.current.get(clientTurnId);
+      if (owner) updateChat(owner.chatId, (chat) => markRuntimeStreamStopping(chat, clientTurnId, true));
+      const rejectStop = (message: string) => {
+        if (currentTurnRef.current?.clientTurnId !== clientTurnId) return;
+        stopRequestedRef.current = false;
+        setStopRequested(false);
+        if (owner) updateChat(owner.chatId, (chat) => markRuntimeStreamStopping(chat, clientTurnId, false));
+        setError(message);
+      };
       void requestAgentRunCancel(endpoint, {
-        sessionId: current.sessionId,
-        clientTurnId: current.clientTurnId,
+        sessionId: current?.sessionId,
+        clientTurnId,
         reason: "user_stop",
       })
         .then((result) => {
           if (!result.ok) {
-            setError(result.status || "Agent cancellation was not accepted.");
+            rejectStop(result.status || "Agent cancellation was not accepted.");
           }
-          return refreshRuntimeRuns(false);
-        })
-        .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+          void refreshRuntimeRuns(false).catch(() => undefined);
+        }, (cause) => rejectStop(cause instanceof Error ? cause.message : String(cause)));
     }
     // A cancel request only asks the backend to stop. Keep the owned response
     // reader alive until its real terminal receipt, including in-flight tools.

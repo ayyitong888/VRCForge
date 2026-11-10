@@ -679,6 +679,10 @@ class AgentRuntimeRunLedger:
                 # Keep that request in events without reopening the completed run.
                 if previous.get("event") == "runtime_turn_completed":
                     merged = dict(previous)
+                    if previous.get("status") == "cancelled" and not previous.get("cancellationReason"):
+                        reason = event.get("cancellationReason") or event.get("reason")
+                        if reason:
+                            merged["cancellationReason"] = reason
                 else:
                     for identity_key in ("sessionId", "turnId"):
                         if not event.get(identity_key) and previous.get(identity_key):
@@ -1034,6 +1038,7 @@ class AgentRuntimeRunLedger:
         context_usage: dict[str, Any] | None = None,
         usage_reconciliation: dict[str, Any] | None = None,
         context_compaction: dict[str, Any] | None = None,
+        cancellation_reason: str | None = None,
     ) -> dict[str, Any]:
         approval_ids = []
         if approval_id:
@@ -1078,6 +1083,8 @@ class AgentRuntimeRunLedger:
         }
         if context_usage:
             record["contextUsage"] = context_usage
+        if cancellation_reason:
+            record["cancellationReason"] = cancellation_reason
         if top_plan.get("reason") == "sub_agent_pending":
             record["reason"] = "sub_agent_pending"
         if usage_reconciliation:

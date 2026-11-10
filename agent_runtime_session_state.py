@@ -63,7 +63,7 @@ class AgentRuntimeSessionState:
         # Cancellation is scoped to one identity tuple.  A session-only target
         # is represented with empty turn/client fields and intentionally keeps
         # the supported "stop every turn in this session" behavior.
-        self._cancelled_targets: set[tuple[str, str, str]] = set()
+        self._cancelled_targets: dict[tuple[str, str, str], str] = {}
         self._active_turns: dict[tuple[str, str], str] = {}
         self._waiting_turns: dict[tuple[str, str], tuple[str, threading.Event]] = {}
         self._finalizing_turns: set[tuple[str, str]] = set()
@@ -227,7 +227,7 @@ class AgentRuntimeSessionState:
                 self._steer_mailboxes.pop(key, None)
                 self._steer_seen_ids.pop(key, None)
             self._cancelled_targets = {
-                target for target in self._cancelled_targets if target[0] != session_id
+                target: reason for target, reason in self._cancelled_targets.items() if target[0] != session_id
             }
             self._final_responses.pop(session_id, None)
 
@@ -1162,7 +1162,8 @@ class AgentRuntimeSessionState:
         session_id: str = "",
         turn_id: str = "",
         client_turn_id: str = "",
-    ) -> bool:
+        reason: str = "user_stop",
+    ) -> tuple[str, str, str] | None:
         session_id = str(session_id or "").strip()
         turn_id = str(turn_id or "").strip()
         client_turn_id = str(client_turn_id or "").strip()
@@ -1176,8 +1177,8 @@ class AgentRuntimeSessionState:
                 ]
                 if active:
                     for (_active_session_id, active_client_turn_id), active_turn_id in active:
-                        self._cancelled_targets.add(
-                            (session_id, active_turn_id, active_client_turn_id)
+                        self._cancelled_targets.setdefault(
+                            (session_id, active_turn_id, active_client_turn_id), reason
                         )
                         waiting = self._waiting_turns.get((session_id, active_client_turn_id))
                         if waiting:
@@ -1185,8 +1186,8 @@ class AgentRuntimeSessionState:
                 else:
                     # Preserve the supported "stop before the turn starts"
                     # behavior; the next turn consumes this session marker.
-                    self._cancelled_targets.add((session_id, "", ""))
-                return True
+                    self._cancelled_targets.setdefault((session_id, "", ""), reason)
+                return (session_id, "", "")
 
             # When one or more turn identities are supplied, all of them must
             # resolve to one active target.  A known partial collision is
@@ -1211,17 +1212,16 @@ class AgentRuntimeSessionState:
                 or (client_turn_id and target[2] == client_turn_id)
             ]
             if colliding and len(matching) != 1:
-                return False
+                return None
+            target = matching[0] if matching else (session_id, turn_id, client_turn_id)
+            self._cancelled_targets.setdefault(target, reason)
             if matching:
-                self._cancelled_targets.add(matching[0])
-                waiting = self._waiting_turns.get((matching[0][0], matching[0][2]))
+                waiting = self._waiting_turns.get((target[0], target[2]))
                 if waiting:
                     waiting[1].set()
-            else:
-                self._cancelled_targets.add((session_id, turn_id, client_turn_id))
-            if session_id and client_turn_id:
-                self._steer_mailboxes.pop((session_id, client_turn_id), None)
-            return True
+            if target[0] and target[2]:
+                self._steer_mailboxes.pop((target[0], target[2]), None)
+            return target
 
     def queue_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> threading.Event | None:
         """Track an admitted request waiting for this session's current owner."""
@@ -1286,8 +1286,8 @@ class AgentRuntimeSessionState:
             # A completed turn must not leave cancellation/steer state behind
             # that could affect a later turn reusing either identifier.
             self._cancelled_targets = {
-                target
-                for target in self._cancelled_targets
+                target: reason
+                for target, reason in self._cancelled_targets.items()
                 if not (
                     (target[1] or target[2])
                     and self._cancel_target_matches(
@@ -1487,14 +1487,18 @@ class AgentRuntimeSessionState:
         turn_id: str = "",
         client_turn_id: str = "",
     ) -> bool:
+        return self.consume_cancel_reason(
+            session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+        ) is not None
+
+    def consume_cancel_reason(
+        self, *, session_id: str = "", turn_id: str = "", client_turn_id: str = "",
+    ) -> str | None:
         session_id = str(session_id or "").strip()
         turn_id = str(turn_id or "").strip()
         client_turn_id = str(client_turn_id or "").strip()
-        candidates = [item for item in (client_turn_id, turn_id, session_id) if item]
-        if not candidates:
-            return False
         with self._ports.shared_state_lock:
-            matched = {
+            matched = [
                 target
                 for target in self._cancelled_targets
                 if self._cancel_target_matches(
@@ -1503,9 +1507,13 @@ class AgentRuntimeSessionState:
                     turn_id=turn_id,
                     client_turn_id=client_turn_id,
                 )
-            }
-            self._cancelled_targets.difference_update(matched)
-            return bool(matched)
+            ]
+            if not matched:
+                return None
+            reason = self._cancelled_targets[matched[0]]
+            for target in matched:
+                del self._cancelled_targets[target]
+            return reason
 
     @staticmethod
     def _cancel_target_matches(

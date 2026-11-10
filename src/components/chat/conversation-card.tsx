@@ -640,6 +640,9 @@ export function UserImageAttachments({
 
 export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed: boolean; runtimeActive?: boolean }) {
   const { t } = useTranslation();
+  if (item.stopRequested) {
+    return <div className="mt-5 text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase="stopping" role="status">{t("chat.stopping")}</div>;
+  }
   if (runtimeActive === false) return null;
   const elapsedSeconds = elapsedSecondsSince(item.createdAt, nowMs);
   const reconnectAttempt = item.providerRetry?.attempt;

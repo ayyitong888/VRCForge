@@ -16302,10 +16302,10 @@ class _RuntimePlannerModel:
         )
         stream_state = {"firstByteAt": None, "lastActivityAt": time.monotonic()}
         context = AGENT_GATEWAY.runtime_sessions.stream_context()
+        if self._runtime_cancel_requested(context):
+            raise RuntimePlannerProviderCancelledError("Provider planning was cancelled before admission.")
         request_index = AGENT_GATEWAY.runtime_sessions.next_provider_request_index()
         if _deadline is not None:
-            if self._runtime_cancel_requested(context):
-                raise RuntimePlannerProviderCancelledError("Compaction was cancelled before provider admission.")
             if time.monotonic() >= _deadline:
                 raise RuntimePlannerProviderTimeoutError("compaction", 0.0)
         # A format correction can call the model again without another gateway
@@ -16364,14 +16364,17 @@ class _RuntimePlannerModel:
             lock=getattr(AGENT_GATEWAY, "_lock", None),
         )
 
-        def stream_callback(delta: str) -> None:
+        def note_stream_activity() -> None:
+            if owner.cancellation.is_set() or self._runtime_cancel_requested(context):
+                owner.cancellation.set()
+                raise RuntimePlannerProviderCancelledError("Provider planning was cancelled by the runtime turn owner.")
             now = time.monotonic()
             if stream_state["firstByteAt"] is None:
                 stream_state["firstByteAt"] = now
             stream_state["lastActivityAt"] = now
-            if owner.cancellation.is_set() or self._runtime_cancel_requested(context):
-                owner.cancellation.set()
-                raise RuntimePlannerProviderCancelledError("Provider planning was cancelled by the runtime turn owner.")
+
+        def stream_callback(delta: str) -> None:
+            note_stream_activity()
             # Planner output remains provisional through JSON/action validation
             # and the runtime completion-evidence gate. Those owners may retry
             # even an explicit reply. The accepted assistant timeline publishes
@@ -16401,10 +16404,7 @@ class _RuntimePlannerModel:
                     "metrics": metrics,
                 })
                 return
-            now = time.monotonic()
-            if stream_state["firstByteAt"] is None:
-                stream_state["firstByteAt"] = now
-            stream_state["lastActivityAt"] = now
+            note_stream_activity()
             client_turn_id = str(context.get("clientTurnId") or "").strip()
             if not client_turn_id:
                 return

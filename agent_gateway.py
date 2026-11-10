@@ -1612,6 +1612,10 @@ class AgentGateway:
         }
         if phase not in allowed_phases or not client_turn_id:
             return
+        if self._runtime_session_state.cancel_requested(
+            session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+        ):
+            return
         payload = {
             "sessionId": summarize_text(session_id, 160),
             "turnId": summarize_text(turn_id, 160),
@@ -6709,6 +6713,26 @@ class AgentGateway:
         previous_timeline_timing: dict[str, Any] | None = None
         params["_runtimeFailureProgress"] = {"steps": steps, "timeline": timeline, "contextUsage": context_usage, "_nativeTurn": native_turn, "_nativeBinding": bool(native_binding)}
 
+        cancellation_reason: str | None = None
+
+        def take_runtime_cancellation() -> bool:
+            nonlocal cancellation_reason
+            reason = self._runtime_session_state.consume_cancel_reason(
+                session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+            )
+            if reason is not None:
+                cancellation_reason = reason
+            return reason is not None
+
+        def cancelled_runtime_plan(reply: str = "") -> dict[str, Any]:
+            return {
+                "summary": "Runtime turn was cancelled by the user.",
+                "reply": reply or "Request cancelled.",
+                "planner": "runtime",
+                "shellNeeded": False,
+                "nextStep": "cancelled",
+            }
+
         def append_timeline_event(
             kind: str,
             *,
@@ -6782,18 +6806,21 @@ class AgentGateway:
                 timing=ledger_timing,
             )
             persisted_at = time.perf_counter()
-            try:
-                self._runtime_timeline_changed(
-                    {
-                        "sessionId": summarize_text(session_id, 160),
-                        "turnId": summarize_text(turn_id, 160),
-                        "clientTurnId": summarize_text(client_turn_id, 160),
-                        "timelineEvent": event,
-                    }
-                )
-            except Exception:
-                # Presentation must never fail or delay the Runtime.
-                pass
+            if cancellation_reason is None and not self._runtime_session_state.cancel_requested(
+                session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+            ):
+                try:
+                    self._runtime_timeline_changed(
+                        {
+                            "sessionId": summarize_text(session_id, 160),
+                            "turnId": summarize_text(turn_id, 160),
+                            "clientTurnId": summarize_text(client_turn_id, 160),
+                            "timelineEvent": event,
+                        }
+                    )
+                except Exception:
+                    # Presentation must never fail or delay the Runtime.
+                    pass
             previous_timeline_timing = {
                 # Attach completed persistence/publication durations to the next
                 # existing event, never add an I/O solely to time this I/O.
@@ -7160,6 +7187,10 @@ class AgentGateway:
         # Optional model-turn limits support automation. Tool-call count is
         # telemetry only; normal turns end at the model's final response.
         for step_index in count():
+            if take_runtime_cancellation():
+                discard_runtime_compaction_for_cancel()
+                last_plan = cancelled_runtime_plan()
+                break
             iteration_started = time.perf_counter()
             settle_started = time.perf_counter()
             native_turn.settle()
@@ -7205,20 +7236,6 @@ class AgentGateway:
                     last_plan["completionActionIds"] = task_loop.completed_action_ids()
                 iterations += 1
                 break
-            if self._runtime_session_state.consume_cancel_request(
-                session_id=session_id,
-                turn_id=turn_id,
-                client_turn_id=client_turn_id,
-            ):
-                discard_runtime_compaction_for_cancel()
-                last_plan = {
-                    "summary": "Runtime turn was cancelled by the user.",
-                    "reply": "Request cancelled.",
-                    "planner": "runtime",
-                    "shellNeeded": False,
-                    "nextStep": "cancelled",
-                }
-                break
             if step_index > 0:
                 usage_before_compaction = dict(context_usage)
                 if native_binding:
@@ -7251,19 +7268,9 @@ class AgentGateway:
                         runtime_compaction = compaction_result
                     elif compaction_blocked:
                         runtime_compaction = {**runtime_compaction, "blocked": True}
-                if self._runtime_session_state.consume_cancel_request(
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    client_turn_id=client_turn_id,
-                ):
+                if take_runtime_cancellation():
                     discard_runtime_compaction_for_cancel()
-                    last_plan = {
-                        "summary": "Runtime turn was cancelled by the user.",
-                        "reply": "Request cancelled.",
-                        "planner": "runtime",
-                        "shellNeeded": False,
-                        "nextStep": "cancelled",
-                    }
+                    last_plan = cancelled_runtime_plan()
                     break
                 if compaction_result and compaction_result.get("applied") is True:
                     append_timeline_event("context_compaction", status="completed")
@@ -7383,11 +7390,7 @@ class AgentGateway:
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
             iterations += 1
-            if self._runtime_session_state.consume_cancel_request(
-                session_id=session_id,
-                turn_id=turn_id,
-                client_turn_id=client_turn_id,
-            ):
+            if take_runtime_cancellation():
                 discard_runtime_compaction_for_cancel()
                 # Cancellation cannot roll back completed effects: a provider
                 # response that already arrived keeps its model text instead of
@@ -7397,13 +7400,7 @@ class AgentGateway:
                     "" if plan.get("plannerFailed") is True
                     else str(plan.get("reply") or plan.get("summary") or "").strip()
                 )
-                last_plan = {
-                    "summary": "Runtime turn was cancelled by the user.",
-                    "reply": preserved_reply or "Request cancelled.",
-                    "planner": "runtime",
-                    "shellNeeded": False,
-                    "nextStep": "cancelled",
-                }
+                last_plan = cancelled_runtime_plan(preserved_reply)
                 break
             if native_binding:
                 if native_compaction_applied:
@@ -7891,6 +7888,7 @@ class AgentGateway:
                 if delay and not self._wait_for_provider_retry(
                     delay, session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
                 ):
+                    take_runtime_cancellation()
                     last_plan = {**plan, "nextStep": "cancelled", "continueLoop": False}
                     break
                 poll_times[poll_key] = (started, time.monotonic())
@@ -7992,6 +7990,12 @@ class AgentGateway:
                 turn_id=turn_id,
                 client_turn_id=client_turn_id,
             )
+            # Stop may be accepted after planning or validation has finished.
+            # This is the last common boundary before the handler starts.
+            if take_runtime_cancellation():
+                discard_runtime_compaction_for_cancel()
+                last_plan = cancelled_runtime_plan()
+                break
             tool_calls_used += 1
             private_material_scan_result: dict[str, Any] | None = None
             if action_kind == "shell":
@@ -9180,12 +9184,13 @@ class AgentGateway:
                     provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
                     provider_usage=task_seed_provider_usage(), continue_after_approval=True,
                 ))
-        self._emit_runtime_status(
-            "verifying",
-            session_id=session_id,
-            turn_id=turn_id,
-            client_turn_id=client_turn_id,
-        )
+        if cancellation_reason is None:
+            self._emit_runtime_status(
+                "verifying",
+                session_id=session_id,
+                turn_id=turn_id,
+                client_turn_id=client_turn_id,
+            )
         if handoff_terminal is not None:
             top_plan = {**handoff_terminal, "task": task_loop.snapshot("await_user_instruction")}
         elif shell_review_terminal_outcome is not None:
@@ -9405,6 +9410,7 @@ class AgentGateway:
                 context_usage=context_usage,
                 usage_reconciliation=usage_reconciliation,
                 context_compaction=planner_policy.runtime_compaction_audit_view(runtime_compaction),
+                cancellation_reason=cancellation_reason if run_status == "cancelled" else None,
             )
         )
 
@@ -9740,22 +9746,24 @@ class AgentGateway:
         turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
         client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
         session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
-        reason = str(params.get("reason") or "user_stop").strip()[:200]
+        reason = str(params.get("reason") or "user_stop").strip()[:200] or "user_stop"
         target_id = turn_id or client_turn_id
         if not target_id and not session_id:
             raise AgentGatewayError("turnId, clientTurnId, or sessionId is required.", status_code=400)
-        accepted = self._runtime_session_state.mark_cancel_requested(
+        target = self._runtime_session_state.mark_cancel_requested(
             session_id=session_id,
             turn_id=turn_id,
             client_turn_id=client_turn_id,
+            reason=reason,
         )
         with self._runtime_continuation_condition:
             self._runtime_continuation_condition.notify_all()
-        if not accepted:
+        if target is None:
             raise AgentGatewayError(
                 "The runtime cancellation identity does not match one active turn.",
                 status_code=409,
             )
+        session_id, turn_id, client_turn_id = target
         return self._cancel_runtime_owned_work(
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id, reason=reason,
         )
@@ -9802,13 +9810,14 @@ class AgentGateway:
             "turnId": turn_id,
             "clientTurnId": client_turn_id,
             "reason": reason,
+            "cancellationReason": reason,
         }
         cancelled_desktop_action_ids: list[str] = []
         cancelled_shell_session_ids: list[str] = []
         resolved_turn_id = turn_id
         resolved_client_turn_id = client_turn_id
         matching_run = None
-        if turn_id or client_turn_id:
+        if (turn_id or client_turn_id) and not (session_id and turn_id and client_turn_id):
             matching_run = next(
                 (
                     run
@@ -9824,16 +9833,6 @@ class AgentGateway:
         if resolved_turn_id and not resolved_client_turn_id:
             resolved_client_turn_id = str((matching_run or {}).get("clientTurnId") or "")
         resolved_session_id = session_id or str((matching_run or {}).get("sessionId") or "")
-        if resolved_session_id and resolved_client_turn_id:
-            self._desktop.browser.cancel_owner(resolved_session_id, resolved_client_turn_id)
-        subagent_cancel_result = self._cancel_runtime_subagents(
-            session_id=resolved_session_id,
-            turn_id=resolved_turn_id,
-            client_turn_id=resolved_client_turn_id,
-        )
-        cancelled_subagent_task_ids = subagent_cancel_result["requestedTaskIds"]
-        failed_subagent_task_ids = subagent_cancel_result["failedTaskIds"]
-        subagent_lookup_failed = subagent_cancel_result["lookupFailed"]
         shell_owner_ids: set[str] = set()
         if resolved_turn_id:
             shell_owner_ids.add(
@@ -9872,6 +9871,18 @@ class AgentGateway:
                 cancelled_desktop_action_ids.append(action_id)
             except AgentGatewayError:
                 continue
+        subagent_cancel_result = self._cancel_runtime_subagents(
+            session_id=resolved_session_id,
+            turn_id=resolved_turn_id,
+            client_turn_id=resolved_client_turn_id,
+        )
+        cancelled_subagent_task_ids = subagent_cancel_result["requestedTaskIds"]
+        failed_subagent_task_ids = subagent_cancel_result["failedTaskIds"]
+        subagent_lookup_failed = subagent_cancel_result["lookupFailed"]
+        # An idle browser can wait for its owned process to exit. Signal the
+        # rest of the turn's work before doing that synchronous teardown.
+        if resolved_session_id and resolved_client_turn_id:
+            self._desktop.browser.cancel_owner(resolved_session_id, resolved_client_turn_id)
         if cancelled_desktop_action_ids:
             event["cancelledDesktopActionIds"] = cancelled_desktop_action_ids
         if cancelled_shell_session_ids:
