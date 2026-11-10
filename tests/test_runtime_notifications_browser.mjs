@@ -107,7 +107,11 @@ try {
   await empty.evaluate(()=>{window.selectSession('other-chat');window.tick();});
   await empty.waitForFunction(()=>window.state.runtimeAttention.length===0);
   assert.equal(await empty.evaluate(()=>window.calls.filter(c=>c.command==='show_background_goal_notification').length),1,'scope switching does not duplicate app-wide notification');
-  assert.ok(await empty.evaluate(()=>window.calls.some(c=>c.ledger)),'notification observes app-wide ledger');
+  assert.deepEqual(
+    await empty.evaluate(()=>window.calls.find(c=>c.ledger)?.ledger[1]),
+    {limit:200,scope:'notifications'},
+    'notification polls the app-wide lifecycle projection',
+  );
   await empty.close();
   const multi=await open({sessionId:'',selectedSessionId:'',snapshot:{runs:{runs:[
     {sessionId:'older',clientTurnId:'older',turnId:'older',status:'blocked',startedAt:'2026-01-01T00:00:00Z'},

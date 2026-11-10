@@ -323,7 +323,7 @@ export async function issueComputerUseTurnGrant(
 
 export async function fetchAgentRuns(
   endpoint: string,
-  params: { limit?: number; sessionId?: string; projectRoot?: string; clientTurnId?: string } = {},
+  params: { limit?: number; sessionId?: string; projectRoot?: string; clientTurnId?: string; scope?: "notifications" } = {},
 ): Promise<AgentRuntimeRunLedger> {
   const query = new URLSearchParams();
   if (params.limit) {
@@ -337,6 +337,9 @@ export async function fetchAgentRuns(
   }
   if (params.clientTurnId) {
     query.set("clientTurnId", params.clientTurnId);
+  }
+  if (params.scope) {
+    query.set("scope", params.scope);
   }
   const suffix = query.toString() ? `?${query.toString()}` : "";
   if (hasTauriInternals()) {

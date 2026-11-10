@@ -561,6 +561,49 @@ def test_queue_event_and_grouped_run_projection_preserve_filters(tmp_path: Path)
     assert str(raised.value) == "clientTurnId is required."
 
 
+def test_notification_runs_preserve_lifecycle_without_history_payload(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    identity = {"sessionId": "session", "clientTurnId": "client", "turnId": "turn"}
+    ledger.append({**identity, "event": "runtime_turn_started", "status": "running"})
+    start = ledger.list_runs()["runs"][0]["startedAt"]
+    ledger.append({
+        **identity,
+        "event": "runtime_turn_completed",
+        "status": "cancelled",
+        "agent": "sub-agent",
+        "nextStep": "paused",
+        "reason": "interrupted",
+        "steps": [{"result": "large history payload" * 1000}],
+    })
+    ledger.append({
+        "clientTurnId": "client",
+        "event": "runtime_turn_cancel_requested",
+        "status": "cancel_requested",
+        "reason": "user_stop",
+    })
+
+    full = ledger.list_runs()
+    with patch.object(ledger_module.copy, "deepcopy", side_effect=AssertionError("notification copied raw history")):
+        notifications = ledger.list_runs(notification_only=True)
+    assert notifications == {
+        "ok": True,
+        "schema": full["schema"],
+        "count": 1,
+        "runs": [{
+            **identity,
+            "status": "cancelled",
+            "agent": "sub-agent",
+            "nextStep": "paused",
+            "reason": "interrupted",
+            "cancellationReason": "user_stop",
+            "startedAt": start,
+            "createdAt": full["runs"][0]["createdAt"],
+            "updatedAt": full["runs"][0]["updatedAt"],
+        }],
+    }
+    assert full["runs"][0]["steps"] and len(full["events"]) == 3
+
+
 def test_list_runs_advances_from_append_and_invalidates_on_replacement(tmp_path: Path) -> None:
     ledger, _lock = make_ledger(tmp_path)
     identity = {"sessionId": "session-cache", "turnId": "turn-1", "clientTurnId": "client-1"}

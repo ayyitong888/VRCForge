@@ -119,7 +119,7 @@ export function useRuntimeWorkspace({
       if (busy) return;
       busy = true;
       try {
-        const ledger = await fetchAgentRuns(endpoint, { limit: 200 });
+        const ledger = await fetchAgentRuns(endpoint, { limit: 200, scope: "notifications" });
         if (!current) return;
         const runs = (ledger.runs || []).filter(run => run.sessionId && run.clientTurnId && run.turnId);
         const started = (run: AgentRuntimeRun) => Date.parse(run.startedAt || run.createdAt || run.updatedAt || "") || 0;

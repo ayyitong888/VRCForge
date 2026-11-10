@@ -16,6 +16,10 @@ from agent_runtime_event_projection import project_runtime_turn_event, capture_t
 
 
 _COMPLETED_RUN_STATUSES = frozenset({"completed", "failed", "denied", "cancelled"})
+_RUN_NOTIFICATION_FIELDS = (
+    "sessionId", "clientTurnId", "turnId", "status", "startedAt", "createdAt", "updatedAt",
+    "agent", "nextStep", "reason", "cancellationReason",
+)
 
 
 def _terminal_continuation(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -624,6 +628,7 @@ class AgentRuntimeRunLedger:
         session_id: str = "",
         project_root: str = "",
         client_turn_id: str = "",
+        notification_only: bool = False,
     ) -> dict[str, Any]:
         session_id = session_id.strip()
         project_root = project_root.strip()
@@ -653,6 +658,7 @@ class AgentRuntimeRunLedger:
                 project_matches=project_matches,
                 event_approval_ids=event_approval_ids,
                 limit=max(limit * 8, 100),
+                copy_events=not notification_only,
             )
         runs_by_key: dict[str, dict[str, Any]] = {}
         event_count_by_key: dict[str, int] = {}
@@ -699,6 +705,20 @@ class AgentRuntimeRunLedger:
             started_at = start_times.get((str(run.get("sessionId") or ""), str(run.get("turnId") or "")))
             if started_at:
                 run["startedAt"] = started_at
+        if notification_only:
+            # The desktop observer only needs lifecycle state. The merged rows
+            # own their top-level dicts and this projection copies only scalars.
+            return {
+                "ok": True,
+                "schema": "vrcforge.runtime_runs.v1",
+                "runs": [
+                    self._ports.redact({
+                        key: run[key] for key in _RUN_NOTIFICATION_FIELDS if isinstance(run.get(key), str)
+                    })
+                    for run in runs
+                ],
+                "count": len(runs),
+            }
         return {
             "ok": True,
             "schema": "vrcforge.runtime_runs.v1",

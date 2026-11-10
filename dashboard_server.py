@@ -3628,12 +3628,14 @@ def app_agent_runtime_runs(
     sessionId: str = "",
     projectRoot: str = "",
     clientTurnId: str = "",
+    scope: Literal["notifications"] | None = None,
 ) -> dict[str, Any]:
     return AGENT_GATEWAY.runtime_runs.list_runs(
         limit=limit,
         session_id=sessionId,
         project_root=projectRoot,
         client_turn_id=clientTurnId,
+        notification_only=scope == "notifications",
     )
 
 
