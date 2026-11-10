@@ -897,6 +897,7 @@ class ChatTranscriptsRequest(BaseModel):
     source_revisions: list[dict[str, Any]] = Field(default_factory=list, alias="sourceRevisions")
     chat_patches: dict[str, ChatSnapshotPatch] | None = Field(default=None, alias="chatPatches")
     chat_origin_id: str | None = Field(default=None, alias="chatOriginId", max_length=64)
+    chat_save_id: str | None = Field(default=None, alias="chatSaveId", min_length=1, max_length=64)
 
     model_config = {"populate_by_name": True}
 

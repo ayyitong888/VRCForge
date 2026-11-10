@@ -836,6 +836,54 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.json()["detail"]["code"], "chat_store_snapshot_changed")
             self.assertEqual(app_path.read_text(encoding="utf-8"), replacement)
 
+    def test_chat_save_retry_recovers_committed_acknowledgement(self) -> None:
+        chat = {"id": "app-chat", "projectPath": "", "items": [{"id": "u1", "type": "user", "text": "one"}]}
+        updated = {**chat, "items": [*chat["items"], {"id": "u2", "type": "user", "text": "two"}]}
+        with TestClient(dashboard_server.app) as client:
+            self.assertEqual(client.post("/api/app/chats", json={"chats": [chat]}).status_code, 200)
+            source_revisions = client.get("/api/app/chats").json()["sources"]
+            request = {
+                "chats": [updated],
+                "sourceRevisions": source_revisions,
+                "chatOriginId": "lost-save-ack-origin",
+                "chatSaveId": "lost-save-ack-operation",
+            }
+            with patch.object(dashboard_server.EVENT_BUS, "broadcast", new_callable=AsyncMock) as broadcast:
+                committed = client.post("/api/app/chats", json=request)
+                self.assertEqual(committed.status_code, 200, committed.text)
+                # Simulate loss of the first response while replaying its exact request.
+                replayed = client.post("/api/app/chats", json=request)
+                self.assertEqual(replayed.status_code, 200, replayed.text)
+                self.assertEqual(replayed.json(), committed.json())
+                self.assertEqual(sum(call.args[0] == "chatStorageChanged" for call in broadcast.await_args_list), 1)
+            distinct = client.post("/api/app/chats", json={**request, "chatSaveId": "different-operation"})
+            self.assertEqual(distinct.status_code, 409, distinct.text)
+            self.assertEqual(client.get("/api/app/chats").json()["chats"][0]["items"], updated["items"])
+
+    def test_chat_save_acknowledges_before_notifying_other_windows_or_memory(self) -> None:
+        async def save() -> None:
+            request = dashboard_server.ChatTranscriptsRequest(
+                chatOriginId="ack-before-side-effects-origin", chatSaveId="ack-before-side-effects-operation",
+            )
+            tasks = dashboard_server.BackgroundTasks()
+            with (
+                patch.object(dashboard_server, "write_chat_transcripts_storage", return_value=({"ok": True}, [], [])) as storage,
+                patch.object(dashboard_server, "chat_attachment_vault_store") as vault,
+                patch.object(dashboard_server, "capture_automatic_memory_after_chat_storage", return_value={}) as capture,
+                patch.object(dashboard_server.EVENT_BUS, "broadcast", new_callable=AsyncMock) as broadcast,
+            ):
+                receipt = await dashboard_server.write_chat_transcripts(request, tasks)
+                self.assertTrue(receipt["ok"])
+                storage.assert_called_once_with(request)
+                vault.return_value.retain.assert_called_once_with({})
+                broadcast.assert_not_awaited()
+                capture.assert_not_called()
+                await tasks()
+                broadcast.assert_awaited_once_with("chatStorageChanged", {"source": "app", "originId": request.chat_origin_id})
+                capture.assert_called_once_with([])
+
+        asyncio.run(save())
+
     def test_chat_save_rejects_missing_revision_for_existing_source(self) -> None:
         chat = {"id": "app-chat", "projectPath": "", "items": [{"id": "u1", "type": "user", "text": "one"}]}
         with TestClient(dashboard_server.app) as client:

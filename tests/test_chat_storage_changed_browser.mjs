@@ -42,7 +42,7 @@ if(process.env.VRCFORGE_TEST_LEGACY_CHAT_RELOAD_QUEUE==="1")contents=contents.re
 return {contents,loader:"tsx"};
 });}
 }]:[]});
-let gets=0,posts=0,postOriginIds=[];
+let gets=0,posts=0,postOriginIds=[],postBodies=[];
 const chat={id:"chat",sessionId:"session",title:"initial",revision:0,projectPath:"",projectType:"general",
 createdAt:"2026-01-01T00:00:00Z",updatedAt:"2026-01-01T00:00:00Z",items:[{id:"u1",type:"user",text:"initial",createdAt:"2026-01-01T00:00:00Z"}]};
 let chats=[chat];
@@ -52,7 +52,7 @@ let release;let markStarted;const gate=new Promise(resolve=>{release=resolve;});
 const started=new Promise(resolve=>{markStarted=resolve;});nextGetHold={gate,markStarted};return {started,release};}
 const server=createServer(async(req,res)=>{
 if(req.url.startsWith('/api/app/chats')){res.setHeader('Content-Type','application/json');
-if(req.method==='POST'){posts++;let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);postOriginIds.push(body.chatOriginId);chats=body.chats;res.end(JSON.stringify({ok:true,sourceRevisions:[]}));return;}
+if(req.method==='POST'){posts++;let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);postOriginIds.push(body.chatOriginId);postBodies.push(body);chats=body.chats;res.end(JSON.stringify({ok:true,sourceRevisions:[]}));return;}
 gets++;const snapshot=chats;const held=nextGetHold;nextGetHold=null;if(held){held.markStarted();await held.gate;}
 res.end(JSON.stringify({ok:true,chats:snapshot,count:snapshot.length,sources:[],recoveries:[],writeBlocked:false}));return;}
 if(req.url==='/fixture.js'){res.setHeader('Content-Type','text/javascript');res.end(bundle.outputFiles[0].text);return;}
@@ -74,6 +74,20 @@ assert.equal(posts,beforeOwnWrite+1,'explicit persistence should complete withou
 assert.equal(postOriginIds.at(-1),originId,'the write carries the exact per-webview origin identity');
 await page.evaluate((id)=>{window.notify(id);window.notify(id);window.notify(id);},originId);
 await page.waitForTimeout(220);assert.equal(gets,before,'self write echoes do not queue a full reload');
+const beforeLostAck=posts;
+const discardSaveResponse=async(route)=>{
+  if(route.request().method()!=='POST')return route.continue();
+  await route.fetch();
+  await route.abort();
+};
+await page.route('**/api/app/chats',discardSaveResponse,{times:2});
+await page.evaluate(()=>window.persist().then(()=>{throw new Error('expected transport error');},()=>{}));
+await page.evaluate(()=>window.persist());
+assert.equal(posts,beforeLostAck+3,'one retry per save attempt, then the next attempt recovers the pending receipt');
+const lostAckBodies=postBodies.slice(beforeLostAck);
+assert.ok(lostAckBodies[0].chatSaveId,'chat save carries a retry identifier');
+assert.notEqual(lostAckBodies[0].chatSaveId,postBodies[beforeLostAck-1].chatSaveId,'distinct operations use distinct identifiers');
+assert.deepEqual(lostAckBodies,[lostAckBodies[0],lostAckBodies[0],lostAckBodies[0]],'transport and later retries replay the exact operation');
 chats=[{...chats[0],items:[...chats[0].items,{id:'u2',type:'user',text:'telegram-visible',createdAt:'2026-01-01T00:00:01Z'}]}];
 const heldReload=holdNextGet();
 await page.evaluate(()=>{window.notify();window.notify();window.notify();});

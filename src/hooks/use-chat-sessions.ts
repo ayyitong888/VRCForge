@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { fetchChats, saveChats, type ChatRecoveryMarker, type ChatSourceRevision, type StoredChats } from "../lib/api";
+import { fetchChats, saveChats, type ChatRecoveryMarker, type ChatSaveReceipt, type ChatSourceRevision, type StoredChats } from "../lib/api";
 import { deleteChatPermanentlyApi } from "../lib/api/app";
 import { ApiError } from "../lib/api/http";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
@@ -63,6 +63,13 @@ type ChatStorageLoadOutcome = {
 type ChatStorageError = {
   kind: "save" | "conflict" | "blocked";
   message: string;
+};
+
+type PendingChatSave = {
+  endpoint: string;
+  snapshot: ChatThread[];
+  saveVersion: number;
+  submit: () => Promise<ChatSaveReceipt>;
 };
 
 export function chatSaveErrorMessage(cause: unknown, recoveryFallback: string, conflictFallback = "Chat storage changed in another window. Retry the save."): string {
@@ -168,6 +175,7 @@ export function useChatSessions({
   const chatRestoreInFlightKeysRef = useRef(new Set<string>());
   const chatRestoreMountedRef = useRef(true);
   const chatSourceRevisionsRef = useRef<ChatSourceRevision[]>([]);
+  const pendingChatSaveRef = useRef<PendingChatSave | null>(null);
   // The initial browser cache is an unsynchronized local candidate, not a
   // server baseline. An empty baseline preserves it as a local addition during
   // the first three-way merge instead of interpreting a missing server row as
@@ -537,13 +545,37 @@ export function useChatSessions({
     if (chatPersistenceBlockedRef.current) {
       throw new Error(t("chat.sessionSaveBlocked"));
     }
+    const acknowledgedVersion = await settlePendingChatSave(clearDirty);
+    if (acknowledgedVersion === saveVersion) return;
     const chatPatches = buildChatStoragePatches(
       snapshot,
       chatBaselineFingerprintsRef.current,
       chatServerDigestsRef.current,
       chatServerMetadataShapesRef.current,
     );
-    const result = await saveChats(endpoint, snapshot, chatSourceRevisionsRef.current, chatPatches);
+    const sourceRevisions = chatSourceRevisionsRef.current;
+    const chatSaveId = globalThis.crypto.randomUUID();
+    pendingChatSaveRef.current = {
+      endpoint,
+      snapshot,
+      saveVersion,
+      submit: () => saveChats(endpoint, snapshot, sourceRevisions, chatPatches, chatSaveId),
+    };
+    await settlePendingChatSave(clearDirty);
+  }
+
+  async function settlePendingChatSave(clearDirty: boolean): Promise<number | undefined> {
+    const pending = pendingChatSaveRef.current;
+    if (!pending || pending.endpoint !== endpoint) return undefined;
+    const { snapshot, saveVersion } = pending;
+    let result: ChatSaveReceipt;
+    try {
+      result = await pending.submit();
+    } catch (cause) {
+      if (!(cause instanceof ApiError) || cause.status !== 0) pendingChatSaveRef.current = null;
+      throw cause;
+    }
+    pendingChatSaveRef.current = null;
     const nextServerDigests = chatDigestsFromPayload(result.chatDigests, snapshot);
     const nextServerShapes = chatMetadataShapesFromPayload(result.chatMetadataShapes, snapshot);
     if (chatServerDigestsRef.current !== undefined && nextServerDigests === undefined) {
@@ -565,6 +597,16 @@ export function useChatSessions({
       chatDeletedIdsRef.current.clear();
     }
     clearResolvedChatStorageError();
+    return saveVersion;
+  }
+
+  async function settlePendingChatSaveBeforeRead(): Promise<void> {
+    try {
+      await settlePendingChatSave(true);
+    } catch (cause) {
+      // A definite conflict is handled by the authoritative read and merge.
+      if (!(cause instanceof ApiError) || cause.status !== 409) throw cause;
+    }
   }
 
   async function saveWithOneReconcileRetryWithinStorageOperation(
@@ -629,6 +671,7 @@ export function useChatSessions({
           if (!isCurrentRestore()) {
             return { status: "cancelled", chats: chatsRef.current, shouldPersist: false } satisfies ChatStorageLoadOutcome;
           }
+          await settlePendingChatSaveBeforeRead();
           const payload = await fetchChats<unknown>(endpoint, restoreProjectPaths);
           return reconcileFetchedChatStorage(
             payload,
@@ -679,6 +722,7 @@ export function useChatSessions({
     }
     try {
       const reloaded = await enqueueChatStorageOperation(async () => {
+        await settlePendingChatSaveBeforeRead();
         const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths(), chatServerDigestsRef.current);
         const outcome = await reconcileFetchedChatStorage(payload);
         if (outcome.status !== "ready") {

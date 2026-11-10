@@ -4184,6 +4184,8 @@ async def app_answer_agent_question(question_id: str, request: AgentQuestionAnsw
 CHAT_TRANSCRIPTS_MAX_BYTES = 16 * 1024 * 1024
 CHAT_TRANSCRIPTS_MAX_CHATS = 100
 CHAT_TRANSCRIPTS_LOCK = RLock()
+CHAT_SAVE_RECEIPTS: dict[tuple[str, str], dict[str, Any]] = {}
+CHAT_SAVE_RECEIPT_LIMIT = 32
 CHAT_REQUESTED_PROJECT_PATH_LIMIT = 100
 CHAT_REQUESTED_PROJECT_PATHS: dict[str, str] = {}
 
@@ -5488,30 +5490,47 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/app/chats")
-async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, Any]:
-    storage_result, chats, automatic_groups = await asyncio.to_thread(write_chat_transcripts_storage, request)
-    # Notify already-open desktop sessions after the CAS-backed snapshot is
-    # committed. The frontend reloads through its serialized reconcile path,
-    # preserving dirty local chats and the current active-chat selection.
-    await EVENT_BUS.broadcast("chatStorageChanged", {"source": "app", "originId": request.chat_origin_id})
-    # Vault 引用同步：该请求总是携带全部会话，作为活引用快照驱动 LRU 清理。
-    # 清理失败绝不阻断会话保存。
-    vault_retention: dict[str, Any] = {}
-    try:
-        vault_retention = await asyncio.to_thread(
-            chat_attachment_vault_store().retain,
-            collect_vault_attachment_refs(chats),
-        )
-    except Exception:
-        vault_retention = {}
-    automatic_capture: dict[str, int] = {}
-    try:
-        automatic_capture = await asyncio.to_thread(capture_automatic_memory_after_chat_storage, automatic_groups)
-        if automatic_capture.get("acceptedCount") or automatic_capture.get("conflictCount"):
-            await MEMORY_REVIEW.notify_review_changed()
-    except Exception:
-        automatic_capture = {}
-    return {**storage_result, "vaultRetention": vault_retention, "automaticCapture": automatic_capture}
+async def write_chat_transcripts(request: ChatTranscriptsRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    save_key = (request.chat_origin_id, request.chat_save_id) if request.chat_origin_id and request.chat_save_id else None
+
+    def commit():
+        with CHAT_TRANSCRIPTS_LOCK:
+            if save_key is not None and save_key in CHAT_SAVE_RECEIPTS:
+                return CHAT_SAVE_RECEIPTS[save_key], None
+            storage_result, chats, automatic_groups = write_chat_transcripts_storage(request)
+            # Retention can delete attachment bodies. Keep it in commit order
+            # so an older live-reference snapshot cannot prune a newer save.
+            try:
+                vault_retention = chat_attachment_vault_store().retain(collect_vault_attachment_refs(chats))
+            except Exception:
+                vault_retention = {}
+            receipt = {**storage_result, "vaultRetention": vault_retention}
+            if save_key is not None:
+                CHAT_SAVE_RECEIPTS[save_key] = receipt
+                if len(CHAT_SAVE_RECEIPTS) > CHAT_SAVE_RECEIPT_LIMIT:
+                    del CHAT_SAVE_RECEIPTS[next(iter(CHAT_SAVE_RECEIPTS))]
+            return receipt, automatic_groups
+
+    async def publish(automatic_groups: list[tuple[MemoryScope, str, list[dict[str, Any]]]]) -> dict[str, int]:
+        try:
+            await EVENT_BUS.broadcast("chatStorageChanged", {"source": "app", "originId": request.chat_origin_id})
+        except Exception as exc:
+            emit_log("warn", "socket", "Could not broadcast committed chat storage change.", {"error": str(exc)})
+        try:
+            automatic_capture = await asyncio.to_thread(capture_automatic_memory_after_chat_storage, automatic_groups)
+            if automatic_capture.get("acceptedCount") or automatic_capture.get("conflictCount"):
+                await MEMORY_REVIEW.notify_review_changed()
+            return automatic_capture
+        except Exception:
+            return {}
+
+    receipt, automatic_groups = await asyncio.to_thread(commit)
+    if automatic_groups is None:
+        return receipt
+    if save_key is not None:
+        background_tasks.add_task(publish, automatic_groups)
+        return receipt
+    return {**receipt, "automaticCapture": await publish(automatic_groups)}
 
 
 def capture_automatic_memory_after_chat_storage(

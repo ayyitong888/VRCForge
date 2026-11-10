@@ -1,4 +1,4 @@
-import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
+import { ApiError, hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 import type { AgentNotes } from "./types";
 import type { ChatStoragePatches } from "../chat-storage-delta";
 import { chatStorageOriginId } from "../chat-storage-origin";
@@ -103,12 +103,7 @@ export async function fetchChats<T>(endpoint: string, projectPaths: string[] = [
   return requestJson<StoredChats<T>>(`${endpoint}/api/app/chats${suffix}`);
 }
 
-export async function saveChats<T>(
-  endpoint: string,
-  chats: T[],
-  sourceRevisions: ChatSourceRevision[] = [],
-  chatPatches?: ChatStoragePatches,
-): Promise<{
+export type ChatSaveReceipt = {
   ok: boolean;
   path: string;
   count: number;
@@ -117,7 +112,15 @@ export async function saveChats<T>(
   sourceRevisions?: ChatSourceRevision[];
   chatDigests?: Record<string, string>;
   chatMetadataShapes?: Record<string, Record<string, unknown>>;
-}> {
+};
+
+export async function saveChats<T>(
+  endpoint: string,
+  chats: T[],
+  sourceRevisions: ChatSourceRevision[] = [],
+  chatPatches?: ChatStoragePatches,
+  chatSaveId = globalThis.crypto.randomUUID(),
+): Promise<ChatSaveReceipt> {
   // Patched records are reconstructed against their authoritative server digest.
   // Sending their full bodies as well doubles the payload without contributing
   // data; retain complete bodies only for new/unpatched records.
@@ -126,17 +129,25 @@ export async function saveChats<T>(
     return typeof id === "string" && Object.prototype.hasOwnProperty.call(chatPatches, id)
       ? { id } : chat;
   }) : chats;
-  if (hasTauriInternals()) {
-    return invokeTauriWithAbort("save_chats", {
-      request: {
-        body: { chats: wireChats, sourceRevisions, chatOriginId: chatStorageOriginId(), ...(chatPatches ? { chatPatches } : {}) },
-        timeoutMs: 60000,
-      },
+  const body = {
+    chats: wireChats,
+    sourceRevisions,
+    chatOriginId: chatStorageOriginId(),
+    chatSaveId,
+    ...(chatPatches ? { chatPatches } : {}),
+  };
+  const submit = () => hasTauriInternals()
+    ? invokeTauriWithAbort<ChatSaveReceipt>("save_chats", { request: { body, timeoutMs: 60000 } })
+    : requestJson<ChatSaveReceipt>(`${endpoint}/api/app/chats`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
+  try {
+    return await submit();
+  } catch (cause) {
+    if (!(cause instanceof ApiError) || cause.status !== 0) throw cause;
+    // A transport error cannot tell us whether the backend already committed.
+    return submit();
   }
-  return requestJson(`${endpoint}/api/app/chats`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chats: wireChats, sourceRevisions, chatOriginId: chatStorageOriginId(), ...(chatPatches ? { chatPatches } : {}) }),
-  });
 }
