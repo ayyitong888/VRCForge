@@ -2972,11 +2972,12 @@ async def refresh_app_unity_readiness() -> dict[str, Any]:
     LAST_STATUS_FINGERPRINT = fingerprint
     LAST_STATUS_CONNECTED = bool(snapshot.get("connected"))
     await EVENT_BUS.broadcast("unity_status", snapshot)
+    health = await asyncio.to_thread(build_bootstrap_app_health, refresh_projects=False)
     return {
         "ok": True,
         "schema": "vrcforge.unity_readiness_refresh.v1",
         "unityStatus": snapshot,
-        "health": build_bootstrap_app_health(refresh_projects=False),
+        "health": health,
     }
 
 

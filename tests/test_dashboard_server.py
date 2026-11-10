@@ -1393,6 +1393,28 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.LAST_STATUS_FINGERPRINT = previous_fingerprint
             dashboard_server.LAST_STATUS_CONNECTED = previous_connected
 
+    def test_app_unity_readiness_health_runs_off_event_loop(self) -> None:
+        async def exercise() -> None:
+            loop_thread = threading.get_ident()
+
+            def build_health(*, refresh_projects: bool) -> dict:
+                self.assertFalse(refresh_projects)
+                self.assertNotEqual(threading.get_ident(), loop_thread)
+                return {"state": {"executionReady": True}}
+
+            with (
+                patch.multiple(dashboard_server, CURRENT_UNITY_STATUS=None,
+                               LAST_STATUS_FINGERPRINT="", LAST_STATUS_CONNECTED=None),
+                patch.object(type(dashboard_server.UNITY_STATUS), "build_unity_status_snapshot",
+                             return_value={"connected": True, "executionReady": True}),
+                patch.object(dashboard_server.EVENT_BUS, "broadcast", new_callable=AsyncMock),
+                patch.object(dashboard_server, "build_bootstrap_app_health", side_effect=build_health),
+            ):
+                payload = await dashboard_server.refresh_app_unity_readiness()
+            self.assertTrue(payload["health"]["state"]["executionReady"])
+
+        asyncio.run(exercise())
+
     def test_app_bootstrap_degrades_when_agent_surfaces_fail(self) -> None:
         with (
             patch.object(dashboard_server.AGENT_GATEWAY, "build_manifest", side_effect=RuntimeError("manifest broken")),
