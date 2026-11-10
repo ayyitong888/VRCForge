@@ -166,6 +166,11 @@ export function ConversationCard({
             <textarea
               value={displayedText}
               onChange={(event) => onEditTextChange?.(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return;
+                event.preventDefault();
+                if (!event.repeat && !editSaveDisabledReason) onEditItemSave?.();
+              }}
               className="min-h-[90px] w-full resize-none rounded-2xl border border-muted bg-muted px-3 py-2 text-sm outline-none"
             />
             {imageAttachments.length ? (
@@ -202,16 +207,6 @@ export function ConversationCard({
             ) : null}
             <div className="flex items-center gap-1 pt-1">
               {deliveryMetadata}
-              <button
-                type="button"
-                className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                onClick={onEditItemSave}
-                disabled={Boolean(editSaveDisabledReason)}
-                title={editSaveDisabledReason || t("chat.saveEdit")}
-                aria-label={t("chat.saveEdit")}
-              >
-                <Save className="h-3.5 w-3.5" />
-              </button>
               {editSaveDisabledReason ? <span role="status" className="text-xs text-muted-foreground">{editSaveDisabledReason}</span> : null}
               <button
                 type="button"
@@ -221,6 +216,16 @@ export function ConversationCard({
                 aria-label={t("chat.cancelEdit")}
               >
                 <X className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={onEditItemSave}
+                disabled={Boolean(editSaveDisabledReason)}
+                title={editSaveDisabledReason || t("chat.saveEdit")}
+                aria-label={t("chat.saveEdit")}
+              >
+                <Save className="h-3.5 w-3.5" />
               </button>
             </div>
           </div>
