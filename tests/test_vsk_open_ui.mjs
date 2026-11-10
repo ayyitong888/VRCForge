@@ -29,8 +29,7 @@ assert.match(source, /if \(!active\) \{ cleanup\(\); return; \}/);
 assert.match(source, /if \(!ready \|\| !hasTauriInternals\(\)\) return/);
 assert.match(source, /\.slice\(0, 32\)/);
 assert.doesNotMatch(source, /dangerouslySetInnerHTML|eval\(|devMode:\s*true|allowDowngrade:\s*true/);
-assert.match(source, /vskPreviewIdentity\(preview\)\.name/);
-assert.match(source, /vskPreviewIdentity\(preview\)\.version/);
+assert.match(source, /vskPreviewIdentity\(preview\)/);
 assert.match(source, /manifest\.author/);
 assert.match(source, /preview\?\.signer_fingerprint/);
 assert.match(source, /governance\.signerTrustStatus/);
@@ -45,20 +44,18 @@ assert.match(source, /preview\?\.official === true/);
 assert.match(source, /preview\.officialPublisher/);
 assert.doesNotMatch(source, /manifest\.(?:official|officialPublisher)|ayyitong888/);
 assert.match(source, /signatureStatuses\.has\(signatureStatus\.toLowerCase\(\)\)[\s\S]*?vskOpen\.signatureStatus\./);
-assert.match(source, /vskOpen\.permission\.\$\{rawPermission\}/);
-assert.match(source, /unknownPermission", \{ permission: rawPermission \}/);
+assert.match(source, /manifest\.description/);
+assert.match(source, /<progress aria-labelledby="vsk-open-title"/);
+assert.doesNotMatch(source, /vskOpen\.permissions|preview\?\.permissions/);
 const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 assert.match(app, /<VskOpenDialog ready=\{runtimeConnected\} onPreflight=\{preflightVskPackage\} onImport=\{importVskPackage\}/);
+assert.match(app, /<VskOpenDialog[^\n]*onManage=\{\(\) => void openSkills\(\)\}/);
 for (const language of ["zh-CN", "zh-TW", "en-US", "ja-JP"]) {
   const locale = JSON.parse(await readFile(new URL(`../src/locales/${language}.json`, import.meta.url), "utf8"));
-  for (const key of ["title", "description", "name", "version", "author", "path", "details", "notProvided", "signature", "signerTrust", "signerTrustUnknown", "signerFingerprint", "permissions", "unknownPermission", "checking", "invalid", "confirm", "importing", "imported"]) {
+  for (const key of ["title", "author", "path", "details", "notProvided", "signature", "signerTrust", "signerTrustUnknown", "signerFingerprint", "checking", "invalid", "confirm", "importing", "imported", "done", "manage"]) {
     assert.ok(locale.vskOpen[key], `${language}.${key}`);
   }
   assert.equal(locale.vskOpen.signatureStatus.signed, language === "en-US" ? "Signed" : language === "ja-JP" ? "署名済み" : language === "zh-CN" ? "已签名" : "已簽章");
   for (const status of ["trusted", "untrusted", "revoked", "unsigned_dev"]) assert.ok(locale.vskOpen.signerTrustStatus[status], `${language}.signerTrustStatus.${status}`);
-  for (const permission of ["read_project", "read_assets", "read_package", "analyze_logs", "build_index", "unity_scan_scene", "unity_modify_materials", "unity_modify_prefab", "unity_modify_components", "unity_run_validation", "write_project_files", "delete_files", "execute_shell", "run_editor_script", "network_access", "read_env", "write_outside_project"]) {
-    assert.ok(locale.vskOpen.permission[permission], `${language}.permission.${permission}`);
-  }
-  assert.match(locale.vskOpen.unknownPermission, /\{\{permission\}\}/);
 }
 console.log("VSK file-open confirmation, no-auto-import, failed-check, duplicate-click and lifecycle contracts passed");

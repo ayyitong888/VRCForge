@@ -4940,7 +4940,7 @@ export default function App() {
         onDismiss={() => setAppUpdatePrompt(null)}
       />
 
-      <VskOpenDialog ready={runtimeConnected} onPreflight={preflightVskPackage} onImport={importVskPackage} />
+      <VskOpenDialog ready={runtimeConnected} onPreflight={preflightVskPackage} onImport={importVskPackage} onManage={() => void openSkills()} />
 
     </main>
   );

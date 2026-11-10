@@ -2,16 +2,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { CheckCircle2 } from "lucide-react";
 import type { SkillPackageEntry, SkillPackagePreflight } from "../../lib/api";
 import { hasTauriInternals } from "../../lib/api/http";
 import { displayVskPath, vskPreviewIdentity } from "../../lib/vsk-open-presentation";
 import { Button } from "../ui/button";
 
 /** File-open requests are untrusted data, not permission to install a package. */
-export function VskOpenDialog({ ready, onPreflight, onImport }: {
+export function VskOpenDialog({ ready, onPreflight, onImport, onManage }: {
   ready: boolean;
   onPreflight: (path: string) => Promise<SkillPackagePreflight>;
   onImport: (path: string) => Promise<unknown>;
+  onManage: () => void;
 }) {
   const { t } = useTranslation();
   const [paths, setPaths] = useState<string[]>([]);
@@ -77,6 +79,10 @@ export function VskOpenDialog({ ready, onPreflight, onImport }: {
     return () => { active = false; };
   }, [path]);
 
+  useEffect(() => {
+    if (imported) dialogRef.current?.querySelector<HTMLButtonElement>("[data-vsk-done]")?.focus();
+  }, [imported]);
+
   function dismiss() {
     if (busyRef.current) return;
     verifiedPath.current = "";
@@ -94,6 +100,7 @@ export function VskOpenDialog({ ready, onPreflight, onImport }: {
     finally { busyRef.current = false; setBusy(false); }
   }
   if (!path) return null;
+  const identity = preview && vskPreviewIdentity(preview);
   const manifest = preview?.manifest && typeof preview.manifest === "object" ? preview.manifest : {};
   const governance = preview?.governance && typeof preview.governance === "object" ? preview.governance : {};
   const signatureStatus = String(preview?.signature_status || preview?.signatureStatus || "").trim();
@@ -106,69 +113,62 @@ export function VskOpenDialog({ ready, onPreflight, onImport }: {
       || "",
   ).trim();
   const showOfficialPublisher = official && Boolean(officialPublisher);
-  const permissions = Array.isArray(preview?.permissions) ? preview.permissions : [];
-  const authorName = [manifest.author_display_name, manifest.author].find(
+  const authorName = [manifest.author_display_name, manifest.author, preview?.author].find(
     (value): value is string => typeof value === "string" && value.trim().length > 0,
-  );
-  const knownPermissions = new Set([
-    "read_project", "read_assets", "read_package", "analyze_logs", "build_index",
-    "unity_scan_scene", "unity_modify_materials", "unity_modify_prefab", "unity_modify_components", "unity_run_validation",
-    "write_project_files", "delete_files", "execute_shell", "run_editor_script", "network_access", "read_env", "write_outside_project",
-  ]);
+  )?.trim();
+  const description = typeof manifest.description === "string" ? manifest.description.trim() : "";
   const trustStatuses = new Set(["trusted", "untrusted", "revoked", "unsigned_dev"]);
   const signatureStatuses = new Set(["signed", "dev"]);
   return (
     <dialog ref={dialogRef} aria-labelledby="vsk-open-title"
-      className="m-auto max-h-[85vh] w-[min(92vw,36rem)] overflow-y-auto rounded-xl border border-border bg-card p-6 text-foreground shadow-panel backdrop:bg-black/55"
+      className="m-auto max-h-[85vh] w-[min(92vw,26rem)] overflow-y-auto rounded-xl border border-border bg-card p-5 text-foreground shadow-panel backdrop:bg-black/55"
       onCancel={(event) => { event.preventDefault(); dismiss(); }}>
-      <h2 id="vsk-open-title" className="text-lg font-semibold">{t("vskOpen.title")}</h2>
-      <p className="mt-2 text-sm text-muted-foreground">{t("vskOpen.description")}</p>
-      <details className="mt-3 text-xs">
-        <summary className="cursor-pointer text-muted-foreground">{t("vskOpen.details")}</summary>
-        <div className="mt-2 space-y-2">
-          <div><span className="text-muted-foreground">{t("vskOpen.path")}</span><code className="mt-1 block break-all">{displayVskPath(path)}</code></div>
-          {preview && <div><span className="text-muted-foreground">{t("vskOpen.signerFingerprint")}</span><code className="mt-1 block break-all font-mono">{signerFingerprint || t("vskOpen.signerTrustUnknown")}</code></div>}
+      <h2 id="vsk-open-title" className="flex items-center gap-2 text-lg font-semibold" aria-live="polite">
+        {imported && <CheckCircle2 className="size-5 text-primary" aria-hidden="true" />}
+        {t(busy ? "vskOpen.importing" : imported ? "vskOpen.imported" : "vskOpen.title")}
+      </h2>
+      {identity && <div className="mt-2 min-w-0 text-sm">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="break-words font-semibold">{identity.name}</span>
+          <span className="text-xs text-muted-foreground">{identity.version}</span>
         </div>
-      </details>
-      {preview && <dl className="mt-4 space-y-3 text-sm">
-        <div><dt className="text-muted-foreground">{t("vskOpen.name")}</dt><dd className="font-semibold">{vskPreviewIdentity(preview).name}</dd></div>
-        <div><dt className="text-muted-foreground">{t("vskOpen.version")}</dt><dd className="font-semibold">{vskPreviewIdentity(preview).version}</dd></div>
-        <div><dt className="text-muted-foreground">{t("vskOpen.author")}</dt><dd className="font-semibold">{authorName || t("vskOpen.notProvided")}</dd></div>
-        <div>
-          <dt className="text-muted-foreground">{t("vskOpen.signature")}</dt>
-          <dd className="font-semibold">{signatureStatuses.has(signatureStatus.toLowerCase())
-            ? t(`vskOpen.signatureStatus.${signatureStatus.toLowerCase()}`)
-            : signatureStatus || "—"}</dd>
+        {!busy && !imported && <p className="mt-1 text-xs text-muted-foreground">
+          {t("vskOpen.author")} · {authorName || t("vskOpen.notProvided")}
+        </p>}
+      </div>}
+      {busy ? (
+        <progress aria-labelledby="vsk-open-title" className="mt-4 block h-2 w-full accent-primary" />
+      ) : imported ? (
+        <div className="mt-5 flex justify-end gap-2">
+          <Button data-vsk-done type="button" variant="secondary" onClick={dismiss}>{t("vskOpen.done")}</Button>
+          <Button type="button" onClick={() => { dismiss(); onManage(); }}>{t("vskOpen.manage")}</Button>
         </div>
-        <div>
-          <dt className="text-muted-foreground">{t("vskOpen.signerTrust")}</dt>
-          <dd>{trustStatuses.has(signerTrustStatus.toLowerCase())
-            ? t(`vskOpen.signerTrustStatus.${signerTrustStatus.toLowerCase()}`)
-            : signerTrustStatus || t("vskOpen.signerTrustUnknown")}</dd>
-        </div>
-        {showOfficialPublisher && <div><dt className="text-muted-foreground">{t("vskOpen.officialPublisher")}</dt><dd className="font-semibold">{officialPublisher}</dd></div>}
-        <div>
-          <dt className="text-muted-foreground">{t("vskOpen.permissions")}</dt>
-          {permissions.length ? <ul className="mt-1 list-disc space-y-1 pl-5">{permissions.map((permission, index) => {
-            const rawPermission = String(permission);
-            return <li key={`${rawPermission}-${index}`}>{knownPermissions.has(rawPermission)
-              ? t(`vskOpen.permission.${rawPermission}`)
-              : t("vskOpen.unknownPermission", { permission: rawPermission })}</li>;
-          })}</ul> : <dd>—</dd>}
-        </div>
-        {preview.warnings?.map((warning, index) => <p key={index}>{warning}</p>)}
-      </dl>}
-      {!preview && !error && <p role="status" className="mt-3">{t("vskOpen.checking")}</p>}
-      {error && <p role="alert" className="mt-3 whitespace-pre-wrap text-destructive">{error}</p>}
-      {imported && <p role="status" className="mt-3">{t("vskOpen.imported")}</p>}
-      <div className="mt-5 flex justify-end gap-2">
-        <Button data-vsk-cancel type="button" variant="secondary" disabled={busy} onClick={dismiss}>
-          {t(imported ? "common.close" : "common.cancel")}
-        </Button>
-        {!imported && <Button type="button" disabled={!preview || !!error || busy} onClick={() => { void confirmImport(); }}>
-          {t(busy ? "vskOpen.importing" : "vskOpen.confirm")}
-        </Button>}
-      </div>
+      ) : (
+        <>
+          {description && <p className="mt-3 line-clamp-3 break-words text-sm text-muted-foreground">{description}</p>}
+          <details className="mt-3 text-xs">
+            <summary className="cursor-pointer text-muted-foreground">{t("vskOpen.details")}</summary>
+            <div className="mt-2 space-y-2">
+              <div><span className="text-muted-foreground">{t("vskOpen.path")}</span><code className="mt-1 block break-all">{displayVskPath(path)}</code></div>
+              {preview && <>
+                <p>{t("vskOpen.signature")} · {signatureStatuses.has(signatureStatus.toLowerCase())
+                  ? t(`vskOpen.signatureStatus.${signatureStatus.toLowerCase()}`) : signatureStatus || "—"}</p>
+                <p>{t("vskOpen.signerTrust")} · {trustStatuses.has(signerTrustStatus.toLowerCase())
+                  ? t(`vskOpen.signerTrustStatus.${signerTrustStatus.toLowerCase()}`) : signerTrustStatus || t("vskOpen.signerTrustUnknown")}</p>
+                {showOfficialPublisher && <p>{t("vskOpen.officialPublisher")} · {officialPublisher}</p>}
+                {signerFingerprint && <div><span className="text-muted-foreground">{t("vskOpen.signerFingerprint")}</span><code className="mt-1 block break-all">{signerFingerprint}</code></div>}
+              </>}
+            </div>
+          </details>
+          {preview?.warnings?.map((warning, index) => <p key={index} className="mt-2 text-xs text-muted-foreground">{warning}</p>)}
+          {!preview && !error && <p role="status" className="mt-3 text-sm">{t("vskOpen.checking")}</p>}
+          {error && <p role="alert" className="mt-3 whitespace-pre-wrap text-sm text-destructive">{error}</p>}
+          <div className="mt-5 flex justify-end gap-2">
+            <Button data-vsk-cancel type="button" variant="secondary" onClick={dismiss}>{t("common.cancel")}</Button>
+            <Button type="button" disabled={!preview || !!error} onClick={() => { void confirmImport(); }}>{t("vskOpen.confirm")}</Button>
+          </div>
+        </>
+      )}
     </dialog>
   );
 }
