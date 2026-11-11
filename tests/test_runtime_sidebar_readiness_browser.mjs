@@ -26,7 +26,9 @@ const bundle = await build({
         const { chats = [], questions = [], runtimeAttention = [] } = reviewFixture || {};
         const review = pendingQuestionReviewTargets(chats, questions, active);
         const currentChat = chats.find((chat) => chat.id === active);
-        const runtimeReview = runtimeReviewItemForChat(currentChat, runtimeAttention);
+        const scopedQuestions = currentChat ? filterQuestionsForRuntimeScope(questions,
+          {sessionId: currentChat.sessionId, projectRoot: currentChat.projectPath}) : [];
+        const runtimeReview = runtimeReviewItemForChat(currentChat, runtimeAttention, scopedQuestions);
         return <><RightRuntimeSidebar
         runtimeConnected loadingUnityStatus={state === "checking"} workspaceProjectLabel="VRCForge"
         workspaceProjectType={projectType} projectWorkspace
@@ -147,7 +149,16 @@ try {
   await page.locator('[data-review-owner]').getByText("review-chat").waitFor();
   assert.equal(await review.count(), 0, "a blocked origin must not show a review badge after its question is answered");
 
-  blockedReply.response.plan.completionGate.reason = "verification_required";
+  delete blockedReply.response.plan.completionGate;
+  stale.questions[0].originClientTurnId = blockedRun.clientTurnId;
+  await show("ready", 0, "unity", false, stale);
+  assert.equal(await review.count(), 0, "an answered Question owns its old continuation receipt even without a gate");
+
+  stale.questions[0].originClientTurnId = "another-client";
+  await show("ready", 0, "unity", false, stale);
+  await review.waitFor();
+
+  blockedReply.response.plan.completionGate = { reason: "verification_required" };
   await show("ready", 0, "unity", false, stale);
   await review.click();
   assert.equal(await page.evaluate(() => window.reviewItemOpened), blockedReply.id);
@@ -163,6 +174,21 @@ try {
   stale.runtimeAttention = [{ sessionId: blockedRun.sessionId, status: "blocked" }];
   await show("ready", 0, "unity", false, stale);
   await review.waitFor({ state: "detached" });
+  if (process.env.VRCFORGE_QUESTION_CONTINUATION_REPLAY) {
+    const { run, terminal, question } = JSON.parse(readFileSync(process.env.VRCFORGE_QUESTION_CONTINUATION_REPLAY, "utf8"));
+    assert.equal(question.status, "answered");
+    await show("ready", 0, "unity", false, {
+      activeChatId: "original",
+      chats: [{ id: "original", sessionId: run.sessionId, projectPath: run.projectRoot, items: [
+        { id: "original-reply", type: "agent", response: terminal },
+        { id: "original-answer", type: "question_answer", questionId: question.questionId },
+      ] }],
+      questions: [question],
+      runtimeAttention: [run],
+    });
+    await page.locator("[data-review-owner]").getByText("original").waitFor();
+    assert.equal(await review.count(), 0, "the original answered Milltina question cannot keep the review badge active");
+  }
   console.log("Unity readiness, approval access and pending review navigation passed");
 } finally {
   await browser?.close();

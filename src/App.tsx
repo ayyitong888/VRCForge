@@ -1136,7 +1136,7 @@ export default function App() {
     () => pendingQuestionReviewTargets(chats, runtimeConnected ? agentQuestions : [], activeChatId),
     [chats, runtimeConnected, agentQuestions, activeChatId],
   );
-  const runtimeReviewItem = runtimeReviewItemForChat(activeChat || undefined, runtimeAttention);
+  const runtimeReviewItem = runtimeReviewItemForChat(activeChat || undefined, runtimeAttention, scopedAgentQuestions);
   const sending = localActivitySending || Boolean(activeRuntimeCancelTarget);
   const runtimeAwareChatSidebar = useMemo(() => {
     const visibleChatId = activeView === "chat" ? activeChatId : "";

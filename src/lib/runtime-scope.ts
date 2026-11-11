@@ -75,12 +75,29 @@ export function pendingQuestionReviewTargets(chats: ChatThread[], questions: Age
   return { count: targets.length, target: targets.find(({ chat }) => chat.id === activeChatId) || targets[0] };
 }
 
-export function runtimeReviewItemForChat(chat: ChatThread | undefined, runtimeAttention: AgentRuntimeRun[]) {
+export function runtimeReviewItemForChat(
+  chat: ChatThread | undefined,
+  runtimeAttention: AgentRuntimeRun[],
+  questions: AgentQuestion[] = [],
+) {
   return chat?.items.find((item) => {
     if (item.type !== "agent" || !runtimeAttention.some((run) =>
       (run.clientTurnId && item.response.clientTurnId === run.clientTurnId)
       || (run.turnId && (item.response.turnId || item.response.turn_id) === run.turnId))) return false;
-    if (item.response.plan?.completionGate?.reason !== "question_pending") return true;
+    const reason = item.response.plan?.completionGate?.reason;
+    if (reason === "visual_checkpoint_pending") return false;
+    if (reason !== "question_pending") {
+      if (reason) return true;
+      const originTurnId = item.response.turnId || item.response.turn_id;
+      // Older continuation receipts lost their completion gate. The exact
+      // Question record still owns its pending/answered state.
+      return !questions.some((question) => (
+        (Boolean(question.originClientTurnId) && question.originClientTurnId === item.response.clientTurnId)
+        || (Boolean(question.originTurnId) && question.originTurnId === originTurnId)
+      ) && questionBelongsToRuntimeScope(
+        question, { sessionId: chat.sessionId, projectRoot: chat.projectPath }, { requireSession: true },
+      ));
+    }
     // Channel project selection uses the same gate but has no Question card.
     return item.response.steps?.some((step) => step.tool === "vrcforge_request_project_selection"
       && !("historical" in step && step.historical === true)
