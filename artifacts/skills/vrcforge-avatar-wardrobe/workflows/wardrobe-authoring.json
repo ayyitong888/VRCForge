@@ -279,6 +279,15 @@
         "mustNotDuplicateCurvesPerMaterialSlot": true
       }
     },
+    "originalClothingLayering": {
+      "scope": "each_outfit_and_affected_original_clothing_objects",
+      "inspectEvidence": ["confirmed_default_outfit", "exact_object_paths_and_parent_visibility", "existing_fx_and_modular_avatar_controls", "available_author_fit_guidance"],
+      "compareOnAndOffWhenCoverageOrClippingIsUnclear": true,
+      "comparisonKeepsOutfitPoseAndBodyShapeFixed": true,
+      "perOutfitDecisions": ["keep_for_coverage_if_fit_is_good", "disable_if_clipping_and_recheck_coverage", "preserve_unrelated", "unresolved_if_neither_combination_fits"],
+      "writeScope": "approved_outfit_default_exit_and_other_affected_state_bindings",
+      "verification": ["same_outfit_multiview_coverage_and_clipping", "independent_visibility_and_binding_readback", "switch_between_outfits_and_restore_confirmed_default"]
+    },
     "bodyShapeFitting": {
       "fitTradeoff": {
         "askUserBeforeChoosing": true,
