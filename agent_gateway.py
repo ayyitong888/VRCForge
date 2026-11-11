@@ -904,7 +904,8 @@ class AgentGateway:
                 resolve=lambda question_id, continuation_prompt: self._goal.resolve_agent_goal_question(
                     question_id,
                     continuation_prompt=continuation_prompt,
-                )
+                ),
+                skip=lambda question_id: self._goal.resolve_agent_goal_question(question_id, skipped=True),
             ),
             RuntimeQuestionResolutionPort(
                 resolve=lambda question_id, task_seed, continuation_prompt: self._resume_runtime_task_after_question(
@@ -1838,15 +1839,15 @@ class AgentGateway:
         with self._lock:
             if not self._runtime_continuation_accepting or stable_id in self._question_continuations_inflight:
                 return {"ok": False, "status": "deferred", "questionId": stable_id}
-            self._question_continuations_inflight.add(stable_id)
             self.questions.record_runtime_continuation(stable_id, "queued",
                 runtimeContinuationClientTurnId=client_turn_id, runtimeContinuationTurnId="")
+            self._question_continuations_inflight.add(stable_id)
         def run() -> None:
             try:
                 if not self.wait_runtime_session_idle(session_id):
                     return
-                if not self.questions.claim_runtime_continuation(stable_id, client_turn_id=client_turn_id):
                 new_turn = async_answer or self._blocking_question_turn_closed(task_seed)
+                if not self.questions.claim_runtime_continuation(stable_id, client_turn_id=client_turn_id):
                     return
                 if not new_turn and self._runtime_session_state.cancel_requested(
                     session_id=session_id,
@@ -2055,9 +2056,9 @@ class AgentGateway:
         question_id: str,
         task_seed: Mapping[str, Any],
         continuation_prompt: str,
-    ) -> Mapping[str, Any] | None:
         *,
         new_turn: bool = False,
+    ) -> Mapping[str, Any] | None:
         """Resume one foreground task through the existing planner continuation path."""
         seed = dict(task_seed or {})
         browser_open = ensure_dict(seed.pop("_browserOpenRequest", None))
@@ -6033,10 +6034,10 @@ class AgentGateway:
         params["_resolvedRuntimeSessionId"] = session_id
         params["_resolvedRuntimeTurnId"] = turn_id
         params["_resolvedRuntimeClientTurnId"] = client_turn_id
-        self._admit_runtime_turn(
         continuation = ensure_dict(task_continuation)
         question_reply_turn = continuation.get("source") == "question_answered" and not continuation.get("context")
         resuming_task = task_continuation is not None and not question_reply_turn
+        self._admit_runtime_turn(
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
             is_continuation=resuming_task,
         )
@@ -6356,7 +6357,6 @@ class AgentGateway:
         except ValueError as exc:
             raise AgentGatewayError(str(exc), status_code=409) from exc
 
-        checkpoint_user_policy: dict[str, Any] | None = None
         if native_binding and question_reply_turn and continuation_observation:
             self._runtime_session_state.append_native_user(
                 session_id, binding=native_binding, human=False,
@@ -6365,6 +6365,7 @@ class AgentGateway:
                 ),
             )
 
+        checkpoint_user_policy: dict[str, Any] | None = None
         checkpoint_skip_authority: dict[str, Any] | None = None
         checkpoint_correction_block_reason = ""
         checkpoint_correction_retryable = False
@@ -9771,11 +9772,11 @@ class AgentGateway:
         target_id = turn_id or client_turn_id
         if not target_id and not session_id:
             raise AgentGatewayError("turnId, clientTurnId, or sessionId is required.", status_code=400)
-        target = self._runtime_session_state.mark_cancel_requested(
         if not turn_id and session_id and ":question:" in client_turn_id and self.questions.cancel_queued_runtime_continuation(
             session_id=session_id, client_turn_id=client_turn_id,
         ):
             return {"ok": True, "status": "cancelled", "sessionId": session_id, "clientTurnId": client_turn_id}
+        target = self._runtime_session_state.mark_cancel_requested(
             session_id=session_id,
             turn_id=turn_id,
             client_turn_id=client_turn_id,

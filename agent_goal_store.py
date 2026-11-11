@@ -391,6 +391,7 @@ class AgentGoalStore:
                         or event.get("failedAt")
                         or event.get("deniedAt")
                         or event.get("blockedAt")
+                        or event.get("skippedAt")
                         or event.get("updatedAt")
                         or ""
                     )
@@ -402,6 +403,12 @@ class AgentGoalStore:
                             "revision": int(previous.get("revision") or 1) + 1,
                             "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
                         }
+                    )
+                elif event_name == "goal_delivery_question_skipped" and "nextWakeAt" in event:
+                    projected.update(
+                        wakeAt=str(event["nextWakeAt"] or ""),
+                        revision=int(previous.get("revision") or 1) + 1,
+                        updatedAt=event.get("updatedAt") or previous.get("updatedAt"),
                     )
                 elif isinstance(usage_delta, dict) and usage_delta:
                     projected["updatedAt"] = event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt")
@@ -1958,6 +1965,8 @@ class AgentGoalStore:
                 event["approvalReference"] = normalized_reference
             else:
                 event["questionId"] = normalized_reference
+                if normalized_reference != delivery.get("questionId"):
+                    event["questionAnsweredAt"] = ""
                 event["questionReminderAt"] = _iso(blocked_at + timedelta(seconds=QUESTION_REMINDER_SECONDS))
                 event["questionReminderSentAt"] = ""
             self._append(event)
@@ -2243,6 +2252,7 @@ class AgentGoalStore:
         question_id: str,
         *,
         continuation_prompt: str = "",
+        skipped: bool = False,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         reference = str(question_id or "").strip()
@@ -2266,14 +2276,46 @@ class AgentGoalStore:
             status = str(delivery.get("status") or "")
             if status not in {"blocked", "parked"} or str(delivery.get("blockedKind") or "") != "question":
                 raise AgentGoalStoreError("Goal delivery is not waiting for this question.", 409)
-            prompt = _summarize(continuation_prompt, 4_000)
-            if not prompt:
-                raise AgentGoalStoreError("Question continuation prompt is required.")
             answered_at = now or _utc_now()
             schedule_was_advanced = bool(
                 delivery.get("scheduleAdvanced") or delivery.get("continuationScheduleAdvanced")
             )
             next_revision = int(delivery.get("revision") or 0) + 1
+            if skipped:
+                event = {
+                    "event": "goal_delivery_question_skipped",
+                    "goalId": delivery.get("goalId"),
+                    "deliveryId": delivery.get("deliveryId"),
+                    "status": "skipped",
+                    "state": "skipped",
+                    "terminal": True,
+                    "revision": next_revision,
+                    "questionAnsweredAt": _iso(answered_at),
+                    "skippedAt": _iso(answered_at),
+                    "blockedKind": "",
+                    "blockedReason": "",
+                    "continuationPrompt": "",
+                    "consumeRetry": False,
+                    "retryable": False,
+                    "willRetry": False,
+                    "retryAt": "",
+                    "noticeUnread": False,
+                    "phaseDeadlineAt": "",
+                    "deadlineAt": "",
+                    "scheduleAdvanced": False,
+                }
+                goal = self.project_goals().get(str(delivery.get("goalId") or ""), {})
+                if goal.get("wakeAt") == delivery.get("scheduledFor"):
+                    if not schedule_was_advanced:
+                        event.update(self._schedule_fields(delivery, answered_at))
+                    elif delivery.get("continuationScheduleAdvanced"):
+                        # Restore the already-advanced schedule in the same durable event.
+                        event["nextWakeAt"] = str(delivery.get("nextWakeAt") or "")
+                self._append(event)
+                return self.project_deliveries()[str(delivery.get("deliveryId") or "")]
+            prompt = _summarize(continuation_prompt, 4_000)
+            if not prompt:
+                raise AgentGoalStoreError("Question continuation prompt is required.")
             self._append(
                 {
                     "event": "goal_delivery_question_answered",

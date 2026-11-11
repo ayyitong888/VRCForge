@@ -1,11 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import pytest
 
 from agent_gateway import AgentGateway
 from dashboard_api_models import AgentQuestionAnswerRequest
 import dashboard_server as server
+
+
+def test_goal_question_skip_settles_occurrence_without_queuing_model(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    goal = gateway.goal.create_agent_goal({
+        "title": "Review a fixture", "chatId": "fixture-chat",
+        "wakeAt": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+    })["goal"]
+    delivery = gateway.goal.wake_agent_goal(goal["goalId"])["delivery"]
+    gateway.goal.begin_agent_goal_delivery(delivery["deliveryId"], {"clientTurnId": delivery["clientTurnId"]})
+    question = gateway.questions.create({"question": "Continue the review?", "goalDeliveryId": delivery["deliveryId"]})["question"]
+    gateway.goal.block_agent_goal_delivery(delivery["deliveryId"], kind="question", reference=question["questionId"],
+        response={"questionId": question["questionId"]})
+
+    skipped = gateway.questions.answer(question["questionId"], {"selectedOptionId": "skip"})
+    assert skipped["runtimeContinuation"]["status"] == "settled_without_dispatch"
+    assert skipped["goalDelivery"]["delivery"]["status"] == "skipped"
+    assert skipped["goalDelivery"]["delivery"]["willRetry"] is False
+    assert not skipped["goalDelivery"]["delivery"].get("continuationPrompt")
 
 
 def test_question_answer_route_preserves_visual_verdict_and_attachment(tmp_path, monkeypatch):

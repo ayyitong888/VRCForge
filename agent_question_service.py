@@ -121,6 +121,7 @@ class GoalQuestionResolutionPort:
     """Resolve an answered Question into an already-owned Goal delivery."""
 
     resolve: Callable[[str, str], Mapping[str, object] | None]
+    skip: Callable[[str], Mapping[str, object] | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,7 +495,7 @@ class AgentQuestionService:
                         "Choose Continue or Stop for this runtime tool-loop Question.", status_code=400,
                     )
                 tool_loop_stop = tool_loop_pause and selected_option_id == "stop"
-                skip_without_dispatch = selected_option_id == "skip" and not goal_delivery_id
+                skip_without_dispatch = selected_option_id == "skip"
                 # The App submits custom replies and skips as answer-source IDs;
                 # only a declared choice ID must belong to the Question options.
                 if selected_option_id not in {"", "custom", "skip"} and selected_option is None:
@@ -555,12 +556,15 @@ class AgentQuestionService:
             self._runtime_resolution.accept_visual(deepcopy(answered))
         # A persisted answer can precede an interrupted Goal projection. Its
         # resolver is idempotent, so retries must finish that durable handoff.
-        if goal_delivery_id:
+        if goal_delivery_id and answered.get("selectedOptionId") == "skip":
+            if self._goal_resolution.skip is not None:
+                payload["goalDelivery"] = self._goal_resolution.skip(resolved_id)
+        elif goal_delivery_id:
             payload["goalDelivery"] = self._goal_resolution.resolve(
                 resolved_id,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
-        if not goal_delivery_id and answered.get("runtimeContinuationStatus") == "settled_without_dispatch":
+        if answered.get("runtimeContinuationStatus") == "settled_without_dispatch":
             payload["runtimeContinuation"] = {"ok": True, "status": "settled_without_dispatch", "questionId": resolved_id}
         elif (runtime_seed and not goal_delivery_id and not settle_only and not tool_loop_stop
                 and self._runtime_resolution is not None
@@ -630,10 +634,6 @@ class AgentQuestionService:
             self.record_runtime_continuation(question_id, "claimed", **identity)
             return True
 
-    def cancel_runtime_questions(self, *, session_id: str = "", turn_id: str = "", client_turn_id: str = "") -> list[dict[str, object]]:
-        """Persist cancellation and return trusted seeds for the stopped turn."""
-        cancelled_seeds: list[dict[str, object]] = []
-        with _locked(self._persistence.shared_state_lock):
     def cancel_queued_runtime_continuation(self, *, session_id: str, client_turn_id: str) -> bool:
         """Cancel an answer's own queued turn before it claims the runtime."""
         with _locked(self._persistence.shared_state_lock):
@@ -646,6 +646,10 @@ class AgentQuestionService:
                     return True
         return False
 
+    def cancel_runtime_questions(self, *, session_id: str = "", turn_id: str = "", client_turn_id: str = "") -> list[dict[str, object]]:
+        """Persist cancellation and return trusted seeds for the stopped turn."""
+        cancelled_seeds: list[dict[str, object]] = []
+        with _locked(self._persistence.shared_state_lock):
             for question_id, question in self._project(include_answered=True).items():
                 seed = question.get("runtimeTaskSeed")
                 if not isinstance(seed, Mapping) or not any((session_id, turn_id, client_turn_id)):
@@ -712,12 +716,12 @@ class AgentQuestionService:
         raw_seed = question.get("runtimeTaskSeed")
         seed = deepcopy(dict(raw_seed)) if isinstance(raw_seed, Mapping) else {}
         seed["_questionBlocking"] = question.get("blocking", True)
+        if answer := AgentQuestionService._sanitize_answer_for_model(str(question.get("answer") or "")):
+            seed["_authenticatedUserAnswer"] = answer
         attachments = question.get("attachments")
         if isinstance(attachments, list) and attachments:
             seed["_authenticatedUserAttachments"] = deepcopy(attachments)
         if question.get("runtimeQuestionFeedbackPending"):
-        if answer := AgentQuestionService._sanitize_answer_for_model(str(question.get("answer") or "")):
-            seed["_authenticatedUserAnswer"] = answer
             seed["_authenticatedQuestionFeedbackPending"] = True
         if question.get("questionFeedbackRevision") is not None:
             seed["_questionFeedbackRevision"] = question.get("questionFeedbackRevision")
@@ -741,11 +745,11 @@ class AgentQuestionService:
         project_root: str = "",
         session_id: str = "",
         include_answered: bool = False,
+        keep_active: bool = False,
     ) -> dict[str, object]:
         questions = list(self._project(include_answered=include_answered).values())
         if project_root:
             normalized_project_root = self._scope.normalize_path(project_root)
-        keep_active: bool = False,
             questions = [
                 item
                 for item in questions

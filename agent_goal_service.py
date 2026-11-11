@@ -522,12 +522,14 @@ class AgentGoalService:
         question_id: str,
         *,
         continuation_prompt: str = "",
+        skipped: bool = False,
     ) -> dict[str, Any] | None:
         safe_prompt = str(self._events.redact_persistence(continuation_prompt) or "")
         try:
             delivery = self._store.resolve_delivery_question(
                 question_id,
                 continuation_prompt=safe_prompt,
+                skipped=skipped,
             )
         except AgentGoalStoreError as exc:
             if exc.status_code == 404:

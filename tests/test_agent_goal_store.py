@@ -1117,6 +1117,98 @@ class AgentGoalStoreTests(unittest.TestCase):
         ]
         self.assertEqual(len(answered_events), 1)
 
+    def test_question_skip_closes_occurrence_without_retry_after_restart(self) -> None:
+        for interval in (0, 5):
+            with self.subTest(recurring_minutes=interval):
+                store = self.make_store()
+                goal, delivery = self.start_delivery(store, chat_id=f"chat-{interval}", recurring_minutes=interval)
+                blocked = store.block_delivery_for_question(delivery["deliveryId"], f"question-{interval}")
+                skipped_at = datetime.fromisoformat(blocked["questionReminderAt"])
+                if interval:
+                    self.assertEqual(store.emit_due_question_reminders(now=skipped_at)[0]["status"], "parked")
+
+                skipped = store.resolve_delivery_question(f"question-{interval}", skipped=True, now=skipped_at)
+                self.assertEqual(skipped["deliveryId"], delivery["deliveryId"])
+                self.assertEqual(skipped["status"], "skipped")
+                self.assertTrue(skipped["terminal"])
+                self.assertFalse(skipped["retryable"])
+                self.assertFalse(skipped["willRetry"])
+                self.assertFalse(skipped["noticeUnread"])
+                self.assertFalse(skipped.get("continuationPrompt"))
+                self.assertEqual(skipped["attempt"], delivery["attempt"])
+
+                reopened = self.make_store()
+                repeated = reopened.resolve_delivery_question(f"question-{interval}", skipped=True)
+                self.assertEqual(repeated["revision"], skipped["revision"])
+                self.assertEqual(reopened.emit_due_question_reminders(now=skipped_at + timedelta(days=1)), [])
+                current_goal = reopened.project_goals()[goal["goalId"]]
+                self.assertEqual(current_goal["wakeCount"], 1)
+                self.assertEqual(reopened.list_due(limit=10, now=skipped_at + timedelta(minutes=1)), [])
+                if interval:
+                    next_at = skipped_at + timedelta(minutes=interval)
+                    self.assertEqual(current_goal["wakeAt"], next_at.isoformat())
+                    _, next_delivery = reopened.wake(goal["goalId"], now=next_at + timedelta(minutes=1))
+                    self.assertNotEqual(next_delivery["deliveryId"], delivery["deliveryId"])
+                    self.assertEqual(next_delivery["attempt"], 1)
+                else:
+                    self.assertEqual(current_goal["wakeAt"], "")
+                    with self.assertRaisesRegex(AgentGoalStoreError, "not due"):
+                        reopened.wake(goal["goalId"], now=skipped_at + timedelta(days=1))
+
+    def test_question_skip_matches_second_wait_after_previous_answer(self) -> None:
+        store = self.make_store()
+        goal, delivery = self.start_delivery(store)
+        store.block_delivery_for_question(delivery["deliveryId"], "first-question")
+        store.resolve_delivery_question("first-question", continuation_prompt="Continue with the first answer.")
+        _, reclaimed = store.wake(goal["goalId"])
+        store.begin_delivery(reclaimed["deliveryId"], {"clientTurnId": reclaimed["clientTurnId"]})
+        store.block_delivery_for_question(reclaimed["deliveryId"], "second-question")
+
+        skipped = store.resolve_delivery_question("second-question", skipped=True)
+
+        self.assertEqual(skipped["questionId"], "second-question")
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertFalse(skipped.get("continuationPrompt"))
+        self.assertEqual(store.project_goals()[goal["goalId"]]["wakeAt"], "")
+
+    def test_question_skip_keeps_a_newer_schedule(self) -> None:
+        store = self.make_store()
+        goal, delivery = self.start_delivery(store, recurring_minutes=5)
+        store.block_delivery_for_question(delivery["deliveryId"], "previous-schedule-question")
+        next_at = datetime.now(timezone.utc) + timedelta(hours=1)
+        store.update(goal["goalId"], {"status": "active", "wakeAt": next_at.isoformat()})
+
+        skipped = store.resolve_delivery_question("previous-schedule-question", skipped=True)
+
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertEqual(store.project_goals()[goal["goalId"]]["wakeAt"], next_at.isoformat())
+
+    def test_question_skip_restores_an_already_advanced_legacy_schedule_once(self) -> None:
+        store = self.make_store()
+        goal, delivery = self.start_delivery(store, recurring_minutes=5)
+        blocked = store.block_delivery_for_question(delivery["deliveryId"], "legacy-question")
+        next_at = datetime.now(timezone.utc) + timedelta(hours=1)
+        store._append({
+            "event": "goal_delivery_blocked",
+            "goalId": goal["goalId"],
+            "deliveryId": delivery["deliveryId"],
+            "revision": blocked["revision"] + 1,
+            "scheduleAdvanced": True,
+            "nextWakeAt": next_at.isoformat(),
+        })
+        store.resolve_delivery_question("legacy-question", continuation_prompt="Continue after the first answer.")
+        _, reclaimed = store.wake(goal["goalId"])
+        store.begin_delivery(reclaimed["deliveryId"], {"clientTurnId": reclaimed["clientTurnId"]})
+        store.block_delivery_for_question(reclaimed["deliveryId"], "legacy-second-question")
+        self.assertEqual(store.project_goals()[goal["goalId"]]["wakeAt"], delivery["scheduledFor"])
+
+        store.resolve_delivery_question("legacy-second-question", skipped=True)
+
+        reopened = self.make_store()
+        current_goal = reopened.project_goals()[goal["goalId"]]
+        self.assertEqual(current_goal["wakeAt"], next_at.isoformat())
+        self.assertEqual(current_goal["wakeCount"], 1)
+
     def test_recurring_blocked_goal_remains_single_flight_until_decision(self) -> None:
         store = self.make_store()
         goal, delivery = self.start_delivery(store, recurring_minutes=5)
