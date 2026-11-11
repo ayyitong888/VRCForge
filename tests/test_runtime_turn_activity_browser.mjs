@@ -6,10 +6,31 @@ import { build } from "esbuild";
 
 const replay = process.env.VRCFORGE_RUNTIME_ACTIVITY_REPLAY
   ? JSON.parse(await readFile(process.env.VRCFORGE_RUNTIME_ACTIVITY_REPLAY, "utf8")) : undefined;
+const questionReplay = process.env.VRCFORGE_QUESTION_CONTINUATION_REPLAY
+  ? JSON.parse(await readFile(process.env.VRCFORGE_QUESTION_CONTINUATION_REPLAY, "utf8")) : undefined;
 const run = replay?.run || { sessionId: "external-session", clientTurnId: "external-cid", turnId: "backend-turn", status: "running", startedAt: "2026-10-23T12:00:00Z" };
 const events = replay?.events || Array.from({ length: 450 }, (_, sequence) => ({ id: `accepted-${sequence}`, sequence,
   timestamp: new Date(Date.parse("2026-10-23T12:00:00Z") + sequence * 1000).toISOString(), kind: "assistant",
   payload: { phase: "commentary", summary: `Accepted public dialogue ${sequence}` } }));
+const captureIds = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
+const questionRun = { sessionId: "question-session", clientTurnId: "turn:question:first", turnId: "question-turn", status: "blocked" };
+const questionEvents = Array.from({ length: 410 }, (_, sequence) => {
+  const event = { id: `question-event-${sequence}`, sequence, timestamp: new Date(1792972800000 + sequence * 1000).toISOString() };
+  if (sequence === 402 || sequence === 404) {
+    const captureId = captureIds[sequence === 402 ? 0 : 1];
+    return { ...event, kind: "tool_result", payload: { captures: [{ preview: {
+      schema: "vrcforge.scene_capture_preview.v1", mimeType: "image/png", captureId,
+      resourceUri: `vrcforge://scene-capture-preview/${captureId}?context=runtime%3Aquestion-session&revision=1&store=11111111111111111111111111111111`,
+    } }] } };
+  }
+  return { ...event, kind: "assistant", payload: { phase: sequence === 409 ? "final_answer" : "commentary" } };
+});
+const questionCase = questionReplay || {
+  run: questionRun, events: questionEvents,
+  terminal: { ...questionRun, continuationSource: "question_answered", plan: { nextStep: "needs_user_action" }, timeline: questionEvents.slice(0, 256) },
+  question: { sessionId: questionRun.sessionId, originClientTurnId: questionRun.clientTurnId },
+  lastCaptureIds: captureIds,
+};
 assert.ok(events.length > 2, "a history/live overlap needs multiple original events");
 const pageSize = Math.min(200, Math.ceil(events.length / 2));
 const bundle = await build({
@@ -18,6 +39,8 @@ import React, { useCallback, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useRuntimeTurnActivity } from './src/hooks/use-runtime-turn-activity';
 import { useRuntimeTurnContinuationDelivery } from './src/hooks/use-runtime-turn-continuation';
+import { capturePreviewsForQuestion } from './src/lib/chat-timeline-presentation';
+window.questionCaptures = question => capturePreviewsForQuestion(question, window.visibleChats[0].items);
 const identity = ${JSON.stringify(run)};
 const initial = { id: 'owner', sessionId: identity.sessionId, projectPath: '', title: 'Visible chat', items: [{ id: 'user', type: 'user', text: 'Continue', clientTurnId: identity.clientTurnId }] };
 function Harness() {
@@ -42,7 +65,7 @@ function Harness() {
   window.setEndpoint = setEndpoint;
   window.resetChats = next => { current.current = next; window.visibleChats = next; setChats(next); };
   window.visibleChats = chats;
-  return <div id='mounted' />;
+  return <div id='mounted' data-session={chats.at(-1)?.sessionId} />;
 }
 window.requests = [];
 window.pendingPages = [];
@@ -126,9 +149,35 @@ try {
     'exact terminal receipt removes a restored stale activity even after observer marked the turn finished');
   assert.ok(await page.evaluate(() => window.visibleChats[0].items.find(i => i.type === 'agent').timeline.some(e => e.id === 'late-progress')),
     'settlement transfers accepted stream history into the existing receipt');
+  {
+    const { run: origin, events: originalEvents, terminal: oldTerminal, question, lastCaptureIds } = questionCase;
+    await page.evaluate(({ origin, oldTerminal }) => {
+      const timeline = oldTerminal.timeline.map(event => {
+        const { captures, ...payload } = event.payload;
+        return { ...event, payload };
+      });
+      window.resetChats([{ id: 'original-question-owner', sessionId: origin.sessionId, projectPath: origin.projectRoot,
+        items: [{ id: 'saved-question-continuation', type: 'agent', response: { ...oldTerminal, timeline }, timeline }] }]);
+      window.replaceRuns([origin]);
+    }, { origin, oldTerminal });
+    for (let cursor = 0; cursor < originalEvents.length; cursor += 200) {
+      const portion = originalEvents.slice(cursor, cursor + 200);
+      await page.waitForFunction(() => window.pendingPages.length === 1);
+      await page.evaluate(({ origin, portion, hasMore }) => window.pendingPages.shift()({ ok: true, run: origin,
+        events: portion, nextSequence: portion.at(-1).sequence + 1, hasMore }),
+      { origin, portion, hasMore: cursor + 200 < originalEvents.length });
+    }
+    await page.waitForFunction(({ question, lastCaptureIds }) => lastCaptureIds.every(id =>
+      window.questionCaptures(question).some(capture => capture.resourceUri.includes(id))), { question, lastCaptureIds });
+    assert.equal(await page.evaluate(() => window.visibleChats[0].items.some(i => i.type === 'streaming')), false,
+      'repairing saved question images never starts another turn');
+  }
   // A reused session with two chats cannot be guessed; an exact CID owns one.
   await page.evaluate(() => {
     window.resetChats([{ id: 'wrong', sessionId: 'other-session', items: [] }, { id: 'owner', sessionId: window.identity.sessionId, items: [] }]);
+  });
+  await page.waitForFunction(() => document.querySelector('#mounted')?.dataset.session === window.identity.sessionId);
+  await page.evaluate(() => {
     window.delta({ type: 'agentRuntimeDelta', ...window.identity, clientTurnId: 'second-cid', turnId: 'second-turn', activity: true });
   });
   await page.waitForFunction(() => window.requests.some(r => r.clientTurnId === 'second-cid'));
@@ -139,6 +188,7 @@ try {
   await page.evaluate(() => window.root.unmount());
   assert.deepEqual(errors, []);
   console.log(`runtime activity browser replay: passed (${events.length} ${replay ? "original ledger" : "fixture"} events; pagination/live/terminal overlap, no duplicate stream, exact ownership, abort)`);
+  console.log(`question continuation: restored both late screenshots from ${questionCase.events.length} ${questionReplay ? "original ledger" : "fixture"} events`);
 } finally {
   await browser?.close();
   await new Promise(resolve => server.close(resolve));

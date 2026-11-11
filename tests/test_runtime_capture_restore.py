@@ -2,6 +2,7 @@ import copy
 import json
 import os
 from pathlib import Path
+from threading import RLock
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +14,7 @@ from mcp_resource_registry import McpResourceRegistry
 
 def ledger(path):
     return AgentRuntimeRunLedger(SimpleNamespace(log_path=lambda: path, redact=lambda value: value,
-        error_factory=lambda message, status: ValueError(message)))
+        error_factory=lambda message, status: ValueError(message), shared_state_lock=RLock()))
 
 
 def fixture():
@@ -58,6 +59,16 @@ def test_old_terminal_capture_projection_preserves_occurrences_and_ownership(tmp
         foreign = copy.deepcopy(source)
         foreign['continuationEvent'][field] = 'foreign'
         assert all('captures' not in event['payload'] for event in _terminal_continuation(foreign)['timeline'])
+
+
+def test_sparse_terminal_does_not_attach_omitted_capture_to_reused_action():
+    source = fixture()
+    late_result = source["continuationEvent"]["timeline"][1]
+    late_result["sequence"] = 404
+    source["steps"][1]["result"] = {}
+    source["continuationEvent"]["timeline"] = [{"sequence": 0, "kind": "phase"}, late_result]
+
+    assert "captures" not in _terminal_continuation(source)["timeline"][1]["payload"]
 
 
 def test_original_persisted_capture_restore_and_image_authorization(monkeypatch):

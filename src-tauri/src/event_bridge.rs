@@ -323,7 +323,7 @@ fn sanitize_runtime_timeline_event(value: &serde_json::Value) -> Option<serde_js
     let mut payload = serde_json::Map::new();
     for (key, limit) in [
         ("label", 160usize),
-        ("summary", 1000usize),
+        ("summary", if kind == "assistant" { 32_000 } else { 1_000 }),
         ("status", 80usize),
         ("tool", 160usize),
         ("actionId", 96usize),
@@ -351,12 +351,52 @@ fn sanitize_runtime_timeline_event(value: &serde_json::Value) -> Option<serde_js
             serde_json::Value::String(subagent_status),
         );
     }
+    if kind == "tool_result" {
+        if let Some(captures) = source
+            .and_then(|item| item.get("captures"))
+            .and_then(|item| item.as_array())
+        {
+            let previews: Vec<_> = captures.iter().take(32).filter_map(sanitize_capture_preview).collect();
+            if !previews.is_empty() {
+                payload.insert("captures".to_string(), serde_json::Value::Array(previews));
+            }
+        }
+    }
     Some(serde_json::json!({
         "id": id,
         "sequence": sequence,
         "timestamp": timestamp,
         "kind": kind,
         "payload": payload,
+    }))
+}
+
+fn sanitize_capture_preview(capture: &serde_json::Value) -> Option<serde_json::Value> {
+    let preview = capture.get("preview")?;
+    let schema = preview.get("schema")?.as_str()?;
+    let mime_type = preview.get("mimeType")?.as_str()?;
+    let capture_id = preview.get("captureId")?.as_str()?;
+    let uri = preview.get("resourceUri")?.as_str()?;
+    if schema != "vrcforge.scene_capture_preview.v1"
+        || mime_type != "image/png"
+        || capture_id.len() != 36
+        || !capture_id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            14 => (b'1'..=b'5').contains(&byte),
+            19 => matches!(byte.to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b'),
+            _ => byte.is_ascii_hexdigit(),
+        })
+        || uri.len() > 2048
+        || uri.strip_prefix("vrcforge://scene-capture-preview/")?
+            .split(['?', '#']).next()? != capture_id
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "angle": bounded_event_text(capture.get("angle"), 80),
+        "preview": {
+            "schema": schema, "mimeType": mime_type, "captureId": capture_id, "resourceUri": uri
+        }
     }))
 }
 
@@ -678,6 +718,17 @@ fn sanitize_runtime_turn_event(payload: &serde_json::Value) -> Option<serde_json
     }
     if let Some(reason) = bounded_safe_identifier(plan.and_then(|item| item.get("reason"))) {
         result["plan"]["reason"] = serde_json::Value::String(reason);
+    }
+    if let Some(gate) = plan.and_then(|item| item.get("completionGate")) {
+        let mut projected_gate = serde_json::Map::new();
+        for key in ["status", "reason"] {
+            if let Some(identifier) = bounded_safe_identifier(gate.get(key)) {
+                projected_gate.insert(key.to_string(), serde_json::Value::String(identifier));
+            }
+        }
+        if !projected_gate.is_empty() {
+            result["plan"]["completionGate"] = serde_json::Value::Object(projected_gate);
+        }
     }
     if let Some(public_messages) = sanitize_public_messages(
         plan.and_then(|item| item.get("publicMessages")),
@@ -1381,6 +1432,60 @@ mod tests {
             .get("arguments")
             .is_none());
         assert!(sanitized.get("payload").is_none());
+    }
+
+    #[test]
+    fn question_continuation_bridge_preserves_capture_references_and_waiting_gate() {
+        let capture_id = "00000000-0000-4000-8000-000000000402";
+        let preview = serde_json::json!({
+            "schema": "vrcforge.scene_capture_preview.v1",
+            "mimeType": "image/png",
+            "captureId": capture_id,
+            "resourceUri": format!("vrcforge://scene-capture-preview/{capture_id}?revision=1"),
+        });
+        let mut private_preview = preview.clone();
+        private_preview["pngBase64"] = serde_json::json!("do not expose");
+        let mut mismatched = preview.clone();
+        mismatched["resourceUri"] = serde_json::json!("https://example.com/image.png");
+        let capture_event = serde_json::json!({
+            "id": "capture-event", "sequence": 402,
+            "timestamp": "2026-11-11T11:12:13Z", "kind": "tool_result",
+            "payload": {"captures": [
+                {"angle": "front", "preview": private_preview, "imagePath": "private.png"},
+                {"angle": "wrong", "preview": mismatched}
+            ]}
+        });
+        let projected = sanitize_backend_event(serde_json::json!({
+            "type": "agentRuntimeDelta", "payload": {"timelineEvent": capture_event}
+        })).unwrap();
+        let expected = serde_json::json!([{"angle": "front", "preview": preview}]);
+        assert_eq!(projected["timelineEvent"]["payload"]["captures"], expected);
+
+        let final_answer = "a".repeat(1100);
+        let terminal = sanitize_backend_event(serde_json::json!({
+            "type": "agentRuntimeTurn",
+            "payload": {
+                "schema": "vrcforge.runtime_turn_event.v1",
+                "continuationSource": "question_answered",
+                "sessionId": "owner-session", "turnId": "terminal-turn",
+                "clientTurnId": "parent:question:id",
+                "plan": {"completionGate": {
+                    "status": "blocked", "reason": "question_pending", "private": "do not expose"
+                }},
+                "timeline": [capture_event, {
+                    "id": "final-event", "sequence": 409,
+                    "timestamp": "2026-11-11T11:12:15Z", "kind": "assistant",
+                    "payload": {"phase": "final_answer", "summary": final_answer}
+                }]
+            }
+        })).unwrap();
+        let terminal = &terminal["payload"];
+        assert_eq!(terminal["clientTurnId"], "parent:question:id");
+        assert_eq!(terminal["timeline"][0]["payload"]["captures"], expected);
+        assert_eq!(terminal["timeline"][1]["payload"]["summary"], final_answer);
+        assert_eq!(terminal["plan"]["completionGate"], serde_json::json!({
+            "status": "blocked", "reason": "question_pending"
+        }));
     }
 
     #[test]

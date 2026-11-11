@@ -409,8 +409,7 @@ export function ChatWorkspace({
     if (!question) return undefined;
     const clientTurnId = question.originClientTurnId || "";
     return questionOrigins.get(clientTurnId)
-      || questionOrigins.get(question.originTurnId || "")
-      || questionOrigins.get(clientTurnId.split(":question:", 1)[0]);
+      || questionOrigins.get(question.originTurnId || "");
   };
   const pendingQuestionsByOrigin = new Map<ConversationItem | undefined, AgentQuestion[]>();
   for (const question of pendingQuestionPrompts) {
@@ -491,7 +490,7 @@ export function ChatWorkspace({
   const questionResourceImageContext = (question: AgentQuestion) => {
     const capturePreviews = questionCapturePreviews(question);
     if (!capturePreviews.length || !resourceImageEndpoint || !resourceChatId || !resourceProjectPath) return undefined;
-    const ownerTurn = String(question.originClientTurnId || "").split(":question:", 1)[0] || "";
+    const ownerTurn = String(question.originClientTurnId || "").trim();
     return {
       endpoint: resourceImageEndpoint,
       chatId: resourceChatId,

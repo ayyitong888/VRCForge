@@ -334,3 +334,50 @@ def test_runtime_turn_projection_ignores_container_retry_decision_without_raisin
 
     assert projected is not None
     assert "plannerFailure" not in projected["plan"]
+
+
+
+def test_long_question_continuation_retains_captures_and_final_in_order() -> None:
+    timeline = [
+        {
+            "id": f"event-{sequence}",
+            "sequence": sequence,
+            "timestamp": "2026-11-11T11:12:13Z",
+            "kind": "tool_result",
+            "payload": {"tool": "scan", "privateResult": "do not expose"},
+        }
+        for sequence in range(410)
+    ]
+    for sequence, angle in ((101, "back"), (402, "front"), (404, "oblique")):
+        capture_id = f"00000000-0000-4000-8000-{sequence:012d}"
+        timeline[sequence]["payload"]["captures"] = [{
+            "angle": angle,
+            "imagePath": "private.png",
+            "preview": {
+                "schema": "vrcforge.scene_capture_preview.v1",
+                "mimeType": "image/png",
+                "captureId": capture_id,
+                "resourceUri": f"vrcforge://scene-capture-preview/{capture_id}?revision=1",
+            },
+        }]
+    timeline[409].update(kind="assistant", payload={"phase": "final_answer", "summary": "Review both images."})
+    payload = {
+        "continuationSource": "question_answered",
+        "sessionId": "session",
+        "turnId": "turn",
+        "clientTurnId": "client:question:original",
+        "plan": {"completionGate": {
+            "status": "blocked", "reason": "question_pending", "private": "do not expose",
+        }},
+        "timeline": timeline,
+    }
+
+    projected = project_runtime_turn_event(payload)
+    events = projected["timeline"]
+    assert len(events) == 256
+    assert [event["sequence"] for event in events] == sorted(event["sequence"] for event in events)
+    assert [event["sequence"] for event in events if event["payload"].get("captures")] == [101, 402, 404]
+    assert events[-1]["payload"] == {"phase": "final_answer", "summary": "Review both images."}
+    assert projected["plan"]["completionGate"] == {"status": "blocked", "reason": "question_pending"}
+    assert "privateResult" not in repr(events) and "imagePath" not in repr(events)
+    assert project_runtime_turn_event(projected) == projected

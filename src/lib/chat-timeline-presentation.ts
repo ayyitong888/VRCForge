@@ -1,5 +1,6 @@
 import type { AgentQuestion, AgentRuntimeResponse } from "./api/types";
 import type { ChatTimelineEvent, ConversationItem } from "./chat-types";
+import { normalizeTimelineCaptures } from "./chat-streaming";
 
 export type TimelineBatchKind = "command" | "tool" | "file_edit" | "subagent" | "process";
 
@@ -58,8 +59,7 @@ export function capturePreviewsForQuestion(
   question: Pick<AgentQuestion, "originClientTurnId" | "sessionId">,
   items: readonly ConversationItem[] = [],
 ): QuestionCapturePreview[] {
-  const origin = String(question.originClientTurnId || "").trim();
-  const ownerTurn = origin.split(":question:", 1)[0] || origin;
+  const ownerTurn = String(question.originClientTurnId || "").trim();
   if (!ownerTurn) return [];
   const questionSession = String(question.sessionId || "").trim();
   const seen = new Set<string>();
@@ -89,15 +89,15 @@ export function capturePreviewsForQuestion(
       }
     }
     for (const capture of candidates) {
-        const resourceUri = String(capture.preview?.resourceUri || "").trim();
-        if (!resourceUri || seen.has(resourceUri)) continue;
-        let captureSession = sessionId;
-        try {
-          captureSession = new URL(resourceUri).searchParams.get("context")?.replace(/^runtime:/, "") || captureSession;
-        } catch { /* Invalid resource URIs are ignored by the existing renderer. */ }
-        if (!captureSession) continue;
-        seen.add(resourceUri);
-        previews.push({ resourceUri, label: String(capture.angle || "").trim(), sessionId: captureSession });
+      const resourceUri = String(capture.preview?.resourceUri || "").trim();
+      if (!resourceUri || seen.has(resourceUri)) continue;
+      let captureSession = sessionId;
+      try {
+        captureSession = new URL(resourceUri).searchParams.get("context")?.replace(/^runtime:/, "") || captureSession;
+      } catch { /* Invalid resource URIs are ignored by the existing renderer. */ }
+      if (!captureSession || (questionSession && questionSession !== captureSession)) continue;
+      seen.add(resourceUri);
+      previews.push({ resourceUri, label: String(capture.angle || "").trim(), sessionId: captureSession });
     }
   }
   return previews;
@@ -515,6 +515,7 @@ export function materializeRuntimeTimeline(response: AgentRuntimeResponse, fallb
       ? raw.kind as ChatTimelineEvent["kind"]
       : "assistant";
     const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+    const captures = kind === "tool_result" ? normalizeTimelineCaptures(payload.captures) : [];
     // Final Markdown bodies have a separate bound from compact tool summaries.
     // Keep aligned with the gateway's assistant timeline event projection.
     const summaryLimit = kind === "assistant" ? 32_000 : 1000;
@@ -541,12 +542,7 @@ export function materializeRuntimeTimeline(response: AgentRuntimeResponse, fallb
         ...(typeof payload.phase === "string" ? { phase: payload.phase.slice(0, 80) } : {}),
         ...(typeof payload.messageId === "string" && payload.messageId ? { messageId: payload.messageId.slice(0, 180) } : {}),
         ...(typeof payload.actionId === "string" ? { actionId: payload.actionId.slice(0, 96) } : {}),
-        ...(Array.isArray(payload.captures) ? { captures: payload.captures.slice(0, 32).filter(capture =>
-          capture?.preview?.schema === "vrcforge.scene_capture_preview.v1" && capture.preview.mimeType === "image/png"
-          && typeof capture.preview.resourceUri === "string" && capture.preview.resourceUri.length <= 2048).map(capture => ({
-            angle: String(capture.angle || "").slice(0, 80), preview: { schema: capture.preview.schema, mimeType: capture.preview.mimeType,
-              captureId: String(capture.preview.captureId || ""), resourceUri: capture.preview.resourceUri },
-          })) } : {}),
+        ...(captures.length ? { captures } : {}),
         ...(payload.subagentStatus ? { subagentStatus: payload.subagentStatus } : {}),
       },
     } satisfies ChatTimelineEvent;

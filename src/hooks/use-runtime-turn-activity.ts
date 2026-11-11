@@ -85,6 +85,15 @@ function hasAuthoritativeReply(chat: ChatThread, identity: Identity): boolean {
     && responseMatchesIdentity(item.response, identity) && !needsRuntimeReceipt(item.response));
 }
 
+function needsQuestionTimelineReadback(chat: ChatThread, identity: Identity): boolean {
+  return chat.items.some((item) => item.type === "agent"
+    && responseMatchesIdentity(item.response, identity)
+    && item.response.continuationSource === "question_answered"
+    && item.response.plan.nextStep === "needs_user_action"
+    && !(item.timeline || item.response.timeline || []).some((event) =>
+      event.kind === "assistant" && event.payload?.phase === "final_answer"));
+}
+
 /** Exact durable receipts own completion, even after a storage merge restores a live row. */
 export function settleRuntimeTurnActivity(chat: ChatThread, identity: Identity): ChatThread {
   if (chat.sessionId !== identity.sessionId || !hasAuthoritativeReply(chat, identity)) return chat;
@@ -231,7 +240,7 @@ export function useRuntimeTurnActivity(params: Params) {
     if (!activity) {
       // A persisted real terminal receipt is already authoritative after a
       // reload. Existing in-flight history readers still finish their catch-up.
-      if (hasAuthoritativeReply(owner, identity)) {
+      if (hasAuthoritativeReply(owner, identity) && !needsQuestionTimelineReadback(owner, identity)) {
         finished.current.add(key);
         return;
       }

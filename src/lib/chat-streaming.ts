@@ -67,6 +67,20 @@ function boundedTimelineText(value: unknown, limit: number): string | undefined 
   return bounded || undefined;
 }
 
+export function normalizeTimelineCaptures(value: unknown): NonNullable<ChatTimelineEvent["payload"]["captures"]> {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 32).flatMap((capture) => {
+    const preview = capture?.preview;
+    if (preview?.schema !== "vrcforge.scene_capture_preview.v1" || preview.mimeType !== "image/png"
+      || typeof preview.resourceUri !== "string" || preview.resourceUri.length > 2048) return [];
+    return [{
+      angle: String(capture.angle || "").slice(0, 80),
+      preview: { schema: preview.schema, mimeType: preview.mimeType,
+        captureId: String(preview.captureId || ""), resourceUri: preview.resourceUri },
+    }];
+  });
+}
+
 /** Accept only the server's bounded, non-CoT timeline projection. */
 export function normalizeAgentRuntimeTimelineEvent(value: unknown): ChatTimelineEvent | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -81,6 +95,7 @@ export function normalizeAgentRuntimeTimelineEvent(value: unknown): ChatTimeline
     ? source.payload as Record<string, unknown>
     : {};
   const subagentStatus = boundedTimelineText(rawPayload.subagentStatus, 40);
+  const captures = kind === "tool_result" ? normalizeTimelineCaptures(rawPayload.captures) : [];
   return {
     id,
     sequence,
@@ -95,6 +110,7 @@ export function normalizeAgentRuntimeTimelineEvent(value: unknown): ChatTimeline
       ...(boundedTimelineText(rawPayload.phase, 80) ? { phase: boundedTimelineText(rawPayload.phase, 80) } : {}),
       ...(boundedTimelineText(rawPayload.messageId, 180) ? { messageId: boundedTimelineText(rawPayload.messageId, 180) } : {}),
       ...(boundedTimelineText(rawPayload.actionId, 96) ? { actionId: boundedTimelineText(rawPayload.actionId, 96) } : {}),
+      ...(captures.length ? { captures } : {}),
       ...(subagentStatus && SUBAGENT_STATUSES.has(subagentStatus as "created" | "started" | "completed" | "failed")
         ? { subagentStatus: subagentStatus as "created" | "started" | "completed" | "failed" }
         : {}),

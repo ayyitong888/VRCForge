@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from collections.abc import Mapping
 import re
 from typing import Any
 
+from chat_resource_image import public_capture_previews
 
+
+_TIMELINE_EVENT_LIMIT = 256
 RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1"
 RUNTIME_CONTINUATION_SOURCES = frozenset(
     {"approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed", "foreground_interrupted"}
@@ -177,8 +181,15 @@ def _sequence(value: Any, fallback: int) -> int:
 
 def capture_timeline_from_steps(timeline: list, steps: list) -> list:
     """Project capture metadata at its original result occurrence, never full results."""
-    from collections import defaultdict, deque
-    from chat_resource_image import public_capture_previews
+    # Action IDs can repeat. An event window with gaps cannot be aligned with
+    # the legacy step list by occurrence. These events already carry their captures.
+    if timeline:
+        first = _sequence(timeline[0].get("sequence"), 0) if isinstance(timeline[0], Mapping) else 0
+        if first > 1 or any(
+            isinstance(item, Mapping) and _sequence(item.get("sequence"), first + index) != first + index
+            for index, item in enumerate(timeline)
+        ):
+            return timeline
 
     results = defaultdict(deque)
     for step in steps:
@@ -198,6 +209,31 @@ def capture_timeline_from_steps(timeline: list, steps: list) -> list:
             item = {**item, "payload": {**payload, "captures": captures}}
         output.append(item)
     return output
+
+
+def _terminal_timeline_indices(timeline: list) -> list[int]:
+    if len(timeline) <= _TIMELINE_EVENT_LIMIT:
+        return list(range(len(timeline)))
+
+    ordinary = []
+    important = deque(maxlen=_TIMELINE_EVENT_LIMIT)
+    last_final = None
+    for index, item in enumerate(timeline):
+        if not isinstance(item, Mapping):
+            continue
+        kind = item.get("kind")
+        payload = item.get("payload")
+        if kind == "assistant" and isinstance(payload, Mapping) and payload.get("phase") == "final_answer":
+            important.append(index)
+            last_final = index
+        elif kind == "tool_result" and public_capture_previews(payload):
+            important.append(index)
+        elif len(ordinary) < _TIMELINE_EVENT_LIMIT:
+            ordinary.append(index)
+    if last_final is not None and last_final < important[0]:
+        important.popleft()
+        important.appendleft(last_final)
+    return sorted([*important, *ordinary[:_TIMELINE_EVENT_LIMIT - len(important)]])
 
 
 def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -269,13 +305,22 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
         result["plan"]["reason"] = plan["reason"]
     if planner_failure is not None:
         result["plan"]["plannerFailure"] = planner_failure
+    completion_gate = plan.get("completionGate")
+    if isinstance(completion_gate, Mapping):
+        gate = {
+            key: value for key in ("status", "reason")
+            if (value := _planner_failure_identifier(completion_gate.get(key))) is not None
+        }
+        if gate:
+            result["plan"]["completionGate"] = gate
     context_usage = _project_context_usage(payload.get("contextUsage"))
     if context_usage is not None:
         result["contextUsage"] = context_usage
     timeline = payload.get("timeline")
     if isinstance(timeline, list):
         projected_timeline = []
-        for index, raw in enumerate(timeline[:256]):
+        for index in _terminal_timeline_indices(timeline):
+            raw = timeline[index]
             if not isinstance(raw, Mapping):
                 continue
             item = {
@@ -292,7 +337,6 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
                     if raw_payload.get(key) is not None
                 }
             if item["kind"] == "tool_result":
-                from chat_resource_image import public_capture_previews
                 captures = public_capture_previews(raw.get("payload"))
                 if captures:
                     item["payload"]["captures"] = captures

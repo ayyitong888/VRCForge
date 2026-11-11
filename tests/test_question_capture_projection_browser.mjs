@@ -35,11 +35,16 @@ const agent = (clientTurnId, sessionId, timeline) => ({
 });
 
 const current = { questionId: "new", originClientTurnId: "turn-new:question:q1", sessionId: "session-a" };
-assert.deepEqual(capturePreviewsForQuestion(current, [agent("turn-new", "session-a", [capture(uri, "front")])]), [
+assert.deepEqual(capturePreviewsForQuestion(current, [
+  agent("turn-new", "session-a", [capture(uri, "previous")]),
+  agent(current.originClientTurnId, "session-a", [capture(uri, "front")]),
+]), [
   { resourceUri: uri, label: "front", sessionId: "session-a" },
 ], "new visual checkpoints reuse their own approved capture resource");
 assert.deepEqual(capturePreviewsForQuestion(current, [agent("turn-other", "session-a", [capture(otherUri, "back")])]), [], "unrelated turns never provide a latest-image fallback");
-assert.deepEqual(capturePreviewsForQuestion({ questionId: "none", originClientTurnId: "turn-new:question:q2", sessionId: "session-a" }, [agent("turn-new", "session-a", [])]), [], "questions without a capture remain text-only");
-assert.deepEqual(capturePreviewsForQuestion({ questionId: "cross", originClientTurnId: "turn-new:question:q3", sessionId: "session-b" }, [agent("turn-new", "session-a", [capture(uri, "front")])]), [], "same client turn in another session is rejected");
+assert.deepEqual(capturePreviewsForQuestion(current, [agent("turn-new", "session-a", [capture(uri, "front")])]), [], "a continuation never borrows the parent's screenshots");
+assert.deepEqual(capturePreviewsForQuestion(current, [agent(current.originClientTurnId, "session-a", [])]), [], "questions without a capture remain text-only");
+assert.deepEqual(capturePreviewsForQuestion({ ...current, sessionId: "session-b" }, [agent(current.originClientTurnId, "session-a", [capture(uri, "front")])]), [], "same client turn in another session is rejected");
+assert.deepEqual(capturePreviewsForQuestion(current, [agent(current.originClientTurnId, "session-a", [capture(otherUri, "front")])]), [], "foreign capture context is rejected");
 await fs.rm(temp, { recursive: true, force: true });
 console.log("question capture projection: new/old turn binding, no-image fallback, and cross-session isolation passed");
