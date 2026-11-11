@@ -1986,7 +1986,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertIn("Multiple avatars", payload["plan"].get("summary", ""))
 
-    def test_auto_shell_denial_ends_turn_with_reason_before_replanning(self) -> None:
+    def test_auto_shell_denial_waits_for_manual_approval_before_replanning(self) -> None:
         from approval_auto_review import ShellAutoReview
 
         gateway = self.gateway
@@ -2015,16 +2015,12 @@ class AgentLoopP0Tests(unittest.TestCase):
         assert planner.call_count == 1
         assert reviewer.call_count == 1
         launch.assert_not_called()
-        assert result["plan"]["nextStep"] == "tool_failed"
-        assert result["plan"]["continueLoop"] is False
-        assert result["plan"]["error"]["code"] == "shell_auto_review_denied"
-        assert reason in result["plan"]["reply"]
-        assert any(
-            event.get("kind") == "assistant"
-            and event.get("payload", {}).get("phase") == "final_answer"
-            and reason in event["payload"].get("summary", "")
-            for event in result["timeline"]
-        )
+        assert result["approval_id"]
+        assert result["shell"]["status"] == "pending_approval"
+        approval = gateway.approval_transactions.list_approvals()[0]
+        assert approval["id"] == result["approval_id"]
+        assert approval["status"] == "pending"
+        assert reason in approval["reason"]
 
     def test_unplanned_message_provider_failure_is_typed_not_fake_disconnect(self) -> None:
         gateway = self.gateway

@@ -1234,6 +1234,7 @@ def test_internal_auto_shell_uses_review_before_host_process(tmp_path: Path, dec
 
     def review_request(prompt):
         assert not process_owner.processes
+        assert gateway.approval_transactions.list_approvals() == []
         reviews.append(json.loads(prompt.splitlines()[-1]))
         if decision == "unavailable":
             raise TimeoutError("provider did not reply")
@@ -1257,14 +1258,24 @@ def test_internal_auto_shell_uses_review_before_host_process(tmp_path: Path, dec
     assert reviews[0]["userObjective"] == f"Read reference.txt under {cwd}"
     if decision == "allow":
         assert result["status"] == "executed" and len(process_owner.processes) == 1
+        assert gateway.approval_transactions.list_approvals() == []
+    elif decision == "deny":
+        assert result["status"] == "pending_approval" and not process_owner.processes
+        approval = gateway.approval_transactions.list_approvals()[0]
+        assert approval["id"] == result["approval_id"]
+        assert approval["status"] == "pending"
+        assert "Target is outside the requested directory." in approval["reason"]
+        assert gateway.approval_transactions.approve(approval["id"])["ok"]
+        applied = gateway.shell.execute_approved({"approval_id": approval["id"]})
+        assert applied["status"] == "applied", applied
+        assert len(process_owner.processes) == 1
     else:
         assert result["status"] == "rejected" and not process_owner.processes
+        assert gateway.approval_transactions.list_approvals() == []
         assert result["mutationStarted"] is False
-        code = "shell_auto_review_denied" if decision == "deny" else "shell_auto_review_unavailable"
-        reason = "Target is outside the requested directory." if decision == "deny" else "review could not complete"
         outcome = normalize_agent_tool_result(result, fallback_summary="Shell failed", write=False)
-        assert outcome["error"]["code"] == code
-        assert reason in outcome["summary"]
+        assert outcome["error"]["code"] == "shell_auto_review_unavailable"
+        assert "review could not complete" in outcome["summary"]
         assert "private provider exception" not in outcome["summary"]
 
 

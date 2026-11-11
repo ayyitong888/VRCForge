@@ -54,7 +54,7 @@ def test_dashboard_auto_review_fails_closed_when_reviewer_errors(monkeypatch) ->
     monkeypatch.setattr(dashboard_server._RUNTIME_PLANNER_MODEL, "review", fail_review)
     assert dashboard_server._review_auto_approval(
         {"targetTool": "vrcforge_write_file", "arguments": {}}
-    ) == "manual"
+    ) == "unavailable"
 
 
 def test_general_manual_approvals_offer_once_reject_and_remembered_category() -> None:

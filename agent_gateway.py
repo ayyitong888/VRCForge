@@ -1463,7 +1463,8 @@ class AgentGateway:
                             "target_tool": name,
                             "arguments": arguments,
                             "agent_name": agent_name,
-                        }
+                        },
+                        internal_runtime=True,
                     )
                 ),
             )

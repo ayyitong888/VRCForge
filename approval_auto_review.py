@@ -108,7 +108,7 @@ def review_auto_approval(
     }
     payload = _bounded_review_payload(evidence)
     if payload is None:
-        return "manual"
+        return "unavailable"
     prompt = (
         "You are an independent approval reviewer. No external capabilities, prior conversation, or execution authority are available. "
         "Return JSON only, exactly {\"decision\":\"allow_auto\"} or {\"decision\":\"manual\"}. "
@@ -124,11 +124,12 @@ def review_auto_approval(
             + prompt
         )
     if len(prompt) > _AUTO_REVIEW_PROMPT_MAX_CHARS:
-        return "manual"
+        return "unavailable"
     try:
         parsed = json.loads(request_text(prompt))
     except Exception:
-        return "manual"
+        return "unavailable"
     if not isinstance(parsed, dict) or set(parsed) != {"decision"}:
-        return "manual"
-    return "allow_auto" if parsed.get("decision") == "allow_auto" else "manual"
+        return "unavailable"
+    decision = parsed["decision"]
+    return decision if decision in ("allow_auto", "manual") else "unavailable"

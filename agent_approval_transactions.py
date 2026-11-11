@@ -1383,6 +1383,7 @@ class AgentApprovalTransactionService:
                     },
                     internal_wrapper=internal_wrapper,
                     task_context=task_context,
+                    internal_runtime=True,
                 )
             else:
                 outcome = self._ports.call_tool(tool_name, params, agent_name=agent_name)
@@ -1478,6 +1479,7 @@ class AgentApprovalTransactionService:
         internal_wrapper: bool = False,
         include_arguments_digest: bool = False,
         task_context: Mapping[str, Any] | None = None,
+        internal_runtime: bool = False,
     ) -> dict[str, Any]:
         config = self._ports.ensure_config()
         if not config.allow_write_requests:
@@ -1616,6 +1618,7 @@ class AgentApprovalTransactionService:
             )
         )
         directly_approved = full_permission_auto and not requires_explicit_for_mode
+        review_before_publish = internal_runtime and execution_mode == "auto" and not requires_explicit_for_mode
         explicit_approval_reason = str(
             always_manual_reason
             or mandatory_manual_approval_reason
@@ -1692,6 +1695,7 @@ class AgentApprovalTransactionService:
             ),
             task_context=normalized_task_context,
             initial_status="approved" if directly_approved else "pending",
+            review_before_publish=review_before_publish,
         )
         if include_arguments_digest:
             approval["argumentsDigest"] = stable_hash(
@@ -1719,41 +1723,19 @@ class AgentApprovalTransactionService:
                 }
             )
         auto_review_decision = "manual" if execution_mode == "auto" else "not_applicable"
-        if execution_mode == "auto" and self._auto_approval_reviewer is not None:
-            try:
-                # The public approval receipt intentionally projects arguments
-                # with summarize_params. The independent reviewer needs the
-                # owner-held record so executionTarget and other safety
-                # identity fields survive until its existing redaction step.
-                review_approval = approval
-                approval_id = str(approval.get("id") or "")
-                with self._ports.state.shared_state_lock:
-                    stored_approval = self._ports.state.approvals.get(approval_id)
-                    if isinstance(stored_approval, dict):
-                        review_approval = copy.deepcopy(stored_approval)
-                auto_review_decision = str(
-                    self._auto_approval_reviewer(review_approval) or "manual"
-                ).strip()
-            except Exception:
-                auto_review_decision = "manual"
-            if auto_review_decision not in {"allow_auto", "manual"}:
-                auto_review_decision = "manual"
-            if auto_review_decision != "not_applicable":
-                self._ports.append_audit(
-                    {
-                        "event": "approval_independent_auto_review",
-                        "approvalId": approval.get("id"),
-                        "targetTool": target_tool,
-                        "reviewerDecision": auto_review_decision,
-                        "manualPolicyRequired": requires_explicit_for_mode,
-                    }
-                )
+        if review_before_publish:
+            auto_review_decision = "allow_auto" if approval["status"] == "approved" else "manual"
+        elif not internal_runtime and execution_mode == "auto" and self._auto_approval_reviewer is not None:
+            with self._ports.state.shared_state_lock:
+                stored_approval = self._ports.state.approvals.get(approval["id"], approval)
+                review_record = copy.deepcopy(stored_approval)
+            auto_review_decision = self._review_write_approval(review_record)
         if self.auto_approval_enabled(config) and not requires_explicit_for_mode:
             if execution_mode != "auto" or auto_review_decision == "allow_auto":
                 auto_payload = self._auto_execute_approval(approval, config)
                 if auto_payload is not None:
                     return auto_payload
-                if directly_approved:
+                if approval["status"] == "approved":
                     raise AgentGatewayError("Automatic approval could not proceed.", status_code=409)
         if self.auto_approval_enabled(config) and requires_explicit_for_mode:
             self._ports.append_audit(
@@ -1802,8 +1784,27 @@ class AgentApprovalTransactionService:
             ),
         }
 
+    def _review_write_approval(self, approval: dict[str, Any]) -> str:
+        reviewer = self._auto_approval_reviewer
+        decision = "unavailable"
+        if reviewer is not None:
+            try:
+                response = reviewer(approval)
+                if response in ("allow_auto", "manual"):
+                    decision = response
+            except Exception:
+                pass
+        self._ports.append_audit({
+            "event": "approval_independent_auto_review",
+            "approvalId": approval["id"],
+            "targetTool": approval["targetTool"],
+            "reviewerDecision": decision,
+            "manualPolicyRequired": bool(approval.get("requiresExplicitApproval")),
+        })
+        return decision
+
     def _auto_execute_approval(
-        self, approval: dict[str, Any], config: AgentGatewayConfig,
+        self, approval: dict[str, Any], config: AgentGatewayConfig | None = None,
     ) -> dict[str, Any] | None:
         """Auto-approve and apply an approval under the auto / full-permission tiers.
 
@@ -4119,16 +4120,13 @@ class AgentApprovalTransactionService:
         task_context: Mapping[str, Any] | None = None,
         initial_status: str = "pending",
         approval_channel: str = "internal",
+        review_before_publish: bool = False,
     ) -> dict[str, Any]:
         normalized_status = str(initial_status or "pending").strip().casefold()
         if normalized_status not in {"pending", "approved"}:
             raise ValueError("initial approval status must be pending or approved")
         normalized_channel = str(approval_channel or "internal").strip().casefold()
         external_mcp = normalized_channel == "external_mcp"
-        if external_mcp or normalized_status == "pending":
-            self._ports.signal_background_activity(
-                "external_mcp_write" if external_mcp else "pending_approval"
-            )
         now = datetime.now(timezone.utc)
         permission_context = self.permission_audit_context()
         prior_history = self._prior_target_write_history(arguments, task_context)
@@ -4160,8 +4158,6 @@ class AgentApprovalTransactionService:
                     "permissionLabel": permission_context["permissionLabel"],
                 }
             )
-        if normalized_status == "approved":
-            approval["approvedAt"] = now.isoformat()
         if requires_explicit_approval:
             approval["requiresExplicitApproval"] = True
             approval["autoApprovalBlocked"] = True
@@ -4180,10 +4176,24 @@ class AgentApprovalTransactionService:
         if user_constraints and user_constraints.content:
             approval["userConstraintsApplied"] = True
             approval["userConstraintsPath"] = str(user_constraints.path)
+        if review_before_publish:
+            decision = self._review_write_approval(copy.deepcopy(approval))
+            if decision == "unavailable":
+                raise AgentGatewayError("The automatic approval reviewer did not return a decision.", status_code=503)
+            if decision == "allow_auto":
+                current_config = self._ports.ensure_config()
+                if current_config.allow_write_requests and normalize_execution_mode(current_config.execution_mode) == "auto":
+                    normalized_status = approval["status"] = "approved"
+        if normalized_status == "approved":
+            approval["approvedAt"] = utc_now_iso()
+        if external_mcp or normalized_status == "pending":
+            self._ports.signal_background_activity(
+                "external_mcp_write" if external_mcp else "pending_approval"
+            )
         with self._ports.state.shared_state_lock:
             self._ports.state.approvals[approval["id"]] = approval
-            # Full Permission writes are already authorized. The decision path
-            # records their approval without publishing a human request first.
+            # Already authorized writes enter the normal decision path without
+            # publishing or persisting a human approval request first.
             if normalized_status == "approved" and not external_mcp:
                 return redact_sensitive(dict(approval))
             try:

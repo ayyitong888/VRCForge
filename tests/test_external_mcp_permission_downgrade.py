@@ -49,6 +49,8 @@ def test_external_write_obeys_per_action_approval_mode(tmp_path: Path, risk: str
     config.execution_mode = mode
     gateway.save_config(config)
     executed = []
+    reviews = []
+    gateway.approval_transactions.auto_approval_reviewer = lambda request: reviews.append(request) or "allow_auto"
     gateway.approval_transactions.register_write_handler(
         "vrcforge_permission_probe", "Check per-action approval.", risk,
         lambda arguments: executed.append(arguments) or {"ok": True},
@@ -69,3 +71,4 @@ def test_external_write_obeys_per_action_approval_mode(tmp_path: Path, risk: str
     resolved = gateway.call_external_mcp_tool("vrcforge_permission_probe", {"value": 1, "confirmation": confirmation})
     assert resolved["status"] == ("executed" if decision == "approve" else "rejected")
     assert executed == ([{"value": 1}] if decision == "approve" else [])
+    assert reviews == []

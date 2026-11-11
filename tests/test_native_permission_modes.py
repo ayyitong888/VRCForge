@@ -122,9 +122,11 @@ def test_native_runtime_write_uses_real_approval_owner_for_each_permission_mode(
     ])
     _set_mode(gateway, mode)
     if mode == "auto":
-        # Auto mode requires an explicit independent reviewer decision.  Keep
-        # the fixture honest instead of relying on a missing reviewer callback.
-        gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "allow_auto"
+        def allow_review(_approval):
+            assert gateway.approval_transactions.list_approvals() == []
+            assert invoked == []
+            return "allow_auto"
+        gateway.approval_transactions.auto_approval_reviewer = allow_review
 
     initial = _run(gateway, tmp_path, clientTurnId=f"write-{mode}")
     if mode == "approval":
@@ -177,7 +179,7 @@ def test_native_approved_prewrite_failure_resumes_planner_without_replaying_writ
 
 
 @pytest.mark.parametrize("reviewer_setup", ["missing", "exception", "not_applicable"])
-def test_native_auto_requires_a_positive_reviewer_decision(
+def test_native_auto_unavailable_reviewer_cannot_publish_or_execute(
     tmp_path: Path, reviewer_setup: str,
 ) -> None:
     gateway, _model, invoked = _write_gateway_for_mode(tmp_path, [
@@ -194,7 +196,9 @@ def test_native_auto_requires_a_positive_reviewer_decision(
 
     result = _run(gateway, tmp_path, clientTurnId=f"write-auto-{reviewer_setup}")
 
-    assert result["write"]["status"] == "approval_pending"
+    assert result["write"]["status"] == "failed"
+    assert "reviewer did not return a decision" in result["write"]["outcome"]["summary"]
+    assert gateway.approval_transactions.list_approvals() == []
     assert invoked == []
 
 
@@ -204,7 +208,11 @@ def test_native_auto_reviewer_manual_keeps_low_risk_write_pending(tmp_path: Path
         call("write-1", "fixture_write", {"projectRoot": str(tmp_path / "UnityProject"), "value": "review"}),
     ])
     _set_mode(gateway, "auto")
-    gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "manual"
+    def deny_review(_approval):
+        assert gateway.approval_transactions.list_approvals() == []
+        return "manual"
+
+    gateway.approval_transactions.auto_approval_reviewer = deny_review
 
     initial = _run(gateway, tmp_path, clientTurnId="write-auto-review")
 

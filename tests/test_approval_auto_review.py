@@ -48,14 +48,14 @@ def test_auto_review_uses_one_bounded_scope_prompt_for_unity_without_main_decisi
 
 @pytest.mark.parametrize("response", ["not-json", '{"decision":"allow_auto","extra":1}'])
 def test_auto_review_fails_closed_for_invalid_or_ambiguous_model_response(response: str) -> None:
-    assert review_auto_approval(_approval(), lambda _prompt: response) == "manual"
+    assert review_auto_approval(_approval(), lambda _prompt: response) == "unavailable"
 
 
 def test_auto_review_fails_closed_on_provider_exception() -> None:
     def fail(_prompt: str) -> str:
         raise TimeoutError("review timed out")
 
-    assert review_auto_approval(_approval(), fail) == "manual"
+    assert review_auto_approval(_approval(), fail) == "unavailable"
 
 
 def test_auto_review_rejects_oversized_preview_before_request_and_ignores_forged_decision() -> None:
@@ -70,7 +70,7 @@ def test_auto_review_rejects_oversized_preview_before_request_and_ignores_forged
         calls += 1
         return '{"decision":"manual"}'
 
-    assert review_auto_approval(approval, request_text) == "manual"
+    assert review_auto_approval(approval, request_text) == "unavailable"
     assert calls == 0
 
 

@@ -527,6 +527,25 @@ class AgentShellService:
                 })
                 if review.decision != "allow":
                     denied = review.decision == "deny"
+                    approval_params = dict(params)
+                    if not classification["projectRoot"] and approval_params.get("yieldMs") == 10_000:
+                        # The runtime's default UI yield is not part of the
+                        # command. Approved reads run to completion.
+                        approval_params.pop("yieldMs")
+                    # Only offer approval when the existing foreground approval
+                    # transaction can retain and replay this exact invocation.
+                    if (
+                        denied
+                        and (classification["projectRoot"] or classification["readOnly"])
+                        and not environment_overrides
+                        and not any(params.get(key) for key in ("background", "pty"))
+                        and "yieldMs" not in approval_params and "yield_ms" not in approval_params
+                        and self._timeout_seconds(params) > 0
+                    ):
+                        return self._request_shell_approval(
+                            approval_params, classification, agent_name, task_context,
+                            review_denial_reason=f"Automatic approval review rejected this shell command: {review.reason}",
+                        )
                     error = (
                         f"Automatic approval review rejected this shell command: {review.reason}"
                         if denied else f"Automatic approval review could not complete: {review.reason}"
@@ -547,25 +566,7 @@ class AgentShellService:
                     }
 
             if classification["risk"] == "high":
-                approval = self._create_approval(
-                    params,
-                    classification,
-                    agent_name,
-                    task_context=task_context,
-                )
-                if self._ports.approvals.auto_enabled():
-                    auto_payload = self._ports.approvals.auto_execute(approval)
-                    if auto_payload is not None:
-                        auto_payload["classification"] = classification
-                        return auto_payload
-                return {
-                    "ok": True,
-                    "status": "pending_approval",
-                    "classification": classification,
-                    "approval": approval,
-                    "approval_id": approval["id"],
-                    "approvalId": approval["id"],
-                }
+                return self._request_shell_approval(params, classification, agent_name, task_context)
 
             execution = self._execute_direct(
                 params,
@@ -713,14 +714,12 @@ class AgentShellService:
         )
         if expected_execution_binding_hash != current_execution_binding_hash:
             self._raise("Stored shell approval executable or referenced file binding has changed.", 409)
-        if not project_root_value:
-            self._raise("Stored shell approval Unity project root is required.")
-        project_root = Path(project_root_value).expanduser().resolve()
+        project_root = str(Path(project_root_value).expanduser().resolve()) if project_root_value else ""
         if not expected_project_root_hash:
             self._raise("Stored shell approval Unity project root hash is required.")
-        if expected_project_root_hash != stable_hash(str(project_root)):
+        if expected_project_root_hash != stable_hash(project_root):
             self._raise("Stored shell approval Unity project root hash does not match.")
-        if not self._ports.is_unity_project_root(project_root):
+        if project_root and not self._ports.is_unity_project_root(Path(project_root)):
             self._raise("Stored shell approval Unity project root is no longer valid.")
 
         environment_overrides = self._environment_overrides(params)
@@ -732,9 +731,9 @@ class AgentShellService:
                 "command": command,
                 "cwd": str(cwd),
                 "workspace_root": str(workspace_root),
-                "projectRoot": str(project_root),
+                "projectRoot": project_root,
             },
-            unity_project_access=True,
+            unity_project_access=bool(project_root),
         )
         if classification.get("risk") == "reject":
             self._raise(
@@ -743,8 +742,10 @@ class AgentShellService:
             )
         if classification.get("commandHash") != expected_hash:
             self._raise("Reclassified shell command hash does not match approval.")
-        if classification.get("projectRoot") != str(project_root):
+        if classification.get("projectRoot") != project_root:
             self._raise("Reclassified shell Unity project root does not match approval.")
+        if not project_root and not classification["readOnly"]:
+            self._raise("A shell approval without a Unity project can only run a read-only command.")
 
         execution = self._execute_direct(
             params,
@@ -1401,6 +1402,24 @@ class AgentShellService:
                 return False
         return self._args_stay_in_workspace(path_args, workspace_root) if path_args else True
 
+    def _request_shell_approval(
+        self, params: dict[str, Any], classification: dict[str, Any], agent_name: str,
+        task_context: dict[str, Any] | None, *, review_denial_reason: str = "",
+    ) -> dict[str, Any]:
+        approval = self._create_approval(
+            params, classification, agent_name, task_context=task_context,
+            review_denial_reason=review_denial_reason,
+        )
+        if not review_denial_reason and self._ports.approvals.auto_enabled():
+            auto_payload = self._ports.approvals.auto_execute(approval)
+            if auto_payload is not None:
+                auto_payload["classification"] = classification
+                return auto_payload
+        return {
+            "ok": True, "status": "pending_approval", "classification": classification,
+            "approval": approval, "approval_id": approval["id"], "approvalId": approval["id"],
+        }
+
     def _create_approval(
         self,
         params: dict[str, Any],
@@ -1408,6 +1427,7 @@ class AgentShellService:
         agent_name: str,
         *,
         task_context: dict[str, Any] | None = None,
+        review_denial_reason: str = "",
     ) -> dict[str, Any]:
         session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
         turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
@@ -1425,7 +1445,7 @@ class AgentShellService:
         pty = False
         yield_ms = 10_000
         project_root = str(classification.get("projectRoot") or "").strip()
-        if not project_root:
+        if not project_root and not (review_denial_reason and classification["readOnly"]):
             self._raise("A protected Unity project root is required for shell approval.")
         execution_binding_hash = stable_hash(
             json.dumps(
@@ -1496,7 +1516,7 @@ class AgentShellService:
             "project_root_hash": stable_hash(project_root),
             "classification_snapshot": classification,
         }
-        manual_reason = (
+        manual_reason = review_denial_reason or (
             self.manual_approval_reason(classification)
             if self._ports.approvals.execution_mode() == "auto"
             else ""
@@ -1506,7 +1526,7 @@ class AgentShellService:
                 agent_name=agent_name,
                 target_tool="vrcforge_shell_execute",
                 arguments=arguments,
-                reason=str(params.get("reason") or "High-risk shell command requires approval."),
+                reason=review_denial_reason or str(params.get("reason") or "High-risk shell command requires approval."),
                 preview={
                     "command": classification["command"],
                     "cwd": classification["cwd"],

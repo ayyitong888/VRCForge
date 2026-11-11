@@ -23,7 +23,7 @@ def test_reviewer_sees_complete_safe_mutation_content_and_identifiers():
 def test_oversized_content_is_not_approved_using_only_a_byte_count():
     calls = []
     record = {"targetTool": "write_file", "arguments": {"content": "x" * 20000}}
-    assert review_auto_approval(record, lambda prompt: calls.append(prompt) or '{"decision":"allow_auto"}') == "manual"
+    assert review_auto_approval(record, lambda prompt: calls.append(prompt) or '{"decision":"allow_auto"}') == "unavailable"
     assert calls == []
 
 
