@@ -844,7 +844,7 @@ export async function deleteAgentProgress(
 
 export async function fetchAgentQuestions(
   endpoint: string,
-  params: { limit?: number; sessionId?: string; projectRoot?: string; includeAnswered?: boolean } = {},
+  params: { limit?: number; sessionId?: string; projectRoot?: string; includeAnswered?: boolean; activeOnly?: boolean } = {},
 ): Promise<{ ok: boolean; schema?: string; questions: AgentQuestion[]; count: number }> {
   const query = new URLSearchParams();
   if (params.limit) {
@@ -858,6 +858,9 @@ export async function fetchAgentQuestions(
   }
   if (params.includeAnswered) {
     query.set("includeAnswered", "true");
+  }
+  if (params.activeOnly) {
+    query.set("activeOnly", "true");
   }
   const suffix = query.toString() ? `?${query.toString()}` : "";
   if (hasTauriInternals()) {

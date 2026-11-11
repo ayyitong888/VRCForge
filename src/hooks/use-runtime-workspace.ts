@@ -49,9 +49,17 @@ type UseRuntimeWorkspaceParams = {
   chatIdForSessionId?: (sessionId: string) => string;
 };
 
+const ACTIVE_QUESTION_CONTINUATION_STATUSES = new Set(["queued", "claimed", "running", "cancelling"]);
+
+function isActiveAgentQuestion(question: AgentQuestion) {
+  return question.status === "pending"
+    || ACTIVE_QUESTION_CONTINUATION_STATUSES.has(question.runtimeContinuationStatus || "")
+    || ACTIVE_QUESTION_CONTINUATION_STATUSES.has(question.runtimeContinuation?.status || "");
+}
+
 function retainRecentAgentQuestions(questions: AgentQuestion[]) {
   let history = 0;
-  return questions.filter((question) => isBlockingAgentQuestion(question) || history++ < 8);
+  return questions.filter((question) => isActiveAgentQuestion(question) || history++ < 8);
 }
 
 export function useRuntimeWorkspace({
@@ -219,7 +227,7 @@ export function useRuntimeWorkspace({
     }
   }
 
-  function clearScopedRuntimeProjection(keepBlockingQuestions = false) {
+  function clearScopedRuntimeProjection(keepActiveQuestions = false) {
     if (isProjectWorkbenchSmokeMode()) {
       return;
     }
@@ -229,7 +237,7 @@ export function useRuntimeWorkspace({
     setDesktopBridge(null);
     setAgentGoals([]);
     setAgentProgress([]);
-    setAgentQuestions((items) => keepBlockingQuestions ? items.filter(isBlockingAgentQuestion) : []);
+    setAgentQuestions((items) => keepActiveQuestions ? items.filter(isActiveAgentQuestion) : []);
     setAgentMemory([]);
     setMemoryReviewUnreadCount(0);
     setMemoryReviewNeedsAttention(false);
@@ -247,7 +255,7 @@ export function useRuntimeWorkspace({
     // Project/session changes must invalidate the visible runtime projection
     // before the next paint. Otherwise a failed or slow snapshot can leave a
     // previous project's Save-as-Skill source actionable in the new project.
-    const keepBlockingQuestions = runtimeConnected && runtimeScopeRef.current.endpoint === endpoint;
+    const keepActiveQuestions = runtimeConnected && runtimeScopeRef.current.endpoint === endpoint;
     runtimeScopeRef.current = {
       token: runtimeScopeToken,
       endpoint,
@@ -256,7 +264,7 @@ export function useRuntimeWorkspace({
       projectRoot: activeRuntimeProjectPath || "",
     };
     runtimeRefreshSeqRef.current += 1;
-    clearScopedRuntimeProjection(keepBlockingQuestions);
+    clearScopedRuntimeProjection(keepActiveQuestions);
     if (!runtimeConnected) {
       activeDesktopRefreshSeqRef.current += 1;
       setActiveDesktopActions([]);

@@ -547,6 +547,7 @@ export function useChatRunController({
       const result = await fetchAgentQuestions(endpoint, {
         sessionId: targetSessionId,
         projectRoot: turn.projectPath || undefined,
+        activeOnly: true,
       });
       return result.questions.some((question) => {
         if ((question.runtimeContinuation?.sessionId || question.sessionId) !== targetSessionId) return false;

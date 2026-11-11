@@ -1814,7 +1814,7 @@ class AgentGateway:
             feedback_revision = 0
         if feedback_revision > 0 and str(seed.get("_questionKind") or seed.get("requestedKind") or "") == "visual_checkpoint":
             marker += ":feedback:" + str(feedback_revision)
-        return (prefix + marker)[:240]
+        return prefix[:240 - len(marker)] + marker
 
     def _resume_runtime_task_after_question(
         self,
@@ -1824,39 +1824,44 @@ class AgentGateway:
     ) -> Mapping[str, Any] | None:
         """Queue one scope-bound continuation; app shutdown owns and drains it.
 
-        The authenticated App answer is the authority. This finite worker uses
-        the original task's provider budget and existing supervised tools only.
-        It opens no listener and never borrows a later turn's scope.
+        The authenticated answer owns the dispatch. An open task can resume;
+        a finished task's answer starts a new turn in its original session.
         """
         stable_id = str(question_id or "").strip()
-        if task_seed.get("_questionBlocking") is False:
-            return self._route_async_question_answer(stable_id, task_seed, continuation_prompt)
-        if self._blocking_question_turn_closed(task_seed):
-            return self._settle_saved_question_answer(stable_id, task_seed)
-        if task_seed.get("_questionKind") == "visual_checkpoint":
-            return self._route_async_question_answer(stable_id, task_seed, continuation_prompt)
+        async_answer = task_seed.get("_questionBlocking") is False or task_seed.get("_questionKind") == "visual_checkpoint"
+        if async_answer:
+            routed = self._route_async_question_answer(stable_id, task_seed, continuation_prompt)
+            if routed is not None:
+                return routed
+        session_id = str(task_seed.get("sessionId") or "")
         client_turn_id = self._question_continuation_client_turn_id(stable_id, task_seed)
         with self._lock:
             if not self._runtime_continuation_accepting or stable_id in self._question_continuations_inflight:
                 return {"ok": False, "status": "deferred", "questionId": stable_id}
             self._question_continuations_inflight.add(stable_id)
+            self.questions.record_runtime_continuation(stable_id, "queued",
+                runtimeContinuationClientTurnId=client_turn_id, runtimeContinuationTurnId="")
         def run() -> None:
             try:
-                if self._blocking_question_turn_closed(task_seed):
-                    self._settle_saved_question_answer(stable_id, task_seed)
+                if not self.wait_runtime_session_idle(session_id):
                     return
                 if not self.questions.claim_runtime_continuation(stable_id, client_turn_id=client_turn_id):
+                new_turn = async_answer or self._blocking_question_turn_closed(task_seed)
                     return
-                if self._runtime_session_state.cancel_requested(
-                    session_id=str(task_seed.get("sessionId") or ""),
+                if not new_turn and self._runtime_session_state.cancel_requested(
+                    session_id=session_id,
                     turn_id=str(task_seed.get("turnId") or ""),
                     client_turn_id=str(task_seed.get("clientTurnId") or ""),
                 ):
                     raise AgentGatewayError("The original task was stopped; the answer was saved.", status_code=409)
-                result = self._dispatch_runtime_task_after_question(stable_id, task_seed, continuation_prompt)
+                if new_turn:
+                    NativeRuntimeTurn.cancel_question(self._runtime_session_state, task_seed, answer_saved=True)
+                    result = self._dispatch_runtime_task_after_question(stable_id, task_seed, continuation_prompt, new_turn=True)
+                else:
+                    result = self._dispatch_runtime_task_after_question(stable_id, task_seed, continuation_prompt)
                 if result is None:
                     raise AgentGatewayError("The Question has no resumable task context.", status_code=409)
-                if bool(task_seed.get("_authenticatedQuestionFeedbackPending")) and isinstance(result, Mapping):
+                if not new_turn and task_seed.get("_authenticatedQuestionFeedbackPending") and isinstance(result, Mapping):
                     result = dict(result)
                     result["status"] = "needs_user_action"
                     result["completionGate"] = {"status": "needs_user_action", "reason": "visual_checkpoint_pending"}
@@ -1868,7 +1873,8 @@ class AgentGateway:
                     task = dict(ensure_dict(result.get("task")))
                     task["status"] = "needs_user_action"
                     result["task"] = task
-                self.questions.record_runtime_continuation(stable_id, "delivered")
+                self.questions.record_runtime_continuation(stable_id, "delivered",
+                    **({"runtimeQuestionFeedbackPending": False} if new_turn else {}))
                 try:
                     self._runtime_turn_completed(result)
                 except Exception:  # noqa: BLE001 - the durable turn is replayed on reconnect.
@@ -1930,10 +1936,8 @@ class AgentGateway:
         )
 
     def _blocking_question_turn_closed(self, seed: Mapping[str, Any]) -> bool:
-        """A tool-only decision can suspend work; a closed review cannot restart it."""
+        """Only a genuinely suspended turn can reuse its pending tool call."""
         visual = seed.get("_questionKind") == "visual_checkpoint"
-        if visual and seed.get("_questionResolution") == "later":
-            return True
         session_id = str(seed.get("sessionId") or "")
         turn_id = str(seed.get("turnId") or "")
         client_turn_id = str(seed.get("clientTurnId") or "")
@@ -2004,7 +2008,7 @@ class AgentGateway:
             return question
         return None
 
-    def _route_async_question_answer(self, question_id: str, seed: Mapping[str, Any], prompt: str) -> dict[str, Any]:
+    def _route_async_question_answer(self, question_id: str, seed: Mapping[str, Any], prompt: str) -> dict[str, Any] | None:
         session_id = str(seed.get("sessionId") or "")
         origin = str(seed.get("clientTurnId") or "")
         input_id = "question-answer:" + question_id
@@ -2026,13 +2030,11 @@ class AgentGateway:
                     self._runtime_followup_queue.cancel(queue_id=existing["queueId"], session_id=lane)
                 return self._settle_saved_question_answer(question_id)
             if not self._question_origin_active(seed):
-                return self._settle_saved_question_answer(
-                    question_id, seed if seed.get("_questionKind") == "visual_checkpoint" else None,
-                )
-            if seed.get("_questionBlocking") is False and self._runtime_run_ledger.read_terminal_continuation(
+                return None
+            if self._runtime_run_ledger.read_terminal_continuation(
                 session_id=session_id, client_turn_id=origin, turn_id=str(seed.get("turnId") or ""),
             ):
-                return self._settle_saved_question_answer(question_id)
+                return None
             result = {} if attachments else self.submit_runtime_steer({
                 "sessionId": session_id, "targetClientTurnId": origin,
                 "clientTurnId": input_id, "message": prompt, "laneId": lane,
@@ -2046,9 +2048,7 @@ class AgentGateway:
                     runtimeContinuationClientTurnId=origin, runtimeContinuationTurnId=str(seed.get("turnId") or ""))
                 return {"ok": True, "mode": "steer", "status": "steered", "questionId": question_id,
                         "sessionId": session_id, "clientTurnId": origin, "turnId": seed.get("turnId"), "inputId": input_id}
-            return self._settle_saved_question_answer(
-                question_id, seed if seed.get("_questionKind") == "visual_checkpoint" else None,
-            )
+            return None
 
     def _dispatch_runtime_task_after_question(
         self,
@@ -2056,6 +2056,8 @@ class AgentGateway:
         task_seed: Mapping[str, Any],
         continuation_prompt: str,
     ) -> Mapping[str, Any] | None:
+        *,
+        new_turn: bool = False,
         """Resume one foreground task through the existing planner continuation path."""
         seed = dict(task_seed or {})
         browser_open = ensure_dict(seed.pop("_browserOpenRequest", None))
@@ -2090,7 +2092,7 @@ class AgentGateway:
         if seed.get("followupLaneId"):
             params["followupLaneId"] = str(seed["followupLaneId"])
         params["message"] = str(seed.get("objective") or "") + "\n" + continuation_prompt
-        if feedback_pending:
+        if feedback_pending and not new_turn:
             params["_questionFeedbackPending"] = True
         authenticated_attachments = seed.pop("_authenticatedUserAttachments", None)
         if isinstance(authenticated_attachments, list) and authenticated_attachments:
@@ -2131,7 +2133,18 @@ class AgentGateway:
             context.pop("_nativeConversation", None)
             context.pop("_nativeAdmittedToolNames", None)
             continuation["context"] = context
-            params["_questionAnswerRequireIdle"] = True
+        if new_turn:
+            params["message"] = authenticated_answer or "Please see my attached answer to the previous question."
+            params["planMode"] = seed.get("planMode") is True
+            if authenticated_answer:
+                params["_humanUserMessageSource"] = {
+                    "source": "app_user_message", "message": authenticated_answer,
+                    "sessionId": params["session_id"], "clientTurnId": client_turn_id,
+                    "projectRoot": params["projectRoot"],
+                }
+            # Carry the reply and its question context, without restoring an old
+            # task's tool proposals, approvals, or snapshot over newer history.
+            continuation = {key: continuation[key] for key in ("source", "questionId", "plannerObservation")}
         self._signal_background_activity("question_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
@@ -5784,9 +5797,8 @@ class AgentGateway:
                 turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
                 client_turn_id=resolved_client_turn_id,
             )
-            # A chat steer that arrives after the final model boundary becomes
-            # a follow-up. Question answers are already persisted and belong
-            # only to the run that asked them.
+            # An answer the old turn never consumed is still queued in the
+            # question ledger. Start it in a new turn through the same worker.
             deferred: list[dict[str, Any]] = []
             followup_outcomes: list[dict[str, Any]] = []
             for item in late_steers:
@@ -5797,9 +5809,7 @@ class AgentGateway:
                     turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
                 )
                 if question:
-                    self._settle_saved_question_answer(
-                        str(question["questionId"]), ensure_dict(question.get("runtimeTaskSeed")),
-                    )
+                    self.questions.reconcile_runtime_continuation(str(question["questionId"]))
                     continue
                 if input_id.startswith("question-answer:"):
                     continue
@@ -6024,8 +6034,11 @@ class AgentGateway:
         params["_resolvedRuntimeTurnId"] = turn_id
         params["_resolvedRuntimeClientTurnId"] = client_turn_id
         self._admit_runtime_turn(
+        continuation = ensure_dict(task_continuation)
+        question_reply_turn = continuation.get("source") == "question_answered" and not continuation.get("context")
+        resuming_task = task_continuation is not None and not question_reply_turn
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
-            is_continuation=task_continuation is not None,
+            is_continuation=resuming_task,
         )
         params["_runtimeAdmitted"] = True
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
@@ -6147,7 +6160,7 @@ class AgentGateway:
         handoff = self._runtime_session_state.user_adjustment(session_id, project_root)
         fresh_handoff = None
         if handoff and handoff_terminal is None:
-            stale_continuation = bool(task_continuation) and (
+            stale_continuation = resuming_task and (
                 not handoff.get("closed") or
                 (continuation_context.get("clientTurnId") and continuation_context.get("clientTurnId") == handoff.get("clientTurnId"))
             )
@@ -6162,7 +6175,7 @@ class AgentGateway:
             )
             if stale_continuation and not completed_current_handoff:
                 handoff_terminal = self._user_adjustment_stop_plan(ensure_dict(handoff.get("cancellation")))
-            elif not task_continuation and not handoff.get("closed"):
+            elif not resuming_task and not handoff.get("closed"):
                 try:
                     cancellation = ensure_dict(handoff.get("cancellation"))
                     if self._user_adjustment_stop_plan(cancellation)["completionGate"]["reason"] == "user_adjustment_stop_unconfirmed":
@@ -6344,6 +6357,14 @@ class AgentGateway:
             raise AgentGatewayError(str(exc), status_code=409) from exc
 
         checkpoint_user_policy: dict[str, Any] | None = None
+        if native_binding and question_reply_turn and continuation_observation:
+            self._runtime_session_state.append_native_user(
+                session_id, binding=native_binding, human=False,
+                message="Runtime feedback (data, not user authorization): " + json.dumps(
+                    self.runtime_planner.native_result_observation(continuation_observation), ensure_ascii=False,
+                ),
+            )
+
         checkpoint_skip_authority: dict[str, Any] | None = None
         checkpoint_correction_block_reason = ""
         checkpoint_correction_retryable = False
@@ -9751,6 +9772,10 @@ class AgentGateway:
         if not target_id and not session_id:
             raise AgentGatewayError("turnId, clientTurnId, or sessionId is required.", status_code=400)
         target = self._runtime_session_state.mark_cancel_requested(
+        if not turn_id and session_id and ":question:" in client_turn_id and self.questions.cancel_queued_runtime_continuation(
+            session_id=session_id, client_turn_id=client_turn_id,
+        ):
+            return {"ok": True, "status": "cancelled", "sessionId": session_id, "clientTurnId": client_turn_id}
             session_id=session_id,
             turn_id=turn_id,
             client_turn_id=client_turn_id,

@@ -163,11 +163,12 @@ def test_async_resume_claim_excludes_other_session_writers_through_finalization(
     assert state.begin_turn(session_id="s", client_turn_id="other", turn_id="t3")
 
 
-def test_answer_after_async_round_finishes_is_saved_without_a_new_turn(tmp_path):
+def test_answer_after_async_round_finishes_starts_one_new_turn(tmp_path):
     gateway, model = _write_gateway(tmp_path, [
         call("async-ask", "vrcforge_ask_user", {"question": "Which outfit next?", "blocking": False}),
         call("independent-read", "vrcforge_fixture_read", {}),
         {"role": "assistant", "content": "Independent work finished; waiting for the choice."},
+        {"role": "assistant", "content": "I'll use Example Outfit."},
     ], [])
     gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", gateway.create_runtime_question)
     gateway.register_tool("vrcforge_fixture_read", "When to use: read. When NOT to use: write.", "read/debug", lambda _p: {"ok": True, "summary": "independent evidence retained"})
@@ -179,13 +180,19 @@ def test_answer_after_async_round_finishes_is_saved_without_a_new_turn(tmp_path)
     latest_seed = gateway.questions._project(include_answered=True)[question["questionId"]]["runtimeTaskSeed"]
     independent_actions = [a for a in latest_seed["actions"] if a["tool"] == "vrcforge_fixture_read"]
     assert len(independent_actions) == 1 and independent_actions[0]["status"] == "completed"
+    completed = threading.Event()
+    gateway._runtime_turn_completed = lambda _result: completed.set()
     answer = gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
-    assert answer["runtimeContinuation"]["status"] == "settled_without_dispatch"
-    assert answer["question"]["runtimeContinuationStatus"] == "settled_without_dispatch"
+    assert answer["runtimeContinuation"]["status"] == "queued"
     assert answer["question"]["answer"] == "Example Outfit"
+    assert completed.wait(5)
     assert gateway.shutdown_runtime_continuations(5)["ok"]
     assert gateway.list_runtime_followups(session_id="native-continuation-session") == []
-    assert len(model.requests) == 3
+    assert len(model.requests) == 4
+    assert {"role": "user", "content": "Example Outfit"} in model.requests[-1]["messages"]
+    [new_run] = gateway.runtime_runs.list_runs(session_id="native-continuation-session",
+        client_turn_id=answer["runtimeContinuation"]["clientTurnId"])["runs"]
+    assert new_run["turnId"] != first["turnId"]
 
 
 def test_active_answer_steers_240_character_origin_without_truncation(tmp_path):
@@ -197,6 +204,31 @@ def test_active_answer_steers_240_character_origin_without_truncation(tmp_path):
     assert result["runtimeContinuation"]["mode"] == "steer"
     assert result["runtimeContinuation"]["clientTurnId"] == origin
     assert len(gateway.runtime_sessions.drain_steer(session_id="async-session", client_turn_id=origin)) == 1
+
+
+def test_saved_unclaimed_answer_is_sent_as_user_text_after_restart(tmp_path):
+    session_id = "native-continuation-session"
+    gateway, model = _write_gateway(tmp_path, [
+        call("async-ask", "vrcforge_ask_user", {"question": "Which outfit next?", "blocking": False}),
+        {"role": "assistant", "content": "Waiting for your choice."},
+    ], [])
+    gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", gateway.create_runtime_question)
+    _run(gateway, tmp_path)
+    [question] = gateway.questions.list(session_id=session_id)["questions"]
+    assert gateway.shutdown_runtime_continuations(5)["ok"]
+    reply = gateway.questions.answer(question["questionId"], {"sessionId": session_id, "answer": "Example Outfit"})
+    assert reply["question"]["runtimeContinuationStatus"] == "queued"
+    assert len(model.requests) == 2
+
+    restarted, restarted_model = _write_gateway(tmp_path, [{"role": "assistant", "content": "I'll use Example Outfit."}], [])
+    completed = threading.Event()
+    restarted._runtime_turn_completed = lambda _result: completed.set()
+    assert restarted.questions.reconcile_runtime_continuations() == {"queued": 1, "interrupted": 0}
+    assert completed.wait(5)
+    assert restarted.shutdown_runtime_continuations(5)["ok"]
+    assert len(restarted_model.requests) == 1
+    assert {"role": "user", "content": "Example Outfit"} in restarted_model.requests[0]["messages"]
+    assert restarted.questions.reconcile_runtime_continuations()["queued"] == 0
 
 
 def test_real_native_answer_during_independent_read_has_one_execution_owner(tmp_path, monkeypatch):
@@ -232,12 +264,14 @@ def test_real_native_answer_during_independent_read_has_one_execution_owner(tmp_
     assert results[0]["plan"]["nextStep"] != "needs_user_action", "answered questions must not be replayed as a stale completion blocker"
 
 
-def test_answer_after_last_native_model_boundary_stays_saved_without_followup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("terminal_visible", [True, False])
+def test_answer_after_last_native_model_boundary_starts_a_new_turn(tmp_path, monkeypatch, terminal_visible):
     from agent_runtime_session_state import AgentRuntimeSessionState
     entered, release = threading.Event(), threading.Event()
     gateway, model = _write_gateway(tmp_path, [
         call("async-ask", "vrcforge_ask_user", {"question": "Which outfit next?", "blocking": False}),
         {"role": "assistant", "content": "Waiting for your choice."},
+        {"role": "assistant", "content": "I'll use Example Outfit."},
     ], [])
     gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", gateway.create_runtime_question)
     original_finish = AgentRuntimeSessionState.finish_turn
@@ -247,26 +281,40 @@ def test_answer_after_last_native_model_boundary_stays_saved_without_followup(tm
             assert release.wait(5)
         return original_finish(state, **identity)
     monkeypatch.setattr(AgentRuntimeSessionState, "finish_turn", final_boundary)
+    if not terminal_visible:
+        ledger_type = type(gateway._runtime_run_ledger)
+        read_terminal = ledger_type.read_terminal_continuation
+        monkeypatch.setattr(ledger_type, "read_terminal_continuation",
+            lambda ledger, **identity: read_terminal(ledger, **identity) if release.is_set() else None)
     results = []
     origin = "turn-" + "z" * 235
     runner = threading.Thread(target=lambda: results.append(_run(gateway, tmp_path, clientTurnId=origin)))
     runner.start()
     assert entered.wait(5)
     question = gateway.questions.list(session_id="native-continuation-session")["questions"][0]
+    completed = threading.Event()
+    gateway._runtime_turn_completed = lambda _result: completed.set()
     try:
         answer = gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
-        assert answer["runtimeContinuation"]["status"] == "settled_without_dispatch"
+        continuation = answer["runtimeContinuation"]
+        assert continuation["status"] == ("queued" if terminal_visible else "steered")
     finally:
         release.set()
         runner.join(5)
     assert not runner.is_alive() and results
+    assert completed.wait(5)
+    assert gateway.shutdown_runtime_continuations(5)["ok"]
     followups = gateway.list_runtime_followups(session_id="native-continuation-session", include_terminal=False)
     assert followups == []
     restarted = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     saved = restarted.questions.list(session_id="native-continuation-session", include_answered=True)["questions"][0]
-    assert saved["runtimeContinuationStatus"] == "settled_without_dispatch"
+    assert saved["runtimeContinuationStatus"] == "delivered"
+    saved_client_turn_id = saved["runtimeContinuationClientTurnId"]
+    assert len(saved_client_turn_id) <= 240
+    assert saved_client_turn_id.endswith(":question:" + question["questionId"])
     assert saved["answer"] == "Example Outfit"
-    assert len(model.requests) == 2
+    assert len(model.requests) == 3
+    assert {"role": "user", "content": "Example Outfit"} in model.requests[-1]["messages"]
 
 
 def test_answer_winning_before_seed_refresh_keeps_queued_handoff(tmp_path):
@@ -387,11 +435,22 @@ def test_answer_to_an_old_question_does_not_join_another_active_turn(tmp_path, m
     question = _question(gateway, tmp_path)["question"]
     monkeypatch.setattr(gateway, "_dispatch_runtime_task_after_question", lambda *_a: (_ for _ in ()).throw(AssertionError("must not start another writer")))
     response = gateway.questions.answer(question["questionId"], {"sessionId": "async-session", "answer": "Example Outfit"})
-    assert response["runtimeContinuation"]["status"] == "settled_without_dispatch"
+    assert response["runtimeContinuation"]["status"] == "queued"
     saved = gateway.questions._project(include_answered=True)[question["questionId"]]
-    assert saved["runtimeContinuationStatus"] == "settled_without_dispatch"
+    assert saved["runtimeContinuationStatus"] == "queued"
     assert gateway.list_runtime_followups(session_id="async-session") == []
     assert gateway.runtime_sessions.drain_steer(session_id="async-session", client_turn_id="different-active") == []
+    stopped = gateway.request_runtime_cancel({
+        "sessionId": "async-session", "clientTurnId": response["runtimeContinuation"]["clientTurnId"],
+    })
+    assert stopped["status"] == "cancelled"
+    assert gateway.runtime_sessions.owns_turn(
+        session_id="async-session", client_turn_id="different-active", turn_id="active-turn",
+    )
+    saved = gateway.questions.list(session_id="async-session", include_answered=True)["questions"][0]
+    assert saved["runtimeContinuationStatus"] == "cancelled"
+    assert saved["answer"] == "Example Outfit"
+    assert gateway.shutdown_runtime_continuations(5)["ok"]
 
 
 def test_answer_to_old_question_does_not_join_reused_client_turn_id(tmp_path):
@@ -399,13 +458,15 @@ def test_answer_to_old_question_does_not_join_reused_client_turn_id(tmp_path):
     gateway.runtime_sessions.begin_turn(session_id="async-session", client_turn_id="origin-cid", turn_id="new-turn")
     question = _question(gateway, tmp_path)["question"]
     answer = gateway.questions.answer(question["questionId"], {"sessionId": "async-session", "answer": "Example Outfit"})
-    assert answer["runtimeContinuation"]["status"] == "settled_without_dispatch"
+    assert answer["runtimeContinuation"]["status"] == "queued"
     assert gateway.runtime_sessions.drain_steer(session_id="async-session", client_turn_id="origin-cid") == []
+    assert gateway.shutdown_runtime_continuations(5)["ok"]
 
 
-def test_answer_to_already_settled_blocking_native_call_does_not_restart_agent(tmp_path):
+def test_answer_to_already_settled_blocking_native_call_starts_new_turn(tmp_path):
     gateway, model = _write_gateway(tmp_path, [
         call("question-1", "vrcforge_ask_user", {"question": "Which outfit?"}),
+        {"role": "assistant", "content": "I'll use Example Outfit."},
     ], [])
     gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", gateway.create_runtime_question)
     original = _run(gateway, tmp_path)
@@ -415,14 +476,18 @@ def test_answer_to_already_settled_blocking_native_call_does_not_restart_agent(t
         "native-continuation-session", binding=_binding(tmp_path), call_id="question-1", content="The turn has moved on."
     )
 
+    completed = threading.Event()
+    gateway._runtime_turn_completed = lambda _result: completed.set()
     answer = gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
-    assert answer["runtimeContinuation"]["status"] == "settled_without_dispatch"
+    assert answer["runtimeContinuation"]["status"] == "queued"
     assert answer["question"]["answer"] == "Example Outfit"
+    assert completed.wait(5)
     assert gateway.shutdown_runtime_continuations(5)["ok"]
-    assert len(model.requests) == 1
-    assert not gateway.runtime_runs.list_runs(
-        session_id="native-continuation-session", client_turn_id=f"native-cid:question:{question['questionId']}"
+    assert len(model.requests) == 2
+    [run] = gateway.runtime_runs.list_runs(
+        session_id="native-continuation-session", client_turn_id=answer["runtimeContinuation"]["clientTurnId"],
     )["runs"]
+    assert run["turnId"] != original["turnId"]
 
 
 def test_skip_blocking_question_saves_without_resuming_and_allows_next_message(tmp_path):
@@ -454,7 +519,7 @@ def test_skip_blocking_question_saves_without_resuming_and_allows_next_message(t
 
 
 @pytest.mark.parametrize("resolution", ["later", "uncertain", "pass", "fail"])
-def test_visual_answer_to_returned_turn_saves_without_dispatch(tmp_path, resolution):
+def test_visual_answer_to_returned_turn_starts_with_user_answer(tmp_path, resolution):
     session_id = "native-continuation-session"
     gateway, model = _write_gateway(tmp_path, [
         call("question-1", "vrcforge_ask_user", {
@@ -472,19 +537,19 @@ def test_visual_answer_to_returned_turn_saves_without_dispatch(tmp_path, resolut
     origin = question["originClientTurnId"]
     assert gateway.get_runtime_session(session_id, client_turn_id=origin)["status"] == "completed"
 
+    completed = threading.Event()
+    gateway._runtime_turn_completed = lambda _result: completed.set()
     answer = gateway.questions.answer(question["questionId"], {
         "sessionId": session_id, "selectedOptionId": resolution,
     })
-    assert answer["runtimeContinuation"]["status"] == "settled_without_dispatch"
+    assert answer["runtimeContinuation"]["status"] == "queued"
     assert answer["question"]["status"] == "answered"
     assert answer["question"]["resolution"] == resolution
-    assert answer["question"]["runtimeQuestionFeedbackPending"] is False
-    assert gateway.questions.reconcile_runtime_continuations()["queued"] == 0
-    assert len(model.requests) == 1
+    assert completed.wait(5)
+    assert gateway.shutdown_runtime_continuations(5)["ok"]
     assert not gateway.list_runtime_followups(session_id=session_id)
-
-    _run(gateway, tmp_path, message="Start a different request", clientTurnId="manual-next-turn")
     assert len(model.requests) == 2
+    assert {"role": "user", "content": resolution.title()} in model.requests[-1]["messages"]
     results = [message for message in model.requests[-1]["messages"] if message.get("tool_call_id") == "question-1"]
     assert len(results) == 1
     assert json.loads(results[0]["content"])["status"] == "answered"
@@ -512,20 +577,18 @@ def test_visual_answer_during_blocking_tool_never_starts_another_turn(tmp_path, 
         "vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", ask_and_answer,
     )
     _run(gateway, tmp_path)
-    assert during_tool[0]["runtimeContinuation"]["status"] == (
-        "settled_without_dispatch" if resolution == "later" else "steered"
-    )
+    assert during_tool[0]["runtimeContinuation"]["status"] == "steered"
     assert gateway.shutdown_runtime_continuations(1)["ok"]
     assert len(model.requests) == 2
     assert gateway.list_runtime_followups(session_id=session_id) == []
     saved = gateway.questions.list(session_id=session_id, include_answered=True)["questions"][0]
-    assert saved["runtimeContinuationStatus"] == ("settled_without_dispatch" if resolution == "later" else "delivered")
+    assert saved["runtimeContinuationStatus"] == "delivered"
     assert not gateway.runtime_runs.list_runs(
         session_id=session_id, client_turn_id=saved["originClientTurnId"] + ":question:" + saved["questionId"],
     )["runs"]
     answer_seen = any(message.get("role") == "user" and "User answer: " + resolution.title() in message.get("content", "")
                       for message in model.requests[-1]["messages"])
-    assert answer_seen is (resolution == "pass")
+    assert answer_seen
     native = gateway.runtime_sessions.native_conversation(session_id, binding=_binding(tmp_path))
     assert gateway.runtime_sessions._native_pending(native) == set()
 

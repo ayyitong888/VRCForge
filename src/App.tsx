@@ -2291,7 +2291,7 @@ export default function App() {
       return;
     }
     initialGlobalQuestionFetchRef.current = true;
-    void fetchAgentQuestions(endpoint, { limit: 1000 }).then((result) => {
+    void fetchAgentQuestions(endpoint, { activeOnly: true }).then((result) => {
       notifyCallUserQuestions(result.questions);
       result.questions.forEach((question) => upsertAgentQuestion(question, true));
     }).catch(() => {

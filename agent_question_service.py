@@ -634,6 +634,18 @@ class AgentQuestionService:
         """Persist cancellation and return trusted seeds for the stopped turn."""
         cancelled_seeds: list[dict[str, object]] = []
         with _locked(self._persistence.shared_state_lock):
+    def cancel_queued_runtime_continuation(self, *, session_id: str, client_turn_id: str) -> bool:
+        """Cancel an answer's own queued turn before it claims the runtime."""
+        with _locked(self._persistence.shared_state_lock):
+            for question_id, question in self._project(include_answered=True).items():
+                if (question.get("sessionId") == session_id
+                        and question.get("runtimeContinuationStatus") == "queued"
+                        and question.get("runtimeContinuationClientTurnId") == client_turn_id
+                        and question.get("originClientTurnId") != client_turn_id):
+                    self.record_runtime_continuation(question_id, "cancelled", runtimeQuestionFeedbackPending=False)
+                    return True
+        return False
+
             for question_id, question in self._project(include_answered=True).items():
                 seed = question.get("runtimeTaskSeed")
                 if not isinstance(seed, Mapping) or not any((session_id, turn_id, client_turn_id)):
@@ -704,6 +716,8 @@ class AgentQuestionService:
         if isinstance(attachments, list) and attachments:
             seed["_authenticatedUserAttachments"] = deepcopy(attachments)
         if question.get("runtimeQuestionFeedbackPending"):
+        if answer := AgentQuestionService._sanitize_answer_for_model(str(question.get("answer") or "")):
+            seed["_authenticatedUserAnswer"] = answer
             seed["_authenticatedQuestionFeedbackPending"] = True
         if question.get("questionFeedbackRevision") is not None:
             seed["_questionFeedbackRevision"] = question.get("questionFeedbackRevision")
@@ -731,6 +745,7 @@ class AgentQuestionService:
         questions = list(self._project(include_answered=include_answered).values())
         if project_root:
             normalized_project_root = self._scope.normalize_path(project_root)
+        keep_active: bool = False,
             questions = [
                 item
                 for item in questions
@@ -740,11 +755,16 @@ class AgentQuestionService:
             questions = [item for item in questions if str(item.get("sessionId") or "") == session_id]
         # Answered history must not displace a question that still needs input
         # or whose owned continuation is active in a bounded App snapshot.
-        questions.sort(key=lambda item: (
-            2 if item.get("status") == "pending" else 1 if item.get("runtimeContinuationStatus") in {"queued", "claimed"} else 0,
-            str(item.get("updatedAt") or item.get("createdAt") or ""),
-        ), reverse=True)
-        questions = questions[: max(1, min(int(limit), AGENT_QUESTION_MAX_ITEMS))]
+        def priority(item: Mapping[str, object]) -> int:
+            if item.get("status") == "pending":
+                return 2
+            return int(item.get("runtimeContinuationStatus") in {"queued", "claimed", "running", "cancelling"})
+
+        questions.sort(key=lambda item: (priority(item), str(item.get("updatedAt") or item.get("createdAt") or "")), reverse=True)
+        history_budget = max(0 if keep_active else 1, min(int(limit), AGENT_QUESTION_MAX_ITEMS))
+        if keep_active:
+            history_budget += sum(priority(item) > 0 for item in questions)
+        questions = questions[:history_budget]
         return {
             "ok": True,
             "schema": "vrcforge.agent_questions.v1",

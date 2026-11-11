@@ -11,7 +11,8 @@ export const cancelAgentRunFollowup = async (_endpoint, queueId) => ({ ok: true,
 export const listAgentRunFollowups = async () => ({ ok: true, items: window.__recoveryQueue || window.__durableQueue || [] });
 export const fetchAgentQuestions = async (_endpoint, params = {}) => ({
   ok: true,
-  questions: window.__agentQuestions.filter((question) => !params.sessionId || question.sessionId === params.sessionId),
+  questions: window.__agentQuestions.filter((question) => (!params.sessionId || question.sessionId === params.sessionId)
+    && (params.activeOnly || params.includeAnswered || question.status === "pending")),
 });
 export const issueComputerUseTurnGrant = async () => null;
 export const requestAgentRunCancel = async () => ({ ok: true });
@@ -360,6 +361,7 @@ try {
       questionId: "question-fixture", status: "answered", sessionId: "session-fixture",
       runtimeContinuation: { status: "running", sessionId: "session-fixture" },
     }];
+    window.__setQuestionActivity(false);
   });
   await page.evaluate(() => window.__controller.resumeQueuedTurns());
   await page.waitForTimeout(60);

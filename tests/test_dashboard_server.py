@@ -3896,6 +3896,50 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(other.json()["questions"]["questions"], [])
         self.assertEqual(pending_only.json()["questions"], [])
 
+    def test_runtime_snapshot_retains_active_questions_beyond_history_limit(self) -> None:
+        scope = {"sessionId": "question-snapshot-active", "projectRoot": "ProjectA"}
+        with TestClient(dashboard_server.app) as client:
+            questions = dashboard_server.AGENT_GATEWAY.questions
+            pending = {
+                questions.create({"question": f"Pending question {index}?", "blocking": False, **scope})["question"]["questionId"]
+                for index in range(7)
+            }
+            active = {}
+            for status in ("queued", "claimed"):
+                question_id = questions.create({"question": f"Continue {status}?", **scope})["question"]["questionId"]
+                questions.answer(question_id, {"answer": "yes", **scope})
+                questions.record_runtime_continuation(question_id, status)
+                active[question_id] = status
+            history = set()
+            for index in range(8):
+                question_id = questions.create({"question": f"Completed question {index}?", **scope})["question"]["questionId"]
+                questions.answer(question_id, {"answer": "yes", **scope})
+                history.add(question_id)
+            snapshot = client.get("/api/app/runtime/snapshot", params=scope)
+            active_only = client.get("/api/app/agent/questions", params={**scope, "activeOnly": True, "limit": 1})
+
+        self.assertEqual(snapshot.status_code, 200)
+        rows = {row["questionId"]: row for row in snapshot.json()["questions"]["questions"]}
+        self.assertEqual({key for key, row in rows.items() if row["status"] == "pending"}, pending)
+        self.assertEqual({key: rows[key]["runtimeContinuationStatus"] for key in active}, active)
+        self.assertEqual(len(rows.keys() & history), 6)
+        self.assertEqual(active_only.status_code, 200)
+        self.assertEqual({row["questionId"] for row in active_only.json()["questions"]}, pending | active.keys())
+
+    def test_question_answer_broadcast_includes_exact_answer_beyond_pending_limit(self) -> None:
+        scope = {"sessionId": "question-broadcast-active", "projectRoot": "ProjectA"}
+        with TestClient(dashboard_server.app) as client:
+            questions = dashboard_server.AGENT_GATEWAY.questions
+            question_id = questions.create({"question": "Which result should be kept?", **scope})["question"]["questionId"]
+            for index in range(31):
+                questions.create({"question": f"Pending question {index}?", **scope})
+            with patch.object(dashboard_server.EVENT_BUS, "broadcast", new_callable=AsyncMock) as broadcast:
+                answered = client.post(f"/api/app/agent/questions/{question_id}/answer", json={"answer": "The first result", **scope})
+
+        self.assertEqual(answered.status_code, 200)
+        question_events = [call.args[1] for call in broadcast.await_args_list if call.args[0] == "agentQuestions"]
+        self.assertEqual(question_events[-1]["questions"], [answered.json()["question"]])
+
     def test_answered_goal_question_recovers_after_interrupted_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

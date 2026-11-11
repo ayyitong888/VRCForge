@@ -2929,7 +2929,9 @@ def read_app_runtime_snapshot(
         desktop_actions = AGENT_GATEWAY.desktop.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot)
         goals = AGENT_GATEWAY.goal.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot)
         progress = AGENT_GATEWAY.list_agent_progress(limit=12, session_id=sessionId, project_root=projectRoot)
-        questions = AGENT_GATEWAY.questions.list(limit=6, session_id=sessionId, project_root=projectRoot, include_answered=True)
+        questions = AGENT_GATEWAY.questions.list(
+            limit=6, session_id=sessionId, project_root=projectRoot, include_answered=True, keep_active=True,
+        )
         memory = AGENT_GATEWAY.list_agent_memory(limit=8, project_root=projectRoot)
     else:
         runs = {"ok": True, "schema": "vrcforge.runtime_runs.v1", "runs": [], "events": [], "count": 0}
@@ -4127,8 +4129,10 @@ async def app_delete_agent_progress(progress_id: str, sessionId: str = "", proje
 
 
 @app.get("/api/app/agent/questions")
-def app_agent_questions(limit: int = 50, sessionId: str = "", projectRoot: str = "", includeAnswered: bool = False) -> dict[str, Any]:
-    return AGENT_GATEWAY.questions.list(limit=limit, session_id=sessionId, project_root=projectRoot, include_answered=includeAnswered)
+def app_agent_questions(limit: int = 50, sessionId: str = "", projectRoot: str = "", includeAnswered: bool = False,
+                        activeOnly: bool = False) -> dict[str, Any]:
+    return AGENT_GATEWAY.questions.list(limit=0 if activeOnly else limit, session_id=sessionId,
+        project_root=projectRoot, include_answered=includeAnswered or activeOnly, keep_active=activeOnly)
 
 
 @app.post("/api/app/agent/questions")
@@ -4175,7 +4179,7 @@ async def app_answer_agent_question(question_id: str, request: AgentQuestionAnsw
         )
     except AgentQuestionServiceError as exc:
         raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
-    await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.questions.list(limit=30, session_id=request.session_id or "", project_root=request.project_root or "", include_answered=True))
+    await EVENT_BUS.broadcast("agentQuestions", {"questions": [payload["question"]]})
     if payload.get("goalDelivery") is not None:
         await broadcast_background_goal_state({})
     return payload
