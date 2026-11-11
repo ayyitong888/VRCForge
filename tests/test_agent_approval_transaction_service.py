@@ -128,6 +128,56 @@ def test_auto_approved_write_blocked_by_recovery_keeps_no_write_facts(tmp_path: 
     assert handler_calls == []
 
 
+@pytest.mark.parametrize(
+    ("mode", "tool", "expected_status"),
+    [
+        ("roslyn_full_auto", "vrcforge_toggle_scene_object", "approved"),
+        ("approval", "vrcforge_toggle_scene_object", "pending"),
+        ("roslyn_full_auto", "vrcforge_install_user_unity_tools", "pending"),
+    ],
+)
+def test_first_visible_write_state_matches_approval_policy(
+    tmp_path: Path, mode: str, tool: str, expected_status: str,
+) -> None:
+    gateway = _gateway(tmp_path)
+    service = gateway.approval_transactions
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    config.execution_mode = mode
+    config.roslyn_risk_acknowledged = True
+    gateway.save_config(config)
+    states_at_creation = []
+    handler_calls = []
+    ports = service._ports
+
+    def observe_audit(event: dict) -> None:
+        if event["event"] in {"approval_requested", "approval_approved"}:
+            states_at_creation.append([item["status"] for item in service.list_approvals()])
+        ports.append_audit(event)
+
+    def observe_activity(reason: str) -> None:
+        if reason == "approval_transition":
+            states_at_creation.append([item["status"] for item in service.list_approvals()])
+        ports.signal_background_activity(reason)
+
+    service._ports = replace(
+        ports, append_audit=observe_audit, signal_background_activity=observe_activity,
+    )
+    service.register_write_handler(
+        tool, "Replay a write approval", "low",
+        lambda arguments: handler_calls.append(arguments) or {"ok": True},
+        pre_write_checkpoint_required=False,
+        manual_approval_resolver=lambda *_: "Editor code requires confirmation.",
+    )
+    result = service.create_apply_request({"targetTool": tool, "arguments": {}})
+
+    assert states_at_creation
+    assert all(states == [expected_status] for states in states_at_creation)
+    assert result["status"] == ("executed" if expected_status == "approved" else "pending")
+    assert len(handler_calls) == (1 if expected_status == "approved" else 0)
+
+
 def _class_definition(path: Path, class_name: str) -> ast.ClassDef:
     tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     return next(

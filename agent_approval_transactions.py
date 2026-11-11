@@ -1615,6 +1615,7 @@ class AgentApprovalTransactionService:
                 or (execution_mode == "auto" and bool(auto_policy_reason or risk_escalation_reason))
             )
         )
+        directly_approved = full_permission_auto and not requires_explicit_for_mode
         explicit_approval_reason = str(
             always_manual_reason
             or mandatory_manual_approval_reason
@@ -1690,6 +1691,7 @@ class AgentApprovalTransactionService:
                 },
             ),
             task_context=normalized_task_context,
+            initial_status="approved" if directly_approved else "pending",
         )
         if include_arguments_digest:
             approval["argumentsDigest"] = stable_hash(
@@ -1748,9 +1750,11 @@ class AgentApprovalTransactionService:
                 )
         if self.auto_approval_enabled(config) and not requires_explicit_for_mode:
             if execution_mode != "auto" or auto_review_decision == "allow_auto":
-                auto_payload = self._auto_execute_approval(approval)
+                auto_payload = self._auto_execute_approval(approval, config)
                 if auto_payload is not None:
                     return auto_payload
+                if directly_approved:
+                    raise AgentGatewayError("Automatic approval could not proceed.", status_code=409)
         if self.auto_approval_enabled(config) and requires_explicit_for_mode:
             self._ports.append_audit(
                 {
@@ -1798,7 +1802,9 @@ class AgentApprovalTransactionService:
             ),
         }
 
-    def _auto_execute_approval(self, approval: dict[str, Any]) -> dict[str, Any] | None:
+    def _auto_execute_approval(
+        self, approval: dict[str, Any], config: AgentGatewayConfig,
+    ) -> dict[str, Any] | None:
         """Auto-approve and apply an approval under the auto / full-permission tiers.
 
         Returns the execution payload, or None when auto-approval could not
@@ -1809,8 +1815,8 @@ class AgentApprovalTransactionService:
         approval_id = str(approval.get("id") or "").strip()
         if not approval_id:
             return None
-        block_reason = self._auto_approval_block_reason(approval)
-        permission_context = self.permission_audit_context()
+        block_reason = self._auto_approval_block_reason(approval, config)
+        permission_context = self.permission_audit_context(config)
         if block_reason:
             self._ports.append_audit(
                 {
@@ -4119,9 +4125,10 @@ class AgentApprovalTransactionService:
             raise ValueError("initial approval status must be pending or approved")
         normalized_channel = str(approval_channel or "internal").strip().casefold()
         external_mcp = normalized_channel == "external_mcp"
-        self._ports.signal_background_activity(
-            "external_mcp_write" if external_mcp else "pending_approval"
-        )
+        if external_mcp or normalized_status == "pending":
+            self._ports.signal_background_activity(
+                "external_mcp_write" if external_mcp else "pending_approval"
+            )
         now = datetime.now(timezone.utc)
         permission_context = self.permission_audit_context()
         prior_history = self._prior_target_write_history(arguments, task_context)
@@ -4175,6 +4182,10 @@ class AgentApprovalTransactionService:
             approval["userConstraintsPath"] = str(user_constraints.path)
         with self._ports.state.shared_state_lock:
             self._ports.state.approvals[approval["id"]] = approval
+            # Full Permission writes are already authorized. The decision path
+            # records their approval without publishing a human request first.
+            if normalized_status == "approved" and not external_mcp:
+                return redact_sensitive(dict(approval))
             try:
                 self._persist_pending_approvals_locked()
             except (OSError, UnicodeError, TypeError, ValueError) as exc:
