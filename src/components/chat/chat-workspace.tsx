@@ -758,9 +758,6 @@ export function ChatWorkspace({
           {(() => {
             let recentAssistantTurns: ConversationItem[] = [];
             const shownQuestionIds = new Set<string>();
-            const openingMessageId = conversation.find((item) => (item.type === "user" && !item.composerQueued)
-              || item.type === "agent" || item.type === "streaming" || item.type === "question_answer")?.id;
-            const firstDialogueItem = conversationItems.find((item) => item.id === openingMessageId);
             return conversationItems.map((item, itemIndex) => {
             if (item.type === "user") recentAssistantTurns = [];
             if (item.type === "agent" || item.type === "streaming") recentAssistantTurns.push(item);
@@ -772,11 +769,6 @@ export function ChatWorkspace({
               || pendingQuestionPrompts.some((question) => question.questionId === item.questionId)
               || questionAppearsInTurn(item.question || "", origin)
               || recentAssistantTurns.some((turn) => questionAppearsInTurn(item.question || "", turn))
-            );
-            const questionQuoteInitiallyOpen = item.type === "question_answer" && !shownQuestionIds.size && (
-              item === firstDialogueItem
-              || Boolean(firstDialogueItem && (origin ? origin === firstDialogueItem
-                : recentAssistantTurns.includes(firstDialogueItem) && questionAppearsInTurn(item.question || "", firstDialogueItem)))
             );
             if (item.type === "question_answer" && item.question && item.selectedOptionId !== "skip") shownQuestionIds.add(item.questionId);
             const roundStartedAt = roundDateSeparators.get(item);
@@ -837,7 +829,6 @@ export function ChatWorkspace({
                 item={item}
                 runtimeActive={itemRuntimeActive}
                 questionAlreadyShown={questionAlreadyShown}
-                questionQuoteInitiallyOpen={questionQuoteInitiallyOpen}
                 pendingQuestions={pendingQuestionsByOrigin.get(item)}
                 renderQuestionEntry={renderQuestionEntry}
                 onOpenChatById={onOpenChatById}

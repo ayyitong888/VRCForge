@@ -74,14 +74,12 @@ try {
     assert.equal(await item.locator('[data-question-answer-value]').innerText(), answer);
     assert.equal(await item.locator('[data-question-answer-value]').isVisible(), true);
     const originalQuestion = item.locator('[data-question-answer-question]');
-    assert.equal(await originalQuestion.isVisible(), false, 'saved questions initially hide the full quote');
-    await item.locator('[data-question-answer-quote] summary').click();
+    assert.equal(await originalQuestion.isVisible(), true, 'saved answers always show the original question');
     const bubble = item.locator('[data-user-message-bubble]');
     const prompt = item.locator('[data-chat-question-prompt]');
     assert.ok((await bubble.boundingBox()).x > (await prompt.boundingBox()).x, 'the reply is aligned to the right');
     assert.notEqual(await originalQuestion.evaluate(el => getComputedStyle(el.querySelector('.chat-markdown')).color), await bubble.evaluate(el => getComputedStyle(el.querySelector('[data-question-answer-value] .chat-markdown')).color), 'the quoted question is muted');
     assert.equal(await originalQuestion.innerText(), 'Review the avatar from the front.');
-    assert.equal(await originalQuestion.isVisible(), true);
   }
 
   assert.equal(await page.locator('#review-3 [data-chat-quote-content][data-question-answer-value]').count(), 1, 'saved reply remains selectable as a chat quote');

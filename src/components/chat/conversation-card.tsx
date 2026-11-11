@@ -65,7 +65,6 @@ export function ConversationCard({
   saveOperationTool,
   onSaveOperationAsSkill,
   questionAlreadyShown,
-  questionQuoteInitiallyOpen,
   pendingQuestions = [],
   renderQuestionEntry,
   onOpenChatById,
@@ -101,7 +100,6 @@ export function ConversationCard({
   saveOperationTool?: string;
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
   questionAlreadyShown?: boolean;
-  questionQuoteInitiallyOpen?: boolean;
   pendingQuestions?: AgentQuestion[];
   renderQuestionEntry?: (question: AgentQuestion, showPrompt: boolean) => ReactNode;
   /** Opens another conversation in this project scope by chat id. */
@@ -314,14 +312,12 @@ export function ConversationCard({
           {item.question || item.text ? (
             <div className="min-w-0 max-w-full space-y-1 rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble>
               {item.question ? (
-                <details open={questionQuoteInitiallyOpen} className="text-muted-foreground" data-question-answer-quote>
-                  <summary className="w-fit cursor-pointer rounded-sm text-xs hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                    {t("questionCard.title")}
-                  </summary>
+                <div className="text-muted-foreground" data-question-answer-quote>
+                  <div className="text-xs">{t("questionCard.title")}</div>
                   <blockquote className="mt-1 [&_.chat-markdown]:text-muted-foreground" data-question-answer-question>
                     <ChatMarkdown text={item.question} />
                   </blockquote>
-                </details>
+                </div>
               ) : null}
               {item.text ? (
                 <div data-question-answer-text data-question-answer-value data-chat-quote-content>

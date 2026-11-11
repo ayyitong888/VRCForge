@@ -151,8 +151,8 @@ try {
   assert.equal(await userMarkdown.locator("strong").innerText(), "the project");
   assert.equal(await userMarkdown.locator("code").innerText(), "Renderer");
   const answerQuestion = page.locator("[data-question-answer-question]");
-  assert.equal(await answerQuestion.isVisible(), false, "a question after an earlier message starts folded");
-  await page.locator("[data-question-answer-quote] summary").click();
+  assert.equal(await answerQuestion.isVisible(), true, "a historical answered question is visible without interaction");
+  assert.equal(await page.locator("details[data-question-answer-quote]").count(), 0, "answered questions have no collapse control");
   assert.doesNotMatch(await answerQuestion.innerText(), /\*\*/, "the question does not expose synthetic emphasis delimiters");
   assert.equal(await answerQuestion.locator("strong").innerText(), "this project");
   assert.equal(await answerQuestion.locator("ol > li").count(), 2, "the quoted question retains its ordered list");
@@ -198,14 +198,10 @@ try {
   assert.equal(await questionDock.count(), 0);
   assert.equal(await referenceAnswer.locator("[data-chat-question-prompt]").count(), 0, "the original assistant prompt is kept in its original turn without duplication");
   const referenceQuote = referenceAnswer.locator("[data-question-answer-question]");
-  assert.equal(await referenceQuote.isVisible(), false, "a question after the opening message folds when answered");
+  assert.equal(await referenceQuote.isVisible(), true, "the question remains visible as soon as the answer arrives");
   assert.equal(await referenceAnswer.locator("[data-question-answer-value]").innerText(), "脸部细节");
   assert.equal(await referenceAnswer.locator("[data-question-answer-value]").isVisible(), true);
-  await referenceAnswer.locator("[data-question-answer-quote] summary").click();
   assert.equal(await referenceQuote.innerText(), referencePrompt);
-  assert.equal(await referenceQuote.isVisible(), true);
-  await referenceAnswer.locator("[data-question-answer-quote] summary").click();
-  assert.equal(await referenceQuote.isVisible(), false);
   await page.evaluate(() => window.setQuestions([]));
   const historicalTurn = agent("historic final reply", later, "done", "first");
   historicalTurn.response.timeline = [{
@@ -218,6 +214,7 @@ try {
   ]);
   assert.equal(await page.locator('[data-chat-question-prompt="historic-q"]').count(), 0, "a prompt inside an older run is not recreated for each answer");
   assert.equal(await page.locator('[data-question-answer="historic-q"] [data-user-message-bubble]').count(), 2);
+  assert.equal(await page.locator('[data-question-answer="historic-q"] [data-question-answer-question]:visible').count(), 2);
 
   const openingAnswer = { id: "opening-answer", type: "question_answer", questionId: "opening-q", question: referencePrompt, text: "脸部细节" };
   await render([agent(referencePrompt, later, "done", "opening"), openingAnswer]);
@@ -326,7 +323,7 @@ try {
     assert.equal(await humanAnswer.locator("[data-question-answer-value] strong").count(), 0, "the answer's ordinary text is not made bold with the question");
     assert.notEqual(await fullQuestion.evaluate((node) => getComputedStyle(node.querySelector(".chat-markdown")).color), await humanAnswer.locator("[data-question-answer-value]").evaluate((node) => getComputedStyle(node.querySelector(".chat-markdown")).color), "the quoted question is visually secondary");
     assert.ok(await humanAnswer.locator("[data-question-answer-value]").evaluate((node) => Number(getComputedStyle(node).fontWeight) < 600), "the answer retains ordinary font weight");
-    if (!(await fullQuestion.isVisible())) await humanAnswer.locator("[data-question-answer-quote] summary").click();
+    assert.equal(await fullQuestion.isVisible(), true, "the recovered question remains visible without interaction");
     const questionBounds = await humanAnswer.locator("[data-question-answer-question]").boundingBox();
     const answerValueBounds = await humanAnswer.locator("[data-question-answer-value]").boundingBox();
     assert.ok(questionBounds.y + questionBounds.height <= answerValueBounds.y, "the complete question occupies the line above the answer");
