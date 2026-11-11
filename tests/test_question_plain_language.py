@@ -50,6 +50,8 @@ def test_actual_planner_request_guides_all_user_question_text(layer, native):
     assert "diagnostic details" in prompt
     assert "specific capability or permission gap" in prompt
     assert "missing fact, preference, or decision" in prompt
+    assert "use the relevant tools to resolve factual uncertainty" in prompt
+    assert "If the user gives you a criterion, apply it yourself" in prompt
     assert "reuse the existing confirmation card" in prompt
 
 
@@ -85,3 +87,6 @@ def test_registered_tool_description_carries_guidance_through_real_projection(tm
     else:
         assert "missing fact, preference, or decision" in descriptor["whenToUse"]
         assert "color they prefer" in descriptor["whenToUse"]
+        assert "use the relevant tools to resolve factual uncertainty" in descriptor["whenToUse"]
+        assert "capture and inspect current screenshots to identify clipping" in descriptor["description"]
+        assert "If the user gives you a criterion, apply it yourself" in descriptor["description"]

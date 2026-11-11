@@ -27,6 +27,10 @@ VISUAL_RESOLUTIONS = frozenset({"pass", "fail", "uncertain", "later"})
 RUNTIME_TOOL_LOOP_SOURCE = "runtime_tool_loop"
 ASK_USER_USAGE_INSTRUCTION = (
     "Use ask_user for a missing fact, preference, or decision only the user can supply and that changes the next step. "
+    "Before asking, check the user's instructions and current evidence, and use the relevant tools to resolve factual uncertainty. "
+    "If the user gives you a criterion, apply it yourself. For example, capture and inspect current screenshots to identify clipping "
+    "before asking which outfit needs adjustment. Continue once the evidence resolves the choice. "
+    "Ask only about what remains unresolved and requires the user's input, and keep doing independent work when possible. "
     "Example: ask which color they prefer before applying a texture. "
 )
 CALL_USER_USAGE_INSTRUCTION = (
