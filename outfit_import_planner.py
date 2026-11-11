@@ -4,8 +4,9 @@ import json
 import os
 import re
 import zipfile
+from collections.abc import Collection, Mapping
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from outfit_package_inspector import inspect_outfit_package, is_single_fbx_folder
@@ -192,6 +193,39 @@ DEPENDENCY_RULES: list[dict[str, Any]] = [
 ]
 
 
+def select_loose_avatar_texture_assets(
+    requested_paths: Any,
+    source_entries: Mapping[str, str],
+    metadata_paths: Collection[str],
+) -> list[str]:
+    """Resolve explicitly selected avatar textures within an inspected or sealed source."""
+    if requested_paths is None:
+        return []
+    if not isinstance(requested_paths, list) or not 1 <= len(requested_paths) <= 5000:
+        raise ValueError("avatarTexturePaths must contain 1..5000 exact loose texture paths.")
+    sidecars = {path.casefold() for path in metadata_paths}
+    seen: set[str] = set()
+    destinations: list[str] = []
+    for path in requested_paths:
+        if (
+            not isinstance(path, str)
+            or path != path.strip()
+            or any(c in path for c in ("\\", ":", "\x00"))
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or PurePosixPath(path).suffix.casefold() not in {".png", ".jpg", ".jpeg"}
+            or path not in source_entries
+        ):
+            raise ValueError("avatarTexturePaths must use exact source-relative PNG/JPG/JPEG paths listed in the loose import.")
+        key = path.casefold()
+        if key in seen:
+            raise ValueError("avatarTexturePaths must not contain duplicate paths.")
+        if f"{key}.meta" in sidecars:
+            raise ValueError(f"avatarTexturePaths entry already has source import settings: {path}. Omit it from avatarTexturePaths to preserve its .meta.")
+        seen.add(key)
+        destinations.append(source_entries[path])
+    return destinations
+
+
 def build_outfit_import_plan(
     package_path: str | Path,
     project_path: str | Path | None = None,
@@ -201,6 +235,7 @@ def build_outfit_import_plan(
     selected_prefab: str | None = None,
     base_avatar_name: str | None = None,
     max_entries: int = 5000,
+    avatar_texture_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     dependency_mode = str(dependency_mode or "auto").strip().casefold()
     if dependency_mode not in {"auto", "selected_only"}:
@@ -329,6 +364,26 @@ def build_outfit_import_plan(
             inspection=inspection,
             warnings=warnings,
             dependency_preflight=dependency_preflight,
+        )
+
+    if avatar_texture_paths is not None:
+        if plan["kind"] != "loose_prefab_copy":
+            raise ValueError("avatarTexturePaths is only supported for loose folder imports.")
+        source_entries = {
+            path[len(target_root) + 1:]: path for path in plan["expectedAssetPaths"]
+        }
+        metadata_paths = set()
+        for path in source_entries:
+            sidecar = source_path / f"{path}.meta"
+            if sidecar.exists() or sidecar.is_symlink():
+                metadata_paths.add(f"{path}.meta")
+        plan["avatarTextureAssets"] = select_loose_avatar_texture_assets(
+            avatar_texture_paths, source_entries, metadata_paths,
+        )
+        refresh = next(item for item in plan["steps"] if item["id"] == "refresh")
+        refresh["description"] = (
+            "Refresh copied assets, enable streaming for selected avatar textures with mipmaps, "
+            "and read back their import settings before material assignment."
         )
 
     return {

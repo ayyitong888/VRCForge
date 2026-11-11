@@ -2201,9 +2201,15 @@ class WardrobeOutfitWorkflowService:
         dependency_mode = self._text(normalized, "dependencyMode", "dependency_mode")
         if dependency_mode:
             build_kwargs["dependency_mode"] = dependency_mode
-        return self._ports.build_import_plan(
-            **build_kwargs,
-        )
+        if "avatarTexturePaths" not in normalized:
+            return self._ports.build_import_plan(**build_kwargs)
+        paths = normalized["avatarTexturePaths"]
+        if paths is None:
+            raise WardrobeOutfitWorkflowError("avatarTexturePaths must be an array of exact loose texture paths.")
+        try:
+            return self._ports.build_import_plan(**build_kwargs, avatar_texture_paths=paths)
+        except ValueError as exc:
+            raise WardrobeOutfitWorkflowError(str(exc)) from exc
 
     def request_outfit_import(
         self,

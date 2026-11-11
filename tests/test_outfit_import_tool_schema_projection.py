@@ -16,3 +16,14 @@ def test_outfit_import_plan_and_inspect_read_schemas_are_discoverable():
     assert "projectPath" in plan["properties"]
     assert inspect["required"] == ["packagePath"]
     assert set(inspect["properties"]) == {"packagePath", "maxEntries"}
+
+
+def test_avatar_texture_selection_is_optional_in_plan_and_apply():
+    plan = canonical_unity_read_tool_input_schema("vrcforge_plan_outfit_import")
+    write = canonical_unity_write_tool_input_schema("vrcforge_import_outfit_package")
+    selection = write["properties"]["avatarTexturePaths"]
+    assert selection == plan["properties"]["avatarTexturePaths"]
+    assert selection["type"] == "array"
+    assert selection["uniqueItems"] is True
+    assert "avatarTexturePaths" not in plan["required"]
+    assert "avatarTexturePaths" not in write["required"]

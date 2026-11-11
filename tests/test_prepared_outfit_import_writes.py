@@ -236,6 +236,7 @@ def test_preparer_reports_missing_unitypackage_payload_and_correction(tmp_path: 
 def _approved(
     *, timeout_seconds: float = 180.0, poll_seconds: float = 0.5,
     verify_imported_asset_content=None,
+    supports_avatar_texture_refresh: bool = True,
 ) -> PreparedOutfitImportApprovedWriteService:
     return PreparedOutfitImportApprovedWriteService(
         PreparedOutfitImportApprovedWritePorts(
@@ -287,6 +288,7 @@ def _approved(
             map_error=lambda exc: dashboard_server.to_http_exception(exc),
             handled_errors=(RuntimeError, dashboard_server.UnityMcpError, ValueError),
             verify_imported_asset_content=verify_imported_asset_content,
+            supports_avatar_texture_refresh=lambda _settings: supports_avatar_texture_refresh,
         )
     )
 
@@ -1353,6 +1355,56 @@ def test_loose_texture_import_completed_refresh_without_compilation_is_not_faile
     assert result["assetDatabaseRefresh"]["verification"]["state"] == "unknown"
     assert result.get("checkpointRecoveryRequired") is not True
     assert (project / "Assets/VRCForge/ImportedOutfits/Body.png").read_bytes() == b"isolated texture fixture"
+
+
+@pytest.mark.parametrize("outcome", ["verified", "missing_readback", "old_core"])
+def test_new_avatar_texture_import_requires_streaming_readback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    from unity_import_checkpoint import prepare_import_asset_checkpoint
+
+    project = _project(tmp_path)
+    loose = tmp_path / "textures"
+    loose.mkdir()
+    (loose / "Body.png").write_bytes(b"avatar texture fixture")
+    (loose / "Icon.png").write_bytes(b"unselected icon fixture")
+    target = "Assets/VRCForge/ImportedOutfits/Body.png"
+    prepared, preview = _prepare(tmp_path, {"plan": {
+        "readyToApply": True, "kind": "loose_prefab_copy", "projectPath": str(project),
+        "targetFolder": "Assets/VRCForge/ImportedOutfits", "source": {"path": str(loose)},
+    }}, {
+        "packagePath": str(loose), "projectPath": str(project),
+        "avatarTexturePaths": ["Body.png"],
+    })
+    assert preview["plan"]["avatarTextureAssets"] == [target]
+    assert build_prepared_execution_plan(prepared)[0][1]["avatarTextureAssets"] == [target]
+    checkpoint = prepare_import_asset_checkpoint(
+        project, prepared, verify_project=dashboard_server._verify_prepared_import_project_identity,
+    )
+    assert checkpoint["ok"] is True
+    assert {target, target + ".meta"} <= set(checkpoint["assetFootprint"]["archiveAbsentFiles"])
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings",
+                        lambda _: SimpleNamespace(unity_mcp_timeout_seconds=30))
+    rows = [{
+        "assetPath": target, "mipmapEnabled": True,
+        "streamingMipmaps": True, "mipmapCount": 10,
+    }]
+    raw = {"ok": True, "after": {"avatarTextureReadback": rows if outcome == "verified" else []}}
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", lambda *_args, **_kwargs:
+                        dashboard_server.McpResult(0, "", "", raw))
+    result = _approved(supports_avatar_texture_refresh=outcome != "old_core").execute(prepared)
+    assert result["ok"] is (outcome == "verified")
+    if outcome == "verified":
+        assert result["avatarTextureReadback"] == rows
+        assert result["nextTool"] == "vrcforge_preview_material_texture_assignment"
+    elif outcome == "missing_readback":
+        assert result["checkpointRecoveryRequired"] is True
+        assert result["failureLayer"] == "unity_avatar_texture_readback"
+        assert "nextTool" not in result
+    else:
+        assert result["failureLayer"] == "unity_avatar_texture_preflight"
+        assert result["mutationStarted"] is False
+        assert not (project / target).exists()
 
 
 def test_preparer_rejects_reserved_and_handler_is_bound() -> None:

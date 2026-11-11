@@ -27908,7 +27908,7 @@ def register_agent_gateway_tools() -> None:
         "read/debug",
         inspect_chat_attachment_sync,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "When to use: preview a supervised import for a UnityPackage, Booth folder, loose prefab/texture folder, or an unpacked folder containing one explicit FBX model, without writing Unity project files. When NOT to use: do not guess among multiple standalone FBX models or treat a lone FBX file as a complete source folder. Negative example: put a newly generated FBX in its own output folder and inspect that folder before importing; do not fabricate a prefab selection.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.plan_outfit_import)
+    AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "When to use: preview a supervised import for a UnityPackage, Booth folder, loose prefab/texture folder, or a folder containing one explicit FBX model, without writing Unity project files. For loose PNG/JPG/JPEG files without source .meta that will be assigned to avatar materials, list their exact source-folder-relative names in avatarTexturePaths to preview mip streaming setup and readback. When NOT to use: do not guess among multiple standalone FBX models or treat a lone FBX file as a complete source folder. Negative example: do not list a UI icon or an existing Unity texture in avatarTexturePaths.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.plan_outfit_import)
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: build_full_health_payload())
     AGENT_GATEWAY.register_tool(
         "vrcforge_know_yourself",
@@ -28956,7 +28956,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_import_outfit_package",
-        "When to use: import an approved UnityPackage or copy external prefab, material, PNG/JPG texture files, or a single standalone FBX model from an unpacked folder into the Unity project's Assets folder. packagePath is the exact existing filesystem path. targetFolder is used only when copying a loose folder; UnityPackage assets keep the exact paths stored in the package, so inspect the plan's selectedUnityPackage/selectedPrefab and target paths before approval. The plan identifies existing destination paths and the overwrite count. Texture-only and single-FBX folders are supported without a prefab; inspect and plan first, then use the sealed exact-file checkpoint for ordinary packages. A code-bearing package requires the established full-project checkpoint because Unity import callbacks and compilation can write beyond its pathname list. When NOT to use: do not guess among multiple standalone FBX models, change existing importer settings, assign material slots, extract a texture-only ZIP, or copy arbitrary project files. Negative example: targetFolder does not relocate UnityPackage contents; a PNG already inside Assets needs material assignment rather than another import.",
+        "When to use: import an approved UnityPackage or copy loose prefab, material, texture files, or one standalone FBX into the Unity project. Use the exact packagePath and plan the import before approval. For new loose PNG/JPG/JPEG files without source .meta that will be assigned to avatar materials, pass the same exact source-folder-relative avatarTexturePaths used in the plan. The approved import enables streaming on those textures when mipmaps are enabled and returns avatarTextureReadback before a separate material assignment. targetFolder applies to loose files only; UnityPackages retain their recorded paths. Code-bearing imports require the full-project checkpoint. When NOT to use: do not modify existing texture importers, assign material slots, guess among multiple FBX models, extract ZIPs, or copy arbitrary project files. Negative example: leave a UI icon out of avatarTexturePaths.",
         "medium",
         WARDROBE_OUTFIT_APPROVED_WRITES.import_package,
         risk_level_resolver=classify_prepared_outfit_import_risk,
@@ -29752,6 +29752,9 @@ PREPARED_OUTFIT_IMPORT_APPROVED_WRITE = PreparedOutfitImportApprovedWriteService
             ),
             "prepared outfit import refresh",
         ),
+        supports_avatar_texture_refresh=lambda settings: UnityMcpCoreClient(
+            Path(settings.unity_project_path), timeout_seconds=3.0,
+        ).core_info().get("assetDatabaseRefreshAvatarTextureReadback") is True,
         read_model_renderers=lambda settings, path, offset: ensure_dict_payload(
             extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_asset_info", {
                 "assetPath": path,

@@ -119,8 +119,8 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "vrcforge_plan_outfit_import": {
         "title": "Outfit Import Plan",
-        "inputs": ["Local .unitypackage, Booth folder, or loose prefab/texture folder path plus optional Unity project path."],
-        "outputs": ["Supervised import plan, selected package/prefab, expected assets, write target, and rollback requirements."],
+        "inputs": ["Local .unitypackage, Booth folder, or loose prefab/texture folder path plus optional Unity project path. For loose folders, avatarTexturePaths selects exact PNG/JPG/JPEG source paths with no .meta that will be used on avatar materials."],
+        "outputs": ["Supervised import plan, expected assets, selected avatar texture destinations, write target, and rollback requirements."],
         "sideEffects": "none",
         "tags": ["outfit", "booth", "unitypackage", "preview"],
     },
@@ -632,9 +632,9 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "vrcforge_import_outfit_package": {
         "title": "Import Unity Assets",
-        "inputs": ["External source .unitypackage or unpacked prefab/material/PNG/JPG texture folder, Unity project path, and target Assets folder."],
-        "outputs": ["Imported or copied project asset paths; assigning a texture to a material is a separate operation."],
-        "sideEffects": "imports UnityPackage or copies external asset files into Assets after approval and checkpoint",
+        "inputs": ["External .unitypackage or loose asset folder, Unity project path, target Assets folder, and optional exact avatarTexturePaths selected in the preview."],
+        "outputs": ["Imported asset paths and avatarTextureReadback for selected new textures. Wait for that readback before the separate material assignment."],
+        "sideEffects": "imports assets after approval and checkpoint, and enables mip streaming for selected new avatar textures that generate mipmaps",
         "tags": ["asset", "import", "copy", "external", "folder", "texture", "image", "png", "unitypackage", "write"],
     },
     "vrcforge_install_vpm_package": {

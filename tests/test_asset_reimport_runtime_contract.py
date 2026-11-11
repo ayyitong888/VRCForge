@@ -21,12 +21,22 @@ namespace UnityEditor {
  public static class SessionState { public static System.Collections.Generic.Dictionary<string,string> Values=new(); public static void SetString(string k,string v)=>Values[k]=v; public static string GetString(string k,string f)=>Values.TryGetValue(k,out var v)?v:f; public static void EraseString(string k)=>Values.Remove(k); }
  public class MonoScript:UnityEngine.Object { public static Type LoadedClass=typeof(UnityEditor.AssetImporters.ScriptedImporter); public Type GetClass()=>LoadedClass; }
  public class MonoImporter:AssetImporter {}
- public class AssetImporter { public static AssetImporter GetAtPath(string path){AssetDatabase.ImporterLookups++; if(AssetDatabase.DropInstanceOnSecondLookup&&AssetDatabase.ImporterLookups>1) AssetDatabase.MissingInstance=true; return (AssetDatabase.ReadbackMissing||AssetDatabase.MissingInstance||path==AssetDatabase.MissingInstancePath||(AssetDatabase.RestoreMissingBeforeImport&&AssetDatabase.Imports==0&&path.EndsWith(".lilcontainer")))?null:(path.EndsWith(".cs")?new MonoImporter():(path.EndsWith(".lilcontainer")?new UnityEditor.AssetImporters.ScriptedImporter():new AssetImporter()));} }
+ public class AssetImporter { public static AssetImporter GetAtPath(string path){AssetDatabase.ImporterLookups++; if(AssetDatabase.DropInstanceOnSecondLookup&&AssetDatabase.ImporterLookups>1) AssetDatabase.MissingInstance=true; return (AssetDatabase.ReadbackMissing||AssetDatabase.MissingInstance||path==AssetDatabase.MissingInstancePath||(AssetDatabase.RestoreMissingBeforeImport&&AssetDatabase.Imports==0&&path.EndsWith(".lilcontainer")))?null:(path.EndsWith(".cs")?new MonoImporter():(path.EndsWith(".lilcontainer")?new UnityEditor.AssetImporters.ScriptedImporter():(path.EndsWith(".png")?new TextureImporter(path):new AssetImporter())));} }
+ public class TextureImporter:AssetImporter {
+  private readonly string path;
+  public TextureImporter(string path) { this.path=path; streamingMipmaps=AssetDatabase.Streaming.Contains(path); }
+  public bool mipmapEnabled => !path.EndsWith("NoMip.png");
+  public bool streamingMipmaps;
+  public void SaveAndReimport() { AssetDatabase.TextureReimports++; if (streamingMipmaps) AssetDatabase.Streaming.Add(path); }
+ }
  public static class AssetDatabase {
   public static int Imports,Saves,Refreshes,Reads; public static bool ReadbackMissing,MissingInstance,WrongTypeAfterImport; public static string[] Paths={"Assets/A.asset"};
   public static event System.Action<string> importPackageStarted,importPackageCompleted,importPackageCancelled; public static event System.Action<string,string> importPackageFailed; public static System.Action<string[]> onImportPackageItemsCompleted;
   public static void SaveAssets()=>Saves++;
   public static void Refresh()=>Refreshes++;
+  public static System.Collections.Generic.HashSet<string> Streaming=new();
+  public static int TextureReimports;
+  public static bool TextureReadbackMismatch;
   public static void ImportAsset(string path,ImportAssetOptions options){Imports++; MissingInstance=false; if(ThrowAfterImport) throw new InvalidOperationException("fixture native import failure"); if(FailAfterImport) ReadbackMissing=true; if(DriftMetaAfterImport) System.IO.File.WriteAllText(System.IO.Path.Combine(System.Environment.GetEnvironmentVariable("FIXTURE_ROOT"),path.Replace('/','\\')+".meta"),"drift"); if(DriftManifestAfterImport) File.WriteAllText(System.IO.Path.Combine(System.Environment.GetEnvironmentVariable("FIXTURE_ROOT"),"Packages/com.example.embedded/package.json"),"{\"name\":\"com.example.embedded\",\"version\":\"2.0.0\"}");}
   public static bool FailAfterImport,ThrowAfterImport,RegistrationDrift,DropInstanceOnSecondLookup,DriftMetaAfterImport,DriftManifestAfterImport,RestoreMissingBeforeImport; public static int ImporterLookups; public static string MissingInstancePath;
   public static Type GetDefaultImporter(string path)=>path.EndsWith(".cs")?typeof(MonoImporter):(path.EndsWith(".lilcontainer")?typeof(UnityEditor.AssetImporters.ScriptedImporter):typeof(AssetImporter)); public static Type GetImporterOverride(string path)=>RegistrationDrift&&Imports>0?typeof(string):null;
@@ -35,13 +45,19 @@ namespace UnityEditor {
   public static string AssetPathToGUID(string path)=>path==ScriptGuidPath?new string('b',32):new string('a',32);
   public static string ScriptGuidPath="Assets/Scripted/Importer.cs";
   public static string GUIDToAssetPath(string guid)=>guid==new string('b',32)?ScriptGuidPath:"";
-  public static T LoadAssetAtPath<T>(string path) where T:UnityEngine.Object => path==ScriptGuidPath?(T)(UnityEngine.Object)new MonoScript():null;
+  public static T LoadAssetAtPath<T>(string path) where T:UnityEngine.Object {
+   if(path==ScriptGuidPath) return (T)(UnityEngine.Object)new MonoScript();
+   if(path.EndsWith(".png") && Refreshes>0) return (T)(UnityEngine.Object)new UnityEngine.Texture2D {
+    mipmapCount=path.EndsWith("NoMip.png")?1:4, streamingMipmaps=Streaming.Contains(path)&&!TextureReadbackMismatch
+   };
+   return null;
+  }
   public static AssetImporter GetAtPath(string path)=>ReadbackMissing?null:(path.EndsWith(".lilcontainer")?new UnityEditor.AssetImporters.ScriptedImporter():new AssetImporter());
  }
 }
 namespace UnityEditor.AssetImporters { public class ScriptedImporter:UnityEditor.AssetImporter {} }
 namespace UnityEditor.PackageManager { public static class Client { public static object Resolve()=>null; } }
-namespace UnityEngine { public class Object {} public static class Debug { public static void Log(object x){} public static void LogError(object x){} } }
+namespace UnityEngine { public class Object {} public class Texture2D:Object { public int mipmapCount; public bool streamingMipmaps; } public static class Debug { public static void Log(object x){} public static void LogError(object x){} } }
 namespace VRCForge.Core.MCP {
  public class VRCForgeCommandAttribute:System.Attribute { public string Summary{get;set;} public bool UsesContinuation{get;set;} public string ContinuationAction{get;set;} public int ContinuationTimeoutSeconds{get;set;} public VRCForgeCommandAttribute(string toolId){} }
  public class VRCForgeInputAttribute:System.Attribute { public bool IsRequired{get;set;} public VRCForgeInputAttribute(string description){} }
@@ -100,6 +116,34 @@ class Runner {
   else if(a[0]=="drift"){var id=Start(new JObject{{"reimportAssets",new JArray(item)}});File.WriteAllText(file,"drift");var done=Finish(id);Check((string)done["status"]=="failed","drift must fail");Check(UnityEditor.AssetDatabase.Imports==0,"drift imported despite queued identity");}
   else if(a[0]=="readback"||a[0]=="changed_type"||a[0]=="changed_registration"){var id=Start(new JObject{{"reimportAssets",new JArray(item)}});if(a[0]=="readback")UnityEditor.AssetDatabase.FailAfterImport=true;else if(a[0]=="changed_type") UnityEditor.AssetDatabase.WrongTypeAfterImport=true;else UnityEditor.AssetDatabase.RegistrationDrift=true;var done=Finish(id);Check((string)done["status"]=="failed","readback mismatch must fail: "+done);Check(UnityEditor.AssetDatabase.Imports==1,"readback case must import once");Check((string)done["error"]["code"]=="asset_database_reimport_readback_failed","wrong readback code: "+done);}
   else if(a[0]=="legacy"){var id=Start(new JObject());var done=Finish(id);Check((string)done["status"]=="done","legacy route not done");Check(UnityEditor.AssetDatabase.Imports==0&&UnityEditor.AssetDatabase.Saves==1&&UnityEditor.AssetDatabase.Refreshes==1,"legacy SaveAssets+Refresh missing");}
+  else if(a[0].StartsWith("avatar_texture")){
+   foreach(var name in new[]{"Avatar.png","NoMip.png"}){
+    var path=Path.Combine(root,"Assets",name);
+    File.WriteAllText(path,"fixture texture");
+    File.WriteAllText(path+".meta","fixture imported metadata");
+   }
+   var args=new JObject { ["avatarTextureAssets"]=new JArray("Assets/Avatar.png","Assets/NoMip.png") };
+   if(a[0]=="avatar_texture_invalid_path"){
+    args["avatarTextureAssets"]=new JArray("Assets/Avatar.png","Assets/../Assets/NoMip.png");
+    var rejected=(JObject)T.GetMethod("HandleCommand").Invoke(null,new object[]{args});
+    Check((string)rejected["status"]=="failed"&&UnityEditor.AssetDatabase.Refreshes==0,"invalid texture path must reject the batch");
+   } else {
+    UnityEditor.AssetDatabase.TextureReadbackMismatch=a[0]=="avatar_texture_readback_failure";
+    var done=Finish(Start(args));
+    if(UnityEditor.AssetDatabase.TextureReadbackMismatch){
+     Check((string)done["status"]=="failed"&&(string)done["error"]["code"]=="avatar_texture_import_readback_failed","native texture readback mismatch must fail");
+    } else {
+     Check((string)done["status"]=="done","avatar texture import must complete");
+     var proof=done["after"]["avatarTextureReadback"] as JArray;
+     Check(proof?.Count==2,"both importer readbacks are required");
+     Check((string)proof[0]["assetPath"]=="Assets/Avatar.png"&&(bool)proof[0]["mipmapEnabled"]
+      &&(bool)proof[0]["streamingMipmaps"]&&(int)proof[0]["mipmapCount"]==4,"avatar mipmaps must stream");
+     Check(!(bool)proof[1]["mipmapEnabled"]&&!(bool)proof[1]["streamingMipmaps"],"disabled mipmaps must stay unchanged");
+     Finish(Start(args));
+     Check(UnityEditor.AssetDatabase.TextureReimports==1,"an already-correct importer must not reimport again");
+    }
+   }
+  }
   Console.WriteLine(a[0]+":pass");return 0;
  }catch(Exception e){Console.Error.WriteLine(e);return 1;}}
  static string Hash(string p){using(var s=System.Security.Cryptography.SHA256.Create())return BitConverter.ToString(s.ComputeHash(File.ReadAllBytes(p))).Replace("-","").ToLowerInvariant();}
@@ -131,7 +175,8 @@ def refresh_probe(tmp_path_factory):
     return dotnet_root / "dotnet.exe", dll
 
 
-@pytest.mark.parametrize("case", ["success", "missing_instance", "missing_second_instance", "queued_instance_missing", "preflight", "drift", "readback", "changed_type", "changed_registration", "legacy", "package_success", "package_missing_manifest", "package_mismatched_name", "package_non_cs", "package_library", "package_queued_meta_drift", "package_queued_manifest_drift", "package_after_meta_drift", "package_after_manifest_drift", "scripted_success", "scripted_bad_old_hash", "scripted_bad_new_hash", "scripted_bad_guid", "scripted_bad_class", "scripted_non_scripted_type", "scripted_nonnull_ref", "scripted_queued_metadata_drift", "scripted_queued_class_drift", "scripted_after_meta_drift", "scripted_readback_null", "scripted_native_exception"])
+@pytest.mark.parametrize("case", ["success", "missing_instance", "missing_second_instance", "queued_instance_missing", "preflight", "drift", "readback", "changed_type", "changed_registration", "legacy", "package_success", "package_missing_manifest", "package_mismatched_name", "package_non_cs", "package_library", "package_queued_meta_drift", "package_queued_manifest_drift", "package_after_meta_drift", "package_after_manifest_drift", "scripted_success", "scripted_bad_old_hash", "scripted_bad_new_hash", "scripted_bad_guid", "scripted_bad_class", "scripted_non_scripted_type", "scripted_nonnull_ref", "scripted_queued_metadata_drift", "scripted_queued_class_drift", "scripted_after_meta_drift", "scripted_readback_null", "scripted_native_exception",
+    "avatar_texture_success", "avatar_texture_invalid_path", "avatar_texture_readback_failure"])
 def test_asset_reimport_runtime(refresh_probe, tmp_path, case):
     dotnet, dll = refresh_probe
     env = os.environ.copy(); env["FIXTURE_ROOT"] = str(tmp_path)

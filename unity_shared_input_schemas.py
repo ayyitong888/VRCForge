@@ -17,6 +17,14 @@ def outfit_import_input_schema(*, require_project_path: bool) -> dict[str, Any]:
             "packagePath": {"type": "string", "minLength": 1, "description": "Exact existing filesystem path to a UnityPackage or loose outfit folder; this is not an Assets-relative path. Loose folders may include prefab, material, texture, model, and Editor assembly definition (.asmdef) files."},
             "projectPath": {"type": "string", "minLength": 1, "description": "Exact existing Unity project root."},
             "targetFolder": {"type": "string", "description": "Optional project-relative Assets/... destination; applies only when copying a loose folder, not when importing a UnityPackage. The plan shows existing destination paths that would be overwritten and requests confirmation before applying them."},
+            "avatarTexturePaths": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5000,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+                "description": "Exact case-sensitive source-folder-relative PNG/JPG/JPEG paths with forward slashes. List only new textures without a source .meta that will be used in avatar materials. For loose folder imports, apply enables streaming when mipmaps are generated and returns importer readback before material assignment.",
+            },
             "selectedUnityPackage": {"type": "string", "description": "Optional exact nested UnityPackage path selected from the preceding package inspection; omit when the source is already one package or a loose folder."},
             "dependencyMode": {
                 "type": "string",

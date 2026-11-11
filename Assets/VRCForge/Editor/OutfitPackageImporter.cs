@@ -776,6 +776,7 @@ namespace VRCForge.Editor
     {
         internal const bool SavesDirtyAssets = false;
         internal const string ToolName = "vrc_refresh_asset_database";
+        internal const string AvatarTextureAssetsArgument = "avatarTextureAssets";
         private const double RefreshResponseGraceSeconds = 0.25d;
         private static bool refreshScheduled;
         private static double refreshNotBefore;
@@ -1081,6 +1082,76 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException("Reimport source and metadata must be ordinary files.");
         }
 
+        private static JArray PrepareAvatarTextureAssets(JToken token, bool imported = false)
+        {
+            if (token == null) return null;
+            if (!(token is JArray paths) || paths.Count == 0)
+                throw new InvalidOperationException("avatarTextureAssets requires exact newly imported PNG or JPEG paths.");
+
+            var assetsRoot = Path.GetFullPath(Path.Combine(CheckpointPrepareTool.ProjectRoot(), "Assets"));
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in paths)
+            {
+                var path = item.Type == JTokenType.String ? item.Value<string>() : null;
+                if (string.IsNullOrEmpty(path) || !path.StartsWith("Assets/", StringComparison.Ordinal)
+                    || path.Contains("\\") || path.Contains(":")
+                    || path.Split('/').Any(segment => segment.Length == 0
+                        || segment.EndsWith(".", StringComparison.Ordinal)
+                        || segment.EndsWith(" ", StringComparison.Ordinal)
+                        || segment.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                    || !seen.Add(path))
+                    throw new InvalidOperationException("avatarTextureAssets requires unique canonical paths under Assets.");
+
+                var extension = Path.GetExtension(path).ToLowerInvariant();
+                if (extension != ".png" && extension != ".jpg" && extension != ".jpeg")
+                    throw new InvalidOperationException($"Avatar texture must be a PNG or JPEG: {path}");
+                var absolute = Path.GetFullPath(Path.Combine(assetsRoot, path.Substring("Assets/".Length)));
+                if (!File.Exists(absolute) || (File.GetAttributes(absolute) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException($"New avatar texture file is unavailable: {path}");
+                MaterialShaderTool.EnsureNoReparseBoundary(assetsRoot, absolute);
+                if (imported || File.Exists(absolute + ".meta"))
+                    EnsureOrdinarySource(absolute);
+            }
+            return (JArray)paths.DeepClone();
+        }
+
+        private static JArray ConfigureImportedAvatarTextures(JArray paths)
+        {
+            var importers = new List<TextureImporter>(paths.Count);
+            foreach (var path in PrepareAvatarTextureAssets(paths, imported: true).Values<string>())
+            {
+                if (!(AssetImporter.GetAtPath(path) is TextureImporter importer)
+                    || AssetDatabase.LoadAssetAtPath<UnityEngine.Texture2D>(path) == null)
+                    throw new InvalidOperationException($"New avatar texture did not import as Texture2D: {path}");
+                importers.Add(importer);
+            }
+
+            foreach (var importer in importers)
+            {
+                if (!importer.mipmapEnabled || importer.streamingMipmaps) continue;
+                importer.streamingMipmaps = true;
+                importer.SaveAndReimport();
+            }
+
+            var readback = new JArray();
+            foreach (var path in paths.Values<string>())
+            {
+                var importer = AssetImporter.GetAtPath(path) as TextureImporter;
+                var texture = AssetDatabase.LoadAssetAtPath<UnityEngine.Texture2D>(path);
+                if (importer == null || texture == null || (importer.mipmapEnabled && !importer.streamingMipmaps)
+                    || (texture.mipmapCount > 1 && !texture.streamingMipmaps))
+                    throw new InvalidOperationException($"Avatar texture mipmap streaming readback failed: {path}");
+                readback.Add(new JObject
+                {
+                    ["assetPath"] = path,
+                    ["mipmapEnabled"] = importer.mipmapEnabled,
+                    ["streamingMipmaps"] = importer.streamingMipmaps,
+                    ["mipmapCount"] = texture.mipmapCount,
+                });
+            }
+            return readback;
+        }
+
         private static bool IsLowerHex(string value)
         {
             foreach (var c in value) if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
@@ -1126,9 +1197,12 @@ namespace VRCForge.Editor
                 CheckpointPrepareTool.ValidateProject(@params);
                 CheckpointPrepareTool.EnsureEditorReady();
                 var reimportAssets = PrepareReimportAssets(@params?["reimportAssets"]);
+                var avatarTextureAssets = PrepareAvatarTextureAssets(@params?[AvatarTextureAssetsArgument]);
                 var resolvePackages = @params?["resolvePackages"]?.Value<bool?>() ?? false;
                 if (resolvePackages && reimportAssets != null)
                     throw new InvalidOperationException("resolvePackages cannot be combined with reimportAssets.");
+                if (avatarTextureAssets != null && (resolvePackages || reimportAssets != null))
+                    throw new InvalidOperationException("avatarTextureAssets requires a loose import refresh.");
                 var packageResolveTimeoutSeconds = Math.Max(
                     5,
                     Math.Min(@params?["packageResolveTimeoutSeconds"]?.Value<int?>() ?? 120, 300));
@@ -1169,6 +1243,7 @@ namespace VRCForge.Editor
                         ["resolve_packages"] = resolvePackages,
                         ["package_resolve_timeout_seconds"] = packageResolveTimeoutSeconds,
                         ["reimport_assets"] = reimportAssets,
+                        ["avatar_texture_assets"] = avatarTextureAssets,
                         ["reference_rollback"] = CaptureReferenceRollback(reimportAssets),
                     },
                     TimeSpan.FromSeconds(300));
@@ -1268,13 +1343,28 @@ namespace VRCForge.Editor
             }
             var operation = UnityAsyncJobRegistry.ReadOperation(jobId);
             var reimportAssets = operation?["reimport_assets"] as JArray;
+            var avatarTextureAssets = operation?["avatar_texture_assets"] as JArray;
             try
             {
-                UnityAsyncJobRegistry.Complete(jobId, () => ReadSnapshot(reimportAssets));
+                if (avatarTextureAssets == null)
+                {
+                    UnityAsyncJobRegistry.Complete(jobId, () => ReadSnapshot(reimportAssets));
+                }
+                else
+                {
+                    var readback = ConfigureImportedAvatarTextures(avatarTextureAssets);
+                    UnityAsyncJobRegistry.Complete(jobId, () =>
+                    {
+                        var snapshot = ReadSnapshot();
+                        snapshot["avatarTextureReadback"] = readback;
+                        return snapshot;
+                    });
+                }
             }
             catch (Exception ex)
             {
-                FailRefresh(jobId, "asset_database_reimport_readback_failed", ex);
+                FailRefresh(jobId, avatarTextureAssets == null
+                    ? "asset_database_reimport_readback_failed" : "avatar_texture_import_readback_failed", ex);
             }
         }
 

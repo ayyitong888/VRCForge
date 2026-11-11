@@ -1181,6 +1181,16 @@ namespace VRCForge.Editor
                 return ToolError("app_lane_invalid", "The VRCForge App execution lane is invalid.", modern, true);
             }
 
+            if (toolName == VRCForge.Editor.AssetDatabaseRefreshTool.ToolName
+                && arguments[VRCForge.Editor.AssetDatabaseRefreshTool.AvatarTextureAssetsArgument] != null
+                && ((lane != InvocationLane.ApprovedWrite && lane != InvocationLane.ExternalMcpWrite)
+                    || executionContext["gatewayTargetTool"]?.Type != JTokenType.String
+                    || executionContext.Value<string>("gatewayTargetTool") != "vrcforge_import_outfit_package"))
+            {
+                return ToolError("avatar_texture_refresh_not_allowed",
+                    "Avatar texture import settings require a prepared outfit import approval.", modern, true);
+            }
+
             var asyncWrite = modern
                 && metadata != null
                 && metadata["io.vrcforge/asyncWrite"] != null
@@ -2725,6 +2735,7 @@ namespace VRCForge.Editor
                 ["compileSnapshot"] = CompileErrorMonitor.ReadCoreInfoSnapshot(30),
                 ["scanScope"] = ScanScopeJournal.Capabilities(),
                 ["assetDatabaseRefreshSavesDirtyAssets"] = VRCForge.Editor.AssetDatabaseRefreshTool.SavesDirtyAssets,
+                ["assetDatabaseRefreshAvatarTextureReadback"] = true,
                 ["checkpointPrepareSavesDirtyAssets"] = VRCForge.Editor.CheckpointPrepareTool.SavesDirtyAssets,
                 ["checkpointRecoveryEvidenceOnly"] = true,
                 ["checkpointRecoveryEvidenceSchema"] = "vrcforge.recovery_witness.v1",

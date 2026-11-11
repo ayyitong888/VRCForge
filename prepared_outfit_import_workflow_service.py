@@ -17,9 +17,23 @@ from prepared_unity_execution import (
     prepared_evidence,
 )
 from outfit_package_inspector import unitypackage_member_parts
+from outfit_import_planner import select_loose_avatar_texture_assets
 
 
 PreparedImportCall = tuple[str, dict[str, Any]]
+
+
+def loose_outfit_refresh_arguments(
+    project_path: str, loose_plan: dict[str, Any], avatar_texture_paths: Any,
+) -> dict[str, Any]:
+    arguments = {
+        "projectPath": project_path, "resolvePackages": False,
+        "packageResolveTimeoutSeconds": 120,
+    }
+    if avatar_texture_paths is not None:
+        files = {item["relativePath"]: item["target"]["targetRelativePath"] for item in loose_plan["files"]}
+        arguments["avatarTextureAssets"] = select_loose_avatar_texture_assets(avatar_texture_paths, files, files)
+    return arguments
 
 
 # The approval owner binds this only around its synchronous handler. It is not
@@ -515,16 +529,12 @@ class PreparedOutfitImportPreparer:
                 )
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
-            calls: list[PreparedImportCall] = [
-                (
-                    "vrc_refresh_asset_database",
-                    {
-                        "projectPath": project_identity["projectPath"],
-                        "resolvePackages": False,
-                        "packageResolveTimeoutSeconds": 120,
-                    },
-                )
-            ]
+            refresh = loose_outfit_refresh_arguments(
+                project_identity["projectPath"], loose_plan, arguments.get("avatarTexturePaths"),
+            )
+            if "avatarTextureAssets" in refresh:
+                plan_payload = {**plan_payload, "avatarTextureAssets": refresh["avatarTextureAssets"]}
+            calls: list[PreparedImportCall] = [("vrc_refresh_asset_database", refresh)]
             evidence = {
                 "kind": kind,
                 "planSha256": self._ports.digest(plan_payload),
@@ -634,6 +644,7 @@ class PreparedOutfitImportApprovedWritePorts:
     handled_errors: tuple[type[BaseException], ...]
     verify_imported_asset_content: Callable[[str | Path, str | Path, list[str]], dict[str, Any]] | None = None
     read_model_renderers: Callable[[Any, str, int], dict[str, Any]] | None = None
+    supports_avatar_texture_refresh: Callable[[Any], bool] | None = None
 
 
 class PreparedOutfitImportApprovedWriteService:
@@ -918,10 +929,29 @@ class PreparedOutfitImportApprovedWriteService:
                         "Prepared loose outfit project identity is invalid."
                     )
                 failure_layer = "project_identity_verification"
-                self._ports.verify_project_identity(project_identity)
+                project_root = self._ports.verify_project_identity(project_identity)
                 loose_plan = evidence.get("loosePlan")
                 if not isinstance(loose_plan, dict):
                     raise RuntimeError("Prepared loose outfit plan is missing.")
+                failure_layer = "approved_call_validation"
+                refresh_tool, refresh_arguments = prepared_call(arguments, 0)
+                expected_refresh = loose_outfit_refresh_arguments(
+                    project_identity["projectPath"], loose_plan, arguments.get("avatarTexturePaths"),
+                )
+                if refresh_tool != "vrc_refresh_asset_database":
+                    raise RuntimeError("Prepared loose outfit refresh call is invalid.")
+                self._ports.require_evidence(expected_refresh, refresh_arguments, "refresh arguments")
+                settings = self._ports.load_settings(arguments)
+                avatar_textures = expected_refresh.get("avatarTextureAssets", [])
+                if avatar_textures:
+                    failure_layer = "unity_avatar_texture_preflight"
+                    supports_refresh = self._ports.supports_avatar_texture_refresh
+                    if supports_refresh is None or not supports_refresh(settings):
+                        raise RuntimeError("Install and load a Unity Core that supports avatar texture import readback.")
+                    for path in avatar_textures:
+                        metadata = project_root / (path + ".meta")
+                        if metadata.exists() or metadata.is_symlink():
+                            raise RuntimeError(f"Avatar texture destination metadata already exists: {path}.meta")
                 try:
                     failure_layer = "loose_asset_copy"
                     loose_copied = self._ports.execute_loose_import(loose_plan)
@@ -939,21 +969,6 @@ class PreparedOutfitImportApprovedWriteService:
                     }
                 failure_layer = "project_identity_verification"
                 self._ports.verify_project_identity(project_identity)
-                refresh_tool, refresh_arguments = prepared_call(arguments, 0)
-                expected_refresh = {
-                    "projectPath": project_identity["projectPath"],
-                    "resolvePackages": False,
-                    "packageResolveTimeoutSeconds": 120,
-                }
-                if refresh_tool != "vrc_refresh_asset_database":
-                    raise RuntimeError(
-                        "Prepared loose outfit refresh call is invalid."
-                    )
-                failure_layer = "approved_call_validation"
-                self._ports.require_evidence(
-                    expected_refresh, refresh_arguments, "refresh arguments"
-                )
-                settings = self._ports.load_settings(arguments)
                 settings.unity_mcp_timeout_seconds = max(
                     int(settings.unity_mcp_timeout_seconds or 30), 150
                 )
@@ -973,6 +988,27 @@ class PreparedOutfitImportApprovedWriteService:
                         "error": refresh.get("error")
                         or "Asset refresh failed after loose outfit import.",
                     }
+                texture_readback = []
+                if avatar_textures:
+                    failure_layer = "unity_avatar_texture_readback"
+                    after = refresh.get("after")
+                    texture_readback = after.get("avatarTextureReadback") if isinstance(after, dict) else None
+                    if (
+                        not isinstance(texture_readback, list)
+                        or len(texture_readback) != len(avatar_textures)
+                        or any(
+                            not isinstance(row, dict)
+                            or not isinstance(row.get("assetPath"), str)
+                            or not isinstance(row.get("mipmapEnabled"), bool)
+                            or not isinstance(row.get("streamingMipmaps"), bool)
+                            or type(row.get("mipmapCount")) is not int
+                            or row["mipmapCount"] < 1
+                            or ((row["mipmapEnabled"] or row["mipmapCount"] > 1) and not row["streamingMipmaps"])
+                            for row in texture_readback
+                        )
+                        or {row["assetPath"] for row in texture_readback} != set(avatar_textures)
+                    ):
+                        raise RuntimeError("Unity did not verify mipmap streaming for the exact newly imported avatar textures.")
                 write_started = False
                 model_path = plan_payload.get("expectedRenderableModelPath")
                 model_readback = None
@@ -1005,11 +1041,16 @@ class PreparedOutfitImportApprovedWriteService:
                     **loose_copied,
                     "importedPrefabCandidates": prefab_assets,
                     "assetDatabaseRefresh": refresh,
+                    **({"avatarTextureReadback": texture_readback} if avatar_textures else {}),
                     **({"modelReadback": model_readback} if model_readback is not None else {}),
                     # An assembly-definition-only dependency import has no
                     # outfit to bind; keep the next step a readback instead
                     # of sending the agent into avatar authoring.
-                    "nextTool": "vrcforge_add_outfit" if prefab_assets else "vrcforge_get_asset_info",
+                    "nextTool": (
+                        "vrcforge_preview_material_texture_assignment" if avatar_textures
+                        else "vrcforge_add_outfit" if prefab_assets
+                        else "vrcforge_get_asset_info"
+                    ),
                 }
             queue = evidence.get("queue")
             if (

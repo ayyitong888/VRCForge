@@ -5,6 +5,8 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+import pytest
+
 import outfit_import_planner as planner
 from outfit_import_planner import (
     build_outfit_import_plan,
@@ -762,6 +764,38 @@ def test_loose_prefab_plan_targets_assets_folder_without_file_contents(tmp_path:
     assert "Assets/VRCForge/ImportedOutfits/Dress/Dress.prefab" in plan["expectedAssetPaths"]
     assert "SECRET_PREFAB_TEXT" not in rendered
     assert "SECRET_TEXTURE_BYTES" not in rendered
+
+
+def test_loose_avatar_texture_plan_lists_only_explicit_new_textures(tmp_path: Path) -> None:
+    folder = tmp_path / "LooseOutfit"
+    (folder / "Textures").mkdir(parents=True)
+    (folder / "Textures" / "Face.png").write_bytes(b"face")
+    (folder / "Textures" / "Body.JPEG").write_bytes(b"body")
+    (folder / "Icon.png").write_bytes(b"icon")
+    target = "Assets/VRCForge/ImportedOutfits/Dress"
+
+    plan = build_outfit_import_plan(
+        folder,
+        target_folder=target,
+        avatar_texture_paths=["Textures/Face.png", "Textures/Body.JPEG"],
+    )["plan"]
+
+    assert plan["readyToApply"] is True
+    assert plan["avatarTextureAssets"] == [f"{target}/Textures/Face.png", f"{target}/Textures/Body.JPEG"]
+    assert f"{target}/Icon.png" in plan["expectedAssetPaths"]
+    assert "avatarTextureAssets" not in build_outfit_import_plan(folder)["plan"]
+    assert not (folder / "Textures" / "Face.png.meta").exists()
+
+
+@pytest.mark.parametrize("path", ["face.png", "../Face.png", "Face.png"])
+def test_loose_avatar_texture_plan_rejects_nonexact_or_existing_import_settings(
+    tmp_path: Path, path: str,
+) -> None:
+    (tmp_path / "Face.png").write_bytes(b"face")
+    (tmp_path / "Face.png.meta").write_text("preserve settings", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="avatarTexturePaths"):
+        build_outfit_import_plan(tmp_path, avatar_texture_paths=[path])
 
 
 def test_loose_prefab_plan_includes_asmdef_dependency(tmp_path: Path) -> None:

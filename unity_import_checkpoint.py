@@ -10,6 +10,7 @@ from prepared_archive_imports import _entry_manifest, _opened_source_matches
 from prepared_file_imports import verify_directory, verify_regular_file
 from prepared_unity_execution import build_prepared_execution_plan, prepared_evidence
 from outfit_import_planner import UNITY_IMPORT_CODE_PAYLOAD_SUFFIXES
+from prepared_outfit_import_workflow_service import loose_outfit_refresh_arguments
 
 
 def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, verify_project, prepare=None) -> dict:
@@ -77,9 +78,15 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
             "resolvePackages": False, "packageResolveTimeoutSeconds": 120,
         })
         if evidence["kind"] == "loose_prefab_copy":
-            if calls != [refresh]:
-                raise ValueError("The loose import's sealed Core calls changed.")
             loose = evidence["loosePlan"]
+            loose_refresh = loose_outfit_refresh_arguments(
+                refresh[1]["projectPath"], loose, arguments.get("avatarTexturePaths"),
+            )
+            if calls != [(refresh[0], loose_refresh)]:
+                raise ValueError("The loose import's sealed Core calls changed.")
+            for name in loose_refresh.get("avatarTextureAssets", []):
+                if canonical(name + ".meta").exists():
+                    raise ValueError("An approved new avatar texture's destination metadata already exists.")
             verify_directory(loose["sourceRoot"], label="Import source")
             if verify_directory(loose["project"], label="Unity project").resolve() != project_root.resolve():
                 raise ValueError("The loose import project changed.")
