@@ -10,21 +10,23 @@ const bundle = await build({
     import { createRoot } from "react-dom/client";
     import { RightRuntimeSidebar } from "./src/components/runtime/runtime-sidebar";
     import { AgentQuestionCard } from "./src/components/chat/agent-question-card";
-    import { pendingQuestionReviewTargets, filterQuestionsForRuntimeScope } from "./src/lib/runtime-scope";
+    import { pendingQuestionReviewTargets, filterQuestionsForRuntimeScope, runtimeReviewItemForChat } from "./src/lib/runtime-scope";
     import { initializeI18n } from "./src/i18n";
     const root = createRoot(document.getElementById("root"));
     const ready = initializeI18n();
     window.showSidebar = async (state, pendingApprovals = 0, projectType = "unity", hasExternalPendingApprovals = false, reviewFixture) => {
       await ready;
       window.approvalsOpened = false;
+      window.reviewItemOpened = undefined;
       const bridge = state === "offline" ? "warning" : state === "checking" ? "unknown" : "ok";
       const tools = state === "ready" ? "ok" : state === "checking" ? "unknown" : "warning";
       function Sidebar() {
         const [active, setActive] = useState(reviewFixture?.activeChatId || "");
         const [reveal, setReveal] = useState();
-        const { chats = [], questions = [] } = reviewFixture || {};
+        const { chats = [], questions = [], runtimeAttention = [] } = reviewFixture || {};
         const review = pendingQuestionReviewTargets(chats, questions, active);
         const currentChat = chats.find((chat) => chat.id === active);
+        const runtimeReview = runtimeReviewItemForChat(currentChat, runtimeAttention);
         return <><RightRuntimeSidebar
         runtimeConnected loadingUnityStatus={state === "checking"} workspaceProjectLabel="VRCForge"
         workspaceProjectType={projectType} projectWorkspace
@@ -37,10 +39,14 @@ const bundle = await build({
         subAgentTaskCount={0} subAgentRunningTaskCount={0} subAgentCompletedTaskCount={0}
         userAttachmentSources={[]} approvalsLoaded pendingApprovals={pendingApprovals} workspaceSummary={null}
         hasExternalPendingApprovals={hasExternalPendingApprovals}
-        runtimeReviewCount={review.count}
+        runtimeReviewCount={review.count || (runtimeReview ? 1 : 0)}
         onOpenRuntimeReview={() => {
-          setActive(review.target.chat.id);
-          setReveal({ questionId: review.target.question.questionId });
+          if (review.target) {
+            setActive(review.target.chat.id);
+            setReveal({ questionId: review.target.question.questionId });
+          } else {
+            window.reviewItemOpened = runtimeReview?.id;
+          }
         }}
         activeDesktopActions={[]} refreshUnityStatus={() => {}} providerTestAttempted={false}
         onHideSidebar={() => {}} onOpenPendingApprovals={() => window.approvalsOpened = true}
@@ -123,7 +129,41 @@ try {
   assert.equal(await page.locator("[data-review-owner]").textContent(), owner.id);
   assert.ok((await card.innerText()).includes(pending.question));
   assert.ok((await card.innerText()).includes(pending.options[0].label));
-  console.log("Unity readiness, environment disclosure and external approval access in general workspaces passed");
+
+  const blockedRun = { sessionId: "review-session", clientTurnId: "review-client", turnId: "review-turn", status: "blocked" };
+  const blockedReply = {
+    id: "blocked-reply", type: "agent",
+    response: { clientTurnId: blockedRun.clientTurnId, turnId: blockedRun.turnId,
+      plan: { completionGate: { reason: "question_pending", status: "needs_user_action" } } },
+  };
+  const answered = { type: "question_answer", questionId: "previously-answered" };
+  const stale = {
+    activeChatId: "review-chat",
+    chats: [{ id: "review-chat", sessionId: blockedRun.sessionId, projectPath: "D:/Fixture", items: [blockedReply, answered] }],
+    questions: [{ questionId: answered.questionId, sessionId: blockedRun.sessionId, projectRoot: "D:/Fixture", status: "answered" }],
+    runtimeAttention: [blockedRun],
+  };
+  await show("ready", 0, "unity", false, stale);
+  await page.locator('[data-review-owner]').getByText("review-chat").waitFor();
+  assert.equal(await review.count(), 0, "a blocked origin must not show a review badge after its question is answered");
+
+  blockedReply.response.plan.completionGate.reason = "verification_required";
+  await show("ready", 0, "unity", false, stale);
+  await review.click();
+  assert.equal(await page.evaluate(() => window.reviewItemOpened), blockedReply.id);
+
+  blockedReply.response.plan.completionGate.reason = "question_pending";
+  blockedReply.response.steps = [{ tool: "vrcforge_request_project_selection", result: { projectSelectionRequested: true } }];
+  await show("ready", 0, "unity", false, stale);
+  await review.click();
+  assert.equal(await page.evaluate(() => window.reviewItemOpened), blockedReply.id);
+
+  delete blockedReply.response.clientTurnId;
+  delete blockedReply.response.turnId;
+  stale.runtimeAttention = [{ sessionId: blockedRun.sessionId, status: "blocked" }];
+  await show("ready", 0, "unity", false, stale);
+  await review.waitFor({ state: "detached" });
+  console.log("Unity readiness, approval access and pending review navigation passed");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

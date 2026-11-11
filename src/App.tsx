@@ -91,7 +91,7 @@ import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice"
 import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
-import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, pendingQuestionReviewTargets, questionBelongsToRuntimeScope } from "./lib/runtime-scope";
+import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, pendingQuestionReviewTargets, questionBelongsToRuntimeScope, runtimeReviewItemForChat } from "./lib/runtime-scope";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import { flushChatsBeforeQuit } from "./lib/app-quit";
 import {
@@ -1136,9 +1136,7 @@ export default function App() {
     () => pendingQuestionReviewTargets(chats, runtimeConnected ? agentQuestions : [], activeChatId),
     [chats, runtimeConnected, agentQuestions, activeChatId],
   );
-  const runtimeReviewItem = activeChat?.items.find((item) => item.type === "agent" && runtimeAttention.some((run) =>
-    item.response.clientTurnId === run.clientTurnId
-      || (item.response.turnId || item.response.turn_id) === run.turnId));
+  const runtimeReviewItem = runtimeReviewItemForChat(activeChat || undefined, runtimeAttention);
   const sending = localActivitySending || Boolean(activeRuntimeCancelTarget);
   const runtimeAwareChatSidebar = useMemo(() => {
     const visibleChatId = activeView === "chat" ? activeChatId : "";

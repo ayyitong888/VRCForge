@@ -1,4 +1,4 @@
-import type { AgentApproval, AgentQuestion } from "./api";
+import type { AgentApproval, AgentQuestion, AgentRuntimeRun } from "./api";
 import type { ChatThread } from "./chat-types";
 import { normalizeProjectPathKey } from "./project-path";
 import { approvalIdFromResponse } from "./runtime-parsing";
@@ -73,4 +73,18 @@ export function pendingQuestionReviewTargets(chats: ChatThread[], questions: Age
     return [{ chat, question }];
   });
   return { count: targets.length, target: targets.find(({ chat }) => chat.id === activeChatId) || targets[0] };
+}
+
+export function runtimeReviewItemForChat(chat: ChatThread | undefined, runtimeAttention: AgentRuntimeRun[]) {
+  return chat?.items.find((item) => {
+    if (item.type !== "agent" || !runtimeAttention.some((run) =>
+      (run.clientTurnId && item.response.clientTurnId === run.clientTurnId)
+      || (run.turnId && (item.response.turnId || item.response.turn_id) === run.turnId))) return false;
+    if (item.response.plan?.completionGate?.reason !== "question_pending") return true;
+    // Channel project selection uses the same gate but has no Question card.
+    return item.response.steps?.some((step) => step.tool === "vrcforge_request_project_selection"
+      && !("historical" in step && step.historical === true)
+      && step.result !== null && typeof step.result === "object"
+      && "projectSelectionRequested" in step.result && step.result.projectSelectionRequested === true);
+  });
 }
