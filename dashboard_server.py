@@ -429,7 +429,7 @@ from telegram_dashboard_integration import make_telegram_runtime_factory
 from channel_dashboard_integration import DashboardChannelApprovals, DashboardChannelPermissions
 from telegram_dashboard_monitor import TelegramDashboardMonitorMapper
 from channel_runtime_recovery import ChannelRuntimeRecovery
-from telegram_bot_questions import TelegramBotQuestions
+from telegram_bot_questions import TelegramBotQuestions, TelegramQuestionError
 from memory_review_provider import invoke_memory_provider
 from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
 from optimization_service import (
@@ -10430,6 +10430,23 @@ async def _telegram_pending_questions(*, project: str, session: str) -> dict:
         project_root=project, session_id=session, include_answered=False, limit=50)
 
 
+async def _telegram_lookup_question(question_id: str, *, project: str, session: str) -> dict | None:
+    try:
+        return await asyncio.to_thread(AGENT_GATEWAY.questions.get_scoped,
+            question_id, project_root=project, session_id=session)
+    except AgentQuestionServiceError as exc:
+        if exc.status_code == 404:
+            return None
+        raise TelegramQuestionError("question_scope_unavailable") from exc
+
+
+async def _telegram_answer_question(question_id: str, params: dict) -> dict:
+    try:
+        return await app_answer_agent_question(question_id, AgentQuestionAnswerRequest(**params))
+    except HTTPException as exc:
+        raise TelegramQuestionError("question_answer_unavailable") from exc
+
+
 def _telegram_save_chats(chats: list, revisions: list) -> dict:
     result = write_chat_transcripts_storage(ChatTranscriptsRequest(chats=chats, sourceRevisions=revisions))
     EVENT_BUS.broadcast_from_sync("chatStorageChanged", {"source": "telegram"})
@@ -10470,7 +10487,7 @@ TELEGRAM_SERVICE = TelegramBotService(
     ),
     recovery=ChannelRuntimeRecovery(AGENT_GATEWAY.runtime_runs),
     questions=TelegramBotQuestions(list_pending=_telegram_pending_questions,
-        answer=lambda question_id, params: app_answer_agent_question(question_id, AgentQuestionAnswerRequest(**params))),
+        lookup=_telegram_lookup_question, answer=_telegram_answer_question),
     settings=TelegramSettings(runtime_paths.CONFIG_DIR / "telegram.dpapi"),
     database_path=runtime_paths.USER_DATA_DIR / "telegram" / "bot.sqlite3",
     owns_backend=lambda: BACKEND_OWNER_LEASE.owned,

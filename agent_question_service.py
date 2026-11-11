@@ -776,6 +776,17 @@ class AgentQuestionService:
             "count": len(questions),
         }
 
+    def get_scoped(self, question_id: str, *, session_id: str, project_root: str) -> dict[str, object]:
+        """Look up the exact owned question independently of list limits and status."""
+        question = self._project(include_answered=True).get(question_id)
+        owner_project = str(question.get("projectRoot") or "").strip() if question else ""
+        project_root = project_root.strip()
+        if (question is None or not session_id or question.get("sessionId") != session_id
+                or bool(owner_project) != bool(project_root)
+                or (project_root and self._scope.normalize_path(owner_project) != self._scope.normalize_path(project_root))):
+            raise AgentQuestionServiceError("Question does not belong to this session and project.", status_code=404)
+        return self._redact(question)
+
     def _project(self, *, include_answered: bool = False) -> dict[str, dict[str, object]]:
         return self._persistence.project(include_answered=include_answered)
 

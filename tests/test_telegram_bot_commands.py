@@ -215,6 +215,11 @@ def test_question_commands_derive_scope_from_route_and_preserve_queued_status(tm
                     "private": "must-not-be-forwarded",
                 }]}
 
+            async def lookup(self, question_id, *, project, session):
+                if question_id == "q1":
+                    return {"questionId": question_id, "projectRoot": project, "sessionId": session, "status": "pending"}
+                return None
+
             async def answer(self, question_id, params):
                 self.answer_calls.append((question_id, params))
                 return {"ok": True, "question": {
@@ -224,7 +229,7 @@ def test_question_commands_derive_scope_from_route_and_preserve_queued_status(tm
                 }}
 
         port = Port()
-        facade = TelegramBotQuestions(port.list_pending, port.answer)
+        facade = TelegramBotQuestions(port.list_pending, port.answer, lookup=port.lookup)
         with TelegramBotStore(tmp_path / "questions.db", bot_identity="7") as store:
             runtime = Runtime()
             commands = TelegramCommandDispatcher(owner_id=42, projects=("/allowed",),

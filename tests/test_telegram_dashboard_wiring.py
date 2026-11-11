@@ -118,12 +118,27 @@ async def _worker(root):
                    for row in response.json()["questions"])
         pending = await server.TELEGRAM_SERVICE.questions.list(str(project), question_scope)
         assert [row["questionId"] for row in pending] == [question_id]
-        answer = await server.TELEGRAM_SERVICE.questions.answer(question_id, "yes", str(project), question_scope)
+        for index in range(8):
+            server.AGENT_GATEWAY.questions.create({"question": f"Additional question {index}",
+                "projectRoot": str(project), "sessionId": question_scope})
+        equivalent_project = project.as_posix() + "/"
+        pending = await server.TELEGRAM_SERVICE.questions.list(equivalent_project, question_scope)
+        assert len(pending) == 8 and all(row["questionId"] != question_id for row in pending)
+        from telegram_bot_questions import TelegramQuestionError
+        for foreign_project, foreign_session in (("", question_scope), (equivalent_project, "other-session")):
+            try:
+                await server.TELEGRAM_SERVICE.questions.answer(question_id, "foreign answer", foreign_project, foreign_session)
+                raise AssertionError("Telegram accepted an out-of-scope question answer")
+            except TelegramQuestionError as error:
+                assert error.code == "question_not_in_scope"
+        answer = await server.TELEGRAM_SERVICE.questions.answer(question_id, "yes", equivalent_project, question_scope)
         assert answer["question"]["status"] == "answered"
+        repeated = await server.TELEGRAM_SERVICE.questions.answer(question_id, "changed answer", equivalent_project, question_scope)
+        assert repeated["idempotent"] is True
         response = await client.get("/api/app/agent/questions", headers=auth, params={
             "sessionId": question_scope, "projectRoot": str(project), "includeAnswered": True})
         assert response.status_code == 200, response.text
-        assert any(row["questionId"] == question_id and row["status"] == "answered"
+        assert any(row["questionId"] == question_id and row["status"] == "answered" and row["answer"] == "yes"
                    for row in response.json()["questions"])
     snapshot = server._telegram_chat_snapshot()
     assert snapshot["sourceRevisions"] == snapshot["sources"]

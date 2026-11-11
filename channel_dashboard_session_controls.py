@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from typing import Any
 
+from agent_command_safety import normalize_filesystem_path
 from channel_runtime_adapter import ChannelRuntimeAdapter
 from channel_session_controls import compact_chat_items
 from channel_session_controls import SessionControlError
@@ -23,7 +24,7 @@ async def has_unresolved_state(*, chat: dict[str, Any], project_root: str,
         approvals, question_snapshot = await asyncio.wait_for(asyncio.gather(
             approval_port.list_pending(project_root, session),
             asyncio.to_thread(list_questions, project_root=project_root, session_id=session,
-                              include_answered=True, limit=100),
+                              include_answered=True, keep_active=True, limit=1),
         ), 2.0)
     except Exception:
         raise SessionControlError("recovery_unavailable") from None
@@ -33,10 +34,15 @@ async def has_unresolved_state(*, chat: dict[str, Any], project_root: str,
     if any(row.get("status") == "pending" for row in approvals):
         return True
     # Empty scope in the question service is an unfiltered query; enforce it here.
-    if any(str(row.get("projectRoot") or "") == project_root and str(row.get("sessionId") or "") == session
-           and (row.get("status") == "pending" or row.get("runtimeContinuationStatus") in {"queued", "claimed"})
-           for row in questions):
-        return True
+    project_key = normalize_filesystem_path(project_root) if project_root else ""
+    for row in questions:
+        if row.get("sessionId") != session or not (
+            row.get("status") == "pending" or row.get("runtimeContinuationStatus") in {"queued", "claimed"}
+        ):
+            continue
+        root = str(row.get("projectRoot") or "").strip()
+        if (normalize_filesystem_path(root) if root else "") == project_key:
+            return True
     if (chat.get("compaction") or {}).get("status") == "compacting":
         return True
     for item in chat.get("items") or []:

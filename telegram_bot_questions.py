@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+from agent_command_safety import normalize_filesystem_path
+
 
 class TelegramQuestionError(RuntimeError):
     def __init__(self, code: str) -> None:
@@ -18,12 +20,14 @@ class TelegramBotQuestions:
         list_pending: Callable[..., Awaitable[Mapping[str, Any]]],
         answer: Callable[..., Awaitable[Mapping[str, Any]]],
         *,
+        lookup: Callable[..., Awaitable[Mapping[str, Any] | None]],
         max_items: int = 8,
         max_text: int = 1000,
     ) -> None:
         if max_items <= 0 or max_text <= 0:
             raise ValueError("question bounds must be positive")
         self._list_pending = list_pending
+        self._lookup = lookup
         self._answer = answer
         self._max_items = max_items
         self._max_text = max_text
@@ -34,11 +38,11 @@ class TelegramBotQuestions:
         rows = payload.get("questions") if isinstance(payload, Mapping) else None
         if not isinstance(rows, list):
             raise TelegramQuestionError("question_scope_unavailable")
+        project_key = normalize_filesystem_path(project) if project else ""
         scoped = [
             row for row in rows
             if isinstance(row, Mapping)
-            and str(row.get("projectRoot") or "") == project
-            and str(row.get("sessionId") or "") == session
+            and _matches_scope(row, project_key, session)
             and str(row.get("status") or "") == "pending"
         ]
         return [_public_question(row, self._max_text) for row in scoped[: self._max_items]]
@@ -51,8 +55,11 @@ class TelegramBotQuestions:
         answer_text = str(answer or "")
         if not answer_text.strip() or len(answer_text) > 2000:
             raise TelegramQuestionError("question_answer_invalid")
-        current = await self.list(project, session)
-        if not any(str(item.get("questionId") or "") == resolved for item in current):
+        current = await self._lookup(resolved, project=project, session=session)
+        project_key = normalize_filesystem_path(project) if project else ""
+        if (not isinstance(current, Mapping) or current.get("questionId") != resolved
+                or current.get("status") not in {"pending", "answered"}
+                or not _matches_scope(current, project_key, session)):
             raise TelegramQuestionError("question_not_in_scope")
         payload = await self._answer(
             resolved,
@@ -76,6 +83,13 @@ class TelegramBotQuestions:
         if project_root is None or not session:
             raise TelegramQuestionError("question_scope_required")
         return project, session
+
+
+def _matches_scope(row: Mapping[str, Any], project_key: str, session: str) -> bool:
+    if row.get("sessionId") != session:
+        return False
+    root = str(row.get("projectRoot") or "").strip()
+    return (normalize_filesystem_path(root) if root else "") == project_key
 
 
 def _public_question(row: Mapping[str, Any], max_text: int) -> dict[str, Any]:

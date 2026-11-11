@@ -44,3 +44,17 @@ def test_unreadable_authority_never_allows_context_mutation():
                 approval_port=SimpleNamespace(list_pending=unavailable), list_questions=lambda **params: {"questions": []})
         assert str(exc.value) == "recovery_unavailable"
     asyncio.run(run())
+
+
+def test_project_path_variants_keep_pending_question_blocking_context_changes(tmp_path):
+    async def run():
+        async def list_approvals(project, session):
+            return []
+
+        def list_questions(**params):
+            return {"questions": [{"projectRoot": str(tmp_path), "sessionId": "s", "status": "pending"}]}
+
+        assert await has_unresolved_state(chat={"sessionId": "s", "items": []},
+            project_root=tmp_path.as_posix() + "/", approval_port=SimpleNamespace(list_pending=list_approvals),
+            list_questions=list_questions)
+    asyncio.run(run())
