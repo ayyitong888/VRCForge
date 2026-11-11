@@ -972,7 +972,7 @@ def _build_create_wardrobe_core_calls_from_request(
                 "parameterType": "Int",
                 "conditionMode": "Equals",
                 "threshold": 0.0,
-                "writeDefaults": bool(request.get("writeDefaults", True)),
+                **({"writeDefaults": request["writeDefaults"]} if "writeDefaults" in request else {}),
                 "preview": preview,
             },
         ),

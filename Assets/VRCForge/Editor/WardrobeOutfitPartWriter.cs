@@ -133,31 +133,18 @@ namespace VRCForge.Editor
                 var wardrobeLayerIndex = FindWardrobeLayerIndex(fxController, parameterName);
 
                 var existingValues = new SortedSet<int>();
-                bool wardrobeWriteDefaults = true;
-                if (wardrobeLayerIndex >= 0)
+                var wardrobeLayer = wardrobeLayerIndex >= 0 ? fxController.layers[wardrobeLayerIndex] : null;
+                if (wardrobeLayer != null)
                 {
-                    var wardrobeMachine = fxController.layers[wardrobeLayerIndex].stateMachine;
                     var equals = new List<EqualsInfo>();
-                    CollectAnyStateEquals(wardrobeMachine, parameterName, equals);
-                    var stateByName = new Dictionary<string, AnimatorState>();
-                    CollectStatesByName(wardrobeMachine, stateByName);
-                    var wdFlags = new List<bool>();
+                    CollectAnyStateEquals(wardrobeLayer.stateMachine, parameterName, equals);
+                    CollectStatesByName(wardrobeLayer.stateMachine, new Dictionary<string, AnimatorState>());
                     foreach (var eq in equals)
                     {
                         existingValues.Add(eq.value);
-                        if (stateByName.TryGetValue(eq.stateName, out var st) && st != null)
-                        {
-                            wdFlags.Add(st.writeDefaultValues);
-                        }
-                    }
-                    if (wdFlags.Count > 0)
-                    {
-                        wardrobeWriteDefaults = wdFlags[0];
                     }
                 }
-                var newWriteDefaults = @params["writeDefaults"] != null
-                    ? @params["writeDefaults"].ToObject<bool>()
-                    : wardrobeWriteDefaults;
+                var newWriteDefaults = AnimatorWriteDefaults.Resolve(fxController, wardrobeLayer, @params.Value<bool?>("writeDefaults"), avatar: descriptor);
 
                 // 3. Resolve the part objects to avatar-root-relative binding paths.
                 var onObjects = new List<string>();

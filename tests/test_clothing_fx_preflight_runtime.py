@@ -14,6 +14,8 @@ def test_clothing_preflight_relative_bindings_and_menu_capacity(tmp_path, scenar
     if 'private static Dictionary<JObject, string> PreflightItems' in raw:
         markers+=['private static Dictionary<JObject, string> PreflightItems','private static string ResolveRelativeObjectPath']
         preflight=next(l.strip() for l in raw.splitlines() if 'var resolvedPaths = PreflightItems' in l)
+    if 'private static string ResolveParameterName' in raw:
+        markers.append('private static string ResolveParameterName')
     bodies='\n'.join(method(raw,m) for m in markers)
     binding=next(l.strip() for l in raw.splitlines() if 'var binding = new EditorCurveBinding' in l)
     run(tmp_path,r'''using System;using System.Linq;using System.Collections.Generic;
@@ -45,3 +47,58 @@ class Probe{BODIES
 static bool Reject(string p){try{ResolveAvatarDescriptor(p);return false;}catch(InvalidOperationException){return true;}}
 static void Main(){var a=new VRCAvatarDescriptor{name="Avatar",transform=new Transform{name="Avatar"}};var b=new VRCAvatarDescriptor{name="Avatar",transform=new Transform{name="Avatar"}};Resources.items.Add(a);Resources.items.Add(b);if(!Reject("Avatar")||!Reject(""))throw new Exception("ambiguous avatar selected first");Resources.items.Remove(b);if(ResolveAvatarDescriptor("")!=a||ResolveAvatarDescriptor("avatar")!=a)throw new Exception("unique avatar semantics changed");}}
 '''.replace('BODIES',bodies))
+
+
+def test_clothing_toggle_applies_resolved_write_defaults_only_to_new_states(tmp_path):
+    relative = 'Assets/VRCForge/Editor/ClothingFxAuthor.cs'
+    revision = os.environ.get('VRCFORGE_CLOTHING_BINDING_GIT_REF')
+    source = (subprocess.check_output(['git', 'show', f'{revision}:{relative}'], cwd=ROOT, text=True, encoding='utf-8')
+              if revision else (ROOT / relative).read_text(encoding='utf-8-sig'))
+    author = method(source, 'private static void EnsureFxLayer')
+    convention = ', new Dictionary<string, bool> { ["Hat"] = false }' if 'newLayerWriteDefaults' in author else ''
+    run(tmp_path, r'''
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+enum AnimatorControllerParameterType { Bool }
+enum AnimatorConditionMode { If, IfNot }
+class Parameter { public string name; }
+class AnimationClip { }
+class State { public bool writeDefaultValues = true; public AnimationClip motion; }
+class Transition {
+    public bool hasExitTime;
+    public float duration;
+    public void AddCondition(AnimatorConditionMode mode, float threshold, string name) { }
+}
+class StateMachine {
+    public List<State> states = new List<State>();
+    public State AddState(string name) { var state = new State(); states.Add(state); return state; }
+    public Transition AddAnyStateTransition(State state) => new Transition();
+}
+class Layer {
+    public string name;
+    public float defaultWeight;
+    public StateMachine stateMachine = new StateMachine();
+}
+class AnimatorController {
+    public List<Parameter> parameters = new List<Parameter>();
+    public Layer[] layers = Array.Empty<Layer>();
+    public void AddParameter(string name, AnimatorControllerParameterType type) => parameters.Add(new Parameter { name = name });
+    public void AddLayer(string name) => layers = layers.Append(new Layer { name = name }).ToArray();
+}
+class Probe {
+    AUTHOR
+    static void Main() {
+        var controller = new AnimatorController();
+        EnsureFxLayer(controller, "Hat", "Hat", new AnimationClip(), new AnimationClip() CONVENTION);
+        var states = controller.layers.Single().stateMachine.states;
+        if (states.Count != 2 || states.Any(state => state.writeDefaultValues))
+            throw new Exception("The resolved Off convention did not reach both new toggle states.");
+        states[0].writeDefaultValues = true;
+        EnsureFxLayer(controller, "Hat", "Hat", new AnimationClip(), new AnimationClip() CONVENTION);
+        if (controller.layers.Length != 1 || states.Count != 2 || !states[0].writeDefaultValues || states[1].writeDefaultValues)
+            throw new Exception("Existing toggle states were changed.");
+    }
+}
+'''.replace('AUTHOR', author).replace('CONVENTION', convention))

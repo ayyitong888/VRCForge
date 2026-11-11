@@ -223,7 +223,7 @@ def _legacy_create_wardrobe_calls(
                 "parameterType": "Int",
                 "conditionMode": "Equals",
                 "threshold": 0.0,
-                "writeDefaults": bool(request.get("writeDefaults", True)),
+                **({"writeDefaults": request["writeDefaults"]} if "writeDefaults" in request else {}),
                 "preview": preview,
             },
         ),

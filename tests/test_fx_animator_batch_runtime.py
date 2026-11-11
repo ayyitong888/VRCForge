@@ -19,6 +19,10 @@ def test_actual_ordered_fx_planner(tmp_path):
     compiler=compilers[-1]; newtonsoft=compiler.parents[2]/"Newtonsoft.Json.dll"
     source=(ROOT/"Assets/VRCForge/Editor/Generic/UnityFxAnimatorBatch.cs").read_text(encoding="utf-8")
     selected=[method(source,sig) for sig in ("internal static JArray ValidateEnvelope","internal static JObject BuildPlan","private static IEnumerable<JObject> States","private static string Required","private static float Number","private static bool Boolean","private static string InterruptionSource","internal static JToken Projection","internal static void Verify")]
+    selected.append(source[source.index("private static bool IsAdditive"):source.index("private static string Required")])
+    resolver=(ROOT/"Assets/VRCForge/Editor/Generic/AnimatorWriteDefaults.cs").read_text(encoding="utf-8")
+    selected.append("static class AnimatorWriteDefaults {"+method(resolver,"internal static bool ResolveNew")
+                    +method(resolver,"internal static void RequireUsableMotion")+"}")
     runner=r'''
     static int failures;
     static void Check(bool v,string name){Console.WriteLine((v?"PASS ":"FAIL ")+name);if(!v)failures++;}
@@ -36,6 +40,50 @@ def test_actual_ordered_fx_planner(tmp_path):
         Check((bool)Edges(plan)[0]["orderedInterruption"]==true,"omitted ordered interruption preserves Unity default");
         Check(((JArray)before["layers"][0]["machine"]["states"]).Count==1 && Edges(before).Count==0,"planning leaves input state untouched");
         Check((int)plan["layers"][0]["defaultWeight"]==0,"muted existing layer remains muted");
+        var writeDefaultsOff=Original();writeDefaultsOff["layers"][0]["machine"]["states"][0]["writeDefaultValues"]=false;
+        edits=Edits();plan=BuildPlan(writeDefaultsOff,edits,Motions());
+        Check(!(bool)plan["layers"][0]["machine"]["states"][1]["writeDefaultValues"] && !(bool)edits[0]["writeDefaults"],"new state inherits target WD OFF in plan and apply arguments");
+        var update=JObject.Parse(@"{'action':'update_state','layerName':'L','stateName':'Idle','speed':2}");
+        plan=BuildPlan(writeDefaultsOff,new JArray(update),Motions());
+        Check(!(bool)plan["layers"][0]["machine"]["states"][0]["writeDefaultValues"] && update["writeDefaults"]==null,"omitted existing WD OFF remains untouched");
+        var emptyMotions=new HashSet<string>{"Assets/New.anim"};
+        Check(Reject(()=>BuildPlan(writeDefaultsOff,Edits(),Motions(),emptyMotions)),"new WD OFF state refuses an empty clip");
+        plan=BuildPlan(before,Edits(),Motions(),emptyMotions);
+        Check((bool)plan["layers"][0]["machine"]["states"][1]["writeDefaultValues"],"new WD ON state accepts an empty clip");
+        var emptyExisting=(JObject)before.DeepClone();emptyExisting["layers"][0]["machine"]["states"][0]["_emptyMotion"]=true;
+        var turnOff=JArray.Parse(@"[{'action':'update_state','layerName':'L','stateName':'Idle','writeDefaults':false}]");
+        Check(Reject(()=>BuildPlan(emptyExisting,turnOff,Motions())),"WD ON to OFF refuses an existing empty motion");
+        emptyExisting["layers"][0]["machine"]["states"][0]["writeDefaultValues"]=false;
+        plan=BuildPlan(emptyExisting,new JArray(update.DeepClone()),Motions());
+        Check(!(bool)plan["layers"][0]["machine"]["states"][0]["writeDefaultValues"],"unrelated edit does not rewrite an existing empty motion");
+        var attachEmpty=JArray.Parse(@"[{'action':'update_state','layerName':'L','stateName':'Idle','motionClipPath':'Assets/New.anim'}]");
+        Check(Reject(()=>BuildPlan(writeDefaultsOff,attachEmpty,Motions(),emptyMotions)),"assigning empty clip to WD OFF is rejected");
+        edits=Edits();edits.Insert(0,JObject.Parse(@"{'action':'update_state','layerName':'L','stateName':'Idle','writeDefaults':false}"));
+        plan=BuildPlan(before,edits,Motions());
+        Check(!(bool)plan["layers"][0]["machine"]["states"][1]["writeDefaultValues"],"new state sees sequential earlier WD edit");
+        var mixed=Original();var mixedStates=(JArray)mixed["layers"][0]["machine"]["states"];
+        var other=(JObject)mixedStates[0].DeepClone();other["name"]="Other";other["writeDefaultValues"]=false;mixedStates.Add(other);
+        Check(Reject(()=>BuildPlan(mixed,Edits(),Motions())),"mixed ordinary target requires explicit WD");
+        edits=Edits();edits[0]["writeDefaults"]=false;plan=BuildPlan(mixed,edits,Motions());
+        Check(!(bool)plan["layers"][0]["machine"]["states"][2]["writeDefaultValues"],"explicit WD is accepted in mixed target");
+        var fallback=Original();var fallbackLayers=(JArray)fallback["layers"];
+        var sibling=(JObject)fallbackLayers[0].DeepClone();sibling["name"]="Reference";
+        sibling["machine"]["states"][0]["writeDefaultValues"]=false;fallbackLayers.Add(sibling);
+        fallbackLayers[0]["machine"]["states"][0]["_directBlendTree"]=true;
+        edits=Edits();plan=BuildPlan(fallback,edits,Motions());
+        Check(!(bool)plan["layers"][0]["machine"]["states"][1]["writeDefaultValues"],"Direct Blend Tree exception leaves target inference to controller convention");
+        edits=Edits();edits.Insert(0,JObject.Parse(@"{'action':'update_state','layerName':'L','stateName':'Idle','motionClipPath':'Assets/New.anim'}"));
+        plan=BuildPlan(fallback,edits,Motions());
+        Check((bool)plan["layers"][0]["machine"]["states"][1]["writeDefaultValues"],"replacing a Direct Blend Tree with a clip makes its state ordinary for subsequent edits");
+        edits=Edits();edits.Insert(0,JObject.Parse(@"{'action':'delete_layer','layerName':'Reference'}"));
+        plan=BuildPlan(fallback,edits,Motions());
+        Check((bool)plan["layers"][0]["machine"]["states"][1]["writeDefaultValues"],"removing the only ordinary convention makes a subsequent new state default ON");
+        edits=Edits();edits.Insert(0,JObject.Parse(@"{'action':'delete_layer','layerName':'Reference'}"));
+        plan=BuildPlan(fallback,edits,Motions(),null,new[]{false});
+        Check(!(bool)plan["layers"][0]["machine"]["states"][1]["writeDefaultValues"],"bound avatar convention is the fallback when batch FX has no ordinary state");
+        fallbackLayers[0]["mode"]="Additive";
+        plan=BuildPlan(fallback,Edits(),Motions());
+        Check((bool)plan["layers"][0]["machine"]["states"][1]["writeDefaultValues"],"new additive state defaults ON independently of controller convention");
         edits=Edits();edits.Add(edits[1].DeepClone());plan=BuildPlan(before,edits,Motions());
         Check(Edges(plan).Count==2,"ensure transition appends rather than deduplicates");
         edits.Add(JObject.Parse(@"{'action':'delete_transition','layerName':'L','sourceStateName':'Idle','destinationStateName':'New','transitionIndex':0}"));
@@ -112,4 +160,4 @@ def test_actual_ordered_fx_planner(tmp_path):
     (tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8")
     result=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
-    assert result.stdout.count("PASS ")==39
+    assert result.stdout.count("PASS ")==54

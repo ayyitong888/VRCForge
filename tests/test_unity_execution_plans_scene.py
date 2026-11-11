@@ -107,6 +107,12 @@ def test_expression_builders_preserve_aliases_defaults_and_non_preview():
     assert args["preview"] is False and args["writeDefaults"] is False and args["parameterType"] == "Int"
 
 
+def test_ensure_animator_state_execution_plan_keeps_write_defaults_omitted():
+    args = {"avatarPath": "Avatar", "layerName": "FX", "stateName": "On", "parameterName": "P"}
+    _, request = build_scene_execution_plan("vrcforge_ensure_animator_state", args)[0]
+    assert "writeDefaults" not in request
+
+
 @pytest.mark.parametrize("target,tool", [
     ("vrcforge_write_avatar_descriptor", "vrc_write_avatar_descriptor"),
     ("vrcforge_write_animation_curve", "vrc_write_animation_curve"),

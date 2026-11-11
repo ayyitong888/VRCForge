@@ -8,6 +8,7 @@ using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
+using VRC.SDK3.Avatars.Components;
 using VRCForge.Core.MCP;
 using VRCForge.Editor.Generic;
 
@@ -28,7 +29,8 @@ namespace VRCForge.Editor
         }
 
         // Pure JSON planning: no Unity object or asset is mutated here.
-        internal static JObject BuildPlan(JObject before, JArray edits, ISet<string> existingMotions)
+        internal static JObject BuildPlan(JObject before, JArray edits, ISet<string> existingMotions,
+            ISet<string> emptyMotions = null, IEnumerable<bool> avatarValues = null)
         {
             var result = (JObject)before.DeepClone();
             foreach (var token in edits)
@@ -73,26 +75,34 @@ namespace VRCForge.Editor
                 {
                     var name = Required(edit, "stateName"); edit["stateName"] = name;
                     var state = allStates.SingleOrDefault(item => (string)item["name"] == name);
+                    var previousWriteDefaults = (bool?)state?["writeDefaultValues"];
                     if (state == null)
                     {
                         if (action == "update_state") throw new InvalidOperationException("State not found for update.");
                         Required(edit, "motionClipPath");
-                        state = new JObject { ["name"] = name, ["speed"] = 1f, ["writeDefaultValues"] = true,
+                        if (edit["writeDefaults"] == null)
+                            edit["writeDefaults"] = AnimatorWriteDefaults.ResolveNew(layerName, IsAdditive(layers[0]),
+                                OrdinaryValues(layers[0]), ((JArray)result["layers"]).OfType<JObject>().SelectMany(OrdinaryValues), avatarValues);
+                        state = new JObject { ["name"] = name, ["speed"] = 1f,
                             ["timeParameterActive"] = false, ["timeParameter"] = "",
                             ["motionPath"] = "", ["transitions"] = new JArray() };
                         if (((JArray)machine["states"]).Count == 0 && (string)machine["defaultState"] == "") machine["defaultState"] = name;
                         ((JArray)machine["states"]).Add(state);
                         if (edit["speed"] == null) edit["speed"] = 1f;
-                        if (edit["writeDefaults"] == null) edit["writeDefaults"] = true;
                     }
                     if (edit["motionClipPath"] != null)
                     {
                         var path = Required(edit, "motionClipPath");
                         if (!existingMotions.Contains(path)) throw new InvalidOperationException("Batch motion must be an existing clip.");
                         edit["motionClipPath"] = path; state["motionPath"] = path;
+                        state["_directBlendTree"] = false;
+                        state["_emptyMotion"] = emptyMotions?.Contains(path) == true;
                     }
                     if (edit["speed"] != null) state["speed"] = Number(edit, "speed", 1f, false);
                     if (edit["writeDefaults"] != null) state["writeDefaultValues"] = Boolean(edit, "writeDefaults", true);
+                    var writeDefaults = (bool)state["writeDefaultValues"];
+                    if (previousWriteDefaults != writeDefaults || edit["motionClipPath"] != null)
+                        AnimatorWriteDefaults.RequireUsableMotion(name, writeDefaults, (bool?)state["_emptyMotion"] == true);
                     if (edit["timeParameter"] != null)
                     {
                         var parameter = Required(edit, "timeParameter");
@@ -179,6 +189,12 @@ namespace VRCForge.Editor
             foreach (var child in ((JArray)machine["machines"]).OfType<JObject>())
                 foreach (var state in States(child)) yield return state;
         }
+        private static bool IsAdditive(JObject layer) => (string)layer["mode"] == "Additive";
+        private static IEnumerable<bool> OrdinaryValues(JObject layer) =>
+            IsAdditive(layer) || !(layer["machine"] is JObject machine) ? Enumerable.Empty<bool>()
+                : States(machine).Where(state => (bool?)state["_directBlendTree"] != true)
+                    .Select(state => (bool)state["writeDefaultValues"]);
+
         private static string Required(JObject value, string name)
         {
             var text = (value[name]?.ToString() ?? "").Trim();
@@ -218,7 +234,8 @@ namespace VRCForge.Editor
             {
                 var edits = ValidateEnvelope(arguments);
                 var hasMotion = edits.OfType<JObject>().Any(edit => edit["motionClipPath"] != null);
-                var bindingRoot = hasMotion ? WriteAnimationCurveTool.ResolveBindingRoot(arguments) : null;
+                var hasBindingRoot = !string.IsNullOrWhiteSpace((string)arguments["animatorRootPath"]);
+                var bindingRoot = hasMotion || hasBindingRoot ? WriteAnimationCurveTool.ResolveBindingRoot(arguments) : null;
                 var path = AvatarPrimitiveCrudCore.NormalizeAssetPath(Required(arguments, "controllerPath"));
                 if (!path.StartsWith("Assets/", StringComparison.Ordinal)) throw new InvalidOperationException("Controller must be an existing Assets controller.");
                 var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(path)
@@ -228,18 +245,24 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException("Save or discard existing controller edits before a batch.");
                 var guid = AssetDatabase.AssetPathToGUID(path);
                 var motions = new HashSet<string>(StringComparer.Ordinal);
+                var emptyMotions = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var edit in edits.OfType<JObject>())
                     if (edit["motionClipPath"] != null)
                     {
                         var motion = Required(edit, "motionClipPath");
-                        if (!motion.StartsWith("Assets/", StringComparison.Ordinal) || AssetDatabase.LoadAssetAtPath<AnimationClip>(motion) == null)
+                        var clip = motion.StartsWith("Assets/", StringComparison.Ordinal)
+                            ? AssetDatabase.LoadAssetAtPath<AnimationClip>(motion) : null;
+                        if (clip == null)
                             throw new InvalidOperationException("Batch references a missing motion clip.");
                         if (bindingRoot != null)
-                            WriteAnimationCurveTool.ValidateClipBindings(bindingRoot, AssetDatabase.LoadAssetAtPath<AnimationClip>(motion));
+                            WriteAnimationCurveTool.ValidateClipBindings(bindingRoot, clip);
                         motions.Add(motion);
+                        if (clip.empty) emptyMotions.Add(motion);
                     }
                 var before = Snapshot(controller);
-                var expected = BuildPlan(before, edits, motions);
+                var avatar = bindingRoot?.GetComponent<VRCAvatarDescriptor>();
+                var expected = BuildPlan(before, edits, motions, emptyMotions,
+                    AnimatorWriteDefaults.IsAvatarFxController(avatar, controller) ? AnimatorWriteDefaults.GetAvatarOrdinaryValues(avatar) : null);
                 if (arguments["preview"]?.Value<bool?>() ?? false)
                     return VRCForgeToolResult.Completed("Preview: would apply one controller batch.", new {
                         ok = true, preview = true, batch = true, controllerPath = path, editCount = edits.Count,

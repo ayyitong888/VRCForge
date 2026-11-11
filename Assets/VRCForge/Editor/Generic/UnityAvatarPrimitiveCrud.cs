@@ -1265,7 +1265,7 @@ namespace VRCForge.Editor
         {
             if (clip == null) return;
             foreach (var binding in AnimationUtility.GetCurveBindings(clip).Concat(AnimationUtility.GetObjectReferenceCurveBindings(clip)))
-                ValidateBindingTarget(root, binding);
+                if (!AnimatorWriteDefaults.IsTimingCurve(binding)) ValidateBindingTarget(root, binding);
         }
 
         private static string NormalizeAction(string value)
@@ -2117,7 +2117,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Optional explicit animator controller asset path.", IsRequired = false)] public string controllerPath { get; set; } = "";
             [VRCForgeInput("Optional compatibility alias for controllerPath.", IsRequired = false)] public string fxControllerPath { get; set; } = "";
             [VRCForgeInput("Optional new state name.", IsRequired = false)] public string newName { get; set; } = "";
-            [VRCForgeInput("Optional write-defaults flag.", IsRequired = false)] public bool? writeDefaults { get; set; }
+            [VRCForgeInput("Explicit Write Defaults setting. Omit to preserve an existing state or infer the convention for a new state.", IsRequired = false)] public bool? writeDefaults { get; set; }
             [VRCForgeInput("Optional motion AnimationClip asset path.", IsRequired = false)] public string motionClipPath { get; set; } = "";
             [VRCForgeInput("Optional state speed.", IsRequired = false)] public float? speed { get; set; }
             [VRCForgeInput("Expected current state speed; rejects a mismatched or missing state before mutation.", IsRequired = false)] public float? expectedSpeed { get; set; }
@@ -2159,10 +2159,13 @@ namespace VRCForge.Editor
                     : action == "delete_parameter" ? ""
                     : GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{AvatarPrimitiveCrudCore.Sanitize(descriptor.name, "Avatar")}_FX.controller");
                 var motionClipPath = AvatarPrimitiveCrudCore.NormalizeAssetPath(@params["motionClipPath"]?.ToString() ?? "");
-                if ((action == "ensure_state" || action == "update_state") && !string.IsNullOrEmpty(motionClipPath))
-                    WriteAnimationCurveTool.ValidateClipBindings(descriptor.gameObject, AssetDatabase.LoadAssetAtPath<AnimationClip>(motionClipPath));
-                if ((action == "ensure_state" || action == "update_state") && !string.IsNullOrEmpty(motionClipPath)
-                    && AssetDatabase.LoadAssetAtPath<AnimationClip>(motionClipPath) == null)
+                var editsState = action == "ensure_state" || action == "update_state";
+                var assignedClip = editsState && !string.IsNullOrEmpty(motionClipPath)
+                    ? AssetDatabase.LoadAssetAtPath<AnimationClip>(motionClipPath) : null;
+                if (editsState && !string.IsNullOrEmpty(motionClipPath))
+                    WriteAnimationCurveTool.ValidateClipBindings(descriptor.gameObject, assignedClip);
+                var createsMotionClip = editsState && !string.IsNullOrEmpty(motionClipPath) && assignedClip == null;
+                if (createsMotionClip)
                 {
                     motionClipPath = GeneratedAssetPaths.ValidateNewAssetPath(motionClipPath);
                     if (AssetDatabase.LoadMainAssetAtPath(motionClipPath) != null
@@ -2194,10 +2197,24 @@ namespace VRCForge.Editor
                     return HandleDeleteParameter(controller, @params, preview, plan);
                 }
                 ValidateEdit(controller, action, @params);
-                var stateChange = (action == "ensure_state" || action == "update_state")
-                    ? BuildStateChange(controller == null ? null : AvatarPrimitiveCrudCore.FindState(
-                        controller.layers.SingleOrDefault(item => item.name == plan.layerName)?.stateMachine, plan.stateName), @params)
-                    : null;
+                JObject stateChange = null;
+                if (editsState)
+                {
+                    var layer = controller?.layers.SingleOrDefault(item => item.name == plan.layerName.Trim());
+                    var existing = AvatarPrimitiveCrudCore.FindState(layer?.stateMachine, plan.stateName.Trim());
+                    var avatar = controller == null || AnimatorWriteDefaults.IsAvatarFxController(descriptor, controller) ? descriptor : null;
+                    var writeDefaults = AnimatorWriteDefaults.Resolve(controller, layer, @params["writeDefaults"]?.Value<bool?>(), existing, avatar);
+                    var assignsMotion = @params["motionClipPath"] != null;
+                    if ((existing == null || assignsMotion || existing.writeDefaultValues != writeDefaults) && !createsMotionClip)
+                        AnimatorWriteDefaults.RequireUsableMotion(plan.stateName, writeDefaults,
+                            !writeDefaults && AnimatorWriteDefaults.HasEmptyMotion(assignsMotion ? assignedClip : existing?.motion));
+                    if (existing == null && @params["writeDefaults"] == null)
+                    {
+                        @params = (JObject)@params.DeepClone();
+                        @params["writeDefaults"] = writeDefaults;
+                    }
+                    stateChange = BuildStateChange(existing, @params);
+                }
                 var stateDigest = ControllerStateDigest(controller);
                 var expectedStateDigest = @params["expectedStateDigest"]?.ToString() ?? "";
                 if (expectedStateDigest.Length > 0 && !string.Equals(expectedStateDigest, stateDigest, StringComparison.Ordinal))
@@ -2215,8 +2232,7 @@ namespace VRCForge.Editor
 
                 var createdController = controller == null;
                 recovery.Capture(controllerPath);
-                if (!string.IsNullOrEmpty(motionClipPath) && AssetDatabase.LoadAssetAtPath<AnimationClip>(motionClipPath) == null)
-                    recovery.Capture(motionClipPath);
+                if (createsMotionClip) recovery.Capture(motionClipPath);
                 if (createdController) recovery.Capture(descriptor.gameObject.scene.path);
                 recovery.Begin();
                 if (createdController) Undo.RegisterCompleteObjectUndo(descriptor, "Assign new FX controller");
@@ -2229,7 +2245,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(controller);
                 failurePhase = "asset_save";
                 AssetDatabase.SaveAssetIfDirty(controller);
-                if (!string.IsNullOrEmpty(motionClipPath))
+                if (createsMotionClip)
                 {
                     var motion = AssetDatabase.LoadAssetAtPath<AnimationClip>(motionClipPath);
                     if (motion != null) AssetDatabase.SaveAssetIfDirty(motion);
@@ -2254,7 +2270,7 @@ namespace VRCForge.Editor
                     mutationStarted = true, mutationApplied = true, committed = true, commitState = "committed",
                     checkpointRecoveryRequired = false, temporaryCleanupRequired = false,
                     readback = new { persisted = true, controllerPath, assetGuid = evidence.Guid,
-                        fileDigest = evidence.File.Digest, state = actual },
+                        fileDigest = evidence.File.Digest, state = UnityFxAnimatorBatch.Projection(actual) },
                     ok = true,
                     preview = false,
                     action,
@@ -2358,7 +2374,8 @@ namespace VRCForge.Editor
                 ["motionPath"] = AssetDatabase.GetAssetPath(state.motion) };
             var after = before == null ? new JObject {
                 ["name"] = arguments["stateName"]?.ToString() ?? "", ["speed"] = 1f,
-                ["writeDefaultValues"] = true, ["timeParameterActive"] = false, ["timeParameter"] = "", ["motionPath"] = "" }
+                ["writeDefaultValues"] = arguments["writeDefaults"].Value<bool>(), ["timeParameterActive"] = false,
+                ["timeParameter"] = "", ["motionPath"] = "" }
                 : (JObject)before.DeepClone();
             if (arguments["newName"] != null) after["name"] = arguments["newName"].ToString().Trim();
             if (arguments["speed"] != null) after["speed"] = arguments["speed"].Value<float>();
@@ -2402,6 +2419,8 @@ namespace VRCForge.Editor
                     child.state.name, child.state.speed, child.state.writeDefaultValues,
                     child.state.timeParameterActive, child.state.timeParameter,
                     motionPath = AssetDatabase.GetAssetPath(child.state.motion),
+                    _directBlendTree = AnimatorWriteDefaults.IsDirectBlendTree(child.state),
+                    _emptyMotion = AnimatorWriteDefaults.HasEmptyMotion(child.state.motion),
                     transitions = (child.state.transitions ?? Array.Empty<AnimatorStateTransition>()).Select(DescribeTransition).ToArray()
                 }).ToArray(),
                 machines = machine.stateMachines.Select(child => DescribeMachine(child.stateMachine)).ToArray()
@@ -2911,7 +2930,7 @@ namespace VRCForge.Editor
             }
             if (@params["motionClipPath"] != null)
             {
-                state.motion = LoadOrCreateClip(@params["motionClipPath"].ToString(), assetDir);
+                state.motion = LoadOrCreateClip(@params["motionClipPath"].ToString(), assetDir, state.writeDefaultValues);
             }
             if (@params["speed"] != null)
             {
@@ -2946,7 +2965,7 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("timeParameter must reference an existing Float Animator parameter.");
         }
 
-        private static AnimationClip LoadOrCreateClip(string rawPath, string assetDir)
+        private static AnimationClip LoadOrCreateClip(string rawPath, string assetDir, bool writeDefaults)
         {
             var path = AvatarPrimitiveCrudCore.NormalizeAssetPath(rawPath);
             if (string.IsNullOrWhiteSpace(path))
@@ -2962,6 +2981,11 @@ namespace VRCForge.Editor
             var folder = Path.GetDirectoryName(path)?.Replace("\\", "/") ?? assetDir;
             AvatarPrimitiveCrudCore.EnsureAssetFolder(folder);
             clip = new AnimationClip { name = Path.GetFileNameWithoutExtension(path) };
+            if (!writeDefaults)
+            {
+                AnimatorWriteDefaults.AddTimingCurve(clip);
+                AnimatorWriteDefaults.RequireUsableMotion(clip.name, writeDefaults, clip.empty);
+            }
             AssetDatabase.CreateAsset(clip, path);
             Undo.RegisterCreatedObjectUndo(clip, "Create state motion clip");
             return clip;

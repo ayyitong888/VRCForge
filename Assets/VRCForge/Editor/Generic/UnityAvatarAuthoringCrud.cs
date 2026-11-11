@@ -1050,7 +1050,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Animator parameter type.", IsRequired = false)] public string parameterType { get; set; } = "Int";
             [VRCForgeInput("Animator condition mode.", IsRequired = false)] public string conditionMode { get; set; } = "Equals";
             [VRCForgeInput("Animator condition threshold.", IsRequired = false)] public float? threshold { get; set; } = 0f;
-            [VRCForgeInput("Set Write Defaults on the ensured state.", IsRequired = false)] public bool? writeDefaults { get; set; } = true;
+            [VRCForgeInput("Explicit Write Defaults setting. Omit to preserve an existing state or infer the convention for a new state.", IsRequired = false)] public bool? writeDefaults { get; set; }
             [VRCForgeInput("Optional: use an existing Float parameter as normalized motion time.", IsRequired = false)] public bool? timeParameterActive { get; set; }
             [VRCForgeInput("Optional existing Float Animator parameter used as normalized motion time.", IsRequired = false)] public string timeParameter { get; set; } = "";
             [VRCForgeInput("Return a non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
@@ -1074,7 +1074,7 @@ namespace VRCForge.Editor
                 var parameterType = AvatarAuthoringCrudCore.ParseAnimatorParameterType(@params["parameterType"]?.ToString() ?? "Int");
                 var conditionMode = AvatarAuthoringCrudCore.ParseConditionMode(@params["conditionMode"]?.ToString() ?? "Equals");
                 var threshold = @params["threshold"]?.Value<float?>() ?? 0f;
-                var writeDefaults = @params["writeDefaults"]?.Value<bool?>() ?? true;
+                var requestedWriteDefaults = @params["writeDefaults"]?.Value<bool?>();
                 var timeParameterActive = @params["timeParameterActive"]?.Value<bool?>();
                 var timeParameter = (@params["timeParameter"]?.ToString() ?? "").Trim();
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
@@ -1088,8 +1088,12 @@ namespace VRCForge.Editor
                 var animationAssetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Animations);
                 var controller = AvatarAuthoringCrudCore.GetFxController(descriptor);
                 ValidateTargetIdentity(controller, layerName, stateName, parameterName, parameterType);
-                var layerExists = controller != null && controller.layers.Any(layer => string.Equals(layer.name, layerName, StringComparison.Ordinal));
-                var existingState = layerExists ? FindState(controller.layers.First(layer => layer.name == layerName).stateMachine, stateName) : null;
+                var existingLayer = controller?.layers.SingleOrDefault(layer => string.Equals(layer.name, layerName, StringComparison.Ordinal));
+                var layerExists = existingLayer != null;
+                var existingState = layerExists ? FindState(existingLayer.stateMachine, stateName) : null;
+                var writeDefaults = AnimatorWriteDefaults.Resolve(controller, existingLayer, requestedWriteDefaults, existingState, descriptor);
+                if (!writeDefaults && existingState != null && existingState.writeDefaultValues && existingState.motion != null)
+                    AnimatorWriteDefaults.RequireUsableMotion(stateName, writeDefaults, AnimatorWriteDefaults.HasEmptyMotion(existingState.motion));
                 if (timeParameterActive == true && timeParameter.Length == 0 && existingState == null)
                     throw new InvalidOperationException("timeParameter is required when timeParameterActive is true for a new state.");
                 var effectiveTimeParameter = timeParameter.Length > 0 ? timeParameter : (existingState?.timeParameter ?? "");
@@ -1207,7 +1211,7 @@ namespace VRCForge.Editor
                     state = layer.stateMachine.AddState(stateName);
                     stateCreated = true;
                 }
-                state.writeDefaultValues = writeDefaults;
+                if (stateCreated || requestedWriteDefaults.HasValue) state.writeDefaultValues = writeDefaults;
                 if (timeParameter.Length > 0) state.timeParameter = timeParameter;
                 if (timeParameterActive.HasValue) state.timeParameterActive = timeParameterActive.Value;
                 if (state.timeParameterActive && string.IsNullOrWhiteSpace(state.timeParameter))
@@ -1220,7 +1224,7 @@ namespace VRCForge.Editor
                         Before = new { exists = false }
                     };
                     receipts.Add(clipReceipt);
-                    var clip = CreateEmptyClip(animationAssetDir, clipPath);
+                    var clip = CreateStateClip(animationAssetDir, clipPath, writeDefaults);
                     state.motion = clip;
                     clipReceipt.Asset = AssetDatabase.GetAssetPath(clip);
                 }
@@ -1285,6 +1289,7 @@ namespace VRCForge.Editor
                         : new { exists = true, assetPath = clipReceipt.Asset, name = readbackClip.name };
                     clipReceipt.Status = readbackClip != null ? "succeeded" : "failed";
                     if (readbackClip == null) throw new InvalidOperationException("Animation clip readback failed.");
+                    AnimatorWriteDefaults.RequireUsableMotion(stateName, writeDefaults, readbackClip.empty);
                     SceneObjectCopyCore.ReadStableAssetEvidence(clipReceipt.Asset, "Ensure animator clip readback");
                 }
                 recovery.Complete();
@@ -1512,10 +1517,11 @@ namespace VRCForge.Editor
             return true;
         }
 
-        private static AnimationClip CreateEmptyClip(string assetDir, string path)
+        private static AnimationClip CreateStateClip(string assetDir, string path, bool writeDefaults)
         {
             AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
             var clip = new AnimationClip { name = Path.GetFileNameWithoutExtension(path) };
+            if (!writeDefaults) AnimatorWriteDefaults.AddTimingCurve(clip);
             AssetDatabase.CreateAsset(clip, path);
             Undo.RegisterCreatedObjectUndo(clip, "Create animator state clip");
             return clip;

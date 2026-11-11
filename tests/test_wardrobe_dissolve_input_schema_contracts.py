@@ -46,6 +46,8 @@ def test_shader_and_clothing_inputs_keep_instruction_changes_locks_and_item_alia
     _assert_valid(preview, {"projectPath": "C:/Unity/Avatar", "changes": [{"material_id": "m", "semantic_property": "x", "after": 1.0}]})
     clothing = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_apply_clothing_fx"]
     _assert_valid(clothing, {"projectPath": "C:/Unity/Avatar", "items": [{"displayName": "Hat", "sampleObjectPath": "Avatar/Hat"}]})
+    _assert_valid(clothing, {"projectPath": "X:/FixtureProject", "items": [{"displayName": "Hat", "writeDefaults": False}]})
+    _assert_invalid(clothing, {"projectPath": "X:/FixtureProject", "items": [{"displayName": "Hat", "writeDefaults": "false"}]})
     _assert_invalid(clothing, {"projectPath": "C:/Unity/Avatar", "items": [{"unknown": "x"}]})
 
 

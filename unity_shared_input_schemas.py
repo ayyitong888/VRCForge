@@ -481,15 +481,15 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
         "action": {
             "type": "string",
             "enum": ["ensure_layer", "delete_layer", "ensure_state", "update_state", "delete_state", "ensure_transition", "delete_transition", "delete_parameter"],
-            "description": "Single-edit mode: ensure_layer creates the named layer; ensure_state and update_state both use the current upsert path and may create a missing layer/state. Batch update_state instead requires an existing state, and every batch layer must already exist. The first state added to an empty layer becomes its default. Batch preview exposes this at plan.layers[].machine.defaultState. delete_parameter refuses parameters still referenced in the controller.",
+            "description": "Single-edit mode: ensure_layer creates the named layer; ensure_state can create a missing layer and state. update_state requires an existing state in both modes, and every batch layer must already exist. The first state added to an empty layer becomes its default. Batch preview exposes this at plan.layers[].machine.defaultState. delete_parameter refuses parameters still referenced in the controller.",
         },
         "assetDir": {"type": "string", "pattern": "^Assets/"},
         "layerName": {"type": "string"},
         "stateName": {"type": "string", "description": "Exact state name. Creation in an empty layer makes the first added state its default; existing layer defaults are preserved by ensure_state."},
         "destinationStateName": {"type": "string"},
         "newName": {"type": "string"},
-        "writeDefaults": {"type": "boolean"},
-        "motionClipPath": {"type": "string", "pattern": "^Assets/"},
+        "writeDefaults": {"type": "boolean", "description": "Omit to preserve an existing state. For a new state, use the target layer, then the FX controller, then the bound avatar's unanimous explicitly assigned non-FX convention. A mixed FX convention requires an explicit boolean. With no convention, new states default to On."},
+        "motionClipPath": {"type": "string", "pattern": "^Assets/", "description": "Exact AnimationClip path. Creating a Write Defaults Off state, switching a state to Off, or replacing an Off state's motion requires a non-empty clip. Single mode can create a clip at an approved new path and add a placeholder timing curve. Batch mode requires an existing clip."},
         "speed": {"type": "number"},
         "expectedSpeed": {"type": "number", "description": "Expected current speed for a single state edit; a mismatch is refused before mutation."},
         "expectedStateDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Copy from the authoritative FX preview to reject controller changes before writing."},
@@ -582,7 +582,7 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["oneOf"].append({
 })
 MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["properties"]["edits"] = {
     "type": "array", "minItems": 1, "maxItems": 128, "items": _FX_BATCH_ITEM_SCHEMA,
-    "description": "Ordered atomic batch on one exact existing controllerPath; avatarPath and single-action fields are not accepted. Every layerName must select one existing unambiguous layer; batch mode never creates layers. ensure_state can add a missing state only inside an existing layer and then requires an existing motionClipPath. Batch mode never creates controllers or motion clips. For any motionClipPath, supply animatorRootPath for scene binding validation or assetOnly=true for reusable asset-only authoring. At most 128 edits and 512 KiB. Supports state/transition edits and delete_layer by exact unique layerName; delete synced dependents before their target. Layer deletion preserves subassets and clips.",
+    "description": "Ordered atomic batch on one exact existing controllerPath; avatarPath and single-action fields are not accepted. Every layerName must select one existing unambiguous layer; batch mode never creates layers. Creating a state requires an existing motionClipPath. For a Write Defaults Off state being created, switched to Off or given a different motion, the resulting clip must contain at least one animation binding. Batch mode never creates controllers or motion clips. For any motionClipPath, supply animatorRootPath for scene binding validation or assetOnly=true for reusable asset-only authoring. At most 128 edits and 512 KiB. Supports state/transition edits and delete_layer by exact unique layerName; delete synced dependents before their target. Layer deletion preserves subassets and clips.",
 }
 MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["allOf"] = [{
     "if": {"required": ["edits"], "properties": {"edits": {"contains": {"required": ["motionClipPath"]}}}},

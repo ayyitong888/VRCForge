@@ -240,6 +240,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "items": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"type": "object", "additionalProperties": False, "properties": {
                 "displayName": {"type": "string"}, "name": {"type": "string"}, "parameterName": {"type": "string"},
                 "animationClipName": {"type": "string"}, "sampleObjectPath": {"type": "string"}, "objectPath": {"type": "string"},
+                "writeDefaults": {"type": "boolean", "description": "Write Defaults for both states in a new clothing FX layer. Omit to use the FX controller convention, then the avatar's unanimous explicitly assigned non-FX convention. A mixed FX controller requires an explicit boolean. With no convention, defaults to On."},
             }}},
         },
     },
@@ -920,7 +921,8 @@ _WARDROBE_VALUE_LIST = {
 }
 _WARDROBE_PARAMETER_NAME = {"type": ["string", "null"], "description": "Existing Int expression parameter identifying the wardrobe."}
 _WARDROBE_CLIP_DIRECTORY = {"type": ["string", "null"], "description": "Optional Assets-relative generated clip directory; omission uses the existing generated Wardrobe directory."}
-_WARDROBE_WRITE_DEFAULTS = {**_WARDROBE_BOOLEAN_INPUT, "description": "Optional Write Defaults override. Omission preserves the existing wardrobe state convention. Prefer a JSON boolean; legacy scalar coercion is unchanged."}
+_WARDROBE_WRITE_DEFAULTS = {**_WARDROBE_BOOLEAN_INPUT, "description": "Optional Write Defaults override. Omit to use the wardrobe layer, then the FX controller, then the avatar's unanimous explicitly assigned non-FX convention. A mixed FX convention requires an explicit boolean. With no convention, new states default to On."}
+_ENSURE_STATE_WRITE_DEFAULTS = {**_WARDROBE_BOOLEAN_INPUT, "description": "Optional Write Defaults override. Omit to preserve an existing state. New states use the target layer, then the FX controller, then the bound avatar's unanimous explicitly assigned non-FX convention. A mixed FX convention requires an explicit boolean. With no convention, new states default to On. Generated Off-state motions contain a placeholder timing curve."}
 _WARDROBE_MENU_TOGGLE = {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Create a matching menu toggle. Prefer a JSON boolean; legacy scalar coercion is unchanged."}
 _WARDROBE_DEFAULT_OFF = {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Set added objects inactive as part of authoring, subject to the part defaultOn setting. Prefer a JSON boolean."}
 _WARDROBE_PUBLIC_PROPERTIES = {
@@ -931,7 +933,7 @@ _WARDROBE_PUBLIC_PROPERTIES = {
         "defaultControlName": {"type": ["string", "null"], "default": "Default", "description": "Default outfit menu control and FX state name."},
         "layerName": {"type": ["string", "null"], "description": "FX layer name; defaults to the wardrobe parameter name."},
         "assetDir": {"type": ["string", "null"], "description": "Optional Assets-relative output directory for generated wardrobe assets."},
-        "writeDefaults": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Write Defaults for the default FX state; prefer a JSON boolean."},
+        "writeDefaults": _ENSURE_STATE_WRITE_DEFAULTS,
         "saved": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Persist the wardrobe expression parameter; prefer a JSON boolean."},
         "networkSynced": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Synchronize the wardrobe parameter; prefer a JSON boolean."},
     },
@@ -1005,7 +1007,7 @@ _WARDROBE_PUBLIC_PROPERTIES = {
         "parameterType": {"type": ["string", "null"], "default": "Int", "description": "Animator parameter type."},
         "conditionMode": {"type": ["string", "null"], "default": "Equals", "description": "Animator condition mode."},
         "threshold": {**_WARDROBE_NUMBER_INPUT, "default": 0, "description": "Condition threshold; existing numeric-string conversion is preserved."},
-        "writeDefaults": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "State Write Defaults value; prefer a JSON boolean."},
+        "writeDefaults": _ENSURE_STATE_WRITE_DEFAULTS,
         "assetDir": {"type": ["string", "null"], "description": "Optional output directory when Animator assets must be created."},
     },
 }
@@ -1265,12 +1267,13 @@ _ADD_OUTFIT_PROPERTIES = {
 for _outfit_flag, _outfit_default in (
     ('manageWardrobe', True), ('setupOutfit', True), ('unpackPrefab', False),
     ('worldPositionStays', True), ('saveScene', True), ('addMenuToggle', True),
-    ('setObjectsDefaultOff', True), ('subMenuOverflow', True), ('writeDefaults', True),
+    ('setObjectsDefaultOff', True), ('subMenuOverflow', True),
 ):
     _ADD_OUTFIT_PROPERTIES[_outfit_flag] = {
         'default': _outfit_default,
-        'description': 'Optional boolean. Existing conversion accepts numbers and strings true/false, 1/0, yes/no, y/n, on/off; null or unrecognized values use the default. ' + ('Omission preserves the wardrobe tool default; only forwarded when explicitly provided.' if _outfit_flag == 'writeDefaults' else ''),
+        'description': 'Optional boolean. Existing conversion accepts numbers and strings true/false, 1/0, yes/no, y/n, on/off; null or unrecognized values use the default.',
     }
+_ADD_OUTFIT_PROPERTIES['writeDefaults'] = _WARDROBE_WRITE_DEFAULTS
 _ADD_OUTFIT_PROPERTIES['manageWardrobe']['description'] += ' True requires an existing strict scan. False installs/setup only, without wardrobe scanning, creation or binding; use for the first outfit before the separate approved add_wardrobe_outfit primitive.'
 for _outfit_alias, _outfit_canonical in {
     'avatar_path': 'avatarPath', 'asset_path': 'assetPath', 'query': 'assetQuery', 'asset_query': 'assetQuery',

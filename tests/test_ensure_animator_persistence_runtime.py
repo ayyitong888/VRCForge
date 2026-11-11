@@ -7,6 +7,7 @@ import shutil
 import subprocess
 
 import pytest
+from test_curve_fx_authoring_runtime_contract import method
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "Assets/VRCForge/Editor/Generic/UnityAvatarAuthoringCrud.cs"
@@ -53,7 +54,8 @@ def test_ensure_animator_persistence_runtime(tmp_path: Path) -> None:
         assert got.returncode == 0, got.stderr
         raw = got.stdout
     else: raw = SOURCE.read_text(encoding="utf-8-sig")
-    product = "namespace VRCForge.Editor { using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;using UnityEngine;using UnityEditor;using UnityEditor.Animations;using VRC.SDK3.Avatars.Components;" + _class_source(raw, "public static class EnsureAnimatorStateTool") + "}"
+    resolver = SOURCE.with_name("AnimatorWriteDefaults.cs").read_text(encoding="utf-8-sig")
+    product = "namespace VRCForge.Editor { using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;using UnityEngine;using UnityEditor;using UnityEditor.Animations;using VRC.SDK3.Avatars.Components;" + _class_source(raw, "public static class EnsureAnimatorStateTool") + _class_source(resolver, "internal static class AnimatorWriteDefaults") + "}"
     stubs = r'''
 
 namespace VRCForge.Core.MCP { public sealed class VRCForgeCommandAttribute:System.Attribute{public VRCForgeCommandAttribute(string toolId){} public string Summary{get;set;}} public sealed class VRCForgeInputAttribute:System.Attribute{public VRCForgeInputAttribute(string d){} public bool IsRequired{get;set;}} public static class VRCForgeToolResult{ public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>Failed(message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>Failed(message,payload); public static object Failed(string m,object p=null)=>new JObject{{"ok",false},{"status","failed"},{"message",m},{"payload",p==null?null:JObject.FromObject(p)}};public static object Completed(string m,object p)=>new JObject{{"ok",true},{"status","completed"},{"message",m},{"payload",JObject.FromObject(p)}};} }
@@ -65,12 +67,42 @@ namespace VRC.SDK3.Avatars.Components { using UnityEngine; using UnityEditor.Ani
 namespace VRCForge.Editor { using UnityEngine;using UnityEditor;using UnityEditor.Animations;using VRC.SDK3.Avatars.Components; public static class SceneObjectCopyCore{public sealed class Evidence{public string Guid="guid";public sealed class FileData{public string Digest="digest";}public FileData File=new FileData();}public static Evidence ReadStableAssetEvidence(string p,string l)=>new Evidence{Guid=AssetDatabase.AssetPathToGUID(p)};public static Evidence ReadStableAssetEvidence(string p,string l,Action<string,string> f)=>ReadStableAssetEvidence(p,l);} public static class GeneratedAssetPaths{public const string Controllers="Controllers",Animations="Animations";public static string ResolveDirectory(string v,string a,string c,bool categorizeExplicit)=>"Assets/Generated/"+c;public static string UniqueAssetPath(string p)=>p;public static string ValidateNewAssetPath(string p)=>p;} public static class AvatarAuthoringCrudCore{public static VRCAvatarDescriptor ResolveAvatarDescriptor(string p)=>Resources.Items[0];public static AnimatorController GetFxController(VRCAvatarDescriptor d){foreach(var l in d.baseAnimationLayers)if(l.animatorController!=null)return l.animatorController;return null;}public static AnimatorController EnsureFxController(VRCAvatarDescriptor d,string dir,string p){var c=GetFxController(d);if(c!=null)return c;c=AnimatorController.CreateAnimatorControllerAtPath(p);d.baseAnimationLayers=new[]{new VRCAvatarDescriptor.CustomAnimLayer{type=VRCAvatarDescriptor.AnimLayerType.FX,animatorController=c}};return c;}public static AnimatorControllerParameterType ParseAnimatorParameterType(string v)=>v=="Float"?AnimatorControllerParameterType.Float:AnimatorControllerParameterType.Int;public static AnimatorConditionMode ParseConditionMode(string v)=>AnimatorConditionMode.Equals;public static string GetTransformPath(Transform t)=>"Avatar";public static string NormalizeAssetDir(string v,string a,string c)=>"Assets/Generated/"+c;public static string Sanitize(string v,string f)=>f;public static void EnsureAssetFolder(string p){} } public static class ManageFxAnimatorTool{public static int Describes;public static JObject DescribeForBatch(AnimatorController c){Describes++;return new JObject{{"mismatch",AssetDatabase.Mismatch&&Describes>1},{"layers",c.layers.Length},{"parameters",c.parameters.Length}};}} public static class WriteAnimationCurveTool{internal sealed class AssetEditRecovery{public static int Restores;public static bool RestoreResult=true;public void Capture(string p){}public void Begin(){}public void Complete(){}public bool Restore(){Restores++;return RestoreResult;}}} }
 
 '''
+    stubs = stubs.replace("public class AnimatorControllerLayer{", """
+public enum AnimatorLayerBlendingMode { Override, Additive }
+public enum BlendTreeType { Simple1D, Direct }
+public class ChildMotion { public Motion motion; }
+public class BlendTree : Motion { public BlendTreeType blendType; public ChildMotion[] children=Array.Empty<ChildMotion>(); }
+public class AnimatorControllerLayer{ public AnimatorLayerBlendingMode blendingMode;
+""").replace("public bool writeDefaultValues,timeParameterActive;", "public bool writeDefaultValues=true,timeParameterActive;")
+    stubs = stubs.replace("public class AnimationClip:UnityEditor.Animations.Motion{}", "public class AnimationClip:UnityEditor.Animations.Motion{public bool empty=true;}")
+    stubs = stubs.replace("public class AnimatorController:Object", "public class AnimatorController:RuntimeAnimatorController")
+    stubs = stubs.replace("public enum AnimLayerType{FX}", "public bool customizeAnimationLayers; public CustomAnimLayer[] specialAnimationLayers=Array.Empty<CustomAnimLayer>(); public enum AnimLayerType{FX,Base,Additive}")
+    stubs = stubs.replace("public AnimatorController animatorController;", "public RuntimeAnimatorController animatorController;")
+    stubs = stubs.replace("return l.animatorController;", "return l.animatorController as AnimatorController;")
+    stubs += r'''
+namespace UnityEngine {
+ public class RuntimeAnimatorController:Object {}
+ public class AnimatorOverrideController:RuntimeAnimatorController { public RuntimeAnimatorController runtimeAnimatorController; }
+ public class AnimationCurve { public static AnimationCurve Constant(float a,float b,float v)=>new AnimationCurve(); }
+}
+namespace UnityEditor {
+ public struct EditorCurveBinding {
+  public string path,propertyName; public Type type; public bool isPPtrCurve;
+  public static EditorCurveBinding FloatCurve(string path,Type type,string property)=>new EditorCurveBinding{path=path,type=type,propertyName=property};
+ }
+ public static class AnimationUtility { public static void SetEditorCurve(AnimationClip clip,EditorCurveBinding binding,AnimationCurve curve)=>clip.empty=false; }
+}
+'''
+    checkpoint = "".join(method(raw, signature) for signature in (
+        "internal static string[] CheckpointAssetPaths", "internal static void RequireExpectedCheckpointAssetPaths",
+    ) if signature in raw)
+    stubs = stubs.replace("public static class AvatarAuthoringCrudCore{", "public static class AvatarAuthoringCrudCore{" + checkpoint)
     runner = r'''
 
 class Probe {
  static int failures;
  static void Check(bool ok,string name){Console.WriteLine((ok?"PASS ":"FAIL ")+name);if(!ok)failures++;}
- static JObject Run(bool preview=false,bool saveFailure=false,bool mismatch=false,bool missingClip=false,bool dirty=false,bool restore=true,bool newController=false,bool sceneFailure=false,bool timeActive=false,string timeName="",string timeType="Int",bool existingTime=false,string existingTimeType="Float"){
+ static JObject Run(bool preview=false,bool saveFailure=false,bool mismatch=false,bool missingClip=false,bool dirty=false,bool restore=true,bool newController=false,bool sceneFailure=false,bool timeActive=false,string timeName="",string timeType="Int",bool existingTime=false,string existingTimeType="Float",string wdFixture="",bool? requestedWD=null){
   AssetDatabase.Saves=0;AssetDatabase.GlobalSaves=0;AssetDatabase.Refreshed=false;AssetDatabase.Imported.Clear();
   AssetDatabase.SaveFailure=saveFailure;AssetDatabase.Mismatch=mismatch;AssetDatabase.ReturnNull=missingClip;
   VRCForge.Editor.ManageFxAnimatorTool.Describes=0;
@@ -79,13 +111,36 @@ class Probe {
   UnityEditor.SceneManagement.EditorSceneManager.Saves=0;UnityEditor.SceneManagement.EditorSceneManager.Fail=sceneFailure;
   var controller=new AnimatorController{name="FX",dirty=dirty,layers=new[]{new AnimatorControllerLayer{name="Layer"}}};
   if(existingTime){var old=controller.layers[0].stateMachine.AddState("State");old.timeParameterActive=true;old.timeParameter="Mode";controller.AddParameter("Mode",existingTimeType=="Int"?AnimatorControllerParameterType.Int:AnimatorControllerParameterType.Float);}
+  var machine=controller.layers[0].stateMachine;
+  if(wdFixture=="existing")machine.AddState("State").writeDefaultValues=false;
+  if(wdFixture=="nested" || wdFixture=="mixed"){
+    var nested=new AnimatorStateMachine();nested.AddState("Off").writeDefaultValues=false;
+    machine.stateMachines=new[]{new ChildAnimatorStateMachine{stateMachine=nested}};
+    if(wdFixture=="mixed")machine.AddState("On");
+  }
+  if(wdFixture=="fallback" || wdFixture=="additive" || wdFixture=="direct" || wdFixture=="mixed-fallback"){
+    controller.AddLayer("Reference");controller.layers[1].stateMachine.AddState("Off").writeDefaultValues=false;
+    if(wdFixture=="additive")controller.layers[0].blendingMode=AnimatorLayerBlendingMode.Additive;
+    if(wdFixture=="direct")machine.AddState("Direct").motion=new BlendTree{blendType=BlendTreeType.Direct};
+    if(wdFixture=="mixed-fallback")controller.layers[1].stateMachine.AddState("On");
+  }
   var avatar=new VRCAvatarDescriptor{name="Avatar",transform=new Transform{name="Avatar"},baseAnimationLayers=newController?Array.Empty<VRCAvatarDescriptor.CustomAnimLayer>():new[]{new VRCAvatarDescriptor.CustomAnimLayer{type=VRCAvatarDescriptor.AnimLayerType.FX,animatorController=controller}}};
+  if(wdFixture=="avatar" || wdFixture=="dormant-avatar"){
+    var other=new AnimatorController();other.AddLayer("Reference");other.layers[0].stateMachine.AddState("Off").writeDefaultValues=false;
+    avatar.customizeAnimationLayers=wdFixture=="avatar";
+    avatar.specialAnimationLayers=new[]{new VRCAvatarDescriptor.CustomAnimLayer{type=VRCAvatarDescriptor.AnimLayerType.Base,animatorController=other}};
+  }
   UnityEditor.Resources.Items=new[]{avatar};AssetDatabase.Assets.Clear();
   if(!newController)AssetDatabase.Assets["Assets/FX.controller"]=controller;
+  if(wdFixture=="empty-existing"){
+    var empty=new AnimationClip{name="Existing"};machine.AddState("State").motion=empty;
+    AssetDatabase.Assets["Assets/Existing.anim"]=empty;
+  }
   AssetDatabase.Assets["Assets/Unrelated.anim"]=new AnimationClip{dirty=true};
   var args=new JObject{{"avatarPath","Avatar"},{"layerName","Layer"},{"stateName","State"},{"parameterName","Mode"},{"parameterType",timeType},{"preview",preview}};
   if(timeName.Length>0)args["timeParameter"]=timeName;
   if(timeActive)args["timeParameterActive"]=true;
+  if(requestedWD.HasValue)args["writeDefaults"]=requestedWD.Value;
   return JObject.FromObject(VRCForge.Editor.EnsureAnimatorStateTool.HandleCommand(args));
  }
  static bool RolledBack(JObject result)=>!(bool)result["ok"]&&(string)result["payload"]["commitState"]=="rolled_back"&&VRCForge.Editor.WriteAnimationCurveTool.AssetEditRecovery.Restores==1;
@@ -104,9 +159,22 @@ class Probe {
   var preserved=Run(existingTime:true,timeType:"Float");var preservedAfter=(JObject)preserved["payload"]["transaction"]["items"][0]["after"];Check((bool)preserved["ok"]&&(bool)preservedAfter["state"]["timeParameterActive"]&&((string)preservedAfter["state"]["timeParameter"])=="Mode","omitted time fields preserve existing state");
   var invalid=Run(timeActive:true,timeName:"Mode",timeType:"Int");Check(!(bool)invalid["ok"]&&AssetDatabase.Saves==0,"non-Float time parameter is rejected before mutation");
   var invalidExisting=Run(timeActive:true,existingTime:true,existingTimeType:"Int");Check(!(bool)invalidExisting["ok"]&&AssetDatabase.Saves==0,"active time parameter validates existing reference");
+  var offPreview=Run(preview:true,wdFixture:"nested");Check((bool)offPreview["ok"]&&!(bool)offPreview["payload"]["plan"]["writeDefaults"]&&AssetDatabase.Saves==0,"nested target convention governs preview without writes");
+  var offNew=Run(wdFixture:"nested");Check((bool)offNew["ok"]&&!(bool)offNew["payload"]["transaction"]["items"][0]["after"]["state"]["writeDefaultValues"],"new state inherits nested OFF convention through persisted receipt");
+  var offExisting=Run(wdFixture:"existing");Check((bool)offExisting["ok"]&&!(bool)offExisting["payload"]["writeDefaults"],"existing OFF state preserves omitted setting");
+  var mixed=Run(wdFixture:"mixed");Check(!(bool)mixed["ok"]&&((string)mixed["message"]).Contains("writeDefaults")&&AssetDatabase.Saves==0,"mixed ordinary target rejected before writes");
+  var mixedFallback=Run(wdFixture:"mixed-fallback");Check(!(bool)mixedFallback["ok"]&&((string)mixedFallback["message"]).Contains("writeDefaults")&&AssetDatabase.Saves==0,"empty target and mixed controller rejected before writes");
+  var explicitMixed=Run(wdFixture:"mixed",requestedWD:true);Check((bool)explicitMixed["ok"]&&(bool)explicitMixed["payload"]["writeDefaults"],"explicit choice accepted in mixed target");
+  var fallback=Run(wdFixture:"fallback");Check((bool)fallback["ok"]&&!(bool)fallback["payload"]["writeDefaults"],"empty target follows ordinary controller OFF convention");
+  var direct=Run(wdFixture:"direct");Check((bool)direct["ok"]&&!(bool)direct["payload"]["writeDefaults"],"direct blend tree is excluded from ordinary WD convention");
+  var additive=Run(wdFixture:"additive");Check((bool)additive["ok"]&&(bool)additive["payload"]["writeDefaults"],"new additive states default ON");
+  var generated=Run(wdFixture:"nested");Check((bool)generated["ok"] && !AssetDatabase.LoadAssetAtPath<AnimationClip>((string)generated["payload"]["transaction"]["items"][1]["after"]["assetPath"]).empty,"generated OFF clip has real motion data");
+  var emptyExisting=Run(wdFixture:"empty-existing",requestedWD:false);Check(!(bool)emptyExisting["ok"]&&AssetDatabase.Saves==0,"explicit WD OFF rejects an existing empty clip before writes");
+  var avatarDefault=Run(wdFixture:"avatar");Check((bool)avatarDefault["ok"]&&!(bool)avatarDefault["payload"]["writeDefaults"],"new state in empty FX controller follows the avatar's explicit playable convention");
+  var dormant=Run(wdFixture:"dormant-avatar");Check((bool)dormant["ok"]&&(bool)dormant["payload"]["writeDefaults"],"dormant descriptor slots do not affect new state defaults");
   return failures==0?0:1;
  }
 }
 
 '''
-    cs=tmp_path/"Probe.cs";cs.write_text("using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;using VRCForge.Core.MCP;using UnityEngine;using UnityEditor;using UnityEditor.Animations;using VRC.SDK3.Avatars.Components;"+stubs+product+runner,encoding="utf-8");dll=tmp_path/"Probe.dll";cmd=[dotnet,str(compilers[-1]),"-nologo","-target:exe","-nostdlib+","-langversion:8.0",f"-out:{dll}"]+[f"-r:{p}" for p in refs[-1].glob("*.dll")]+[f"-r:{compilers[-1].parents[2]/'Newtonsoft.Json.dll'}",str(cs)];built=subprocess.run(cmd,capture_output=True,text=True,timeout=60);assert built.returncode==0,built.stdout+built.stderr;shutil.copy2(compilers[-1].parents[2]/"Newtonsoft.Json.dll",tmp_path/"Newtonsoft.Json.dll");(tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8");run=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30);assert run.returncode==0,run.stdout+run.stderr;assert run.stdout.count("PASS ")==14,run.stdout
+    cs=tmp_path/"Probe.cs";cs.write_text("using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;using VRCForge.Core.MCP;using UnityEngine;using UnityEditor;using UnityEditor.Animations;using VRC.SDK3.Avatars.Components;"+stubs+product+runner,encoding="utf-8");dll=tmp_path/"Probe.dll";cmd=[dotnet,str(compilers[-1]),"-nologo","-target:exe","-nostdlib+","-langversion:8.0",f"-out:{dll}"]+[f"-r:{p}" for p in refs[-1].glob("*.dll")]+[f"-r:{compilers[-1].parents[2]/'Newtonsoft.Json.dll'}",str(cs)];built=subprocess.run(cmd,capture_output=True,text=True,timeout=60);assert built.returncode==0,built.stdout+built.stderr;shutil.copy2(compilers[-1].parents[2]/"Newtonsoft.Json.dll",tmp_path/"Newtonsoft.Json.dll");(tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8");run=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30);assert run.returncode==0,run.stdout+run.stderr;assert run.stdout.count("PASS ")==27,run.stdout

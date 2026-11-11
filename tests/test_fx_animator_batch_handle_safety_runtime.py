@@ -40,7 +40,9 @@ namespace UnityEngine {
         public static void Emit(string condition, LogType type) => logMessageReceived?.Invoke(condition, "", type);
     }
 }
-public class AnimationClip : UnityEngine.Object {}
+public class AnimationClip : UnityEngine.Object { public bool empty; }
+public class VRCAvatarDescriptor {}
+public class GameObject { public T GetComponent<T>() where T : class => null; }
 public class Transition { public bool hasFixedDuration; }
 public class State { public Transition[] transitions = new Transition[] { new Transition() }; }
 public class StateMachine { public Transition[] anyStateTransitions = new Transition[] { new Transition() }; }
@@ -88,7 +90,7 @@ public static class VRCForgeToolResult { public static Result FailedWithExceptio
     public static Result FailedWithCode(string code, string message, object payload) => new Result { ok = false, mutationStarted = true };
 }
 public static class WriteAnimationCurveTool {
-    public static object ResolveBindingRoot(JObject arguments) => throw new Exception("This no-motion fixture must not resolve scene bindings.");
+    public static GameObject ResolveBindingRoot(JObject arguments) => throw new Exception("This no-motion fixture must not resolve scene bindings.");
     public static void ValidateClipBindings(object root, AnimationClip clip) => throw new Exception("This no-motion fixture must not validate scene bindings.");
     public sealed class AssetEditRecovery {
         public static int Captures, Begins, Completes;
@@ -180,7 +182,11 @@ def compile_and_run(source: str, output: Path) -> subprocess.CompletedProcess:
 private static JArray ValidateEnvelope(JObject arguments) => (JArray)arguments["edits"].DeepClone();
 private static string Required(JObject value, string name) => value[name]?.ToString() ?? throw new InvalidOperationException(name + " is required.");
 private static JObject Snapshot(AnimatorController controller) => new JObject();
-private static JObject BuildPlan(JObject before, JArray edits, ISet<string> existingMotions) => new JObject();
+private static JObject BuildPlan(JObject before, JArray edits, ISet<string> existingMotions, ISet<string> emptyMotions, IEnumerable<bool> avatarValues) => new JObject();
+private static class AnimatorWriteDefaults {
+    public static bool IsAvatarFxController(VRCAvatarDescriptor avatar, AnimatorController controller) => false;
+    public static IEnumerable<bool> GetAvatarOrdinaryValues(VRCAvatarDescriptor avatar) => Enumerable.Empty<bool>();
+}
 private static JObject Projection(JObject value) => value;
 private static void Verify(JObject expected, JObject actual) {}
 private static void ApplyLayerDeletion(AnimatorController controller, string layerName) {}

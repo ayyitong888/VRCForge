@@ -12,12 +12,17 @@ def test_binding_targets_report_missing_relative_object_component_and_property(t
     source = SOURCE.read_text(encoding="utf-8-sig")
     helpers = "\n".join(method(source, signature) for signature in (
         "internal static void ValidateBindingTarget(", "internal static void ValidateClipBindings("))
+    wd_source = SOURCE.with_name("AnimatorWriteDefaults.cs").read_text(encoding="utf-8-sig")
+    timing = [line for line in wd_source.splitlines() if "private const string Timing" in line]
+    start = wd_source.index("internal static bool IsTimingCurve")
+    timing.append(wd_source[start:wd_source.index(";", start) + 1])
+    helpers += "\nstatic class AnimatorWriteDefaults {" + "\n".join(timing) + "}"
     program = r'''
 using System;using System.Linq;using System.Collections.Generic;
 class GameObject {public string name;public Transform transform;public bool component=true;public GameObject(string n){name=n;transform=new Transform{gameObject=this};}}
 class Transform {public GameObject gameObject;public Dictionary<string,Transform> children=new Dictionary<string,Transform>();public Transform Find(string p)=>children.TryGetValue(p,out var t)?t:null;}
 class AnimationClip {public EditorCurveBinding[] bindings=Array.Empty<EditorCurveBinding>();}
-struct EditorCurveBinding {public string path,propertyName;public Type type;}
+struct EditorCurveBinding {public string path,propertyName;public Type type;public bool isPPtrCurve;}
 static class ComponentCrudCore {public static string GetHierarchyPath(Transform t)=>t.gameObject.name;}
 static class AnimationUtility {
  public static object GetAnimatedObject(GameObject r,EditorCurveBinding b){var t=b.path==""?r.transform:r.transform.Find(b.path);return t!=null&&t.gameObject.component?t.gameObject:null;}
@@ -40,6 +45,10 @@ class Probe {
   var childRoot=new GameObject("NestedAnimator");childRoot.transform.children["CityNoir"]=outfit.transform;b.path="CityNoir";ValidateBindingTarget(childRoot,b);
   b.path="Milltina/CityNoir";var clip=new AnimationClip{bindings=new[]{b}};
   try{ValidateClipBindings(root,clip);throw new Exception("bad clip attached to FX");}catch(InvalidOperationException){}
+  b.path="__VRCForgeWriteDefaultsTiming";b.propertyName="VRCForgeWriteDefaultsTiming";
+  ValidateClipBindings(root,new AnimationClip{bindings=new[]{b}});
+  b.isPPtrCurve=true;
+  try{ValidateClipBindings(root,new AnimationClip{bindings=new[]{b}});throw new Exception("non-timing binding bypassed validation");}catch(InvalidOperationException){}
   Console.WriteLine("wrong-prefix, component, property, root and nested Animator targets replayed");
  }
 }

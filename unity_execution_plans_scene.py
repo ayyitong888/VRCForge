@@ -210,9 +210,11 @@ def build_ensure_animator_state_request(params: dict[str, Any], preview: bool) -
         "parameterType": str(params.get("parameter_type") or params.get("parameterType") or "Int").strip() or "Int",
         "conditionMode": str(params.get("condition_mode") or params.get("conditionMode") or "Equals").strip() or "Equals",
         "threshold": float(params.get("threshold", 0) or 0),
-        "writeDefaults": _bool(params.get("write_defaults", params.get("writeDefaults")), True),
         "preview": preview,
     }
+    write_defaults = params.get("write_defaults", params.get("writeDefaults"))
+    if write_defaults is not None:
+        request["writeDefaults"] = _bool(write_defaults, True)
     if params.get("time_parameter_active", params.get("timeParameterActive")) is not None:
         request["timeParameterActive"] = _bool(
             params.get("time_parameter_active", params.get("timeParameterActive")), False

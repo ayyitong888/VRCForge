@@ -192,10 +192,8 @@ namespace VRCForge.Editor
                 }
 
                 var writeDefaultsConsistent = wdFlags.Count == 0 || wdFlags.All(f => f == wdFlags[0]);
-                var wardrobeWriteDefaults = wdFlags.Count > 0 ? wdFlags[0] : true;
-                bool newWriteDefaults = @params["writeDefaults"] != null
-                    ? @params["writeDefaults"].ToObject<bool>()
-                    : wardrobeWriteDefaults;
+                var wardrobeWriteDefaults = AnimatorWriteDefaults.GetLayerConvention(wardrobeLayer);
+                var newWriteDefaults = AnimatorWriteDefaults.Resolve(fxController, wardrobeLayer, @params.Value<bool?>("writeDefaults"), avatar: descriptor);
 
                 // 4. Assign the new int value.
                 int newValue;

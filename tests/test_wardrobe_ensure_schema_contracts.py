@@ -50,15 +50,31 @@ def test_creation_keeps_default_and_legacy_paths_and_order_are_accepted(descript
     assert workflow.build_manage_wardrobe_request(payload, True)["orderValues"] == [3, 2, 1]
 
 
-def test_ensure_aliases_keep_real_builder_defaults(descriptors):
+def test_ensure_aliases_keep_defaults_except_write_defaults(descriptors):
     import dashboard_server as server
     _, catalog = descriptors
     identity = {"executionTarget": {"schema": "vrcforge.execution_target.v1", "namespace": {}, "scope": {}, "project": {}, "editor": {}}}
-    args = {**identity, "layer_name": "Wardrobe", "state_name": "Dress", "parameter_name": "Clothes"}
+    args = {**identity, "projectPath": "X:/FixtureProject", "layer_name": "Wardrobe", "state_name": "Dress", "parameter_name": "Clothes"}
     schema = catalog["vrcforge_preview_ensure_animator_state"]["inputSchema"]
     Draft202012Validator(schema).validate(args)
     request = server.build_ensure_animator_state_request(args, True)
     assert request["parameterType"] == schema["properties"]["parameterType"]["default"] == "Int"
     assert request["conditionMode"] == schema["properties"]["conditionMode"]["default"] == "Equals"
-    assert request["writeDefaults"] == schema["properties"]["writeDefaults"]["default"] is True
+    assert "default" not in schema["properties"]["writeDefaults"]
+    assert "writeDefaults" not in request
+    assert server.build_ensure_animator_state_request({**args, "write_defaults": "false"}, True)["writeDefaults"] is False
     assert list(Draft202012Validator(schema).iter_errors(identity))
+
+
+@pytest.mark.parametrize("preview", [False, True])
+def test_wardrobe_creation_defers_omitted_write_defaults_to_core(descriptors, preview):
+    from wardrobe_outfit_workflow_service import build_create_wardrobe_core_calls
+
+    _, catalog = descriptors
+    schema = catalog["vrcforge_create_wardrobe"]["inputSchema"]
+    assert "default" not in schema["properties"]["writeDefaults"]
+    args = {"avatarPath": "Avatar", "parameterName": "Wardrobe"}
+    omitted = dict(build_create_wardrobe_core_calls(args, preview))["vrc_ensure_animator_state"]
+    explicit = dict(build_create_wardrobe_core_calls({**args, "writeDefaults": False}, preview))["vrc_ensure_animator_state"]
+    assert "writeDefaults" not in omitted
+    assert explicit["writeDefaults"] is False

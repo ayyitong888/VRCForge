@@ -22,7 +22,7 @@ namespace VRCForge.Editor
         {
             [VRCForgeInput("Optional avatar root hierarchy path; empty is allowed only when selection is unambiguous.", IsRequired = false)]
             public string avatarPath { get; set; } = "";
-            [VRCForgeInput("One or more clothing items. Each item may specify displayName/name, parameterName, animationClipName, and sampleObjectPath/objectPath.", IsRequired = true)]
+            [VRCForgeInput("One or more clothing items. Each item may specify displayName/name, parameterName, animationClipName, sampleObjectPath/objectPath, and writeDefaults for a new layer.", IsRequired = true)]
             public JArray items { get; set; } = new JArray();
         }
 
@@ -61,6 +61,7 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Failed("No VRCExpressionsMenu found on the avatar.");
                 }
                 var resolvedPaths = PreflightItems(descriptor.transform, menuAsset, items);
+                var newLayerWriteDefaults = ResolveNewLayerWriteDefaults(fxController, descriptor, resolvedPaths.Keys);
                 var fxControllerPath = AssetDatabase.GetAssetPath(fxController);
                 var parametersPath = AssetDatabase.GetAssetPath(parametersAsset);
                 var menuPath = AssetDatabase.GetAssetPath(menuAsset);
@@ -76,17 +77,13 @@ namespace VRCForge.Editor
                 foreach (var item in items.OfType<JObject>())
                 {
                     var displayName = FirstNonEmpty(item, "displayName", "name");
-                    var paramName = FirstNonEmpty(item, "parameterName");
                     var clipName = FirstNonEmpty(item, "animationClipName");
                     var objectPath = FirstNonEmpty(item, "sampleObjectPath", "objectPath");
                     if (string.IsNullOrWhiteSpace(displayName))
                     {
                         displayName = "Clothing";
                     }
-                    if (string.IsNullOrWhiteSpace(paramName))
-                    {
-                        paramName = "Cloth_" + SanitizeName(displayName);
-                    }
+                    var paramName = ResolveParameterName(item, displayName);
                     if (string.IsNullOrWhiteSpace(clipName))
                     {
                         clipName = "FX_" + SanitizeName(displayName) + "_Toggle";
@@ -115,7 +112,7 @@ namespace VRCForge.Editor
                     clipOffReceipt.After = DescribeAsset(clipOff);
                     clipOffReceipt.Status = "succeeded";
 
-                    EnsureFxLayer(fxController, displayName, paramName, clipOn, clipOff);
+                    EnsureFxLayer(fxController, displayName, paramName, clipOn, clipOff, newLayerWriteDefaults);
                     EnsureExpressionParameter(parametersAsset, paramName);
                     EnsureMenuToggle(menuAsset, displayName, paramName);
                     controllerReceipt.After = DescribeAsset(fxController);
@@ -220,14 +217,35 @@ namespace VRCForge.Editor
                 paths[item] = ResolveRelativeObjectPath(avatarRoot, objectPath);
                 var displayName = FirstNonEmpty(item, "displayName", "name");
                 if (string.IsNullOrWhiteSpace(displayName)) { displayName = "Clothing"; }
-                var parameter = FirstNonEmpty(item, "parameterName");
-                if (string.IsNullOrWhiteSpace(parameter)) { parameter = "Cloth_" + SanitizeName(displayName); }
+                var parameter = ResolveParameterName(item, displayName);
                 if (!menu.controls.Any(control => control.parameter != null && control.parameter.name == parameter))
                     newParameters.Add(parameter);
             }
             if (menu.controls.Count + newParameters.Count > VRCExpressionsMenu.MAX_CONTROLS)
                 throw new InvalidOperationException("The expressions menu has insufficient space for the requested clothing toggles.");
             return paths;
+        }
+
+        private static string ResolveParameterName(JObject item, string displayName)
+        {
+            var parameter = FirstNonEmpty(item, "parameterName");
+            return string.IsNullOrWhiteSpace(parameter) ? "Cloth_" + SanitizeName(displayName) : parameter;
+        }
+
+        private static Dictionary<string, bool> ResolveNewLayerWriteDefaults(AnimatorController controller, VRCAvatarDescriptor avatar,
+            IEnumerable<JObject> items)
+        {
+            var existingLayerNames = new HashSet<string>(controller.layers.Select(layer => layer.name), StringComparer.Ordinal);
+            var resolved = new Dictionary<string, bool>(StringComparer.Ordinal);
+            foreach (var item in items)
+            {
+                var displayName = FirstNonEmpty(item, "displayName", "name");
+                var layerName = ResolveParameterName(item, string.IsNullOrWhiteSpace(displayName) ? "Clothing" : displayName);
+                if (existingLayerNames.Contains(layerName) || resolved.ContainsKey(layerName)) continue;
+                var requested = item.Value<bool?>("writeDefaults");
+                resolved.Add(layerName, AnimatorWriteDefaults.Resolve(controller, null, requested, avatar: avatar));
+            }
+            return resolved;
         }
 
         private static string ResolveRelativeObjectPath(Transform avatarRoot, string rawPath)
@@ -292,7 +310,8 @@ namespace VRCForge.Editor
             }
         }
 
-        private static void EnsureFxLayer(AnimatorController controller, string displayName, string paramName, AnimationClip clipOn, AnimationClip clipOff)
+        private static void EnsureFxLayer(AnimatorController controller, string displayName, string paramName, AnimationClip clipOn, AnimationClip clipOff,
+            IReadOnlyDictionary<string, bool> newLayerWriteDefaults)
         {
             if (!controller.parameters.Any(parameter => parameter.name == paramName))
             {
@@ -310,6 +329,8 @@ namespace VRCForge.Editor
             var stateMachine = layer.stateMachine;
             var stateOn = stateMachine.AddState(displayName + "_ON");
             var stateOff = stateMachine.AddState(displayName + "_OFF");
+            stateOn.writeDefaultValues = newLayerWriteDefaults[paramName];
+            stateOff.writeDefaultValues = stateOn.writeDefaultValues;
             stateOn.motion = clipOn;
             stateOff.motion = clipOff;
 
