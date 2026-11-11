@@ -7,12 +7,12 @@
     <style>
       html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #f5f6f8; }
       main[data-vrcforge-startup-shell] {
+        --startup-duration: 4800ms;
         position: fixed;
         inset: 0;
         z-index: 1000;
         overflow: hidden;
-        background: linear-gradient(140deg, #fffcfd 26%, #fff2f7 74%, #ffe1ef);
-        color: #8f1948;
+        background: linear-gradient(140deg, #fffcfd 22%, #fff2f7 70%, #f4e8f7);
       }
       .startup-portrait {
         position: absolute;
@@ -26,71 +26,66 @@
         inset: -3%;
         background: url("/vrcforge-startup-portrait.webp") 82% 44% / cover no-repeat;
         transform-origin: 72% 37%;
-        animation: startup-camera 5s cubic-bezier(.2, .72, .29, 1) both;
+        animation: startup-camera var(--startup-duration) cubic-bezier(.2, .72, .29, 1) both;
       }
-      .startup-bloom {
+      .startup-materials {
         position: absolute;
         left: 22%;
         top: 50%;
-        width: clamp(6rem, 16vw, 12rem);
+        width: clamp(8rem, 20vw, 15rem);
+        aspect-ratio: 1;
         transform: translate(-50%, -50%);
+        pointer-events: none;
       }
-      .startup-bloom > g {
-        transform-origin: 60px 60px;
-        animation: startup-bloom-open 1.9s cubic-bezier(.2, .72, .3, 1) both;
-      }
-      .startup-bloom-outline {
-        fill: #efa8c3;
-        fill-opacity: .18;
-        stroke: #b54a75;
-        stroke-width: 1.25;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-        stroke-dasharray: 1;
-        animation: startup-bloom-ink 1.55s ease-out both;
-      }
-      .startup-petals { position: absolute; inset: 0; pointer-events: none; }
-      .startup-petals > span {
+      .startup-swatch {
         position: absolute;
-        top: var(--top);
-        left: var(--left);
-        width: var(--size);
-        aspect-ratio: 1.35;
-        border-radius: 90% 22% 82% 24%;
-        background: linear-gradient(145deg, #fff7fb, #e475a1);
-        animation: startup-petal 5s var(--delay) linear both;
+        inset: 25% 17%;
+        overflow: hidden;
+        border: 1px solid var(--edge);
+        border-radius: 11%;
+        background: linear-gradient(145deg, #fff9fc, var(--fabric));
+        box-shadow: 0 .5rem 1.4rem #ad6d9426, inset 0 1px #fff;
+        transform: translateY(var(--lift)) rotate(-28deg) skewX(16deg);
+        animation: startup-swatch 1.45s var(--delay) cubic-bezier(.18, .72, .25, 1) both;
       }
-      .startup-petals > span:nth-child(1) { --top: 14%; --left: 82%; --size: 1.15rem; --delay: 0s; }
-      .startup-petals > span:nth-child(2) { --top: 35%; --left: 64%; --size: .78rem; --delay: .15s; }
-      .startup-petals > span:nth-child(3) { --top: 58%; --left: 96%; --size: 1.35rem; --delay: .3s; }
+      .startup-swatch:nth-child(1) { --lift: 29%; --delay: 160ms; --edge: #d8a3bd; --fabric: #efc8d9; }
+      .startup-swatch:nth-child(2) { --lift: 1%; --delay: 80ms; --edge: #c9afd9; --fabric: #e3d1ee; }
+      .startup-swatch:nth-child(3) { --lift: -28%; --delay: 0ms; --edge: #dfa9bf; --fabric: #f4cddf; }
+      .startup-swatch::before {
+        content: "";
+        position: absolute;
+        inset: 10%;
+        border: 1px dashed #a9557d66;
+        border-radius: 8%;
+      }
+      .startup-swatch:last-child::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(112deg, transparent 32%, #fff9fdc9 51%, transparent 69%);
+        opacity: 0;
+        animation: startup-swatch-light var(--startup-duration) ease-in-out both;
+      }
       @keyframes startup-camera {
         from { transform: translate3d(1.5%, .5%, 0) scale(1); }
-        to { transform: translate3d(-2.5%, -1%, 0) scale(1.095); }
+        to { transform: translate3d(-1.8%, -1%, 0) scale(1.07); }
       }
-      @keyframes startup-bloom-open {
-        from { opacity: .52; transform: rotate(-12deg) scale(.83); }
-        to { opacity: 1; transform: rotate(0) scale(1); }
+      @keyframes startup-swatch {
+        from { opacity: .16; transform: translateY(9%) rotate(-19deg) skewX(10deg) scale(.82); }
+        to { opacity: 1; transform: translateY(var(--lift)) rotate(-28deg) skewX(16deg); }
       }
-      @keyframes startup-bloom-ink {
-        from { fill-opacity: .04; stroke-dashoffset: .9; }
-        70% { fill-opacity: .08; }
-        to { fill-opacity: .18; stroke-dashoffset: 0; }
-      }
-      @keyframes startup-petal {
-        0% { opacity: 0; transform: translate3d(0, 0, 0) rotate(14deg) scaleX(.75); }
-        14% { opacity: .84; }
-        49% { transform: translate3d(-10vw, 10vh, 0) rotate(88deg) scaleX(.48); }
-        72% { opacity: .72; }
-        100% { opacity: 0; transform: translate3d(-21vw, 28vh, 0) rotate(168deg) scaleX(.9); }
+      @keyframes startup-swatch-light {
+        0%, 25% { opacity: 0; transform: translateX(-110%); }
+        40%, 64% { opacity: .83; }
+        83%, 100% { opacity: 0; transform: translateX(110%); }
       }
       @media (orientation: portrait) {
         .startup-portrait { inset: 0; mask-image: linear-gradient(0deg, transparent 12%, #000 58%); }
         .startup-portrait::before { background-position: 62% 44%; }
-        .startup-bloom { top: auto; left: 50%; bottom: 5%; transform: translateX(-50%); }
+        .startup-materials { top: auto; left: 50%; bottom: 5%; transform: translateX(-50%); }
       }
       @media (prefers-reduced-motion: reduce) {
-        .startup-portrait::before, .startup-bloom > g, .startup-bloom-outline { animation: none; }
-        .startup-petals { display: none; }
+        .startup-portrait::before, .startup-swatch, .startup-swatch:last-child::after { animation: none; }
       }
       @media (prefers-color-scheme: dark) {
         html, body, #root { background: #111827; }
@@ -100,20 +95,9 @@
   <body>
     <main data-vrcforge-startup-shell aria-label="VRCForge" hidden>
       <div class="startup-portrait" aria-hidden="true"></div>
-      <svg class="startup-bloom" viewBox="0 0 120 120" aria-hidden="true">
-        <g>
-          <path class="startup-bloom-outline" pathLength="1"
-            d="M49.4 45.4 C38 37 41 20 55 17 Q57 17 60 23 Q63 17 65 17 C79 20 82 37 70.6 45.4
-               C75.1 32 92.2 29.6 99.4 42 Q100 43.9 95.2 48.6 Q101.8 49.6 102.4 51.5 C103.9 65.7 88.7 73.8 77.1 65.6
-               C91.3 65.7 98.9 81.2 89.3 91.8 Q87.7 93 81.7 89.9 Q82.8 96.6 81.2 97.7 C68.1 103.5 55.7 91.5 60 78
-               C64.3 91.5 51.9 103.5 38.8 97.7 Q37.2 96.6 38.3 89.9 Q32.3 93 30.7 91.8 C21.1 81.2 28.7 65.7 42.9 65.6
-               C31.3 73.8 16.1 65.7 17.6 51.5 Q18.2 49.6 24.8 48.6 Q20 43.9 20.6 42 C27.8 29.6 44.9 32 49.4 45.4 Z" />
-          <path d="M60 54V43 M66 58L76 55 M64 65L70 73 M56 65L50 73 M54 58L44 55"
-            fill="none" stroke="#bd6385" stroke-width="1" stroke-linecap="round" />
-          <circle cx="60" cy="60" r="2.15" fill="#9f3f67" />
-        </g>
-      </svg>
-      <div class="startup-petals" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="startup-materials" aria-hidden="true">
+        <div class="startup-swatch"></div><div class="startup-swatch"></div><div class="startup-swatch"></div>
+      </div>
     </main>
     <div id="root"></div>
     <script>

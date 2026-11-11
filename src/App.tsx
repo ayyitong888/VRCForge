@@ -118,7 +118,7 @@ import {
   type ThemeMode,
 } from "./lib/app-preferences";
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
-import { dismissStartupSplash } from "./lib/startup-splash";
+import { dismissStartupSplash, dismissStartupSplashAfterAnimation } from "./lib/startup-splash";
 import { useDashboardProjectSelection } from "./hooks/use-dashboard-project-selection";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import { isUnstartedChat } from "./lib/chat-thread";
@@ -2225,7 +2225,9 @@ export default function App() {
   useLayoutEffect(() => {
     if (!isTauriRuntime() || backgroundRuntimeReady || startupIssue) {
       dismissStartupSplash();
+      return;
     }
+    return dismissStartupSplashAfterAnimation();
   }, [backgroundRuntimeReady, startupIssue]);
 
   useEffect(() => {
@@ -2251,7 +2253,6 @@ export default function App() {
       })
       .catch(() => {
         if (active) {
-          dismissStartupSplash();
           void startRuntime({ waitForBootstrap: false });
         }
       });
