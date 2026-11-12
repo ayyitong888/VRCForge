@@ -7,16 +7,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def startup_observer_source(source: str) -> str:
     return source[source.index("#[derive(Debug, PartialEq, Eq)]\npub(crate) enum BackendStartupWait"):
-                  source.index("pub(crate) fn backend_start_failure_payload(")]
+                  source.index("fn backend_exit_payload(")]
 
 
 def startup_replay_source(source: str) -> str:
     observer = startup_observer_source(source)
-    begin = source[source.index("pub(crate) fn begin_backend_start("):
-                   source.index("pub(crate) fn clear_backend_start_in_progress(")]
+    begin = source[source.index("fn claim_backend_start("):
+                   source.index("fn publish_backend_start_status(")]
     call = "wait_for_backend_or_child_exit(&state, Duration::from_secs(18), || { warnings += 1; assert!(!begin_backend_start(&state).unwrap()); })" if "on_timeout:" in observer else "wait_for_backend_or_child_exit(&state, Duration::from_secs(18))"
     return r'''
 use std::{sync::{Mutex, atomic::{AtomicU64, Ordering}}, time::Duration};
+const BACKEND_CHILD_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 static CLOCK: AtomicU64 = AtomicU64::new(0);
 static READY_AT: AtomicU64 = AtomicU64::new(u64::MAX);
 struct Instant(u64);
@@ -38,7 +39,13 @@ impl Child {
         Ok(if CLOCK.load(Ordering::Acquire) >= self.exit_at { Some(Exit) } else { None })
     }
 }
-struct BackendState { child: Mutex<Option<Child>>, shutdown_started: Shutdown, start_in_progress: Mutex<bool> }
+#[derive(Default)]
+struct BackendStartupStatus { in_progress: bool, attempt: u64, sequence: u64, receipt: Option<()> }
+struct BackendState { child: Mutex<Option<Child>>, shutdown_started: Shutdown, startup_status: Mutex<BackendStartupStatus> }
+fn startup_has_failed(_: &BackendStartupStatus) -> bool { false }
+fn begin_backend_start(state: &BackendState) -> Result<bool, String> {
+    Ok(claim_backend_start(&mut state.startup_status.lock().unwrap(), false))
+}
 fn backend_port_open() -> bool { CLOCK.load(Ordering::Acquire) >= READY_AT.load(Ordering::Acquire) }
 #[allow(dead_code)]
 fn managed_backend_exit_code(state: &BackendState) -> Result<Option<Option<i32>>, String> {
@@ -47,7 +54,7 @@ fn managed_backend_exit_code(state: &BackendState) -> Result<Option<Option<i32>>
 ''' + observer + begin + r'''
 fn replay(ready: u64, exit: u64, stop: u64, replace: u64, expected: &str, warning_count: usize) {
     CLOCK.store(0, Ordering::Release); READY_AT.store(ready, Ordering::Release);
-    let state = BackendState { child: Mutex::new(Some(Child { exit_at: exit, replace_at: replace })), shutdown_started: Shutdown(stop), start_in_progress: Mutex::new(false) };
+    let state = BackendState { child: Mutex::new(Some(Child { exit_at: exit, replace_at: replace })), shutdown_started: Shutdown(stop), startup_status: Mutex::new(BackendStartupStatus::default()) };
     assert!(begin_backend_start(&state).unwrap());
     #[allow(unused_mut)] let mut warnings = 0;
     let outcome = ''' + call + r'''.unwrap();

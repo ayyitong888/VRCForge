@@ -1,4 +1,16 @@
 {
+  "startupSplash": {
+    "prepare": "Preparing runtime files…",
+    "listen": "Waiting for the runtime to listen…",
+    "verify": "Verifying the runtime session…",
+    "timeout": "Runtime startup timed out",
+    "exited": "The runtime process exited",
+    "error": "The runtime could not start",
+    "retry": "Retry",
+    "logs": "Log directory: {{directory}}",
+    "simulatedExit": "The simulated runtime exited (code 1).",
+    "simulatedLog": "Simulation: the process exited while startup was in progress."
+  },
   "window": {
     "minimize": "Minimize",
     "maximize": "Maximize",

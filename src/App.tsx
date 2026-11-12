@@ -118,7 +118,10 @@ import {
   type ThemeMode,
 } from "./lib/app-preferences";
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
-import { dismissStartupSplash, dismissStartupSplashAfterAnimation } from "./lib/startup-splash";
+import {
+  connectStartupWorkspace, dismissStartupSplash, isStartupSimulation, reportStartupStatus,
+  type BackendStartupStatus,
+} from "./lib/startup-splash";
 import { useDashboardProjectSelection } from "./hooks/use-dashboard-project-selection";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import { isUnstartedChat } from "./lib/chat-thread";
@@ -225,13 +228,7 @@ type BackendStartResult = {
   already_running: boolean;
   mode: string;
   message: string;
-};
-
-type BackendStartStatus = {
-  ok?: boolean;
-  status?: string;
-  error?: string;
-  logDir?: string;
+  startupStatus?: BackendStartupStatus;
 };
 
 type BackendEventMessage = {
@@ -444,6 +441,8 @@ export default function App() {
   const runtimeStartingRef = useRef(false);
   const startupLaunchStartedAtRef = useRef<number | null>(null);
   const backendReadyStatusRef = useRef<"idle" | "starting" | "ready" | "error">("idle");
+  const backendReadyFailureRef = useRef<Error>();
+  const backendStartupReceiptRef = useRef<{ attempt: number; sequence: number }>();
   const backendReadyEndpointRef = useRef(endpoint);
   const backendReadyWaitersRef = useRef<
     Array<{
@@ -2223,21 +2222,25 @@ export default function App() {
   }, [showOnboarding, onboardingMinimized, onboardingStep, onboardingSelectedProjectReady, onboardingUnityToolsReady, activeProjectType, providerReadyForOnboarding, externalAgentVerified, providerSetupGuide, activeView, showProjectModal]);
 
   useLayoutEffect(() => {
-    if (!isTauriRuntime() || backgroundRuntimeReady || startupIssue) {
+    if (!isTauriRuntime() && !isStartupSimulation) {
       dismissStartupSplash();
       return;
     }
-    return dismissStartupSplashAfterAnimation();
-  }, [backgroundRuntimeReady, startupIssue]);
+    return connectStartupWorkspace({
+      copy: (key, variables) => t(`startupSplash.${key}`, variables),
+      retry: () => void startRuntime({ waitForBootstrap: false, retry: true }),
+    });
+  }, [t]);
 
   useEffect(() => {
+    if (isStartupSimulation) return;
     if (!isTauriRuntime()) {
       void startRuntime({ waitForBootstrap: false });
       return;
     }
     let active = true;
     let unlistenStartStatus: (() => void) | null = null;
-    void listen<BackendStartStatus>("vrcforge-backend-start-status", (event) => {
+    void listen<BackendStartupStatus>("vrcforge-backend-start-status", (event) => {
       if (!active) {
         return;
       }
@@ -2595,6 +2598,7 @@ export default function App() {
     backendReadyStatusRef.current = "ready";
     backendReadyEndpointRef.current = target;
     setBackgroundRuntimeReady(true);
+    reportStartupStatus({ ok: true, status: "ready" });
     const startedAt = startupLaunchStartedAtRef.current;
     const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
     metrics.backendReadyEventMs = startedAt === null ? null : Math.round(performance.now() - startedAt);
@@ -2607,6 +2611,7 @@ export default function App() {
     backendReadyStatusRef.current = "error";
     setBackgroundRuntimeReady(false);
     const error = new Error(message);
+    backendReadyFailureRef.current = error;
     const waiters = backendReadyWaitersRef.current.splice(0);
     waiters.forEach((waiter) => waiter.reject(error));
   }
@@ -2614,6 +2619,9 @@ export default function App() {
   function waitForBackendReady(target = backendReadyEndpointRef.current): Promise<string> {
     if (!isTauriRuntime() || backendReadyStatusRef.current === "ready") {
       return Promise.resolve(target);
+    }
+    if (backendReadyStatusRef.current === "error" && backendReadyFailureRef.current) {
+      return Promise.reject(backendReadyFailureRef.current);
     }
     return new Promise((resolve, reject) => {
       let timeoutId = 0;
@@ -2635,38 +2643,50 @@ export default function App() {
     });
   }
 
-  function handleBackendStartStatus(payload: BackendStartStatus | undefined, target = backendReadyEndpointRef.current) {
-    if (payload?.ok) {
-      resolveBackendReady(target, payload.status);
-      refreshStartupInBackground(target, { refreshProjects: true });
-      return;
+  function handleBackendStartStatus(
+    payload: BackendStartupStatus | undefined,
+    target = backendReadyEndpointRef.current,
+    refreshOnReady = true,
+  ) {
+    if (!payload) return;
+    if (payload.attempt !== undefined && payload.sequence !== undefined) {
+      const prior = backendStartupReceiptRef.current;
+      if (prior && (payload.attempt < prior.attempt
+        || (payload.attempt === prior.attempt && payload.sequence <= prior.sequence))) return;
+      backendStartupReceiptRef.current = { attempt: payload.attempt, sequence: payload.sequence };
     }
-    const message =
-      payload?.error ||
-      (payload?.status === "timeout" ? `VRCForge runtime startup timed out. Logs: ${payload?.logDir || "unknown"}` : "");
+    reportStartupStatus(payload);
+    if (payload.ok) {
+      resolveBackendReady(target, payload.status);
+      if (refreshOnReady) refreshStartupInBackground(target, { refreshProjects: true });
+      return true;
+    }
+    const message = payload.error;
     if (message) {
-      rejectBackendReady(message);
       if (isRuntimeSessionVerificationError(message)) {
         handleRuntimeSessionFailure(message);
       } else {
+        rejectBackendReady(message);
         setStartupIssue(message);
       }
     }
   }
 
   function handleRuntimeSessionFailure(message: string) {
+    reportStartupStatus({ status: "error", error: message });
+    rejectBackendReady(message);
     bootstrapRequestSequenceRef.current += 1;
     bootstrapForegroundRequestRef.current = 0;
     bootstrapSilentPendingTargetRef.current = null;
     bootstrapSilentActiveTargetRef.current = null;
-    setBackgroundRuntimeReady(false);
     setAppSessionToken("");
     setBootstrap(null);
     setStartupIssue(message);
     setBackendMessage("session_mismatch");
   }
 
-  async function startRuntime(options: { waitForBootstrap?: boolean } = {}): Promise<string | null> {
+  async function startRuntime(options: { waitForBootstrap?: boolean; retry?: boolean } = {}): Promise<string | null> {
+    if (isStartupSimulation) return null;
     if (runtimeStartingRef.current) {
       if (options.waitForBootstrap ?? true) {
         try {
@@ -2693,7 +2713,7 @@ export default function App() {
         const startedAt = performance.now();
         startupLaunchStartedAtRef.current = startedAt;
         backendReadyStatusRef.current = "starting";
-        const result = await invoke<BackendStartResult>("start_backend");
+        const result = await invoke<BackendStartResult>("start_backend", options.retry ? { retry: true } : undefined);
         const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
         metrics.startBackendInvokeMs = Math.round(performance.now() - startedAt);
         metrics.startBackendMode = result.mode;
@@ -2704,13 +2724,14 @@ export default function App() {
         setAppSessionToken("");
         setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
+        const resolvedFromReceipt = handleBackendStartStatus(result.startupStatus, targetEndpoint, result.mode === "starting");
         if (result.mode === "starting") {
           if (waitForBootstrap) {
             await waitForBackendReady(targetEndpoint);
             await refreshStartupWithMetrics(targetEndpoint, { refreshProjects: true });
           }
         } else {
-          resolveBackendReady(targetEndpoint, result.mode);
+          if (!resolvedFromReceipt) resolveBackendReady(targetEndpoint, result.mode);
           await refreshStartupWithMetrics(targetEndpoint, { refreshProjects: true });
         }
       } else {
@@ -2729,6 +2750,7 @@ export default function App() {
       if (isRuntimeSessionVerificationError(message)) {
         handleRuntimeSessionFailure(message);
       } else {
+        reportStartupStatus({ status: "error", error: message });
         setStartupIssue(message);
       }
       return null;
@@ -4124,7 +4146,7 @@ export default function App() {
 
   async function retryStartupOrHealth() {
     if (hasStartupIssue || !runtimeConnected) {
-      await startRuntime();
+      await startRuntime({ retry: true });
       return;
     }
     try {
@@ -4820,7 +4842,7 @@ export default function App() {
         externalAgentReady={externalAgentVerified}
         loadingRuntime={loading}
         currentLanguage={i18n.language}
-        onRetryRuntime={() => void startRuntime()}
+        onRetryRuntime={() => void startRuntime({ retry: true })}
         onOpenSettings={() => {
           setOnboardingMinimized(true);
           setProviderSetupGuide(true);

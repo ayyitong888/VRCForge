@@ -161,13 +161,20 @@ def test_artifact_scan_allows_only_certifi_exact_public_ca_bundle_path(tmp_path:
 def test_artifact_scan_checks_installer_raw_stream_only_for_high_confidence_tokens(tmp_path: Path) -> None:
     secret = "sk-" + "a" * 32
     installer = tmp_path / "installer.exe"
-    installer.write_bytes(b"MZ" + secret.encode("ascii") + b"\0")
+    installer.write_bytes(b"MZ\0" + secret.encode("ascii") + b"\0")
 
     result = _artifact_scan(installer)
 
     assert result.returncode == 1
     assert "installer.exe: openai_api_key" in result.stderr
     assert secret not in result.stderr
+
+
+def test_artifact_scan_ignores_key_prefix_inside_vsk_event_name(tmp_path: Path) -> None:
+    installer = tmp_path / "installer.exe"
+    installer.write_bytes(b"MZ\0vrcforge:vsk-open" + b"native-event-dispatch" + b"\0")
+
+    assert _artifact_scan(installer).returncode == 0
 
 
 def test_content_baseline_survives_line_shift_but_rejects_changed_content(tmp_path: Path) -> None:
@@ -193,5 +200,5 @@ def test_release_build_runs_sensitive_scan_before_building_artifacts() -> None:
     desktop_build = build_script.index("Build-TauriDesktopApp -DestinationExe")
     assert scan_call < desktop_build
     artifact_scan = build_script.index("Release artifact sensitive-string scan failed.")
-    installer_build = build_script.index("Web NSIS build failed.")
+    installer_build = build_script.index("Self-drawn Windows setup build failed.")
     assert artifact_scan > installer_build

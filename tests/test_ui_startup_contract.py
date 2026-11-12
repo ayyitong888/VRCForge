@@ -282,16 +282,21 @@ def test_startup_loads_the_app_while_showing_a_real_noninteractive_shell() -> No
     assert 'aria-hidden="true"' in index_source
     assert '<main data-vrcforge-startup-shell aria-label="VRCForge" hidden>' in index_source
     assert index_source.index("</main>") < index_source.index('<div id="root">')
-    assert "startup-portrait" in index_source
-    assert '<div class="startup-materials" aria-hidden="true">' in index_source
-    assert index_source.count('<div class="startup-swatch"></div>') == 3
+    assert '<canvas class="startup-sketch"' in index_source
+    assert 'src="/vrcforge-startup-sketch.js"' in index_source
+    assert "startup-materials" not in index_source
+    assert "startup-swatch" not in index_source
     assert "<svg" not in index_source
     assert "startup-petals" not in index_source
-    assert "<button" not in index_source
+    assert '<p class="startup-progress" role="status" hidden>' in index_source
+    panel = index_source[index_source.index('<section class="startup-failure"') : index_source.index("</section>")]
+    assert 'role="alertdialog"' in panel
+    assert 'tabindex="-1" hidden>' in panel
+    assert '<button type="button"></button>' in panel
+    assert index_source.count("<button") == 1
     assert "<input" not in index_source
     assert "prefers-reduced-motion: reduce" in index_source
-    assert "--startup-duration: 4800ms" in index_source
-    assert "startup-camera var(--startup-duration)" in index_source
+    assert "--startup-duration: 3550ms" in index_source
     assert index_source.index("window.requestAnimationFrame") < index_source.index('src="/src/main.tsx"')
     assert "startupShellPaintedMs" in index_source
     assert 'src="/src/main.tsx"' in index_source

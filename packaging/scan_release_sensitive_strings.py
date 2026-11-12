@@ -108,7 +108,7 @@ CONFIG_SUFFIXES = frozenset({".cfg", ".env", ".ini", ".properties", ".toml", ".y
 RAW_BINARY_RULES: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     ("private_key", re.compile(br"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----")),
     ("github_token", re.compile(br"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
-    ("openai_api_key", re.compile(br"sk-(?:proj-)?[A-Za-z0-9_-]{20,}")),
+    ("openai_api_key", re.compile(br"(?<![A-Za-z0-9_])sk-(?:proj-)?[A-Za-z0-9_-]{20,}")),
     ("aws_access_key", re.compile(br"(?:AKIA|ASIA)[A-Z0-9]{16}")),
     ("bearer_token", re.compile(br"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{20,}")),
 )

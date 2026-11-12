@@ -1,4 +1,16 @@
 {
+  "startupSplash": {
+    "prepare": "正在准备运行时文件…",
+    "listen": "正在等待运行时监听端口…",
+    "verify": "正在验证运行时会话…",
+    "timeout": "运行时启动超时",
+    "exited": "运行时进程已退出",
+    "error": "运行时启动失败",
+    "retry": "重试",
+    "logs": "日志目录：{{directory}}",
+    "simulatedExit": "模拟的运行时进程已退出（退出码 1）。",
+    "simulatedLog": "模拟日志：进程在启动过程中退出。"
+  },
   "window": {
     "minimize": "最小化",
     "maximize": "最大化",

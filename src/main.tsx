@@ -1,4 +1,6 @@
-import { dismissStartupSplash } from "./lib/startup-splash";
+import { dismissStartupSplash, initializeStartupSplash } from "./lib/startup-splash";
+
+initializeStartupSplash();
 
 async function main() {
   const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});

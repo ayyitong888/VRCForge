@@ -1,4 +1,16 @@
 {
+  "startupSplash": {
+    "prepare": "正在準備執行階段檔案…",
+    "listen": "正在等待執行階段監聽連接埠…",
+    "verify": "正在驗證執行階段工作階段…",
+    "timeout": "執行階段啟動逾時",
+    "exited": "執行階段程序已結束",
+    "error": "執行階段啟動失敗",
+    "retry": "重試",
+    "logs": "記錄目錄：{{directory}}",
+    "simulatedExit": "模擬的執行階段程序已結束（結束代碼 1）。",
+    "simulatedLog": "模擬記錄：程序在啟動過程中結束。"
+  },
   "window": {
     "minimize": "最小化",
     "maximize": "最大化",
