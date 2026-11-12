@@ -10025,16 +10025,22 @@ def agent_runtime_session(session_id: str, request: Request) -> dict[str, Any]:
 @app.post("/api/agent/tool/{tool_name}")
 async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentToolRequest) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=False)
+    params = dict(tool_request.params or {})
     try:
+        if tool_name == "vrcforge_request_apply":
+            target = str(params.get("target_tool") or params.get("targetTool") or "").strip()
+            arguments = ensure_dict(params.get("arguments") or params.get("params"))
+            AGENT_GATEWAY._guard_external_mcp_project_scope(target, arguments)
+        else:
+            AGENT_GATEWAY._guard_external_mcp_project_scope(tool_name, params)
         payload = await asyncio.to_thread(
             AGENT_GATEWAY.call_tool,
             tool_name,
-            tool_request.params,
+            params,
             tool_request.agent_name,
         )
     except AgentGatewayError as exc:
         raise runtime_http_error("internal_error", exc.status_code, exc) from exc
-    params = ensure_dict(tool_request.params or {})
     session_id = str(params.get("sessionId") or params.get("session_id") or "")
     project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "")
     if tool_name.startswith("vrcforge_progress_"):
@@ -11709,10 +11715,17 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
         unknown_blendshapes = None
         unknown_preview = None
         candidate_avatar_payload = None
+        name_selection = set(request.blendshape_names or ())
         if filter_scope in {"face_static", "face_unknown"}:
             classified_rows, classification_summary = classify_face_blendshape_details(
                 scoped_export, selected_avatar
             )
+            if name_selection:
+                # Classify before filtering so preceding authored markers still apply.
+                classified_rows = [row for row in classified_rows if row["blendshapeName"] in name_selection]
+                classification_summary = dict.fromkeys(classification_summary, 0)
+                for row in classified_rows:
+                    classification_summary[row["usageCategory"]] += 1
             all_unknown_blendshapes = [
                 row for row in classified_rows if row["usageCategory"] == "unknown"
             ]
@@ -11725,29 +11738,38 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
                 "total": unknown_total,
                 "returned": len(unknown_blendshapes),
                 "hasMore": len(unknown_blendshapes) < unknown_total,
-                "nextRequest": {"scope": "face_unknown"}
+                "nextRequest": {
+                    "scope": "face_unknown",
+                    **({"blendshapeNames": request.blendshape_names} if name_selection else {}),
+                    **({"rendererPaths": request.renderer_paths} if name_selection and request.renderer_paths else {}),
+                }
                 if filter_scope == "face_static" and len(unknown_blendshapes) < unknown_total
                 else None,
             }
             selected_category = "static_shape" if filter_scope == "face_static" else "unknown"
             blendshapes = [row for row in classified_rows if row["usageCategory"] == selected_category]
+        else:
+            blendshapes = serialize_blendshape_details(scoped_export, selected_avatar, filter_scope)
+            if name_selection:
+                blendshapes = [row for row in blendshapes if row["blendshapeName"] in name_selection]
+        if name_selection or classification_summary is not None:
             candidate_avatar_payload = filter_avatar_to_blendshape_rows(
                 scoped_export,
                 selected_avatar.avatar_path,
                 blendshapes,
             )
-        else:
-            blendshapes = serialize_blendshape_details(scoped_export, selected_avatar, filter_scope)
+        avatars = [candidate_avatar_payload] if candidate_avatar_payload is not None else scoped_export.get("avatars", [])
         source_summary = export_payload.get("summary", {})
+        explicit_selection = request.renderer_paths is not None or bool(name_selection)
         selection_summary = (
-            _blendshape_selection_summary(scoped_export)
-            if request.renderer_paths is not None
+            _blendshape_selection_summary({"avatars": avatars} if name_selection else scoped_export)
+            if explicit_selection
             else source_summary
         )
         selected_avatar_payload = serialize_selected_avatar(selected_avatar)
         source_selected_avatar = None
         summary_scope = "source_inventory"
-        if request.renderer_paths is not None:
+        if explicit_selection:
             source_selected_avatar = {
                 **selected_avatar_payload,
                 "scope": "avatar_inventory",
@@ -11756,7 +11778,7 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
                 **selected_avatar_payload,
                 "rendererCount": selection_summary["rendererCount"],
                 "blendshapeCount": selection_summary["blendshapeCount"],
-                "scope": "renderer_selection_inventory",
+                "scope": "blendshape_selection_inventory" if name_selection else "renderer_selection_inventory",
             }
             summary_scope = "selection_inventory"
         emit_log(
@@ -11771,16 +11793,16 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
             "executionMode": "mock" if using_mock_execute else "live-unity",
             "generatedAtUtc": export_payload.get("generatedAtUtc"),
             "summary": selection_summary,
-            **({"sourceSummary": source_summary} if request.renderer_paths is not None else {}),
-            "avatars": (
-                [candidate_avatar_payload] if candidate_avatar_payload is not None else scoped_export.get("avatars", [])
-            ),
+            **({"sourceSummary": source_summary} if explicit_selection else {}),
+            "avatars": avatars,
             "selectedAvatar": selected_avatar_payload,
             **({"sourceSelectedAvatar": source_selected_avatar} if source_selected_avatar is not None else {}),
             "blendshapes": blendshapes,
             "filterScope": filter_scope,
             "summaryScope": summary_scope,
             **({"rendererPaths": request.renderer_paths} if request.renderer_paths is not None else {}),
+            **({"blendshapeNames": request.blendshape_names, "matchStatus": "matched" if blendshapes else "no_matches"}
+               if name_selection else {}),
             "filterNote": (
                 "Face-related is broader than static sculpting and can include preset expressions. face_static returns all classified static candidates plus a bounded unknown preview; use face_unknown to inspect the full ambiguous set."
                 if filter_scope == "face_static"
@@ -27593,7 +27615,7 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_call_user",
         "When to use: request a specific human action or judgment unavailable to tools. "
         + CALL_USER_USAGE_INSTRUCTION + QUESTION_LANGUAGE_INSTRUCTION
-        + "Use kind=visual_checkpoint for visual acceptance with pass, fail, uncertain, and later; this gate always blocks and only explicit pass/fail resolves it. For an ordinary decision with independent work available, set blocking=false and continue only that independent work; approval and checkpoint requirements remain authoritative. Include the view or location and preserve the task. Consolidate related questions and reuse a pending request. When NOT to use: do not request routine checks, progress acknowledgments, already granted approval, or work available tools can complete. Negative example: do not call after every tool, transfer a single tool failure to the user, invent a component switch, or treat silence, dismissal, or uncertainty as acceptance.",
+        + "Use kind=visual_checkpoint for visual acceptance with pass, fail, uncertain, and later. It blocks until the user replies. Every submitted answer closes the question, and only an explicit pass grants visual acceptance. For an ordinary decision with independent work available, set blocking=false and continue only that independent work; approval and checkpoint requirements remain authoritative. Include the view or location and preserve the task. Consolidate related questions and reuse a pending request. When NOT to use: do not request routine checks, progress acknowledgments, already granted approval, or work available tools can complete. Negative example: do not call after every tool, transfer a single tool failure to the user, invent a component switch, or treat silence, dismissal, or uncertainty as acceptance.",
         "plan/preview",
         AGENT_GATEWAY.call_user,
     )
@@ -27736,7 +27758,22 @@ def register_agent_gateway_tools() -> None:
         ),
     )
     AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatars(build_agent_dashboard_request(params)))
-    AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Read avatar blendshape names, current weights and renderer identity. when-to-use: scope=face lists face-related shapes including expressions; scope=face_static lists all evidence-classified static sculpt candidates and a bounded preview of ambiguous shapes; use scope=face_unknown to inspect the full ambiguous set; scope=all preserves the complete inventory. when-NOT-to-use: do not treat face as a static-sculpt filter or use this read tool to change weights/materials; for example, 'set the dress blendshape to 100' requires a separate approved write.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(**{**build_agent_dashboard_request(params).model_dump(), "rendererPaths": params.get("rendererPaths")})))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_scan_blendshapes",
+        "Read avatar blendshape names, current weights and renderer identity. "
+        "When to use: pass blendshapeNames for known exact case-sensitive names and rendererPaths for known renderers. "
+        "scope=face lists face-related shapes including expressions; scope=face_static lists evidence-classified "
+        "static sculpt candidates and a bounded preview of ambiguous shapes; use scope=face_unknown to inspect "
+        "the full ambiguous set; scope=all preserves the complete inventory. "
+        "When NOT to use: do not treat face as a static-sculpt filter or use this read tool to change weights/materials. "
+        "Negative example: 'set the dress blendshape to 100' requires a separate approved write.",
+        "read/debug",
+        lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(
+            **build_agent_dashboard_request(params).model_dump(),
+            rendererPaths=params.get("rendererPaths"),
+            blendshapeNames=params.get("blendshapeNames"),
+        )),
+    )
     AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: SHADER_VISION_PROTECTION.scan_shader_materials(ShaderMaterialScanRequest(**params)))
     for name, reader_name, collection in (
         ("vrcforge_list_shader_tuning_history", "read_shader_tuning_history", "records"),
@@ -29635,7 +29672,7 @@ AVATAR_TUNING_PREPARED = AvatarTuningPreparedService(
     ports=AvatarTuningPreparedPorts(
         parse_manual_arguments=lambda arguments: ManualBlendshapeApplyRequest(
             **arguments
-        ).model_dump(),
+        ).model_dump(exclude_unset=True),
         parse_mock_execute=lambda arguments: build_agent_dashboard_request(
             arguments
         ).mock_execute,

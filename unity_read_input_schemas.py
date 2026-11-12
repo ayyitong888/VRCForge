@@ -483,6 +483,14 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "items": {"type": "string", "minLength": 1, "pattern": "\\S"},
                 "description": "Optional exact exported rendererPath hierarchy paths inside the selected avatar. Unknown paths fail; this selection does not override scope.",
             },
+            "blendshapeNames": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "pattern": "\\S"},
+                "description": "Optional exact case-sensitive Blendshape names. Match any listed name within the selected avatar, rendererPaths and scope. Use scope=all if the names might be outside the face scope. No match returns zero rows.",
+            },
         },
     },
     "vrcforge_preview_blendshape_apply": {

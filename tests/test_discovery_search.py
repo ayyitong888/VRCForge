@@ -1,5 +1,7 @@
 from copy import deepcopy
 
+import pytest
+
 import dashboard_server
 from runtime_planner_service import PlannerCatalogSnapshot, PlannerTool, RuntimePlannerService
 from tool_discovery_search import search_tool_leaves
@@ -159,6 +161,52 @@ def test_scan_query_stays_read_only_and_does_not_infer_preview_pair():
     assert "manage_fx_animator" not in scanned["toolNames"]
     assert "preview_manage_fx_animator" not in scanned["requiredTools"]
     assert all(not name.startswith("manage") for name in scanned["loadCall"]["tools"])
+
+
+def test_explicit_preview_search_loads_blendshape_preview_after_write_and_scan_are_loaded():
+    catalog = dashboard_server._RuntimePlannerCatalog().read(
+        "execution", project_context_active=True
+    )
+    block = "avatar_structure/mesh_shape_data"
+    loaded = {"unity_apply_blendshapes", "unity_scan_blendshapes"}
+
+    result = search_tool_leaves(
+        "preview blendshape adjustments", catalog.visible_tools, {block: sorted(loaded)},
+        available_tool_names=loaded,
+    )
+
+    match = result["matches"][0]
+    assert match["leafPath"] == block
+    assert match["toolNames"] == ["unity_preview_blendshape_apply"]
+    assert match["requiredTools"] == []
+    assert match["loadCall"] == {"block": block, "tools": ["unity_preview_blendshape_apply"]}
+
+
+def test_explicit_preview_search_stays_read_only_even_with_an_exact_write_pair():
+    result = search_tool_leaves("preview update FX animator state speed", _task_tools(), {})
+
+    match = result["matches"][0]
+    assert "preview_manage_fx_animator" in match["toolNames"]
+    assert "manage_fx_animator" not in match["loadCall"]["tools"]
+    assert match["requiredTools"] == []
+
+
+@pytest.mark.parametrize("query", [
+    "inspect fixture_on blendshape value preview set weight submit approval request",
+    "inspect and set avatar mesh blendshape weight fixture_on preview change value",
+    "read inspect mesh blendshape current weight; set preview blendshape weight with approval",
+])
+def test_mixed_blendshape_task_ranks_writers_by_topic_relevance(query):
+    catalog = dashboard_server._RuntimePlannerCatalog().read(
+        "execution", project_context_active=True
+    )
+
+    result = search_tool_leaves(query, catalog.visible_tools, {})
+
+    match = result["matches"][0]
+    assert match["leafPath"] == "avatar_structure/mesh_shape_data"
+    assert "unity_apply_blendshapes" in match["toolNames"]
+    assert "unity_scan_blendshapes" in match["toolNames"]
 
 
 def test_temporary_is_context_only_and_unknown_change_falls_back():

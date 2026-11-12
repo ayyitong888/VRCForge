@@ -21,6 +21,7 @@ PAGE_SCHEMA = "vrcforge.tool_result_page.v1"
 MAX_PAGE_CHARS = 12000
 MAX_SCAN_SUMMARY_CHARS = 6000
 MAX_INLINE_SCAN_CHARS = 4000
+DEFAULT_PAGE_ITEMS = 6
 _SCAN_PAGING_FIELDS = ("paging", "pagination", "nextRequest", "nextKeyRequest",
                        "nextOffset", "hasMore", "total", "totalCount", "returned", "complete", "readHints")
 
@@ -45,7 +46,7 @@ INPUT_SCHEMA = {
                         "description": "RFC6901 pointer: empty string selects root; otherwise keep the leading slash, e.g. /parameters or /layers/0/states. Escape a key's slash as ~1 and tilde as ~0. Copy exact pointers from returned rows."},
         "offset": {"type": "integer", "minimum": 0, "default": 0,
                    "description": "Zero-based item or field offset within the selected collection; at most its returned count. Use nextRequest to continue."},
-        "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6,
+        "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": DEFAULT_PAGE_ITEMS,
                   "description": "Maximum items in this page (1 through 20). The character budget may return fewer; follow nextRequest when hasMore is true."},
         "textOffset": {"type": "integer", "minimum": 0,
                        "description": "Only for an exact text field with offset=0: character offset in its sanitized text, independent of item offset/limit. Copy nextRequest to retrieve remaining text."},
@@ -135,9 +136,21 @@ def observation_result_continuation(step: Mapping[str, Any], visible_result: obj
     args = request.get("arguments")
     if (not isinstance(args, dict) or args.get("resultRef") != descriptor.get("resultRef")
             or args.get("source", "result") != "result" or args.get("textOffset") is not None
-            or not isinstance(args.get("jsonPointer"), str) or not args["jsonPointer"]):
+            or not isinstance(args.get("jsonPointer"), str)):
         return fields, descriptor
     pointer = args["jsonPointer"]
+    suggested = None
+    if not pointer:
+        if args.get("offset") != 0:
+            return fields, descriptor
+        collections = [row for row in descriptor.get("collections", [])
+                       if row["type"] == "array" and row["count"] > DEFAULT_PAGE_ITEMS]
+        if len(collections) != 1:
+            return fields, descriptor
+        suggested = collections[0]
+        pointer = suggested["jsonPointer"]
+        if not pointer:
+            return fields, descriptor
     following = 0
     try:
         source = _select(step.get("result"), pointer, sanitize)
@@ -157,7 +170,10 @@ def observation_result_continuation(step: Mapping[str, Any], visible_result: obj
     except (ValueError, PermissionError, TypeError, AttributeError):
         pass  # Missing or hidden collection: no delivered prefix, start at zero.
     replacement = deepcopy(request)
-    replacement["arguments"]["offset"] = following
+    replacement["arguments"].update(jsonPointer=pointer, offset=following)
+    if suggested is not None and following >= suggested["count"]:
+        descriptor.pop("nextRequest", None)
+        return fields, descriptor
     descriptor["nextRequest"] = replacement
 
     def align(value: object) -> None:
@@ -173,7 +189,8 @@ def observation_result_continuation(step: Mapping[str, Any], visible_result: obj
             for child in value:
                 align(child)
 
-    align(fields)
+    if suggested is None:
+        align(fields)
     return fields, descriptor
 
 
@@ -373,7 +390,7 @@ def result_continuation(session_id: str, turn_id: str, project_root: str, step: 
     return {"resultRef": ref, "scope": "current_turn", "sourceStep": step["index"],
             "collections": collection_manifest(step["result"], sanitize),
             "nextRequest": {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "jsonPointer": "", "offset": 0}},
-            "instructions": "Read retained data by jsonPointer and offset without rerunning its tool. Collection counts are exact; offsets are zero-based. Root pages reveal further fields. References expire when this turn ends."}
+            "instructions": "Use nextRequest for the suggested data page, or copy the needed collection's jsonPointer with offset 0. Use root only for other fields. Do not rerun the tool. References expire when this turn ends."}
 
 
 def model_payload_continuation(session_id: str, turn_id: str, project_root: str,
@@ -628,7 +645,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
         return _unavailable_field_page(
             exc, result_ref=ref, source=source, step=step, sanitize=sanitize,
         )
-    offset, limit = params.get("offset", 0), params.get("limit", 6)
+    offset, limit = params.get("offset", 0), params.get("limit", DEFAULT_PAGE_ITEMS)
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError("offset must be nonnegative and limit must be between 1 and 20")
     members = list(value.items()) if isinstance(value, dict) else list(enumerate(value)) if isinstance(value, list) else [(None, value)]

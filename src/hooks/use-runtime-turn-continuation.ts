@@ -135,7 +135,9 @@ export function projectAgentQuestionContinuation(
 ): AgentQuestion {
   const raw = String(question.runtimeContinuationStatus || question.runtimeContinuation?.status || "").toLowerCase();
   if (!raw) return question;
-  const marker = `:question:${question.questionId}`;
+  const revision = question.questionFeedbackRevision || 0;
+  const feedback = question.kind === "visual_checkpoint" && revision > 0 ? `:feedback:${revision}` : "";
+  const marker = `:question:${question.questionId}${feedback}`;
   const targetClientTurnId = question.runtimeContinuation?.clientTurnId || question.runtimeContinuationClientTurnId;
   const targetTurnId = question.runtimeContinuation?.turnId || question.runtimeContinuationTurnId;
   const run = runs.find((candidate) => candidate.sessionId === question.sessionId

@@ -16,12 +16,6 @@ export type TimelineInvocation = {
 
 export type TimelinePresentationEntry =
   | {
-      type: "captures";
-      id: string;
-      startedAt: string;
-      captures: NonNullable<ChatTimelineEvent["payload"]["captures"]>;
-    }
-  | {
       type: "batch";
       id: string;
       kind: TimelineBatchKind;
@@ -450,13 +444,7 @@ function interleavedTimelineEntries(
       continue;
     }
     const invocation = invocationsByFirstEvent.get(event.id);
-    if (!invocation) {
-      if (event.kind === "tool_result" && event.payload.captures?.length) {
-        flushBatch();
-        entries.push({ type: "captures", id: event.id, startedAt: event.timestamp, captures: event.payload.captures });
-      }
-      continue;
-    }
+    if (!invocation) continue;
     if (currentBatch?.kind !== invocation.kind) {
       flushBatch();
       currentBatch = {
@@ -468,10 +456,6 @@ function interleavedTimelineEntries(
       };
     }
     currentBatch.invocations.push(invocation);
-    if (event.kind === "tool_result" && event.payload.captures?.length) {
-      flushBatch();
-      entries.push({ type: "captures", id: event.id, startedAt: event.timestamp, captures: event.payload.captures });
-    }
   }
   flushBatch();
   return entries;

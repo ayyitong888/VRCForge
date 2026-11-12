@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "
 import { useTranslation } from "react-i18next";
 import { updateAgentGoal } from "../../lib/api";
 import type { AgentApproval, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
+import type { RunningEnterAction } from "../../lib/app-preferences";
 import type {
   ApprovalActionState,
   ChatAttachment,
@@ -104,6 +105,7 @@ export function ChatWorkspace({
   setInput,
   sending,
   queueAllowed,
+  runningEnterAction,
   permission,
   onSubmit,
   onQueue,
@@ -152,6 +154,7 @@ export function ChatWorkspace({
   onBackgroundGoalProviderWarningsRendered,
   onBackgroundGoalCatchUpDismiss,
   onAnswerQuestion,
+  onDismissQuestion,
   onReplyInChat,
   onOpenChatById,
   focusInput = false,
@@ -165,6 +168,7 @@ export function ChatWorkspace({
   onScrollToBottom,
   pendingApprovalForResponse,
   scopedPendingApprovals,
+  approvalReveal,
   approvalActions,
   latestRetryableItemId,
   latestEditableUserItemId,
@@ -204,6 +208,7 @@ export function ChatWorkspace({
   setInput: (value: string) => void;
   sending: boolean;
   queueAllowed: boolean;
+  runningEnterAction?: RunningEnterAction;
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
   onQueue?: (event?: FormEvent) => void;
@@ -252,6 +257,7 @@ export function ChatWorkspace({
   onBackgroundGoalProviderWarningsRendered: (warnings: AgentGoalBackgroundAcknowledgement[]) => void;
   onBackgroundGoalCatchUpDismiss: () => void;
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
+  onDismissQuestion: (questionId: string) => void;
   onReplyInChat?: (questionId: string) => void;
   /** Opens another conversation in this project scope by chat id. */
   onOpenChatById?: (chatId: string) => void;
@@ -265,6 +271,7 @@ export function ChatWorkspace({
   showScrollToBottom: boolean;
   onScrollToBottom: () => void;
   pendingApprovalForResponse: (response: AgentRuntimeResponse) => AgentApproval | null;
+  approvalReveal?: { approvalId: string } | null;
   approvalActions: Record<string, ApprovalActionState>;
   latestRetryableItemId: string;
   latestEditableUserItemId: string;
@@ -338,22 +345,24 @@ export function ChatWorkspace({
   });
   const conversationRenderScope = sessionHandoffSourceChatId || "chat";
   const conversationItemKeyOccurrences = new Map<string, number>();
-  const navigationMarkers = useMemo<ChatPositionMarker[]>(() => {
+  const [steeringReveal, setSteeringReveal] = useState<{ ownerKey: string; sequence: number }>();
+  const { navigationMarkers, steeringAnchorsByOwner } = useMemo(() => {
     const occurrences = new Map<string, number>();
     const seenTurns = new Set<string>();
     const markers: ChatPositionMarker[] = [];
+    const steeringAnchorsByOwner = new Map<string, Map<string, string>>();
     const responsesByTurn = new Map<string, Extract<ConversationItem, { type: "agent" }>["response"]>();
     for (const item of conversationItems) {
       if (item.type === "agent" && item.response.clientTurnId) responsesByTurn.set(item.response.clientTurnId, item.response);
     }
-    const addUser = (user: Extract<ConversationItem, { type: "user" | "question_answer" }>, key: string) => {
+    const addUser = (user: Extract<ConversationItem, { type: "user" | "question_answer" }>, key: string, reveal?: () => void) => {
       if (user.text.trim() === "<task-notification-trigger/>") return;
       const turn = user.type === "user" ? user.clientTurnId || user.id : user.id;
       if (seenTurns.has(turn)) return;
       seenTurns.add(turn);
       const preview = user.text.replace(/\s+/g, " ").trim();
       const response = user.type === "user" ? responsesByTurn.get(turn) : undefined;
-      markers.push({ key, preview: preview.length > 96 ? `${preview.slice(0, 95)}…` : preview,
+      markers.push({ key, reveal, preview: preview.length > 96 ? `${preview.slice(0, 95)}…` : preview,
         getAssistantPreview: response ? () => {
           const text = agentReplyPreviewText(response).replace(/\s+/g, " ").trim();
           return text.length > 600 ? `${text.slice(0, 599)}…` : text;
@@ -371,9 +380,20 @@ export function ChatWorkspace({
       if (initialUser) {
         addUser(initialUser, conversationItemRenderKey(initialUser, conversationRenderScope, occurrences));
       }
+      const steers = turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined;
+      if (steers?.length) {
+        const anchors = new Map<string, string>();
+        const reveal = () => setSteeringReveal((current) => ({ ownerKey: renderKey, sequence: (current?.sequence ?? 0) + 1 }));
+        for (const message of steers) {
+          const key = `${renderKey}:steer:${message.id}`;
+          anchors.set(message.id, key);
+          addUser(message, key, reveal);
+        }
+        steeringAnchorsByOwner.set(renderKey, anchors);
+      }
     }
-    return markers;
-  }, [conversationItems, conversationRenderScope, steeringProjection.initialUsersByTurnId]);
+    return { navigationMarkers: markers, steeringAnchorsByOwner };
+  }, [conversationItems, conversationRenderScope, steeringProjection.initialUsersByTurnId, steeringProjection.messagesByTurnId]);
   const historyScrollRef = useRef<HTMLDivElement>(null);
   const questionCapturePreviews = (question: AgentQuestion) => capturePreviewsForQuestion(question, conversationItems);
   const questionResourceImageContext = (question: AgentQuestion) => {
@@ -433,6 +453,7 @@ export function ChatWorkspace({
       setInput={setInput}
       sending={composerSending}
       queueAllowed={queueAllowed}
+      runningEnterAction={runningEnterAction}
       permission={permission}
       onSubmit={onSubmit}
       onQueue={onQueue}
@@ -485,6 +506,7 @@ export function ChatWorkspace({
       approvals={scopedPendingApprovals}
       actions={approvalActions}
       disabled={sending}
+      reveal={approvalReveal}
       onApprove={onApprove}
       onReject={onReject}
       onModifyApproval={onModifyApproval}
@@ -589,6 +611,7 @@ export function ChatWorkspace({
                 <AgentQuestionCard
                   questions={pendingQuestionPrompts}
                   onAnswerQuestion={onAnswerQuestion}
+                  onDismissQuestion={onDismissQuestion}
                   onReplyInChat={onReplyInChat}
                   capturePreviewsForQuestion={questionCapturePreviews}
                   resourceImageContextForQuestion={questionResourceImageContext}
@@ -667,7 +690,15 @@ export function ChatWorkspace({
             const turnId = item.type === "agent" ? item.response.clientTurnId : item.type === "streaming" ? item.clientTurnId : "";
             const turnSessionId = runtimeSessionId || (item.type === "agent" ? item.response.sessionId || item.response.session_id : "");
             const runtimeActive = turnId && turnSessionId ? runtimeTurnActivityStatus(runtimeRuns, turnSessionId, turnId) : undefined;
-            const itemRuntimeActive = item.type === "streaming" && !isExternalRuntimeStream(item) ? undefined : runtimeActive;
+            const questionRuntime = isExternalRuntimeStream(item)
+              ? projectedAgentQuestions.find((question) => question.blocking !== false
+                && question.runtimeContinuation?.clientTurnId === turnId
+                && (question.runtimeContinuation?.sessionId || question.sessionId) === turnSessionId)
+              : undefined;
+            const itemRuntimeActive = item.type === "streaming" && !isExternalRuntimeStream(item) ? undefined
+              : runtimeActive ?? (questionRuntime && questionContinuationDisplay(questionRuntime) === "active");
+            const questionPreparing = questionRuntime
+              && (runtimeActive === undefined || questionRuntime.runtimeContinuation?.status === "queued");
             const initialUser = turnId ? steeringProjection.initialUsersByTurnId.get(turnId) : undefined;
             const capturedOperation = item.type === "agent"
               ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
@@ -684,6 +715,8 @@ export function ChatWorkspace({
                 onReopenQuestion={onReplyInChat}
                 onOpenChatById={onOpenChatById}
                 interleavedUserMessages={turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined}
+                steeringNavAnchorKeys={steeringAnchorsByOwner.get(renderKey)}
+                steeringRevealSequence={steeringReveal?.ownerKey === renderKey ? steeringReveal.sequence : undefined}
                 initialUserContent={initialUser ? (
                   <div data-chat-nav-anchor={conversationItemRenderKey(initialUser, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={initialUser.id} data-turn-initial-user>
                     <ConversationCard
@@ -735,7 +768,8 @@ export function ChatWorkspace({
                 onSaveOperationAsSkill={onSaveOperationAsSkill}
                 />
                 {item.type === "streaming" ? (
-                  <StreamingPhaseStatus item={item} nowMs={activityNowMs} showElapsed={false} runtimeActive={itemRuntimeActive} />
+                  <StreamingPhaseStatus item={questionPreparing && !item.phase ? { ...item, phase: "preparing" } : item}
+                    nowMs={activityNowMs} showElapsed={false} runtimeActive={itemRuntimeActive} />
                 ) : null}
               </div>
             );
@@ -766,6 +800,7 @@ export function ChatWorkspace({
             <AgentQuestionCard
               questions={pendingQuestionPrompts}
               onAnswerQuestion={onAnswerQuestion}
+              onDismissQuestion={onDismissQuestion}
               onReplyInChat={onReplyInChat}
               capturePreviewsForQuestion={questionCapturePreviews}
               resourceImageContextForQuestion={questionResourceImageContext}

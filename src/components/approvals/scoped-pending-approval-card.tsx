@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Pencil, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { presentApproval } from "../../lib/approval-presentation";
@@ -13,24 +13,36 @@ type ScopedPendingApprovalCardProps = {
   approvals: AgentApproval[];
   actions: Record<string, ApprovalActionState>;
   disabled: boolean;
+  reveal?: { approvalId: string } | null;
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
   onModifyApproval: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
 };
 
-export function ScopedPendingApprovalCard({ approvals, actions, disabled, onApprove, onReject, onModifyApproval }: ScopedPendingApprovalCardProps) {
+export function ScopedPendingApprovalCard({ approvals, actions, disabled, reveal, onApprove, onReject, onModifyApproval }: ScopedPendingApprovalCardProps) {
   const { t } = useTranslation();
   const [editingApprovalId, setEditingApprovalId] = useState("");
   const [collapsed, setCollapsed] = useState(false);
+  const sectionRef = useRef<HTMLElement>(null);
   const visibleApprovals = approvals.filter(
     (approval) => approval.status === "pending" && !["approve", "reject"].includes(actions[approval.id] || ""),
   );
+  const visibleApprovalIds = visibleApprovals.map(({ id }) => id).join("\n");
 
   useEffect(() => {
-    if (disabled || editingApprovalId || Object.values(actions).some(Boolean)) return undefined;
+    setCollapsed(false);
+  }, [reveal, visibleApprovalIds]);
+  useEffect(() => {
+    if (!reveal || collapsed) return;
+    const cards = sectionRef.current?.querySelectorAll<HTMLElement>("[data-approval-id]");
+    Array.from(cards ?? []).find((card) => card.dataset.approvalId === reveal.approvalId)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [collapsed, reveal, visibleApprovalIds]);
+  useEffect(() => {
+    if (collapsed || !visibleApprovalIds || disabled || editingApprovalId || Object.values(actions).some(Boolean)) return undefined;
     const timer = window.setTimeout(() => setCollapsed(true), 30_000);
     return () => window.clearTimeout(timer);
-  }, [disabled, editingApprovalId, actions]);
+  }, [collapsed, disabled, editingApprovalId, actions, reveal, visibleApprovalIds]);
   if (visibleApprovals.length === 0) {
     return null;
   }
@@ -40,6 +52,7 @@ export function ScopedPendingApprovalCard({ approvals, actions, disabled, onAppr
 
   return (
     <section
+      ref={sectionRef}
       className="overflow-hidden rounded-2xl border border-border bg-card shadow-panel"
       data-scoped-pending-approval
       data-approval-composer-replacement

@@ -58,6 +58,26 @@ def test_all_without_renderer_filter_returns_every_shape(scan):
     result=scan[0](scope='all')
     assert len(result['blendshapes'])==5
 
+def test_exact_shape_names_intersect_renderer_selection_and_scope(scan):
+    invoke, export = scan
+    result = invoke(avatarPath=PATH, scope='all', rendererPaths=[f'{PATH}/Body'],
+                    blendshapeNames=['Breast', 'Smile'])
+    assert result['blendshapeNames'] == ['Breast', 'Smile']
+    assert result['matchStatus'] == 'matched'
+    assert [(row['blendshapeName'], row['currentWeight']) for row in result['blendshapes']] == [('Breast', 42)]
+    assert [shape['name'] for shape in result['avatars'][0]['renderers'][0]['blendshapes']] == ['Breast']
+    assert result['summary'] == {'avatarCount': 1, 'rendererCount': 1, 'blendshapeCount': 1}
+    assert result['sourceSelectedAvatar']['blendshapeCount'] == 5
+    assert len(export['avatars'][0]['renderers'][1]['blendshapes']) == 2
+
+    for params in ({'scope': 'all', 'blendshapeNames': ['breast']},
+                   {'scope': 'face', 'blendshapeNames': ['Breast']}):
+        no_match = invoke(avatarPath=PATH, **params)
+        assert no_match['matchStatus'] == 'no_matches'
+        assert no_match['blendshapes'] == []
+        assert no_match['avatars'][0]['renderers'] == []
+        assert no_match['summary']['blendshapeCount'] == 0
+
 def test_static_face_scope_separates_expression_tracking_and_unknown(scan):
     invoke,export=scan
     renderer=export['avatars'][0]['renderers'][0]
@@ -82,6 +102,11 @@ def test_static_face_scope_separates_expression_tracking_and_unknown(scan):
     assert result['classificationSummary']=={'static_shape':1,'expression':1,'tracking':1,'unknown':1}
     assert [shape['name'] for shape in result['avatars'][0]['renderers'][0]['blendshapes']]==['jaw_wide']
     assert [shape['name'] for shape in renderer['blendshapes']]==[shape['name'] for shape in original]
+
+    selected = invoke(avatarPath=PATH, scope='face_static', blendshapeNames=['jaw_wide'])
+    assert [row['blendshapeName'] for row in selected['blendshapes']] == ['jaw_wide']
+    assert selected['blendshapes'][0]['authorSection'] == 'FACEOPTION'
+    assert selected['unknownBlendshapes'] == []
 
 def test_static_face_unknown_preview_is_bounded(scan):
     invoke,export=scan
@@ -144,6 +169,8 @@ def test_unknown_renderer_reports_real_candidates_and_can_be_corrected(scan):
 
 @pytest.mark.parametrize('params',[{'scope':'body'},{'rendererPaths':[]},{'rendererPaths':['x','x']},
     {'rendererPaths':['']},{'rendererPaths':[' ']},{'rendererPaths':[42]},
-    {'rendererPaths':[str(i) for i in range(33)]},{'filterScope':'all'}])
+    {'rendererPaths':[str(i) for i in range(33)]},{'filterScope':'all'},
+    {'blendshapeNames': []}, {'blendshapeNames': ['Smile', 'Smile']}, {'blendshapeNames': [' ']},
+    {'blendshapeNames': [42]}, {'blendshapeNames': [str(i) for i in range(33)]}])
 def test_public_invalid_selection_rejected(params):
     with pytest.raises(jsonschema.ValidationError):jsonschema.validate(params,UNITY_READ_TOOL_INPUT_SCHEMAS[TOOL])

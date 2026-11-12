@@ -93,7 +93,7 @@ import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice"
 import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
-import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, questionBelongsToRuntimeScope } from "./lib/runtime-scope";
+import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, questionBelongsToRuntimeScope } from "./lib/runtime-scope";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import { flushChatsBeforeQuit } from "./lib/app-quit";
 import {
@@ -112,8 +112,10 @@ import {
   loadLayoutPaneWidths,
   loadAutomaticUpdateCheckEnabled,
   loadDeveloperOptionsEnabled,
+  loadRunningEnterAction,
   loadThemePreference,
   persistAutomaticUpdateCheckEnabled,
+  persistRunningEnterAction,
   type LayoutPaneWidths,
   type ThemeMode,
 } from "./lib/app-preferences";
@@ -336,7 +338,9 @@ export default function App() {
   const [activeProjectType, setActiveProjectType] = useState<ProjectType>("general");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [pendingApprovalPanelOpen, setPendingApprovalPanelOpen] = useState(false);
+  const [approvalReveal, setApprovalReveal] = useState<{ chatId: string; approvalId: string } | null>(null);
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
+  const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
   const [developerOptionsEverEnabled, setDeveloperOptionsEverEnabled] = useState(false);
   const [computerUseEnabled, setComputerUseEnabled] = useState(false);
@@ -402,6 +406,7 @@ export default function App() {
   const [subAgentActionBusyTaskIds, setSubAgentActionBusyTaskIds] = useState<Set<string>>(() => new Set());
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [pendingReplyQuestionId, setPendingReplyQuestionId] = useState("");
+  const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
   const attachmentLoadsRef = useRef(0);
   const replySubmitInFlightRef = useRef(false);
@@ -516,6 +521,8 @@ export default function App() {
     providerTestPassed,
     providerTestPassedForPersistedConfig,
     providerConnectedAt,
+    providerRuntimeConnectedAt,
+    bindRuntimeProviderConnection,
     providerReadyForOnboarding,
     visionProvider,
     visionApiKey,
@@ -970,7 +977,7 @@ export default function App() {
     updateChat,
     onContinuation: (event: RuntimeTurnEvent) => {
       if (event.continuationSource !== "question_answered") return;
-      const questionId = event.clientTurnId?.split(":question:")[1]?.trim();
+      const questionId = event.clientTurnId?.match(/:question:([^:]+)(?::feedback:[1-9]\d*)?$/)?.[1];
       if (!questionId) return;
       const clientTurnId = event.clientTurnId?.trim();
       if (clientTurnId) {
@@ -1020,9 +1027,18 @@ export default function App() {
     (item) => item.status === "pending" && approvalBelongsToRuntimeScope(item, runtimeScope),
   );
   const pendingApprovalItems = projectPendingApprovalItems.filter(
-    (item) => approvalBelongsToRuntimeScope(item, runtimeScope, { requireSession: true }),
+    (item) => displayChat && pendingApprovalOwner(item, chats)?.id === displayChat.id,
   );
   const pendingApprovals = projectPendingApprovalItems.length;
+  const openPendingApprovalOwner = useCallback((approval: AgentApproval) => {
+    const owner = pendingApprovalOwner(approval, chats);
+    if (!owner) return false;
+    openChat(owner);
+    setSelectedSubAgentPanelOpen(false);
+    setPendingApprovalPanelOpen(false);
+    setApprovalReveal({ chatId: owner.id, approvalId: approval.id });
+    return true;
+  }, [openChat, chats]);
   const hasUnresolvedRuntimeState = (chatId: string, targetSessionId: string): boolean => {
     const asRecord = (value: unknown): Record<string, unknown> | undefined => (
       typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined
@@ -1105,6 +1121,7 @@ export default function App() {
     chats,
     chatStorageReady,
     runtimeQueueVersion,
+    bindRuntimeProviderConnection,
   });
   const localActivitySending = chatRunSending || compacting;
   const visibleQueued = useMemo(
@@ -1159,6 +1176,8 @@ export default function App() {
       chats.find((chat) => chat.sessionId === ownerSessionId)?.id || "",
   });
   const activeRuntimeCancelTarget = runtimeActivityCancelTarget(chats, activeChat || undefined, runtimeRuns);
+  const scopedAgentQuestions = hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : [];
+  const dismissedAgentQuestion = scopedAgentQuestions.find((question) => question.status === "pending" && dismissedQuestionIds.has(question.questionId));
   const sending = localActivitySending || Boolean(activeRuntimeCancelTarget);
   const runtimeAwareChatSidebar = useMemo(() => {
     const visibleChatId = activeView === "chat" ? activeChatId : "";
@@ -1704,42 +1723,9 @@ export default function App() {
           setError(t("approval.notificationExpired"));
           return;
         }
-        const approvalSessionId = String(approval.taskContext?.sessionId || "").trim();
-        const approvalTurnId = String(approval.taskContext?.turnId || "").trim();
-        const approvalClientTurnId = String(approval.taskContext?.clientTurnId || "").trim();
-        const ownerChat = chats.find((chat) => {
-          if (approvalSessionId && chat.sessionId !== approvalSessionId) {
-            return false;
-          }
-          return chat.items.some((item) => {
-            if (item.type !== "agent") {
-              return false;
-            }
-            const response = item.response;
-            const responseApprovalId = String(
-              response.approvalId
-              || response.approval_id
-              || response.shell?.approvalId
-              || response.shell?.approval_id
-              || response.shell?.approval?.id
-              || response.write?.approvalId
-              || response.write?.approval_id
-              || "",
-            );
-            return responseApprovalId === approval.id
-              || (approvalTurnId && (response.turnId === approvalTurnId || response.turn_id === approvalTurnId))
-              || (approvalClientTurnId && response.clientTurnId === approvalClientTurnId);
-          });
-        });
-        if (ownerChat) {
-          openChat(ownerChat);
+        if (!openPendingApprovalOwner(approval)) {
+          setError(t("approval.notificationFailed"));
         }
-        setActiveView("chat");
-        setSelectedSubAgentPanelOpen(false);
-        window.setTimeout(() => {
-          document.querySelector<HTMLElement>(`[data-approval-id="${approval.id.replace(/["\\]/g, "\\$&")}"]`)
-            ?.scrollIntoView({ block: "center", behavior: "smooth" });
-        }, 0);
       })().catch((cause) => {
         if (active) {
           setError(cause instanceof Error ? cause.message : t("approval.notificationFailed"));
@@ -1758,7 +1744,7 @@ export default function App() {
       active = false;
       unlistenAction?.();
     };
-  }, [chats, endpoint, openChat, t]);
+  }, [endpoint, openPendingApprovalOwner, t]);
   const currentModelInfo = useMemo(
     () => {
       const modelScopeMatches =
@@ -1990,6 +1976,7 @@ export default function App() {
     apiConfig,
     providerTestPassed: providerTestPassedForPersistedConfig,
     providerConnectedAt,
+    providerRuntimeConnectedAt,
   });
   const localizeHealthMessage = useCallback(
     (message?: string) => localizeRuntimeHealthMessage(t, message),
@@ -2031,13 +2018,13 @@ export default function App() {
           ? { ...payload.runtimeContinuation, sessionId: payload.runtimeContinuation.sessionId || sessionId }
           : agentQuestions.find((item) => item.questionId === questionId)?.runtimeContinuation,
       });
+      void refreshRuntimeRuns(false);
       const answerChat = chats.find((chat) => chat.sessionId === answeredQuestion?.sessionId);
       const answerChatId = answerChat?.id;
       const answerItem = questionAnswerItem(payload.question, payload.question.answer || value);
       if (answerChat && answerChatId) {
         persistQuestionAnswer(answerChatId, answerItem);
       }
-      void refreshRuntimeRuns(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       throw cause;
@@ -3448,7 +3435,10 @@ export default function App() {
           sessionId: question.sessionId || sessionId,
           projectRoot: question.projectRoot || activeRuntimeProjectPath || undefined,
         });
-        upsertAgentQuestion(payload.question);
+        upsertAgentQuestion({
+          ...payload.question,
+          runtimeContinuation: payload.runtimeContinuation || payload.question.runtimeContinuation,
+        });
         const answerChat = activeChat && (!question.sessionId || activeChat.sessionId === question.sessionId)
           ? activeChat
           : undefined;
@@ -3470,20 +3460,20 @@ export default function App() {
     if (!chatAvailable) {
       return;
     }
-    if (deliveryMode === "steer" && (message === "/compact" || message.startsWith("/compact "))) {
+    if (message === "/compact" || message.startsWith("/compact ")) {
       void compactChat();
       setInput("");
       return;
     }
-    if (deliveryMode === "steer" && (message === "/goal" || message.startsWith("/goal "))) {
+    if (message === "/goal" || message.startsWith("/goal ")) {
       void handleGoalSlashCommand(message);
       return;
     }
-    if (deliveryMode === "steer" && (message === "/memory" || message.startsWith("/memory "))) {
+    if (message === "/memory" || message.startsWith("/memory ")) {
       void createMemoryFromSlash(message);
       return;
     }
-    if (deliveryMode === "steer" && (message === "/delegate" || message.startsWith("/delegate "))) {
+    if (message === "/delegate" || message.startsWith("/delegate ")) {
       const command = parseDelegateCommand(
         message,
         skills.map((skill) => skill.name),
@@ -3497,12 +3487,12 @@ export default function App() {
       setInput("");
       return;
     }
-    if (deliveryMode === "steer" && (message === "/handoff" || message.startsWith("/handoff "))) {
+    if (message === "/handoff" || message.startsWith("/handoff ")) {
       setHandoffSendOpen((current) => !current);
       setInput("");
       return;
     }
-    if (deliveryMode === "steer" && (message === "/desktop" || message.startsWith("/desktop "))) {
+    if (message === "/desktop" || message.startsWith("/desktop ")) {
       if (!developerOptionsEnabled || !computerUseEnabled) {
         setError(t("computerUse.disabled"));
         return;
@@ -4494,6 +4484,11 @@ export default function App() {
               loading={loading}
               runtimeConnected={runtimeConnected}
               currentLanguage={i18n.language}
+              runningEnterAction={runningEnterAction}
+              onRunningEnterActionChange={(action) => {
+                setRunningEnterAction(action);
+                persistRunningEnterAction(action);
+              }}
               themeCustomization={themeCustomization}
               themeBackgroundError={themeBackgroundError}
               apiProvider={apiProvider}
@@ -4602,6 +4597,7 @@ export default function App() {
               setInput={setInput}
               sending={sending}
               queueAllowed={(chatRunSending || pendingQuestionSessionIds.has(activeChat?.sessionId || "")) && !stopRequested}
+              runningEnterAction={runningEnterAction}
               permission={permission}
               onSubmit={submitMessage}
               onQueue={() => void submitMessage(undefined, "queue")}
@@ -4656,7 +4652,7 @@ export default function App() {
               conversation={conversation}
               attachmentPayloads={displayChat?.attachmentPayloads}
               queued={visibleQueued}
-              agentQuestions={hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : []}
+              agentQuestions={scopedAgentQuestions.filter((question) => question.status !== "pending" || !dismissedQuestionIds.has(question.questionId))}
               backgroundGoalDeliveries={
                 activeChatId
                   ? (backgroundGoalState?.recent || []).filter((delivery) => delivery.chatId === activeChatId)
@@ -4667,6 +4663,7 @@ export default function App() {
               onBackgroundGoalProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
               onBackgroundGoalCatchUpDismiss={dismissBackgroundGoalCatchUp}
               onAnswerQuestion={answerRuntimeQuestion}
+              onDismissQuestion={(questionId) => setDismissedQuestionIds((current) => new Set(current).add(questionId))}
               onReplyInChat={replyToAgentQuestionInComposer}
               focusInput={Boolean(pendingReplyQuestionId)}
               pendingReplyQuestionId={pendingReplyQuestionId}
@@ -4686,6 +4683,7 @@ export default function App() {
               onScrollToBottom={conversationScroll.scrollToBottom}
               pendingApprovalForResponse={pendingApprovalForResponse}
               scopedPendingApprovals={pendingApprovalItems}
+              approvalReveal={approvalReveal?.chatId === displayChat?.id ? approvalReveal : null}
               approvalActions={approvalActions}
               editingItemId={editingMessage?.chatId === activeChatId ? editingMessage.itemId : ""}
               editingText={editingMessage?.draftText || ""}
@@ -4719,17 +4717,6 @@ export default function App() {
               onHandoffSendOpenChange={setHandoffSendOpen}
             />
           )}
-          {activeView !== "chat" || pendingApprovalPanelOpen ? (
-            <PendingApprovalsStrip
-              approvals={projectPendingApprovalItems}
-              actions={approvalActions}
-              loading={loading}
-              onApprove={approveShell}
-              onReject={rejectShell}
-              onClose={activeView === "chat" ? () => setPendingApprovalPanelOpen(false) : undefined}
-            />
-          ) : null}
-
         </section>
         {rightSidebarVisible ? (
           <>
@@ -4782,7 +4769,28 @@ export default function App() {
               onOpenUserAttachmentSource={openUserAttachmentSource}
               approvalsLoaded={agentApprovals !== null}
               pendingApprovals={pendingApprovals}
+              approvalPanel={pendingApprovalPanelOpen ? (
+                <PendingApprovalsStrip
+                  approvals={projectPendingApprovalItems}
+                  actions={approvalActions}
+                  loading={loading}
+                  onApprove={approveShell}
+                  onReject={rejectShell}
+                  onClose={() => setPendingApprovalPanelOpen(false)}
+                />
+              ) : undefined}
               runtimeReviewCount={runtimeAttention.length}
+              dismissedQuestion={dismissedAgentQuestion ? {
+                label: dismissedAgentQuestion.header || dismissedAgentQuestion.question || dismissedAgentQuestion.questionId,
+                onReopen: () => {
+                  setDismissedQuestionIds((current) => {
+                    const next = new Set(current);
+                    next.delete(dismissedAgentQuestion.questionId);
+                    return next;
+                  });
+                  setActiveView("chat");
+                },
+              } : undefined}
               workspaceSummary={workspaceDiff}
               activeDesktopActions={activeDesktopActions}
               refreshUnityStatus={refreshUnityStatus}
@@ -4790,7 +4798,9 @@ export default function App() {
               providerTestAttempted={Boolean(providerTestMessage.trim())}
               onHideSidebar={() => setRightSidebarCollapsed(true)}
               onOpenPendingApprovals={() => {
-                setPendingApprovalPanelOpen(true);
+                const target = projectPendingApprovalItems.length === 1 ? projectPendingApprovalItems[0] : undefined;
+                if (target && openPendingApprovalOwner(target)) return;
+                setPendingApprovalPanelOpen((current) => !current);
               }}
               localizeHealthMessage={localizeHealthMessage}
               />}

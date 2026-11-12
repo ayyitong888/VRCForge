@@ -158,12 +158,16 @@ class AvatarSceneScanRequest(ConnectionRequest):
 
 class AvatarBlendshapeListRequest(DashboardRequest):
     renderer_paths: list[str] | None = Field(default=None, alias="rendererPaths", min_length=1, max_length=32)
+    blendshape_names: list[str] | None = Field(default=None, alias="blendshapeNames", min_length=1, max_length=32)
 
     @model_validator(mode="after")
-    def validate_renderer_paths(self) -> "AvatarBlendshapeListRequest":
+    def validate_selectors(self) -> "AvatarBlendshapeListRequest":
         paths = self.renderer_paths
         if paths is not None and (any(not path.strip() for path in paths) or len(set(paths)) != len(paths)):
             raise ValueError("rendererPaths must contain unique non-empty exact hierarchy paths.")
+        names = self.blendshape_names
+        if names is not None and (any(not name.strip() for name in names) or len(set(names)) != len(names)):
+            raise ValueError("blendshapeNames must contain unique non-empty exact Blendshape names.")
         return self
 
 

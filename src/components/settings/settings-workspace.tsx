@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SUPPORTED_LOCALES } from "../../i18n";
 import type { SettingsSection } from "../../lib/app-view";
+import type { RunningEnterAction } from "../../lib/app-preferences";
 import type {
   DiagnosticsStatus,
   DiagnosticLogLevel,
@@ -50,6 +51,8 @@ type SettingsWorkspaceProps = {
   runtimeConnected: boolean;
   providerConfigurationLocked?: boolean;
   currentLanguage: string;
+  runningEnterAction: RunningEnterAction;
+  onRunningEnterActionChange: (action: RunningEnterAction) => void;
   themeCustomization: ThemeCustomization;
   themeBackgroundError?: string;
   apiProvider: string;
@@ -155,6 +158,8 @@ export function SettingsWorkspace({
   runtimeConnected,
   providerConfigurationLocked = false,
   currentLanguage,
+  runningEnterAction,
+  onRunningEnterActionChange,
   themeCustomization,
   themeBackgroundError = "",
   apiProvider,
@@ -305,6 +310,21 @@ export function SettingsWorkspace({
                   </button>
                 ))}
               </div>
+            </section>
+
+            <section className="mt-10">
+              <label className="block text-base font-semibold" htmlFor="settings-running-enter-action">
+                {t("settings.runningEnterAction")}
+              </label>
+              <select
+                id="settings-running-enter-action"
+                className="mt-3 max-w-full rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground"
+                value={runningEnterAction}
+                onChange={(event) => onRunningEnterActionChange(event.target.value === "steer" ? "steer" : "queue")}
+              >
+                <option value="queue">{t("settings.runningEnterQueue")}</option>
+                <option value="steer">{t("settings.runningEnterSteer")}</option>
+              </select>
             </section>
 
             <section className="mt-10">

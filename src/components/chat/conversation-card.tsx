@@ -11,7 +11,7 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
@@ -26,6 +26,7 @@ import { cn, formatCount } from "../../lib/utils";
 import { formatLocalMessageTime, formatMessageDateSeparator } from "../../lib/message-time";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { ChatImagePreview } from "./chat-image-preview";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
@@ -36,6 +37,8 @@ import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, displayPlanne
 export function ConversationCard({
   item,
   interleavedUserMessages = [],
+  steeringNavAnchorKeys,
+  steeringRevealSequence,
   initialUserContent,
   chatResourceImageContext,
   attachmentPayloads,
@@ -66,6 +69,8 @@ export function ConversationCard({
 }: {
   item: Exclude<ConversationItem, { type: "handoff_card" }>;
   interleavedUserMessages?: Extract<ConversationItem, { type: "user" }>[];
+  steeringNavAnchorKeys?: ReadonlyMap<string, string>;
+  steeringRevealSequence?: number;
   initialUserContent?: ReactNode;
   chatResourceImageContext?: Pick<ChatResourceImageContextValue, "endpoint" | "chatId" | "projectPath">;
   attachmentPayloads?: AttachmentPayloadVault;
@@ -107,6 +112,9 @@ export function ConversationCard({
   const streamingCreatedAt = item.type === "streaming" ? item.createdAt : undefined;
   const [streamingNowMs, setStreamingNowMs] = useState(() => Date.now());
   const [interleavedUsersExpanded, setInterleavedUsersExpanded] = useState(item.type === "streaming");
+  useLayoutEffect(() => {
+    if (steeringRevealSequence !== undefined) setInterleavedUsersExpanded(true);
+  }, [steeringRevealSequence]);
   useEffect(() => {
     if (!streamingCreatedAt) return undefined;
     setStreamingNowMs(Date.now());
@@ -326,7 +334,7 @@ export function ConversationCard({
       interleavedUserMessages,
       interleavedUsersExpanded,
       onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
-      renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads),
+      renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, steeringNavAnchorKeys?.get(message.id)),
       onOpenChatById,
     });
     return (
@@ -456,7 +464,7 @@ export function ConversationCard({
     interleavedUserMessages,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
-    renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads),
+    renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, steeringNavAnchorKeys?.get(message.id)),
     onOpenChatById,
     live: runtimeActive ?? false,
     t,
@@ -492,12 +500,13 @@ export function ConversationCard({
 function renderInterleavedUserMessage(
   message: Extract<ConversationItem, { type: "user" }>,
   attachmentPayloads?: AttachmentPayloadVault,
+  navigationAnchor?: string,
 ) {
   const attachments = resolveAttachmentPayloadReferences(message.attachments || [], attachmentPayloads);
   const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
   const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
   return (
-    <div key={`steering-${message.id}`} className="group flex min-w-0 justify-end" data-chat-steering-message={message.id}>
+    <div key={`steering-${message.id}`} className="group flex min-w-0 justify-end" data-chat-steering-message={message.id} data-chat-nav-anchor={navigationAnchor}>
       <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
         {images.length ? <UserImageAttachments messageId={message.id} attachments={images} /> : null}
         {message.text ? (
@@ -525,25 +534,6 @@ export function UserImageAttachments({
 }) {
   const [preview, setPreview] = useState<ChatAttachment | null>(null);
   const { t } = useTranslation();
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  const closeLabel = t("chat.closeImagePreview");
-  useEffect(() => {
-    if (!preview) {
-      return;
-    }
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    closeButtonRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setPreview(null);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      previousFocus?.focus();
-    };
-  }, [preview]);
   useEffect(() => {
     const openRequestedAttachment = (event: Event) => {
       const detail = (event as CustomEvent<{ messageId?: string; attachmentId?: string }>).detail;
@@ -568,38 +558,19 @@ export function UserImageAttachments({
           <div key={attachment.id} className="relative">
             <button
               type="button"
-              className="group/image block overflow-hidden rounded-lg border border-border bg-muted/70 transition hover:border-foreground/30 focus:outline-none focus:ring-2 focus:ring-ring"
+              className="block cursor-zoom-in overflow-hidden rounded-lg border border-border bg-muted/70 transition hover:border-foreground/30 focus:outline-none focus:ring-2 focus:ring-ring"
               onClick={() => setPreview(attachment)}
+              aria-haspopup="dialog"
               aria-label={t("chat.imagePreview")}
               title={attachment.name}
             >
-              <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-cover transition group-hover/image:scale-[1.02]" />
+              <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-contain" />
             </button>
           </div>
         ))}
       </div>
       {preview?.dataUrl ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("chat.imagePreview")}
-          onClick={() => setPreview(null)}
-        >
-          <div className="relative flex max-h-full max-w-full items-center justify-center" onClick={(event) => event.stopPropagation()}>
-            <button
-              ref={closeButtonRef}
-              type="button"
-              className="fixed right-5 top-5 z-10 rounded-full bg-black/70 p-2 text-white transition hover:bg-black focus:outline-none focus:ring-2 focus:ring-white/80"
-              onClick={() => setPreview(null)}
-              aria-label={closeLabel}
-              title={closeLabel}
-            >
-              <X className="h-4 w-4" />
-            </button>
-            <img src={preview.dataUrl} alt={preview.name} className="max-h-[82vh] max-w-[86vw] rounded-xl object-contain shadow-panel" />
-          </div>
-        </div>
+        <ChatImagePreview src={preview.dataUrl} alt={preview.name} onClose={() => setPreview(null)} />
       ) : null}
     </>
   );

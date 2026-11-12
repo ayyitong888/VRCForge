@@ -6,7 +6,8 @@ import pytest
 from runtime_planner_service import RuntimePlannerService
 from runtime_planner_service import sanitize_planner_observation_text as sanitize
 from agent_tool_result_reader import (
-    MAX_PAGE_CHARS, TOOL_NAME, bind_tool_result_context, read_tool_result, result_continuation, result_reference,
+    MAX_PAGE_CHARS, TOOL_NAME, bind_tool_result_context, observation_result_continuation,
+    read_tool_result, result_continuation, result_reference,
 )
 
 
@@ -24,6 +25,32 @@ def scan_result():
     return {"parameters": [{"name": f"Parameter{i}", "type": "Bool"} for i in range(27)] + [
         {"name": "衣柜", "type": "Int", "default_int": 0, "used_by_condition": True}],
         "layers": [{"name": "Wardrobe", "states": [{"name": "Rest"}]}]}
+
+
+@pytest.mark.parametrize(("tool", "field"), [
+    ("vrcforge_scan_blendshapes", "blendshapes"),
+    ("vrcforge_scan_fx_animator", "parameters"),
+    ("vrcforge_scan_avatar_items", "items"),
+])
+def test_observation_starts_at_the_only_large_result_collection(tool, field):
+    rows = [{"name": f"Item {index}"} for index in range(32)]
+    step = retained({"summary": {"count": len(rows)}, "avatars": [{"name": "Avatar"}], field: rows}, tool=tool)
+    _, observation = observation_result_continuation(step, {}, sanitize)
+    assert step["resultRead"]["nextRequest"]["arguments"]["jsonPointer"] == ""
+    request = observation["nextRequest"]["arguments"]
+    assert request["jsonPointer"] == "/" + field and request["offset"] == 0
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        assert read_tool_result(request, sanitize=sanitize)["items"][0]["value"] == rows[0]
+
+
+def test_observation_keeps_explicit_cursor_and_does_not_guess_between_large_collections():
+    rows = [{"name": f"Item {index}"} for index in range(32)]
+    step = retained({"parameters": rows, "layers": rows})
+    assert observation_result_continuation(step, {}, sanitize)[1]["nextRequest"]["arguments"]["jsonPointer"] == ""
+    step["resultRead"]["nextRequest"]["arguments"].update(jsonPointer="/layers", offset=3)
+    observation = observation_result_continuation(step, {"layers": rows[:3]}, sanitize)[1]
+    assert observation["nextRequest"]["arguments"]["jsonPointer"] == "/layers"
+    assert observation["nextRequest"]["arguments"]["offset"] == 3
 
 
 def test_real_gateway_issues_current_turn_ref_and_reader_recovers_tail_parameter():

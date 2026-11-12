@@ -581,6 +581,40 @@ def bind_runtime_unity_project(
     return bound
 
 
+_EXTERNAL_PROJECT_PATH_KEYS = ("projectPath", "project_path", "projectRoot", "project_root")
+
+
+def _external_tool_requires_project_path(name: str, schema: Mapping[str, Any]) -> bool:
+    # Checkpoint IDs carry their own scope, and catalogue availability is global.
+    return name not in {
+        "vrcforge_preview_restore_checkpoint", "vrcforge_restore_checkpoint",
+        "vrcforge_project_catalog_registration_status",
+    } and "projectPath" in ensure_dict(schema.get("properties"))
+
+
+def _external_project_input_schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    if not _external_tool_requires_project_path(name, schema):
+        return schema
+    required = list(schema.get("required") or [])
+    properties = dict(schema["properties"])
+    project_property = properties["projectPath"]
+    guidance = "Supply the absolute project root on each external call. App project selection is unnecessary."
+    properties["projectPath"] = {
+        **project_property,
+        "type": "string", "minLength": 1,
+        "description": " ".join(filter(None, (project_property.get("description"), guidance))),
+    }
+    paths = [{"required": [key]} for key in _EXTERNAL_PROJECT_PATH_KEYS if key in properties]
+    paths.extend(
+        {"required": [key], "properties": {key: {"required": ["projectPath"]}}}
+        for key in ("arguments", "params")
+        if "projectPath" in ensure_dict(ensure_dict(properties.get(key)).get("properties"))
+    )
+    if len(paths) == 1:
+        return {**schema, "properties": properties, "required": list(dict.fromkeys([*required, "projectPath"]))}
+    return {**schema, "properties": properties, "allOf": [*schema.get("allOf", []), {"anyOf": paths}]}
+
+
 
 def _external_mcp_tool_block(name: str, *, write: bool) -> str:
     catalogue = EXTERNAL_MCP_WRITE_TOOL_BLOCKS if write else EXTERNAL_MCP_READ_TOOL_BLOCKS
@@ -1700,6 +1734,20 @@ class AgentGateway:
             "status": "failed", "errorCode": "project_selection_invalid_response", "retryable": False,
         }
 
+    @staticmethod
+    def _question_continuation_client_turn_id(question_id: str, seed: Mapping[str, Any]) -> str:
+        marker = ":question:" + question_id
+        prefix = str(seed.get("clientTurnId") or "")
+        if seed.get("_questionBlocking") is False:
+            prefix = prefix[:240 - len(marker)]
+        try:
+            feedback_revision = int(seed.get("_questionFeedbackRevision") or 0)
+        except (TypeError, ValueError):
+            feedback_revision = 0
+        if feedback_revision > 0 and str(seed.get("_questionKind") or seed.get("requestedKind") or "") == "visual_checkpoint":
+            marker += ":feedback:" + str(feedback_revision)
+        return (prefix + marker)[:240]
+
     def _resume_runtime_task_after_question(
         self,
         question_id: str,
@@ -1713,21 +1761,20 @@ class AgentGateway:
         It opens no listener and never borrows a later turn's scope.
         """
         stable_id = str(question_id or "").strip()
+        client_turn_id = self._question_continuation_client_turn_id(stable_id, task_seed)
         if task_seed.get("_questionBlocking") is False:
             routed = self._route_async_question_answer(stable_id, task_seed, continuation_prompt)
             if routed is not None:
                 return routed
-            marker = ":question:" + stable_id
-            target_cid = str(task_seed.get("clientTurnId") or "")[:240 - len(marker)] + marker
             self.questions.record_runtime_continuation(stable_id, "queued",
-                runtimeContinuationClientTurnId=target_cid, runtimeContinuationTurnId="")
+                runtimeContinuationClientTurnId=client_turn_id, runtimeContinuationTurnId="")
         with self._lock:
             if not self._runtime_continuation_accepting or stable_id in self._question_continuations_inflight:
                 return {"ok": False, "status": "deferred", "questionId": stable_id}
             self._question_continuations_inflight.add(stable_id)
         def run() -> None:
             try:
-                if not self.questions.claim_runtime_continuation(stable_id):
+                if not self.questions.claim_runtime_continuation(stable_id, client_turn_id=client_turn_id):
                     return
                 if self._runtime_session_state.cancel_requested(
                     session_id=str(task_seed.get("sessionId") or ""),
@@ -1782,9 +1829,10 @@ class AgentGateway:
                 self._question_continuations_inflight.discard(stable_id)
                 self._runtime_continuation_condition.notify_all()
             raise
-        return {"ok": True, "status": "queued", "questionId": stable_id,
-                **({"sessionId": str(task_seed.get("sessionId") or ""), "clientTurnId": target_cid, "turnId": ""}
-                   if task_seed.get("_questionBlocking") is False else {})}
+        return {
+            "ok": True, "status": "queued", "questionId": stable_id,
+            "sessionId": str(task_seed.get("sessionId") or ""), "clientTurnId": client_turn_id, "turnId": "",
+        }
 
     def _settle_async_question_steers(self, input_ids: list[str], *, session_id: str, client_turn_id: str, **fields: Any) -> None:
         """Only consumption or a durable queue receipt settles a hot answer."""
@@ -1858,10 +1906,8 @@ class AgentGateway:
         seed = dict(task_seed or {})
         asynchronous = seed.get("_questionBlocking") is False
         feedback_pending = bool(seed.pop("_authenticatedQuestionFeedbackPending", False))
-        try:
-            feedback_revision = int(seed.pop("_questionFeedbackRevision", 0) or 0)
-        except (TypeError, ValueError):
-            feedback_revision = 0
+        client_turn_id = self._question_continuation_client_turn_id(question_id, seed)
+        seed.pop("_questionFeedbackRevision", None)
         task_context = approval_task_context(seed, tool="vrcforge_ask_user", arguments=ensure_dict(seed.get("requestedArguments")))
         if task_context is None:
             return None
@@ -1884,15 +1930,7 @@ class AgentGateway:
         if prepared is None:
             return None
         params = ensure_dict(prepared.get("params"))
-        marker = ":question:" + question_id
-        prefix = str(seed.get("clientTurnId") or "")
-        client_turn_id = prefix[:240 - len(marker)] + marker if asynchronous else prefix + marker
-        # Visual checkpoint feedback can be submitted more than once for the
-        # same durable Question.  Keep ordinary ask_user compatibility while
-        # giving each visual revision a distinct provider turn identity.
-        if feedback_revision > 0 and str(seed.get("_questionKind") or seed.get("requestedKind") or "") == "visual_checkpoint":
-            client_turn_id += ":feedback:" + str(feedback_revision)
-        params["clientTurnId"] = client_turn_id[:240]
+        params["clientTurnId"] = client_turn_id
         if seed.get("followupLaneId"):
             params["followupLaneId"] = str(seed["followupLaneId"])
         params["message"] = str(seed.get("objective") or "") + "\n" + continuation_prompt
@@ -2512,6 +2550,8 @@ class AgentGateway:
                     block=block,
                 ))
         tools.sort(key=lambda item: str(item.get("name") or ""))
+        for tool in tools:
+            tool["inputSchema"] = _external_project_input_schema(tool["name"], tool["inputSchema"])
         return tools
 
     @staticmethod
@@ -3766,63 +3806,61 @@ class AgentGateway:
     def _guard_external_mcp_project_scope(
         self,
         tool_name: str,
-        arguments: Mapping[str, Any],
+        arguments: dict[str, Any],
     ) -> None:
-        """Reject ambiguous optional-project calls after multiple scopes appear."""
-
-        # Checkpoint IDs already select one durable scope, including local state.
-        # The recovery service validates any explicitly supplied project path.
-        if tool_name in {"vrcforge_preview_restore_checkpoint", "vrcforge_restore_checkpoint"}:
-            return
+        """Bind an explicitly supplied project before external tool dispatch."""
 
         schema = (
             canonical_unity_write_tool_input_schema(tool_name)
             if tool_name in EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
             else canonical_unity_read_tool_input_schema(tool_name)
         )
+        catalogue = tool_name == "vrcforge_project_catalog_registration_status"
+        if not catalogue and not _external_tool_requires_project_path(tool_name, schema):
+            return
         properties = ensure_dict(schema.get("properties"))
-        if "projectPath" not in properties:
+        scopes = [arguments, *(
+            ensure_dict(arguments.get(key)) for key in ("arguments", "params")
+            if "projectPath" in ensure_dict(ensure_dict(properties.get(key)).get("properties"))
+        )]
+        supplied_paths = [
+            value.strip() for scope in scopes for key in _EXTERNAL_PROJECT_PATH_KEYS
+            if isinstance(value := scope.get(key), str) and value.strip()
+        ]
+        if catalogue and not supplied_paths:
             return
-        raw_project = str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
-        # This tool can report catalogue availability without examining any
-        # one project's registration. A caller that supplies projectPath still
-        # gets the project-specific membership check below.
-        if tool_name == "vrcforge_project_catalog_registration_status" and not raw_project:
-            return
-        if raw_project:
-            self._register_runtime_project_scope(raw_project)
-            return
-        if "projectPath" in ensure_list(schema.get("required")):
+        absolute_paths = all(Path(path).is_absolute() for path in supplied_paths)
+        project_keys = set()
+        for path in supplied_paths:
+            try:
+                project_keys.add(command_safety.normalize_filesystem_path(path))
+            except (OSError, ValueError):
+                project_keys.add(path.casefold())
+        if absolute_paths and len(project_keys) == 1:
+            arguments["projectPath"] = supplied_paths[0]
+            self._register_runtime_project_scope(supplied_paths[0])
             return
         with self._lock:
             known_project_paths = sorted(self._external_mcp_project_paths, key=str.casefold)
-        if len(known_project_paths) > 1:
-            next_action = (
-                "Choose the exact intended projectPath from knownProjectPaths and retry the read "
-                "with arguments.projectPath set to that path. "
-                "If none is the intended project, ask the user to select it in the VRCForge App "
-                "project picker and provide its exact path; do not guess."
-            )
-            candidates = ", ".join(repr(path) for path in known_project_paths)
-            raise AgentGatewayError(
-                "projectPath is required for this project-scoped external MCP call because the "
-                "Gateway has seen multiple Unity project scopes. Previously supplied projectPath "
-                f"candidates (not proof they are currently open): {candidates}. {next_action}",
-                status_code=409,
-                cause_code="external_mcp_project_scope_ambiguous",
-                failure_layer="gateway_validation",
-                failure_phase="external_mcp_project_scope_validation",
-                operation_kind="write" if tool_name in self._write_handlers else "read",
-                tool=tool_name,
-                tool_routing_started=False,
-                mutation_started=False,
-                committed=False,
-                commit_state="not_started",
-                details={
-                    "knownProjectPaths": known_project_paths,
-                    "nextAction": next_action,
-                },
-            )
+        next_action = "Provide the exact intended project root in arguments.projectPath and retry; do not guess."
+        message = "An absolute projectPath is required in arguments.projectPath for every project-scoped external tool call."
+        cause_code = "external_mcp_project_path_required"
+        if absolute_paths and len(project_keys) > 1:
+            cause_code = "external_mcp_project_path_conflict"
+            message = "arguments.projectPath and its supplied aliases must identify the same project."
+        elif not supplied_paths and len(known_project_paths) > 1:
+            cause_code = "external_mcp_project_scope_ambiguous"
+            message += " The Gateway has seen multiple Unity project scopes."
+            next_action = "Choose the exact intended projectPath from knownProjectPaths or ask the user for the exact root, then pass it in arguments.projectPath. Do not guess."
+        raise AgentGatewayError(
+            message, status_code=409, cause_code=cause_code,
+            failure_layer="gateway_validation",
+            failure_phase="external_mcp_project_scope_validation",
+            operation_kind="write" if tool_name in self._write_handlers else "read",
+            tool=tool_name, tool_routing_started=False, mutation_started=False,
+            committed=False, commit_state="not_started",
+            details={"knownProjectPaths": known_project_paths, "nextAction": next_action},
+        )
 
     def _register_runtime_project_scope(self, project_root: str) -> None:
         raw_project = str(project_root or "").strip()

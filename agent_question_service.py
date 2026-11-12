@@ -43,6 +43,7 @@ QUESTION_LANGUAGE_INSTRUCTION = (
     "Leave API names, internal IDs, diagnostic details and the agent's verification plan out of the question. "
     "Use short choices describing the user's decision or observed result, including an unable-to-find/unsure choice when relevant. "
     "For visual_checkpoint choices, use option objects with unique IDs and an explicit resolution value (pass, fail, uncertain, or later). "
+    "A submitted reply closes that question. Only pass grants visual acceptance; follow up only when there is a new decision to make. "
 )
 QUESTION_INPUT_SCHEMA = {
     "type": "object", "required": ["question"], "additionalProperties": True,
@@ -318,7 +319,7 @@ class AgentQuestionService:
         if not resolved_id:
             raise AgentQuestionServiceError("questionId is required.", status_code=400)
         continuation_answer: str | None = None
-        feedback_pending = False
+        visual_acceptance_pending = False
         settle_only = bool(values.get("settleOnly") or values.get("settle_only"))
         feedback_attachments = _question_attachments(values.get("attachments"))
         with _locked(self._persistence.shared_state_lock):
@@ -356,7 +357,7 @@ class AgentQuestionService:
                             continue
                         answer_text = _question_text(option.get("value") or option.get("label"), "answer", 2000)
                         break
-                if not answer_text and not feedback_attachments:
+                if not answer_text and not feedback_attachments and selected_option_id != "skip":
                     raise AgentQuestionServiceError("An answer is required.", status_code=400)
                 kind = str(existing.get("kind") or "decision").strip().lower()
                 resolution = str(values.get("resolution") or "").strip().lower()
@@ -372,6 +373,8 @@ class AgentQuestionService:
                 if kind == "visual_checkpoint":
                     if resolution and resolution not in VISUAL_RESOLUTIONS:
                         raise AgentQuestionServiceError("Unsupported visual checkpoint resolution.", status_code=400)
+                    if selected_option_id == "skip" and resolution:
+                        raise AgentQuestionServiceError("Skipping a Question cannot record a visual resolution.", status_code=400)
                     option_resolution = _visual_resolution(selected_option, answer_text)
                     if not resolution:
                         resolution = option_resolution
@@ -383,85 +386,39 @@ class AgentQuestionService:
                             raise AgentQuestionServiceError("Selected Question option does not match the visual resolution.", status_code=400)
                         if not declared_resolution and not option_resolution:
                             raise AgentQuestionServiceError("Selected Question option has no declared visual resolution.", status_code=400)
-                    prior_answer = str(existing.get("answer") or "")
-                    safe_answer = str(self._scope.redact_goal_persistence(answer_text) or "")
-                    if (
-                        str(existing.get("status") or "") == "pending"
-                        and prior_answer == safe_answer
-                        and str(existing.get("selectedOptionId") or "") == selected_option_id
-                        and str(existing.get("resolution") or "") == resolution
-                        and _same_json_value(existing.get("attachments") or [], feedback_attachments)
-                        and bool(answer_text or selected_option_id or feedback_attachments)
-                    ):
-                        return {"ok": True, "question": self._redact(existing), "idempotent": True}
+                    # Keep a new continuation identity when an older app saved
+                    # non-terminal feedback for this same question.
                     try:
                         feedback_revision = int(existing.get("questionFeedbackRevision") or 0) + 1
                     except (TypeError, ValueError):
                         feedback_revision = 1
-                    if not settle_only and (resolution in {"fail", "uncertain"} or resolution not in VISUAL_RESOLUTIONS):
-                        feedback_pending = True
-                        continuation_answer = self._sanitize_answer_for_model(
-                            answer_text or "The user attached feedback without an acceptance decision."
-                        )
-                        self._persistence.append({
-                            "event": "question_feedback",
-                            "status": "pending",
-                            "questionId": resolved_id,
-                            "runtimeContinuationStatus": "queued" if runtime_seed and not goal_delivery_id else "",
-                            "runtimeQuestionFeedbackPending": bool(runtime_seed and not goal_delivery_id),
-                            "answer": str(self._scope.redact_goal_persistence(answer_text) or ""),
-                            "selectedOptionId": selected_option_id,
-                            "resolution": resolution,
-                            "attachments": feedback_attachments,
-                            "questionFeedbackRevision": feedback_revision,
-                        })
-                        pending = self._project(include_answered=True).get(resolved_id)
-                        if pending is None:
-                            raise OSError("Question storage did not preserve the pending feedback.")
-                        payload = {"ok": True, "question": self._redact(pending), "feedback": True}
-                    if resolution == "later":
-                        deferred = {
-                            "event": "question_deferred",
-                            "status": "pending",
-                            "questionId": resolved_id,
-                            "resolution": resolution,
-                            "answer": str(self._scope.redact_goal_persistence(answer_text) or ""),
-                            "selectedOptionId": selected_option_id,
-                        }
-                        self._persistence.append(deferred)
-                        pending = self._project(include_answered=True).get(resolved_id)
-                        if pending is None:
-                            raise OSError("Question storage did not preserve the deferred Question.")
-                        return {"ok": True, "question": self._redact(pending), "deferred": True}
-                if not feedback_pending:
-                    continuation_answer = self._sanitize_answer_for_model(answer_text)
-                    safe_answer = self._scope.redact_goal_persistence(answer_text)
-                    event = {
+                    visual_acceptance_pending = not settle_only and resolution != "pass"
+                continuation_answer = self._sanitize_answer_for_model(answer_text)
+                event = {
                     "event": "question_answered",
                     "status": "answered",
                     "questionId": resolved_id,
-                    "answer": str(safe_answer or ""),
+                    "answer": str(self._scope.redact_goal_persistence(answer_text) or ""),
                     "selectedOptionId": selected_option_id,
+                    "attachments": feedback_attachments,
                     "projectRoot": str(values.get("projectRoot") or existing.get("projectRoot") or ""),
                     "sessionId": str(values.get("sessionId") or existing.get("sessionId") or ""),
                 }
-                    if kind == "visual_checkpoint":
-                        event["resolution"] = resolution
-                        event["questionFeedbackRevision"] = feedback_revision
-                        event["runtimeQuestionFeedbackPending"] = False
-                    if settle_only:
-                        event["runtimeContinuationStatus"] = "settled_without_dispatch"
-                    if feedback_attachments:
-                        event["attachments"] = feedback_attachments
-                    if runtime_seed and not goal_delivery_id and not settle_only:
-                        # The saved answer and the not-yet-dispatched marker are
-                        # one durable event, so a restart cannot lose the handoff.
-                        event["runtimeContinuationStatus"] = "queued"
-                    self._persistence.append(event)
-                    answered = self._project(include_answered=True).get(resolved_id)
-                    if answered is None:
-                        raise OSError("Question storage did not preserve the answer.")
-                    payload = {"ok": True, "question": self._redact(answered)}
+                if kind == "visual_checkpoint":
+                    event["resolution"] = resolution
+                    event["questionFeedbackRevision"] = feedback_revision
+                    event["runtimeQuestionFeedbackPending"] = bool(visual_acceptance_pending and runtime_seed and not goal_delivery_id)
+                if settle_only:
+                    event["runtimeContinuationStatus"] = "settled_without_dispatch"
+                if runtime_seed and not goal_delivery_id and not settle_only:
+                    # The saved answer and the not-yet-dispatched marker are
+                    # one durable event, so a restart cannot lose the handoff.
+                    event["runtimeContinuationStatus"] = "queued"
+                self._persistence.append(event)
+                answered = self._project(include_answered=True).get(resolved_id)
+                if answered is None:
+                    raise OSError("Question storage did not preserve the answer.")
+                payload = {"ok": True, "question": self._redact(answered)}
         # A persisted answer can precede an interrupted Goal projection. Its
         # resolver is idempotent, so retries must finish that durable handoff.
         if goal_delivery_id:
@@ -480,7 +437,7 @@ class AgentQuestionService:
                 dispatch_seed["_authenticatedUserAnswer"] = continuation_answer
             if feedback_attachments:
                 dispatch_seed["_authenticatedUserAttachments"] = feedback_attachments
-            if feedback_pending:
+            if visual_acceptance_pending:
                 dispatch_seed["_authenticatedQuestionFeedbackPending"] = True
             question_snapshot = payload.get("question")
             if isinstance(question_snapshot, Mapping):
@@ -532,13 +489,14 @@ class AgentQuestionService:
             **{str(key): value for key, value in fields.items()},
         })
 
-    def claim_runtime_continuation(self, question_id: str) -> bool:
+    def claim_runtime_continuation(self, question_id: str, *, client_turn_id: str = "") -> bool:
         """Only an unanswered dispatch claim can cross into the runtime."""
         with _locked(self._persistence.shared_state_lock):
             question = self._project(include_answered=True).get(question_id, {})
             if question.get("status") not in {"answered", "pending"} or question.get("runtimeContinuationStatus") != "queued":
                 return False
-            self.record_runtime_continuation(question_id, "claimed")
+            identity = {"runtimeContinuationClientTurnId": client_turn_id, "runtimeContinuationTurnId": ""} if client_turn_id else {}
+            self.record_runtime_continuation(question_id, "claimed", **identity)
             return True
 
     def cancel_runtime_questions(self, *, session_id: str = "", turn_id: str = "", client_turn_id: str = "") -> list[dict[str, object]]:
@@ -689,11 +647,21 @@ class AgentQuestionService:
             str(answer_text if answer_text is not None else values.get("answer") or "").strip()
         )
         selected_option_id = str(values.get("selectedOptionId") or "").strip()
+        guidance = "Resume the unfinished work under the existing constraints and do not repeat completed steps."
+        if values.get("kind") == "visual_checkpoint":
+            resolution = str(values.get("resolution") or "")
+            if resolution != "pass":
+                disposition = "skip" if selected_option_id == "skip" else resolution or "feedback without a verdict"
+                guidance = (
+                    f"Visual checkpoint response is {disposition}. It does not approve the preview. "
+                    "Keep visual acceptance unresolved and continue only work that does not require it."
+                )
+                if disposition in {"later", "skip"}:
+                    guidance += " Do not ask the same question again in this turn."
         return (
             "Continue the same task after the user answered a pending question.\n"
             f"Question: {question_text}\n"
-            f"User answer: {answer or selected_option_id or 'No text provided.'}\n"
-            "Resume the unfinished work under the existing constraints and do not repeat completed steps."
+            f"User answer: {answer or selected_option_id or 'No text provided.'}\n{guidance}"
         )
 
     @staticmethod
@@ -760,12 +728,6 @@ def _visual_resolution(option: Mapping[str, object] | None, answer: str) -> str:
     if prefix in {"later", "稍后确认", "稍后处理"}:
         return "later"
     return ""
-
-
-def _same_json_value(left: object, right: object) -> bool:
-    return json.dumps(left, ensure_ascii=False, sort_keys=True, separators=(",", ":")) == json.dumps(
-        right, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    )
 
 
 def _question_attachments(value: object) -> list[dict[str, object]]:

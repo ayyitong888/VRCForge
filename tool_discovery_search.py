@@ -170,9 +170,27 @@ def _is_write_intent(tokens):
     return bool(tokens & _WRITE_INTENT)
 
 
+def _same_action_input_schema(preview, write):
+    if preview == write:
+        return True
+    # The shared descriptor adds this optional approval control only to
+    # writers. It is not part of the arguments describing the change itself.
+    properties = write.get("properties")
+    if (not isinstance(properties, Mapping) or "checkpointChoice" not in properties
+            or "checkpointChoice" in (write.get("required") or ())):
+        return False
+    return preview == {**write, "properties": {
+        name: spec for name, spec in properties.items() if name != "checkpointChoice"
+    }}
+
+
 def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
     query, truncation = _bounded_query(query)
-    tokens = _terms(query)
+    # An explicit preview command asks for a read-only preview, even when the
+    # operation being previewed is a write and has a different input schema.
+    preview_command = re.match(r"(?:preview(?:\s+|$)|预览)", query, re.IGNORECASE)
+    topic_query = query[preview_command.end():] if preview_command else query
+    tokens = _terms(topic_query)
     records = [t for t in tools if t.block != "core" and "/" in t.block]
     scores = {}
     for tool in records:
@@ -185,11 +203,14 @@ def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
         text_hits = len(tokens & text_terms)
         schema_hits = len((tokens - _WRITE_INTENT - _READ_INTENT) & _schema_terms(tool.input_schema))
         scores[tool.name] = (name_hits, schema_hits, text_hits)
-    search_records = (
-        [tool for tool in records if not tool.write]
-        if tokens & _READ_INTENT and not tokens & _WRITE_INTENT else records
-    )
-    relevance = _search_relevance(search_records, tokens, query)
+    if preview_command:
+        search_records = [tool for tool in records
+                          if not tool.write and tool.runtime_name.startswith("vrcforge_preview_")]
+    elif tokens & _READ_INTENT and not tokens & _WRITE_INTENT:
+        search_records = [tool for tool in records if not tool.write]
+    else:
+        search_records = records
+    relevance = _search_relevance(search_records, tokens, topic_query)
     exact_leaf = query.strip().casefold()
     leaf_matches = [t for t in records if t.block.casefold() == exact_leaf]
     exact_tool_matches = [
@@ -203,9 +224,9 @@ def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
         if best_topic_score > 0
         and relevance[tool.name][0] >= best_topic_score * 0.75
     ]
-    write_intent = _is_write_intent(tokens)
+    write_intent = not preview_command and _is_write_intent(tokens)
     numeric_change = any(token.isdigit() for token in tokens)
-    if not write_intent and not (tokens & _READ_INTENT):
+    if not preview_command and not write_intent and not (tokens & _READ_INTENT):
         # A task-shaped query can omit an imperative (for example, a compact
         # request naming a controller and speed). Prefer a write-capable tool
         # only when the visible schema exposes multiple matching task fields.
@@ -227,6 +248,7 @@ def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
             selected = max(
                 candidates,
                 key=lambda tool: (
+                    relevance[tool.name],
                     scores[tool.name][1] * 3 + scores[tool.name][0] * 2,
                     tool.name,
                 ),
@@ -238,7 +260,7 @@ def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
                 if (tool.block == selected_block and tool.runtime_name.startswith("vrcforge_preview_")
                         and not tool.write
                         and "vrcforge_" + tool.runtime_name[len("vrcforge_preview_"):] == selected.runtime_name
-                        and dict(tool.input_schema) == dict(selected.input_schema)):
+                        and _same_action_input_schema(tool.input_schema, selected.input_schema)):
                     pair_names.add(tool.name)
             matched = [
                 tool for tool in records
@@ -273,14 +295,14 @@ def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
         required_names = set()
         matched_names = {t.name for t in matches}
         for preview in local.values():
-            if tokens & _READ_INTENT:
+            if preview_command or tokens & _READ_INTENT:
                 continue
             prefix = "vrcforge_preview_"
             if not preview.runtime_name.startswith(prefix) or preview.write:
                 continue
             write = local.get("vrcforge_" + preview.runtime_name[len(prefix):])
             if (write is not None and write.write
-                    and dict(preview.input_schema) == dict(write.input_schema)
+                    and _same_action_input_schema(preview.input_schema, write.input_schema)
                     and matched_names & {preview.name, write.name}):
                 required_names.update((preview.name, write.name))
         required = sorted(required_names)
@@ -295,7 +317,7 @@ def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
             "leafPath": block,
             "toolNames": sorted(t.name for t in matches),
             "requiredTools": required,
-            "companionScope": "same-leaf exact preview/write pair with identical input contract",
+            "companionScope": "same-leaf exact preview/write pair with identical action arguments",
             "sameLeafToolNames": sorted(t.name for t in records if t.block == block),
             "alreadyLoadedTools": [n for n in bundle if n not in missing],
             "reuse": not missing,

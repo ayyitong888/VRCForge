@@ -14,6 +14,7 @@ import { isInternalRuntimeUrl } from "../../lib/runtime-url";
 import { cn } from "../../lib/utils";
 import { chatFileHref, localChatFilePath, openChatFile } from "../../lib/chat-file-link";
 import { MarkdownCodeBlock } from "./markdown-code-block";
+import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 import { loadChatResourceImage, type ChatResourceImageContext as ChatResourceImageRequestContext } from "../../lib/api/chat-resource-image";
 
 export const ChatResourceImageContext = createContext<ChatResourceImageRequestContext | null>(null);
@@ -265,7 +266,28 @@ function isChatResourceImageUri(value: string): boolean {
   return /^vrcforge:\/\/scene-capture-preview\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\?context=runtime%3A[A-Za-z0-9._~-]+&revision=[1-9][0-9]*&store=[0-9a-f]{32}$/i.test(value);
 }
 
-function AuthenticatedChatResourceImage({ uri, alt, context, className }: { uri: string; alt: string; context: ChatResourceImageRequestContext; className: string }) {
+export function ChatCaptureThumbnail({ uri, alt, className, onOpen }: { uri: string; alt: string; className: string; onOpen: (image: ChatImageSource) => void }) {
+  const context = useContext(ChatResourceImageContext);
+  if (!context || !isChatResourceImageUri(uri)) return alt ? <span>{alt}</span> : null;
+  return <AuthenticatedChatResourceImage uri={uri} alt={alt} context={context} className="h-full w-full object-contain" thumbnail={{ className, onOpen }} />;
+}
+
+export function ChatCaptureResourcePreview({ uri, alt, onClose }: { uri: string; alt: string; onClose: () => void }) {
+  const context = useContext(ChatResourceImageContext);
+  if (!context || !isChatResourceImageUri(uri)) return null;
+  return <AuthenticatedChatResourceImage uri={uri} alt={alt} context={context} onClosePreview={onClose} />;
+}
+
+function AuthenticatedChatResourceImage({
+  uri, alt, context, className, thumbnail, onClosePreview,
+}: {
+  uri: string;
+  alt: string;
+  context: ChatResourceImageRequestContext;
+  className?: string;
+  thumbnail?: { className: string; onOpen: (image: ChatImageSource) => void };
+  onClosePreview?: () => void;
+}) {
   const [src, setSrc] = useState("");
   const [unavailable, setUnavailable] = useState(false);
   const { t } = useTranslation();
@@ -287,7 +309,20 @@ function AuthenticatedChatResourceImage({ uri, alt, context, className }: { uri:
   }, [context.endpoint, context.chatId, context.projectPath, context.sessionId, context.clientTurnId, uri]);
   if (!src) {
     if (unavailable) return <span role="status">{alt ? `${alt} · ${t("chat.imageUnavailable")}` : t("chat.imageUnavailable")}</span>;
+    if (onClosePreview) return <span role="status">{t("common.loading")}</span>;
     return alt ? <span>{alt}</span> : null;
   }
-  return <img className={className} src={src} alt={alt} />;
+  if (onClosePreview) return <ChatImagePreview src={src} alt={alt} onClose={onClosePreview} />;
+  const image = <img className={className} src={src} alt={alt} />;
+  return thumbnail ? (
+    <button
+      type="button"
+      className={cn("block w-full cursor-zoom-in overflow-hidden rounded-md border border-border bg-muted/40", thumbnail.className)}
+      aria-haspopup="dialog"
+      aria-label={alt ? `${t("chat.imagePreview")} · ${alt}` : t("chat.imagePreview")}
+      onClick={() => thumbnail.onOpen({ src, alt })}
+    >
+      {image}
+    </button>
+  ) : image;
 }

@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, ChevronDown, ChevronRight, CircleStop, ExternalLink, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { presentApproval } from "../../lib/approval-presentation";
@@ -27,7 +27,8 @@ import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ApprovalRevisionEditor } from "../approvals/approval-revision-editor";
-import { ChatMarkdown } from "./chat-markdown";
+import { ChatCaptureResourcePreview, ChatCaptureThumbnail, ChatMarkdown } from "./chat-markdown";
+import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 
 type AgentTimelineStep = NonNullable<AgentRuntimeResponse["steps"]>[number] & {
   actionId?: string;
@@ -128,12 +129,11 @@ export function buildAgentTimelineRows({
       <span>{t("chat.cancelled")}</span>
     </div>,
   ] : rows;
-  const finishRows = (rows: ReactNode[]): ReactNode[] => [...finishStatusRows(rows), ...((response.timeline || []).some(event => event.kind === "tool_result" && event.payload?.captures?.length) ? [] : buildCaptureImageRows(
-    [...(response.steps || []), ...(response.timeline || []).filter(event => event.kind === "tool_result" && event.payload?.captures?.length)
-      .map(event => ({ kind: "tool", result: { captures: event.payload?.captures } }))],
-    [response.plan.reply || "", ...(response.timeline || []).filter(event => event.kind === "assistant").map(event => event.payload?.summary || "")].join("\n"),
-  ))];
   const durableTimeline = (response.timeline || []) as ChatTimelineEvent[];
+  const finishRows = (rows: ReactNode[]): ReactNode[] => [
+    ...finishStatusRows(rows),
+    ...buildCaptureImageRows(response.steps, response.plan.reply, durableTimeline),
+  ];
   const durableRows = buildDurableTimelineRows(
     durableTimeline,
     elapsedSeconds,
@@ -149,6 +149,7 @@ export function buildAgentTimelineRows({
       onInterleavedUsersExpandedChange,
       renderInterleavedUserMessage,
       onOpenChatById,
+      captureText: response.plan.reply,
     },
   );
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
@@ -199,7 +200,7 @@ export function buildAgentTimelineRows({
     } else if (!fallbackAnswer && shouldSurfaceModelIdentity && planLabel && hasDurableAssistant) {
       rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t, "assistant-model"));
     }
-    return finishRows(rows);
+    return finishStatusRows(rows);
   }
   const orderedSteps = normalizeAgentSteps(response.steps);
   const legacyFallback = orderedSteps.length === 0;
@@ -293,13 +294,18 @@ export function buildAgentTimelineRows({
   return finishRows(fallbackRows);
 }
 
-/** Tool image activity is grouped by its original result; explicit Markdown remains inline. */
-export function buildCaptureImageRows(steps: AgentRuntimeResponse["steps"] = [], alreadyRendered = "", seen = new Set<string>()): ReactNode[] {
-  const rows: ReactNode[] = [];
-  for (const step of steps || []) {
-    const result = step.result as { captures?: unknown[]; preview?: unknown; angle?: unknown } | undefined;
+/** One gallery per turn, ordered by receipt. Images embedded in the answer stay inline. */
+function buildCaptureImageRows(steps: AgentRuntimeResponse["steps"] = [], alreadyRendered = "", events: ChatTimelineEvent[] = []): ReactNode[] {
+  const images: Array<{ uri: string; label: string }> = [];
+  const seen = new Set<string>();
+  const results = [
+    ...events.filter(event => event.kind === "tool_result" && event.payload.captures?.length)
+      .map(event => ({ captures: event.payload.captures })),
+    ...steps.map(step => step.result),
+  ];
+  for (const value of results) {
+    const result = value as { captures?: unknown[]; preview?: unknown; angle?: unknown } | undefined;
     if (!result || typeof result !== "object") continue;
-    const images: Array<{ uri: string; label: string }> = [];
     for (const capture of Array.isArray(result.captures) ? result.captures : [result]) {
       if (!capture || typeof capture !== "object") continue;
       const { preview, angle } = capture as { preview?: Record<string, unknown>; angle?: unknown };
@@ -310,34 +316,44 @@ export function buildCaptureImageRows(steps: AgentRuntimeResponse["steps"] = [],
       seen.add(uri);
       images.push({ uri, label: typeof angle === "string" ? angle.replace(/[\[\]\r\n]/g, " ") : "" });
     }
-    if (images.length) rows.push(<CaptureImageActivity key={images[0].uri} images={images} />);
   }
-  return rows;
+  return images.length ? [<CaptureImageActivity key={images[0].uri} images={images} />] : [];
 }
 
 function CaptureImageActivity({ images }: { images: Array<{ uri: string; label: string }> }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  const [preview, setPreview] = useState<{ src: string; label: string } | null>(null);
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => { if (preview && !dialog.current?.open) dialog.current?.showModal(); }, [preview]);
+  const [preview, setPreview] = useState<ChatImageSource | null>(null);
+  const [resourcePreview, setResourcePreview] = useState<{ uri: string; label: string; request: number } | null>(null);
+  const labels = images.map(({ label }) => label ? t(`chat.captureAngles.${label}`, label) : t("chat.imagePreview"));
+  const labeledImages = images.map((image, index) => ({
+    uri: image.uri,
+    label: labels.indexOf(labels[index]) !== labels.lastIndexOf(labels[index]) ? `${labels[index]} · ${index + 1}` : labels[index],
+  }));
   return <div data-agent-capture-images className="px-1 text-sm">
-    <button type="button" className="flex items-center gap-2 py-2 text-muted-foreground" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-      <Eye className="h-4 w-4" /><span>{t("vision.images")} · {images.length}</span>
-      {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-    </button>
+    <div className="flex flex-wrap items-center gap-x-3">
+      <button type="button" className="flex items-center gap-2 py-2 text-muted-foreground" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+        <Eye className="h-4 w-4" /><span>{t("vision.images")} · {images.length}</span>
+        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+      </button>
+      {labeledImages.map(image => (
+        <button key={image.uri} type="button" aria-haspopup="dialog" data-agent-capture-link
+          className="text-blue-600 underline-offset-2 hover:underline dark:text-blue-400"
+          onClick={() => setResourcePreview(current => ({ ...image, request: (current?.request ?? 0) + 1 }))}>
+          {image.label}
+        </button>
+      ))}
+    </div>
     {expanded ? <div className="flex gap-3 overflow-x-auto pb-2">
-      {images.map(image => <button key={image.uri} type="button" data-agent-capture-image
-        className="w-36 shrink-0 overflow-hidden rounded-lg [&_img]:my-0 [&_img]:h-24 [&_img]:w-36 [&_img]:object-cover"
-        aria-label={t("chat.imagePreview")} onClick={event => {
-          const src = event.currentTarget.querySelector("img")?.src;
-          if (src?.startsWith("data:image/png;base64,")) setPreview({ src, label: image.label });
-        }}><ChatMarkdown text={`![${image.label}](${image.uri})`} /></button>)}
+      {labeledImages.map(image => <div key={image.uri} data-agent-capture-image className="w-36 shrink-0">
+        <ChatCaptureThumbnail uri={image.uri} alt={image.label} className="h-24" onOpen={image => {
+          setResourcePreview(null);
+          setPreview(image);
+        }} />
+      </div>)}
     </div> : null}
-    <dialog ref={dialog} className="max-h-[92vh] max-w-[94vw] rounded-xl bg-background p-4 backdrop:bg-black/70" onClose={() => setPreview(null)}>
-      <button type="button" className="mb-2 block text-sm text-muted-foreground" onClick={() => dialog.current?.close()}>{t("chat.closeImagePreview")}</button>
-      {preview ? <img src={preview.src} alt={preview.label} className="max-h-[82vh] max-w-[86vw] object-contain" /> : null}
-    </dialog>
+    {preview ? <ChatImagePreview {...preview} onClose={() => setPreview(null)} /> : null}
+    {resourcePreview ? <ChatCaptureResourcePreview key={resourcePreview.request} uri={resourcePreview.uri} alt={resourcePreview.label} onClose={() => setResourcePreview(null)} /> : null}
   </div>;
 }
 
@@ -359,21 +375,13 @@ export function buildDurableTimelineRows(
     onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
     renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
     onOpenChatById?: (chatId: string) => void;
+    captureText?: string;
   } = {},
 ): ReactNode[] {
   // Lifecycle evidence stays durable; the right sidebar owns its presentation.
   // A dropped cancellation marker is replaced by the turn's status row.
-  // Older receipts keep capture previews only in full step results. Bind them
-  // to their matching result event, never to the earlier tool invocation.
-  const captureResults = buildRuntimeStepResultQueues(steps);
-  const captureEvents = events.map(event => {
-    if (event.kind !== "tool_result" || !event.payload.actionId) return event;
-    const result = captureResults.get(event.payload.actionId)?.shift() as { captures?: ChatTimelineEvent["payload"]["captures"] } | undefined;
-    return event.payload.captures?.length || !result?.captures?.length ? event
-      : { ...event, payload: { ...event.payload, captures: result.captures } };
-  });
   const presentation = buildTimelinePresentation(
-    captureEvents.filter((event) => event.kind !== "subagent"
+    events.filter((event) => event.kind !== "subagent"
       && !(options.dropCancellationMarkers && (isCancellationMarkerTimelineEvent(event)
         || (event.kind === "assistant" && event.payload?.status === "completion_unverified")))),
     elapsedSeconds,
@@ -386,8 +394,7 @@ export function buildDurableTimelineRows(
     ));
   }
   const resultQueues = buildRuntimeStepResultQueues(steps);
-  const captureSeen = new Set<string>();
-  const publicText = events.filter(event => event.kind === "assistant").map(event => event.payload.summary || "").join("\n");
+  const publicText = [options.captureText || "", ...events.filter(event => event.kind === "assistant").map(event => event.payload.summary || "")].join("\n");
   const takeFullResult = (invocation: TimelineInvocation): unknown => {
     if (!invocation.actionId) return undefined;
     const queue = resultQueues.get(invocation.actionId);
@@ -432,6 +439,7 @@ export function buildDurableTimelineRows(
           showStatus={calls.some(({ invocation }) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
           openByDefault={!options.live}
+          scrollable={calls.length > 5}
         >
           {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail, options.onOpenChatById))}
         </WorkSegmentRow>
@@ -447,11 +455,6 @@ export function buildDurableTimelineRows(
   ));
   for (const entry of presentation.entries) {
     appendMessagesBefore(entry.startedAt);
-    if (entry.type === "captures") {
-      flushToolCalls();
-      processRows.push(...buildCaptureImageRows([{ kind: "tool", result: { captures: entry.captures } }], publicText, captureSeen));
-      continue;
-    }
     if (entry.type === "assistant") {
       flushToolCalls();
       if (!includeAssistant) continue;
@@ -468,6 +471,7 @@ export function buildDurableTimelineRows(
       continue;
     }
     for (const storedInvocation of entry.invocations) {
+      appendMessagesBefore(storedInvocation.startedAt);
       // Stop ends the client observation, not the tool's side effects. Without
       // a result we can say interrupted, never success or still running.
       const invocation = options.dropCancellationMarkers
@@ -515,18 +519,12 @@ export function buildDurableTimelineRows(
         </WorkSegmentRow>
       </div>
     );
-    const collapsedMessages = interleavedMessages.length && !options.interleavedUsersExpanded
-      ? interleavedMessages.map((message) => options.renderInterleavedUserMessage?.(message) || (
-        <div key={`steer-collapsed-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-          <div className="max-w-[78%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">{message.text}</div>
-        </div>
-      ))
-      : [];
-    rows.unshift(group, ...collapsedMessages);
+    rows.unshift(group);
   }
   if (options.providerLine && finalAssistant) {
     rows.push(<div key="agent-turn-provider" className="mt-2 px-1 text-[10px] leading-relaxed text-muted-foreground/75">{options.providerLine}</div>);
   }
+  rows.push(...buildCaptureImageRows(steps, publicText, events));
   return rows;
 }
 
@@ -1321,7 +1319,7 @@ export function RunRow({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="group/run flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
+        className="group/run flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:text-foreground focus-visible:text-foreground"
       >
         <Icon className="h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0 truncate text-xs" title={title}>{title}</span>
@@ -1354,6 +1352,7 @@ function WorkSegmentRow({
   controlledOpen,
   onOpenChange,
   processHeader = false,
+  scrollable = false,
   children,
 }: {
   kind: TimelineBatchKind;
@@ -1368,6 +1367,7 @@ function WorkSegmentRow({
   controlledOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   processHeader?: boolean;
+  scrollable?: boolean;
   children: ReactNode;
 }) {
   const [localOpen, setLocalOpen] = useState(openByDefault);
@@ -1385,7 +1385,7 @@ function WorkSegmentRow({
           if (controlledOpen === undefined) setLocalOpen(next);
           onOpenChange?.(next);
         }}
-        className="group/work-segment flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 py-2 text-left transition-colors hover:bg-muted/50"
+        className="group/work-segment flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 py-2 text-left transition-colors hover:text-foreground focus-visible:text-foreground"
       >
         {processHeader ? (
           <>
@@ -1393,23 +1393,33 @@ function WorkSegmentRow({
               <span className="truncate" data-agent-turn-process-title>{title}</span>
               {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
             </span>
-            {summaryMeta ? <span className="min-w-0 truncate text-xs text-muted-foreground/70" data-agent-turn-tool-count>{summaryMeta}</span> : null}
+            {summaryMeta ? <span className="min-w-0 truncate text-xs opacity-70" data-agent-turn-tool-count>{summaryMeta}</span> : null}
             {showStatus ? <span data-agent-operation-summary-status className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
           </>
         ) : (
           <>
             {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
             <span className="min-w-0 truncate text-sm leading-relaxed" data-agent-tool-group-title>{title}</span>
-            {summaryMeta ? <span className="min-w-0 truncate text-xs text-muted-foreground/70">{summaryMeta}</span> : null}
+            {summaryMeta ? <span className="min-w-0 truncate text-xs opacity-70">{summaryMeta}</span> : null}
             {showStatus ? <span data-agent-operation-summary-status className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
             <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
               {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             </span>
           </>
         )}
-        {summary ? <span className="basis-full truncate text-xs font-normal text-muted-foreground/80" title={summary} data-agent-turn-process-summary>{summary}</span> : null}
+        {summary ? <span className="basis-full truncate text-xs font-normal opacity-80" title={summary} data-agent-turn-process-summary>{summary}</span> : null}
       </button>
-      {open ? <div className="mt-3 space-y-3 py-1" data-agent-process-content>{children}</div> : null}
+      {open ? (
+        <div
+          className={cn("mt-3 space-y-3 py-1", scrollable && "app-scrollbar max-h-44 overflow-y-auto overscroll-y-contain pr-1")}
+          role={scrollable ? "region" : undefined}
+          aria-label={scrollable ? summaryMeta : undefined}
+          tabIndex={scrollable ? 0 : undefined}
+          data-agent-process-content
+        >
+          {children}
+        </div>
+      ) : null}
     </div>
   );
 }
