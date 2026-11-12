@@ -16526,6 +16526,12 @@ class _RuntimePlannerModel:
         started_at = time.monotonic()
         try:
             while not owner.done.wait(self._POLL_SECONDS):
+                if self._runtime_cancel_requested(context):
+                    # Stop the turn immediately. The tracked worker releases its transport independently.
+                    owner.cancellation.set()
+                    raise RuntimePlannerProviderCancelledError(
+                        "Provider planning was cancelled by the runtime turn owner."
+                    )
                 interrupt_for_steer(owner, AGENT_GATEWAY.runtime_sessions, context,
                                     enabled=not _review and _deadline is None,
                                     join_seconds=self._CANCEL_JOIN_SECONDS)
@@ -16553,12 +16559,6 @@ class _RuntimePlannerModel:
                     owner.cancellation.set()
                     owner.done.wait(self._CANCEL_JOIN_SECONDS)
                     raise RuntimePlannerProviderTimeoutError("overall", overall_timeout)
-                if self._runtime_cancel_requested(context):
-                    owner.cancellation.set()
-                    owner.done.wait(self._CANCEL_JOIN_SECONDS)
-                    raise RuntimePlannerProviderCancelledError(
-                        "Provider planning was cancelled by the runtime turn owner."
-                    )
             interrupt_for_steer(owner, AGENT_GATEWAY.runtime_sessions, context,
                                 enabled=not _review and _deadline is None,
                                 join_seconds=0)

@@ -1384,6 +1384,12 @@ export function useChatRunController({
       runtimeRequestStarted = true;
       const confirmProviderConnection = bindRuntimeProviderConnection?.(targetEndpoint, turn.provider, turn.model);
       if (!background) {
+        const activeTurn = currentTurnRef.current;
+        if (activeTurn?.clientTurnId === turn.id && activeTurn.sessionId !== chatSessionId) {
+          const dispatchedTurn = { ...activeTurn, sessionId: chatSessionId };
+          currentTurnRef.current = dispatchedTurn;
+          setCurrentTurn(dispatchedTurn);
+        }
         dispatchedTurnAbortRef.current = abortController;
         streamingTurnsRef.current.set(turn.id, { chatId, confirmProviderConnection, followup });
       }

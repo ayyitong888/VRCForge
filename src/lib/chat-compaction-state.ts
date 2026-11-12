@@ -1,9 +1,19 @@
-import type { ChatCompactionState, ChatThread } from "./chat-types";
+import type { ChatCompactionState, ChatThread, ConversationItem } from "./chat-types";
 import type { AgentContextUsage } from "./api";
 
 const MAX_COMPACTION_LATENCY_MS = 24 * 60 * 60 * 1_000;
 const MAX_COMPACTION_SUMMARY_CHARACTERS = 100_000;
 const MAX_COMPACTION_ATTEMPTS = 16;
+
+export function chatCompactionStatusForDisplay(
+  state: ChatCompactionState | undefined,
+  conversation: readonly ConversationItem[],
+): ChatCompactionState | undefined {
+  if (state?.status !== "cancelled" || !state.completedAt) return state;
+  const completedAt = Date.parse(state.completedAt);
+  return conversation.some((item) => item.type === "user" && !item.composerQueued
+    && Date.parse(item.createdAt || "") > completedAt) ? undefined : state;
+}
 
 export type RevisionedChatUpdate = {
   applied: boolean;

@@ -21,6 +21,16 @@ const stateTranspiled = ts.transpileModule(stateSource, {
 }).outputText;
 const statePolicy = await import(`data:text/javascript;base64,${Buffer.from(stateTranspiled).toString("base64")}`);
 
+test("a previous compaction cancellation stops appearing after a newer message is submitted", () => {
+  const state = { generation: "old-compaction", status: "cancelled", completedAt: "2026-11-11T18:15:36.659Z" };
+  const newer = { type: "user", createdAt: "2026-11-12T14:08:46.021Z" };
+  const { chatCompactionStatusForDisplay } = statePolicy;
+  assert.equal(chatCompactionStatusForDisplay(state, [newer]), undefined);
+  assert.equal(chatCompactionStatusForDisplay(state, [{ ...newer, composerQueued: true }]), state);
+  const current = { ...state, completedAt: "2026-11-12T14:09:00.000Z" };
+  assert.equal(chatCompactionStatusForDisplay(current, [newer]), current);
+});
+
 const boundaryStart = source.indexOf("export function contextUsageBoundaryItemId");
 const usageStart = source.indexOf("export function latestContextWindowUsage");
 const usageEnd = source.indexOf("export function projectRuntimeCompactionItems", usageStart);

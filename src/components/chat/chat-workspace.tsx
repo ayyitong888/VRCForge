@@ -34,6 +34,7 @@ import { capturePreviewsForQuestion } from "../../lib/chat-timeline-presentation
 import { ChatPositionRail, type ChatPositionMarker } from "./chat-position-rail";
 import { isExternalRuntimeStream } from "../../lib/runtime-stream-owner";
 import { runtimeTurnActivityStatus } from "../../lib/runtime-run-status";
+import { chatCompactionStatusForDisplay } from "../../lib/chat-compaction-state";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -683,6 +684,7 @@ export function ChatWorkspace({
     </div>
   ) : null;
 
+  const visibleCompaction = chatCompactionStatusForDisplay(compaction, conversation);
   if (conversation.length === 0) {
     return (
       <div className="relative flex min-h-0 flex-1 flex-col">
@@ -720,7 +722,7 @@ export function ChatWorkspace({
         <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock data-chat-composer-has-queue={queued.length ? "" : undefined}>
           <div className="mx-auto max-w-3xl">
             {replyBanner}
-            <CompactionStatus state={compaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
+            <CompactionStatus state={visibleCompaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
             {activeGoalBar}
             {questionDock}
             {pendingQueue}
@@ -913,7 +915,7 @@ export function ChatWorkspace({
       <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock data-chat-composer-has-queue={queued.length ? "" : undefined}>
         <div className="mx-auto max-w-3xl">
           {replyBanner}
-          <CompactionStatus state={compaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
+          <CompactionStatus state={visibleCompaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
           {handoffSendOpen ? (
             <div className="mb-2">
               <SessionHandoffSend

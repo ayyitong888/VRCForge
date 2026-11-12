@@ -22,8 +22,8 @@ export const issueComputerUseTurnGrant = async () => null;
 export const requestChatTitle = async () => ({title:'Fixture'});
 export const recordAgentRunQueued = async () => ({ok:true,accepted:true,mode:'followup',queueId:'q',sequence:1});
 export const requestAgentRunCancel = (_endpoint,payload) => new Promise((resolve,reject) => {window.cancelRequests.push(payload);window.cancelResolve=resolve;window.cancelReject=reject;});
-export const sendAgentMessage = (_endpoint,_message,_session,_history,_agent,options) => new Promise((resolve,reject) => {
- window.sendCount++;window.sendSignal=options.signal;window.sendResolve=resolve;window.sendReject=reject;
+export const sendAgentMessage = (_endpoint,_message,session,_history,_agent,options) => new Promise((resolve,reject) => {
+ window.sendCount++;window.sentSession=session;window.sendSignal=options.signal;window.sendResolve=resolve;window.sendReject=reject;
  options.signal.addEventListener('abort',()=>reject(new Error('Request cancelled.')),{once:true});
 });
 export const fetchAgentRunTimeline = async (_endpoint,sessionId,clientTurnId,afterSequence) => {
@@ -64,6 +64,7 @@ function Harness(){
  window.controller=controller;window.chats=chats;window.delta=delta;
  window.failStatusRead=()=>window.sendReject(new AgentTurnDeliveryUnconfirmedError('temporary read failure'));
  window.start=()=>{window.turnPromise=controller.submitTurn({id:'cid',text:'fixture only',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',sessionId:'session',planMode:false});};
+ window.startBranch=(id)=>{window.turnPromise=controller.runTurnNow('owner',{id,text:'fixture only',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',planMode:false},{baseItems:[],sessionId:''});};
  window.replace=(items,nextRuns)=>{latest.current=[{...initial,items}];setChats(latest.current);setRuns(nextRuns);};
  window.replaceChat=(chat,nextRuns)=>{latest.current=[chat];setChats(latest.current);setRuns(nextRuns);};
  window.setRuns=setRuns;
@@ -116,6 +117,17 @@ try{
  assert.equal(await page.evaluate(()=>window.cancelRequests.length),0,'local preparation Stop does not claim to cancel an unadmitted backend turn');
  assert.equal(await page.evaluate(()=>window.chats[0].items.some(i=>i.type==='agent'&&i.response.status==='cancelled')),false,'local preparation interruption does not invent a backend cancelled receipt');
  console.log('PASS Stop during context preparation prevents runtime admission');
+ for (const id of ['edit-fixture', 'retry-fixture']) {
+   await reload();
+   await page.evaluate(id=>window.startBranch(id),id);
+   await page.waitForFunction(()=>window.sendCount===1);
+   await page.evaluate(()=>window.controller.stopCurrentRun());
+   const result=await page.evaluate(()=>({send:window.sentSession,cancel:window.cancelRequests[0]}));
+   assert.equal(result.send, 'session-'+id);
+   assert.equal(result.cancel.sessionId, result.send, 'Stop must use the dispatched branch session');
+   assert.equal(result.cancel.clientTurnId, id);
+ }
+ console.log('PASS edited and retried messages cancel their dispatched session');
  await reload();
  await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);await page.evaluate(()=>window.controller.stopCurrentRun());await page.waitForTimeout(50);
  assert.equal(await page.evaluate(()=>window.sendSignal.aborted),false,'pending cancel acknowledgement must not abort the owned response reader');

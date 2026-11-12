@@ -649,6 +649,46 @@ def test_model_worker_routes_three_visual_journey_samples_through_one_turn_owner
     assert model.active_call_count() == 0
 
 
+def test_cancelled_turn_finishes_while_provider_transport_unwinds(monkeypatch) -> None:
+    config = fixture_config()
+    model = dashboard_server._RuntimePlannerModel(SimpleNamespace(current_config=lambda: config))
+    model._CANCEL_JOIN_SECONDS = 5
+    started, cancel, signalled, release, stopped = (threading.Event() for _ in range(5))
+    errors = []
+
+    def request(_settings, _prompt, *, cancel_event, **_kwargs):
+        started.set()
+        assert cancel_event.wait(2)
+        signalled.set()
+        assert release.wait(3)
+        raise RuntimeError("transport closed")
+
+    def run():
+        try:
+            model.plan("cancel while waiting for model")
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", lambda _: SimpleNamespace())
+    monkeypatch.setattr(dashboard_server, "request_llm_plan_with_metadata", request)
+    monkeypatch.setattr(model, "_runtime_cancel_requested", lambda _: cancel.is_set())
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert started.wait(2)
+        cancel.set()
+        assert signalled.wait(1)
+        assert stopped.wait(1), "Stop must finish before the provider transport closes"
+        assert isinstance(errors[0], dashboard_server.RuntimePlannerProviderCancelledError)
+        assert model.active_call_count() == 1
+    finally:
+        release.set()
+        thread.join(3)
+        assert model.shutdown(1)["ok"]
+
+
 def test_four_cancelled_provider_workers_release_capacity_and_fifth_enters() -> None:
     binding = dashboard_server._RuntimePlannerProviderTurnBinding()
     config = fixture_config()
@@ -673,6 +713,9 @@ def test_four_cancelled_provider_workers_release_capacity_and_fifth_enters() -> 
                 stop_requested = False
                 with pytest.raises(dashboard_server.RuntimePlannerProviderCancelledError):
                     model.plan("cancel")
+                deadline = time.monotonic() + 1
+                while model.active_call_count() and time.monotonic() < deadline:
+                    time.sleep(0.005)
                 assert model.active_call_count() == 0
     assert calls == 5
 
