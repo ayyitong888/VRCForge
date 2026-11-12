@@ -6,6 +6,8 @@ import { applyAgentRuntimeDeltaToStreamingItem, elapsedSecondsFromTimeline } fro
 import { materializeRuntimeTimeline, mergeRuntimeTimelines } from "../lib/chat-timeline-presentation";
 import { coalesceRuntimeTurnStreams, isExternalRuntimeStream, QUESTION_CONTINUATION_STREAM_PREFIX } from "../lib/runtime-stream-owner";
 
+import { questionContinuationOwner } from "../lib/runtime-scope";
+
 export { RUNTIME_ACTIVITY_STREAM_PREFIX } from "../lib/runtime-stream-owner";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
@@ -168,12 +170,16 @@ export function projectAgentQuestionContinuation(
 
 const ACTIVE_QUESTION_CONTINUATION_STATUSES = new Set(["running", "queued", "cancelling"]);
 
+export function runtimeContinuationKey(sessionId: string, turnId: string): string {
+  return JSON.stringify([sessionId, turnId]);
+}
+
 /** Project only server-confirmed active question continuations into their owning chat. */
 export function projectQuestionContinuationActivity(
   chat: ChatThread,
   questions: AgentQuestion[],
   runs: AgentRuntimeRun[],
-  settledClientTurnIds: ReadonlySet<string> = new Set(),
+  settledContinuationKeys: ReadonlySet<string> = new Set(),
 ): ChatThread {
   const active = new Map<string, Extract<ConversationItem, { type: "streaming" }>>();
   for (const source of questions) {
@@ -183,9 +189,10 @@ export function projectQuestionContinuationActivity(
     const continuation = question.runtimeContinuation;
     const status = String(continuation?.status || "").toLowerCase();
     const clientTurnId = String(continuation?.clientTurnId || "").trim();
-    if (!clientTurnId || settledClientTurnIds.has(clientTurnId) || !ACTIVE_QUESTION_CONTINUATION_STATUSES.has(status)) continue;
+    if (!clientTurnId || !ACTIVE_QUESTION_CONTINUATION_STATUSES.has(status)) continue;
     const turnSessionId = continuation?.sessionId || question.sessionId;
-    if (turnSessionId !== chat.sessionId) continue;
+    if (turnSessionId !== chat.sessionId
+      || settledContinuationKeys.has(runtimeContinuationKey(chat.sessionId, clientTurnId))) continue;
     chat = coalesceRuntimeTurnStreams(chat, clientTurnId);
     const prior = chat.items.find((candidate) => candidate.type === "streaming" && candidate.clientTurnId === clientTurnId);
     const id = prior?.id || `${QUESTION_CONTINUATION_STREAM_PREFIX}${clientTurnId}`;
@@ -238,9 +245,10 @@ export function applyQuestionContinuationDelta(
   const clientTurnId = String(delta.clientTurnId || "").trim();
   const sessionId = String(delta.sessionId || "").trim();
   if (!clientTurnId || !sessionId) return false;
-  const ownerChat = chats.find((chat) => chat.sessionId === sessionId
+  const owners = chats.filter((chat) => chat.sessionId === sessionId
     && chat.items.some((item) => item.type === "streaming" && item.clientTurnId === clientTurnId));
-  if (!ownerChat) return false;
+  if (owners.length !== 1) return false;
+  const [ownerChat] = owners;
   const streams = ownerChat.items.filter((item) => item.type === "streaming" && item.clientTurnId === clientTurnId);
   const owner = streams.find((item) => !isExternalRuntimeStream(item)) || streams[0];
   if (!owner?.id.startsWith(QUESTION_CONTINUATION_STREAM_PREFIX)) return false;
@@ -290,13 +298,13 @@ export function useQuestionContinuationActivity({
   questions,
   runs,
   updateChat,
-  settledClientTurnIds,
+  settledContinuationKeys,
 }: {
   chats: ChatThread[];
   questions: AgentQuestion[];
   runs: AgentRuntimeRun[];
   updateChat: (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean;
-  settledClientTurnIds: ReadonlySet<string>;
+  settledContinuationKeys: ReadonlySet<string>;
 }) {
   const chatsRef = useRef(chats);
   const updateChatRef = useRef(updateChat);
@@ -304,13 +312,21 @@ export function useQuestionContinuationActivity({
   updateChatRef.current = updateChat;
 
   useEffect(() => {
-    for (const chat of chats) {
-      const next = projectQuestionContinuationActivity(chat, questions, runs, settledClientTurnIds);
+    const questionsByOwner = new Map<ChatThread, AgentQuestion[]>();
+    for (const question of questions) {
+      const owner = questionContinuationOwner(chats, question);
+      if (!owner) continue;
+      const owned = questionsByOwner.get(owner);
+      if (owned) owned.push(question);
+      else questionsByOwner.set(owner, [question]);
+    }
+    for (const [chat, owned] of questionsByOwner) {
+      const next = projectQuestionContinuationActivity(chat, owned, runs, settledContinuationKeys);
       if (next !== chat) updateChat(chat.id, (current) => (
-        projectQuestionContinuationActivity(current, questions, runs, settledClientTurnIds)
+        projectQuestionContinuationActivity(current, owned, runs, settledContinuationKeys)
       ));
     }
-  }, [chats, questions, runs, updateChat, settledClientTurnIds]);
+  }, [chats, questions, runs, updateChat, settledContinuationKeys]);
 
   return useCallback((delta: AgentRuntimeDeltaEvent) => {
     const consumed = applyRuntimeSteerConsumptionDelta(chatsRef.current, updateChatRef.current, delta);
@@ -323,17 +339,28 @@ type UseRuntimeTurnContinuationParams = {
   chats: ChatThread[];
   appendToChat: (chatId: string, item: ConversationItem) => void;
   updateChat?: (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean;
-  onContinuation?: (event: RuntimeTurnEvent) => void;
+  onContinuation?: (event: RuntimeTurnEvent, owner: ChatThread) => void;
 };
+
+function continuationMatchesResponse(event: RuntimeTurnEvent, response: AgentRuntimeResponse): boolean {
+  const responseSessionId = response.sessionId || response.session_id;
+  if (responseSessionId && responseSessionId !== event.sessionId) return false;
+  const clientTurnId = event.clientTurnId?.trim();
+  if (clientTurnId && response.clientTurnId) return response.clientTurnId === clientTurnId;
+  return Boolean(event.turnId && (response.turnId || response.turn_id) === event.turnId);
+}
+
+function continuationMatchesStream(event: RuntimeTurnEvent, item: ConversationItem): boolean {
+  return isExternalRuntimeStream(item) && item.clientTurnId === event.clientTurnId
+    && (!item.turnId || !event.turnId || item.turnId === event.turnId);
+}
 
 export function runtimeContinuationDeliveryState(
   event: RuntimeTurnEvent,
   items: ConversationItem[],
 ): "append" | "defer" | "stored" | "replace-failed" {
   const clientTurnId = event.clientTurnId?.trim();
-  const matches = (item: ConversationItem) => item.type === "agent"
-    && ((clientTurnId && item.response.clientTurnId === clientTurnId)
-      || (item.response.turnId || item.response.turn_id) === event.turnId);
+  const matches = (item: ConversationItem) => item.type === "agent" && continuationMatchesResponse(event, item.response);
   if (event.continuationSource === "foreground_completed"
     && items.some((item) => item.type === "streaming" && clientTurnId && item.clientTurnId === clientTurnId
       && !isExternalRuntimeStream(item))) {
@@ -421,19 +448,27 @@ export function useRuntimeTurnContinuationDelivery({
     if (!event) {
       return false;
     }
-    // Async replay may create a fresh backend turn after a crash, but the
-    // continuation client-turn id is deterministic for the owned Shell or
-    // sub-agent task. Use it as the visible exactly-once key when available.
+    // A foreground retry can keep its client id and receive a new backend
+    // turn. Async continuations instead replay one logical delivery across runs.
     const continuationId = event.clientTurnId?.trim() || event.turnId!;
-    const key = `${event.sessionId}:${continuationId}`;
+    const key = event.continuationSource === "foreground_completed"
+      ? JSON.stringify([event.sessionId, continuationId, event.turnId])
+      : runtimeContinuationKey(event.sessionId!, continuationId);
     if (deliveredRef.current.has(key)) {
       return true;
     }
-    onContinuationRef.current?.(event);
     const candidates = chatsRef.current.filter((chat) => chat.sessionId === event.sessionId);
     const exactOwners = candidates.filter((chat) => chat.items.some((item) =>
       (item.type === "user" || item.type === "streaming") && item.clientTurnId === event.clientTurnId));
-    const ownerChat = candidates.length === 1 ? candidates[0] : exactOwners.length === 1 ? exactOwners[0] : undefined;
+    const questionId = event.continuationSource === "question_answered"
+      ? event.clientTurnId?.match(/:question:([^:]+)(?::feedback:[1-9]\d*)?$/)?.[1]
+      : undefined;
+    const ownerChat = questionId
+      ? questionContinuationOwner(candidates, {
+        questionId, sessionId: event.sessionId,
+        runtimeContinuation: { questionId, sessionId: event.sessionId, clientTurnId: event.clientTurnId },
+      })
+      : candidates.length === 1 ? candidates[0] : exactOwners.length === 1 ? exactOwners[0] : undefined;
     if (!ownerChat) {
       pendingRef.current.set(key, event);
       while (pendingRef.current.size > MAX_PENDING_CONTINUATIONS) {
@@ -459,14 +494,17 @@ export function useRuntimeTurnContinuationDelivery({
       }
     }
     pendingRef.current.delete(key);
+    const finish = () => {
+      onContinuationRef.current?.(event, ownerChat);
+      return true;
+    };
     if (deliveryState === "stored") {
       updateChatRef.current?.(ownerChat.id, (chat) => {
-        const streams = chat.items.filter((item) => isExternalRuntimeStream(item) && item.clientTurnId === event.clientTurnId);
+        const streams = chat.items.filter((item) => continuationMatchesStream(event, item));
         if (!streams.length) return chat;
         const timeline = streams.flatMap((item) => item.type === "streaming" ? item.timeline || [] : []);
         return { ...chat, items: chat.items.filter((item) => !streams.includes(item)).map((item) => item.type === "agent"
-          && ((event.clientTurnId && item.response.clientTurnId === event.clientTurnId)
-            || (item.response.turnId || item.response.turn_id) === event.turnId)
+          && continuationMatchesResponse(event, item.response)
           ? { ...item, timeline: mergeRuntimeTimelines(timeline, materializeRuntimeTimeline(item.response), item.timeline || []) }
           : item) };
       });
@@ -484,22 +522,24 @@ export function useRuntimeTurnContinuationDelivery({
       const response = responseFromRuntimeTurnEvent(event);
       const elapsedSeconds = elapsedSecondsFromTimeline(response.timeline);
       const completedAt = event.completedAt;
-      const replaced = updateChatRef.current?.(ownerChat.id, (chat) => ({
-        ...chat,
-        items: chat.items.map((item) => item.type === "agent"
-          && ((event.clientTurnId?.trim() && item.response.clientTurnId === event.clientTurnId.trim())
-            || (item.response.turnId || item.response.turn_id) === event.turnId)
-          ? { ...item, response, completedAt, ...(elapsedSeconds === undefined ? {} : { elapsedSeconds }) }
-          : item),
-      }));
-      if (replaced) return true;
+      const replaced = updateChatRef.current?.(ownerChat.id, (chat) => {
+        const streams = chat.items.filter((item) => continuationMatchesStream(event, item));
+        const streamTimeline = streams.flatMap((item) => item.type === "streaming" ? item.timeline || [] : []);
+        return { ...chat, items: chat.items.filter((item) => !streams.includes(item)).map((item) => {
+          if (item.type !== "agent" || !continuationMatchesResponse(event, item.response)) return item;
+          const previousTurnId = item.response.turnId || item.response.turn_id;
+          const sameRun = !previousTurnId || previousTurnId === event.turnId || previousTurnId === event.clientTurnId;
+          const timeline = mergeRuntimeTimelines(sameRun ? item.timeline || [] : [], streamTimeline, materializeRuntimeTimeline(response));
+          return { ...item, response, timeline, completedAt, elapsedSeconds: elapsedSeconds ?? (sameRun ? item.elapsedSeconds : undefined) };
+        }) };
+      });
+      if (replaced) return finish();
     }
     if (deliveryState === "append" || deliveryState === "replace-failed") {
       const response = responseFromRuntimeTurnEvent(event);
       const elapsedSeconds = elapsedSecondsFromTimeline(response.timeline);
       const completedAt = event.completedAt;
-      const externalStream = ownerChat.items.find((item) => isExternalRuntimeStream(item)
-        && item.clientTurnId === event.clientTurnId);
+      const externalStream = ownerChat.items.find((item) => continuationMatchesStream(event, item));
       if (externalStream && updateChatRef.current) {
         updateChatRef.current(ownerChat.id, (chat) => {
           chat = coalesceRuntimeTurnStreams(chat, event.clientTurnId!);
@@ -511,7 +551,7 @@ export function useRuntimeTurnContinuationDelivery({
             ...(completedAt ? { completedAt } : {}),
           }] };
         });
-        return true;
+        return finish();
       }
       appendToChatRef.current(ownerChat.id, {
         // Keep the app-owned identifier outside the bridge's secret-prefix
@@ -523,7 +563,7 @@ export function useRuntimeTurnContinuationDelivery({
         ...(completedAt ? { completedAt } : {}),
       });
     }
-    return true;
+    return finish();
   }, []);
 
   useEffect(() => {

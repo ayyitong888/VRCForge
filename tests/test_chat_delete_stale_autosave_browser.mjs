@@ -96,5 +96,15 @@ try{
  assert.equal(cleanupFailure.error,"Chat record deleted, but runtime history cleanup is incomplete: runtime cleanup failed");
  await page.evaluate(()=>window.sessions.persistChatsNow());
  assert.equal(await page.evaluate(()=>window.__error),cleanupFailure.error,"a later successful chat save must not clear a runtime cleanup failure");
+ chats=[makeChat("alias-deleted","shared-session","Delete one alias"),makeChat("alias-survivor","shared-session","Keep this alias")];
+ runtimeDeleteStatus=200;
+ await page.reload();
+ await page.waitForFunction(()=>window.sessions?.chatStorageReady===true&&window.sessions.chats.some(chat=>chat.id==="alias-deleted"));
+ await page.evaluate(()=>window.sessions.deleteChatPermanently("alias-deleted"));
+ assert.deepEqual(chats.map(chat=>chat.id),["alias-survivor"],"only the chosen chat is deleted durably");
+ assert.deepEqual(runtimeDeletes,["session-target"],"a surviving alias keeps the shared runtime session");
+ await page.evaluate(()=>window.sessions.deleteChatPermanently("alias-survivor"));
+ assert.deepEqual(chats,[]);
+ assert.deepEqual(runtimeDeletes,["session-target","shared-session"],"removing the last alias cleans up runtime history");
  console.log(JSON.stringify({status:"passed",staleRequest:posts[0],stable422AutosaveRequests:1,explicitRetry,transientRetryStatuses:posts.slice(2,4).map(post=>post.status),runtimeDeletes,localIdsAfterCleanupFailure:cleanupFailure.ids,cleanupFailure:cleanupFailure.error}));
 }finally{await browser?.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

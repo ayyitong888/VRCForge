@@ -189,14 +189,16 @@ class AgentRuntimeRunLedger:
         return safe_entry
 
     @staticmethod
-    def _turn_key(event: dict[str, Any]) -> str:
+    def _turn_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
         session = str(event.get("sessionId") or "").strip()
         client = str(event.get("clientTurnId") or "").strip()
         turn = str(event.get("turnId") or "").strip()
         # One host client id can be reused for multiple server-side turns.
         # Server turn identity owns lifecycle and timeline grouping; retain
         # client id only for older rows that did not persist a turn id.
-        return f"{session}\0{turn or client}" if session and (turn or client) else ""
+        if session and turn:
+            return (session, "turn", turn)
+        return (session, "client", client) if session and client else None
 
     def append_timeline_event(
         self,
@@ -216,9 +218,9 @@ class AgentRuntimeRunLedger:
         self.append({
             "event": "runtime_turn_timeline_event",
             "status": "running",
-            "sessionId": str(session_id or "")[:180],
-            "turnId": str(turn_id or "")[:180],
-            "clientTurnId": str(client_turn_id or "")[:240],
+            "sessionId": session_id,
+            "turnId": turn_id,
+            "clientTurnId": client_turn_id,
             "provider": str(provider or "")[:120],
             "providerLabel": str(provider_label or "")[:160],
             "model": str(model or "")[:160],
@@ -252,10 +254,10 @@ class AgentRuntimeRunLedger:
     def recover_interrupted_runs(self) -> int:
         """Materialize old, non-terminal runs as durable foreground continuations."""
         with self.shared_state_lock:
-            starts: dict[str, dict[str, Any]] = {}
-            timelines: dict[str, list[dict[str, Any]]] = {}
-            terminals: set[str] = set()
-            interrupted: set[str] = set()
+            starts: dict[tuple[str, str, str], dict[str, Any]] = {}
+            timelines: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+            terminals: set[tuple[str, str, str]] = set()
+            interrupted: set[tuple[str, str, str]] = set()
             continuation_rows: deque[tuple[int, dict[str, Any]]] = deque(maxlen=512)
             shell_states: dict[str, dict[str, Any]] = {}
             start_times: dict[tuple[str, str], str] = {}
@@ -660,8 +662,6 @@ class AgentRuntimeRunLedger:
                 limit=max(limit * 8, 100),
                 copy_events=not notification_only,
             )
-        runs_by_key: dict[str, dict[str, Any]] = {}
-        event_count_by_key: dict[str, int] = {}
         filtered_events: list[dict[str, Any]] = []
         for event in events:
             related_by_approval = bool(related_approval_ids.intersection(event_approval_ids(event)))
@@ -672,11 +672,39 @@ class AgentRuntimeRunLedger:
             if not project_matches(str(event.get("projectRoot") or "")):
                 continue
             filtered_events.append(event)
-            key = (
-                str(event.get("clientTurnId") or "").strip()
-                or str(event.get("turnId") or "").strip()
-                or f"event:{event.get('id') or len(filtered_events)}"
-            )
+
+        runs_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+        event_count_by_key: dict[tuple[str, str, str], int] = {}
+        known_runs: dict[tuple[str, str], set[tuple[str, str, str]]] = {}
+        for event in filtered_events:
+            session = str(event.get("sessionId") or "").strip()
+            client = str(event.get("clientTurnId") or "").strip()
+            turn = str(event.get("turnId") or "").strip()
+            if session and client:
+                key = (session, "turn", turn) if turn else (session, "client", client)
+                if turn:
+                    known_runs.setdefault((session, client), set()).add(key)
+                known_runs.setdefault(("", client), set()).add(key)
+
+        for index, event in enumerate(filtered_events):
+            session = str(event.get("sessionId") or "").strip()
+            client = str(event.get("clientTurnId") or "").strip()
+            turn = str(event.get("turnId") or "").strip()
+            if session and turn:
+                key = (session, "turn", turn)
+            elif client:
+                candidates = known_runs.get((session, client), set())
+                if not session:
+                    # Legacy client-only cancellation may annotate an unambiguous
+                    # run, but must never overwrite a different session's row.
+                    turns = {key for key in candidates if key[1] == "turn"}
+                    if turns and len({key[0] for key in candidates}) == 1:
+                        candidates = turns
+                    if len(candidates) != 1 and event.get("event") == "runtime_turn_cancel_requested":
+                        continue
+                key = next(iter(candidates)) if len(candidates) == 1 else (session, "client", client)
+            else:
+                key = (session, "event", str(event.get("id") or index))
             event_count_by_key[key] = event_count_by_key.get(key, 0) + 1
             previous = runs_by_key.get(key, {})
             merged = {**previous, **event}
@@ -865,8 +893,8 @@ class AgentRuntimeRunLedger:
                 # mutates the cached raw rows or their nested timeline data.
                 copy_events=False,
             )
-        by_key: dict[str, dict[str, Any]] = {}
-        order: list[str] = []
+        by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        order: list[tuple[str, str]] = []
         for event in events:
             continuation = _terminal_continuation(event)
             if not isinstance(continuation, dict):
@@ -879,7 +907,7 @@ class AgentRuntimeRunLedger:
             started_at = start_times.get((session_id, turn_id))
             if started_at:
                 continuation["startedAt"] = started_at
-            key = f"{session_id}:{client_turn_id or turn_id}"
+            key = (session_id, client_turn_id or turn_id)
             if key not in by_key:
                 order.append(key)
             # Older receipt rows can replace a terminal projection without

@@ -105,6 +105,9 @@ from optimization_service import (
 )
 from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO_SKILL_WRITE_INPUT_SCHEMA
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_runtime_turn_identity import (
+    MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH, continuation_client_turn_id,
+)
 from agent_native_history_store import NativeHistoryStore
 from agent_runtime_native_turn import NativeRuntimeTurn
 from agent_progress_evidence import accepted_receipt, completion_checks, matched_checks
@@ -1808,15 +1811,14 @@ class AgentGateway:
 
     @staticmethod
     def _question_continuation_client_turn_id(question_id: str, seed: Mapping[str, Any]) -> str:
-        marker = ":question:" + question_id
         prefix = str(seed.get("clientTurnId") or "")
         try:
             feedback_revision = int(seed.get("_questionFeedbackRevision") or 0)
         except (TypeError, ValueError):
             feedback_revision = 0
-        if feedback_revision > 0 and str(seed.get("_questionKind") or seed.get("requestedKind") or "") == "visual_checkpoint":
-            marker += ":feedback:" + str(feedback_revision)
-        return prefix[:240 - len(marker)] + marker
+        if str(seed.get("_questionKind") or seed.get("requestedKind") or "") != "visual_checkpoint":
+            feedback_revision = 0
+        return continuation_client_turn_id(prefix, "question", question_id, feedback_revision=feedback_revision)
 
     def _resume_runtime_task_after_question(
         self,
@@ -5238,8 +5240,12 @@ class AgentGateway:
     ) -> dict[str, Any]:
         params = dict(params or {})
         params.pop("_runtimeAdmitted", None)
-        self._signal_background_activity("runtime_message")
         try:
+            session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
+            client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
+            if len(session_id) > MAX_RUNTIME_SESSION_ID_LENGTH or len(client_turn_id) > MAX_RUNTIME_CLIENT_TURN_ID_LENGTH:
+                raise AgentGatewayError("Runtime sessionId or clientTurnId exceeds its length limit.", status_code=400)
+            self._signal_background_activity("runtime_message")
             with self.runtime_planner.bind_turn(params) as metadata:
                 params["_contextCompactionLimit"] = metadata.verified_context_limit
                 params["_plannerAttemptLabel"] = metadata.planner_label
@@ -5421,11 +5427,11 @@ class AgentGateway:
             return None
         original_client_turn_id = str(seed.get("clientTurnId") or "").strip()
         suffix = {"shell_process_finished": "shell", "sub_agent_finished": "subagent", "question_answered": "question"}[source]
-        client_turn_id = (
-            f"{original_client_turn_id}:{suffix}:{stable_id}"
-            if original_client_turn_id
-            else f"{suffix}:{stable_id}"
-        )[:240]
+        client_turn_id = continuation_client_turn_id(original_client_turn_id, suffix, stable_id)
+        if source == "question_answered":
+            client_turn_id = str(seed.get("_interruptedRuntimeClientTurnId") or "").strip() or (
+                self._question_continuation_client_turn_id(stable_id, seed)
+            )
         notice = summarize_text(
             summary
             or (
@@ -9823,60 +9829,57 @@ class AgentGateway:
     ) -> dict[str, Any]:
         # Internal task cleanup also owns resources after its runtime turn ended.
         # Public Stop must first validate the active identity in request_runtime_cancel.
-        with self._lock:
-            for continuation in self._runtime_run_ledger.shell_continuation_states(limit=0):
-                if continuation.get("shellContinuationState") != "pending":
-                    continue
-                if (session_id and continuation.get("sessionId") != session_id
-                        or turn_id and continuation.get("turnId") != turn_id
-                        or client_turn_id and continuation.get("clientTurnId") != client_turn_id):
-                    continue
-                self._runtime_run_ledger._append_shell_continuation_state_locked(
-                    continuation, "interrupted", reason="user_stop",
+        session_wide = bool(session_id and not (turn_id or client_turn_id))
+        resolved_session_id, resolved_turn_id, resolved_client_turn_id = session_id, turn_id, client_turn_id
+        if not session_wide and not (session_id and turn_id and client_turn_id):
+            matching = [
+                run for run in self._runtime_run_ledger.list_runs(limit=200, session_id=session_id,
+                                                                 client_turn_id=client_turn_id).get("runs", [])
+                if run.get("sessionId") and run.get("turnId") and run.get("clientTurnId")
+                and (not session_id or run["sessionId"] == session_id)
+                and (not turn_id or run["turnId"] == turn_id)
+                and (not client_turn_id or run["clientTurnId"] == client_turn_id)
+            ]
+            if len(matching) == 1:
+                owner = matching[0]
+                resolved_session_id, resolved_turn_id, resolved_client_turn_id = (
+                    owner["sessionId"], owner["turnId"], owner["clientTurnId"],
                 )
-        cancelled_question_seeds = self.questions.cancel_runtime_questions(
-            session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id
-        )
-        for seed in cancelled_question_seeds:
-            NativeRuntimeTurn.cancel_question(self._runtime_session_state, seed)
+        runtime_scope_known = session_wide or bool(resolved_session_id and resolved_turn_id and resolved_client_turn_id)
+        if runtime_scope_known:
+            with self._lock:
+                for continuation in self._runtime_run_ledger.shell_continuation_states(limit=0):
+                    if continuation.get("shellContinuationState") != "pending":
+                        continue
+                    if (continuation.get("sessionId") != resolved_session_id
+                            or (not session_wide and (continuation.get("turnId") != resolved_turn_id
+                                or continuation.get("clientTurnId") != resolved_client_turn_id))):
+                        continue
+                    self._runtime_run_ledger._append_shell_continuation_state_locked(
+                        continuation, "interrupted", reason="user_stop",
+                    )
+            cancelled_question_seeds = self.questions.cancel_runtime_questions(
+                session_id=resolved_session_id, turn_id=resolved_turn_id, client_turn_id=resolved_client_turn_id,
+            )
+            for seed in cancelled_question_seeds:
+                NativeRuntimeTurn.cancel_question(self._runtime_session_state, seed)
         event = {
             "event": "runtime_turn_cancel_requested",
             "status": "cancel_requested",
-            "sessionId": session_id,
-            "turnId": turn_id,
-            "clientTurnId": client_turn_id,
+            "sessionId": resolved_session_id,
+            "turnId": resolved_turn_id,
+            "clientTurnId": resolved_client_turn_id,
             "reason": reason,
             "cancellationReason": reason,
         }
         cancelled_desktop_action_ids: list[str] = []
         cancelled_shell_session_ids: list[str] = []
-        resolved_turn_id = turn_id
-        resolved_client_turn_id = client_turn_id
-        matching_run = None
-        if (turn_id or client_turn_id) and not (session_id and turn_id and client_turn_id):
-            matching_run = next(
-                (
-                    run
-                    for run in self._runtime_run_ledger.list_runs(limit=200).get("runs", [])
-                    if (not session_id or str(run.get("sessionId") or "") == session_id)
-                    and (not turn_id or str(run.get("turnId") or "") == turn_id)
-                    and (not client_turn_id or str(run.get("clientTurnId") or "") == client_turn_id)
-                ),
-                None,
-            )
-        if not resolved_turn_id:
-            resolved_turn_id = str((matching_run or {}).get("turnId") or "")
-        if resolved_turn_id and not resolved_client_turn_id:
-            resolved_client_turn_id = str((matching_run or {}).get("clientTurnId") or "")
-        resolved_session_id = session_id or str((matching_run or {}).get("sessionId") or "")
         shell_owner_ids: set[str] = set()
-        if resolved_turn_id:
+        if runtime_scope_known and resolved_turn_id:
             shell_owner_ids.add(
                 self._runtime_shell_owner(resolved_turn_id, resolved_client_turn_id, resolved_session_id)
             )
-        elif resolved_client_turn_id:
-            shell_owner_ids.add(self._runtime_shell_owner("", resolved_client_turn_id, resolved_session_id))
-        elif resolved_session_id:
+        elif session_wide:
             shell_owner_ids.add(resolved_session_id)
             shell_owner_ids.add(self._runtime_shell_owner("", "", resolved_session_id))
             for run in self._runtime_run_ledger.list_runs(limit=200).get("runs", []):
@@ -9889,17 +9892,25 @@ class AgentGateway:
                 )
         for shell_owner_id in shell_owner_ids:
             cancelled_shell_session_ids.extend(self.shell.cancel_owner(shell_owner_id))
-        for action in self._desktop.list_active_desktop_actions(limit=32).get("actions", []):
+        actions = self._desktop.list_active_desktop_actions(limit=32).get("actions", [])
+        desktop_turn_actions = [
+            action for action in actions
+            if resolved_client_turn_id and str(action.get("clientTurnId") or "") == resolved_client_turn_id
+            and (not resolved_session_id or str(action.get("sessionId") or "") == resolved_session_id)
+            and (not resolved_turn_id or str(action.get("turnId") or "") == resolved_turn_id)
+        ]
+        # A legacy client-only Stop may reach a standalone action with no
+        # runtime row. Require a single ownership scope before cancelling it.
+        if not runtime_scope_known and len({
+            (str(action.get("sessionId") or ""), str(action.get("turnId") or ""))
+            for action in actions if str(action.get("clientTurnId") or "") == resolved_client_turn_id
+        }) > 1:
+            desktop_turn_actions = []
+        desktop_turn_action_ids = {str(action.get("actionId") or "") for action in desktop_turn_actions}
+        for action in actions:
             action_id = str(action.get("actionId") or "")
-            same_turn = bool(
-                resolved_client_turn_id
-                and str(action.get("clientTurnId") or "") == resolved_client_turn_id
-            )
-            same_session = bool(
-                session_id
-                and not (turn_id or client_turn_id)
-                and str(action.get("sessionId") or "") == session_id
-            )
+            same_turn = action_id in desktop_turn_action_ids
+            same_session = session_wide and str(action.get("sessionId") or "") == session_id
             if not action_id or not (same_turn or same_session):
                 continue
             try:
@@ -9908,7 +9919,7 @@ class AgentGateway:
             except AgentGatewayError:
                 continue
         subagent_cancel_result = self._cancel_runtime_subagents(
-            session_id=resolved_session_id,
+            session_id=resolved_session_id if runtime_scope_known else "",
             turn_id=resolved_turn_id,
             client_turn_id=resolved_client_turn_id,
         )
@@ -9917,7 +9928,7 @@ class AgentGateway:
         subagent_lookup_failed = subagent_cancel_result["lookupFailed"]
         # An idle browser can wait for its owned process to exit. Signal the
         # rest of the turn's work before doing that synchronous teardown.
-        if resolved_session_id and resolved_client_turn_id:
+        if runtime_scope_known and resolved_session_id and resolved_client_turn_id:
             self._desktop.browser.cancel_owner(resolved_session_id, resolved_client_turn_id)
         if cancelled_desktop_action_ids:
             event["cancelledDesktopActionIds"] = cancelled_desktop_action_ids

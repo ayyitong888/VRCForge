@@ -684,8 +684,11 @@ class AgentQuestionService:
         if self._runtime_resolution is not None:
             if self._runtime_resolution.interrupt is not None:
                 for question in interrupted:
+                    seed = deepcopy(dict(question.get("runtimeTaskSeed") or {}))
+                    if claimed_id := question.get("runtimeContinuationClientTurnId"):
+                        seed["_interruptedRuntimeClientTurnId"] = claimed_id
                     self._runtime_resolution.interrupt(
-                        str(question["questionId"]), deepcopy(dict(question.get("runtimeTaskSeed") or {})),
+                        str(question["questionId"]), seed,
                         "Your answer was saved. VRCForge restarted after continuation began; inspect the current task before continuing.",
                     )
             for question in queued:

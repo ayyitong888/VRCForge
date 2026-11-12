@@ -1,14 +1,37 @@
 import asyncio
 import time
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import dashboard_server
+from agent_gateway import AgentGateway
 from agent_runtime_run_ledger import AgentRuntimeRunLedger
 
 
 class DashboardRuntimeLoopTests(unittest.TestCase):
+    def test_wrong_followup_owner_releases_claim_without_dispatch(self) -> None:
+        for session_id, client_turn_id in [("wrong-session", "right-client"), ("right-session", "wrong-client")]:
+            with self.subTest(session_id=session_id, client_turn_id=client_turn_id), TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                queue = AgentGateway(root / "config.json", root / "audit")
+                inserted = queue.enqueue_runtime_followup({"sessionId": "lane", "runtimeSessionId": "right-session",
+                                                           "clientTurnId": "right-client", "message": "fixture"})
+                with (patch.object(dashboard_server, "RUNTIME_QUEUE_PORT", queue),
+                      patch.object(dashboard_server.AGENT_GATEWAY, "runtime_message") as run):
+                    with self.assertRaises(dashboard_server.HTTPException) as failure:
+                        asyncio.run(dashboard_server._execute_app_agent_runtime_message(
+                            dashboard_server.AgentRuntimeMessageRequest(message="fixture", session_id=session_id,
+                                client_turn_id=client_turn_id, followup_queue_id=inserted["queueId"], followup_lane_id="lane"),
+                            human_user_message=False,
+                        ))
+                self.assertEqual(failure.exception.status_code, 409)
+                run.assert_not_called()
+                self.assertEqual(queue.list_runtime_followups(session_id="lane")[0]["status"], "pending")
+                self.assertEqual(len(queue.claim_runtime_followups(session_id="lane", owner_id="retry", queue_id=inserted["queueId"])), 1)
+
     def test_runtime_message_ledger_projection_keeps_event_loop_responsive(self) -> None:
         async def exercise() -> tuple[int, int]:
             heartbeat_count = 0

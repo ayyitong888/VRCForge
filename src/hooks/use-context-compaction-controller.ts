@@ -408,6 +408,7 @@ export function useContextCompactionController({
     if (!chat) {
       return null;
     }
+    if (input.pinnedSessionId) return { baseItems: chat.items, sessionId: chat.sessionId };
     const outcome = await compactChat({
       chatId: input.chatId,
       endpoint: input.endpoint,

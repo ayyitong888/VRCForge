@@ -12,6 +12,7 @@ async function load(file) {
 }
 const activity = await load("src/hooks/use-runtime-turn-activity.ts");
 const continuation = await load("src/hooks/use-runtime-turn-continuation.ts");
+const { questionContinuationOwner } = await load("src/lib/runtime-scope.ts");
 const original = process.env.VRCFORGE_CHAT_METADATA_REPLAY ? JSON.parse(readFileSync(process.env.VRCFORGE_CHAT_METADATA_REPLAY, "utf8")) : { id: "chat", sessionId: "session", items: [] };
 const identity = { sessionId: original.sessionId, clientTurnId: "continue:question:owned", turnId: "backend-turn" };
 const run = { ...identity, status: "running", startedAt: "2026-10-24T00:00:00Z" };
@@ -37,4 +38,25 @@ assert.equal(activity.projectRuntimeTurnActivity(questionFirst, run), questionFi
 assert.equal(continuation.runtimeContinuationDeliveryState(terminal, questionFirst.items), "append", "the shared observer can settle a question-first row");
 assert.equal(continuation.runtimeContinuationDeliveryState(terminal, [{ ...owners[0], id: "local-http-stream" }]), "defer", "foreground HTTP sends keep completion ownership");
 assert.equal(activity.applyRuntimeActivityDelta(chat, { ...identity, sessionId: "other", timelineEvent: event("wrong", 2) }), chat);
+const questionOwner = { ...original, id: "question-owner", items: [
+  { id: "answer-owned", type: "question_answer", questionId: question.questionId, text: "answer" },
+] };
+const sessionAlias = { ...original, id: "session-alias", items: [] };
+assert.equal(questionContinuationOwner([sessionAlias, questionOwner], question), questionOwner,
+  "the durable Question answer owns projection irrespective of alias ordering");
+assert.equal(questionContinuationOwner([sessionAlias, { ...questionOwner, items: [] }], question), undefined,
+  "an ambiguous shared session cannot project a continuation");
+const wrongOwner = continuation.projectQuestionContinuationActivity(sessionAlias, [question], [run]);
+const rightOwner = continuation.projectQuestionContinuationActivity(questionOwner, [question], [run]);
+assert.equal(continuation.applyQuestionContinuationDelta([wrongOwner, rightOwner], () => {
+  throw Error("an ambiguous delta must not write to the first alias");
+}, { ...identity, textDelta: "ambiguous" }), false);
+assert.equal(continuation.runtimeContinuationDeliveryState(terminal, [{
+  type: "agent", response: { ...identity, sessionId: "previous-session", status: "completed" },
+}]), "append", "a historical reply retained from another session cannot suppress the current receipt");
+const settledInPreviousSession = new Set([continuation.runtimeContinuationKey("previous-session", identity.clientTurnId)]);
+assert.equal(continuation.projectQuestionContinuationActivity(questionOwner, [question], [run], settledInPreviousSession)
+  .items.some(item => item.type === "streaming"), true, "a terminal from another session cannot suppress this continuation");
+assert.notEqual(continuation.runtimeContinuationKey("a:b", "c"), continuation.runtimeContinuationKey("a", "b:c"),
+  "tuple keys distinguish IDs containing the same delimiter");
 console.log(`PASS shared runtime/question CID owner and lossless handoff (${original.items.length} original chat items)`);

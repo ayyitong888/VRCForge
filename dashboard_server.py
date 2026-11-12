@@ -3315,12 +3315,21 @@ async def _execute_app_agent_runtime_message(
             queue_id=runtime_request.followup_queue_id,
             limit=1,
         )
-        if not claimed or claimed[0].get("clientTurnId") != runtime_request.client_turn_id:
+        if not claimed:
             raise HTTPException(status_code=409, detail={"code": "followup_queue_not_ready"})
-        followup_claim_token = str(claimed[0].get("claimToken") or "")
+        queued = claimed[0]
+        followup_claim_token = str(queued.get("claimToken") or "")
+        queued_session_id = str(queued.get("runtimeSessionId") or "").strip()
+        if (queued.get("clientTurnId") != runtime_request.client_turn_id
+                or (queued_session_id and queued_session_id != str(runtime_request.session_id or "").strip())):
+            await asyncio.to_thread(
+                RUNTIME_QUEUE_PORT.release_runtime_followup, runtime_request.followup_queue_id,
+                followup_lane_id, followup_claim_token, keep_pending=True,
+            )
+            raise HTTPException(status_code=409, detail={"code": "followup_queue_not_ready"})
         # Replay retains the user's mode when this input was queued, including
         # after restart; a new composer's default cannot change that task.
-        runtime_params["planMode"] = claimed[0].get("planMode") is True
+        runtime_params["planMode"] = queued.get("planMode") is True
     try:
         if runtime_request.computer_use_requested:
             AGENT_GATEWAY.desktop.require_computer_use_enabled()
@@ -4299,28 +4308,55 @@ async def app_delete_agent_memory(memory_id: str, request: AgentMemoryDeleteRequ
 
 @app.delete("/api/app/agent/chats/{chat_id}")
 async def app_delete_agent_chat(chat_id: str) -> dict[str, Any]:
-    """Permanently delete a chat: drop its runtime session state and native history files.
+    """Discard a runtime session after the last durable chat reference is removed."""
 
-    Idempotent: deleting an unknown or never-run chat still returns removed=True,
-    because the desired end state (no retained chat data) already holds.
-    """
+    session_id = chat_id.strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Runtime session id is required.")
+
+    def has_chat_reference() -> bool:
+        def referenced(path: Path, *, scope: str, project_path: str = "") -> bool:
+            target = chat_store_target(path, scope=scope, project_path=project_path)
+            chats, _, recovery = load_chat_transcript_file(target, scope=scope)
+            if recovery:
+                raise AgentGatewayError("Chat storage is unavailable; runtime history was kept.", status_code=409)
+            return any(str(chat.get("sessionId") or "").strip() == session_id for chat in chats)
+
+        if referenced(chat_transcripts_path(), scope="app"):
+            return True
+        _, recovery = inspect_chat_project_index()
+        if recovery:
+            raise AgentGatewayError("Chat project index is unavailable; runtime history was kept.", status_code=409)
+        for project_path in load_chat_project_index_paths():
+            path = project_chat_transcripts_path(project_path)
+            if path is None:
+                raise AgentGatewayError("Chat project storage is unavailable; runtime history was kept.", status_code=409)
+            if referenced(path, scope="project", project_path=project_path):
+                return True
+        return False
+
     sessions = getattr(AGENT_GATEWAY, "runtime_sessions", None)
     if sessions is not None:
-        def stop_and_discard_runtime_session() -> None:
+        def stop_and_discard_runtime_session() -> bool:
             try:
-                AGENT_GATEWAY.request_runtime_cancel({
-                    "sessionId": chat_id,
-                    "reason": "chat_deleted",
-                })
-                # The guard waits for active/finalizing owners, then retains
-                # the gateway's admission lock through discard so a new turn
-                # cannot enter in the gap between quiescence and deletion.
-                with AGENT_GATEWAY.runtime_session_idle_guard(chat_id, timeout_seconds=15.0):
-                    sessions.discard_session(chat_id)
+                with CHAT_TRANSCRIPTS_LOCK:
+                    if has_chat_reference():
+                        return False
+                    AGENT_GATEWAY.request_runtime_cancel({"sessionId": session_id, "reason": "chat_deleted"})
+                # Wait without holding the chat-store lock. Reserve idle again
+                # in chat-store → gateway lock order before the final discard.
+                with AGENT_GATEWAY.runtime_session_idle_guard(session_id, timeout_seconds=15.0):
+                    pass
+                with CHAT_TRANSCRIPTS_LOCK:
+                    if has_chat_reference():
+                        return False
+                    with AGENT_GATEWAY.runtime_session_idle_guard(session_id, timeout_seconds=0.0):
+                        sessions.discard_session(session_id)
+                return True
             except AgentGatewayError as exc:
                 raise runtime_http_error("agent_runtime_request_failed", exc.status_code, exc) from exc
 
-        await asyncio.to_thread(stop_and_discard_runtime_session)
+        return {"ok": True, "removed": await asyncio.to_thread(stop_and_discard_runtime_session)}
     return {"ok": True, "removed": True}
 
 
@@ -11038,7 +11074,7 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         source_present = (
             Path(project_path) / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs"
         ).is_file()
-        startup_diagnostic = _latest_vrcforge_core_startup_diagnostic()
+        startup_diagnostic = _latest_vrcforge_core_startup_diagnostic() if source_present else None
         status = (
             "core_start_failed"
             if startup_diagnostic is not None

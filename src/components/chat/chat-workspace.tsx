@@ -60,6 +60,7 @@ export type QueuedChatTurn = {
   text: string;
   attachments: ChatAttachment[];
   queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled";
+  staleBranch?: boolean;
   queueTransition?: "enqueue" | "dispatch";
   composerQueued?: boolean;
 };
@@ -97,12 +98,12 @@ function PendingQueuedTurnCard({
       ) : null}
       <p className="min-w-0 flex-1 truncate text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
       <div className="flex shrink-0 items-center gap-0.5 text-muted-foreground/70 group-hover:text-muted-foreground group-focus-within:text-muted-foreground">
-        {sending ? (
+        {sending && !turn.staleBranch ? (
           <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.sendQueuedNow")} aria-label={t("chat.sendQueuedNow")} disabled={busy} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
             <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
           </Button>
         ) : null}
-        {!sending && !turn.queueTransition && onResume ? <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.resumeFollowups")} aria-label={t("chat.resumeFollowups")} onClick={onResume} data-chat-resume-followups><Play className="h-3.5 w-3.5" aria-hidden="true" /></Button> : null}
+        {!sending && !turn.staleBranch && !turn.queueTransition && onResume ? <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.resumeFollowups")} aria-label={t("chat.resumeFollowups")} onClick={onResume} data-chat-resume-followups><Play className="h-3.5 w-3.5" aria-hidden="true" /></Button> : null}
         <Button type="button" variant="ghost" className="h-7 w-7 p-0"
           aria-label={t("chat.editQueued")} title={t("chat.editQueued")} disabled={busy}
           onClick={async () => {

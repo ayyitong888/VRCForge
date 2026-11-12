@@ -372,6 +372,43 @@ def test_native_request_reuses_unity_scope_routing_rules_and_general_exception()
     assert "A Unity project is explicitly bound to this turn" not in general_request["instructions"]
 
 
+@pytest.mark.parametrize("native", [True, False])
+def test_core_setup_guidance_uses_bound_project_and_existing_approval(native):
+    planner = service()
+
+    def prompt(project_context_active, project_path, *, plan_mode=False):
+        options = dict(
+            observe={"planMode": plan_mode}, exposure_layer="planning",
+            project_context_active=project_context_active, project_path=project_path,
+            internal_tool_blocks=None, global_instructions="", project_instructions="",
+        )
+        if native:
+            request, _ = planner._build_native_plan_request(
+                [{"role": "user", "content": "帮我看看头像"}], **options,
+            )
+            return request["instructions"], json.dumps(request["messages"], ensure_ascii=False)
+        result = planner._build_llm_plan_prompt("帮我看看头像", [], **options)
+        return result, result
+
+    project = "D:/Avatar/Selected Project"
+    instructions, state = prompt(True, project)
+    assert project in state
+    assert "project_environment/assets_packages" in instructions
+    assert "unity_core_upgrade_status" in instructions
+    assert "unity_install_unity_core" in instructions
+    assert "current approval policy" in instructions
+    assert "even when the user only asked for ordinary avatar work" in instructions
+    assert "installedAt" in instructions and "ready=true" in instructions
+    assert "before resuming the original task" in instructions
+    assert "waiting_for_console_snapshot" in instructions and "unity_get_compile_errors" in instructions
+    assert "unity_install_unity_core" not in prompt(False, project)[0]
+    assert "unity_install_unity_core" not in prompt(True, "")[0]
+
+    plan, plan_state = prompt(True, project, plan_mode=True)
+    assert "Plan may diagnose" in plan
+    assert ("Only the user can switch to execution" if native else "Only the user can turn off Plan") in plan_state
+
+
 def test_native_request_projects_direct_images_into_main_user_message() -> None:
     planner = service()
     request, _ = planner._build_native_plan_request(

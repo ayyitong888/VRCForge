@@ -25,7 +25,7 @@ const bundle = await build({
   stdin: { resolveDir: process.cwd(), loader: "tsx", contents: `
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { useRuntimeTurnContinuationDelivery, useQuestionContinuationActivity } from './src/hooks/use-runtime-turn-continuation';
+import { runtimeContinuationKey, useRuntimeTurnContinuationDelivery, useQuestionContinuationActivity } from './src/hooks/use-runtime-turn-continuation';
 const event = ${JSON.stringify(event)};
 const initial = ${JSON.stringify(initialChat)};
 const questions = [{ questionId: 'replay-question', sessionId: event.sessionId, status: 'answered', runtimeContinuation: { sessionId: event.sessionId, clientTurnId: event.clientTurnId, status: 'completed' } }];
@@ -45,12 +45,12 @@ function Harness() {
   }, []);
   const append = useCallback((id, item) => updateChat(id, current => ({...current, items: [...current.items, item]})), [updateChat]);
   const deliver = useRuntimeTurnContinuationDelivery({ chats, appendToChat: append, updateChat, onContinuation: value => {
-    settled.current.add(value.clientTurnId);
+    settled.current.add(runtimeContinuationKey(value.sessionId, value.clientTurnId));
     updateChat(initial.id, current => ({ ...current, items: current.items.filter(item => item.id !== 'question-continuation:' + value.clientTurnId) }));
   }});
   // Same ordering as App: bootstrap delivery effect precedes question activity projection.
   useEffect(() => { deliver(event); window.deliveryEffectRan = true; }, [deliver]);
-  useQuestionContinuationActivity({ chats, questions, runs, updateChat, settledClientTurnIds: settled.current });
+  useQuestionContinuationActivity({ chats, questions, runs, updateChat, settledContinuationKeys: settled.current });
   return <div data-mounted />;
 }
 createRoot(document.getElementById('root')).render(<Harness />);

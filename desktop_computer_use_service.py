@@ -755,7 +755,7 @@ class DesktopComputerUseService:
         action_params["_visualTheme"] = str(getattr(context, "visual_theme", "light"))
         action_params["_visualAccent"] = str(getattr(context, "visual_accent", ""))
         request_params["params"] = action_params
-        payload = self.request_desktop_action(request_params)
+        payload = self.request_desktop_action(request_params, runtime_turn_id=turn_id)
         action_id = str(payload.get("actionId") or "")
         if action_id and self._ports.runtime_cancel_requested(
             session_id=session_id,
@@ -768,7 +768,9 @@ class DesktopComputerUseService:
             )
         return self._wait_for_desktop_action_payload(payload, request_params)
 
-    def request_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def request_desktop_action(
+        self, params: dict[str, Any] | None = None, *, runtime_turn_id: str = "",
+    ) -> dict[str, Any]:
         params = params or {}
         action = re.sub(
             r"[^a-z0-9_.-]+",
@@ -857,6 +859,7 @@ class DesktopComputerUseService:
             "action": action,
             "sessionId": session_id,
             "clientTurnId": client_turn_id,
+            **({"turnId": runtime_turn_id} if runtime_turn_id else {}),
             "projectRoot": project_root,
             "promptSummary": prompt,
             "paramsSummary": self.desktop_action_params_audit(action_params),

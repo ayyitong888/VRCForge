@@ -1214,7 +1214,10 @@ class AgentRuntimeSessionState:
             if colliding and len(matching) != 1:
                 return None
             target = matching[0] if matching else (session_id, turn_id, client_turn_id)
-            self._cancelled_targets.setdefault(target, reason)
+            # A client ID can be reused in another session. An unscoped
+            # legacy request may cancel owned work now, never a future turn.
+            if matching or session_id or turn_id:
+                self._cancelled_targets.setdefault(target, reason)
             if matching:
                 waiting = self._waiting_turns.get((target[0], target[2]))
                 if waiting:

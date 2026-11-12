@@ -106,6 +106,23 @@ RUNTIME_SCOPE_UNITY_INSTRUCTION = (
     "Distinguish configured behavior from observed runtime effects; do not generalize sampled transitions, objects, or clip lengths to every case. "
     "Explicit file-content or file-location tasks should still use the filesystem readers."
 )
+RUNTIME_UNITY_CORE_SETUP_INSTRUCTION = (
+    "For any task in this Unity project that needs a live Editor, take responsibility for checking its connection. "
+    "If you lack current evidence that it is connected, or a Unity tool reports that it cannot connect, diagnose the "
+    "exact bound projectPath yourself with unity_core_upgrade_status, even when the user only asked for ordinary avatar work. "
+    "Load this host tool from project_environment/assets_packages; it works before the Unity bridge connects. "
+    "A matching live Core is connected even when its compilation monitor has no saved snapshot. "
+    "Reuse an established diagnosis. If Core is missing or the diagnosis shows it needs updating, load unity_install_unity_core "
+    "from the same leaf, using the package bundled with the app and the current approval policy. Keep the original objective "
+    "through any approval continuation. User-selected Plan may diagnose and "
+    "explain the required action. Only the user can switch Plan to execution. After installation, pass the receipt's exact "
+    "installedAt back to unity_core_upgrade_status and confirm ready=true, the expected loaded Core identity, and a fresh "
+    "compilation result with zero errors before resuming the original task. On first installation, the compile monitor only "
+    "loads after the first compile. If the matching live Core reports waiting_for_console_snapshot, check the Console result "
+    "already in its diagnostics or read unity_get_compile_errors for the same project. Resume after a complete, untruncated Console read with zero errors "
+    "and isCompiling=false. For upgrades keep the fresh compilation requirement. If Unity is compiling or reloading, wait for the "
+    "result. If it reports a compile failure, inspect that error. Ask for a manual step only when the host tools cannot proceed."
+)
 RUNTIME_SCOPE_GENERAL_INSTRUCTION = (
     "This is a general-purpose local Agent turn with no Unity project bound. "
     "Choose autonomously among the visible general Agent tools: prefer the bounded read-only list/read/find/search tools for direct filesystem evidence; use Shell for commands, scripts, or processes; and use questions, TODO/progress, subagents, attachments, vision, or MCP when the task calls for them. "
@@ -4851,6 +4868,8 @@ class RuntimePlannerService:
         )
         if project_context_active:
             instructions += "\n" + RUNTIME_SCOPE_UNITY_INSTRUCTION
+        if "projectPath" in state:
+            instructions += "\n" + RUNTIME_UNITY_CORE_SETUP_INSTRUCTION
         for block in (
             global_instruction_prompt_block(global_instructions),
             project_instruction_prompt_block(project_instructions),
@@ -5260,6 +5279,7 @@ class RuntimePlannerService:
                     + json.dumps({"projectPath": project_path.strip()}, ensure_ascii=False)
                     + "\nFor a tool's projectPath argument, use this string value, not the enclosing object. "
                     "This binding does not authorize writes."
+                    + "\n" + RUNTIME_UNITY_CORE_SETUP_INSTRUCTION
                 )
             project_instructions_block = project_instruction_prompt_block(project_instructions)
             instruction_blocks = "\n\n".join(

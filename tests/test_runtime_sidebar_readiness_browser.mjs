@@ -132,6 +132,20 @@ try {
   assert.ok((await card.innerText()).includes(pending.question));
   assert.ok((await card.innerText()).includes(pending.options[0].label));
 
+  if (!process.env.VRCFORGE_REVIEW_REPLAY) {
+    await show("ready", 0, "unity", false, {
+      activeChatId: "alias",
+      chats: [
+        { ...owner, id: "alias" },
+        { ...owner, items: [{ type: "user", clientTurnId: "question-origin" }] },
+      ],
+      questions: [{ ...pending, originClientTurnId: "question-origin" }],
+    });
+    await page.locator("[data-review-owner]").getByText("alias").waitFor();
+    await review.click();
+    assert.equal(await page.locator("[data-review-owner]").textContent(), owner.id);
+  }
+
   const blockedRun = { sessionId: "review-session", clientTurnId: "review-client", turnId: "review-turn", status: "blocked" };
   const blockedReply = {
     id: "blocked-reply", type: "agent",

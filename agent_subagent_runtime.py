@@ -16,7 +16,8 @@ _CURRENT_CHILD = ContextVar("sub_agent_runtime_owner", default=None)
 def forward_child_cancellation(gateway: Any) -> None:
     owner = _CURRENT_CHILD.get()
     if owner is not None and owner["event"].is_set():
-        gateway.request_runtime_cancel({"clientTurnId": owner["clientTurnId"], "reason": "sub_agent_cancelled"})
+        gateway.request_runtime_cancel({"sessionId": owner["sessionId"], "clientTurnId": owner["clientTurnId"],
+                                        "reason": "sub_agent_cancelled"})
 
 
 def project_child_budget_pause(raw: dict[str, Any], task: str) -> dict[str, Any]:
@@ -108,13 +109,14 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
     def watch_cancel() -> None:
         while not finished.wait(0.02):
             if cancel_event.is_set():
-                gateway.request_runtime_cancel({"clientTurnId": client_turn_id, "reason": "sub_agent_cancelled"})
+                gateway.request_runtime_cancel({"sessionId": child_session_id, "clientTurnId": client_turn_id,
+                                                "reason": "sub_agent_cancelled"})
                 return
 
     # The registry owns the worker/event; this turn owns only its cancellation
     # forwarding thread. It uses no external interface or additional credential.
     watcher = Thread(target=watch_cancel, name="sub-agent-cancel", daemon=True)
-    token = _CURRENT_CHILD.set({"event": cancel_event, "clientTurnId": client_turn_id})
+    token = _CURRENT_CHILD.set({"event": cancel_event, "sessionId": child_session_id, "clientTurnId": client_turn_id})
     watcher.start()
     try:
         with gateway.runtime_planner.bind_role_instructions(system_prompt, allowed_tools=allowed_tools):

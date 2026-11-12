@@ -25,6 +25,7 @@ from agent_tool_result_contract import (
 )
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
 from agent_action_targets import action_target
+from agent_runtime_turn_identity import MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, continuation_client_turn_id
 from checkpoint_user_policy import (
     checkpoint_skip_authority_for_context,
     checkpoint_skip_authority_from_policy,
@@ -865,7 +866,7 @@ def approval_task_context(
         "turnId": _bounded_text(seed.get("turnId"), 180),
         "parentChatId": _bounded_text(seed.get("parentChatId"), 180),
         "usageParentTurnId": _bounded_text(seed.get("usageParentTurnId"), 180),
-        "clientTurnId": _bounded_text(seed.get("clientTurnId"), 180),
+        "clientTurnId": _bounded_text(seed.get("clientTurnId"), MAX_RUNTIME_CLIENT_TURN_ID_LENGTH),
         "projectRoot": _bounded_text(seed.get("projectRoot"), 600),
         "agentName": _bounded_text(seed.get("agentName"), 160),
         "provider": _bounded_text(seed.get("provider"), 80),
@@ -1077,15 +1078,10 @@ def prepare_approval_task_continuation(
     approval_id = _bounded_text(approval.get("id"), 100)
     original_client_turn_id = _bounded_text(context.get("clientTurnId"), 180)
     continuation_marker = "revision" if revision_requested else "approval"
-    continuation_client_turn_id = (
-        f"{original_client_turn_id}:{continuation_marker}:{approval_id}"
-        if original_client_turn_id
-        else f"{continuation_marker}:{approval_id}"
-    )[:240]
     params: dict[str, Any] = {
         "message": _bounded_text(context.get("objective"), None),
         "session_id": _bounded_text(context.get("sessionId"), 180),
-        "clientTurnId": continuation_client_turn_id,
+        "clientTurnId": continuation_client_turn_id(original_client_turn_id, continuation_marker, approval_id),
         "projectRoot": _bounded_text(context.get("projectRoot"), 600),
         "provider": _bounded_text(context.get("provider"), 80),
         "providerLabel": _bounded_text(context.get("providerLabel"), 160),
@@ -1331,11 +1327,7 @@ def prepare_shell_task_continuation(
     if prepared is None:
         return None
     original_client_turn_id = _bounded_text(context.get("clientTurnId"), 180)
-    prepared["params"]["clientTurnId"] = (
-        f"{original_client_turn_id}:shell:{shell_session_id}"
-        if original_client_turn_id
-        else f"shell:{shell_session_id}"
-    )[:240]
+    prepared["params"]["clientTurnId"] = continuation_client_turn_id(original_client_turn_id, "shell", shell_session_id)
     prepared["taskContinuation"]["source"] = "shell_process_finished"
     if (
         _status(event.get("status")) == "finished"
@@ -1446,11 +1438,7 @@ def prepare_sub_agent_task_continuation(
     if prepared is None:
         return None
     original_client_turn_id = _bounded_text(context.get("clientTurnId"), 180)
-    prepared["params"]["clientTurnId"] = (
-        f"{original_client_turn_id}:subagent:{sub_agent_task_id}"
-        if original_client_turn_id
-        else f"subagent:{sub_agent_task_id}"
-    )[:240]
+    prepared["params"]["clientTurnId"] = continuation_client_turn_id(original_client_turn_id, "subagent", sub_agent_task_id)
     prepared["taskContinuation"]["source"] = "sub_agent_finished"
     if cancelled:
         summary = _bounded_text(event.get("error") or event.get("summary"), 600) or (
@@ -1674,7 +1662,7 @@ class AgentTaskLoop:
             "sessionId": _bounded_text(self.session_id, 180),
             "turnId": _bounded_text(self.turn_id, 180),
             "usageParentTurnId": _bounded_text(usage_parent_turn_id, 180),
-            "clientTurnId": _bounded_text(self.client_turn_id, 180),
+            "clientTurnId": _bounded_text(self.client_turn_id, MAX_RUNTIME_CLIENT_TURN_ID_LENGTH),
             "projectRoot": _bounded_text(self.project_root, 600),
             "agentName": _bounded_text(self.agent_name, 160),
             "provider": _bounded_text(self.provider, 80),

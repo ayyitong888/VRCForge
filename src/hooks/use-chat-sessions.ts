@@ -1109,7 +1109,7 @@ export function useChatSessions({
       await persistChatsNow();
       durableDeletionCommitted = true;
       await removeChatTranscriptCache(endpoint, chatId, removedSnapshot.projectPath);
-      if (runtimeSessionId) {
+      if (runtimeSessionId && !chatsRef.current.some((chat) => chat.sessionId.trim() === runtimeSessionId)) {
         const result = await deleteChatPermanentlyApi(endpoint, runtimeSessionId);
         if (result.ok !== true) throw new ApiError("Runtime cleanup did not return success.", 0);
       }

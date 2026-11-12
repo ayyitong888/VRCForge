@@ -45,7 +45,7 @@ function Harness() {
   latest.current = next; setChats([next]); window.chat = next; return true;
  }, []);
  const append = useCallback((id, item) => update(id, current => ({...current, items: [...current.items, item]})), [update]);
- const delta = useQuestionContinuationActivity({chats, questions, runs, updateChat: update, settledClientTurnIds: settled});
+ const delta = useQuestionContinuationActivity({chats, questions, runs, updateChat: update, settledContinuationKeys: settled});
  const terminal = useRuntimeTurnContinuationDelivery({chats, updateChat: update, appendToChat: append, onContinuation: () => { window.terminalCalls++; }});
  window.terminalCalls ??= 0;
  window.receipt = () => delta({type: 'agentRuntimeDelta', sessionId: 'session', clientTurnId: 'active-turn', consumedSteerInputIds: ['confirmed-input']});

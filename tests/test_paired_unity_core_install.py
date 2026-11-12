@@ -8,7 +8,7 @@ import pytest
 
 import dashboard_server
 import vrcforge_runtime_paths as runtime_paths
-from agent_gateway import EXTERNAL_MCP_WRITE_TOOL_BLOCKS
+from agent_gateway import AgentGateway, EXTERNAL_MCP_WRITE_TOOL_BLOCKS
 
 
 def _write_verified_payload(root: Path, *, integrity_valid: bool = True) -> Path:
@@ -67,6 +67,60 @@ def _write_project(root: Path) -> Path:
         encoding="utf-8",
     )
     return root
+
+
+def test_native_avatar_task_can_bootstrap_core_without_a_unity_connection(monkeypatch, tmp_path):
+    from runtime_planner_service import RuntimePlannerService
+    from tests.test_native_permission_modes import _set_mode
+    from tests.test_native_runtime_gateway import NativeModel, NativeTurn, call, finish
+
+    payload = tmp_path / "app"
+    _write_verified_payload(payload)
+    (payload / "VERSION").write_text("1.10.12\n", encoding="utf-8")
+    project = _write_project(tmp_path / "project")
+    old_asset = project / "Assets" / "VRCForge" / "old-core.txt"
+    old_asset.rename(project / "Assets" / "user-asset.txt")
+    old_asset.parent.rmdir()
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    model = NativeModel([])
+    monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
+    dashboard_server.register_agent_gateway_tools()
+    gateway.bind_runtime_planner(RuntimePlannerService(
+        catalog=dashboard_server._RuntimePlannerCatalog(),
+        desktop=dashboard_server._RuntimePlannerDesktopObservation(),
+        model=model,
+        turn=NativeTurn(),
+    ))
+    _set_mode(gateway, "roslyn_full_auto")
+    project_path = project.as_posix()
+    args = {"projectPath": project_path}
+    status_name = "unity_core_upgrade_status"
+    install_name = "unity_install_unity_core"
+
+    def load(request):
+        assert "even when the user only asked for ordinary avatar work" in request["instructions"]
+        return call("load", "load_internal_tool_block", {
+            "block": "project_environment/assets_packages", "tools": [status_name, install_name],
+        })
+
+    def install(request):
+        assert "core_not_installed" in next(item["content"] for item in request["messages"]
+                                            if item.get("tool_call_id") == "diagnose")
+        return call("install", install_name, args)
+
+    model.replies = iter([load, call("diagnose", status_name, args), install, finish])
+    result = gateway.runtime_message({
+        "message": "帮我看看头像", "sessionId": "fresh-project", "clientTurnId": "avatar-work",
+        "projectRoot": project_path, "maxAgenticTurns": 8,
+    })
+
+    assert result.get("write", {}).get("status") in {"executed", "completed"}, (
+        result.get("plan"), [(step.get("tool"), step.get("status")) for step in result.get("steps", [])],
+    )
+    assert (project / "Assets" / "VRCForge" / "new-core.txt").is_file()
+    assert (project / "Assets" / "user-asset.txt").read_text(encoding="utf-8") == "old"
 
 
 def test_verified_unity_core_install_retains_previous_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -498,3 +552,8 @@ def test_core_upgrade_status_reports_descriptor_missing_without_throwing(
     assert result["diagnostics"]["toolRoutingStarted"] is False
     assert result["diagnostics"]["mutationStarted"] is False
     assert result["diagnostics"]["commitState"] == "not_started"
+
+    core_source.unlink()
+    result = dashboard_server.core_upgrade_status_sync({"projectPath": str(project)})
+    assert result["status"] == "core_not_installed"
+    assert result["diagnostics"]["startupDiagnostic"] is None

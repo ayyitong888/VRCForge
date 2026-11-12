@@ -604,6 +604,34 @@ def test_notification_runs_preserve_lifecycle_without_history_payload(tmp_path: 
     assert full["runs"][0]["steps"] and len(full["events"]) == 3
 
 
+def test_run_listing_does_not_fold_distinct_owners_reusing_client_id(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    owners = [
+        ("old-session", "prior-turn", "completed"),
+        ("old-session", "current-turn", "running"),
+        ("other-session", "other-turn", "completed"),
+    ]
+    for session, turn, status in owners:
+        ledger.append({"sessionId": session, "turnId": turn, "clientTurnId": "reused",
+                       "event": "runtime_turn_started" if status == "running" else "runtime_turn_completed",
+                       "status": status})
+    ledger.append({"clientTurnId": "reused", "event": "runtime_turn_cancel_requested", "status": "cancel_requested"})
+    result = ledger.list_runs()
+    assert {(row["sessionId"], row["turnId"], row["status"]) for row in result["runs"]} == set(owners)
+    assert len(result["events"]) == len(owners) + 1
+
+
+def test_batched_continuation_identity_does_not_collide_on_colons(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    owners = {("a:b", "c"), ("a", "b:c")}
+    for index, (session, client) in enumerate(sorted(owners)):
+        identity = {"sessionId": session, "turnId": f"turn-{index}", "clientTurnId": client}
+        ledger.append({**identity, "event": "runtime_turn_completed", "status": "completed", "continuationEvent": {
+            **identity, "continuationSource": "foreground_completed", "plan": {"reply": "done", "nextStep": "done"},
+        }})
+    assert {(row["sessionId"], row["clientTurnId"]) for row in ledger.list_runtime_continuations()} == owners
+
+
 def test_list_runs_advances_from_append_and_invalidates_on_replacement(tmp_path: Path) -> None:
     ledger, _lock = make_ledger(tmp_path)
     identity = {"sessionId": "session-cache", "turnId": "turn-1", "clientTurnId": "client-1"}

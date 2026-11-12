@@ -172,6 +172,41 @@ try {
     assert.equal(await page.evaluate(() => window.visibleChats[0].items.some(i => i.type === 'streaming')), false,
       'repairing saved question images never starts another turn');
   }
+  {
+    const oldRun = { sessionId: "retry-session", clientTurnId: "retry-cid", turnId: "old-turn",
+      status: "running", startedAt: "2026-10-23T13:00:00Z", updatedAt: "2026-10-23T13:03:00Z" };
+    const newRun = { ...oldRun, turnId: "new-turn", startedAt: "2026-10-23T13:01:00Z", updatedAt: "2026-10-23T13:02:00Z" };
+    await page.evaluate(run => {
+      window.resetChats([{ id: 'retry-owner', sessionId: run.sessionId, items: [
+        { type: 'user', id: 'retry-user', clientTurnId: run.clientTurnId, text: 'Retry' },
+      ] }]);
+      window.replaceRuns([run]);
+    }, oldRun);
+    await page.waitForFunction(() => window.pendingPages.length === 1);
+    const oldEvent = { ...events[0], id: "old-event" };
+    await page.evaluate(({ run, event }) => window.pendingPages.shift()({ ok: true, run, events: [event], nextSequence: 1, hasMore: true }),
+      { run: oldRun, event: oldEvent });
+    await page.waitForFunction(() => window.requests.at(-1).afterSequence === 1);
+    await page.evaluate(run => window.deliver({ ...run, schema: 'vrcforge.runtime_turn_event.v1',
+      continuationSource: 'foreground_completed', status: 'cancelled', plan: { reply: 'Older stopped' } }), oldRun);
+    await page.evaluate(({ oldRun, newRun }) => window.replaceRuns([oldRun, newRun]), { oldRun, newRun });
+    await page.waitForFunction(() => window.requests.slice(-2).every(r => r.clientTurnId === 'retry-cid')
+      && window.requests.at(-2).aborted && window.requests.at(-1).afterSequence === 0);
+    const newEvent = { ...events[0], id: "new-event" };
+    await page.evaluate(({ run, event }) => {
+      window.pendingPages.shift(); // Aborted request for the superseded generation.
+      window.pendingPages.shift()({ ok: true, run, events: [event], nextSequence: 1, hasMore: false });
+    }, { run: newRun, event: newEvent });
+    await page.waitForFunction(() => window.visibleChats[0].items.some(i => i.type === 'streaming' && i.timeline?.some(e => e.id === 'new-event')));
+    await page.evaluate(run => window.deliver({ ...run, schema: 'vrcforge.runtime_turn_event.v1',
+      continuationSource: 'foreground_completed', status: 'completed', plan: { reply: 'Retry completed' } }), newRun);
+    const retryItems = await page.evaluate(() => window.visibleChats[0].items);
+    const receipts = retryItems.filter(i => i.type === "agent");
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0].response.turnId, newRun.turnId, "the old generation's delivered terminal cannot suppress the retry");
+    assert.ok(receipts[0].timeline.some(e => e.id === newEvent.id));
+    assert.ok(!receipts[0].timeline.some(e => e.id === oldEvent.id), "the replacement receipt only owns the latest generation's history");
+  }
   // A reused session with two chats cannot be guessed; an exact CID owns one.
   await page.evaluate(() => {
     window.resetChats([{ id: 'wrong', sessionId: 'other-session', items: [] }, { id: 'owner', sessionId: window.identity.sessionId, items: [] }]);

@@ -1,11 +1,15 @@
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
+from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
-from agent_gateway import AgentGateway
+from agent_gateway import AgentGateway, AgentGatewayError
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_runtime_turn_identity import continuation_client_turn_id
+from dashboard_api_models import AgentRuntimeMessageRequest
 
 
 def wait_until(predicate):
@@ -13,6 +17,57 @@ def wait_until(predicate):
     while not predicate() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert predicate()
+
+
+@pytest.mark.parametrize("identity", [{"session_id": "s" * 181}, {"clientTurnId": "c" * 241}])
+def test_oversized_turn_identity_is_rejected_before_admission(tmp_path, identity):
+    with pytest.raises(ValidationError):
+        AgentRuntimeMessageRequest(message="fixture", **identity)
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    with pytest.raises(AgentGatewayError, match="exceeds its length limit") as error:
+        gateway.runtime_message({"message": "fixture", **identity})
+    assert error.value.status_code == 400
+    assert gateway.runtime_runs.list_runs()["runs"] == []
+
+
+def test_runtime_stop_cancels_only_desktop_actions_of_the_exact_generation(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    state = gateway.runtime_sessions
+    assert state.begin_turn(session_id="requested", turn_id="active", client_turn_id="reused")
+    assert state.begin_turn(session_id="unrelated", turn_id="other", client_turn_id="reused")
+    actions = [{"actionId": action, "sessionId": session, "turnId": turn, "clientTurnId": "reused"}
+               for action, session, turn in [("right", "requested", "active"), ("old", "requested", "prior"),
+                                             ("other", "unrelated", "other")]]
+    desktop = type(gateway.desktop)
+    with (patch.object(desktop, "list_active_desktop_actions", return_value={"actions": actions}),
+          patch.object(desktop, "request_desktop_action_cancel", return_value={"ok": True}) as cancel):
+        result = gateway.request_runtime_cancel({"sessionId": "requested", "turnId": "active", "clientTurnId": "reused"})
+    assert result["cancelledDesktopActionIds"] == ["right"]
+    assert [call.args[0] for call in cancel.call_args_list] == ["right"]
+    assert not state.cancel_requested(session_id="unrelated", turn_id="other", client_turn_id="reused")
+
+
+def test_unscoped_stop_cannot_attach_to_a_future_session():
+    state = AgentRuntimeSessionState(AgentRuntimeSessionStatePorts(shared_state_lock=threading.RLock()))
+    assert state.mark_cancel_requested(client_turn_id="reused") == ("", "", "reused")
+    assert not state.queue_turn(session_id="unrelated", turn_id="future", client_turn_id="reused").is_set()
+
+
+def test_interrupted_visual_feedback_recovers_under_its_dispatched_identity(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    seed = {"sessionId": "fixture", "clientTurnId": "parent", "_questionKind": "visual_checkpoint", "_questionFeedbackRevision": 2}
+    expected = gateway._question_continuation_client_turn_id("question", seed)
+    event = gateway.record_interrupted_runtime_task(task_seed=seed, continuation_source="question_answered",
+                                                    owned_id="question", summary="fixture")
+    assert event["clientTurnId"] == expected == "parent:question:question:feedback:2"
+    assert gateway.get_runtime_session("fixture", client_turn_id=expected)["status"] == "completed"
+
+
+def test_long_continuation_id_keeps_unique_suffix():
+    ids = [continuation_client_turn_id("p" * 240, "subagent", "c" * 99 + revision) for revision in "12"]
+    assert all(len(value) == 240 for value in ids)
+    assert ids[0].endswith(":subagent:" + "c" * 99 + "1")
+    assert ids[1].endswith(":subagent:" + "c" * 99 + "2")
 
 
 def test_same_session_native_owner_cannot_settle_another_running_call():

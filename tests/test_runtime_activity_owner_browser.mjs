@@ -13,18 +13,21 @@ const original = ${JSON.stringify(original)};
 const identity = {sessionId:original.sessionId,clientTurnId:'continuation:question:owned',turnId:'backend-owned'};
 const run = {...identity,status:'running',startedAt:'2026-10-24T00:00:00Z'};
 const question={questionId:'owned',sessionId:identity.sessionId,status:'answered',runtimeContinuationStatus:'running',runtimeContinuation:{...identity,status:'running'}};
+const alias={...original,id:'session-alias-first',items:[]};
+const answerOwner={...original,items:[...original.items,{id:'owned-answer',type:'question_answer',questionId:'owned',text:'answer'}]};
+const withAlias=location.search.includes('alias-first');
 window.identity=identity;window.pending=[];
 function Harness(){
- const [chats,setChats]=useState([original]); const ref=useRef(chats);ref.current=chats;
+ const [chats,setChats]=useState(withAlias ? [alias,answerOwner] : [original]); const ref=useRef(chats);ref.current=chats;
  const [questions,setQuestions]=useState(location.search ? [question] : []);const [runs,setRuns]=useState([run]);
  const updateChat=useCallback((id,updater)=>{let changed=false;ref.current=ref.current.map(c=>{if(c.id!==id)return c;const n=updater(c);changed ||= n!==c;return n});if(changed)setChats(ref.current);return changed},[]);
  const append=useCallback((id,item)=>updateChat(id,c=>({...c,items:[...c.items,item]})),[updateChat]);
  const deliver=useRuntimeTurnContinuationDelivery({chats,updateChat,appendToChat:append});
- const questionDelta=useQuestionContinuationActivity({chats,questions,runs,updateChat,settledClientTurnIds:new Set()});
+ const questionDelta=useQuestionContinuationActivity({chats,questions,runs,updateChat,settledContinuationKeys:new Set()});
  const externalDelta=useRuntimeTurnActivity({endpoint:'http://fixture',runtimeConnected:true,chats,runs,updateChat,deliver});
  window.discoverQuestion=()=>setQuestions([question]);
  window.delta=d=>{questionDelta(d);externalDelta(d)};window.deliver=deliver;window.chats=chats;window.setRuns=setRuns;
- return <main>{chats[0].items.filter(i=>i.type==='streaming'&&i.clientTurnId===identity.clientTurnId).map(i=><section data-owner={i.id} key={i.id}><output>{i.text}</output>{(i.timeline||[]).map(e=><p data-event={e.id} key={e.id}>{e.payload?.summary}</p>)}</section>)}</main>
+ return <main>{chats.find(c=>c.id===original.id).items.filter(i=>i.type==='streaming'&&i.clientTurnId===identity.clientTurnId).map(i=><section data-owner={i.id} key={i.id}><output>{i.text}</output>{(i.timeline||[]).map(e=><p data-event={e.id} key={e.id}>{e.payload?.summary}</p>)}</section>)}</main>
 }createRoot(document.getElementById('root')).render(<Harness/>);
 ` }, bundle:true,write:false,platform:"browser",format:"iife",jsx:"automatic",plugins:[{name:"transport",setup(b){
  b.onResolve({filter:/^\.\.\/lib\/api\/agent-runtime$/},args=>args.importer.endsWith('use-runtime-turn-activity.ts')?{path:'transport',namespace:'fixture'}:undefined);
@@ -36,10 +39,11 @@ try {
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  const {chromium}=createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH||'playwright');
  browser=await chromium.launch({headless:true,channel:'msedge'});
- for (const mode of ['', '?question-first']) {
+ for (const mode of ['', '?question-first', '?alias-first']) {
  const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(`http://127.0.0.1:${server.address().port}${mode}`);await page.waitForSelector('[data-owner]', { state: 'attached' });
  const event={id:'accepted-before-question',sequence:0,timestamp:'2026-10-24T00:00:01Z',kind:'assistant',payload:{phase:'commentary',summary:'保留已经接收的进度'}};
+ if(mode==='?alias-first') assert.deepEqual(await page.evaluate(()=>window.chats[0].items),[], 'a shared session alias without the answer receives no activity');
  await page.evaluate(e=>window.delta({type:'agentRuntimeDelta',...window.identity,timelineEvent:e}),event);
  await page.waitForSelector('[data-event="accepted-before-question"]');await page.evaluate(()=>window.discoverQuestion());
  await page.waitForTimeout(100);assert.equal(await page.locator('[data-owner]').count(),1,'question discovery reuses the runtime owner in the DOM');
@@ -49,9 +53,10 @@ try {
  const final={schema:'vrcforge.runtime_turn_event.v1',continuationSource:'question_answered',sessionId:original.sessionId,clientTurnId:'continuation:question:owned',turnId:'backend-owned',plan:{reply:'需要确认下一步',nextStep:'needs_user_action'},timeline:[]};
  await page.evaluate(e=>window.deliver(e),final);await page.waitForFunction(()=>!document.querySelector('[data-owner]'));
  await page.evaluate(e=>window.deliver(e),final);
- const result=await page.evaluate(()=>window.chats[0]);
+ const result=await page.evaluate(id=>window.chats.find(chat=>chat.id===id), original.id);
  assert.equal(result.items.filter(i=>i.type==='agent'&&i.response.clientTurnId===final.clientTurnId).length,1,'one durable reply survives replay');
  assert.equal(result.items.find(i=>i.type==='agent'&&i.response.clientTurnId===final.clientTurnId).timeline[0].id,event.id,'terminal delivery keeps accepted history');
+ if(mode==='?alias-first') assert.deepEqual(await page.evaluate(()=>window.chats[0].items),[], 'the alias receives neither deltas nor terminal receipts');
  assert.deepEqual(errors,[]);await page.close();
  }
  console.log(`PASS browser actual hooks + DOM (${original.items.length} original items), both discovery orders, shared CID owner, once-only delta, terminal timeline transfer`);

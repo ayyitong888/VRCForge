@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
 import { build } from "esbuild";
 
 const require = createRequire(import.meta.url);
@@ -11,20 +9,23 @@ async function bundle(options) {
   new Function("require", "module", "exports", result.outputFiles[0].text)(require, module, module.exports);
   return module.exports;
 }
-const oldSource = execFileSync("git", ["show", "HEAD:src/hooks/use-runtime-turn-continuation.ts"], { encoding: "utf8" });
-const old = await bundle({ stdin: { contents: oldSource, loader: "ts", resolveDir: resolve("src/hooks") } });
 const current = await bundle({ entryPoints: ["src/hooks/use-runtime-turn-continuation.ts"] });
 const activity = await bundle({ entryPoints: ["src/hooks/use-runtime-turn-activity.ts"] });
 const streaming = await bundle({ entryPoints: ["src/lib/chat-streaming.ts"] });
 const identity = { sessionId: "session", clientTurnId: "client", turnId: "turn" };
 const event = { ...identity, continuationSource: "foreground_completed", plan: { nextStep: "needs_user_action" } };
 const externalRow = { id: "runtime-activity:client", type: "streaming", clientTurnId: "client", text: "" };
-assert.equal(old.runtimeContinuationDeliveryState(event, [externalRow]), "defer", "HEAD reproduces the stuck external terminal lifecycle");
 assert.equal(current.runtimeContinuationDeliveryState(event, [externalRow]), "append", "fixed external activity settles from the authoritative receipt");
 assert.equal(current.runtimeContinuationDeliveryState(event, [{ ...externalRow, id: "stream-client" }]), "defer", "the local sender still owns its HTTP completion");
 const run = { ...identity, status: "running" };
 const chat = { id: "chat", sessionId: "session", projectPath: "", title: "", items: [] };
 const projected = activity.projectRuntimeTurnActivity(chat, run);
+const older = { ...run, turnId: "old", startedAt: "2026-10-23T12:00:00Z", updatedAt: "2026-10-23T12:03:00Z" };
+const newer = { ...run, turnId: "new", startedAt: "2026-10-23T12:01:00Z", updatedAt: "2026-10-23T12:02:00Z" };
+assert.equal(activity.runtimeActivityCancelTarget([chat], chat, [older, newer]).turnId, "new",
+  "Stop owns the newest start even if the older run updated last");
+assert.equal(activity.runtimeActivityCancelTarget([chat], chat, [older, { ...newer, status: "completed" }]), undefined,
+  "a stale active row cannot revive a superseded generation");
 assert.equal(projected.items.length, 1);
 assert.equal(activity.projectRuntimeTurnActivity(projected, run), projected, "repeated discovery does not create another stream");
 assert.equal(activity.projectRuntimeTurnActivity(chat, { ...run, status: "failed" }), chat, "a terminal snapshot cannot resurrect activity");
@@ -59,4 +60,4 @@ assert.equal(filled.items[0].timeline.length, 1, "a final-before-history race ba
 assert.equal(filled.items[0].response.plan.nextStep, "needs_user_action");
 const filledLegacy = activity.applyRuntimeActivityDelta({ ...chat, items: [{ id: "legacy", type: "agent", response: withoutAlias }] }, delta);
 assert.equal(filledLegacy.items[0].timeline.length, 1, "an exact backend turn also restores a reply without CID");
-console.log("runtime activity regression: HEAD red (external terminal deferred); candidate green (ownership, local lifecycle, terminal status, body retention, event dedupe)");
+console.log("runtime activity regression: generation selection, ownership, local lifecycle, terminal status, body retention, event dedupe");

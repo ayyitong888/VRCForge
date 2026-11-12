@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { AgentRuntimeResponse, AgentRuntimeRun, AgentTurnResponseRecovery } from "../lib/api/types";
 import { fetchAgentRunTimeline, fetchAgentTurnResponse, type AgentRunTimelinePage } from "../lib/api/agent-runtime";
 import type { ChatThread } from "../lib/chat-types";
@@ -15,6 +15,30 @@ type Activity = Identity & { chatId: string; nextSequence: number; stamp: string
 
 function identityKey(identity: Identity): string {
   return JSON.stringify([identity.sessionId, identity.clientTurnId]);
+}
+
+function runIdentity(run: AgentRuntimeRun): Identity {
+  return { sessionId: (run.sessionId || "").trim(), clientTurnId: (run.clientTurnId || "").trim(), turnId: run.turnId?.trim() || undefined };
+}
+
+function newestRunsByClientTurn(runs: AgentRuntimeRun[]): Map<string, AgentRuntimeRun> {
+  const latest = new Map<string, AgentRuntimeRun>();
+  for (const run of runs) {
+    const identity = runIdentity(run);
+    if (!identity.sessionId || !identity.clientTurnId) continue;
+    const key = identityKey(identity);
+    const previous = latest.get(key);
+    // A late update on an old generation must not outrank a newer start.
+    const startedAt = run.startedAt || "";
+    if (!previous || (identity.turnId && (!previous.turnId || startedAt > (previous.startedAt || "")))) {
+      latest.set(key, run);
+    }
+  }
+  return latest;
+}
+
+function generationKey(identity: Identity): string {
+  return JSON.stringify([identity.sessionId, identity.clientTurnId, identity.turnId]);
 }
 
 function responseMatchesIdentity(response: AgentRuntimeResponse, identity: Identity): boolean {
@@ -52,15 +76,13 @@ export function runtimeActivityCancelTarget(
 ): Identity & { turnId: string } | undefined {
   if (!chat?.sessionId) return undefined;
   const candidates = new Map<string, Identity & { turnId: string }>();
-  for (const run of runs) {
-    const sessionId = String(run.sessionId || "").trim();
-    const clientTurnId = String(run.clientTurnId || "").trim();
-    const turnId = String(run.turnId || "").trim();
+  for (const run of newestRunsByClientTurn(runs).values()) {
+    const { sessionId, clientTurnId, turnId } = runIdentity(run);
     if (!isActiveRuntimeRunStatus(run.status) || !sessionId || sessionId !== chat.sessionId
       || !clientTurnId || !turnId || clientTurnId.includes(":question:")) continue;
     const identity = { sessionId, clientTurnId, turnId };
     if (runtimeActivityOwner(chats, identity)?.id !== chat.id || hasAuthoritativeReply(chat, identity)) continue;
-    candidates.set(JSON.stringify([sessionId, clientTurnId, turnId]), identity);
+    candidates.set(generationKey(identity), identity);
   }
   const matching = [...candidates.values()];
   const projected = matching.filter((identity) => chat.items.some((item) => item.type === "streaming"
@@ -98,7 +120,7 @@ function needsQuestionTimelineReadback(chat: ChatThread, identity: Identity): bo
 export function settleRuntimeTurnActivity(chat: ChatThread, identity: Identity): ChatThread {
   if (chat.sessionId !== identity.sessionId || !hasAuthoritativeReply(chat, identity)) return chat;
   const streams = chat.items.filter((item) => isExternalRuntimeStream(item)
-    && item.clientTurnId === identity.clientTurnId);
+    && item.clientTurnId === identity.clientTurnId && (!identity.turnId || !item.turnId || item.turnId === identity.turnId));
   if (!streams.length) return chat;
   const timeline = streams.flatMap((item) => item.type === "streaming" ? item.timeline || [] : []);
   return { ...chat, items: chat.items.filter((item) => !streams.includes(item)).map((item) =>
@@ -119,7 +141,7 @@ export function projectRuntimeTurnActivity(chat: ChatThread, run: AgentRuntimeRu
   }
   if (!isActiveRuntimeRunStatus(run.status)) return chat;
   return { ...chat, items: [...chat.items, {
-    id: `${RUNTIME_ACTIVITY_STREAM_PREFIX}${clientTurnId}`, type: "streaming", clientTurnId,
+    id: `${RUNTIME_ACTIVITY_STREAM_PREFIX}${clientTurnId}`, type: "streaming", clientTurnId, turnId: run.turnId,
     text: "", stopRequested: stopping, createdAt: run.startedAt, model: run.model, providerLabel: run.providerLabel,
   }] };
 }
@@ -138,7 +160,8 @@ export function applyRuntimeActivityDelta(chat: ChatThread, delta: AgentRuntimeD
       return { ...item, timeline: mergeRuntimeTimelines(materializeRuntimeTimeline(item.response), item.timeline || [], [event]) };
     }
     if (item.type !== "streaming" || item.clientTurnId !== delta.clientTurnId
-      || !isExternalRuntimeStream(item) || item.stopRequested) return item;
+      || !isExternalRuntimeStream(item) || item.stopRequested
+      || (item.turnId && delta.turnId && item.turnId !== delta.turnId)) return item;
     changed = true;
     return applyAgentRuntimeDeltaToStreamingItem(item, delta);
   });
@@ -176,6 +199,9 @@ type Params = {
 export function useRuntimeTurnActivity(params: Params) {
   const latest = useRef(params);
   latest.current = params;
+  const newestRuns = useMemo(() => newestRunsByClientTurn(params.runs), [params.runs]);
+  const latestRuns = useRef(newestRuns);
+  latestRuns.current = newestRuns;
   const activities = useRef(new Map<string, Activity>());
   const finished = useRef(new Set<string>());
   const scope = useRef({ endpoint: params.endpoint, connected: params.runtimeConnected });
@@ -225,7 +251,7 @@ export function useRuntimeTurnActivity(params: Params) {
   }, []);
 
   const observe = useCallback((run: AgentRuntimeRun) => {
-    const identity = { sessionId: String(run.sessionId || "").trim(), clientTurnId: String(run.clientTurnId || "").trim(), turnId: run.turnId };
+    const identity = runIdentity(run);
     const owner = runtimeActivityOwner(latest.current.chats, identity);
     if (!owner) return;
     // The finished cache suppresses network work, never reconciliation. A saved
@@ -235,13 +261,14 @@ export function useRuntimeTurnActivity(params: Params) {
     // UI sends and question continuations retain their existing projection owner.
     if (stream && !isExternalRuntimeStream(stream)) return;
     const key = identityKey(identity);
-    if (finished.current.has(key)) return;
+    const generation = generationKey(identity);
+    if (finished.current.has(generation)) return;
     let activity = activities.current.get(key);
     if (!activity) {
       // A persisted real terminal receipt is already authoritative after a
       // reload. Existing in-flight history readers still finish their catch-up.
       if (hasAuthoritativeReply(owner, identity) && !needsQuestionTimelineReadback(owner, identity)) {
-        finished.current.add(key);
+        finished.current.add(generation);
         return;
       }
       const knownTurn = owner.items.some((item) => item.type === "user"
@@ -267,18 +294,27 @@ export function useRuntimeTurnActivity(params: Params) {
 
   useEffect(() => {
     if (!params.runtimeConnected) return;
-    for (const run of params.runs) observe(run);
     for (const [key, activity] of activities.current) {
       const owner = runtimeActivityOwner(params.chats, activity);
+      const newestTurnId = newestRuns.get(key)?.turnId?.trim();
+      const superseded = Boolean(newestTurnId && activity.turnId && newestTurnId !== activity.turnId);
       const settled = owner && (activity.receiptRecovered || hasAuthoritativeReply(owner, activity));
-      if (!owner || owner.id !== activity.chatId || (settled && activity.caughtUp && !activity.reading)) {
+      if (superseded || !owner || owner.id !== activity.chatId || (settled && activity.caughtUp && !activity.reading)) {
         activity.controller.abort();
         if (activity.timer !== undefined) window.clearTimeout(activity.timer);
         activities.current.delete(key);
-        if (settled) finished.current.add(key);
+        if (settled) finished.current.add(generationKey(activity));
+        if (superseded) params.updateChat(activity.chatId, (chat) => {
+          if (chat.sessionId !== activity.sessionId) return chat;
+          const items = chat.items.filter((item) => item.type !== "streaming"
+            || item.id !== `${RUNTIME_ACTIVITY_STREAM_PREFIX}${activity.clientTurnId}`
+            || (item.turnId && item.turnId !== activity.turnId));
+          return items.length === chat.items.length ? chat : { ...chat, items };
+        });
       }
     }
-  }, [params.chats, params.runs, params.runtimeConnected, params.endpoint, observe]);
+    for (const run of newestRuns.values()) observe(run);
+  }, [params.chats, newestRuns, params.runtimeConnected, params.endpoint, params.updateChat, observe]);
 
   useEffect(() => {
     if (params.runtimeConnected) for (const activity of activities.current.values()) void read(activity);
@@ -310,7 +346,10 @@ export function useRuntimeTurnActivity(params: Params) {
     const identity = { sessionId: delta.sessionId, clientTurnId: delta.clientTurnId, turnId: delta.turnId };
     const owner = runtimeActivityOwner(latest.current.chats, identity);
     if (!owner || hasAuthoritativeReply(owner, identity)) return;
-    const activity = activities.current.get(identityKey(identity));
+    const key = identityKey(identity);
+    const snapshot = latestRuns.current.get(key);
+    if (snapshot?.turnId && delta.turnId && snapshot.turnId !== delta.turnId) return;
+    const activity = activities.current.get(key);
     if (activity?.turnId && delta.turnId && activity.turnId !== delta.turnId) return;
     if (!activity) observe({ ...identity, status: "running" });
     // The question observer applies its own live delta once; this observer

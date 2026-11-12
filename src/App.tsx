@@ -83,7 +83,7 @@ import { parseGoalWakeDirective } from "./hooks/use-goal-wake";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
-import { projectAgentQuestionContinuation, questionContinuationCancelTarget, questionContinuationDisplay, questionContinuationStatus, type RuntimeTurnEvent, useQuestionContinuationActivity, useRuntimeTurnContinuationDelivery } from "./hooks/use-runtime-turn-continuation";
+import { projectAgentQuestionContinuation, questionContinuationCancelTarget, questionContinuationDisplay, questionContinuationStatus, runtimeContinuationKey, type RuntimeTurnEvent, useQuestionContinuationActivity, useRuntimeTurnContinuationDelivery } from "./hooks/use-runtime-turn-continuation";
 import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
 import { useSessionHandoff } from "./hooks/use-session-handoff";
 import { useSkillsWorkspaceController } from "./hooks/use-skills-workspace-controller";
@@ -91,7 +91,7 @@ import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice"
 import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
-import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, pendingQuestionReviewTargets, questionBelongsToRuntimeScope, runtimeReviewItemForChat } from "./lib/runtime-scope";
+import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, pendingQuestionReviewTargets, questionBelongsToRuntimeScope, questionContinuationOwner, runtimeReviewItemForChat } from "./lib/runtime-scope";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import { flushChatsBeforeQuit } from "./lib/app-quit";
 import {
@@ -912,26 +912,23 @@ export default function App() {
     projectPath,
     projectPath ? projectTypeForPath(projectPath) : "general",
   );
-  const settledQuestionContinuationIdsRef = useRef(new Set<string>());
+  const settledQuestionContinuationKeysRef = useRef(new Set<string>());
   const deliverRuntimeTurnContinuation = useRuntimeTurnContinuationDelivery({
     chats,
     appendToChat,
     updateChat,
-    onContinuation: (event: RuntimeTurnEvent) => {
+    onContinuation: (event: RuntimeTurnEvent, ownerChat) => {
       if (event.continuationSource !== "question_answered") return;
       const questionId = event.clientTurnId?.match(/:question:([^:]+)(?::feedback:[1-9]\d*)?$/)?.[1];
       if (!questionId) return;
       const clientTurnId = event.clientTurnId?.trim();
       if (clientTurnId) {
-        settledQuestionContinuationIdsRef.current.add(clientTurnId);
-        const ownerChat = chats.find((chat) => chat.sessionId === event.sessionId
-          && chat.items.some((item) => item.type === "streaming" && item.id === `question-continuation:${clientTurnId}`));
-        if (ownerChat) {
-          updateChat(ownerChat.id, (current) => ({
-            ...current,
-            items: current.items.filter((item) => item.id !== `question-continuation:${clientTurnId}`),
-          }));
-        }
+        settledQuestionContinuationKeysRef.current.add(runtimeContinuationKey(ownerChat.sessionId, clientTurnId));
+        const streamId = `question-continuation:${clientTurnId}`;
+        updateChat(ownerChat.id, (current) => current.sessionId === event.sessionId
+          && current.items.some((item) => item.type === "streaming" && item.id === streamId)
+          ? { ...current, items: current.items.filter((item) => item.id !== streamId) }
+          : current);
       }
       const nextStep = String(event.plan?.nextStep || "").toLowerCase();
       const status = questionContinuationStatus("delivered", nextStep);
@@ -1136,7 +1133,9 @@ export default function App() {
     [chats, runtimeConnected, agentQuestions, activeChatId],
   );
   const runtimeReviewItem = runtimeReviewItemForChat(activeChat || undefined, runtimeAttention, scopedAgentQuestions);
-  const sending = localActivitySending || Boolean(activeRuntimeCancelTarget);
+  const selectedForegroundTurn = currentTurn?.chatId === activeChatId ? currentTurn : null;
+  const selectedCompaction = compacting && activeChat?.compaction?.status === "compacting";
+  const sending = Boolean(selectedForegroundTurn || selectedCompaction || activeRuntimeCancelTarget);
   const runtimeAwareChatSidebar = useMemo(() => {
     const visibleChatId = activeView === "chat" ? activeChatId : "";
     const activityByChat = new Map(chatSidebar.activityByChat);
@@ -1153,7 +1152,7 @@ export default function App() {
     questions: agentQuestions,
     runs: runtimeRuns,
     updateChat,
-    settledClientTurnIds: settledQuestionContinuationIdsRef.current,
+    settledContinuationKeys: settledQuestionContinuationKeysRef.current,
   });
   const applyExternalRuntimeDelta = useRuntimeTurnActivity({
     endpoint, runtimeConnected, chats, runs: runtimeRuns, updateChat,
@@ -1986,25 +1985,25 @@ export default function App() {
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
     setActiveView("chat");
     const answeredQuestion = agentQuestions.find((item) => item.questionId === questionId);
+    if (!answeredQuestion) return;
+    const answerChat = questionContinuationOwner(chats, answeredQuestion);
     try {
       const payload = await answerAgentQuestion(endpoint, questionId, {
         answer: value,
         selectedOptionId: optionId,
-        sessionId: answeredQuestion?.sessionId || sessionId,
-        projectRoot: answeredQuestion?.projectRoot || activeRuntimeProjectPath || undefined,
+        sessionId: answeredQuestion.sessionId || answerChat?.sessionId,
+        projectRoot: answeredQuestion.projectRoot || answerChat?.projectPath || undefined,
       });
       upsertAgentQuestion({
         ...payload.question,
         runtimeContinuation: payload.runtimeContinuation
-          ? { ...payload.runtimeContinuation, sessionId: payload.runtimeContinuation.sessionId || sessionId }
-          : agentQuestions.find((item) => item.questionId === questionId)?.runtimeContinuation,
+          ? { ...payload.runtimeContinuation, sessionId: payload.runtimeContinuation.sessionId || answeredQuestion.sessionId }
+          : answeredQuestion.runtimeContinuation,
       });
       void refreshRuntimeRuns(false);
-      const answerChat = chats.find((chat) => chat.sessionId === answeredQuestion?.sessionId);
-      const answerChatId = answerChat?.id;
       const answerItem = questionAnswerItem(payload.question, payload.question.answer || value);
-      if (answerChat && answerChatId) {
-        persistQuestionAnswer(answerChatId, answerItem);
+      if (answerChat) {
+        persistQuestionAnswer(answerChat.id, answerItem);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -3263,7 +3262,8 @@ export default function App() {
           action: desktopAction,
           prompt: input.trim(),
           sessionId: sessionId || undefined,
-          clientTurnId: currentTurn?.clientTurnId,
+          clientTurnId: selectedForegroundTurn?.sessionId === sessionId
+            ? selectedForegroundTurn?.clientTurnId : activeRuntimeCancelTarget?.clientTurnId,
           projectPath: activeRuntimeProjectPath || undefined,
           projectRoot: activeRuntimeProjectPath || undefined,
           params: desktopAction === "screenshot" ? { projectPath: activeRuntimeProjectPath || undefined } : {},
@@ -3455,21 +3455,19 @@ export default function App() {
         return;
       }
       replySubmitInFlightRef.current = true;
+      const answerChat = questionContinuationOwner(chats, question);
       try {
         const payload = await answerAgentQuestion(endpoint, pendingReplyQuestionId, {
           answer: composerMessage,
           selectedOptionId: "custom",
           attachments: serializeChatAttachments(attachments),
-          sessionId: question.sessionId || sessionId,
-          projectRoot: question.projectRoot || activeRuntimeProjectPath || undefined,
+          sessionId: question.sessionId || answerChat?.sessionId,
+          projectRoot: question.projectRoot || answerChat?.projectPath || undefined,
         });
         upsertAgentQuestion({
           ...payload.question,
           runtimeContinuation: payload.runtimeContinuation || payload.question.runtimeContinuation,
         });
-        const answerChat = activeChat && (!question.sessionId || activeChat.sessionId === question.sessionId)
-          ? activeChat
-          : undefined;
         if (answerChat) {
           const answerItem = questionAnswerItem(payload.question, payload.question.answer || composerMessage, attachments);
           persistQuestionAnswer(answerChat.id, answerItem);
@@ -3574,20 +3572,22 @@ export default function App() {
   }
 
   function stopInteractiveActivity(actionId?: string) {
-    if (currentTurn?.clientTurnId || isChatRunActive()) {
-      stopCurrentRun();
+    if (actionId) {
+      const action = activeDesktopActions.find((candidate) => (candidate.actionId || candidate.id) === actionId);
+      if (action?.sessionId && action.clientTurnId && currentTurn?.sessionId === action.sessionId
+        && currentTurn.clientTurnId === action.clientTurnId && stopCurrentRun(currentTurn.chatId)) {
+        return;
+      }
+      void cancelDesktopAction(actionId);
       return;
     }
+    if (activeChatId && stopCurrentRun(activeChatId)) return;
     if (activeRuntimeCancelTarget) {
       void stopObservedRuntimeTurn(activeRuntimeCancelTarget, "user_stop");
       return;
     }
-    if (compacting && activeChatId) {
+    if (selectedCompaction && activeChatId) {
       cancelCompaction(activeChatId);
-      return;
-    }
-    if (actionId) {
-      void cancelDesktopAction(actionId);
     }
   }
 
@@ -4591,24 +4591,25 @@ export default function App() {
               input={input}
               setInput={setInput}
               sending={sending}
-              stopRequested={stopRequested || activeChat?.items.some((item) => item.type === "streaming" && item.stopRequested)}
-              queueAllowed={(chatRunSending || pendingParentWorkSessionIds.has(activeChat?.sessionId || "")) && !stopRequested}
+              stopRequested={Boolean(selectedForegroundTurn && stopRequested) || activeChat?.items.some((item) => item.type === "streaming" && item.stopRequested)}
+              queueAllowed={(Boolean(selectedForegroundTurn) || pendingParentWorkSessionIds.has(activeChat?.sessionId || ""))
+                && !(selectedForegroundTurn && stopRequested)}
               runningEnterAction={runningEnterAction}
               permission={permission}
               onSubmit={submitMessage}
               onQueue={() => void submitMessage(undefined, "queue")}
               onSteerNow={() => void submitMessage(undefined, "steer")}
-              onStop={stopInteractiveActivity}
+              onStop={() => stopInteractiveActivity()}
               onResumeQueue={() => void resumeQueuedTurns(true)}
               onCancelQueue={() => void cancelQueuedTurns()}
               onEditQueuedTurn={async (turnId) => {
-                const turn = await editQueuedTurn(turnId);
+                const turn = await editQueuedTurn(turnId, activeChatId);
                 if (!turn) return;
                 setInput(current => current ? `${current}\n\n${turn.text}` : turn.text);
                 setAttachments(current => [...current, ...turn.attachments.filter(item => !current.some(existing => existing.id === item.id))]);
               }}
-              onRemoveQueuedTurn={(turnId) => void removeQueuedTurn(turnId)}
-              onSteerQueuedTurn={(turnId) => void steerQueuedTurn(turnId)}
+              onRemoveQueuedTurn={(turnId) => void removeQueuedTurn(turnId, activeChatId)}
+              onSteerQueuedTurn={(turnId) => void steerQueuedTurn(turnId, activeChatId)}
               onSwitchMode={switchMode}
               onOpenChatById={openChatById}
               commands={slashCommands}

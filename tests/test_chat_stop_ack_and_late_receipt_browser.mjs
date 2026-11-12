@@ -4,6 +4,9 @@ import { createRequire } from 'node:module';
 import { build } from 'esbuild';
 import { readFile } from 'node:fs/promises';
 
+const appSource = await readFile('src/App.tsx', 'utf8');
+const stopHandler = appSource.slice(appSource.indexOf('  function stopInteractiveActivity('), appSource.indexOf('  async function stopObservedRuntimeTurn('));
+
 const recoveryResponse = process.env.VRCFORGE_LATE_RECEIPT_REPLAY_PATH
  ? JSON.parse(await readFile(process.env.VRCFORGE_LATE_RECEIPT_REPLAY_PATH,'utf8')) : undefined;
 const recoveryChat = process.env.VRCFORGE_RECOVERY_CHAT_PATH
@@ -20,10 +23,10 @@ export const listAgentRunFollowups = async () => ({ok:true,items:[]});
 export const fetchAgentQuestions = async () => ({ok:true,questions:[]});
 export const issueComputerUseTurnGrant = async () => null;
 export const requestChatTitle = async () => ({title:'Fixture'});
-export const recordAgentRunQueued = async () => ({ok:true,accepted:true,mode:'followup',queueId:'q',sequence:1});
-export const requestAgentRunCancel = (_endpoint,payload) => new Promise((resolve,reject) => {window.cancelRequests.push(payload);window.cancelResolve=resolve;window.cancelReject=reject;});
-export const sendAgentMessage = (_endpoint,_message,session,_history,_agent,options) => new Promise((resolve,reject) => {
- window.sendCount++;window.sentSession=session;window.sendSignal=options.signal;window.sendResolve=resolve;window.sendReject=reject;
+export const recordAgentRunQueued = async (_endpoint,payload) => {window.queueRequests.push(payload);return {ok:true,accepted:true,mode:'followup',queueId:'q',sequence:1};};
+export const requestAgentRunCancel = (endpoint,payload) => new Promise((resolve,reject) => {window.cancelRequests.push({...payload,endpoint});window.cancelResolve=resolve;window.cancelReject=reject;});
+export const sendAgentMessage = (endpoint,_message,session,_history,_agent,options) => new Promise((resolve,reject) => {
+ window.sendCount++;window.sendEndpoint=endpoint;window.sentSession=session;window.sendSignal=options.signal;window.sendResolve=resolve;window.sendReject=reject;
  options.signal.addEventListener('abort',()=>reject(new Error('Request cancelled.')),{once:true});
 });
 export const fetchAgentRunTimeline = async (_endpoint,sessionId,clientTurnId,afterSequence) => {
@@ -41,15 +44,17 @@ import {useProviderSettings} from './src/hooks/use-provider-settings';
 import {resolveRuntimeAuthorizationStatus} from './src/lib/runtime-authorization-status';
 import {AgentTurnDeliveryUnconfirmedError} from './src/lib/api/http';
 import {ConversationCard} from './src/components/chat/conversation-card';
-import {useRuntimeTurnActivity} from './src/hooks/use-runtime-turn-activity';
+import {runtimeActivityCancelTarget,useRuntimeTurnActivity} from './src/hooks/use-runtime-turn-activity';
 import {useRuntimeTurnContinuationDelivery} from './src/hooks/use-runtime-turn-continuation';
 const initial={id:'owner',sessionId:'session',projectPath:'',title:'Existing',items:[]};
+const other={id:'other',sessionId:'other-session',projectPath:'',title:'Other',items:[{type:'streaming',id:'runtime-activity:peer',clientTurnId:'peer',text:''}]};
 window.identity={sessionId:'session',clientTurnId:'cid',turnId:'backend-turn'};
-window.cancelRequests=[];window.errors=[];window.sendCount=0;window.reads=[];window.receiptReads=0;window.ledgerStatus='running';
+window.cancelRequests=[];window.queueRequests=[];window.observedStops=[];window.desktopStops=[];window.errors=[];window.sendCount=0;window.reads=[];window.receiptReads=0;window.ledgerStatus='running';
 window.receipt={ok:true,sessionId:'session',clientTurnId:'cid',status:'running'};
 function Harness(){
- const[chats,setChats]=useState([initial]);const latest=useRef(chats);latest.current=chats;
+ const[chats,setChats]=useState([initial,other]);const latest=useRef(chats);latest.current=chats;
  const[runs,setRuns]=useState([]);
+ const[activeChatId,setActiveChatId]=useState('owner');
  const endpoint='http://isolated-fixture';
  const [apiConfig,setApiConfig]=useState({configured:true,provider:'chatgpt',model:'fixture',apiKeyPresent:true,credentialFingerprint:'first'});
  const settings=useProviderSettings({endpoint,runtimeConnected:true,apiConfig,startRuntime:async()=>endpoint,refresh:async()=>{},setError:()=>{}});
@@ -58,18 +63,30 @@ function Harness(){
  const updateChat=useCallback((id,fn)=>{let changed=false;latest.current=latest.current.map(c=>{if(c.id!==id)return c;const n=fn(c);changed||=n!==c;return n;});if(changed)setChats(latest.current);window.chats=latest.current;return changed;},[]);
  const appendToChat=useCallback((id,item)=>updateChat(id,c=>({...c,items:[...c.items,item]})),[updateChat]);
  const prepareTurnContext=()=>window.holdPreparation?new Promise(resolve=>{window.finishPreparation=resolve;}):Promise.resolve(null);
- const controller=useChatRunController({endpoint,runtimeConnected:true,sessionId:'session',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=> 'owner',updateChat,appendToChat,touchChat:c=>c,startRuntime:async()=>'',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),prepareTurnContext,persistChatsNow:async()=>{},chats,bindRuntimeProviderConnection:settings.bindRuntimeProviderConnection});
+ const controller=useChatRunController({endpoint,runtimeConnected:!new URLSearchParams(location.search).has('cold'),sessionId:'session',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=> 'owner',updateChat,appendToChat,touchChat:c=>c,startRuntime:async()=> 'http://started-runtime',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),prepareTurnContext,persistChatsNow:async()=>{},chats,bindRuntimeProviderConnection:settings.bindRuntimeProviderConnection});
  const deliver=useRuntimeTurnContinuationDelivery({chats,appendToChat,updateChat});
  const delta=useRuntimeTurnActivity({endpoint:'http://isolated-fixture',runtimeConnected:true,chats,runs,updateChat,deliver});
  window.controller=controller;window.chats=chats;window.delta=delta;
  window.failStatusRead=()=>window.sendReject(new AgentTurnDeliveryUnconfirmedError('temporary read failure'));
  window.start=()=>{window.turnPromise=controller.submitTurn({id:'cid',text:'fixture only',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',sessionId:'session',planMode:false});};
  window.startBranch=(id)=>{window.turnPromise=controller.runTurnNow('owner',{id,text:'fixture only',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',planMode:false},{baseItems:[],sessionId:''});};
+ window.steerOther=()=>controller.submitTurn({id:'steer',chatId:'other',text:'steer other chat',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',planMode:false});
  window.replace=(items,nextRuns)=>{latest.current=[{...initial,items}];setChats(latest.current);setRuns(nextRuns);};
  window.replaceChat=(chat,nextRuns)=>{latest.current=[chat];setChats(latest.current);setRuns(nextRuns);};
  window.setRuns=setRuns;
+ const {currentTurn,stopCurrentRun}=controller;
+ const activeRuntimeCancelTarget=runtimeActivityCancelTarget(chats,chats.find(chat=>chat.id===activeChatId),runs);
+ const activeDesktopActions=[{actionId:'desktop-b',sessionId:'other-session',clientTurnId:'peer'}];
+ const stopObservedRuntimeTurn=(target,reason)=>window.observedStops.push({...target,reason});
+ const cancelDesktopAction=id=>window.desktopStops.push(id);
+ const selectedCompaction=false;
+ const cancelCompaction=()=>{};
+ ${stopHandler}
  const outcome=chats[0]?.items.find(i=>i.type==='error'||i.response?.continuationSource==='foreground_interrupted');
- return <div id='mounted' data-provider-status={auth.status} data-credential={apiConfig.credentialFingerprint}>
+ return <div id='mounted' data-provider-status={auth.status} data-credential={apiConfig.credentialFingerprint} data-chat-id={activeChatId}>
+   <button id='select-other' onClick={()=>setActiveChatId('other')}>Open other chat</button>
+   <button id='stop' onClick={()=>stopInteractiveActivity()}>Stop</button>
+   <button id='stop-desktop' onClick={()=>stopInteractiveActivity('desktop-b')}>Stop desktop action</button>
    {outcome && <ConversationCard item={outcome} canRetry onOpenDoctor={()=>{}} onRetryItem={()=>{window.retryClicked=true;}}/>}
  </div>;
 }
@@ -89,16 +106,18 @@ try{
  await reload();
  if(!process.env.VRCFORGE_STOP_TEST_CASE?.startsWith('late')){
  const mounted=page.locator('#mounted');
- const progress={type:'agentRuntimeDelta',sessionId:'session',clientTurnId:'cid',timelineEvent:{
+ const progress={type:'agentRuntimeDelta',sessionId:'session',clientTurnId:'cid',turnId:'backend-turn',timelineEvent:{
    id:'first-model-progress',sequence:0,kind:'assistant',timestamp:'2026-11-08T14:26:21Z',
    payload:{messageId:'model-message-fixture',phase:'commentary',status:'progress',summary:'Accepted model progress'},
  }};
  await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
  await page.evaluate(delta=>{
    window.controller.applyRuntimeDelta({...delta,clientTurnId:'another-turn'});
+   window.controller.applyRuntimeDelta({...delta,sessionId:'other-session',textDelta:'foreign delta'});
    window.controller.applyRuntimeDelta({type:'agentRuntimeDelta',sessionId:'session',clientTurnId:'cid',phase:'waiting_for_model'});
  },progress);
  assert.equal(await mounted.getAttribute('data-provider-status'),'warning','dispatch and unrelated model events leave the connection unverified');
+ assert.equal(await page.evaluate(()=>window.chats[0].items.find(item=>item.type==='streaming').text),'','another session cannot append text even with the same client turn ID');
  await page.evaluate(delta=>window.controller.applyRuntimeDelta(delta),progress);
  await page.waitForFunction(()=>document.querySelector('#mounted').dataset.providerStatus==='ok',null,{timeout:2000});
  assert.equal(await page.evaluate(()=>window.sendCount),1,'real Agent output makes the status green without a separate probe');
@@ -111,6 +130,40 @@ try{
  await page.evaluate(delta=>window.controller.applyRuntimeDelta(delta),progress);
  assert.equal(await mounted.getAttribute('data-provider-status'),'warning','late output for the old credential cannot verify the new credential');
  console.log('PASS real owned model output verifies only its saved provider connection');
+ await reload();await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
+ await page.evaluate(progress=>{
+   window.controller.applyRuntimeDelta({...progress,textDelta:'owned delta'});
+   window.controller.applyRuntimeDelta({...progress,turnId:'other-backend-turn',textDelta:'foreign turn'});
+   window.sendResolve({ok:true,sessionId:'session',clientTurnId:'cid',turnId:'other-backend-turn',observe:{},plan:{reply:'foreign answer',summary:'',nextStep:'done',planner:'fixture',shellNeeded:false},timeline:[]});
+ },progress);
+ await page.waitForFunction(()=>window.chats[0].items.some(i=>i.type==='agent'));
+ assert.equal(await page.evaluate(()=>window.chats[0].items.find(i=>i.type==='agent').response.status),'interrupted');
+ assert.equal(await page.evaluate(()=>window.chats[0].items.find(i=>i.type==='agent').response.plan.reply),'owned delta','wrong backend turn ID cannot replace accepted output or add delta text');
+ await reload();await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
+ await page.evaluate(()=>window.sendResolve({ok:true,sessionId:'other-session',clientTurnId:'other-cid',turnId:'foreign-turn',observe:{},plan:{reply:'foreign answer',summary:'',nextStep:'done',planner:'fixture',shellNeeded:false},timeline:[]}));
+ await page.waitForFunction(()=>window.chats[0].items.some(i=>i.type==='agent'));
+ assert.deepEqual(await page.evaluate(()=>({sessionId:window.chats[0].sessionId,status:window.chats[0].items.find(i=>i.type==='agent').response.status})),{sessionId:'session',status:'interrupted'},'a foreign direct response cannot rebind the chat');
+ console.log('PASS direct receipts and progress share the dispatched identity');
+ await page.goto(`http://127.0.0.1:${server.address().port}/?cold=1`);
+ await page.locator('#mounted').waitFor({state:'attached'});
+ await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
+ await page.evaluate(progress=>window.controller.applyRuntimeDelta(progress),progress);
+ await page.locator('#stop').click();
+ assert.deepEqual(await page.evaluate(()=>({sent:window.sendEndpoint,stopped:window.cancelRequests[0]})),{sent:'http://started-runtime',stopped:{endpoint:'http://started-runtime',sessionId:'session',clientTurnId:'cid',turnId:'backend-turn',reason:'user_stop'}},'Stop uses the endpoint and backend turn ID owned by dispatch');
+ await reload();await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
+ await page.evaluate(()=>window.setRuns([{sessionId:'other-session',clientTurnId:'peer',turnId:'backend-peer',status:'running'}]));
+ await page.locator('#select-other').click();
+ assert.equal(await mounted.getAttribute('data-chat-id'),'other');
+ await page.locator('#stop').click();
+ assert.deepEqual(await page.evaluate(()=>window.observedStops),[{sessionId:'other-session',clientTurnId:'peer',turnId:'backend-peer',reason:'user_stop'}],'the Stop click belongs to the selected observed chat');
+ await page.locator('#stop-desktop').click();
+ assert.deepEqual(await page.evaluate(()=>window.desktopStops),['desktop-b'],'an explicitly selected desktop action cannot cancel another chat');
+ await page.evaluate(()=>window.steerOther());
+ const crossChatSteer = await page.evaluate(()=>window.queueRequests[0]);
+ assert.equal(crossChatSteer.sessionId,'other-session');
+ assert.equal(crossChatSteer.targetClientTurnId,'peer','cross-chat steer targets the visible chat turn rather than the local run in another chat');
+ assert.equal(await page.evaluate(()=>window.cancelRequests.length),0);
+ console.log('PASS Stop endpoint and chat-scoped Stop/steer routing');
  await reload();
  await page.evaluate(()=>{window.holdPreparation=true;window.start();});await page.waitForFunction(()=>typeof window.finishPreparation==='function');await page.evaluate(async()=>{window.controller.stopCurrentRun();window.finishPreparation(null);await window.turnPromise;});
  assert.equal(await page.evaluate(()=>window.sendCount),0,'Stop before runtime dispatch prevents admission instead of abandoning a pending turn into execution');
@@ -121,7 +174,7 @@ try{
    await reload();
    await page.evaluate(id=>window.startBranch(id),id);
    await page.waitForFunction(()=>window.sendCount===1);
-   await page.evaluate(()=>window.controller.stopCurrentRun());
+   await page.locator('#stop').click();
    const result=await page.evaluate(()=>({send:window.sentSession,cancel:window.cancelRequests[0]}));
    assert.equal(result.send, 'session-'+id);
    assert.equal(result.cancel.sessionId, result.send, 'Stop must use the dispatched branch session');

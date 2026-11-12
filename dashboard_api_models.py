@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
+from agent_runtime_turn_identity import MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH
 from chat_attachment_vault import ARCHIVE_MAX_BYTES
 from dashboard_foundation import runtime_settings_path
 from unity_shared_input_schemas import ShaderMaterialCategory
@@ -528,9 +529,9 @@ class AgentSessionRequest(BaseModel):
 class AgentRuntimeMessageRequest(BaseModel):
     plan_mode: bool = Field(default=False, alias="planMode", strict=True)
     agent_name: str = "desktop-agent"
-    session_id: str | None = None
+    session_id: str | None = Field(default=None, max_length=MAX_RUNTIME_SESSION_ID_LENGTH)
     chat_id: str | None = Field(default=None, alias="chatId")
-    client_turn_id: str | None = Field(default=None, alias="clientTurnId")
+    client_turn_id: str | None = Field(default=None, alias="clientTurnId", max_length=MAX_RUNTIME_CLIENT_TURN_ID_LENGTH)
     goal_delivery_id: str | None = Field(default=None, alias="goalDeliveryId")
     message: str
     attachments: list[dict[str, Any]] = Field(default_factory=list)

@@ -521,6 +521,21 @@ def test_claimed_answer_is_not_replayed_after_restart(tmp_path: Path) -> None:
     assert events[0]["plan"]["nextStep"] == "needs_user_action"
 
 
+def test_claimed_question_restart_preserves_recorded_dispatch_identity(tmp_path: Path) -> None:
+    gateway, _, question, _, _, _ = _scripted_question(tmp_path)
+    gateway.shutdown_runtime_continuations(5)
+    _answer(gateway, question, tmp_path)
+    claimed_id = f"runtime-turn:question:{question['questionId']}:feedback:2"
+    assert gateway.questions.claim_runtime_continuation(question["questionId"], client_turn_id=claimed_id)
+
+    restarted = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    assert restarted.questions.reconcile_runtime_continuations() == {"queued": 0, "interrupted": 1}
+    receipt = restarted.get_runtime_session("runtime-session", client_turn_id=claimed_id)
+    assert receipt["status"] == "completed"
+    assert receipt["response"]["clientTurnId"] == claimed_id
+    assert receipt["response"]["plan"]["nextStep"] == "needs_user_action"
+
+
 def test_goal_question_keeps_goal_owner_and_ignores_model_supplied_task_scope(tmp_path: Path) -> None:
     gateway, _, question, _, _, _ = _scripted_question(
         tmp_path,
