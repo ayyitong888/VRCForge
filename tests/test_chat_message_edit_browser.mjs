@@ -34,6 +34,8 @@ try {
   await editor.waitFor();
   const cancel = page.getByRole("button", { name: "Cancel", exact: true });
   const save = page.getByRole("button", { name: "Save", exact: true });
+  assert.equal(await cancel.innerText(), "Cancel");
+  assert.equal(await save.innerText(), "Save");
   assert.ok((await cancel.boundingBox()).x < (await save.boundingBox()).x, "Cancel is left of Save");
 
   await editor.fill("Edited");

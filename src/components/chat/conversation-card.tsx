@@ -7,7 +7,6 @@ import {
   FilePlus2,
   Loader2,
   Pencil,
-  Save,
   SkipForward,
   RotateCcw,
   X,
@@ -203,28 +202,26 @@ export function ConversationCard({
                 />
               </div>
             ) : null}
-            <div className="flex items-center gap-1 pt-1">
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
               {deliveryMetadata}
               {editSaveDisabledReason ? <span role="status" className="text-xs text-muted-foreground">{editSaveDisabledReason}</span> : null}
-              <button
+              <Button
                 type="button"
-                className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                variant="outline"
+                className="h-8 px-3"
                 onClick={onEditItemCancel}
-                title={t("chat.cancelEdit")}
-                aria-label={t("chat.cancelEdit")}
               >
-                <X className="h-3.5 w-3.5" />
-              </button>
-              <button
+                {t("chat.cancelEdit")}
+              </Button>
+              <Button
                 type="button"
-                className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                className="h-8 px-3"
                 onClick={onEditItemSave}
                 disabled={Boolean(editSaveDisabledReason)}
-                title={editSaveDisabledReason || t("chat.saveEdit")}
-                aria-label={t("chat.saveEdit")}
+                title={editSaveDisabledReason || undefined}
               >
-                <Save className="h-3.5 w-3.5" />
-              </button>
+                {t("chat.saveEdit")}
+              </Button>
             </div>
           </div>
         </div>
