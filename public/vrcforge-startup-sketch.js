@@ -6,8 +6,10 @@
   if (!context) return;
 
   const timeline = shell.getAnimations().find((animation) => animation.animationName === "startup-camera");
-  const width = canvas.width;
+  const width = 1040;
   const height = canvas.height;
+  // Keep the original drawing coordinates and crop the baked lettering at the left edge.
+  context.translate(canvas.width - width, 0);
   const colorStart = 2000;
   const colorEnd = 3000;
   const clamp = (value) => Math.max(0, Math.min(1, value));

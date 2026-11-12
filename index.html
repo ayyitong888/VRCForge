@@ -22,7 +22,8 @@
         display: block;
         width: 100%;
         height: 100%;
-        object-fit: contain;
+        object-fit: cover;
+        object-position: center top;
         pointer-events: none;
       }
       /* Draw for 3 seconds, hold for 200 ms, then crossfade for 350 ms. */
@@ -64,7 +65,6 @@
       .startup-failure button { padding: .4rem .85rem; border-radius: .35rem; border: 1px solid #785164; color: #fff; background: #785164; cursor: pointer; }
       @media (prefers-reduced-motion: reduce) {
         main[data-vrcforge-startup-shell] { animation: none; }
-        .startup-sketch { background: url("/vrcforge-startup-portrait.webp") center / contain no-repeat; }
       }
       @media (prefers-color-scheme: dark) {
         html, body, #root { background: #111827; }
@@ -73,7 +73,7 @@
   </head>
   <body>
     <main data-vrcforge-startup-shell aria-label="VRCForge" hidden>
-      <canvas class="startup-sketch" width="1040" height="802" aria-hidden="true"></canvas>
+      <canvas class="startup-sketch" width="1000" height="802" aria-hidden="true"></canvas>
       <p class="startup-progress" role="status" hidden></p>
       <section class="startup-failure" role="alertdialog" aria-modal="true" aria-labelledby="startup-failure-title" tabindex="-1" hidden>
         <h1 id="startup-failure-title"></h1>

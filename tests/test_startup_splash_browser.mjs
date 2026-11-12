@@ -142,12 +142,17 @@ async function runTests() {
     await web.close();
 
     const original = await openStartup({ debug: "0.2" });
+    const framing = await original.locator(`${splash} canvas`).evaluate((canvas) => {
+      const { width, height } = canvas.getBoundingClientRect();
+      return { width, height, fit: getComputedStyle(canvas).objectFit };
+    });
+    assert.deepEqual(framing, { width: 1120, height: 800, fit: "cover" });
     const early = await expectDismissed(original);
     assertDuration(phaseTime(early, "coloring") - phaseTime(early, "drawing"), 660, 1300, "0.2 s remaining line work is accelerated at most 3×");
     assertDuration(phaseTime(early, "holding") - phaseTime(early, "coloring"), 440, 650, "0.2 s ready colors for approximately half a second");
     assertDuration(phaseTime(early, "leaving") - early.paintedAt, 1170, 2400, "minimum visible duration precedes the crossfade");
     assertDuration(early.removedAt - phaseTime(early, "leaving"), 310, 550, "crossfade duration");
-    const finishedCheek = await original.evaluate(() => [...window.startupReplay.sketch.getContext("2d").getImageData(558, 314, 1, 1).data]);
+    const finishedCheek = await original.evaluate(() => [...window.startupReplay.sketch.getContext("2d").getImageData(518, 314, 1, 1).data]);
     assert.ok(finishedCheek[3] === 255 && finishedCheek[0] > finishedCheek[1], "the final portrait is fully colored before the crossfade");
     await original.close();
 
@@ -178,8 +183,8 @@ async function runTests() {
       const samples = window.startupReplay.idleSamples = { eye: new Set(), lamp: new Set() };
       node.addEventListener("startup-frame", ({ detail }) => {
         if (detail.idle <= 0) return;
-        samples.eye.add(context.getImageData(517, 278, 1, 1).data.join(","));
-        samples.lamp.add(context.getImageData(727, 193, 1, 1).data.join(","));
+        samples.eye.add(context.getImageData(477, 278, 1, 1).data.join(","));
+        samples.lamp.add(context.getImageData(687, 193, 1, 1).data.join(","));
       });
     });
     const status = delayed.locator(splash).getByRole("status");
@@ -233,6 +238,21 @@ async function runTests() {
     const reduced = await openStartup({ reducedMotion: "reduce", debug: "0.2" });
     const reducedReceipt = await expectDismissed(reduced);
     assertDuration(reducedReceipt.removedAt - reducedReceipt.paintedAt, 1170, 1800, "reduced motion shows still art for the minimum time");
+    const reducedPortrait = await reduced.evaluate(async () => {
+      const canvas = window.startupReplay.sketch;
+      const source = new Image();
+      source.src = "/vrcforge-startup-portrait.webp";
+      await source.decode();
+      const pixel = document.createElement("canvas").getContext("2d");
+      pixel.drawImage(source, source.width - canvas.width, 320, 1, 1, 0, 0, 1, 1);
+      return {
+        edge: [...canvas.getContext("2d").getImageData(0, 320, 1, 1).data],
+        croppedSource: [...pixel.getImageData(0, 0, 1, 1).data],
+        croppedPixels: source.width - canvas.width,
+      };
+    });
+    assert.equal(reducedPortrait.croppedPixels, 40);
+    assert.deepEqual(reducedPortrait.edge, reducedPortrait.croppedSource, "still art uses the same lettering-free crop");
     await reduced.close();
 
     const disabled = await openStartup({ enabled: false });
