@@ -7,6 +7,7 @@ from threading import Event, Thread
 
 import pytest
 
+from agent_gateway import tool_result_digest
 from session_store_integrity import _is_valid_agent_response, is_valid_chat_record
 from tests.test_native_runtime_gateway import call, finish, run, setup_gateway
 
@@ -96,6 +97,93 @@ def test_cancelled_after_model_reply_preserves_model_text(tmp_path, monkeypatch)
         "id": "cancelled-replied-chat", "sessionId": "native-session",
         "items": [{"id": "cancelled-replied-agent", "type": "agent", "response": response}],
     })
+
+
+def test_stop_after_native_compaction_keeps_committed_compaction_receipt(tmp_path, monkeypatch):
+    from runtime_planner_service import PlannerTurnMetadata
+    from tests.test_native_context_compaction import Compactor
+    from tests.test_native_context_guard import _Turn
+
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("read-after-compact", "vrcforge_read_text_file", {"path": "fixture.txt"}),
+        finish,
+    ])
+    gateway.runtime_planner._turn = _Turn(PlannerTurnMetadata(
+        native_binding="fixture-provider-model-route", verified_context_limit=24_000,
+    ))
+    with gateway.runtime_planner.bind_turn({}):
+        binding = gateway.runtime_planner.native_conversation_binding(str(tmp_path))
+    compactor = Compactor()
+    gateway.runtime_planner._compactor = compactor
+    state = gateway.runtime_sessions
+    state.begin_native_turn("native-session", binding=binding, turn_id="older-turn", message="Keep this instruction")
+    state.append_native_assistant("native-session", binding=binding, message={
+        "role": "assistant", "content": "old context " * 12_000,
+    })
+    consume = type(state).consume_cancel_reason
+
+    def stop_after_tool(owner, **identity):
+        if owner is state and invoked and state.owns_turn(**identity):
+            assert state.mark_cancel_requested(**identity)
+        return consume(owner, **identity)
+
+    monkeypatch.setattr(type(state), "consume_cancel_reason", stop_after_tool)
+    response = run(gateway, tmp_path)
+
+    assert response["task"]["status"] == "cancelled"
+    assert len(compactor.calls) == len(model.requests) == len(invoked) == 1
+    stored = state.native_conversation("native-session", binding=binding)
+    assert compactor.summary in stored["messages"][0]["content"]
+    assert response["contextCompaction"]["applied"] is True
+    assert response["contextCompaction"].get("failureClass") != "cancelled"
+    assert response["contextUsage"]["compactionCount"] == 1
+    assert any(event["kind"] == "context_compaction" for event in response["timeline"])
+
+
+def test_stop_during_tool_keeps_result_and_skips_loop_analysis(tmp_path, monkeypatch):
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("read-before-stop", "vrcforge_read_text_file", {"path": "fixture.txt"}), finish,
+    ])
+    tool_started = Event()
+    release_tool = Event()
+    identity = {}
+    response = {}
+    loop_analysis = []
+
+    def record_tool_phase(payload):
+        if payload["phase"] == "running_tool":
+            identity.update({key: payload[key] for key in ("sessionId", "turnId", "clientTurnId")})
+
+    def slow_read(params):
+        invoked.append(params)
+        tool_started.set()
+        assert release_tool.wait(5)
+        return {"text": "completed read before stop settled"}
+
+    gateway.register_tool("vrcforge_read_text_file", "When to use: read. When NOT to use: write.",
+                          "plan/preview", slow_read)
+    monkeypatch.setattr(gateway, "_runtime_status_changed", record_tool_phase)
+
+    def record_digest(value, **kwargs):
+        if isinstance(value, dict) and value.get("text") == "completed read before stop settled":
+            loop_analysis.append(value)
+        return tool_result_digest(value, **kwargs)
+
+    monkeypatch.setattr("agent_gateway.tool_result_digest", record_digest)
+    worker = Thread(target=lambda: response.update(run(gateway, tmp_path)))
+    worker.start()
+    try:
+        assert tool_started.wait(5)
+        assert gateway.request_runtime_cancel({**identity, "reason": "user_stop"})["ok"]
+        assert worker.is_alive(), "an already dispatched tool must settle before the turn ends"
+    finally:
+        release_tool.set()
+        worker.join(5)
+
+    assert response["task"]["status"] == "cancelled"
+    assert len(model.requests) == len(invoked) == 1
+    assert response["steps"][-1]["result"]["text"] == "completed read before stop settled"
+    assert not loop_analysis
 
 
 def test_stop_at_tool_dispatch_stops_work_and_survives_delayed_cleanup(tmp_path, monkeypatch):

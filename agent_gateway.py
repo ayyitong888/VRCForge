@@ -6986,6 +6986,9 @@ class AgentGateway:
         pending_approval_outcome: dict[str, Any] | None = None
         def discard_runtime_compaction_for_cancel() -> None:
             nonlocal runtime_compaction
+            if native_binding:
+                # Native compaction owns its cancellation and commits before publishing success.
+                return
             if runtime_compaction_usage_checkpoint is not None:
                 # Cancellation restores the prompt window, never already billed
                 # compaction requests (including attempts with unknown usage).
@@ -7413,6 +7416,8 @@ class AgentGateway:
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
             iterations += 1
+            if native_compaction_applied:
+                append_timeline_event("context_compaction", status="completed")
             if take_runtime_cancellation():
                 discard_runtime_compaction_for_cancel()
                 # Cancellation cannot roll back completed effects: a provider
@@ -7426,8 +7431,6 @@ class AgentGateway:
                 last_plan = cancelled_runtime_plan(preserved_reply)
                 break
             if native_binding:
-                if native_compaction_applied:
-                    append_timeline_event("context_compaction", status="completed")
                 for issue in native_turn.output_truncation.notices:
                     append_timeline_event("tool_result", label=issue["name"], tool=issue["name"], status=issue.get("status", "not_executed"),
                         summary=f"工具：{summarize_text(issue['name'], 80)}；参数：{summarize_text(issue['arguments'], 400)}；原因：{summarize_text(issue['reason'], 180)}建议：{summarize_text(issue['suggestion'], 180)}")
@@ -8926,6 +8929,12 @@ class AgentGateway:
                 ):
                     planner_argument_failures = 0
                     unresolved_planner_argument_failure = None
+
+            # The tool receipt and its completion obligations are recorded.
+            if take_runtime_cancellation():
+                discard_runtime_compaction_for_cancel()
+                last_plan = cancelled_runtime_plan()
+                break
 
             if step_waits_for_approval:
                 self._emit_runtime_status(

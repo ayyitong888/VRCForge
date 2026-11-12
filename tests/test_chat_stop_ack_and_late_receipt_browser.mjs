@@ -57,7 +57,8 @@ function Harness(){
  window.rotateCredential=()=>setApiConfig(config=>({...config,credentialFingerprint:'changed'}));
  const updateChat=useCallback((id,fn)=>{let changed=false;latest.current=latest.current.map(c=>{if(c.id!==id)return c;const n=fn(c);changed||=n!==c;return n;});if(changed)setChats(latest.current);window.chats=latest.current;return changed;},[]);
  const appendToChat=useCallback((id,item)=>updateChat(id,c=>({...c,items:[...c.items,item]})),[updateChat]);
- const controller=useChatRunController({endpoint,runtimeConnected:true,sessionId:'session',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=> 'owner',updateChat,appendToChat,touchChat:c=>c,startRuntime:async()=>'',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),persistChatsNow:()=>window.holdPersist?new Promise(resolve=>{window.persistResolve=resolve;}):Promise.resolve(),chats,bindRuntimeProviderConnection:settings.bindRuntimeProviderConnection});
+ const prepareTurnContext=()=>window.holdPreparation?new Promise(resolve=>{window.finishPreparation=resolve;}):Promise.resolve(null);
+ const controller=useChatRunController({endpoint,runtimeConnected:true,sessionId:'session',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=> 'owner',updateChat,appendToChat,touchChat:c=>c,startRuntime:async()=>'',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),prepareTurnContext,persistChatsNow:async()=>{},chats,bindRuntimeProviderConnection:settings.bindRuntimeProviderConnection});
  const deliver=useRuntimeTurnContinuationDelivery({chats,appendToChat,updateChat});
  const delta=useRuntimeTurnActivity({endpoint:'http://isolated-fixture',runtimeConnected:true,chats,runs,updateChat,deliver});
  window.controller=controller;window.chats=chats;window.delta=delta;
@@ -110,11 +111,11 @@ try{
  assert.equal(await mounted.getAttribute('data-provider-status'),'warning','late output for the old credential cannot verify the new credential');
  console.log('PASS real owned model output verifies only its saved provider connection');
  await reload();
- await page.evaluate(()=>{window.holdPersist=true;window.start();});await page.waitForFunction(()=>typeof window.persistResolve==='function');await page.evaluate(()=>{window.controller.stopCurrentRun();window.holdPersist=false;window.persistResolve();});await page.waitForTimeout(100);
+ await page.evaluate(()=>{window.holdPreparation=true;window.start();});await page.waitForFunction(()=>typeof window.finishPreparation==='function');await page.evaluate(async()=>{window.controller.stopCurrentRun();window.finishPreparation(null);await window.turnPromise;});
  assert.equal(await page.evaluate(()=>window.sendCount),0,'Stop before runtime dispatch prevents admission instead of abandoning a pending turn into execution');
  assert.equal(await page.evaluate(()=>window.cancelRequests.length),0,'local preparation Stop does not claim to cancel an unadmitted backend turn');
  assert.equal(await page.evaluate(()=>window.chats[0].items.some(i=>i.type==='agent'&&i.response.status==='cancelled')),false,'local preparation interruption does not invent a backend cancelled receipt');
- console.log('PASS Stop during local persistence prevents runtime admission');
+ console.log('PASS Stop during context preparation prevents runtime admission');
  await reload();
  await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);await page.evaluate(()=>window.controller.stopCurrentRun());await page.waitForTimeout(50);
  assert.equal(await page.evaluate(()=>window.sendSignal.aborted),false,'pending cancel acknowledgement must not abort the owned response reader');

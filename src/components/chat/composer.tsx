@@ -1,4 +1,4 @@
-import { Archive, ArrowUp, Camera, Check, ChevronDown, ClipboardList, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Shield, Square, Target, X } from "lucide-react";
+import { Archive, ArrowUp, Camera, Check, ChevronDown, ClipboardList, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Shield, ShieldAlert, Square, Target, X } from "lucide-react";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Fragment, type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
@@ -494,7 +494,9 @@ export function Composer({
                 title={executionModeLabel(currentMode)}
                 onClick={() => setModeMenuOpen((open) => !open)}
               >
-                <Shield className="h-4 w-4 shrink-0" />
+                {currentModeVisual.tier === "full"
+                  ? <ShieldAlert className="h-4 w-4 shrink-0" />
+                  : <Shield className="h-4 w-4 shrink-0" />}
                 <span className={questionPromptVisible ? "sr-only" : "truncate"}>{executionModeLabel(currentMode)}</span>
                 <ChevronDown className={cn("h-3.5 w-3.5 shrink-0", questionPromptVisible && "hidden")} />
               </button>

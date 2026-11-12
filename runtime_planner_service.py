@@ -1687,8 +1687,7 @@ class RuntimePlannerService:
         self._turn = turn
         self._global_instructions = global_instructions
         self._tool_image_reader = tool_image_reader
-        self._native_binding = ContextVar("runtime_native_binding", default="")
-        self._verified_context_limit = ContextVar("verified_context_limit", default=None)
+        self._turn_metadata = ContextVar("runtime_turn_metadata", default=PlannerTurnMetadata())
         self._role_instructions = ContextVar("runtime_role_instructions", default="")
         self._role_tool_names = ContextVar("runtime_role_tool_names", default=None)
 
@@ -1727,19 +1726,14 @@ class RuntimePlannerService:
     def bind_turn(self, request: Mapping[str, object]):
         scope = self._turn.bind(MappingProxyType(dict(request))) if self._turn else nullcontext(PlannerTurnMetadata())
         with scope as metadata:
-            token = self._native_binding.set(metadata.native_binding)
-            limit = metadata.verified_context_limit
-            limit_token = self._verified_context_limit.set(
-                limit if isinstance(limit, int) and limit > 0 else None
-            )
+            token = self._turn_metadata.set(metadata)
             try:
                 yield metadata
             finally:
-                self._verified_context_limit.reset(limit_token)
-                self._native_binding.reset(token)
+                self._turn_metadata.reset(token)
 
     def native_conversation_binding(self, project_root: str) -> str:
-        route = self._native_binding.get()
+        route = self._turn_metadata.get().native_binding
         if not route:
             return ""
         return hashlib.sha256((route + "\n" + ntpath.normcase(ntpath.normpath(project_root or ""))).encode()).hexdigest()
@@ -1850,7 +1844,8 @@ class RuntimePlannerService:
         client-supplied ``_contextCompactionLimit`` is never accepted here.
         This guard does not compact or mutate native messages.
         """
-        context_limit = self._verified_context_limit.get()
+        metadata = self._turn_metadata.get()
+        context_limit = metadata.verified_context_limit
         if not isinstance(context_limit, int) or context_limit <= 0:
             return None
         serialized = json.dumps(
@@ -1870,6 +1865,24 @@ class RuntimePlannerService:
         )
         projected_tokens = provider_overhead + request_tokens
         image_count = _native_image_count(request)
+        message_count = len(request.get("messages") or [])
+        prior_guard = ensure_dict(usage.get("nativeContextGuard"))
+        prior_input = usage_int(prior_guard.get("observedInputTokens"))
+        prior_messages = usage_int(prior_guard.get("messageCount"))
+        soft_projection = {}
+        # Native history appends within this turn. Calibrate only against a
+        # receipt for the same text-only request shape and host-bound route.
+        if (
+            usage_exact and prior_input is not None and prior_input == last_input_tokens
+            and previous_prompt_tokens is not None and prior_guard.get("requestTokens") == previous_prompt_tokens
+            and prior_guard.get("contextLimit") == context_limit
+            and metadata.provider and prior_guard.get("observedProvider") == metadata.provider
+            and metadata.model and prior_guard.get("observedModel") == metadata.model
+            and not image_count and not prior_guard.get("imageCount")
+            and prior_messages is not None and message_count >= prior_messages
+            and request_tokens >= previous_prompt_tokens
+        ):
+            soft_projection["softProjectedTokens"] = prior_input + (request_tokens - previous_prompt_tokens)
         trigger_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO + 0.999999))
         hard_limit_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_HARD_RATIO + 0.999999))
         return {
@@ -1887,7 +1900,9 @@ class RuntimePlannerService:
             "usageExact": usage_exact and last_input_tokens is not None and previous_prompt_tokens is not None,
             "providerOverheadTokens": provider_overhead,
             "requestTokens": request_tokens,
+            "messageCount": message_count,
             "measurement": "text_only_with_images" if image_count else "native_serialized_request_estimate",
+            **soft_projection,
             **({
                 "imageCount": image_count,
                 "imageTokenEstimateAvailable": False,
@@ -1935,7 +1950,10 @@ class RuntimePlannerService:
     ) -> tuple[dict[str, object], dict[str, object] | None]:
         """Compress settled history while retaining current user instructions exactly."""
         guard = self.native_context_guard(request, context_usage=context_usage)
-        if guard is None or guard["beforeTokens"] < guard["triggerTokens"]:
+        if guard is None or (
+            not guard["blocked"]
+            and guard.get("softProjectedTokens", guard["beforeTokens"]) < guard["triggerTokens"]
+        ):
             return request, guard
         snapshot = native_turn.snapshot()
         metadata = {**guard, "attempts": 0}
@@ -2689,6 +2707,15 @@ class RuntimePlannerService:
                     response_text, provider_usage = normalize_llm_plan_result(raw_response)
                     if queued_receipt is None:
                         self.record_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
+                        if native and native_guard is not None and provider_usage.get("exact") is True:
+                            observed_input = usage_int(provider_usage.get("inputTokens"))
+                            if observed_input is not None:
+                                metadata = self._turn_metadata.get()
+                                native_guard.update({
+                                    "observedInputTokens": observed_input,
+                                    "observedProvider": metadata.provider,
+                                    "observedModel": metadata.model,
+                                })
                     parse_diagnostics: dict[str, object] = {}
                     if native:
                         receipt = deepcopy(dict(raw_response.assistant_message))
