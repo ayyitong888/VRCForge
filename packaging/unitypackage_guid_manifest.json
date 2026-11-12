@@ -230,10 +230,6 @@
       "guid": "c95c9f47527049fcafc757042103caee"
     },
     {
-      "path": "Assets/VRCForge/Editor/Generic/AnimatorWriteDefaults.cs",
-      "guid": "2ad481a86fe64d6ca51dd7fe70fa194e"
-    },
-    {
       "path": "Assets/VRCForge/Editor/Generic/DuplicateProjectAssetTool.cs",
       "guid": "a2c41c1e8b3140a7b47a4d2651f9ac75"
     },

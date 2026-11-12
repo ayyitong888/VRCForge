@@ -20,7 +20,7 @@ def test_actual_ordered_fx_planner(tmp_path):
     source=(ROOT/"Assets/VRCForge/Editor/Generic/UnityFxAnimatorBatch.cs").read_text(encoding="utf-8")
     selected=[method(source,sig) for sig in ("internal static JArray ValidateEnvelope","internal static JObject BuildPlan","private static IEnumerable<JObject> States","private static string Required","private static float Number","private static bool Boolean","private static string InterruptionSource","internal static JToken Projection","internal static void Verify")]
     selected.append(source[source.index("private static bool IsAdditive"):source.index("private static string Required")])
-    resolver=(ROOT/"Assets/VRCForge/Editor/Generic/AnimatorWriteDefaults.cs").read_text(encoding="utf-8")
+    resolver=(ROOT/"Assets/VRCForge/Editor/Generic/UnityAvatarAuthoringCrud.cs").read_text(encoding="utf-8")
     selected.append("static class AnimatorWriteDefaults {"+method(resolver,"internal static bool ResolveNew")
                     +method(resolver,"internal static void RequireUsableMotion")+"}")
     runner=r'''

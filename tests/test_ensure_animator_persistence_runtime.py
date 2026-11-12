@@ -54,7 +54,7 @@ def test_ensure_animator_persistence_runtime(tmp_path: Path) -> None:
         assert got.returncode == 0, got.stderr
         raw = got.stdout
     else: raw = SOURCE.read_text(encoding="utf-8-sig")
-    resolver = SOURCE.with_name("AnimatorWriteDefaults.cs").read_text(encoding="utf-8-sig")
+    resolver = SOURCE.with_name("UnityAvatarAuthoringCrud.cs").read_text(encoding="utf-8-sig")
     product = "namespace VRCForge.Editor { using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;using UnityEngine;using UnityEditor;using UnityEditor.Animations;using VRC.SDK3.Avatars.Components;" + _class_source(raw, "public static class EnsureAnimatorStateTool") + _class_source(resolver, "internal static class AnimatorWriteDefaults") + "}"
     stubs = r'''
 

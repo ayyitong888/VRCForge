@@ -12,7 +12,7 @@ def test_binding_targets_report_missing_relative_object_component_and_property(t
     source = SOURCE.read_text(encoding="utf-8-sig")
     helpers = "\n".join(method(source, signature) for signature in (
         "internal static void ValidateBindingTarget(", "internal static void ValidateClipBindings("))
-    wd_source = SOURCE.with_name("AnimatorWriteDefaults.cs").read_text(encoding="utf-8-sig")
+    wd_source = SOURCE.with_name("UnityAvatarAuthoringCrud.cs").read_text(encoding="utf-8-sig")
     timing = [line for line in wd_source.splitlines() if "private const string Timing" in line]
     start = wd_source.index("internal static bool IsTimingCurve")
     timing.append(wd_source[start:wd_source.index(";", start) + 1])
