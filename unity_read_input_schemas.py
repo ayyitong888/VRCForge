@@ -686,6 +686,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "projectPath": {"type": "string", "description": "Unity project root; omit for the active project."},
             "avatarPath": {"type": "string", "description": "Scene hierarchy path of the avatar root."},
             "controllerPath": {"type": "string", "description": "Project-relative AnimatorController asset path; overrides the avatar FX controller."},
+            "writeDefaultsOnly": {"type": "boolean", "default": False, "description": "For Write Defaults audits, pass true to return the status, On/Off counts, and exact state examples without layers, parameters, or clips."},
         },
     },
     "vrcforge_scan_animation_bindings": {

@@ -23147,6 +23147,39 @@ def _sanitize_animation_binding_continuations(payload: dict[str, Any]) -> dict[s
     return visit(payload)
 
 
+def _summarize_fx_write_defaults(payload: dict[str, Any], *, only: bool = False) -> dict[str, Any]:
+    on = off = unknown = 0
+    on_example = off_example = ""
+    for layer in payload.get("layers") or []:
+        for state in layer.get("states") or []:
+            label = f"{layer['name']} / {state.get('state_path') or state['name']}"
+            value = state.get("write_default_values")
+            if value is True:
+                on += 1
+                on_example = on_example or label
+            elif value is False:
+                off += 1
+                off_example = off_example or label
+            else:
+                unknown += 1
+    reported_count = (payload.get("summary") or {}).get("stateCount")
+    complete = type(reported_count) is int and reported_count == on + off and not unknown
+    if on and off:
+        status = "mixed"
+    elif not complete:
+        status = "incomplete"
+    else:
+        status = "all_on" if on else "all_off" if off else "no_states"
+    return {
+        **({key: payload[key] for key in ("ok", "avatar_path", "controller_path") if key in payload} if only else payload),
+        "writeDefaultsStatus": status,
+        "writeDefaultsOnCount": on,
+        "writeDefaultsOffCount": off,
+        **({"writeDefaultsOnExample": on_example} if on else {}),
+        **({"writeDefaultsOffExample": off_example} if off else {}),
+    }
+
+
 def scan_fx_animator_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     return run_unity_artifact_scan_sync(
@@ -23158,6 +23191,7 @@ def scan_fx_animator_sync(params: dict[str, Any]) -> dict[str, Any]:
             "refreshAssets": False,
         },
         "FX animator scan",
+        payload_transform=lambda payload: _summarize_fx_write_defaults(payload, only=params.get("writeDefaultsOnly") is True),
     )
 
 
@@ -28024,7 +28058,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_inspect_primitive_basis_fixture", "Read the fixed primitive-basis fixture identity and active-scene binding without writing.", "read/debug", inspect_primitive_basis_fixture_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_vrcfury", "Detect the VRCFury package and scan avatars for VRCFury components.", "read/debug", lambda params: scan_addon_framework_sync("vrcfury", params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_items", "Scan avatar hierarchy items including wardrobe-related objects and component types.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_avatar_items)
-    AGENT_GATEWAY.register_tool("vrcforge_scan_fx_animator", "Scan FX animator layers, states, and parameters for an avatar.", "read/debug", scan_fx_animator_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_fx_animator", "When to use: inspect the avatar FX controller, including Write Defaults. For a WD audit pass writeDefaultsOnly:true. Use writeDefaultsStatus, On/Off counts and state examples directly to answer whether WD is mixed. Read layers only if specific additional states are needed. When NOT to use: do not infer conventions in other controllers or modify states. Negative example: a mixed result does not authorize normalizing existing states.", "read/debug", scan_fx_animator_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_animation_bindings", "When to use: inspect exact bindings and keys in named AnimationClips, or discover bindings on an avatar/controller; prefer clipPaths plus case-sensitive bindingSelectors for a narrow read, then bindingView=index/details and follow paging.nextRequest or each binding's nextKeyRequest. When NOT to use: mesh geometry, shader/material properties, or paging through unrelated clips to answer a few known bindings. Negative example: for one named clip's m_IsActive curve, do not enumerate the whole project; select that exact clip and binding.", "read/debug", scan_animation_bindings_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_avatar_controls)
     AGENT_GATEWAY.register_tool(
