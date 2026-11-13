@@ -84,6 +84,12 @@ RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
     + ASK_USER_USAGE_INSTRUCTION + CALL_USER_USAGE_INSTRUCTION
     + QUESTION_CONFIRMATION_INSTRUCTION + QUESTION_LANGUAGE_INSTRUCTION
 )
+RUNTIME_EVIDENCE_COMPLETION_INSTRUCTION = (
+    "When a complete canonical read directly answers every requested fact, reply immediately using its evidence. "
+    "Do not rescan, page supporting detail, or search project files merely to reconfirm answered facts. "
+    "If a requested fact is missing or incomplete, read only the relevant field or page. "
+    "Report observed material references and shader names without inferring rendering, compatibility, or correctness from those names. "
+)
 RUNTIME_TROUBLESHOOTING_INSTRUCTION = (
     "When a problem occurs, diagnose it step by step from the actual error and existing evidence. "
     "Form a concrete hypothesis, search relevant official documentation and mature implementations, "
@@ -4886,6 +4892,7 @@ class RuntimePlannerService:
             "do not resolve failures. Otherwise answer honestly without claiming completion. "
             f"{RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION}"
             f"{RUNTIME_TROUBLESHOOTING_INSTRUCTION}"
+            f"{RUNTIME_EVIDENCE_COMPLETION_INSTRUCTION}"
             'Use ordinary public assistant content for updates; use phase="commentary" only when the protocol supports it. '
             "When work remains, include the next tool call in the same response as the update and continue the task. "
             "Do not use action=reply for a progress update; reserve it for the final answer.\n"
@@ -5351,6 +5358,7 @@ class RuntimePlannerService:
                 f"{RUNTIME_REPLY_LANGUAGE_INSTRUCTION}"
                 f"{RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION}"
                 f"{RUNTIME_TROUBLESHOOTING_INSTRUCTION}"
+                f"{RUNTIME_EVIDENCE_COMPLETION_INSTRUCTION}"
                 "Put public updates in the reply field of the same JSON action object and continue that action; "
                 "do not add a preamble outside the JSON object. Reserve action=reply for the final answer. "
                 "Use already-visible tools directly; do not list or load a block for a tool that is already available. "

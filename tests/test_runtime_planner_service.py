@@ -175,6 +175,21 @@ def test_completion_prompt_separates_success_claim_from_honest_failure_reply() -
     assert '"completion_claim":{"satisfied":false}' in prompt
 
 
+def test_completion_prompt_stops_when_a_complete_canonical_read_answers_the_question() -> None:
+    planner = service()
+    prompt = planner._build_llm_plan_prompt("检查材质和 FX", [])
+    native, _ = planner._build_native_plan_request(
+        [], observe={}, exposure_layer="planning", project_context_active=True,
+        project_path="", internal_tool_blocks=None, global_instructions="", project_instructions="",
+    )
+
+    for instructions in (prompt, native["instructions"]):
+        assert "complete canonical read directly answers every requested fact" in instructions
+        assert "Do not rescan, page supporting detail, or search project files" in instructions
+        assert "without inferring rendering, compatibility, or correctness" in instructions
+        assert "completion_claim" in instructions
+
+
 def test_prompt_does_not_surface_host_owned_remaining_model_turns() -> None:
     prompt = service()._build_llm_plan_prompt(
         "继续诊断",
