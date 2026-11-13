@@ -490,6 +490,27 @@ def test_native_rejected_calls_remain_paired_and_do_not_dispatch(name, arguments
     assert plan["argumentValidation"]["issues"][0]["code"] == issue
 
 
+def test_native_dispatch_parameters_typo_returns_exact_retry_without_execution():
+    dispatcher = PlannerTool(
+        "call_tool", "Dispatch.", "runtime/dispatch",
+        input_schema={"type": "object", "additionalProperties": False,
+                      "required": ["tool", "arguments"],
+                      "properties": {"tool": {"type": "string"}, "arguments": {"type": "object"}}},
+    )
+    tool = PlannerTool("read_slots", "Read material slots.", "read")
+    bad = {"tool": "read_slots", "parameters": {"rendererPaths": ["Avatar/Face"]}}
+
+    payload, rejection = RuntimePlannerService._native_action_payload(
+        native_call("call_tool", json.dumps(bad)), [dispatcher, tool],
+    )
+
+    assert payload is None
+    assert "Rename parameters to arguments" in rejection["summary"]
+    issue = next(issue for issue in rejection["issues"] if issue["path"] == "parameters")
+    assert issue["suggestedFields"] == ["arguments"]
+    assert issue["example"] == {"tool": "read_slots", "arguments": bad["parameters"]}
+
+
 def test_native_action_payload_does_not_execute_runtime_alias_and_reports_current_catalog() -> None:
     advertised = PlannerTool("unity_create_gameobject", "Create.", "write", runtime_name="vrc_create_gameobject", write=True)
     directory = PlannerTool("list_internal_tool_blocks", "Discover.", "read", runtime_name="vrcforge_list_internal_tool_blocks")

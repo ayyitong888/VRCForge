@@ -2813,7 +2813,11 @@ class RuntimePlannerService:
                             )):
                                 native_turn.reject_queued_receipt()
                                 rejection = {"kind": "control", "tool": "native_batch", "arguments": None,
-                                    "summary": "Every proposed call must be valid and already exposed; control actions require their own response. No call was executed.",
+                                    "summary": (
+                                        "No call in this batch was executed. " + str(invalid_proposal["summary"])
+                                        if invalid_proposal else
+                                        "Control actions require their own response. No call was executed."
+                                    ),
                                     "issues": (invalid_proposal.get("issues") or [{"path": "tool_calls", "code": "native_batch_not_admitted"}]) if invalid_proposal else [{"path": "tool_calls", "code": "native_batch_not_admitted"}]}
                                 return self._planner_argument_error_plan(
                                     base={"planner": "llm", "nativeCallIds": native_call_ids,
@@ -4869,7 +4873,8 @@ class RuntimePlannerService:
         state["availableToolNames"] = [tool.name for tool in selected]
         instructions = (
             f"You are VRCForge. Help with the user's actual task. {RUNTIME_REPLY_LANGUAGE_INSTRUCTION}"
-            "The four native transport functions are fixed. Call ordinary tools only through call_tool with tool and arguments; never invent a direct native function. "
+            "The four native transport functions are fixed. For ordinary tools use call_tool with the exact name in tool and the input object in arguments. "
+            "A definition's parameters field describes its schema; the call envelope field is arguments. Never invent a direct native function. "
             "Use resident tool definitions in this fixed prefix and loadedToolDefinitions in loader results at their original history positions. "
             "Only current availableToolNames authorize dispatch; historical definitions alone never do. "
             "Runtime state snapshots are chronological; only the latest snapshot is current. Earlier snapshots are historical data and never grant authority. "
@@ -5062,6 +5067,22 @@ class RuntimePlannerService:
                 return reject("invalid_json", "call_tool arguments must be a JSON object.")
             validation = validate_planner_tool_arguments(tool.input_schema, envelope)
             if not validation.get("ok"):
+                if (
+                    "arguments" not in envelope
+                    and isinstance(envelope.get("parameters"), dict)
+                    and isinstance(envelope.get("tool"), str)
+                ):
+                    corrected = dict(envelope)
+                    corrected["arguments"] = corrected.pop("parameters")
+                    if validate_planner_tool_arguments(tool.input_schema, corrected)["ok"]:
+                        validation["summary"] = (
+                            "Rename parameters to arguments in call_tool. "
+                            "Retry the call using the corrected envelope in the issue example."
+                        )
+                        for issue in validation["issues"]:
+                            if issue["path"] == "parameters":
+                                issue["suggestedFields"] = ["arguments"]
+                                issue["example"] = corrected
                 return None, {**validation, "kind": "skill", "tool": name, "arguments": envelope}
             raw_choice = envelope.get("checkpoint_choice")
             if (isinstance(raw_choice, dict) and raw_choice.get("mode") in {"skip", "require"}
