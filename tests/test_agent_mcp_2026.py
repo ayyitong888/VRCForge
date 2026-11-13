@@ -256,10 +256,10 @@ def test_2026_stdio_notifies_client_when_tool_blocks_change() -> None:
 @pytest.mark.parametrize(
     "message, code",
     [
-        ({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, -32020),
+        ({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, -32602),
         (_request("tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": "2025-11-25", "io.modelcontextprotocol/clientCapabilities": {}}}), -32022),
         (_request("tools/list", {"_meta": _meta(**{"io.modelcontextprotocol/clientInfo": {"name": "", "version": "1"}})}), -32602),
-        (_request("tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION}}), -32021),
+        (_request("tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION}}), -32602),
         (_request("initialize"), -32601),
         (_request("unknown"), -32601),
         (_request("tools/call", {"name": "", "arguments": []}), -32602),

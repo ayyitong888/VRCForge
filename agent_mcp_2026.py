@@ -10,6 +10,7 @@ approval policy remain owned by the gateway that mounts this transport.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import inspect
 import json
@@ -40,9 +41,28 @@ DEFAULT_MAX_BODY_BYTES = 1_048_576
 DEFAULT_MAX_STDIO_LINE_BYTES = 1_048_576
 HTTP_SESSION_IDLE_SECONDS = 15 * 60
 HTTP_MAX_SESSIONS = 256
+MCP_NAME_FIELDS = {"tools/call": "name", "resources/read": "uri", "prompts/get": "name"}
+_BASE64_HEADER_PREFIX = "=?base64?"
+_BASE64_HEADER_SUFFIX = "?="
 
+
+def encode_mcp_name(value: str) -> str:
+    if value == value.strip() and all(char == "\t" or " " <= char <= "~" for char in value) and not (
+        value.startswith(_BASE64_HEADER_PREFIX) and value.endswith(_BASE64_HEADER_SUFFIX)
+    ):
+        return value
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return f"{_BASE64_HEADER_PREFIX}{encoded}{_BASE64_HEADER_SUFFIX}"
+
+
+def _decode_mcp_name(value: str) -> str:
+    if value.startswith(_BASE64_HEADER_PREFIX) and value.endswith(_BASE64_HEADER_SUFFIX):
+        encoded = value[len(_BASE64_HEADER_PREFIX):-len(_BASE64_HEADER_SUFFIX)]
+        return base64.b64decode(encoded, validate=True).decode("utf-8")
+    if encode_mcp_name(value) != value:
+        raise ValueError("Mcp-Name requires encoding")
+    return value
 HEADER_MISMATCH = -32020
-MISSING_REQUIRED_CLIENT_CAPABILITY = -32021
 UNSUPPORTED_PROTOCOL_VERSION = -32022
 
 JsonObject = dict[str, Any]
@@ -141,6 +161,7 @@ def _pre_routing_gateway_rejection(
             "errorCode": source.get("errorCode") or cause_code,
             "tool": tool,
             "recoverable": True,
+            "recoveryAction": "rediscover_target",
             "recoveryTool": "vrcforge_list_execution_targets",
             "recoveryBindingTool": "vrcforge_bind_execution_target",
             "recoveryBindingNote": (
@@ -276,6 +297,7 @@ def _tool_result_content_text(structured: Mapping[str, Any]) -> str:
             "schema": structured.get("schema"),
             "selectedBlock": structured.get("selectedBlock"),
             "loadedBlocks": structured.get("loadedBlocks"),
+            **({"nextCall": structured["nextCall"]} if "nextCall" in structured else {}),
             "blocks": blocks,
             "note": "Full tool-name index is in structuredContent; full descriptions and schemas load only for selected blocks.",
         }
@@ -426,6 +448,10 @@ def _strict_json_loads(text: str | bytes) -> Any:
     return json.loads(text, parse_constant=reject_constant)
 
 
+def is_jsonrpc_notification(message: Any) -> bool:
+    return isinstance(message, Mapping) and message.get("jsonrpc") == "2.0" and "id" not in message and _is_nonempty_string(message.get("method"))
+
+
 def _validate_request(message: Any) -> tuple[Any, str, JsonObject]:
     if not isinstance(message, Mapping):
         raise Mcp2026Error(-32600, "JSON-RPC request must be an object")
@@ -439,22 +465,18 @@ def _validate_request(message: Any) -> tuple[Any, str, JsonObject]:
         raise Mcp2026Error(-32600, "JSON-RPC method must be a non-empty string")
     params = message.get("params")
     if not isinstance(params, Mapping):
-        raise Mcp2026Error(-32020, "MCP request params must be an object")
+        raise Mcp2026Error(-32602, "MCP request params must be an object")
     meta = params.get("_meta")
     if not isinstance(meta, Mapping):
-        raise Mcp2026Error(-32020, "MCP request params._meta must be an object")
+        raise Mcp2026Error(-32602, "MCP request params._meta must be an object")
     requested_version = meta.get(PROTOCOL_VERSION_META_KEY)
+    if not _is_nonempty_string(requested_version) or not isinstance(meta.get(CLIENT_CAPABILITIES_META_KEY), Mapping):
+        raise Mcp2026Error(-32602, "MCP requests require protocolVersion and a clientCapabilities object in params._meta")
     if requested_version != PROTOCOL_VERSION:
         raise Mcp2026Error(
             UNSUPPORTED_PROTOCOL_VERSION,
             "Unsupported MCP protocol version",
             data={"supported": [PROTOCOL_VERSION], "requested": requested_version},
-        )
-    if not isinstance(meta.get(CLIENT_CAPABILITIES_META_KEY), Mapping):
-        raise Mcp2026Error(
-            MISSING_REQUIRED_CLIENT_CAPABILITY,
-            "MCP request client capabilities must be an object",
-            data={"requiredCapabilities": []},
         )
     if CLIENT_INFO_META_KEY in meta:
         client_info = meta[CLIENT_INFO_META_KEY]
@@ -599,7 +621,7 @@ class Mcp2026Router:
                 try:
                     supplied = await _resolve(self._resource_read(resource_uri_without_selection(str(uri))))
                 except ValueError as exc:
-                    raise Mcp2026Error(-32002, str(exc), 404) from exc
+                    raise Mcp2026Error(-32602, str(exc), data={"uri": uri}) from exc
                 if not isinstance(supplied, Mapping) or not isinstance(supplied.get("contents"), Sequence):
                     raise Mcp2026Error(-32603, "Resource registry returned invalid contents", 500)
                 try:
@@ -1061,9 +1083,6 @@ def create_asgi_app(
         if not (_header_has_media_type(accept, "application/json") and _header_has_media_type(accept, "text/event-stream")):
             payload, status = _transport_error("Accept must include application/json and text/event-stream")
             return JSONResponse(payload, status_code=status)
-        if protocol_version != PROTOCOL_VERSION:
-            payload, status = _transport_error("MCP-Protocol-Version must be 2026-07-28")
-            return JSONResponse(payload, status_code=status)
         if str(content_type).split(";", 1)[0].strip().lower() != "application/json":
             payload, status = _transport_error("Content-Type must be application/json")
             return JSONResponse(payload, status_code=status)
@@ -1092,18 +1111,28 @@ def create_asgi_app(
         if not isinstance(message, Mapping):
             return JSONResponse(_error(None, -32600, "JSON-RPC request must be an object"), status_code=400)
         method = message.get("method")
+        params = message.get("params")
+        meta = params.get("_meta") if isinstance(params, Mapping) else None
+        if isinstance(meta, Mapping) and PROTOCOL_VERSION_META_KEY in meta and protocol_version != meta[PROTOCOL_VERSION_META_KEY]:
+            payload, status = _transport_error("MCP-Protocol-Version must match params._meta protocolVersion", request_id=message.get("id"))
+            return JSONResponse(payload, status_code=status)
         if method_header != method:
             payload, status = _transport_error("Mcp-Method must match JSON-RPC method")
             return JSONResponse(payload, status_code=status)
         name_values = _request_header_values(request, "Mcp-Name")
-        if method == "tools/call":
+        name_field = MCP_NAME_FIELDS.get(method) if isinstance(method, str) else None
+        if name_field is not None:
             params = message.get("params")
-            body_name = params.get("name") if isinstance(params, Mapping) else None
-            if len(name_values) != 1 or not name_values[0].strip() or name_values[0] != body_name:
-                payload, status = _transport_error("Mcp-Name must appear exactly once and match tools/call name")
+            body_name = params.get(name_field) if isinstance(params, Mapping) else None
+            try:
+                decoded_name = _decode_mcp_name(name_values[0]) if len(name_values) == 1 else None
+            except ValueError:
+                decoded_name = None
+            if not decoded_name or decoded_name != body_name:
+                payload, status = _transport_error(f"Mcp-Name must appear exactly once and match {method} params.{name_field}", request_id=message.get("id"))
                 return JSONResponse(payload, status_code=status)
         elif name_values:
-            payload, status = _transport_error("Mcp-Name is only valid for tools/call")
+            payload, status = _transport_error("Mcp-Name is only valid for tools/call, resources/read, and prompts/get", request_id=message.get("id"))
             return JSONResponse(payload, status_code=status)
         created = method == "server/discover" and not session_id
         if created and len(sessions) >= HTTP_MAX_SESSIONS:
@@ -1190,6 +1219,8 @@ def run_stdio_loop(
             else:
                 if isinstance(message, list):
                     response = _error(None, -32600, "JSON-RPC batch requests are not supported")
+                elif is_jsonrpc_notification(message):
+                    continue
                 else:
                     response, _ = router.handle(message)
         sink.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")

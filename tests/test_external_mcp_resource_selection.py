@@ -116,7 +116,7 @@ def test_non_json_and_ambiguous_contents_rejected_but_original_read_unchanged(tr
 def test_existing_resource_permission_failure_is_not_bypassed(transport):
     def denied(uri):raise ValueError('Resource unavailable for this authenticated session')
     result=router_for(transport,denied)({'pointer':'/data'})
-    assert result['error']['code']==-32002
+    assert result['error']['code']==(-32602 if transport=='2026' else -32002)
     assert 'result' not in result
 
 @pytest.mark.parametrize('transport',['2026','standard'])
