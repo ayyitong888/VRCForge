@@ -142,3 +142,41 @@ def test_http_name_header_roundtrips_from_bridge(monkeypatch, tmp_path, method, 
         monkeypatch.setattr(bridge, "request_json", send)
         bridge._mcp_request(method, {field: value}, token="fixture")
     assert seen == [value]
+
+@pytest.mark.parametrize(
+    ("invalid", "field", "hint", "expected"),
+    [
+        ({"scope": "everything"}, "scope", "allowedValues", ["face", "face_static", "face_unknown", "all"]),
+        ({"scpoe": "all"}, "scpoe", "suggestedFields", ["scope"]),
+        ({"blendshapeNames": "Ears_on"}, "blendshapeNames", "expected", "array"),
+    ],
+)
+def test_external_blendshape_argument_error_precedes_unity_dispatch(tmp_path, monkeypatch, invalid, field, hint, expected):
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+    calls = []
+
+    def read(tool, arguments, *, agent_name):
+        calls.append(arguments)
+        return {"ok": True}
+
+    monkeypatch.setattr(gateway, "_call_external_mcp_read_tool", read)
+    name = "vrcforge_scan_blendshapes"
+    gateway.register_tool(name, "Scan blendshapes", "avatar", lambda _: {})
+    valid = {"projectPath": str(tmp_path), "scope": "all", "blendshapeNames": ["Ears_on"]}
+    result = gateway.call_external_mcp_tool(name, {**valid, **invalid})
+    assert result["ok"] is False
+    assert result["recoveryAction"] == "fix_and_retry"
+    assert result["mutationStarted"] is False
+    assert result["toolRoutingStarted"] is False
+    issue = next(item for item in result["issues"] if item["path"] == field)
+    assert issue[hint] == expected
+    if field == "blendshapeNames":
+        assert issue["example"] == ["Ears_on"]
+    assert calls == []
+    assert gateway.call_external_mcp_tool(name, valid)["ok"] is True
+    assert calls == [valid]

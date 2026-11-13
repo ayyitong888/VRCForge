@@ -161,7 +161,7 @@ from general_agent_tools import (
     extract_explicit_local_roots,
     host_scope_roots,
 )
-from runtime_planner_service import RuntimePlannerService
+from runtime_planner_service import RuntimePlannerService, validate_planner_tool_arguments
 from background_goal_runtime import (
     RepeatedFailureGuard,
     classify_runtime_step_failure,
@@ -4127,6 +4127,40 @@ class AgentGateway:
             tool = self._tools.get(name)
             if tool is None or not self._external_mcp_read_tool_visible(tool, config):
                 raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
+            schema = canonical_unity_read_tool_input_schema(name)
+            fields = schema.get("properties", {})
+            schema_arguments = {
+                key: value for key, value in arguments.items()
+                if key in fields or key not in {
+                    *_EXTERNAL_PROJECT_PATH_KEYS, "executionTarget", "_externalQuestionProjectBound",
+                }
+            }
+            issues = validate_planner_tool_arguments(schema, schema_arguments)["issues"]
+            if issues:
+                error = build_external_tool_error(
+                    error="Correct the indicated tool arguments and retry.",
+                    error_code="external_tool_arguments_invalid",
+                    failure_layer="gateway_validation",
+                    failure_phase="tool_argument_validation",
+                    operation_kind="read",
+                    tool=name,
+                    tool_routing_started=False,
+                    mutation_started=False,
+                    committed=False,
+                    retryable=True,
+                )
+                return {
+                    "ok": False,
+                    "status": "failed",
+                    "error": error["error"],
+                    "errorDetails": error,
+                    "toolRoutingStarted": False,
+                    "mutationStarted": False,
+                    "commitState": "not_started",
+                    "retryable": True,
+                    "recoveryAction": "fix_and_retry",
+                    "issues": issues,
+                }
             public_reference = arguments.get("executionTarget")
             verified_target = self._validate_external_mcp_execution_target(name, arguments)
             call_arguments = dict(arguments)

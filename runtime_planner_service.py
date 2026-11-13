@@ -453,6 +453,8 @@ def _planner_schema_issue(error: ValidationError):
     if keyword == "type":
         candidates = [error.schema[key] for key in ("const", "default", "minimum") if key in error.schema]
         candidates.extend(error.schema.get("enum", []))
+        if expected == "array":
+            candidates.append([error.instance])
         candidates.extend(("value", 0, 1, False, [], {}, None))
         validator = _PLANNER_ARGUMENT_VALIDATOR(error.schema, registry=Registry())
         issue = {"path": path or "$", "code": code, "expected": " | ".join(expected) if isinstance(expected, list) else str(expected)}
