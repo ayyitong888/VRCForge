@@ -667,3 +667,26 @@ def test_component_binding_identity_only_resolve_skips_scene_bytes_for_owner_sna
     assert reads == []
     assert resolved['scene']['digest'] == target['scene']['digest']
     assert execution_target_digest(resolved) == binding['executionTargetDigest']
+
+@pytest.mark.parametrize('cross_session', [False, True])
+def test_external_read_rejection_offers_exact_target_discovery(tmp_path, monkeypatch, cross_session):
+    gateway = AgentGateway(tmp_path / 'config' / 'gateway.json', tmp_path / 'audit')
+    gateway.register_tool('vrcforge_scan_animator', 'Read Animator.', 'unity',
+                          lambda _args: pytest.fail('stale target reached handler'))
+    monkeypatch.setattr(gateway, 'ensure_config', lambda: SimpleNamespace(enabled=True))
+    monkeypatch.setattr(gateway, '_external_mcp_read_tool_visible', lambda *_args: True)
+    with gateway.resource_context('external:old'):
+        bound = gateway.bind_execution_target(_live_runtime_target(tmp_path), project_root=str(tmp_path))
+    reference = bound['executionTarget'] if cross_session else {**bound['executionTarget'], 'ref': 'unknown'}
+    with gateway.resource_context('external:current'):
+        result = gateway.call_external_mcp_tool('vrcforge_scan_animator', {
+            'projectPath': str(tmp_path), 'executionTarget': reference,
+        })
+    assert result['ok'] is False
+    assert result['errorDetails']['commitState'] == 'not_started'
+    assert result['recoveryAction'] == 'rediscover_target'
+    assert result['recoveryToolCall'] == {
+        'name': 'vrcforge_list_execution_targets',
+        'arguments': {'projectPath': str(tmp_path), 'scope': 'avatar'},
+    }
+    assert result['recoveryBindingTool'] == 'vrcforge_bind_execution_target'

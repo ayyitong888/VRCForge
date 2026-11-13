@@ -119,6 +119,45 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
     return "project"
 
 
+def execution_target_recovery(
+    error: Mapping[str, Any], tool: str, arguments: Mapping[str, Any], *, write: bool,
+) -> dict[str, Any]:
+    if (
+        error.get("failureLayer") != "execution_target"
+        or error.get("commitState") != "not_started"
+        or error.get("errorCode") not in {
+            "execution_target_missing", "execution_target_handle_invalid",
+            "execution_target_reference_invalid", "execution_target_session_mismatch",
+            "execution_target_identity_drifted", "identity_scope_insufficient",
+            "editor_identity_mismatch", "process_identity_mismatch", "scene_identity_mismatch",
+            "avatar_identity_mismatch", "object_identity_mismatch", "component_identity_mismatch",
+        }
+    ):
+        return {}
+    project = str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
+    scope = identity_scope(tool, write=write, arguments=arguments)
+    next_action = (
+        "This call did not reach Unity. List current targets in the same project and session, "
+        "then bind the exact intended candidate. If the identity is ambiguous, ask the user."
+    )
+    if write:
+        next_action += " Prepare a fresh preview and obtain the required approval for the new binding."
+    return {
+        "recoveryAction": "rediscover_target",
+        "safeToRetry": False,
+        "nextAction": next_action if project else "Provide arguments.projectPath for the intended Unity project, then list and bind the exact candidate.",
+        "recoveryTool": "vrcforge_list_execution_targets",
+        "recoveryBindingTool": "vrcforge_bind_execution_target",
+        **(
+            {"recoveryToolCall": {
+                "name": "vrcforge_list_execution_targets",
+                "arguments": {"projectPath": project, "scope": scope},
+            }}
+            if project else {"requiredInput": "arguments.projectPath"}
+        ),
+    }
+
+
 _READ_RUNTIME_IDENTITY_SCOPES = frozenset({"scene", "avatar", "object", "component"})
 _APPLICATION_OWNED_WRITE_TOOLS = frozenset({
     "vrcforge_create_project", "vrcforge_register_project",

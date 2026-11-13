@@ -229,6 +229,9 @@ def canonical_result_facts(
         ("evidence", ("evidence",)),
         ("causeChain", ("causeChain", "causes")),
         ("nextAction", ("nextAction", "nextActions", "recommendedAction")),
+        ("recoveryAction", ("recoveryAction",)),
+        ("recoveryToolCall", ("recoveryToolCall",)),
+        ("recoveryBindingTool", ("recoveryBindingTool",)),
         ("recovery", ("recovery", "recoveryRequired", "checkpointRecoveryRequired")),
     ):
         if (

@@ -190,6 +190,7 @@ from execution_target import (
 from mcp_tool_descriptor import (
     canonical_mcp_tool_name,
     canonical_tool_name,
+    execution_target_recovery,
     identity_scope,
     standardize_tool_descriptor,
 )
@@ -326,6 +327,22 @@ class AgentGatewayError(RuntimeError):
             temporary_cleanup_required=(False if mutation_started is False else None),
             details=details,
         )
+
+
+def _execution_target_tool_rejection(
+    error: AgentGatewayError, tool: str, arguments: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    guidance = execution_target_recovery(error.external_error, tool, arguments, write=False)
+    if not guidance:
+        return None
+    return {
+        "ok": False,
+        "status": "failed",
+        "error": str(error),
+        "errorCode": error.cause_code,
+        "errorDetails": {**error.external_error, **guidance},
+        **guidance,
+    }
 
 
 class AgentDesktopGatewayError(AgentGatewayError, DesktopActionBrokerError):
@@ -1444,9 +1461,15 @@ class AgentGateway:
                 # Restore the same identity as the full-envelope read path.
                 # The shared read guard retains explicit mandatory scopes;
                 # optional reads do not acquire a new name-derived scope.
-                resolved_target = self._validate_external_mcp_execution_target(
-                    tool.name, params_for_handler,
-                )
+                try:
+                    resolved_target = self._validate_external_mcp_execution_target(
+                        tool.name, params_for_handler,
+                    )
+                except AgentGatewayError as exc:
+                    rejection = _execution_target_tool_rejection(exc, tool.name, tool_params)
+                    if rejection is None:
+                        raise
+                    return rejection
                 params_for_handler = dict(tool_params)
                 params_for_handler["executionTarget"] = resolved_target
             agent_token = self._tool_agent_context.set(tool_agent_name)
@@ -3900,6 +3923,11 @@ class AgentGateway:
                 "This Unity MCP call requires arguments.projectPath and the public executionTarget reference returned by vrcforge_bind_execution_target for this same project and session. Call vrcforge_list_execution_targets, then bind one exact candidate. Hierarchy paths alone are never identity.",
                 status_code=409,
                 cause_code="execution_target_missing",
+                failure_layer="execution_target",
+                failure_phase="before_unity_core_call",
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
             )
         required_scope = None
         if required:
@@ -4174,7 +4202,13 @@ class AgentGateway:
             if invalid:
                 return invalid
             public_reference = arguments.get("executionTarget")
-            verified_target = self._validate_external_mcp_execution_target(name, arguments)
+            try:
+                verified_target = self._validate_external_mcp_execution_target(name, arguments)
+            except AgentGatewayError as exc:
+                rejection = _execution_target_tool_rejection(exc, name, arguments)
+                if rejection is None:
+                    raise
+                return rejection
             call_arguments = dict(arguments)
             if verified_target is not None and is_execution_target_reference(public_reference):
                 call_arguments["executionTarget"] = verified_target
@@ -4227,6 +4261,7 @@ class AgentGateway:
                 if not str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
                 else "execution_target",
                 exc,
+                target_arguments=arguments,
                 error_code_override=(
                     "external_mcp_project_binding_missing"
                     if not str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
@@ -4776,6 +4811,7 @@ class AgentGateway:
         error: str | BaseException,
         *,
         error_code_override: str | None = None,
+        target_arguments: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         exception = error if isinstance(error, BaseException) else None
         error_text = str(error)
@@ -4821,6 +4857,8 @@ class AgentGateway:
                 else None
             ),
         )
+        guidance = execution_target_recovery(error_object, tool, target_arguments or {}, write=True)
+        error_object.update(guidance)
         payload = {
             "ok": False,
             "status": "failed",
@@ -4833,6 +4871,7 @@ class AgentGateway:
             "error": error_object["error"],
             "errorDetails": error_object,
             "writeFailure": external_write_failure_view(error_object),
+            **guidance,
         }
         if error_object.get("errorCode") == "blocked_by_interrupted_apply_recovery":
             # The rejected operation did not mutate; these belong to the earlier
@@ -5145,6 +5184,11 @@ class AgentGateway:
                 mutation_started=None if tool.write else False,
                 committed=None if tool.write else False,
             )
+            guidance = execution_target_recovery(
+                getattr(exc, "external_error", {}), name, tool_params, write=tool.write,
+            )
+            if guidance:
+                error_object = {**exc.external_error, **guidance}
             response = {
                 "ok": False,
                 "status": "failed",
@@ -5155,6 +5199,7 @@ class AgentGateway:
                 "errorDetails": error_object,
                 "resultSummary": {"status": "error"},
                 "durationMs": duration_ms,
+                **guidance,
             }
             response["outcome"] = normalize_agent_tool_result(
                 response,
