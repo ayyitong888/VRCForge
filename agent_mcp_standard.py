@@ -19,6 +19,7 @@ from agent_mcp_2026 import (
     _strict_json_clone,
     _strict_json_loads,
     _tool_result_content_text,
+    is_jsonrpc_notification,
 )
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
@@ -457,6 +458,8 @@ def run_standard_stdio_loop(
                 response = _error(None, -32700, "JSON-RPC message exceeds the supported size")
             else:
                 message = _strict_json_loads(raw_line)
+                if is_jsonrpc_notification(message) and message.get("method") == "notifications/cancelled":
+                    continue
                 request_id = message.get("id") if isinstance(message, Mapping) else None
                 response = router.handle(message)
         except Exception:
@@ -505,7 +508,12 @@ def run_negotiated_stdio_loop(
                     method = message.get("method") if isinstance(message, Mapping) else None
                     params = message.get("params") if isinstance(message, Mapping) else None
                     meta = params.get("_meta") if isinstance(params, Mapping) else None
-                    if isinstance(meta, Mapping) and meta.get("io.modelcontextprotocol/protocolVersion") == VRCFORGE_2026_PROTOCOL_VERSION:
+                    if isinstance(meta, Mapping) and "io.modelcontextprotocol/protocolVersion" in meta:
+                        if meta["io.modelcontextprotocol/protocolVersion"] != VRCFORGE_2026_PROTOCOL_VERSION:
+                            response, _status = router_2026.handle(message)
+                            sink.write(json.dumps(response, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
+                            sink.flush()
+                            continue
                         selected_profile = "vrcforge-2026"
                     elif method == "initialize":
                         selected_profile = "mcp-1x"
@@ -521,6 +529,7 @@ def run_negotiated_stdio_loop(
                                 "protocolNamespace": "io.modelcontextprotocol/protocolVersion",
                                 "protocolMetadataLocation": "params._meta",
                                 "protocolVersion": VRCFORGE_2026_PROTOCOL_VERSION,
+                                "supported": [VRCFORGE_2026_PROTOCOL_VERSION, *SUPPORTED_PROTOCOL_VERSIONS],
                                 "fallbackProtocolNamespace": "initialize.params.protocolVersion",
                                 "receivedMethod": method,
                                 "receivedProtocolVersion": (
@@ -547,8 +556,12 @@ def run_negotiated_stdio_loop(
                     )
                     diagnostics.flush()
                 if selected_profile == "vrcforge-2026":
+                    if is_jsonrpc_notification(message):
+                        continue
                     response, _status = router_2026.handle(message)
                 else:
+                    if is_jsonrpc_notification(message) and message.get("method") == "notifications/cancelled":
+                        continue
                     response = router_standard.handle(message)
         except Exception:
             response = _error(request_id, -32700, "Invalid JSON")

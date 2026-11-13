@@ -402,18 +402,17 @@ def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> Non
     assert planning_status == 200
     assert execution_status == 200
     assert execution_load_status == 200
-    assert execution_loaded["result"]["structuredContent"]["catalogGeneration"] == 2
+    assert execution_loaded["result"]["structuredContent"]["catalogGeneration"] == 1
     planning_names = {tool["name"] for tool in planning["result"]["tools"]}
     execution_names = {tool["name"] for tool in execution["result"]["tools"]}
     assert "vrcforge_request_apply" not in planning_names
     assert "vrcforge_request_apply" not in execution_names
     assert "vrcforge_create_gameobject" not in planning_names
-    assert "vrcforge_create_gameobject" in execution_names
+    assert "vrcforge_create_gameobject" not in execution_names
     assert "vrcforge_invoke_loaded_write_tool" not in planning_names
-    assert "vrcforge_invoke_loaded_write_tool" in execution_names
+    assert "vrcforge_invoke_loaded_write_tool" not in execution_names
     assert "vrcforge_invoke_loaded_read_tool" in planning_names
-    assert planning["result"]["catalogGeneration"] == 1
-    assert execution["result"]["catalogGeneration"] == 2
+    assert planning["result"]["tools"] == execution["result"]["tools"]
     for tool in execution["result"]["tools"]:
         assert "When to use:" in tool["description"]
         assert "When NOT to use:" in tool["description"]
@@ -435,8 +434,8 @@ def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> Non
             },
         }
     )
-    assert blocked_bridge_write_status == 200
-    assert blocked_bridge_write["result"]["structuredContent"]["status"] == "planning_activation_cannot_write"
+    assert blocked_bridge_write_status == 400
+    assert blocked_bridge_write["error"]["code"] == -32602
 
     called, called_status = router.handle(
         {
@@ -450,11 +449,9 @@ def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> Non
             },
         }
     )
-    assert called_status == 200
-    assert called["result"]["structuredContent"]["ok"] is True
-    assert Bridge.calls == [
-        ("vrcforge_create_gameobject", {"projectRoot": "D:/Avatar", "name": "External"})
-    ]
+    assert called_status == 400
+    assert called["error"]["code"] == -32602
+    assert Bridge.calls == []
 
 
 def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) -> None:
@@ -680,17 +677,15 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
     after_leaf, _ = router.handle(
         {"jsonrpc": "2.0", "id": 25, "method": "tools/list", "params": {"_meta": meta}}
     )
-    assert "vrcforge_scan_blendshapes" in {tool["name"] for tool in after_leaf["result"]["tools"]}
+    assert "vrcforge_scan_blendshapes" not in {tool["name"] for tool in after_leaf["result"]["tools"]}
     loaded = loaded_leaf
     assert loaded["result"]["structuredContent"]["operationId"]
     assert loaded["result"]["structuredContent"]["loadedBlocks"] == ["avatar_structure/mesh_shape_data", "core"]
     activation_handle = loaded["result"]["structuredContent"]["activationHandle"]
     assert activation_handle.startswith("vrcforge-act-")
     assert loaded["result"]["structuredContent"]["catalogGeneration"] == 1
-    assert router.drain_notifications() == [
-        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
-    ]
-    assert "vrcforge_apply_blendshapes" in {tool["name"] for tool in after_leaf["result"]["tools"]}
+    assert router.drain_notifications() == []
+    assert "vrcforge_apply_blendshapes" not in {tool["name"] for tool in after_leaf["result"]["tools"]}
     assert Bridge.calls == []
 
     integration_leaf, integration_status = router.handle(
@@ -827,11 +822,10 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
         "vrcforge_preflight_skill_package",
         "vrcforge_import_skill_package",
         "vrcforge_export_skill_package",
-    }.issubset(with_skill_names)
+    }.issubset({tool["name"] for tool in skills_loaded["result"]["structuredContent"]["selectedTools"]})
+    assert with_skill_names == {tool["name"] for tool in after_leaf["result"]["tools"]}
     assert skills_loaded["result"]["structuredContent"]["catalogGeneration"] == 2
-    assert router.drain_notifications() == [
-        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
-    ]
+    assert router.drain_notifications() == []
     unloaded, _ = router.handle(
         {
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -840,9 +834,7 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
         }
     )
     assert unloaded["result"]["structuredContent"]["catalogGeneration"] == 3
-    assert router.drain_notifications() == [
-        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
-    ]
+    assert router.drain_notifications() == []
     after_unload, _ = router.handle(
         {"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {"_meta": meta}}
     )
@@ -998,7 +990,7 @@ def test_session_mismatch_surfaces_rebind_discovery_to_external_agent(tmp_path: 
     assert missing_project_result["requiredInput"] == "arguments.projectPath"
 
 
-def test_load_notifies_and_activation_fallback_survives_host_without_relist(monkeypatch) -> None:
+def test_modern_load_keeps_catalogue_stable_and_activation_works_without_relist(monkeypatch) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
 
     class Bridge:
@@ -1017,11 +1009,10 @@ def test_load_notifies_and_activation_fallback_survives_host_without_relist(monk
     meta = {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION, "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "blackbox", "version": "1"}}
     before, _ = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": meta}})
     loaded, _ = router.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials", "allTools": True}}})
-    assert router.drain_notifications() == [{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}]
+    assert router.drain_notifications() == []
     after, _ = router.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {"_meta": meta}})
-    assert "vrcforge_scan_materials" in {tool["name"] for tool in after["result"]["tools"]}
+    assert after["result"]["tools"] == before["result"]["tools"]
     assert loaded["result"]["structuredContent"]["catalogGeneration"] == 1
-    assert after["result"]["tools"][0]["_meta"]["catalogGeneration"] == 1
     handle = loaded["result"]["structuredContent"]["activationHandle"]
     nested_provenance = {"contentHash": "nested"}
     fallback, _ = router.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {"promptSkillProvenance": nested_provenance}}}})

@@ -24,7 +24,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from dashboard_foundation import read_vrcforge_version
-from agent_mcp_2026 import HTTP_SESSION_IDLE_SECONDS, PROTOCOL_VERSION, Mcp2026Router, run_stdio_loop, _host_is_loopback
+from agent_mcp_2026 import HTTP_SESSION_IDLE_SECONDS, MCP_NAME_FIELDS, PROTOCOL_VERSION, Mcp2026Router, encode_mcp_name, run_stdio_loop, _host_is_loopback
 from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
 from mcp_tool_descriptor import standardize_tool_descriptor
 from external_mcp_result_projection import project_tool
@@ -600,6 +600,8 @@ class VRCForgeBridge:
                 requestMayHaveCommitted=True,
                 safeToRetry=False,
                 toolName=tool_name,
+                recoveryAction="query_receipt",
+                nextAction="Read the operation receipt using the URI or execution ID already returned for this call. If none is available, inspect the target read-only before deciding whether the operation is still needed.",
             )
         except Exception as exc:  # noqa: BLE001 - preserve upstream structured rejection facts.
             if isinstance(exc, ExternalHttpBridgeError):
@@ -621,7 +623,7 @@ class VRCForgeBridge:
                     recovery_fields = {
                         key: upstream_data[key]
                         for key in (
-                            "recoverable", "nextAction", "recoveryToolCall", "recoveryTool",
+                            "recoverable", "recoveryAction", "nextAction", "recoveryToolCall", "recoveryTool",
                             "recoveryBindingTool", "recoveryBindingNote", "requiredInput",
                         )
                         if key in upstream_data
@@ -807,8 +809,8 @@ class VRCForgeBridge:
             "MCP-Protocol-Version": PROTOCOL_VERSION,
             "Mcp-Method": method,
         }
-        if method == "tools/call":
-            extra_headers["Mcp-Name"] = str(params.get("name") or "")
+        if name_field := MCP_NAME_FIELDS.get(method):
+            extra_headers["Mcp-Name"] = encode_mcp_name(str(params.get(name_field) or ""))
         if self._mcp_session_id:
             extra_headers["Mcp-Session-Id"] = self._mcp_session_id
         response_headers: dict[str, str] = {}
@@ -1071,7 +1073,7 @@ def run_stdio_server(
                             "description": "Browse or search within this exact category or leaf.",
                         },
                         "query": {
-                            "type": "string", "minLength": 1,
+                            "type": "string", "pattern": "\\S",
                             "description": f"Search by target and operation, a schema field, or an exact tool name. "
                             f"The matcher uses up to {QUERY_MAX_CHARS} characters.",
                         },
@@ -1081,7 +1083,7 @@ def run_stdio_server(
             {
                 "name": "vrcforge_load_tool_block",
                 "description": (
-                    'When to use: Browse one current directory with {"block":"avatar_structure/mesh_shape_data"} or {"block":"avatar_structure/mesh_shape_data","toolNames":[]}; this returns directory and tool names only, without loading tool definitions. Load selected exact names with toolNames:["vrcforge_scan_blendshapes"]. Set "allTools":true to load ALL tools in this leaf, for example {"block":"avatar_structure/mesh_shape_data","allTools":true}; this never loads the whole directory tree. Full schemas are returned for hosts that do not refresh tools/list.\n'
+                    'When to use: Browse one current directory with {"block":"avatar_structure/mesh_shape_data"} or {"block":"avatar_structure/mesh_shape_data","toolNames":[]}; this returns directory and tool names only. Load selected exact names with toolNames:["vrcforge_scan_blendshapes"]. Set "allTools":true only when you need the entire leaf. Use selectedTools and invocationTemplates from the receipt to call the loaded tool.\n'
                     "When NOT to use: Load unrelated blocks, use allTools on a parent directory, or treat loading as write approval.\n"
                     "Negative example: Do not omit names to load a leaf or use allTools to expand every leaf."
                 ),
@@ -1163,7 +1165,7 @@ def run_stdio_server(
                         "additionalProperties": False,
                         "required": ["name"],
                         "properties": {
-                            "name": {"type": "string", "minLength": 1, "maxLength": 240},
+                            "name": {"type": "string", "pattern": "\\S", "maxLength": 240},
                             "arguments": {"type": "object", "additionalProperties": True},
                         },
                     },
@@ -1195,7 +1197,7 @@ def run_stdio_server(
                 {
                     "name": "vrcforge_invoke_loaded_read_tool",
                     "description": (
-                        "When to use: Invoke one exact read Tool from a block already activated in this MCP session when the host has not refreshed tools/list.\n"
+                        "When to use: Invoke one exact read tool with the activationHandle and selected tool name returned by vrcforge_load_tool_block.\n"
                         "When NOT to use: Do not invoke writes, unloaded blocks, guessed Tool names, or reuse a handle after unload/server restart.\n"
                         "Negative example: Calling a material write through the read bridge after loading only the avatar block."
                     ),
@@ -1304,6 +1306,11 @@ def run_stdio_server(
                     }
                     for position, item in enumerate(tools, start=1)
                 ]
+                if tools:
+                    node["nextCall"] = {
+                        "name": "vrcforge_load_tool_block",
+                        "arguments": {"block": leaf_id, "toolNames": [tools[0]["name"]]},
+                    }
             return node
 
         def root_node(root_id: str, *, expanded: bool) -> dict[str, Any]:
@@ -1352,6 +1359,7 @@ def run_stdio_server(
                 'Loading does not grant write approval. tools/list _meta io.vrcforge/toolNames or resultMode=full also remain available.'
             ),
             "tree": tree,
+            **({"nextCall": tree["nextCall"]} if "nextCall" in tree else {}),
         }
 
     def search_blocks(query: str, selected_block: str) -> dict[str, Any]:
@@ -1398,13 +1406,16 @@ def run_stdio_server(
             },
         }
 
-    def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def list_tools(params: Mapping[str, Any], *, stable: bool = False) -> list[dict[str, Any]]:
         nonlocal catalogue_backend_unavailable
         requested_exposure = str(params.get("exposureLayer") or exposure_layer)
+        if stable and exposure_layer == "planning":
+            requested_exposure = "planning"
         if requested_exposure not in {"planning", "execution"}:
             raise ValueError("exposureLayer must be planning or execution")
-        if "exposureLayer" in params:
+        if not stable and "exposureLayer" in params:
             requested_layer["value"] = requested_exposure
+        generation = 0 if stable else tool_list_revision
         tools: list[dict[str, Any]] = [
             standardize_tool_descriptor({
                 "name": "vrcforge_bridge_preflight",
@@ -1414,7 +1425,7 @@ def run_stdio_server(
                     "Negative example: Treating a reachable bridge as proof that a Unity target is bound."
                 ),
                 "inputSchema": {"type": "object", "additionalProperties": False},
-            }, write=False, block="core", exposure_layer=requested_exposure, catalog_generation=tool_list_revision)
+            }, write=False, block="core", exposure_layer=requested_exposure, catalog_generation=generation)
         ]
         tools.extend(block_controls())
         tools.extend(prompt_controls())
@@ -1456,13 +1467,13 @@ def run_stdio_server(
                 or not block
                 or (
                     bridge_tool_block(item) != "core"
-                    and block not in loaded_blocks
+                    and not stable and block not in loaded_blocks
                 )
             ):
                 continue
             metadata = dict(item.get("_meta") or {})
             selection = displayed_tools.get(block)
-            visible = name in DEFAULT_DISCOVERY_TOOLS or (block in loaded_blocks and (selection is None or name in selection))
+            visible = name in DEFAULT_DISCOVERY_TOOLS or (not stable and block in loaded_blocks and (selection is None or name in selection))
             if not visible:
                 metadata["io.vrcforge/defaultVisible"] = False
             tools.append(standardize_tool_descriptor(
@@ -1478,8 +1489,12 @@ def run_stdio_server(
                 write=is_write_tool(item),
                 block=block,
                 exposure_layer=requested_exposure,
-                catalog_generation=tool_list_revision,
+                catalog_generation=generation,
             ))
+        if stable:
+            for item in tools:
+                item["catalogGeneration"] = generation
+                item["_meta"]["catalogGeneration"] = generation
         return tools
 
     def invoke_activated_tool(arguments: Mapping[str, Any], *, write: bool) -> dict[str, Any]:
@@ -1496,6 +1511,8 @@ def run_stdio_server(
                 failure_phase="activated_tool_invocation",
                 operation_kind="discovery",
                 details={"toolName": delegated_name},
+                recoveryAction="rediscover_target",
+                recoveryToolCall={"name": "vrcforge_list_tool_blocks", "arguments": {"query": delegated_name} if delegated_name else {}},
                 catalogGeneration=tool_list_revision,
                 loadedBlocks=sorted(loaded_blocks),
             )
@@ -1533,6 +1550,8 @@ def run_stdio_server(
                 failure_phase="activated_tool_invocation",
                 operation_kind="discovery",
                 details={"toolName": delegated_name, "blocks": sorted(covered_blocks)},
+                recoveryAction="rediscover_target",
+                recoveryToolCall={"name": "vrcforge_list_tool_blocks", "arguments": {"query": delegated_name}},
                 catalogGeneration=tool_list_revision,
                 loadedBlocks=sorted(loaded_blocks),
             )
@@ -1617,16 +1636,33 @@ def run_stdio_server(
         }
 
     def call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if tool_name in {"vrcforge_list_tool_blocks", "vrcforge_load_tool_block", "vrcforge_unload_tool_block",
+                         "vrcforge_list_prompts", "vrcforge_get_prompt"}:
+            from runtime_planner_service import validate_planner_tool_arguments
+
+            controls = prompt_controls() if tool_name.endswith("prompt") or tool_name.endswith("prompts") else block_controls()
+            descriptor = next(item for item in controls if item["name"] == tool_name)
+            issues = validate_planner_tool_arguments(descriptor["inputSchema"], arguments)["issues"]
+            if issues:
+                recovery = {"recoveryAction": "fix_and_retry", "issues": issues}
+                if tool_name == "vrcforge_list_tool_blocks" and any(issue["path"] == "query" for issue in issues):
+                    recovery["recoveryToolCall"] = {"name": tool_name, "arguments": {}}
+                return external_rejection(
+                    status="invalid_tool_block" if any(issue["path"] == "block" for issue in issues) else "invalid_tool_arguments",
+                    error="Correct the indicated fields or use recoveryToolCall to continue.",
+                    error_code="external_tool_arguments_invalid",
+                    failure_layer="external_tool_discovery",
+                    failure_phase="tool_argument_validation",
+                    operation_kind="discovery",
+                    tool=tool_name,
+                    **recovery,
+                )
         nonlocal tool_list_revision
         if tool_name == "vrcforge_bridge_preflight":
             return bridge.preflight()
         if tool_name == "vrcforge_list_prompts":
             cursor = arguments.get("cursor", "")
             page_size = arguments.get("pageSize", 100)
-            if not isinstance(cursor, str) or len(cursor) > 512:
-                raise ValueError("cursor must be a string no longer than 512 characters")
-            if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 100:
-                raise ValueError("pageSize must be an integer between 1 and 100")
             try:
                 return list_prompts({"cursor": cursor, "pageSize": page_size})
             except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
@@ -1638,10 +1674,6 @@ def run_stdio_server(
         if tool_name == "vrcforge_get_prompt":
             name = arguments.get("name")
             prompt_arguments = arguments.get("arguments", {})
-            if not isinstance(name, str) or not name.strip() or len(name) > 240:
-                raise ValueError("name must be a non-empty string no longer than 240 characters")
-            if not isinstance(prompt_arguments, Mapping):
-                raise ValueError("arguments must be an object")
             try:
                 return get_prompt(name.strip(), prompt_arguments)
             except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
@@ -1652,8 +1684,6 @@ def run_stdio_server(
                 return gateway_rejection(exc, operation="get_prompt")
         if tool_name == "vrcforge_list_tool_blocks":
             query = arguments.get("query")
-            if "query" in arguments and (not isinstance(query, str) or not query.strip()):
-                raise ValueError("query must be a non-empty string")
             return block_inventory(arguments.get("block"), query)
         if tool_name == "vrcforge_invoke_loaded_read_tool":
             return invoke_activated_tool(arguments, write=False)
@@ -1685,16 +1715,6 @@ def run_stdio_server(
                 )
             is_load = tool_name == "vrcforge_load_tool_block"
             all_tools = arguments.get("allTools", False) if is_load else False
-            if is_load and type(all_tools) is not bool:
-                return external_rejection(
-                    status="invalid_tool_selection",
-                    error="allTools must be a boolean when supplied.",
-                    error_code="external_tool_selection_invalid",
-                    failure_layer="external_tool_discovery",
-                    failure_phase="block_selection",
-                    operation_kind="discovery",
-                    loadedBlocks=sorted(loaded_blocks),
-                )
             supplied_names = is_load and "toolNames" in arguments
             selected_names = arguments.get("toolNames") if supplied_names else None
             nonempty_names = isinstance(selected_names, list) and bool(selected_names)
@@ -1718,6 +1738,8 @@ def run_stdio_server(
                     failure_phase="block_selection",
                     operation_kind="discovery",
                     details={"selector": selector, "category": block},
+                    recoveryAction="rediscover_target",
+                    recoveryToolCall={"name": "vrcforge_list_tool_blocks", "arguments": {"block": block}},
                     loadedBlocks=sorted(loaded_blocks),
                 )
             targets = (block,)
@@ -1767,6 +1789,8 @@ def run_stdio_server(
                             error_code="external_tool_selection_invalid",
                             failure_layer="external_tool_discovery",
                             failure_phase="block_selection", operation_kind="discovery",
+                            recoveryAction="rediscover_target",
+                            recoveryToolCall={"name": "vrcforge_list_tool_blocks", "arguments": {"block": block}},
                             loadedBlocks=sorted(loaded_blocks),
                         )
                     available = {str(item.get("name") or "") for item in manifest.get("tools", [])
@@ -1778,6 +1802,8 @@ def run_stdio_server(
                         status="invalid_tool_selection", error="toolNames must contain 1..32 unique exact names available in this leaf and exposure layer.",
                         error_code="external_tool_selection_invalid", failure_layer="external_tool_discovery",
                         failure_phase="block_selection", operation_kind="discovery", loadedBlocks=sorted(loaded_blocks),
+                        recoveryAction="rediscover_target",
+                        recoveryToolCall={"name": "vrcforge_list_tool_blocks", "arguments": {"block": block}},
                     )
             if is_load:
                 was_loaded = block in loaded_blocks
@@ -1824,7 +1850,18 @@ def run_stdio_server(
                     "expiresWhen": "covered_block_unloaded_or_stdio_server_exits",
                 }
                 if selected_names is not None:
-                    response["selectedTools"] = [project_tool(item, mode="compact") for item in list_tools({"exposureLayer": requested_layer["value"]}) if item["name"] in selected_names]
+                    selected = [project_tool(item, mode="full") for item in manifest.get("tools", [])
+                                if item.get("name") in selected_names and item_owner(item) == block]
+                    response["selectedTools"] = selected
+                    response["nextAction"] = (
+                        "Choose a selected tool and fill invocationTemplates.arguments.arguments from its inputSchema. "
+                        "Copy target references from read results. Write approvals still apply."
+                    )
+                    response["invocationTemplates"] = [
+                        {"name": f"vrcforge_invoke_loaded_{'write' if is_write_tool(item) else 'read'}_tool",
+                         "arguments": {"activationHandle": handle, "toolName": item["name"], "arguments": {}}}
+                        for item in selected
+                    ]
             return response
         return bridge.call_tool(tool_name, arguments, agent_name="external-stdio-agent")
 
@@ -1926,21 +1963,24 @@ def run_stdio_server(
         run_standard_stdio_loop(router_standard)
         return
 
+    def call_modern_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = call_tool(name, arguments)
+        if "toolListChanged" in result and name in {"vrcforge_load_tool_block", "vrcforge_unload_tool_block"}:
+            result["toolListChanged"] = False
+        return result
+
     router_2026 = Mcp2026Router(
-        list_tools,
-        call_tool,
+        lambda params: list_tools(params, stable=True),
+        call_modern_tool,
         server_name=DEFAULT_SERVER_NAME,
         server_version=read_vrcforge_version(),
         server_instructions=STDIO_SERVER_INSTRUCTIONS,
-        tool_list_revision=lambda: tool_list_revision,
-        tool_call_catalogue=lambda params: list_tools({"exposureLayer": requested_layer["value"], "_lookupToolNames": [str(params.get("name") or "")]}) if isinstance(params, Mapping) and params.get("name") else list_tools({"exposureLayer": requested_layer["value"]}),
+        tool_call_catalogue=lambda params: list_tools({"exposureLayer": exposure_layer, "_lookupToolNames": [str(params.get("name") or "")]}, stable=True),
         resource_list=list_resources,
         resource_templates=list_resource_templates,
         resource_read=read_resource,
-        resource_list_revision=resource_generation,
         prompt_list=list_prompts,
         prompt_get=get_prompt,
-        prompt_list_revision=prompt_generation,
     )
     if protocol_profile == "vrcforge-2026":
         run_stdio_loop(router_2026)
