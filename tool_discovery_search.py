@@ -48,6 +48,15 @@ _QUERY_FILLER_WORDS = frozenset({
     "a", "an", "and", "for", "from", "in", "of", "on", "or", "the", "this", "that", "to", "with",
 })
 
+_QUERY_ALIASES = {
+    "检查": "inspect", "查看": "inspect", "查询": "inspect", "扫描": "scan", "预览": "preview",
+    "修改": "change", "调整": "change", "改": "change", "材质": "material", "贴图": "texture",
+    "纹理": "texture", "动画": "animation", "菜单": "menu", "表情": "expression", "参数": "parameter",
+    "衣柜": "wardrobe", "骨骼": "bone", "头像": "avatar", "混合形状": "blendshape",
+    "材質": "material", "動畫": "animation", "選單": "menu", "參數": "parameter", "頭像": "avatar",
+}
+_QUERY_ALIAS_PATTERN = re.compile("|".join(sorted(_QUERY_ALIASES, key=len, reverse=True)))
+
 
 def _terms(value):
     # Split alpha and numeric runs so compact requests such as ``speed1``
@@ -188,10 +197,11 @@ def _same_action_input_schema(preview, write):
 
 def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
     query, truncation = _bounded_query(query)
+    searchable_query = _QUERY_ALIAS_PATTERN.sub(lambda match: f" {_QUERY_ALIASES[match[0]]} ", query).strip()
     # An explicit preview command asks for a read-only preview, even when the
     # operation being previewed is a write and has a different input schema.
-    preview_command = re.match(r"(?:preview(?:\s+|$)|预览)", query, re.IGNORECASE)
-    topic_query = query[preview_command.end():] if preview_command else query
+    preview_command = re.match(r"preview(?:\s+|$)", searchable_query, re.IGNORECASE)
+    topic_query = searchable_query[preview_command.end():] if preview_command else searchable_query
     tokens = _terms(topic_query)
     records = [t for t in tools if t.block != "core" and "/" in t.block]
     scores = {}
@@ -329,5 +339,6 @@ def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
         "status": "found" if results else "not_found", "matches": results,
         "hasMore": len(ordered) > 5,
         "fallbackCall": {"tools": []},
+        **({"nextAction": "Search again with one operation and one target (for example, inspect material), or use fallbackCall to browse."} if not results else {}),
         "policy": "Copy a loadCall once for the needed leaf bundle; reuse loaded definitions. Loading never authorizes execution or writes.",
     }
