@@ -329,6 +329,7 @@ namespace VRCForge.Editor
 
                 try
                 {
+                    UnityAsyncJobRegistry.RestoreMcpWriteReceipts(GetProjectRoot());
                     tools = SnapshotTools();
                     ApprovedAppCoreTools = SnapshotApprovedWriteTools(tools);
                     token = CreateToken();
@@ -2921,7 +2922,7 @@ namespace VRCForge.Editor
             WriteJsonAtomically(descriptorPath, document);
         }
 
-        private static void WriteJsonAtomically(string path, JObject document)
+        internal static void WriteJsonAtomically(string path, JObject document)
         {
             var directory = Path.GetDirectoryName(path);
             Directory.CreateDirectory(directory);
