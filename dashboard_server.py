@@ -12734,6 +12734,16 @@ def optimize_avatar_parameters_sync(request: AvatarScopedConnectionRequest) -> d
 
 
 def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, Any]:
+    if request.renderer_paths is not None:
+        from renderer_material_slot_read import read_renderer_material_slots
+
+        if request.material_ids or request.index_only or request.offset or request.limit or request.category_overrides:
+            return {"ok": False, "error": "Remove materialIds, indexOnly, offset, limit and categoryOverrides to read exact rendererPaths."}
+        return read_renderer_material_slots(
+            request.project_path, request.avatar_path, request.renderer_paths,
+            read_object=get_gameobject_sync, read_property=read_component_property_sync,
+            inspect_material=inspect_material_properties_sync,
+        )
     try:
         settings = load_dashboard_settings(request)
         avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
@@ -28037,7 +28047,7 @@ def register_agent_gateway_tools() -> None:
             blendshapeNames=params.get("blendshapeNames"),
         )),
     )
-    AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: SHADER_VISION_PROTECTION.scan_shader_materials(ShaderMaterialScanRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "When to use: read actual material slots, shader names, and null slots for specific renderers. For a face/body or other named object, first discover its exact path with vrcforge_get_gameobject, then pass rendererPaths for only those objects. Use indexOnly for whole-avatar material inventory or tuning. When NOT to use: do not use inventory pages to infer whether a specific slot is empty, or use the scan to assign materials. Negative example: a missing inventory row does not prove a null material slot.", "read/debug", lambda params: SHADER_VISION_PROTECTION.scan_shader_materials(ShaderMaterialScanRequest(**params)))
     for name, reader_name, collection in (
         ("vrcforge_list_shader_tuning_history", "read_shader_tuning_history", "records"),
         ("vrcforge_list_shader_tuning_presets", "read_shader_tuning_presets", "presets"),

@@ -188,6 +188,9 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
             "avatarPath": {"type": "string", "description": "Exact loaded-scene avatar hierarchy path; omit only when avatar selection is unambiguous."},
+            "rendererPaths": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True,
+                              "items": {"type": "string", "minLength": 1},
+                              "description": "For material assignments, shaders or empty slots on specific MeshRenderer or SkinnedMeshRenderer objects, pass exact GameObject paths from hierarchy discovery. Returns sharedMaterials slots in order, including nulls. Do not combine with inventory selectors."},
             "materialIds": {"type": "array", "items": {"type": "string"}, "maxItems": 2000, "description": "Exact IDs discovered through indexOnly pages; omit to scan all materials."},
             "includeTextures": {"type": "boolean", "default": True},
             "categoryOverrides": SHADER_CATEGORY_OVERRIDES_SCHEMA,

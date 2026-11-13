@@ -236,6 +236,7 @@ class AvatarScopedConnectionRequest(ConnectionRequest):
 
 
 class ShaderMaterialScanRequest(AvatarScopedConnectionRequest):
+    renderer_paths: list[str] | None = Field(default=None, alias="rendererPaths", min_length=1, max_length=8)
     material_ids: list[str] = Field(default_factory=list, alias="materialIds", description="Exact IDs discovered through indexOnly pages; omit to scan all materials.")
     include_textures: bool = Field(default=True, alias="includeTextures")
     category_overrides: dict[str, ShaderMaterialCategory] = Field(default_factory=dict, alias="categoryOverrides")
