@@ -471,7 +471,7 @@ class UnityMcpCoreClient:
             result = self._single_modern_request(
                 method, params, execution_context=execution_context, request_id=request_id,
             )
-        except UnityMcpCoreConnectionError:
+        except UnityMcpCoreConnectionError as exc:
             if not is_write:
                 raise
             # The submission response can be lost after acceptance. Recover only
@@ -480,7 +480,7 @@ class UnityMcpCoreClient:
                 params["name"], params.get("arguments") or {}, execution_context=execution_context,
             )
             if result is None:
-                raise
+                raise self._unresolved_write_operation(execution_context) from exc
             return result
         if is_write and isinstance(result, dict) and result.get("schema") == "vrcforge.write-operation.v1":
             return self._await_write_operation(result, params["name"], params.get("arguments") or {}, execution_context)
@@ -514,6 +514,24 @@ class UnityMcpCoreClient:
         except (UnityMcpCoreError, OSError, ValueError):
             return None
 
+    @staticmethod
+    def _unresolved_write_operation(execution_context, snapshot=None):
+        snapshot = snapshot or {}
+        error = UnityMcpCoreConnectionError(
+            "The submitted Unity write outcome is unknown. Check its receipt before taking any further action."
+        )
+        error.cause_code = "unity_write_operation_unresolved"
+        error.retryable = False
+        error.details = {
+            "executionId": str(execution_context.get("executionId") or ""),
+            "jobId": snapshot.get("jobId"),
+            "operationStatus": snapshot.get("status"),
+            "commitState": "unknown",
+            "recoveryAction": "query_receipt",
+            "safeToRetry": False,
+        }
+        return error
+
     def _await_write_operation(self, snapshot, tool_name, arguments, execution_context):
         from unity_write_operation_polling import write_operation_result
         execution_id = str(execution_context.get("executionId") or "")
@@ -525,19 +543,16 @@ class UnityMcpCoreClient:
                 _validate_tool_result(result)
                 return result
             if snapshot.get("status") in {"unknown", "not_found", "expired", "failed", "done"} or time.monotonic() >= deadline:
-                error = UnityMcpCoreConnectionError("The submitted Unity write outcome is not yet known; its operation can be queried without resubmitting it.")
-                error.cause_code = "unity_write_operation_unresolved"
-                error.details = {"executionId": execution_id, "jobId": job_id, "operationStatus": snapshot.get("status"), "commitState": "unknown"}
-                raise error
+                raise self._unresolved_write_operation(execution_context, snapshot)
             delay = max(0.25, min(float(snapshot.get("retryAfterMs", 500)) / 1000, 2.0))
             time.sleep(min(delay, max(0, deadline - time.monotonic())))
             try:
                 snapshot = self._query_write_operation(execution_id, job_id)
-            except UnityMcpCoreConnectionError:
+            except UnityMcpCoreConnectionError as exc:
                 # A domain reload temporarily removes/replaces the descriptor.
                 # The next step is another status read, never another write.
                 if time.monotonic() >= deadline:
-                    raise
+                    raise self._unresolved_write_operation(execution_context, snapshot) from exc
 
     def _single_modern_request(
         self,

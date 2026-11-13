@@ -278,6 +278,31 @@ def validate_modular_patch_set(value: Any) -> dict[str, Any]:
     return {"schema": PATCH_SET_SCHEMA, "operationId": operation_id, "files": normalized, "duplicateRegistry": registry}
 
 
+def _unresolved_write_guidance(
+    failure: Mapping[str, Any], recovery: Mapping[str, Any],
+) -> dict[str, Any]:
+    if (
+        failure.get("errorCode") != "unity_write_operation_unresolved"
+        or failure.get("commitState") != "unknown"
+    ):
+        return {}
+    recovery_id = recovery.get("id")
+    return {
+        "recoveryAction": "query_receipt",
+        "safeToRetry": False,
+        "nextAction": (
+            "Inspect the recorded interrupted write and its checkpoint, then read back the exact target. "
+            "Do not submit the write again."
+            if recovery_id else
+            "The write receipt is unavailable. Inspect the exact target read-only and do not submit the write again."
+        ),
+        **({"recoveryToolCall": {
+            "name": "vrcforge_preview_interrupted_apply_recovery",
+            "arguments": {"recoveryId": recovery_id},
+        }} if recovery_id else {}),
+    }
+
+
 def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
     """Find the bounded Unity domain receipt inside transport wrappers."""
 
@@ -2658,6 +2683,9 @@ class AgentApprovalTransactionService:
                 "outcome": completion_outcome,
                 "writeFailure": write_failure,
             }
+            guidance = _unresolved_write_guidance(write_failure, ensure_dict(recovery))
+            payload.update(guidance)
+            completion_outcome.update(guidance)
             if task_completion is not None:
                 payload["taskCompletion"] = task_completion
             if request_trace is not None:
@@ -5323,6 +5351,9 @@ class AgentApprovalTransactionService:
                 "retryable": False,
                 "nextAction": completion_outcome.get("nextAction"),
             }
+            guidance = _unresolved_write_guidance(error_object, ensure_dict(recovery))
+            payload.update(guidance)
+            payload["errorDetails"].update(guidance)
             if isinstance(arguments.get("executionTarget"), Mapping):
                 payload["executionTargetDigest"] = execution_target_digest(arguments["executionTarget"])
             if isinstance(failure_result.get("consoleVerification"), Mapping):

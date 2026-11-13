@@ -2985,10 +2985,14 @@ class AgentGateway:
         return {"resourceTemplates": self._mcp_resources.templates()}
 
     def read_mcp_resource(self, uri: str) -> dict[str, Any]:
-        if uri == "vrcforge://session/current/identity":
+        # An approved caller already knows its operation ID before submitting
+        # the write. It may use the unversioned URI to find the published reply.
+        if uri == "vrcforge://session/current/identity" or re.fullmatch(
+            r"vrcforge://operation/[A-Za-z0-9_-]+/receipt", uri,
+        ):
             context_id = self._mcp_resource_context.get()
             if context_id is None:
-                raise McpResourceError("Current identity requires a resource session")
+                raise McpResourceError("This resource alias requires a resource session")
             uri = scoped_base_uri(uri, context_id)
         return self._mcp_resources.read(uri)
 
@@ -4931,6 +4935,9 @@ class AgentGateway:
             "readbackState",
             "cleanupState",
             "retryable",
+            "safeToRetry",
+            "recoveryAction",
+            "recoveryToolCall",
             "nextAction",
             "result",
             "writeFailure",

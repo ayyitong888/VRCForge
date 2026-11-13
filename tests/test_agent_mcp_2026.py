@@ -719,6 +719,25 @@ def test_routed_gateway_error_keeps_unknown_commit_state():
     assert data["commitStateKnown"] is False
 
 
+def test_receipt_lookup_by_operation_id_is_bound_to_current_session(tmp_path):
+    from agent_gateway import AgentGateway
+    from mcp_resource_registry import McpResourceError
+
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    uri = "vrcforge://operation/mcp-approved-operation/receipt"
+    result = {"ok": True, "status": "executed", "operationId": "mcp-approved-operation"}
+    with gateway.resource_context("external:writer"):
+        gateway.publish_mcp_tool_result_resource(
+            "vrcforge_duplicate_project_asset", {}, result, source_mode="test",
+        )
+        receipt = gateway.read_mcp_resource(uri)["structuredContent"]
+        assert receipt["data"]["operationId"] == result["operationId"]
+        assert receipt["uri"] == result["operationResource"]
+    with gateway.resource_context("external:other"):
+        with pytest.raises(McpResourceError):
+            gateway.read_mcp_resource(uri)
+
+
 def test_execution_target_session_mismatch_returns_same_project_recovery_call() -> None:
     calls = []
 

@@ -276,3 +276,21 @@ def test_unknown_operation_raises_with_queryable_guidance(core_endpoint) -> None
         assert getattr(error, "details", {}).get("executionId") == EXECUTION_ID
     finally:
         fake.close()
+
+
+def test_lost_submission_and_unavailable_receipt_preserve_execution_id(core_endpoint):
+    fake = _start_core(core_endpoint, {"tools/call": None, "server/write-operation": None})
+    try:
+        client = UnityMcpCoreClient(core_endpoint[0], timeout_seconds=2)
+        with pytest.raises(UnityMcpCoreConnectionError) as raised:
+            client.call_tool(
+                TOOL, {"outfitName": "Coat"},
+                execution_context={"lane": "approved_write", "executionId": EXECUTION_ID},
+            )
+        assert raised.value.cause_code == "unity_write_operation_unresolved"
+        assert raised.value.details["executionId"] == EXECUTION_ID
+        assert raised.value.details["commitState"] == "unknown"
+        assert fake.requests.count("tools/call") == 1
+        assert fake.requests.count("server/write-operation") == 1
+    finally:
+        fake.close()

@@ -926,6 +926,37 @@ def test_tool_transport_timeout_is_structured_and_never_safe_to_blind_retry(
     assert result["errorDetails"]["commitStateKnown"] is False
 
 
+def test_lost_confirmed_write_reply_points_to_exact_operation_receipt(tmp_path, monkeypatch):
+    from http.client import RemoteDisconnected
+
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+    config = tmp_path / "agent_gateway.json"
+    config.write_text('{"token":"test-token"}', encoding="utf-8")
+    bridge = module.VRCForgeBridge(
+        base_url="http://127.0.0.1:8757", config_path=config,
+        timeout_seconds=0.1, start_runtime=False,
+    )
+    calls = []
+
+    def disconnect(method, params, **_kwargs):
+        calls.append((method, params))
+        raise RemoteDisconnected("response lost after submission")
+
+    monkeypatch.setattr(bridge, "_mcp_request", disconnect)
+    args = {"confirmation": {"operationId": "mcp-approved-operation"}}
+    result = bridge.call_tool("vrcforge_copy_project_asset", args)
+    assert calls == [("tools/call", {"name": "vrcforge_copy_project_asset", "arguments": args})]
+    assert result["commitState"] == "unknown"
+    assert result["safeToRetry"] is False
+    assert result["recoveryAction"] == "query_receipt"
+    assert result["recoveryResourceRequest"] == {
+        "method": "resources/read",
+        "params": {"uri": "vrcforge://operation/mcp-approved-operation/receipt"},
+    }
+    assert result["receiptOperationId"] == "mcp-approved-operation"
+    assert "vrcforge://operation/mcp-approved-operation/receipt" in result["nextAction"]
+
+
 def test_session_mismatch_surfaces_rebind_discovery_to_external_agent(tmp_path: Path, monkeypatch) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
     config = tmp_path / "agent_gateway.json"

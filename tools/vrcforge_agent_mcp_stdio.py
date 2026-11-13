@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from http.client import IncompleteRead
 from pathlib import Path
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -580,10 +581,36 @@ class VRCForgeBridge:
                 {"name": tool_name, "arguments": params or {}},
                 token=token,
             )
-        except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        except (TimeoutError, urllib.error.URLError, ConnectionError, IncompleteRead) as exc:
             timed_out = isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(
                 getattr(exc, "reason", None), (TimeoutError, socket.timeout)
             )
+            confirmation = (params or {}).get("confirmation")
+            operation_id = confirmation.get("operationId") if isinstance(confirmation, Mapping) else None
+            receipt_uri = (
+                f"vrcforge://operation/{operation_id}/receipt"
+                if isinstance(operation_id, str) and operation_id and all(
+                    character.isascii() and (character.isalnum() or character in "_-")
+                    for character in operation_id
+                ) else ""
+            )
+            recovery = {
+                "requestMayHaveCommitted": True,
+                "safeToRetry": False,
+                "recoveryAction": "query_receipt",
+                "recoveryResourceRequest": (
+                    {"method": "resources/read", "params": {"uri": receipt_uri}}
+                    if receipt_uri else {"method": "resources/list", "params": {}}
+                ),
+                "nextAction": (
+                    f"Use resources/read on {receipt_uri} in this MCP session. A missing receipt does "
+                    "not establish that the write failed. Inspect the target read-only; do not resend."
+                    if receipt_uri else
+                    "List resources in this MCP session and read the receipt only if you can identify "
+                    "this exact operation. Otherwise inspect the target read-only. Do not resend the call."
+                ),
+                **({"receiptOperationId": operation_id} if receipt_uri else {}),
+            }
             return external_rejection(
                 status="transport_error",
                 error=str(exc),
@@ -597,11 +624,9 @@ class VRCForgeBridge:
                 committed=None,
                 retryable=False,
                 exception=exc,
-                requestMayHaveCommitted=True,
-                safeToRetry=False,
                 toolName=tool_name,
-                recoveryAction="query_receipt",
-                nextAction="Read the operation receipt using the URI or execution ID already returned for this call. If none is available, inspect the target read-only before deciding whether the operation is still needed.",
+                details=recovery,
+                **recovery,
             )
         except Exception as exc:  # noqa: BLE001 - preserve upstream structured rejection facts.
             if isinstance(exc, ExternalHttpBridgeError):
