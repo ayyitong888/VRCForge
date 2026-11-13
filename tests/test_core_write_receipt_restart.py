@@ -54,8 +54,11 @@ class Probe {
             var interrupted = UnityAsyncJobRegistry.ReadMcpWriteSnapshot("exec-running");
             Check((string)interrupted?["status"] == "unknown", "interrupted write reported as running or completed");
             Check(interrupted["result"] == null, "interrupted write invented a result");
-            UnityAsyncJobRegistry.Sweep(DateTime.UtcNow.AddHours(1));
-            Check(UnityAsyncJobRegistry.ReadMcpWriteSnapshot("exec-done") == null, "expired receipt still served");
+            UnityAsyncJobRegistry.Sweep(DateTime.UtcNow.AddYears(1));
+            Check(JToken.DeepEquals(UnityAsyncJobRegistry.ReadMcpWriteSnapshot("exec-done"), completed),
+                "Core write receipt was purged by age");
+            Check((string)UnityAsyncJobRegistry.ReadMcpWriteSnapshot("exec-running")?["status"] == "unknown",
+                "interrupted receipt was purged by age");
         }
         return 0;
     }
@@ -92,3 +95,10 @@ class Probe {
             [str(dotnet), str(assembly), mode, str(project)], capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        if mode == "write":
+            # Receipts saved by the previous Core may still carry an elapsed deadline.
+            job_id = (project / "original-job").read_text()
+            receipt = project / "Library" / "VRCForge" / "WriteReceipts" / f"{job_id}.json"
+            old_record = json.loads(receipt.read_text(encoding="utf-8-sig"))
+            old_record["purge_after_utc"] = "2000-01-01T00:00:00.0000000Z"
+            receipt.write_text(json.dumps(old_record), encoding="utf-8")

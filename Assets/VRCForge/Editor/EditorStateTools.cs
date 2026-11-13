@@ -408,7 +408,6 @@ namespace VRCForge.Editor
                 if (mcpWriteReceiptDirectory != null) return;
                 var directory = Path.Combine(projectPath, "Library", "VRCForge", "WriteReceipts");
                 Directory.CreateDirectory(directory);
-                var jobIds = LoadIndexLocked();
                 foreach (var path in Directory.EnumerateFiles(directory, "*.json"))
                 {
                     var jobId = Path.GetFileNameWithoutExtension(path);
@@ -421,28 +420,17 @@ namespace VRCForge.Editor
                         continue;
                     }
                     var record = ParseRecord(raw, jobId);
-                    if (record == null || string.IsNullOrEmpty(McpWriteExecutionId(record))) continue;
-                    if (IsTerminal(record.Value<string>("status"))
-                        && TryReadUtc(record.Value<string>("purge_after_utc"), out var purgeAfter)
-                        && DateTime.UtcNow >= purgeAfter)
+                    if (record == null) continue;
+                    var executionId = McpWriteExecutionId(record);
+                    if (string.IsNullOrEmpty(executionId)) continue;
+                    if (!IsTerminal(record.Value<string>("status")))
                     {
-                        DeleteExpiredMcpWriteReceipt(path);
-                        continue;
+                        MarkMcpWriteUnknown(record, "editor_restarted", "The Editor restarted before the write result was persisted; execution state is unknown.");
+                        VRCForgeMcpCoreServer.WriteJsonAtomically(path, record);
                     }
-                    SessionState.SetString(RecordPrefix + jobId, raw);
-                    jobIds.Add(jobId);
+                    McpWriteSnapshots[executionId] = record;
                 }
-                SaveIndexLocked(jobIds);
                 mcpWriteReceiptDirectory = directory;
-                try
-                {
-                    RecoverMcpWriteSnapshots();
-                }
-                catch
-                {
-                    mcpWriteReceiptDirectory = null;
-                    throw;
-                }
             }
         }
 
@@ -451,9 +439,7 @@ namespace VRCForge.Editor
             if (string.IsNullOrWhiteSpace(executionId)) throw new ArgumentException("executionId is required.", nameof(executionId));
             lock (Sync)
             {
-                SweepLocked(DateTime.UtcNow);
-                var existing = FindMcpWriteByExecutionIdLocked(executionId);
-                if (existing != null) return PublicMcpWriteSnapshot(existing);
+                if (McpWriteSnapshots.TryGetValue(executionId, out var existing)) return PublicMcpWriteSnapshot(existing);
                 var jobId = Guid.NewGuid().ToString("N").ToLowerInvariant();
                 var now = DateTime.UtcNow;
                 var record = new JObject
@@ -469,8 +455,6 @@ namespace VRCForge.Editor
                     ["created_utc"] = now.ToString("O"),
                     ["started_utc"] = JValue.CreateNull(),
                     ["completed_utc"] = JValue.CreateNull(),
-                    ["expires_utc"] = now.AddMinutes(15).ToString("O"),
-                    ["purge_after_utc"] = JValue.CreateNull(),
                     ["operation"] = new JObject
                     {
                         ["kind"] = "mcp_write",
@@ -487,13 +471,6 @@ namespace VRCForge.Editor
             lock (Sync)
             {
                 var record = McpWriteSnapshots.TryGetValue(executionId ?? string.Empty, out var value) ? value : null;
-                if (record != null && IsTerminal(record.Value<string>("status"))
-                    && TryReadUtc(record.Value<string>("purge_after_utc"), out var purgeAfter)
-                    && DateTime.UtcNow >= purgeAfter)
-                {
-                    McpWriteSnapshots.Remove(executionId ?? string.Empty);
-                    record = null;
-                }
                 return record == null ? null : PublicMcpWriteSnapshot(record);
             }
         }
@@ -503,16 +480,18 @@ namespace VRCForge.Editor
             lock (Sync)
             {
                 if (!McpWriteSnapshots.TryGetValue(executionId ?? string.Empty, out var cached) || cached == null) return;
-                cached["status"] = "unknown";
-                cached["after"] = JValue.CreateNull();
-                cached["error"] = new JObject
-                {
-                    ["code"] = "result_persistence_unknown",
-                    ["message"] = reason ?? "The write result could not be persisted; execution state is unknown.",
-                };
-                cached["completed_utc"] = DateTime.UtcNow.ToString("O");
-                cached["purge_after_utc"] = DateTime.UtcNow.Add(TerminalRetention).ToString("O");
+                MarkMcpWriteUnknown(cached, "result_persistence_unknown",
+                    reason ?? "The write result could not be persisted; execution state is unknown.");
             }
+        }
+
+        private static void MarkMcpWriteUnknown(JObject record, string code, string reason)
+        {
+            record["status"] = "unknown";
+            record["after"] = JValue.CreateNull();
+            record["error"] = new JObject { ["code"] = code, ["message"] = reason };
+            record["completed_utc"] = DateTime.UtcNow.ToString("O");
+            record.Remove("purge_after_utc");
         }
 
         internal static JObject Create(
@@ -712,7 +691,8 @@ namespace VRCForge.Editor
                 record["after"] = after == null ? JValue.CreateNull() : after.DeepClone();
                 record["error"] = error == null ? JValue.CreateNull() : error.DeepClone();
                 record["completed_utc"] = now.ToString("O");
-                record["purge_after_utc"] = now.Add(TerminalRetention).ToString("O");
+                if (string.IsNullOrEmpty(McpWriteExecutionId(record)))
+                    record["purge_after_utc"] = now.Add(TerminalRetention).ToString("O");
                 SaveRecordLocked(record);
                 ClearActive(record.Value<string>("tool"), record.Value<string>("job_id"));
                 return PublicPayload(record);
@@ -760,17 +740,10 @@ namespace VRCForge.Editor
                     ClearActive(record.Value<string>("tool"), jobId);
                     status = "expired";
                 }
-                if (IsTerminal(status)
+                if (!isMcpWrite && IsTerminal(status)
                     && TryReadUtc(record.Value<string>("purge_after_utc"), out var purgeAfter)
                     && utcNow >= purgeAfter)
                 {
-                    var executionId = McpWriteExecutionId(record);
-                    if (!string.IsNullOrEmpty(executionId))
-                    {
-                        if (mcpWriteReceiptDirectory != null)
-                            DeleteExpiredMcpWriteReceipt(Path.Combine(mcpWriteReceiptDirectory, jobId + ".json"));
-                        McpWriteSnapshots.Remove(executionId);
-                    }
                     SessionState.EraseString(RecordPrefix + jobId);
                     continue;
                 }
@@ -786,6 +759,11 @@ namespace VRCForge.Editor
                 return null;
             }
             var raw = SessionState.GetString(RecordPrefix + jobId, string.Empty);
+            if (string.IsNullOrEmpty(raw) && mcpWriteReceiptDirectory != null)
+            {
+                var path = Path.Combine(mcpWriteReceiptDirectory, jobId + ".json");
+                if (File.Exists(path)) raw = File.ReadAllText(path);
+            }
             return ParseRecord(raw, jobId);
         }
 
@@ -814,6 +792,7 @@ namespace VRCForge.Editor
         private static void SaveRecordLocked(JObject record)
         {
             SaveRecordValue(record);
+            if (!string.IsNullOrEmpty(McpWriteExecutionId(record))) return;
             var jobId = record.Value<string>("job_id");
             var index = LoadIndexLocked();
             if (!index.Contains(jobId))
@@ -832,6 +811,7 @@ namespace VRCForge.Editor
                 VRCForgeMcpCoreServer.WriteJsonAtomically(
                     Path.Combine(mcpWriteReceiptDirectory, jobId + ".json"), record);
                 McpWriteSnapshots[executionId] = (JObject)record.DeepClone();
+                return;
             }
             SessionState.SetString(RecordPrefix + jobId, record.ToString(Newtonsoft.Json.Formatting.None));
         }
@@ -841,52 +821,6 @@ namespace VRCForge.Editor
             var operation = record["operation"] as JObject;
             return string.Equals((string)operation?["kind"], "mcp_write", StringComparison.Ordinal)
                 ? (string)operation["execution_id"] : null;
-        }
-
-        private static void DeleteExpiredMcpWriteReceipt(string path)
-        {
-            try { File.Delete(path); }
-            catch (IOException) { Debug.LogWarning("[VRCForge MCP] Could not remove an expired write receipt."); }
-            catch (UnauthorizedAccessException) { Debug.LogWarning("[VRCForge MCP] Could not remove an expired write receipt."); }
-        }
-
-        private static void RecoverMcpWriteSnapshots()
-        {
-            lock (Sync)
-            {
-                foreach (var jobId in LoadIndexLocked())
-                {
-                    var record = LoadRecordLocked(jobId);
-                    if (record == null) continue;
-                    var executionId = McpWriteExecutionId(record);
-                    if (string.IsNullOrEmpty(executionId)) continue;
-                    if (record.Value<string>("status") == "queued" || record.Value<string>("status") == "running")
-                    {
-                        record["status"] = "unknown";
-                        record["after"] = JValue.CreateNull();
-                        record["error"] = new JObject { ["code"] = "editor_domain_reloaded", ["message"] = "The Editor domain reloaded before the write result was persisted; execution state is unknown." };
-                        record["completed_utc"] = DateTime.UtcNow.ToString("O");
-                        record["purge_after_utc"] = DateTime.UtcNow.Add(TerminalRetention).ToString("O");
-                        SaveRecordValue(record);
-                    }
-                    else
-                    {
-                        McpWriteSnapshots[executionId] = (JObject)record.DeepClone();
-                    }
-                }
-            }
-        }
-
-        private static JObject FindMcpWriteByExecutionIdLocked(string executionId)
-        {
-            foreach (var jobId in LoadIndexLocked())
-            {
-                var record = LoadRecordLocked(jobId);
-                if (record != null
-                    && string.Equals((string)record["operation"]?["kind"], "mcp_write", StringComparison.Ordinal)
-                    && string.Equals((string)record["operation"]?["execution_id"], executionId, StringComparison.Ordinal)) return record;
-            }
-            return null;
         }
 
         private static JObject PublicMcpWriteSnapshot(JObject record)
