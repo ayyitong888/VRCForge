@@ -151,6 +151,7 @@ from external_tool_result_contract import (
     external_exception_details,
     external_exception_raw_result,
     external_write_failure_view,
+    tool_argument_recovery,
 )
 from agent_budget_policy import freeze_agent_budget_policy
 from agent_general_no_progress import (
@@ -638,6 +639,48 @@ def _external_project_input_schema(name: str, schema: dict[str, Any]) -> dict[st
         return {**schema, "properties": properties, "required": list(dict.fromkeys([*required, "projectPath"]))}
     return {**schema, "properties": properties, "allOf": [*schema.get("allOf", []), {"anyOf": paths}]}
 
+
+
+def _external_tool_argument_rejection(
+    name: str, arguments: Mapping[str, Any], *, write: bool,
+) -> dict[str, Any] | None:
+    schema = (canonical_unity_write_tool_input_schema(name) if write
+              else canonical_unity_read_tool_input_schema(name))
+    fields = schema.get("properties", {})
+    normalized = {
+        key: value for key, value in arguments.items()
+        if key in fields or key not in {
+            *_EXTERNAL_PROJECT_PATH_KEYS, "executionTarget", "_externalQuestionProjectBound",
+        }
+    }
+    # The existing target guard owns reference presence and validity.
+    if write and "executionTarget" not in normalized and "executionTarget" in schema.get("required", ()):
+        schema["required"] = [key for key in schema["required"] if key != "executionTarget"]
+    issues = validate_planner_tool_arguments(schema, normalized)["issues"]
+    if not issues:
+        return None
+    error = build_external_tool_error(
+        error="Correct the indicated tool arguments and retry.",
+        error_code="external_tool_arguments_invalid",
+        failure_layer="gateway_validation",
+        failure_phase="tool_argument_validation",
+        operation_kind="write" if write else "read",
+        tool=name,
+        tool_routing_started=False,
+        mutation_started=False,
+        committed=False,
+        retryable=True,
+    )
+    return {
+        "ok": False,
+        "status": "failed",
+        "tool": name,
+        "error": error["error"],
+        "errorCode": error["errorCode"],
+        "errorDetails": error,
+        "retryable": True,
+        **tool_argument_recovery(issues),
+    }
 
 
 def _external_mcp_tool_block(name: str, *, write: bool) -> str:
@@ -4127,40 +4170,9 @@ class AgentGateway:
             tool = self._tools.get(name)
             if tool is None or not self._external_mcp_read_tool_visible(tool, config):
                 raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
-            schema = canonical_unity_read_tool_input_schema(name)
-            fields = schema.get("properties", {})
-            schema_arguments = {
-                key: value for key, value in arguments.items()
-                if key in fields or key not in {
-                    *_EXTERNAL_PROJECT_PATH_KEYS, "executionTarget", "_externalQuestionProjectBound",
-                }
-            }
-            issues = validate_planner_tool_arguments(schema, schema_arguments)["issues"]
-            if issues:
-                error = build_external_tool_error(
-                    error="Correct the indicated tool arguments and retry.",
-                    error_code="external_tool_arguments_invalid",
-                    failure_layer="gateway_validation",
-                    failure_phase="tool_argument_validation",
-                    operation_kind="read",
-                    tool=name,
-                    tool_routing_started=False,
-                    mutation_started=False,
-                    committed=False,
-                    retryable=True,
-                )
-                return {
-                    "ok": False,
-                    "status": "failed",
-                    "error": error["error"],
-                    "errorDetails": error,
-                    "toolRoutingStarted": False,
-                    "mutationStarted": False,
-                    "commitState": "not_started",
-                    "retryable": True,
-                    "recoveryAction": "fix_and_retry",
-                    "issues": issues,
-                }
+            invalid = _external_tool_argument_rejection(name, arguments, write=False)
+            if invalid:
+                return invalid
             public_reference = arguments.get("executionTarget")
             verified_target = self._validate_external_mcp_execution_target(name, arguments)
             call_arguments = dict(arguments)
@@ -4195,6 +4207,11 @@ class AgentGateway:
             or not config.allow_write_requests
         ):
             raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
+
+        if "confirmation" not in arguments:
+            invalid = _external_tool_argument_rejection(name, arguments, write=True)
+            if invalid:
+                return invalid
 
         try:
             public_reference = arguments.get("executionTarget")
@@ -7121,7 +7138,7 @@ class AgentGateway:
                     "result": {
                         "code": "planner_invalid_response",
                         "summary": summary,
-                        "issues": issues,
+                        **tool_argument_recovery(issues),
                         **({"legalBlocks": list(validation["legalBlocks"])} if "legalBlocks" in validation else {}),
                     },
                     "outcome": outcome,
@@ -7132,7 +7149,7 @@ class AgentGateway:
                     "index": len(steps),
                     "kind": "planner_validation",
                     "tool": tool_name,
-                    "issues": issues,
+                    **tool_argument_recovery(issues),
                     "summary": summary,
                     "status": "failed",
                 }

@@ -28,7 +28,7 @@ from agent_mcp_2026 import HTTP_SESSION_IDLE_SECONDS, MCP_NAME_FIELDS, PROTOCOL_
 from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
 from mcp_tool_descriptor import standardize_tool_descriptor
 from external_mcp_result_projection import project_tool
-from external_tool_result_contract import build_external_tool_error
+from external_tool_result_contract import build_external_tool_error, tool_argument_recovery
 from agent_tool_result_contract import normalize_agent_tool_result
 from internal_tool_blocks import (
     CANONICAL_TOOL_BLOCKS,
@@ -1644,7 +1644,7 @@ def run_stdio_server(
             descriptor = next(item for item in controls if item["name"] == tool_name)
             issues = validate_planner_tool_arguments(descriptor["inputSchema"], arguments)["issues"]
             if issues:
-                recovery = {"recoveryAction": "fix_and_retry", "issues": issues}
+                recovery = tool_argument_recovery(issues)
                 if tool_name == "vrcforge_list_tool_blocks" and any(issue["path"] == "query" for issue in issues):
                     recovery["recoveryToolCall"] = {"name": tool_name, "arguments": {}}
                 return external_rejection(
@@ -1655,6 +1655,7 @@ def run_stdio_server(
                     failure_phase="tool_argument_validation",
                     operation_kind="discovery",
                     tool=tool_name,
+                    retryable=True,
                     **recovery,
                 )
         nonlocal tool_list_revision

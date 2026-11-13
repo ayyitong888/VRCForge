@@ -248,6 +248,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object", "additionalProperties": False,
         "description": "Choose single sourceAssetPath/destinationAssetPath or copies, never both. A single copy may create the classified parent folders listed in preview; copies batches require existing parents. Omit expected* evidence on a new request: VRCForge fills it from the authoritative preview, not agent-calculated identities or digests.",
         "required": ["projectPath"],
+        "x-validation-hint": "Supply a non-empty copies array, or both sourceAssetPath and destinationAssetPath, never both modes.",
         "oneOf": [
             {"required": ["sourceAssetPath", "destinationAssetPath"], "not": {"required": ["copies"]}},
             {"required": ["copies"], "not": {"anyOf": [{"required": ["sourceAssetPath"]}, {"required": ["destinationAssetPath"]}]}},

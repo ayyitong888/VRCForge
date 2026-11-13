@@ -180,3 +180,46 @@ def test_external_blendshape_argument_error_precedes_unity_dispatch(tmp_path, mo
     assert calls == []
     assert gateway.call_external_mcp_tool(name, valid)["ok"] is True
     assert calls == [valid]
+
+
+def test_external_write_branch_error_returns_tool_result_before_target_binding(tmp_path, monkeypatch):
+    from agent_gateway import AgentGateway, create_agent_mcp_app
+    from starlette.testclient import TestClient
+
+    gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    gateway.save_config(config)
+    name = "vrcforge_duplicate_project_asset"
+    gateway.approval_transactions.register_write_handler(name, "Copy asset", "medium", lambda _: {})
+    def bind(*args, **kwargs):
+        raise AssertionError("reached target binding")
+
+    monkeypatch.setattr(gateway, "_validate_external_mcp_execution_target", bind)
+    with TestClient(create_agent_mcp_app(gateway), base_url="http://127.0.0.1") as client:
+        headers = {"Authorization": f"Bearer {config.token}", "Accept": "application/json, text/event-stream",
+                   "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": name}
+        response = client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                          "io.modelcontextprotocol/clientCapabilities": {}},
+                "name": name, "arguments": {"projectPath": str(tmp_path), "copies": [],
+                                            "sourceAssetPath": "Assets/Example.mat"},
+            },
+        })
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["isError"] is True
+    receipt = result["structuredContent"]
+    assert receipt["recoveryAction"] == "fix_and_retry"
+    assert receipt["toolRoutingStarted"] is False and receipt["mutationStarted"] is False
+    assert any("never both" in issue["expected"] for issue in receipt["issues"])
+    assert json.loads(result["content"][0]["text"])["issues"] == receipt["issues"]
+    with pytest.raises(AssertionError, match="reached target binding"):
+        gateway.call_external_mcp_tool(name, {
+            "projectPath": str(tmp_path),
+            "sourceAssetPath": "Assets/Example.mat",
+            "destinationAssetPath": "Assets/VRCForgeGenerated/Example.mat",
+            "preview": True,
+        })

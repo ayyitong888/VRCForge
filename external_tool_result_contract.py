@@ -534,6 +534,17 @@ def _first_commit_state(sources: list[Mapping[str, Any]]) -> str:
     return "unknown" if saw_unknown else ""
 
 
+def tool_argument_recovery(issues: list) -> dict[str, Any]:
+    """Describe a schema rejection before any tool is dispatched."""
+    return {
+        "recoveryAction": "fix_and_retry",
+        "issues": issues,
+        "toolRoutingStarted": False,
+        "mutationStarted": False,
+        "commitState": "not_started",
+    }
+
+
 def build_external_tool_error(
     *,
     error: Any = "",
