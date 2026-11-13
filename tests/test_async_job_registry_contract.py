@@ -357,15 +357,15 @@ def test_retryable_poll_connection_failure_still_respects_deadline(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("compile_payload", "expected_status"),
+    ("compile_payload", "expected_status", "expected_verification"),
     [
-        (None, "pending"),
-        ({"isCompiling": True, "captureComplete": True, "errorCount": 0}, "pending"),
-        ({"isCompiling": False, "captureComplete": True, "errorCount": 1, "errors": [{"message": "CS1002"}]}, "failed"),
+        (None, "done", "unknown"),
+        ({"isCompiling": True, "captureComplete": True, "errorCount": 0}, "pending", "pending"),
+        ({"isCompiling": False, "captureComplete": True, "errorCount": 1, "errors": [{"message": "CS1002"}]}, "failed", "failed"),
     ],
 )
 def test_dashboard_refresh_fallback_preserves_incomplete_and_failed_compile_states(
-    monkeypatch, compile_payload, expected_status
+    monkeypatch, compile_payload, expected_status, expected_verification
 ) -> None:
     import dashboard_server
 
@@ -398,6 +398,10 @@ def test_dashboard_refresh_fallback_preserves_incomplete_and_failed_compile_stat
     result = dashboard_server.refresh_asset_database_sync({"projectPath": "D:/isolated"})
 
     assert result["status"] == expected_status
+    assert result["verification"]["state"] == expected_verification
+    if compile_payload is None:
+        assert result["completionKnown"] is True
+        assert result["verificationWarning"]
     assert calls == ["vrc_refresh_asset_database", "vrc_poll_job", "vrc_get_compile_errors"]
 
 
