@@ -409,6 +409,7 @@ _PLANNER_SCHEMA_CODES = {
 
 
 def _planner_schema_issue(error: ValidationError):
+    from difflib import get_close_matches
     # JSON Schema choice errors contain the errors from all attempted branches.
     # Prefer the closest branch unless the failing constraint supplies explicit guidance.
     hint = error.schema.get("x-validation-hint") if error.validator in {"oneOf", "anyOf", "not"} else None
@@ -439,14 +440,30 @@ def _planner_schema_issue(error: ValidationError):
             ]
             guidance = "declared property"
         for field in fields:
-            yield {"path": f"{path}.{field}" if path else field, "code": code, "expected": guidance}
+            issue = {"path": f"{path}.{field}" if path else field, "code": code, "expected": guidance}
+            if keyword == "additionalProperties":
+                issue["allowedFields"] = sorted(properties)
+                issue["suggestedFields"] = get_close_matches(field, sorted(properties), n=3, cutoff=0.6)
+            yield issue
         return
 
-    if keyword == "type" and isinstance(expected, list):
-        expected = " | ".join(expected)
-    elif keyword in {"enum", "oneOf", "anyOf", "not", "uniqueItems", "invalid_schema_type"}:
+    if keyword == "enum":
+        yield {"path": path or "$", "code": code, "expected": json.dumps(expected, ensure_ascii=False), "allowedValues": expected}
+        return
+    if keyword == "type":
+        candidates = [error.schema[key] for key in ("const", "default", "minimum") if key in error.schema]
+        candidates.extend(error.schema.get("enum", []))
+        candidates.extend(("value", 0, 1, False, [], {}, None))
+        validator = _PLANNER_ARGUMENT_VALIDATOR(error.schema, registry=Registry())
+        issue = {"path": path or "$", "code": code, "expected": " | ".join(expected) if isinstance(expected, list) else str(expected)}
+        for candidate in candidates:
+            if validator.is_valid(candidate):
+                issue["example"] = candidate
+                break
+        yield issue
+        return
+    if keyword in {"oneOf", "anyOf", "not", "uniqueItems", "invalid_schema_type"}:
         expected = {
-            "enum": "one of the declared values",
             "oneOf": "exactly one declared branch",
             "anyOf": "at least one declared branch",
             "not": "remove the disallowed field combination",
@@ -464,7 +481,7 @@ def validate_planner_tool_arguments(
 ) -> dict[str, object]:
     """Validate the registered callable contract and project safe, field-level errors."""
     bounded_schema = bounded_planner_tool_schema(schema)
-    issues: list[dict[str, str]] = []
+    issues: list[dict[str, object]] = []
     if bounded_schema:
         validator = _PLANNER_ARGUMENT_VALIDATOR(bounded_schema, registry=Registry())
         for error in validator.iter_errors(arguments):
@@ -4018,6 +4035,11 @@ class RuntimePlannerService:
                         path = str(issue.get("path") or "").strip()
                         code = str(issue.get("code") or "").strip()
                         expected = str(issue.get("expected") or "").strip()
+                        fields_to_use = issue.get("suggestedFields") or issue.get("allowedFields")
+                        if fields_to_use:
+                            expected = "use " + json.dumps(fields_to_use, ensure_ascii=False)
+                        if "example" in issue:
+                            expected += "; example " + json.dumps(issue["example"], ensure_ascii=False)
                         if path and code:
                             issue_text.append(f"{path}:{code}->{expected}" if expected else f"{path}:{code}")
                     if issue_text:

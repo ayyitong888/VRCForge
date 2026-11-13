@@ -1914,13 +1914,14 @@ def test_shallow_tool_schema_validates_required_type_enum_and_closed_extras() ->
         {"path": "name", "code": "missing_required", "expected": "present"}
     ]
     assert wrong_type["issues"] == [
-        {"path": "count", "code": "wrong_type", "expected": "integer"}
+        {"path": "count", "code": "wrong_type", "expected": "integer", "example": 0}
     ]
     assert wrong_enum["issues"] == [
-        {"path": "mode", "code": "enum", "expected": "one of the declared values"}
+        {"path": "mode", "code": "enum", "expected": '["safe", "force"]', "allowedValues": ["safe", "force"]}
     ]
     assert unknown["issues"] == [
-        {"path": "surprise", "code": "unknown_property", "expected": "declared property"}
+        {"path": "surprise", "code": "unknown_property", "expected": "declared property",
+         "allowedFields": ["count", "mode", "name"], "suggestedFields": []}
     ]
     assert all(
         result["code"] == "planner_invalid_response"

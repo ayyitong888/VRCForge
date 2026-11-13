@@ -51,8 +51,8 @@ def test_prompt_startup_controls_delegate_native_paths_with_bounded_arguments(mo
     assert got_result['promptSkillProvenance']['supportContentHash'] == 'b' * 64
 
     call_count = len(bridge.prompt_calls)
-    assert request('tools/call',name='vrcforge_list_prompts',arguments={'pageSize':0})['error']['code']==-32603
-    assert request('tools/call',name='vrcforge_get_prompt',arguments={'name':'','arguments':{}})['error']['code']==-32603
+    assert request('tools/call',name='vrcforge_list_prompts',arguments={'pageSize':0})['result']['isError'] is True
+    assert request('tools/call',name='vrcforge_get_prompt',arguments={'name':'','arguments':{}})['result']['isError'] is True
     assert len(bridge.prompt_calls) == call_count
 
 @pytest.mark.parametrize('transport',['2026','standard'])
