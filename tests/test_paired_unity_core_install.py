@@ -452,8 +452,8 @@ def test_core_upgrade_status_distinguishes_reload_wait_from_compile_failure(
     monkeypatch.setattr(dashboard_server, "_resolve_install_source_assets", lambda: tmp_path / "source")
     monkeypatch.setattr(
         dashboard_server,
-        "_verified_unity_core_source_identity",
-        lambda _source: {"compiledIdentity": expected},
+        "_unity_core_compiled_identity",
+        lambda _source: expected,
     )
     monkeypatch.setattr(
         dashboard_server,
@@ -519,8 +519,8 @@ def test_core_upgrade_status_reports_descriptor_missing_without_throwing(
     monkeypatch.setattr(dashboard_server, "_resolve_install_source_assets", lambda: tmp_path / "source")
     monkeypatch.setattr(
         dashboard_server,
-        "_verified_unity_core_source_identity",
-        lambda _source: {"compiledIdentity": expected},
+        "_unity_core_compiled_identity",
+        lambda _source: expected,
     )
     monkeypatch.setattr(
         dashboard_server,
@@ -557,3 +557,21 @@ def test_core_upgrade_status_reports_descriptor_missing_without_throwing(
     result = dashboard_server.core_upgrade_status_sync({"projectPath": str(project)})
     assert result["status"] == "core_not_installed"
     assert result["diagnostics"]["startupDiagnostic"] is None
+
+
+def test_core_status_does_not_read_install_tree_hashes(monkeypatch, tmp_path):
+    import dashboard_server
+
+    source = Path(dashboard_server.__file__).resolve().parent / "Assets" / "VRCForge"
+    monkeypatch.setattr(dashboard_server, "resolve_target_project", lambda _: str(tmp_path))
+    monkeypatch.setattr(dashboard_server, "_resolve_install_source_assets", lambda: source)
+    monkeypatch.setattr(
+        dashboard_server, "_unity_core_tree_identity",
+        lambda *_: pytest.fail("read-only Core status must not hash the installation tree"),
+    )
+
+    result = dashboard_server.core_upgrade_status_sync({"projectPath": str(tmp_path)})
+
+    assert result["status"] == "core_not_installed"
+    assert result["expectedCompiledIdentity"]["versionSource"] == "compiled_constant"
+    assert result["expectedCompiledIdentity"]["coreVersion"]

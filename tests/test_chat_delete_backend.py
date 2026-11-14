@@ -100,6 +100,41 @@ def test_delete_fails_closed_when_an_indexed_project_is_unavailable(monkeypatch,
     assert store.load(session_id) is not None
 
 
+@pytest.mark.parametrize("invalid", [False, True])
+def test_delete_uses_one_validated_index_snapshot_per_lock_epoch(monkeypatch, tmp_path, invalid):
+    gateway = _isolated_gateway(monkeypatch, tmp_path)
+    session_id = "index-snapshot-owner"
+    store = gateway.runtime_sessions._ports.native_history_store
+    store.save(session_id, {"binding": "fixture", "messages": []}, {})
+    index_path = dashboard_server.chat_project_index_path()
+    index_path.write_text(
+        json.dumps({"version": 99 if invalid else 1, "projectPaths": []}), encoding="utf-8",
+    )
+    read_bytes = type(index_path).read_bytes
+    read_text = type(index_path).read_text
+    reads = []
+
+    def index_read(method, read):
+        def record(path, *args, **kwargs):
+            if path == index_path:
+                reads.append(method)
+            return read(path, *args, **kwargs)
+        return record
+
+    monkeypatch.setattr(type(index_path), "read_bytes", index_read("bytes", read_bytes))
+    monkeypatch.setattr(type(index_path), "read_text", index_read("text", read_text))
+    if invalid:
+        with pytest.raises(HTTPException) as error:
+            _delete(session_id)
+        assert error.value.status_code == 409
+        assert store.load(session_id) is not None
+        assert reads == ["bytes"]
+    else:
+        assert _delete(session_id) == {"ok": True, "removed": True}
+        assert store.load(session_id) is None
+        assert reads == ["bytes", "bytes"]
+
+
 def test_delete_chat_discards_runtime_session_and_is_idempotent() -> None:
     sessions = dashboard_server.AGENT_GATEWAY.runtime_sessions
     sessions._sessions["chat-sess-test"] = {"id": "chat-sess-test", "turns": []}

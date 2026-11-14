@@ -1781,10 +1781,10 @@ def _write_handoff_chat_snapshot(
         app_chats, app_source, app_recovery = load_chat_transcript_file(chat_store_target(app_path, scope="app"), scope="app")
         if app_recovery: raise ChatPortConflict("chat store recovery required")
         all_chats.extend(dict(item) for item in app_chats); revisions.append(app_source)
-        index_source, index_recovery = inspect_chat_project_index()
+        index_source, index_recovery, project_paths = _scan_chat_project_index()
         if index_recovery: raise ChatPortConflict("chat store recovery required")
         revisions.append(index_source)
-        for project_path in load_chat_project_index_paths():
+        for project_path in project_paths:
             target = project_chat_transcripts_path(project_path)
             if target is None: continue
             project_chats, source, recovery = load_chat_transcript_file(chat_store_target(target, scope="project", project_path=project_path), scope="project")
@@ -4330,10 +4330,10 @@ async def app_delete_agent_chat(chat_id: str) -> dict[str, Any]:
 
         if referenced(chat_transcripts_path(), scope="app"):
             return True
-        _, recovery = inspect_chat_project_index()
+        _, recovery, project_paths = _scan_chat_project_index()
         if recovery:
             raise AgentGatewayError("Chat project index is unavailable; runtime history was kept.", status_code=409)
-        for project_path in load_chat_project_index_paths():
+        for project_path in project_paths:
             path = project_chat_transcripts_path(project_path)
             if path is None:
                 raise AgentGatewayError("Chat project storage is unavailable; runtime history was kept.", status_code=409)
@@ -5330,15 +5330,22 @@ def load_chat_transcript_file(
     return chats, source, recovery_notice
 
 
-def inspect_chat_project_index(*, self_heal_app_owned: bool = False) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _scan_chat_project_index(
+    *, self_heal_app_owned: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any] | None, list[str]]:
     target = chat_project_index_target()
-    scan = scan_session_store(target)
+    project_paths: list[str] = []
+
+    def collect_paths(payload: dict[str, Any]) -> None:
+        project_paths.extend(payload["projectPaths"])
+
+    scan = scan_session_store(target, on_valid_json=collect_paths)
     recovery_notice: dict[str, Any] | None = None
     if self_heal_app_owned and scan.get("status") == "needs_repair":
         repaired = repair_session_store(target, scan)
         if repaired.get("status") in {"repaired", "quarantined"}:
             recovery_notice = chat_recovered_marker(repaired, scope="app-index")
-            scan = scan_session_store(target)
+            scan = scan_session_store(target, on_valid_json=collect_paths)
     source = {
         "storeId": scan.get("storeId"),
         "scope": "app-index",
@@ -5346,21 +5353,14 @@ def inspect_chat_project_index(*, self_heal_app_owned: bool = False) -> tuple[di
         "digest": scan.get("digest"),
         "status": scan.get("status"),
     }
-    if scan.get("status") == "missing":
-        return source, recovery_notice
-    if scan.get("status") != "ok":
-        return source, chat_recovery_marker(scan, scope="app-index")
-    try:
-        payload = load_strict_json(target.path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        marker = {**scan, "status": "needs_repair", "reason": "snapshot_changed"}
-        source["status"] = "needs_repair"
-        return source, chat_recovery_marker(marker, scope="app-index")
-    if not isinstance(payload, dict) or not isinstance(payload.get("projectPaths"), list):
-        marker = {**scan, "status": "unsupported", "reason": "invalid_record_shape"}
-        source["status"] = "unsupported"
-        return source, chat_recovery_marker(marker, scope="app-index")
-    return source, recovery_notice
+    if scan.get("status") not in {"ok", "missing"}:
+        return source, chat_recovery_marker(scan, scope="app-index"), []
+    return source, recovery_notice, project_paths
+
+
+def inspect_chat_project_index(*, self_heal_app_owned: bool = False) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    source, recovery, _ = _scan_chat_project_index(self_heal_app_owned=self_heal_app_owned)
+    return source, recovery
 
 
 def chat_record_fingerprint(chat: dict[str, Any]) -> str:
@@ -5416,7 +5416,7 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
         )
         sources: list[dict[str, Any]] = [{**app_source, "path": str(app_path)}]
         recoveries: list[dict[str, Any]] = [app_recovery] if app_recovery else []
-        index_source, index_recovery = inspect_chat_project_index(self_heal_app_owned=True)
+        index_source, index_recovery, indexed_project_paths = _scan_chat_project_index(self_heal_app_owned=True)
         sources.append({**index_source, "path": str(chat_project_index_path())})
         if index_recovery:
             recoveries.append(index_recovery)
@@ -5428,8 +5428,6 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
         conflicting_chat_ids: set[str] = set()
         for requested_project_path in requested_project_paths:
             remember_chat_project_path(requested_project_path)
-        index_recovery_blocking = bool(index_recovery and index_recovery.get("status") != "recovered")
-        indexed_project_paths = [] if index_recovery_blocking else load_chat_project_index_paths()
         indexed_project_values = {str(value).strip().casefold() for value in indexed_project_paths if str(value).strip()}
         project_sources = list(dict.fromkeys([*indexed_project_paths, *requested_project_paths]))
         for project_path in project_sources:
@@ -5843,13 +5841,12 @@ def write_chat_transcripts_storage(
                 )
             current_chats: list[dict[str, Any]] = [*app_chats]
             delta_project_targets: list[SessionStoreTarget] = []
-            index_source, index_recovery = inspect_chat_project_index(self_heal_app_owned=False)
+            index_source, index_recovery, project_paths = _scan_chat_project_index()
             if index_recovery:
                 raise HTTPException(
                     status_code=409,
                     detail={"code": "chat_store_recovery_required", "recovery": index_recovery},
                 )
-            project_paths: list[str] = list(load_chat_project_index_paths())
             for revision in request.source_revisions:
                 if isinstance(revision, dict) and str(revision.get("scope") or "") == "project":
                     project_path = str(revision.get("projectPath") or "").strip()
@@ -10739,8 +10736,8 @@ def _unity_core_tree_identity(root: Path) -> dict[str, Any]:
     }
 
 
-def _verified_unity_core_source_identity(source_assets: Path) -> dict[str, Any]:
-    """Read compiled Core compatibility identity and fingerprint its install tree."""
+def _unity_core_compiled_identity(source_assets: Path) -> dict[str, Any]:
+    """Read the compatibility constants used by the shipped Core."""
 
     required = (
         (source_assets / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs", "Unity Core server source"),
@@ -10762,7 +10759,7 @@ def _verified_unity_core_source_identity(source_assets: Path) -> dict[str, Any]:
             raise RuntimeError(f"The packaged Unity Core compiled identity is missing {name}.")
         return match.group(1)
 
-    compiled_identity = {
+    return {
         "coreIdentity": compiled_constant(contract_text, "CoreIdentity"),
         "coreVersion": compiled_constant(contract_text, "ProductVersion"),
         "handshakeProtocol": compiled_constant(contract_text, "HandshakeProtocol"),
@@ -10773,6 +10770,12 @@ def _verified_unity_core_source_identity(source_assets: Path) -> dict[str, Any]:
         },
         "versionSource": "compiled_constant",
     }
+
+
+def _verified_unity_core_source_identity(source_assets: Path) -> dict[str, Any]:
+    """Read compatibility identity and fingerprint the tree for installation."""
+
+    compiled_identity = _unity_core_compiled_identity(source_assets)
     return {
         "schema": "vrcforge.unity_core_source.v1",
         "sourceAssets": str(source_assets),
@@ -11074,7 +11077,7 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     if not project_value:
         raise AgentGatewayError("projectPath is required for Core upgrade status.", status_code=400)
     project_path = resolve_target_project(project_value)
-    expected = _verified_unity_core_source_identity(_resolve_install_source_assets())["compiledIdentity"]
+    expected = _unity_core_compiled_identity(_resolve_install_source_assets())
     descriptor_path = Path(project_path) / "Library" / "VRCForge" / "mcp-core.json"
     if not descriptor_path.is_file():
         source_present = (

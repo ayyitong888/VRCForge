@@ -113,8 +113,8 @@ RUNTIME_SCOPE_UNITY_INSTRUCTION = (
     "Explicit file-content or file-location tasks should still use the filesystem readers."
 )
 RUNTIME_UNITY_CORE_SETUP_INSTRUCTION = (
-    "For any task in this Unity project that needs a live Editor, take responsibility for checking its connection. "
-    "If you lack current evidence that it is connected, or a Unity tool reports that it cannot connect, diagnose the "
+    "Start with the Unity tool that answers the task. A successful live call establishes the connection; "
+    "skip a separate status call when it succeeds. If it cannot connect or reports a Core version mismatch, diagnose the "
     "exact bound projectPath yourself with unity_core_upgrade_status, even when the user only asked for ordinary avatar work. "
     "Load this host tool from project_environment/assets_packages; it works before the Unity bridge connects. "
     "A matching live Core is connected even when its compilation monitor has no saved snapshot. "
@@ -124,8 +124,8 @@ RUNTIME_UNITY_CORE_SETUP_INSTRUCTION = (
     "explain the required action. Only the user can switch Plan to execution. After installation, pass the receipt's exact "
     "installedAt back to unity_core_upgrade_status and confirm ready=true, the expected loaded Core identity, and a fresh "
     "compilation result with zero errors before resuming the original task. On first installation, the compile monitor only "
-    "loads after the first compile. If the matching live Core reports waiting_for_console_snapshot, check the Console result "
-    "already in its diagnostics or read unity_get_compile_errors for the same project. Resume after a complete, untruncated Console read with zero errors "
+    "loads after the first compile. If the matching live Core reports waiting_for_console_snapshot, reuse the status tool's Console evidence. "
+    "Call unity_get_compile_errors only if that evidence is missing or incomplete. Resume after a complete, untruncated Console read with zero errors "
     "and isCompiling=false. For upgrades keep the fresh compilation requirement. If Unity is compiling or reloading, wait for the "
     "result. If it reports a compile failure, inspect that error. Ask for a manual step only when the host tools cannot proceed."
 )

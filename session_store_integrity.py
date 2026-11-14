@@ -16,7 +16,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 from chat_transcript_archive import REF_FIELD, is_archived_item
 
@@ -130,8 +130,10 @@ class _SnapshotConflict(RuntimeError):
     pass
 
 
-def scan_session_store(target: SessionStoreTarget) -> dict[str, Any]:
-    """Inspect one store without writing, renaming, touching, or repairing it."""
+def scan_session_store(
+    target: SessionStoreTarget, *, on_valid_json: Callable[[Any], None] | None = None,
+) -> dict[str, Any]:
+    """Inspect one store and optionally consume the validated whole-JSON snapshot."""
 
     if path_has_link_like_segment(target.path, target.guard_root):
         return _scan_result(
@@ -195,7 +197,7 @@ def scan_session_store(target: SessionStoreTarget) -> dict[str, Any]:
         target,
         exists=True,
         digest=_sha256(data),
-        analysis=_analyze(target, data),
+        analysis=_analyze(target, data, on_valid_json=on_valid_json),
     )
 
 
@@ -426,13 +428,17 @@ def repair_session_store(
         )
 
 
-def _analyze(target: SessionStoreTarget, data: bytes) -> _Analysis:
+def _analyze(
+    target: SessionStoreTarget, data: bytes, *, on_valid_json: Callable[[Any], None] | None = None,
+) -> _Analysis:
     if target.format == "jsonl":
         return _analyze_jsonl(target, data)
-    return _analyze_json(target, data)
+    return _analyze_json(target, data, on_valid_json=on_valid_json)
 
 
-def _analyze_json(target: SessionStoreTarget, data: bytes) -> _Analysis:
+def _analyze_json(
+    target: SessionStoreTarget, data: bytes, *, on_valid_json: Callable[[Any], None] | None = None,
+) -> _Analysis:
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -519,6 +525,8 @@ def _analyze_json(target: SessionStoreTarget, data: bytes) -> _Analysis:
             quarantine_bytes=(json.dumps(quarantine_payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"),
             record_recovery=True,
         )
+    if on_valid_json is not None:
+        on_valid_json(payload)
     return _Analysis(status="ok", reason="ok", record_count=1, valid_bytes=data)
 
 

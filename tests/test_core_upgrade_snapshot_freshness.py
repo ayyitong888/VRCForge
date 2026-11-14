@@ -18,7 +18,7 @@ def status(monkeypatch, tmp_path):
                   "compileResult": {"structuredContent": {"data": deepcopy(snapshot)}}, "transportError": ""}
     monkeypatch.setattr(ds, "resolve_target_project", lambda _: str(project))
     monkeypatch.setattr(ds, "_resolve_install_source_assets", lambda: tmp_path / "source")
-    monkeypatch.setattr(ds, "_verified_unity_core_source_identity", lambda _: {"compiledIdentity": expected})
+    monkeypatch.setattr(ds, "_unity_core_compiled_identity", lambda _: expected)
     monkeypatch.setattr(ds, "probe_unity_mcp_core_diagnostics", lambda *args, **kwargs: diagnostic)
     monkeypatch.setattr(ds, "_signal_installed_unity_core_refresh", lambda *args: pytest.fail("read status must not refresh"))
     def call(installed="2026-09-06T09:40:51+09:00"):
