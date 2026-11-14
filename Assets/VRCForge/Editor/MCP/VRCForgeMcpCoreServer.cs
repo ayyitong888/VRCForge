@@ -1198,6 +1198,11 @@ namespace VRCForge.Editor
                 && metadata["io.vrcforge/asyncWrite"].Type == JTokenType.Boolean
                 && metadata["io.vrcforge/asyncWrite"].Value<bool>()
                 && (lane == InvocationLane.ApprovedWrite || lane == InvocationLane.ExternalMcpWrite);
+            if (!asyncWrite && (lane == InvocationLane.ApprovedWrite || lane == InvocationLane.ExternalMcpWrite)
+                && !UnityAsyncJobRegistry.McpWriteReceiptsReady)
+            {
+                return ToolError("write_receipt_unavailable", "The Unity write receipt journal could not be restored. Restore journal access and restart the Core before submitting a new write.", modern, true);
+            }
             return QueueInvocation(toolName, arguments, executionContext, lane, client, peerEvidence, modern, asyncWrite);
         }
 
@@ -1703,10 +1708,16 @@ namespace VRCForge.Editor
 
         private static void QueueMcpWriteExecution(PendingInvocation pending)
         {
-            var operation = UnityAsyncJobRegistry.CreateMcpWrite(
-                pending.ToolName,
-                pending.ExecutionId,
-                GetProjectRoot());
+            JObject operation;
+            try
+            {
+                operation = UnityAsyncJobRegistry.CreateMcpWrite(pending.ToolName, pending.ExecutionId, GetProjectRoot());
+            }
+            catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+            {
+                pending.Response = ToolError("write_receipt_unavailable", "The Unity write receipt could not be saved. Restore journal access and restart the Core before submitting a new write.", pending.Modern, true);
+                return;
+            }
             pending.JobId = (string)operation["jobId"];
             pending.Response = AsyncWriteSubmissionResponse(operation);
             pending.QueueEditorTick = editorUpdateTick;

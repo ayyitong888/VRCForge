@@ -394,11 +394,17 @@ namespace VRCForge.Editor
         private static readonly TimeSpan TerminalRetention = TimeSpan.FromMinutes(15);
         private static readonly object Sync = new object();
         private static readonly Dictionary<string, JObject> McpWriteSnapshots = new Dictionary<string, JObject>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, JObject> McpWriteJobs = new Dictionary<string, JObject>(StringComparer.Ordinal);
         private static string mcpWriteReceiptDirectory;
 
         static UnityAsyncJobRegistry()
         {
             Sweep(DateTime.UtcNow);
+        }
+
+        internal static bool McpWriteReceiptsReady
+        {
+            get { lock (Sync) return mcpWriteReceiptDirectory != null; }
         }
 
         internal static void RestoreMcpWriteReceipts(string projectPath)
@@ -407,30 +413,45 @@ namespace VRCForge.Editor
             {
                 if (mcpWriteReceiptDirectory != null) return;
                 var directory = Path.Combine(projectPath, "Library", "VRCForge", "WriteReceipts");
-                Directory.CreateDirectory(directory);
-                foreach (var path in Directory.EnumerateFiles(directory, "*.json"))
+                McpWriteSnapshots.Clear();
+                McpWriteJobs.Clear();
+                var complete = true;
+                try
                 {
-                    var jobId = Path.GetFileNameWithoutExtension(path);
-                    if (!IsValidJobId(jobId)) continue;
-                    string raw;
-                    try { raw = File.ReadAllText(path); }
-                    catch (IOException)
+                    Directory.CreateDirectory(directory);
+                    foreach (var path in Directory.EnumerateFiles(directory, "*.json"))
                     {
-                        Debug.LogWarning("[VRCForge MCP] Could not read a stored write receipt.");
-                        continue;
+                        var jobId = Path.GetFileNameWithoutExtension(path);
+                        if (!IsValidJobId(jobId)) continue;
+                        JObject record;
+                        try { record = ParseRecord(File.ReadAllText(path), jobId); }
+                        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+                        {
+                            complete = false;
+                            continue;
+                        }
+                        var executionId = record == null ? null : McpWriteExecutionId(record);
+                        if (string.IsNullOrEmpty(executionId))
+                        {
+                            complete = false;
+                            continue;
+                        }
+                        // The interrupted receipt remains on disk; every fresh
+                        // Editor can reconstruct this unknown result from it.
+                        if (!IsTerminal(record.Value<string>("status")))
+                            MarkMcpWriteUnknown(record, "editor_restarted", "The Editor restarted before the write result was persisted; execution state is unknown.");
+                        CacheMcpWriteReceipt(record, executionId, jobId);
                     }
-                    var record = ParseRecord(raw, jobId);
-                    if (record == null) continue;
-                    var executionId = McpWriteExecutionId(record);
-                    if (string.IsNullOrEmpty(executionId)) continue;
-                    if (!IsTerminal(record.Value<string>("status")))
-                    {
-                        MarkMcpWriteUnknown(record, "editor_restarted", "The Editor restarted before the write result was persisted; execution state is unknown.");
-                        VRCForgeMcpCoreServer.WriteJsonAtomically(path, record);
-                    }
-                    McpWriteSnapshots[executionId] = record;
                 }
-                mcpWriteReceiptDirectory = directory;
+                catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+                {
+                    complete = false;
+                }
+
+                if (complete)
+                    mcpWriteReceiptDirectory = directory;
+                else
+                    Debug.LogWarning("[VRCForge MCP] Some write receipts could not be restored. Existing readable receipts remain available; new managed writes are disabled until the journal can be restored.");
             }
         }
 
@@ -440,6 +461,7 @@ namespace VRCForge.Editor
             lock (Sync)
             {
                 if (McpWriteSnapshots.TryGetValue(executionId, out var existing)) return PublicMcpWriteSnapshot(existing);
+                if (mcpWriteReceiptDirectory == null) throw new IOException("The Unity write receipt journal could not be restored.");
                 var jobId = Guid.NewGuid().ToString("N").ToLowerInvariant();
                 var now = DateTime.UtcNow;
                 var record = new JObject
@@ -707,7 +729,7 @@ namespace VRCForge.Editor
             {
                 throw new InvalidOperationException("Async job was not found: " + normalized);
             }
-            return record;
+            return McpWriteJobs.ContainsKey(normalized) ? (JObject)record.DeepClone() : record;
         }
 
         private static void SweepLocked(DateTime utcNow)
@@ -758,13 +780,8 @@ namespace VRCForge.Editor
             {
                 return null;
             }
-            var raw = SessionState.GetString(RecordPrefix + jobId, string.Empty);
-            if (string.IsNullOrEmpty(raw) && mcpWriteReceiptDirectory != null)
-            {
-                var path = Path.Combine(mcpWriteReceiptDirectory, jobId + ".json");
-                if (File.Exists(path)) raw = File.ReadAllText(path);
-            }
-            return ParseRecord(raw, jobId);
+            if (McpWriteJobs.TryGetValue(jobId, out var record)) return record;
+            return ParseRecord(SessionState.GetString(RecordPrefix + jobId, string.Empty), jobId);
         }
 
         private static JObject ParseRecord(string raw, string jobId)
@@ -810,10 +827,16 @@ namespace VRCForge.Editor
             {
                 VRCForgeMcpCoreServer.WriteJsonAtomically(
                     Path.Combine(mcpWriteReceiptDirectory, jobId + ".json"), record);
-                McpWriteSnapshots[executionId] = (JObject)record.DeepClone();
+                CacheMcpWriteReceipt(record, executionId, jobId);
                 return;
             }
             SessionState.SetString(RecordPrefix + jobId, record.ToString(Newtonsoft.Json.Formatting.None));
+        }
+
+        private static void CacheMcpWriteReceipt(JObject record, string executionId, string jobId)
+        {
+            McpWriteSnapshots[executionId] = record;
+            McpWriteJobs[jobId] = record;
         }
 
         private static string McpWriteExecutionId(JObject record)
