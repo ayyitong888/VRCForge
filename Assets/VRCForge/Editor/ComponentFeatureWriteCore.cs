@@ -254,10 +254,12 @@ namespace VRCForge.Editor
         {
             if (exception is ComponentFeatureWriteException controlled)
             {
-                return VRCForgeToolResult.Failed(controlled.Message);
+                return VRCForgeToolResult.RejectedBeforeMutation(
+                    "component_feature_write_rejected", controlled.Message, "unity_core", "write_preflight");
             }
-            return VRCForgeToolResult.FailedWithException("component_feature_write_failed",
-                "Component feature operation failed: " + exception.Message, exception);
+            return VRCForgeToolResult.RejectedBeforeMutation("component_feature_write_failed",
+                "Component feature operation failed: " + exception.Message,
+                "unity_core", "write_preflight", exception: exception);
         }
 
         internal static object BuildMutationFailure(bool restored, Exception exception = null)

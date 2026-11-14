@@ -40,10 +40,12 @@ namespace VRCForge.Editor
         {
             if (exception is SceneObjectCopyException controlled)
             {
-                return VRCForgeToolResult.Failed(controlled.Message);
+                return VRCForgeToolResult.RejectedBeforeMutation(
+                    "scene_object_copy_rejected", controlled.Message, "unity_core", "write_preflight");
             }
-            return VRCForgeToolResult.FailedWithException("scene_object_copy_failed",
-                "Scene object copy operation failed: " + exception.Message, exception);
+            return VRCForgeToolResult.RejectedBeforeMutation("scene_object_copy_failed",
+                "Scene object copy operation failed: " + exception.Message,
+                "unity_core", "write_preflight", exception: exception);
         }
 
         internal static object BuildMutationFailure(string operation, bool restored, Exception exception = null)

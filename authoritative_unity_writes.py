@@ -159,6 +159,25 @@ class AuthoritativeUnityWriteError(ValueError):
         self.details = dict(details or {})
         self.raw_result = dict(raw_result or {})
 
+    @classmethod
+    def before_apply(
+        cls, message: str, status_code: int, *, code: str, layer: str,
+    ) -> AuthoritativeUnityWriteError:
+        rejection = {
+            "ok": False,
+            "errorCode": code,
+            "error": message,
+            "failureLayer": layer,
+            "failurePhase": "preview_rejected",
+            "toolRoutingStarted": False,
+            "mutationStarted": False,
+            "committed": False,
+            "commitState": "not_started",
+            "requestMayHaveCommitted": False,
+            "checkpointRecoveryRequired": False,
+        }
+        return cls(message, status_code=status_code, details=rejection, raw_result=rejection)
+
 
 def _scene_preview_builder(tool_name: str) -> PreviewBuilder:
     return lambda arguments: build_scene_object_copy_preview_arguments(tool_name, arguments)
@@ -393,7 +412,9 @@ def prepare_authoritative_unity_write(
 
     arguments = request.get("arguments") if isinstance(request.get("arguments"), dict) else request.get("params")
     if not isinstance(arguments, dict):
-        raise AuthoritativeUnityWriteError(spec.request_error, status_code=400)
+        raise AuthoritativeUnityWriteError.before_apply(
+            spec.request_error, 400, code="invalid_write_arguments", layer="gateway_validation",
+        )
 
     canonical_project_path = _canonical_unity_project(request.get("projectPath"))
     canonical_request = deepcopy(request)
@@ -403,13 +424,20 @@ def prepare_authoritative_unity_write(
     canonical_request.pop("params", None)
     canonical_request["arguments"] = canonical_arguments
 
-    preview_arguments = spec.build_preview(arguments)
+    try:
+        preview_arguments = spec.build_preview(arguments)
+    except ValueError as exc:
+        raise AuthoritativeUnityWriteError.before_apply(
+            str(exc), 400, code="invalid_preview_arguments", layer="gateway_validation",
+        ) from exc
     if spec.include_project_path_in_preview:
         preview_arguments["expectedProjectPath"] = str(canonical_project_path)
     try:
         payload = invoke_preview(spec.tool_name, preview_arguments)
     except Exception as exc:  # noqa: BLE001 - transport details must not cross this boundary.
-        raise AuthoritativeUnityWriteError(spec.bridge_error, status_code=409) from exc
+        raise AuthoritativeUnityWriteError.before_apply(
+            spec.bridge_error, 409, code="preview_connection_failed", layer="unity_core_preview",
+        ) from exc
 
     if isinstance(payload, dict):
         structured = payload.get("structuredContent") if isinstance(payload.get("structuredContent"), dict) else payload
@@ -479,21 +507,8 @@ def prepare_authoritative_unity_write(
         reason = spec.receipt_error
         if isinstance(exc, spec.domain_error):
             reason = f"{reason} Reason: {exc}"
-        rejection = {
-            "ok": False,
-            "errorCode": "preview_receipt_rejected",
-            "error": reason,
-            "failureLayer": "gateway_validation",
-            "failurePhase": "preview_rejected",
-            "toolRoutingStarted": False,
-            "mutationStarted": False,
-            "committed": False,
-            "commitState": "not_started",
-            "requestMayHaveCommitted": False,
-            "checkpointRecoveryRequired": False,
-        }
-        raise AuthoritativeUnityWriteError(
-            reason, status_code=409, details=rejection, raw_result=rejection,
+        raise AuthoritativeUnityWriteError.before_apply(
+            reason, 409, code="preview_receipt_rejected", layer="gateway_validation",
         ) from exc
 
 
@@ -571,20 +586,20 @@ def _canonical_unity_project(value: Any) -> Path:
     project_text = str(value or "").strip()
     project_path = Path(project_text)
     if not project_text or not project_path.is_absolute():
-        raise AuthoritativeUnityWriteError(
-            "projectPath must be an absolute Unity project path.",
-            status_code=400,
+        raise AuthoritativeUnityWriteError.before_apply(
+            "projectPath must be an absolute Unity project path.", 400,
+            code="invalid_project_path", layer="gateway_validation",
         )
     try:
         canonical_project_path = project_path.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise AuthoritativeUnityWriteError(
-            "projectPath is not an accessible Unity project.",
-            status_code=400,
+        raise AuthoritativeUnityWriteError.before_apply(
+            "projectPath is not an accessible Unity project.", 400,
+            code="invalid_project_path", layer="gateway_validation",
         ) from exc
     if not canonical_project_path.is_dir() or not (canonical_project_path / "Assets").is_dir():
-        raise AuthoritativeUnityWriteError(
-            "projectPath is not an accessible Unity project.",
-            status_code=400,
+        raise AuthoritativeUnityWriteError.before_apply(
+            "projectPath is not an accessible Unity project.", 400,
+            code="invalid_project_path", layer="gateway_validation",
         )
     return canonical_project_path

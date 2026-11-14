@@ -144,18 +144,16 @@ namespace VRCForge.Editor
                 }
                 return Apply(snapshot, sources);
             }
-            catch (ConstraintSourceToolException exception)
+            catch (Exception exception) when (exception is ConstraintSourceToolException || exception is SceneObjectCopyException)
             {
-                return VRCForgeToolResult.Failed(exception.Message);
-            }
-            catch (SceneObjectCopyException exception)
-            {
-                return VRCForgeToolResult.Failed(exception.Message);
+                return VRCForgeToolResult.RejectedBeforeMutation(
+                    "constraint_source_rejected", exception.Message, "unity_core", "write_preflight");
             }
             catch (Exception exception)
             {
-                return VRCForgeToolResult.FailedWithException("constraint_source_failed",
-                    "Constraint source operation failed: " + exception.Message, exception);
+                return VRCForgeToolResult.RejectedBeforeMutation("constraint_source_failed",
+                    "Constraint source operation failed: " + exception.Message,
+                    "unity_core", "write_preflight", exception: exception);
             }
         }
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import authoritative_unity_writes as writes
+from external_tool_result_contract import build_external_tool_error
 from atomic_reference_rename import TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL
 from component_feature_write import TOOL_NAME as COMPONENT_FEATURE_TOOL
 from constraint_source_write import TOOL_NAME as CONSTRAINT_TOOL
@@ -241,6 +242,9 @@ def test_transport_failure_returns_only_the_spec_safe_message(
     assert captured.value.status_code == 409
     assert str(captured.value) == spec.bridge_error
     assert "private" not in str(captured.value)
+    error = build_external_tool_error(operation_kind="write", exception=captured.value)
+    assert error["commitState"] == "not_started"
+    assert error["toolRoutingStarted"] is False
 
 
 def test_unexpected_receipt_parser_failure_returns_only_the_spec_safe_message(
@@ -296,3 +300,5 @@ def test_authoritative_mapping_rejects_non_absolute_projects(project_path: str) 
         )
 
     assert captured.value.status_code == 400
+    error = build_external_tool_error(operation_kind="write", exception=captured.value)
+    assert error["commitState"] == "not_started"

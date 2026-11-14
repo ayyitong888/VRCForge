@@ -3574,7 +3574,8 @@ namespace VRCForge.Editor
         {
             if (!mutationStarted)
             {
-                return VRCForgeToolResult.Failed(SafeError(exception));
+                return VRCForgeToolResult.RejectedBeforeMutation(
+                    "atomic_reference_rename_rejected", SafeError(exception), "unity_core", "write_preflight");
             }
             return VRCForgeToolResult.Failed(
                 restored

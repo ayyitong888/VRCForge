@@ -25,12 +25,13 @@ def _gateway(root: Path) -> AgentGateway:
     return AgentGateway(root / "config.json", root / "audit")
 
 
-def test_internal_preparation_failure_reaches_native_observation_with_cause(tmp_path: Path) -> None:
+@pytest.mark.parametrize("error_type", [RuntimeError, AgentGatewayError])
+def test_internal_preparation_failure_reaches_native_observation_with_cause(tmp_path: Path, error_type) -> None:
     from test_runtime_planner_service import service as planner_service
     gateway = _gateway(tmp_path)
     gateway.ensure_config().allow_write_requests = True
     def reject(_args, _preview):
-        raise RuntimeError("Prepared outfit expected asset path is invalid.")
+        raise error_type("Prepared outfit expected asset path is invalid.")
     gateway.approval_transactions.register_write_handler(
         "vrcforge_import_outfit_package", "Import local clothes", "high",
         lambda _args: pytest.fail("Preparation failure must not invoke the writer"),

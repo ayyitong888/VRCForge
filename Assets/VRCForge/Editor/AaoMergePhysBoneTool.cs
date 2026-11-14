@@ -101,7 +101,8 @@ namespace VRCForge.Editor
             }
             catch (Exception exception)
             {
-                return Failure(exception.Message, false);
+                return VRCForgeToolResult.RejectedBeforeMutation(
+                    "aao_merge_physbone_rejected", exception.Message, "unity_core", "write_preflight");
             }
         }
 

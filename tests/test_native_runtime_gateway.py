@@ -174,6 +174,43 @@ def test_native_gateway_pairs_actual_tool_result_and_keeps_receipt_private(tmp_p
     assert "private-fixture-replay" not in json.dumps(gateway._runtime_session_state.get_session("native-session"))
 
 
+def test_native_invalid_write_arguments_report_no_dispatch(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
+    from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
+
+    name = "vrcforge_duplicate_project_asset"
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [
+        call("bad-copy", name, {"projectPath": str(tmp_path / "UnityProject"),
+                               "sourceAssetPath": "Assets/Face.mat", "destinationAssetPath": 123}),
+        {"role": "assistant", "content": "The write was not sent."},
+    ])
+    gateway.register_tool(name, "Copy an asset.", "write/fixture",
+                          lambda params: invoked.append(params), write=True)
+    make_tool = _TestRuntimePlannerCatalog._tool
+
+    def with_schema(tool):
+        projected = make_tool(tool)
+        if tool.name == name:
+            return replace(projected, input_schema=EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS[name])
+        return projected
+
+    monkeypatch.setattr(_TestRuntimePlannerCatalog, "_tool", staticmethod(with_schema))
+    _set_mode(gateway, "approval")
+    run(gateway, tmp_path / "UnityProject", message="Copy this material")
+    messages = model.requests[1]["messages"]
+    observation = next(
+        item for message in messages if message.get("tool_call_id") == "bad-copy"
+        for item in json.loads(message["content"])["observations"]
+    )["observation"]
+    assert "destinationAssetPath:wrong_type->string" in observation
+    canonical = json.JSONDecoder().raw_decode(observation.split("canonicalOutcome=", 1)[1])[0]
+    assert canonical["commitState"] == "not_started"
+    assert canonical["toolRoutingStarted"] is False
+    assert canonical["recoveryAction"] == "fix_and_retry"
+    assert not invoked
+
+
 def test_native_provider_public_reply_precedes_tool_without_leaking_action_json(tmp_path):
     public_reply = "I will inspect the file before summarizing it."
 

@@ -1572,7 +1572,14 @@ class AgentApprovalTransactionService:
                     dict(arguments),
                     preview,
                 )
-            except AgentGatewayError:
+            except AgentGatewayError as exc:
+                if exc.external_error.get("commitState") == "unknown" and not getattr(exc, "raw_result", None):
+                    exc.external_error = build_external_tool_error(
+                        exception=exc, tool=target_tool, operation_kind="write",
+                        failure_layer="write_request_preparation", failure_phase="request_preparer",
+                        tool_routing_started=False, mutation_started=False, committed=False,
+                        commit_state="not_started", checkpoint_recovery_required=False,
+                    )
                 raise
             except Exception as exc:  # noqa: BLE001 - a failed authoritative preview must block the request.
                 raise AgentGatewayError(
@@ -1589,6 +1596,11 @@ class AgentApprovalTransactionService:
                 raise AgentGatewayError(
                     f"Write request preparation returned invalid arguments for {target_tool}.",
                     status_code=500,
+                    cause_code="write_request_preparation_failed",
+                    failure_layer="write_request_preparation",
+                    failure_phase="request_preparer", operation_kind="write", tool=target_tool,
+                    tool_routing_started=False, mutation_started=False, committed=False,
+                    commit_state="not_started",
                 )
             _verify_prepared_write_preconditions(explicit_preconditions, prepared_arguments)
             arguments = prepared_arguments

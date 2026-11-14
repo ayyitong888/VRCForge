@@ -154,7 +154,6 @@ namespace VRCForge.Editor
         private static void VerifyApply(Parameters p, Snapshot s)
         {
             if (!SceneObjectCopyCore.MatchesCurrentProject(p.expectedProjectPath)
-                || (p.expectedProjectPath ?? string.Empty).Replace('\\', '/').TrimEnd('/') != s.ProjectPath
                 || p.expectedPreviewDigest != s.PreviewDigest || p.expectedScenePath != s.ScenePath
                 || p.expectedSceneGuid != s.SceneGuid || p.expectedHierarchyDigest != s.HierarchyDigest
                 || (s.Action != "prepare" && p.expectedProxyGlobalObjectId != s.ProxyId))

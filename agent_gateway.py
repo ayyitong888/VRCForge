@@ -7196,10 +7196,12 @@ class AgentGateway:
                 ),
                 600,
             )
+            recovery = tool_argument_recovery(issues)
             outcome = normalize_agent_tool_result(
                 {
                     "ok": False,
                     "status": "failed",
+                    **recovery,
                     "error": {
                         "type": "input",
                         "code": "planner_invalid_response",
@@ -7223,7 +7225,7 @@ class AgentGateway:
                     "result": {
                         "code": "planner_invalid_response",
                         "summary": summary,
-                        **tool_argument_recovery(issues),
+                        **recovery,
                         **({"legalBlocks": list(validation["legalBlocks"])} if "legalBlocks" in validation else {}),
                     },
                     "outcome": outcome,
@@ -7234,7 +7236,7 @@ class AgentGateway:
                     "index": len(steps),
                     "kind": "planner_validation",
                     "tool": tool_name,
-                    **tool_argument_recovery(issues),
+                    **recovery,
                     "summary": summary,
                     "status": "failed",
                 }
