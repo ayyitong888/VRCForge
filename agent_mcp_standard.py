@@ -489,7 +489,7 @@ def run_negotiated_stdio_loop(
     diagnostic_stream: TextIO | None = None,
     max_line_bytes: int = DEFAULT_MAX_STDIO_LINE_BYTES,
 ) -> int:
-    """Select one protocol from the first valid frame, then freeze it.
+    """Select one protocol from the opening request, then freeze it.
 
     VRCForge 2026 clients advertise their protocol in request metadata. MCP
     1.x clients begin with ``initialize``. No mid-connection profile switch is
@@ -509,6 +509,8 @@ def run_negotiated_stdio_loop(
                 message = _strict_json_loads(raw_line)
                 request_id = message.get("id") if isinstance(message, Mapping) else None
                 if selected_profile is None:
+                    if is_jsonrpc_notification(message):
+                        continue
                     method = message.get("method") if isinstance(message, Mapping) else None
                     params = message.get("params") if isinstance(message, Mapping) else None
                     meta = params.get("_meta") if isinstance(params, Mapping) else None

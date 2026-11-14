@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
 from agent_mcp_2026 import Mcp2026Router, PROTOCOL_VERSION
 from agent_mcp_standard import (
     LATEST_PROTOCOL_VERSION,
@@ -210,6 +212,52 @@ def test_auto_profile_selects_vrcforge_2026_when_client_advertises_it() -> None:
     response = json.loads(sink.getvalue())
     assert response["result"]["supportedVersions"] == [PROTOCOL_VERSION]
     assert json.loads(diagnostics.getvalue())["selectedProfile"] == "vrcforge-2026"
+
+
+@pytest.mark.parametrize("profile", ["vrcforge-2026", "mcp-1x"])
+@pytest.mark.parametrize("notification_has_version", [False, True])
+def test_auto_stdio_ignores_opening_cancellation_without_pinning_profile(
+    profile: str, notification_has_version: bool,
+) -> None:
+    custom = Mcp2026Router(lambda _params: [], lambda _name, _arguments: {})
+    standard = _router()
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    cancel_params = {"requestId": "unknown-request"}
+    if notification_has_version:
+        cancel_params["_meta"] = meta
+    if profile == "vrcforge-2026":
+        request = {"method": "server/discover", "params": {"_meta": meta}}
+    else:
+        request = {
+            "method": "initialize",
+            "params": {
+                "protocolVersion": LATEST_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "dsh", "version": "1"},
+            },
+        }
+    frames = [
+        {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": cancel_params},
+        {"jsonrpc": "2.0", "id": "opening-request", **request},
+    ]
+    source = io.StringIO("".join(json.dumps(frame) + "\n" for frame in frames))
+    sink = io.StringIO()
+    diagnostics = io.StringIO()
+
+    assert run_negotiated_stdio_loop(
+        custom, standard, input_stream=source, output_stream=sink, diagnostic_stream=diagnostics,
+    ) == 0
+
+    [response] = [json.loads(line) for line in sink.getvalue().splitlines()]
+    assert response["id"] == "opening-request"
+    if profile == "vrcforge-2026":
+        assert response["result"]["supportedVersions"] == [PROTOCOL_VERSION]
+    else:
+        assert response["result"]["protocolVersion"] == LATEST_PROTOCOL_VERSION
+    assert json.loads(diagnostics.getvalue())["selectedProfile"] == profile
 
 
 def test_auto_profile_rejection_reports_exact_v2_metadata_location_without_routing() -> None:
