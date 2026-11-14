@@ -173,7 +173,7 @@ from approved_unity_execution import (
     freeze_approved_unity_execution_plan,
     validate_frozen_approved_unity_execution_plan,
 )
-from agent_mcp_2026 import Mcp2026Router, create_agent_mcp_2026_asgi_app
+from agent_mcp_2026 import Mcp2026Router, McpWriteReceiptUnavailable, create_agent_mcp_2026_asgi_app, is_write_receipt_alias
 from avatar_composition_workflow_skills import (
     AVATAR_COMPOSITION_RUNTIME_CONTRACT_FIELDS,
     AVATAR_COMPOSITION_WORKFLOW_SKILLS,
@@ -2987,14 +2987,20 @@ class AgentGateway:
     def read_mcp_resource(self, uri: str) -> dict[str, Any]:
         # An approved caller already knows its operation ID before submitting
         # the write. It may use the unversioned URI to find the published reply.
-        if uri == "vrcforge://session/current/identity" or re.fullmatch(
-            r"vrcforge://operation/[A-Za-z0-9_-]+/receipt", uri,
-        ):
+        receipt_alias = is_write_receipt_alias(uri)
+        if uri == "vrcforge://session/current/identity" or receipt_alias:
             context_id = self._mcp_resource_context.get()
             if context_id is None:
+                if receipt_alias:
+                    raise McpWriteReceiptUnavailable()
                 raise McpResourceError("This resource alias requires a resource session")
             uri = scoped_base_uri(uri, context_id)
-        return self._mcp_resources.read(uri)
+        try:
+            return self._mcp_resources.read(uri)
+        except McpResourceError as exc:
+            if receipt_alias:
+                raise McpWriteReceiptUnavailable() from exc
+            raise
 
     def list_mcp_prompts(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self._mcp_prompts.list(params)
@@ -3066,7 +3072,7 @@ class AgentGateway:
                 "result": self._external_mcp_visible_value(result),
             },
             "identity": identity, "source_mode": source_mode,
-            "refresh_rule": "Immutable; invoke the Tool again to capture a new operation revision.",
+            "refresh_rule": "Immutable historical result; use a read-only Tool to observe the current target state.",
             "stale": target is None,
             "stale_reason": "execution_target_missing" if target is None else "",
         }]

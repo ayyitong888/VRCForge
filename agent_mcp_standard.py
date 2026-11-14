@@ -15,6 +15,8 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence, TextIO
 from agent_mcp_2026 import (
     PROTOCOL_VERSION as VRCFORGE_2026_PROTOCOL_VERSION,
     Mcp2026Router,
+    McpWriteReceiptUnavailable,
+    WRITE_RECEIPT_READBACK_GUIDANCE,
     _normalise_tool,
     _strict_json_clone,
     _strict_json_loads,
@@ -259,6 +261,8 @@ class McpStandardRouter:
                     raise McpStandardError(-32602, "resources/read requires a non-empty uri")
                 try:
                     supplied = await _resolve(self._resource_read(resource_uri_without_selection(str(uri))))
+                except McpWriteReceiptUnavailable as exc:
+                    raise McpStandardError(-32002, str(exc), WRITE_RECEIPT_READBACK_GUIDANCE) from exc
                 except ValueError as exc:
                     raise McpStandardError(-32002, str(exc)) from exc
                 if not isinstance(supplied, Mapping) or not isinstance(supplied.get("contents"), Sequence):

@@ -6,6 +6,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from agent_mcp_2026 import PROTOCOL_VERSION
@@ -924,6 +925,8 @@ def test_tool_transport_timeout_is_structured_and_never_safe_to_blind_retry(
     assert result["errorDetails"]["schema"] == "vrcforge.external_tool_error.v1"
     assert result["errorDetails"]["failureLayer"] == "external_stdio_http_transport"
     assert result["errorDetails"]["commitStateKnown"] is False
+    assert result["recoveryAction"] == "read_live_target"
+    assert "recoveryResourceRequest" not in result
 
 
 def test_lost_confirmed_write_reply_points_to_exact_operation_receipt(tmp_path, monkeypatch):
@@ -940,6 +943,8 @@ def test_lost_confirmed_write_reply_points_to_exact_operation_receipt(tmp_path, 
 
     def disconnect(method, params, **_kwargs):
         calls.append((method, params))
+        bridge._mcp_session_id = "fixture-session"
+        bridge._mcp_session_last_used = time.monotonic()
         raise RemoteDisconnected("response lost after submission")
 
     monkeypatch.setattr(bridge, "_mcp_request", disconnect)
@@ -955,6 +960,39 @@ def test_lost_confirmed_write_reply_points_to_exact_operation_receipt(tmp_path, 
     }
     assert result["receiptOperationId"] == "mcp-approved-operation"
     assert "vrcforge://operation/mcp-approved-operation/receipt" in result["nextAction"]
+    assert "read the target's current state" in result["nextAction"]
+
+
+def test_expired_session_receipt_read_uses_readback_without_replaying_write(tmp_path, monkeypatch):
+    import pytest
+    from starlette.testclient import TestClient
+    from agent_mcp_2026 import Mcp2026Router, McpWriteReceiptUnavailable, create_asgi_app
+    from tools.vrcforge_agent_mcp_stdio import ExternalHttpBridgeError, VRCForgeBridge
+
+    calls = []
+    config = tmp_path / "agent_gateway.json"
+    config.write_text('{"token":"fixture-token"}', encoding="utf-8")
+    app = create_asgi_app(Mcp2026Router(lambda _: [], lambda *_: {}), route_path="/mcp")
+    bridge = VRCForgeBridge(base_url="http://127.0.0.1", config_path=config, timeout_seconds=1, start_runtime=False)
+    uri = "vrcforge://operation/confirmed-write/receipt"
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        def send(_method, path, *, payload, extra_headers, response_headers, **_kwargs):
+            calls.append(payload["method"])
+            response = client.post(path, json=payload, headers=extra_headers)
+            if response.status_code >= 400:
+                raise ExternalHttpBridgeError(status_code=response.status_code, path=path, body=response.text)
+            response_headers["Mcp-Session-Id"] = response.headers["mcp-session-id"]
+            return response.json()
+
+        monkeypatch.setattr(bridge, "request_json", send)
+        bridge._mcp_request("server/discover", {}, token="fixture-token")
+        old_session = bridge._mcp_session_id
+        deleted = client.delete("/mcp", headers={"Mcp-Session-Id": old_session})
+        assert deleted.status_code == 204
+        with pytest.raises(McpWriteReceiptUnavailable, match="read the target's current state"):
+            bridge.read_resource(uri)
+        assert bridge._mcp_session_id == ""
+    assert calls == ["server/discover", "resources/read"]
 
 
 def test_session_mismatch_surfaces_rebind_discovery_to_external_agent(tmp_path: Path, monkeypatch) -> None:

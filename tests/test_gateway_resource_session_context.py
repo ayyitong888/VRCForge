@@ -96,6 +96,7 @@ def test_approved_resource_context_restores_only_internal_session_when_context_i
 def test_http_gateway_interleaved_sessions_keep_current_state_and_share_history(tmp_path):
     import httpx
     from agent_gateway import create_agent_mcp_app
+    from agent_mcp_2026 import encode_mcp_name
     from tests.test_agent_gateway_integrity import _external_gateway
     from tests.test_mcp_request_sessions import request, headers
     gateway = _external_gateway(tmp_path)
@@ -112,6 +113,8 @@ def test_http_gateway_interleaved_sessions_keep_current_state_and_share_history(
                 h = headers(method, session, gateway.ensure_config().token)
                 if method == "tools/call":
                     h["Mcp-Name"] = name
+                elif method == "resources/read":
+                    h["Mcp-Name"] = encode_mcp_name(params["uri"])
                 response = await client.post("/mcp", json=body, headers=h)
                 assert response.status_code == 200, response.text
                 assert "error" not in response.json(), response.text

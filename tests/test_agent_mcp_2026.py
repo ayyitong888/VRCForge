@@ -721,7 +721,7 @@ def test_routed_gateway_error_keeps_unknown_commit_state():
 
 def test_receipt_lookup_by_operation_id_is_bound_to_current_session(tmp_path):
     from agent_gateway import AgentGateway
-    from mcp_resource_registry import McpResourceError
+    from agent_mcp_2026 import McpWriteReceiptUnavailable
 
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     uri = "vrcforge://operation/mcp-approved-operation/receipt"
@@ -734,8 +734,89 @@ def test_receipt_lookup_by_operation_id_is_bound_to_current_session(tmp_path):
         assert receipt["data"]["operationId"] == result["operationId"]
         assert receipt["uri"] == result["operationResource"]
     with gateway.resource_context("external:other"):
-        with pytest.raises(McpResourceError):
+        with pytest.raises(McpWriteReceiptUnavailable, match="read the target's current state"):
             gateway.read_mcp_resource(uri)
+
+
+@pytest.mark.parametrize("protocol_profile,expected_code", [("vrcforge-2026", -32602), ("mcp-1x", -32002)])
+def test_lost_write_recovery_after_stdio_bridge_restart_reads_live_target(
+    tmp_path, monkeypatch, protocol_profile, expected_code,
+):
+    import io
+    import sys
+    from http.client import RemoteDisconnected
+
+    from starlette.testclient import TestClient
+    from tools.vrcforge_agent_mcp_stdio import ExternalHttpBridgeError, VRCForgeBridge, run_stdio_server
+
+    gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
+    config_path = tmp_path / "bridge.json"
+    config_path.write_text('{"token":"fixture-token"}', encoding="utf-8")
+    uri = "vrcforge://operation/confirmed-temp-copy/receipt"
+    asset = tmp_path / "temporary-copy.mat"
+    calls = []
+    write_name = "vrcforge_duplicate_project_asset"
+    read_name = "vrcforge_get_asset_info"
+    tools = [{"name": name, "inputSchema": {"type": "object"}} for name in (write_name, read_name)]
+
+    def call(name, arguments):
+        calls.append(name)
+        if name == read_name:
+            return {"ok": True, "exists": asset.is_file()}
+        assert name == write_name and not asset.exists()
+        asset.write_text("test copy", encoding="utf-8")
+        result = {"ok": True, "status": "executed", "operationId": arguments["confirmation"]["operationId"]}
+        gateway.publish_mcp_tool_result_resource(name, arguments, result, source_mode="test")
+        return result
+
+    router = Mcp2026Router(lambda _: tools, call, resource_read=gateway.read_mcp_resource)
+    app = create_asgi_app(router, bearer_validator=lambda token: token == "fixture-token",
+                          route_path="/mcp", request_context=gateway.resource_context)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        def new_bridge():
+            bridge = VRCForgeBridge(base_url="http://127.0.0.1", config_path=config_path,
+                                    timeout_seconds=1, start_runtime=False)
+
+            def send(_method, path, *, payload, extra_headers, response_headers, **_kwargs):
+                response = client.post(path, json=payload, headers={"Authorization": "Bearer fixture-token", **extra_headers})
+                if response.status_code >= 400:
+                    raise ExternalHttpBridgeError(status_code=response.status_code, path=path, body=response.text)
+                if "mcp-session-id" in response.headers:
+                    response_headers["Mcp-Session-Id"] = response.headers["mcp-session-id"]
+                if payload["method"] == "tools/call" and payload["params"]["name"] == write_name:
+                    raise RemoteDisconnected("reply lost after dispatch")
+                return response.json()
+
+            monkeypatch.setattr(bridge, "request_json", send)
+            return bridge
+
+        original = new_bridge()
+        failure = original.call_tool(write_name, {"confirmation": {"operationId": "confirmed-temp-copy"}})
+        assert failure["recoveryAction"] == "query_receipt"
+        assert original.read_resource(uri)["contents"]
+
+        restarted = new_bridge()
+        request = _request("resources/read", {"uri": uri})
+        if protocol_profile == "mcp-1x":
+            request["params"].pop("_meta")
+            initialize = {"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                          "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                                     "clientInfo": {"name": "fixture", "version": "1"}}}
+            requests = [initialize, request]
+        else:
+            requests = [request]
+        sink = io.StringIO()
+        monkeypatch.setattr(sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests)) + "\n"))
+        monkeypatch.setattr(sys, "stdout", sink)
+        run_stdio_server(restarted, protocol_profile=protocol_profile)
+        error = [json.loads(line) for line in sink.getvalue().splitlines()][-1]["error"]
+        assert error["code"] == expected_code
+        assert error["data"]["recoveryAction"] == "read_live_target"
+        assert "read the target's current state" in error["data"]["nextAction"]
+        assert "recoveryResourceRequest" not in error["data"]
+        assert restarted.call_tool(read_name, {})["exists"] is True
+
+    assert calls == [write_name, read_name]
 
 
 def test_execution_target_session_mismatch_returns_same_project_recovery_call() -> None:

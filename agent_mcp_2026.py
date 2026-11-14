@@ -16,6 +16,7 @@ import inspect
 import json
 import logging
 import math
+import re
 import sys
 import secrets
 import time
@@ -44,6 +45,27 @@ HTTP_MAX_SESSIONS = 256
 MCP_NAME_FIELDS = {"tools/call": "name", "resources/read": "uri", "prompts/get": "name"}
 _BASE64_HEADER_PREFIX = "=?base64?"
 _BASE64_HEADER_SUFFIX = "?="
+_WRITE_RECEIPT_ALIAS = re.compile(r"vrcforge://operation/[A-Za-z0-9_-]+/receipt")
+WRITE_RECEIPT_READBACK_GUIDANCE = {
+    "recoveryAction": "read_live_target",
+    "safeToRetry": False,
+    "nextAction": (
+        "Use a read-only Unity tool to read the target's current state in the same project, "
+        "compare it with the original request, and decide what remains. Do not resend the previous write."
+    ),
+}
+
+
+def is_write_receipt_alias(uri: str) -> bool:
+    return _WRITE_RECEIPT_ALIAS.fullmatch(uri) is not None
+
+
+class McpWriteReceiptUnavailable(ValueError):
+    def __init__(self) -> None:
+        super().__init__(
+            "The operation receipt is unavailable in the current context. A missing receipt does not "
+            "establish whether the write took effect. " + WRITE_RECEIPT_READBACK_GUIDANCE["nextAction"]
+        )
 
 
 def encode_mcp_name(value: str) -> str:
@@ -620,6 +642,8 @@ class Mcp2026Router:
                     raise Mcp2026Error(-32602, "resources/read requires a non-empty uri")
                 try:
                     supplied = await _resolve(self._resource_read(resource_uri_without_selection(str(uri))))
+                except McpWriteReceiptUnavailable as exc:
+                    raise Mcp2026Error(-32602, str(exc), data=WRITE_RECEIPT_READBACK_GUIDANCE) from exc
                 except ValueError as exc:
                     raise Mcp2026Error(-32602, str(exc), data={"uri": uri}) from exc
                 if not isinstance(supplied, Mapping) or not isinstance(supplied.get("contents"), Sequence):

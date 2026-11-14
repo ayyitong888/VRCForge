@@ -25,7 +25,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from dashboard_foundation import read_vrcforge_version
-from agent_mcp_2026 import HTTP_SESSION_IDLE_SECONDS, MCP_NAME_FIELDS, PROTOCOL_VERSION, Mcp2026Router, encode_mcp_name, run_stdio_loop, _host_is_loopback
+from agent_mcp_2026 import (
+    HTTP_SESSION_IDLE_SECONDS, MCP_NAME_FIELDS, PROTOCOL_VERSION, WRITE_RECEIPT_READBACK_GUIDANCE,
+    Mcp2026Router, McpWriteReceiptUnavailable, encode_mcp_name, is_write_receipt_alias,
+    run_stdio_loop, _host_is_loopback,
+)
 from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
 from mcp_tool_descriptor import standardize_tool_descriptor
 from external_mcp_result_projection import project_tool
@@ -587,30 +591,23 @@ class VRCForgeBridge:
             )
             confirmation = (params or {}).get("confirmation")
             operation_id = confirmation.get("operationId") if isinstance(confirmation, Mapping) else None
-            receipt_uri = (
-                f"vrcforge://operation/{operation_id}/receipt"
-                if isinstance(operation_id, str) and operation_id and all(
-                    character.isascii() and (character.isalnum() or character in "_-")
-                    for character in operation_id
-                ) else ""
-            )
+            receipt_uri = f"vrcforge://operation/{operation_id}/receipt" if isinstance(operation_id, str) else ""
+            readback = WRITE_RECEIPT_READBACK_GUIDANCE["nextAction"]
             recovery = {
+                **WRITE_RECEIPT_READBACK_GUIDANCE,
                 "requestMayHaveCommitted": True,
-                "safeToRetry": False,
-                "recoveryAction": "query_receipt",
-                "recoveryResourceRequest": (
-                    {"method": "resources/read", "params": {"uri": receipt_uri}}
-                    if receipt_uri else {"method": "resources/list", "params": {}}
-                ),
-                "nextAction": (
-                    f"Use resources/read on {receipt_uri} in this MCP session. A missing receipt does "
-                    "not establish that the write failed. Inspect the target read-only; do not resend."
-                    if receipt_uri else
-                    "List resources in this MCP session and read the receipt only if you can identify "
-                    "this exact operation. Otherwise inspect the target read-only. Do not resend the call."
-                ),
-                **({"receiptOperationId": operation_id} if receipt_uri else {}),
             }
+            if (self._mcp_session_id and time.monotonic() - self._mcp_session_last_used < HTTP_SESSION_IDLE_SECONDS
+                    and is_write_receipt_alias(receipt_uri)):
+                recovery.update({
+                    "recoveryAction": "query_receipt",
+                    "recoveryResourceRequest": {"method": "resources/read", "params": {"uri": receipt_uri}},
+                    "receiptOperationId": operation_id,
+                    "nextAction": (
+                        f"If still in the original context, use resources/read on {receipt_uri}. A missing receipt "
+                        f"does not establish that the write failed. If the context changed or the receipt is unavailable: {readback}"
+                    ),
+                })
             return external_rejection(
                 status="transport_error",
                 error=str(exc),
@@ -764,7 +761,20 @@ class VRCForgeBridge:
         return self._mcp_request("resources/templates/list", {}, token=self.require_token())
 
     def read_resource(self, uri: str) -> dict[str, Any]:
-        return self._mcp_request("resources/read", {"uri": uri}, token=self.require_token())
+        session_id = self._mcp_session_id
+        try:
+            return self._mcp_request("resources/read", {"uri": uri}, token=self.require_token())
+        except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
+            error = (exc.raw_result or {}).get("error")
+            data = error.get("data") if isinstance(error, Mapping) else None
+            if isinstance(data, Mapping) and data.get("recoveryAction") == "read_live_target":
+                raise McpWriteReceiptUnavailable() from exc
+            # The existing exact-match 404 path clears a rejected session.
+            # A failed discovery without a previously rejected session must retain its own error.
+            if (isinstance(exc, ExternalHttpBridgeError) and session_id
+                    and not self._mcp_session_id and is_write_receipt_alias(uri)):
+                raise McpWriteReceiptUnavailable() from exc
+            raise
 
     def resource_generation(self) -> int:
         if self._response_list_revisions is not None:
