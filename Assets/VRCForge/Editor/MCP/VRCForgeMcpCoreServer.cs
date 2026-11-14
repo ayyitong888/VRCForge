@@ -30,6 +30,7 @@ namespace VRCForge.Editor
         private const string ModernProtocolVersion = "2026-07-28";
         private const string MinimumProtocolVersion = "2026-07-28";
         private const string MaximumProtocolVersion = "2026-07-28";
+        private const int CoreBindingErrorCode = -33000;
         private const string ApprovedExecutionMetaKey = "io.vrcforge/approvedExecution";
         private const int MaxFrameBytes = 1024 * 1024;
         private const int MaxResponseFrameBytes = 8 * 1024 * 1024;
@@ -897,10 +898,11 @@ namespace VRCForge.Editor
                 return hasId
                     ? Error(
                         id,
-                        -32023,
+                        CoreBindingErrorCode,
                         "MCP handshake is required before using Core methods.",
                         new JObject
                         {
+                            ["reason"] = "core_discovery_required",
                             ["requiredMethod"] = "server/discover",
                             ["protocolRange"] = ProtocolRangeResult(),
                             ["coreInfo"] = CoreInfoResult(),
@@ -951,29 +953,49 @@ namespace VRCForge.Editor
 
         private static VRCForgeMcpMetadataError ValidateProtocolVersion(JObject metadata)
         {
-            var token = metadata["io.modelcontextprotocol/protocolVersion"];
-            var requested = token != null && token.Type == JTokenType.String ? (string)token : string.Empty;
+            var requested = (string)metadata["io.modelcontextprotocol/protocolVersion"];
             var clientRange = metadata["io.vrcforge/protocolRange"] as JObject;
-            var clientMinimum = clientRange == null ? string.Empty : (string)clientRange["minimum"] ?? string.Empty;
-            var clientMaximum = clientRange == null ? string.Empty : (string)clientRange["maximum"] ?? string.Empty;
-            if (IsProtocolVersion(requested)
-                && IsProtocolVersion(clientMinimum)
-                && IsProtocolVersion(clientMaximum)
-                && string.CompareOrdinal(clientMinimum, requested) <= 0
-                && string.CompareOrdinal(requested, clientMaximum) <= 0
-                && string.CompareOrdinal(MinimumProtocolVersion, requested) <= 0
-                && string.CompareOrdinal(requested, MaximumProtocolVersion) <= 0)
+            if (!string.Equals(requested, ModernProtocolVersion, StringComparison.Ordinal))
+            {
+                return new VRCForgeMcpMetadataError
+                {
+                    Code = -32022,
+                    Message = "Unsupported MCP protocol version.",
+                    Data = new JObject
+                    {
+                        ["requested"] = requested,
+                        ["supported"] = new JArray(ModernProtocolVersion),
+                        ["clientRange"] = clientRange == null ? JValue.CreateNull() : clientRange.DeepClone(),
+                        ["coreRange"] = ProtocolRangeResult(),
+                    },
+                };
+            }
+            var minimum = clientRange?["minimum"];
+            var maximum = clientRange?["maximum"];
+            if (minimum?.Type != JTokenType.String || maximum?.Type != JTokenType.String
+                || !IsProtocolVersion((string)minimum) || !IsProtocolVersion((string)maximum)
+                || string.CompareOrdinal((string)minimum, (string)maximum) > 0)
+            {
+                return new VRCForgeMcpMetadataError
+                {
+                    Code = -32602,
+                    Message = "A valid io.vrcforge/protocolRange is required.",
+                };
+            }
+            if (string.CompareOrdinal((string)minimum, requested) <= 0
+                && string.CompareOrdinal(requested, (string)maximum) <= 0)
             {
                 return null;
             }
             return new VRCForgeMcpMetadataError
             {
-                Code = -32022,
-                Message = "No compatible MCP protocol version was negotiated.",
+                Code = CoreBindingErrorCode,
+                Message = "The VRCForge client protocol range excludes the requested version.",
                 Data = new JObject
                 {
+                    ["reason"] = "core_protocol_range_mismatch",
                     ["requested"] = requested,
-                    ["clientRange"] = clientRange == null ? JValue.CreateNull() : clientRange.DeepClone(),
+                    ["clientRange"] = clientRange.DeepClone(),
                     ["coreRange"] = ProtocolRangeResult(),
                 },
             };
@@ -998,22 +1020,29 @@ namespace VRCForge.Editor
             {
                 return new VRCForgeMcpMetadataError
                 {
-                    Code = -32021,
-                    Message = "Required client capabilities are missing.",
-                    Data = new JObject { ["requiredCapabilities"] = new JObject() },
+                    Code = -32602,
+                    Message = "_meta must be an object.",
                 };
             }
-            var protocolError = ValidateProtocolVersion(metadata);
-            if (protocolError != null) return protocolError;
+            var protocolVersion = metadata["io.modelcontextprotocol/protocolVersion"];
+            if (protocolVersion?.Type != JTokenType.String || !IsProtocolVersion((string)protocolVersion))
+            {
+                return new VRCForgeMcpMetadataError
+                {
+                    Code = -32602,
+                    Message = "io.modelcontextprotocol/protocolVersion must be a valid version string.",
+                };
+            }
             if (!(metadata["io.modelcontextprotocol/clientCapabilities"] is JObject))
             {
                 return new VRCForgeMcpMetadataError
                 {
-                    Code = -32021,
-                    Message = "Required client capabilities are missing.",
-                    Data = new JObject { ["requiredCapabilities"] = new JObject() },
+                    Code = -32602,
+                    Message = "io.modelcontextprotocol/clientCapabilities must be an object.",
                 };
             }
+            var protocolError = ValidateProtocolVersion(metadata);
+            if (protocolError != null) return protocolError;
             var clientInfoToken = metadata["io.modelcontextprotocol/clientInfo"];
             var clientInfo = clientInfoToken as JObject;
             if (clientInfo == null
@@ -1032,14 +1061,16 @@ namespace VRCForge.Editor
                 };
             }
             var projectBinding = metadata["io.vrcforge/projectBinding"] as JObject;
-            if (projectBinding == null
+            if (projectBinding?["projectId"]?.Type != JTokenType.String
+                || projectBinding?["instanceId"]?.Type != JTokenType.String
                 || !string.Equals((string)projectBinding["projectId"], descriptorProjectId, StringComparison.Ordinal)
                 || !string.Equals((string)projectBinding["instanceId"], descriptorInstanceId, StringComparison.Ordinal))
             {
                 return new VRCForgeMcpMetadataError
                 {
-                    Code = -32025,
+                    Code = CoreBindingErrorCode,
                     Message = "Unity project instance handshake failed.",
+                    Data = new JObject { ["reason"] = "core_project_binding_mismatch" },
                 };
             }
             return null;
