@@ -1153,7 +1153,11 @@ def create_asgi_app(
             payload, status = _transport_error("MCP-Protocol-Version must match params._meta protocolVersion", request_id=message.get("id"))
             return JSONResponse(payload, status_code=status)
         if method_header != method:
-            payload, status = _transport_error("Mcp-Method must match JSON-RPC method")
+            request_id = message.get("id")
+            payload, status = _transport_error(
+                "Mcp-Method must match JSON-RPC method",
+                request_id=request_id if type(request_id) in {str, int} else None,
+            )
             return JSONResponse(payload, status_code=status)
         name_values = _request_header_values(request, "Mcp-Name")
         name_field = MCP_NAME_FIELDS.get(method) if isinstance(method, str) else None

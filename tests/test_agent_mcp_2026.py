@@ -354,6 +354,31 @@ def test_http_transport_enforces_headers_origin_bearer_and_body(router):
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize(
+    ("request_id", "expected_id"),
+    [("request-17", "request-17"), (0, 0), (True, None), (1.5, None), (None, None)],
+)
+def test_http_method_mismatch_echoes_only_a_valid_request_id(router, request_id, expected_id):
+    async def exercise():
+        app = create_asgi_app(router, bearer_validator=lambda token: token == "good")
+        transport = httpx.ASGITransport(app=app)
+        headers = {
+            "accept": "application/json, text/event-stream",
+            "mcp-protocol-version": PROTOCOL_VERSION,
+            "mcp-method": "tools/list",
+            "authorization": "Bearer good",
+            "origin": "http://127.0.0.1:1234",
+            "content-type": "application/json",
+        }
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/", json=_request("server/discover", request_id=request_id), headers=headers)
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == -32020
+            assert response.json()["id"] == expected_id
+
+    asyncio.run(exercise())
+
+
 def test_http_concurrent_calls_offload_catalogue_without_bypassing_exposure():
     def slow_catalogue(_params):
         time.sleep(0.20)
