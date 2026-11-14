@@ -78,7 +78,7 @@ def bind_authoritative_preview(
     result = _dict(payload, "scene duplicate preview")
     if result.get("schema") != RESULT_SCHEMA or result.get("operation") != OPERATION:
         raise SceneAssetDuplicateError("Scene duplicate preview schema is invalid.")
-    if _project_path(result.get("projectPath")) != project_path:
+    if Path(_project_path(result.get("projectPath"))) != Path(project_path):
         raise SceneAssetDuplicateError("Scene duplicate preview came from a different Unity project.")
     for key, expected in (
         ("ok", True),

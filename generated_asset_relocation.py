@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -121,7 +121,8 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, 
 
 
 def _assert_result_binding(result: dict[str, Any], expected: dict[str, Any], project: str) -> None:
-    if result.get("expectedProjectPath") != project:
+    reported = result.get("expectedProjectPath")
+    if not isinstance(reported, str) or Path(reported) != Path(project):
         raise GeneratedAssetRelocationError("Generated asset relocation project binding changed.")
     returned = result.get("entries")
     if returned != expected["entries"]:

@@ -131,13 +131,15 @@ def test_authoritative_preview_binds_exact_inventory_to_apply() -> None:
         "committed": False,
         "commitState": "not_started",
         "mutationCount": 0,
-        "expectedProjectPath": project,
+        "expectedProjectPath": "c:\\PROJECTS\\AVATAR",
         "entries": [_row()],
     }
     canonical, approval = bind_authoritative_preview(wrapper, preview)
     assert canonical["arguments"]["preview"] is False
     assert canonical["arguments"]["entries"] == [_row()]
     assert approval["mutationCount"] == 1
+    with pytest.raises(GeneratedAssetRelocationError, match="project binding changed"):
+        bind_authoritative_preview(wrapper, {**preview, "expectedProjectPath": "C:/Projects/Other"})
 
 
 def test_apply_result_requires_persisted_verified_core_receipt() -> None:
@@ -158,10 +160,12 @@ def test_apply_result_requires_persisted_verified_core_receipt() -> None:
         "readbackState": "verified",
         "cleanupState": "complete",
         "mutationCount": 1,
-        "expectedProjectPath": project,
+        "expectedProjectPath": "c:\\PROJECTS\\AVATAR",
         "entries": [_row()],
     }
     assert validate_apply_result(arguments, result)["readbackState"] == "verified"
+    with pytest.raises(GeneratedAssetRelocationError, match="project binding changed"):
+        validate_apply_result(arguments, {**result, "expectedProjectPath": "C:/Projects/Other"})
     with pytest.raises(GeneratedAssetRelocationError):
         validate_apply_result(arguments, {**result, "checkpointRecoveryRequired": True})
     with pytest.raises(GeneratedAssetRelocationError):

@@ -77,6 +77,19 @@ def wrapper(*, open_copy: bool = True) -> dict:
     )
 
 
+def test_preview_accepts_windows_project_alias_and_rejects_other_project(tmp_path: Path) -> None:
+    project = tmp_path / "Milltina"
+    request = {**wrapper(), "projectPath": str(project)}
+    preview = preview_payload()
+    preview["projectPath"] = project.as_posix().upper()
+    preview["previewDigest"] = compute_preview_digest(preview)
+    canonical, _ = bind_authoritative_preview(request, preview)
+    assert canonical["arguments"]["expectedProjectPath"] == str(project)
+    preview["projectPath"] = str(project.with_name("Other"))
+    with pytest.raises(SceneAssetDuplicateError, match="different Unity project"):
+        bind_authoritative_preview(request, preview)
+
+
 def apply_payload(canonical: dict) -> dict:
     args = canonical["arguments"]
     open_copy = args["openAsOnlyActiveScene"]
