@@ -40,6 +40,25 @@ def test_stdio_browse_call_loads_full_selected_description(monkeypatch, transpor
     assert bridge.calls == [(NAMES[0], {"selector": "fixture"})]
 
 
+@pytest.mark.parametrize("transport", ["2026", "standard"])
+def test_stdio_named_load_rejects_edge_whitespace_at_the_exact_field(monkeypatch, transport):
+    fixture = {"name": NAMES[0], "description": "Read fixture", "inputSchema": {"type": "object"},
+               "_meta": {"toolBlock": LEAF, "permission": "read"}}
+    request, bridge = stdio_requester(monkeypatch, transport, "execution", [fixture])
+    result = request("tools/call", name="vrcforge_load_tool_block",
+                     arguments={"block": LEAF, "toolNames": [NAMES[0] + "\n"]})["result"]
+    assert result["isError"] is True
+    receipt = result["structuredContent"]
+    assert receipt["recoveryAction"] == "fix_and_retry"
+    assert receipt["issues"][0]["path"] == "toolNames[0]"
+
+    missing = request("tools/call", name="vrcforge_load_tool_block",
+                      arguments={"block": LEAF, "toolNames": [NAMES[1]]})["result"]
+    assert missing["isError"] is True
+    assert missing["structuredContent"]["recoveryAction"] == "rediscover_target"
+    assert bridge.calls == []
+
+
 def test_schema_errors_include_exact_enum_suggested_field_and_type_example():
     from runtime_planner_service import validate_planner_tool_arguments
 
@@ -180,6 +199,29 @@ def test_external_blendshape_argument_error_precedes_unity_dispatch(tmp_path, mo
     assert calls == []
     assert gateway.call_external_mcp_tool(name, valid)["ok"] is True
     assert calls == [valid]
+
+
+def test_external_project_guard_and_argument_correction_share_schema(tmp_path, monkeypatch):
+    import agent_gateway
+
+    gateway = agent_gateway.AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+    name = "vrcforge_scan_blendshapes"
+    gateway.register_tool(name, "Scan blendshapes", "avatar", lambda _: {})
+    project_schema = agent_gateway.canonical_unity_read_tool_input_schema(name)
+    projected = []
+
+    def project(tool):
+        projected.append(tool)
+        return project_schema
+
+    monkeypatch.setattr(agent_gateway, "canonical_unity_read_tool_input_schema", project)
+    response = gateway.call_external_mcp_tool(name, {"project_path": str(tmp_path), "scope": "wrong"})
+    assert response["recoveryAction"] == "fix_and_retry"
+    assert response["issues"][0]["path"] == "scope"
+    assert projected == [name]
 
 
 def test_external_write_branch_error_returns_tool_result_before_target_binding(tmp_path, monkeypatch):

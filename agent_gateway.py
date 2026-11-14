@@ -659,10 +659,8 @@ def _external_project_input_schema(name: str, schema: dict[str, Any]) -> dict[st
 
 
 def _external_tool_argument_rejection(
-    name: str, arguments: Mapping[str, Any], *, write: bool,
+    name: str, arguments: Mapping[str, Any], schema: dict[str, Any], *, write: bool,
 ) -> dict[str, Any] | None:
-    schema = (canonical_unity_write_tool_input_schema(name) if write
-              else canonical_unity_read_tool_input_schema(name))
     fields = schema.get("properties", {})
     normalized = {
         key: value for key, value in arguments.items()
@@ -672,7 +670,7 @@ def _external_tool_argument_rejection(
     }
     # The existing target guard owns reference presence and validity.
     if write and "executionTarget" not in normalized and "executionTarget" in schema.get("required", ()):
-        schema["required"] = [key for key in schema["required"] if key != "executionTarget"]
+        schema = {**schema, "required": [key for key in schema["required"] if key != "executionTarget"]}
     issues = validate_planner_tool_arguments(schema, normalized)["issues"]
     if not issues:
         return None
@@ -4097,14 +4095,17 @@ class AgentGateway:
         self,
         tool_name: str,
         arguments: dict[str, Any],
+        *,
+        schema: Mapping[str, Any] | None = None,
     ) -> None:
         """Bind an explicitly supplied project before external tool dispatch."""
 
-        schema = (
-            canonical_unity_write_tool_input_schema(tool_name)
-            if tool_name in EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
-            else canonical_unity_read_tool_input_schema(tool_name)
-        )
+        if schema is None:
+            schema = (
+                canonical_unity_write_tool_input_schema(tool_name)
+                if tool_name in EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
+                else canonical_unity_read_tool_input_schema(tool_name)
+            )
         catalogue = tool_name == "vrcforge_project_catalog_registration_status"
         if not catalogue and not _external_tool_requires_project_path(tool_name, schema):
             return
@@ -4202,13 +4203,18 @@ class AgentGateway:
                 with self._lock:
                     external_question_project_bound = project_key in self._external_mcp_project_paths
             arguments["_externalQuestionProjectBound"] = external_question_project_bound
-        self._guard_external_mcp_project_scope(name, arguments)
         write_handler = self._write_handlers.get(name)
+        schema = (
+            canonical_unity_write_tool_input_schema(name)
+            if write_handler is not None
+            else canonical_unity_read_tool_input_schema(name)
+        )
+        self._guard_external_mcp_project_scope(name, arguments, schema=schema)
         if write_handler is None:
             tool = self._tools.get(name)
             if tool is None or not self._external_mcp_read_tool_visible(tool, config):
                 raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
-            invalid = _external_tool_argument_rejection(name, arguments, write=False)
+            invalid = _external_tool_argument_rejection(name, arguments, schema, write=False)
             if invalid:
                 return invalid
             public_reference = arguments.get("executionTarget")
@@ -4253,7 +4259,7 @@ class AgentGateway:
             raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
 
         if "confirmation" not in arguments:
-            invalid = _external_tool_argument_rejection(name, arguments, write=True)
+            invalid = _external_tool_argument_rejection(name, arguments, schema, write=True)
             if invalid:
                 return invalid
 

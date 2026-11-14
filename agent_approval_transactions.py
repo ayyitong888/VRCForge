@@ -289,7 +289,7 @@ def _unresolved_write_guidance(
         return {}
     recovery_id = recovery.get("id")
     return {
-        "recoveryAction": "query_receipt",
+        "recoveryAction": "query_receipt" if recovery_id else "read_live_target",
         "safeToRetry": False,
         "nextAction": (
             "Inspect the recorded interrupted write and its checkpoint, then read back the exact target. "

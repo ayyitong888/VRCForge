@@ -1123,7 +1123,7 @@ def run_stdio_server(
                     "properties": {
                         "block": {"type": "string", "enum": block_enum},
                         "toolNames": {"type": "array", "minItems": 0, "maxItems": 32, "uniqueItems": True,
-                                      "items": {"type": "string", "minLength": 1},
+                                      "items": {"type": "string", "pattern": r"^\S(?:[\s\S]*\S)?(?![\s\S])"},
                                       "description": "Omit or pass [] to browse directory and tool names only; no tool definitions are loaded. A non-empty array loads only those exact names. Use allTools:true to load every Tool in one leaf."},
                         "allTools": {"type": "boolean", "default": False,
                                      "description": "Set true only to load ALL tools in this leaf. This does not load parent or sibling directories and does not change call permissions."},
@@ -1789,47 +1789,37 @@ def run_stdio_server(
                     "loadedBlocks": sorted(loaded_blocks),
                 }
             if is_load and all_tools:
-                try:
-                    manifest = bridge.manifest(requested_layer["value"], ["*"], None)
-                except (ExternalMcpBridgeError, ExternalHttpBridgeError):
-                    raise
+                manifest = bridge.manifest(requested_layer["value"], ["*"], None)
                 selected_names = [
                     str(item.get("name") or "") for item in manifest.get("tools", [])
                     if isinstance(item, Mapping) and item_owner(item) == block
                     and str(item.get("name") or "") not in HIDDEN_EXTERNAL_TOOLS
                 ]
             if is_load and supplied_names and not all_tools:
-                valid = (
-                    isinstance(selected_names, list) and 1 <= len(selected_names) <= 32
-                    and all(isinstance(name, str) and name and name == name.strip() for name in selected_names)
-                    and len(set(selected_names)) == len(selected_names)
-                )
-                if valid:
-                    try:
-                        manifest = bridge.manifest(requested_layer["value"], ["*"], selected_names)
-                    except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
-                        if isinstance(exc, ExternalHttpBridgeError) and exc.status_code != 400:
-                            raise
-                        upstream_error = (exc.raw_result or {}).get("error")
-                        if not isinstance(upstream_error, Mapping) or upstream_error.get("code") != -32602:
-                            raise
-                        return external_rejection(
-                            status="invalid_tool_selection",
-                            error=str(upstream_error.get("message") or exc),
-                            error_code="external_tool_selection_invalid",
-                            failure_layer="external_tool_discovery",
-                            failure_phase="block_selection", operation_kind="discovery",
-                            recoveryAction="rediscover_target",
-                            recoveryToolCall={"name": "vrcforge_list_tool_blocks", "arguments": {"block": block}},
-                            loadedBlocks=sorted(loaded_blocks),
-                        )
-                    available = {str(item.get("name") or "") for item in manifest.get("tools", [])
-                                 if isinstance(item, Mapping) and item_owner(item) == block
-                                 and str(item.get("name") or "") not in HIDDEN_EXTERNAL_TOOLS}
-                    valid = set(selected_names).issubset(available)
-                if not valid:
+                try:
+                    manifest = bridge.manifest(requested_layer["value"], ["*"], selected_names)
+                except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
+                    if isinstance(exc, ExternalHttpBridgeError) and exc.status_code != 400:
+                        raise
+                    upstream_error = (exc.raw_result or {}).get("error")
+                    if not isinstance(upstream_error, Mapping) or upstream_error.get("code") != -32602:
+                        raise
                     return external_rejection(
-                        status="invalid_tool_selection", error="toolNames must contain 1..32 unique exact names available in this leaf and exposure layer.",
+                        status="invalid_tool_selection",
+                        error=str(upstream_error.get("message") or exc),
+                        error_code="external_tool_selection_invalid",
+                        failure_layer="external_tool_discovery",
+                        failure_phase="block_selection", operation_kind="discovery",
+                        recoveryAction="rediscover_target",
+                        recoveryToolCall={"name": "vrcforge_list_tool_blocks", "arguments": {"block": block}},
+                        loadedBlocks=sorted(loaded_blocks),
+                    )
+                available = {str(item.get("name") or "") for item in manifest.get("tools", [])
+                             if isinstance(item, Mapping) and item_owner(item) == block
+                             and str(item.get("name") or "") not in HIDDEN_EXTERNAL_TOOLS}
+                if not set(selected_names).issubset(available):
+                    return external_rejection(
+                        status="invalid_tool_selection", error="Select exact tool names available in this leaf and exposure layer.",
                         error_code="external_tool_selection_invalid", failure_layer="external_tool_discovery",
                         failure_phase="block_selection", operation_kind="discovery", loadedBlocks=sorted(loaded_blocks),
                         recoveryAction="rediscover_target",

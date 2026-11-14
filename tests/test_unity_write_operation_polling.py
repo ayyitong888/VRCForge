@@ -278,6 +278,23 @@ def test_unknown_operation_raises_with_queryable_guidance(core_endpoint) -> None
         fake.close()
 
 
+@pytest.mark.parametrize(("recovery", "action"), [
+    ({}, "read_live_target"),
+    ({"id": "recovery-example"}, "query_receipt"),
+])
+def test_unresolved_write_guides_readback_when_no_recovery_record_exists(recovery, action):
+    from agent_approval_transactions import _unresolved_write_guidance
+
+    failure = {"errorCode": "unity_write_operation_unresolved", "commitState": "unknown"}
+    guidance = _unresolved_write_guidance(failure, recovery)
+    assert guidance["recoveryAction"] == action
+    assert guidance["safeToRetry"] is False
+    if recovery:
+        assert guidance["recoveryToolCall"]["arguments"] == {"recoveryId": recovery["id"]}
+    else:
+        assert "recoveryToolCall" not in guidance
+
+
 def test_lost_submission_and_unavailable_receipt_preserve_execution_id(core_endpoint):
     fake = _start_core(core_endpoint, {"tools/call": None, "server/write-operation": None})
     try:
