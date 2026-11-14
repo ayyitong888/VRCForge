@@ -8,6 +8,9 @@ import pytest
 
 import agent_gateway
 import dashboard_server
+from authoritative_unity_writes import prepare_authoritative_unity_write
+from agent_approval_transactions import _explicit_write_preconditions, _verify_prepared_write_preconditions
+from external_tool_result_contract import build_external_tool_error
 from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES
 
 from project_asset_copy import (
@@ -158,6 +161,37 @@ def test_preview_binds_exact_source_destination_and_absence_evidence() -> None:
     assert approval["mutationCount"] == 1
     assert approval["createNew"] is True
     assert approval["overwrite"] is False
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_copy_accepts_flat_preview_project_path_and_keeps_other_projects_rejected(tmp_path, batch) -> None:
+    project = tmp_path / "Milltina project"
+    (project / "Assets").mkdir(parents=True)
+    row = wrapper()["arguments"]
+    payload = preview_payload()
+    if batch:
+        from project_asset_copy import _batch_digest
+
+        payload = {**payload, "batch": True, "copies": [payload],
+                   "previewDigest": _batch_digest([payload])}
+        row = {"copies": [row]}
+    request = build_wrapper_arguments({
+        "projectPath": str(project),
+        "expectedProjectPath": project.as_posix(),
+        **row,
+    })
+    prepared, _ = prepare_authoritative_unity_write(request, None, lambda *_: payload)
+    assert prepared["arguments"]["expectedProjectPath"] == str(project.resolve())
+    _verify_prepared_write_preconditions(_explicit_write_preconditions(request), prepared)
+
+    request["expectedProjectPath"] = (tmp_path / "Other project").as_posix()
+    with patch("dashboard_server._invoke_authoritative_unity_preview", return_value=payload):
+        with pytest.raises(agent_gateway.AgentGatewayError, match="expectedProjectPath") as rejected:
+            dashboard_server.prepare_unity_mcp_write_request(request, None)
+    error = build_external_tool_error(operation_kind="write", exception=rejected.value)
+    assert error["commitState"] == "not_started"
+    assert error["toolRoutingStarted"] is False
+    assert error["mutationStarted"] is False
 
 
 @pytest.mark.parametrize(

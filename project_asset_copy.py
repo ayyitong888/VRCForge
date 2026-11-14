@@ -137,7 +137,7 @@ def bind_authoritative_preview(
         for key, value in envelope.items():
             if not isinstance(key, str) or not key.startswith("expected"):
                 continue
-            if key not in canonical_arguments or json.dumps(value, sort_keys=True) != json.dumps(canonical_arguments[key], sort_keys=True):
+            if not _matches_precondition(key, value, canonical_arguments):
                 raise ProjectAssetCopyError(f"Explicit project asset copy precondition {key} differs from the authoritative preview.")
     canonical = deepcopy(wrapper)
     canonical.pop("params", None)
@@ -420,6 +420,14 @@ def _project_path(value: Any) -> str:
     return str(path)
 
 
+def _matches_precondition(key: str, value: Any, canonical: dict[str, Any]) -> bool:
+    if key not in canonical:
+        return False
+    if key == "expectedProjectPath":
+        return isinstance(value, str) and Path(value) == Path(canonical[key])
+    return json.dumps(value, sort_keys=True) == json.dumps(canonical[key], sort_keys=True)
+
+
 def _dict(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProjectAssetCopyError(f"{label} must be an object.")
@@ -498,7 +506,7 @@ def _bind_batch(wrapper: dict[str, Any], nested: dict[str, Any], payload: Any) -
     for envelope in (wrapper, nested, wrapper.get("params")):
         if isinstance(envelope, dict):
             for key, value in envelope.items():
-                if key.startswith("expected") and (key not in arguments or json.dumps(value, sort_keys=True) != json.dumps(arguments[key], sort_keys=True)):
+                if isinstance(key, str) and key.startswith("expected") and not _matches_precondition(key, value, arguments):
                     raise ProjectAssetCopyError(f"Explicit batch precondition {key} differs from fresh preview.")
     _batch_size(arguments)
     _batch_size(result)

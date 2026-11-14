@@ -183,9 +183,9 @@ def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str
     return sorted(valid) if len(valid) == len(paths) else []
 
 
-def _explicit_write_preconditions(arguments: Mapping[str, Any]) -> dict[str, str]:
+def _explicit_write_preconditions(arguments: Mapping[str, Any]) -> dict[str, str | Path]:
     """Snapshot caller locks before preparers can normalize or mutate envelopes."""
-    locks: dict[str, str] = {}
+    locks: dict[str, str | Path] = {}
     envelopes = [arguments]
     for key in ("arguments", "params"):
         nested = arguments.get(key)
@@ -195,14 +195,17 @@ def _explicit_write_preconditions(arguments: Mapping[str, Any]) -> dict[str, str
         for key, value in envelope.items():
             if not isinstance(key, str) or not key.startswith("expected"):
                 continue
-            encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            encoded = (
+                Path(value) if key == "expectedProjectPath" and isinstance(value, str)
+                else json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            )
             if key in locks and locks[key] != encoded:
                 raise AgentGatewayError(f"Conflicting explicit write precondition: {key}.", status_code=409)
             locks[key] = encoded
     return locks
 
 
-def _verify_prepared_write_preconditions(locks: Mapping[str, str], prepared: Mapping[str, Any]) -> None:
+def _verify_prepared_write_preconditions(locks: Mapping[str, str | Path], prepared: Mapping[str, Any]) -> None:
     if not locks:
         return
     # If preparation creates an execution envelope, locks must survive in
@@ -218,6 +221,14 @@ def _verify_prepared_write_preconditions(locks: Mapping[str, str], prepared: Map
             raise AgentGatewayError(
                 f"Explicit write precondition {key} no longer matches the authoritative preview; inspect and approve a fresh preview.",
                 status_code=409,
+                cause_code="write_precondition_mismatch",
+                failure_layer="gateway_validation",
+                failure_phase="preview_rejected",
+                operation_kind="write",
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
             )
 
 

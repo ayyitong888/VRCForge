@@ -475,13 +475,26 @@ def prepare_authoritative_unity_write(
 
     try:
         return spec.bind_preview(canonical_request, payload)
-    except spec.domain_error as exc:
-        raise AuthoritativeUnityWriteError(
-            f"{spec.receipt_error} Reason: {exc}",
-            status_code=409,
-        ) from exc
     except Exception as exc:  # noqa: BLE001 - receipt parser details must not cross this boundary.
-        raise AuthoritativeUnityWriteError(spec.receipt_error, status_code=409) from exc
+        reason = spec.receipt_error
+        if isinstance(exc, spec.domain_error):
+            reason = f"{reason} Reason: {exc}"
+        rejection = {
+            "ok": False,
+            "errorCode": "preview_receipt_rejected",
+            "error": reason,
+            "failureLayer": "gateway_validation",
+            "failurePhase": "preview_rejected",
+            "toolRoutingStarted": False,
+            "mutationStarted": False,
+            "committed": False,
+            "commitState": "not_started",
+            "requestMayHaveCommitted": False,
+            "checkpointRecoveryRequired": False,
+        }
+        raise AuthoritativeUnityWriteError(
+            reason, status_code=409, details=rejection, raw_result=rejection,
+        ) from exc
 
 
 def validate_authoritative_unity_write_result(
