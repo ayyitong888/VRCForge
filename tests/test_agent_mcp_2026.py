@@ -995,6 +995,50 @@ def _connection_headers(method, **extra):
     }
 
 
+def test_stale_http_receipt_session_guides_live_readback_without_dispatch():
+    from starlette.testclient import TestClient
+
+    calls = []
+    router = Mcp2026Router(
+        lambda _: [], lambda *args: calls.append(args),
+        resource_read=lambda uri: calls.append(uri),
+    )
+
+    def new_app():
+        return create_asgi_app(router, bearer_validator=lambda token: token == "good")
+
+    with TestClient(new_app()) as before:
+        discovery = before.post("/", json=_request("server/discover"), headers=_connection_headers("server/discover"))
+        old_session = discovery.headers["Mcp-Session-Id"]
+
+    uri = "vrcforge://operation/confirmed-temp-copy/receipt"
+    headers = _connection_headers("resources/read", **{"Mcp-Name": uri, "Mcp-Session-Id": old_session})
+    with TestClient(new_app()) as after:
+        response = after.post("/", json=_request("resources/read", {"uri": uri}), headers=headers)
+        assert response.status_code == 404
+        assert "Mcp-Session-Id" not in response.headers
+        error = response.json()["error"]
+        assert error["code"] == -32000
+        assert error["message"] == "Unknown or expired MCP session"
+        assert error["data"]["recoveryAction"] == "read_live_target"
+        assert error["data"]["safeToRetry"] is False
+        assert "Do not resend" in error["data"]["nextAction"]
+        assert "recoveryResourceRequest" not in error["data"]
+
+        ordinary_uri = "vrcforge://session/current/identity"
+        ordinary = after.post("/", json=_request("resources/read", {"uri": ordinary_uri}),
+                              headers={**headers, "Mcp-Name": ordinary_uri})
+        assert ordinary.status_code == 404
+        assert "recoveryAction" not in ordinary.json()["error"]["data"]
+
+        unauthenticated = after.post("/", json=_request("resources/read", {"uri": uri}),
+                                     headers={**headers, "authorization": "Bearer rejected"})
+        assert unauthenticated.status_code == 401
+        assert "recoveryAction" not in unauthenticated.json()["error"]["data"]
+
+    assert calls == []
+
+
 def test_http_connection_projection_uses_session_idle_lifetime(router, monkeypatch):
     from types import SimpleNamespace
     import agent_mcp_2026

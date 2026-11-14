@@ -1097,7 +1097,19 @@ def create_asgi_app(
         if session_id:
             state = sessions.get(session_id)
             if state is None:
-                return JSONResponse(_error(None, -32000, "Unknown or expired MCP session"), status_code=404)
+                guidance = None
+                if token and method_header == "resources/read":
+                    receipt_names = _request_header_values(request, "Mcp-Name")
+                    try:
+                        receipt_name = _decode_mcp_name(receipt_names[0]) if len(receipt_names) == 1 else ""
+                    except ValueError:
+                        receipt_name = ""
+                    if is_write_receipt_alias(receipt_name):
+                        guidance = WRITE_RECEIPT_READBACK_GUIDANCE
+                return JSONResponse(
+                    _error(None, -32000, "Unknown or expired MCP session", guidance),
+                    status_code=404,
+                )
             if not secrets.compare_digest(state["owner"], owner):
                 return JSONResponse(_error(None, -32000, "MCP session belongs to another credential"), status_code=403)
         if deleting:

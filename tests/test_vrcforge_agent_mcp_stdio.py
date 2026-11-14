@@ -972,13 +972,13 @@ def test_expired_session_receipt_read_uses_readback_without_replaying_write(tmp_
     calls = []
     config = tmp_path / "agent_gateway.json"
     config.write_text('{"token":"fixture-token"}', encoding="utf-8")
-    app = create_asgi_app(Mcp2026Router(lambda _: [], lambda *_: {}), route_path="/mcp")
+    app = create_asgi_app(Mcp2026Router(lambda _: [], lambda *_: {}), bearer_validator=lambda token: token == "fixture-token", route_path="/mcp")
     bridge = VRCForgeBridge(base_url="http://127.0.0.1", config_path=config, timeout_seconds=1, start_runtime=False)
     uri = "vrcforge://operation/confirmed-write/receipt"
     with TestClient(app, base_url="http://127.0.0.1") as client:
-        def send(_method, path, *, payload, extra_headers, response_headers, **_kwargs):
+        def send(_method, path, *, token, payload, extra_headers, response_headers, **_kwargs):
             calls.append(payload["method"])
-            response = client.post(path, json=payload, headers=extra_headers)
+            response = client.post(path, json=payload, headers={**extra_headers, "Authorization": f"Bearer {token}"})
             if response.status_code >= 400:
                 raise ExternalHttpBridgeError(status_code=response.status_code, path=path, body=response.text)
             response_headers["Mcp-Session-Id"] = response.headers["mcp-session-id"]
@@ -987,7 +987,7 @@ def test_expired_session_receipt_read_uses_readback_without_replaying_write(tmp_
         monkeypatch.setattr(bridge, "request_json", send)
         bridge._mcp_request("server/discover", {}, token="fixture-token")
         old_session = bridge._mcp_session_id
-        deleted = client.delete("/mcp", headers={"Mcp-Session-Id": old_session})
+        deleted = client.delete("/mcp", headers={"Mcp-Session-Id": old_session, "Authorization": "Bearer fixture-token"})
         assert deleted.status_code == 204
         with pytest.raises(McpWriteReceiptUnavailable, match="read the target's current state"):
             bridge.read_resource(uri)

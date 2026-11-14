@@ -761,18 +761,12 @@ class VRCForgeBridge:
         return self._mcp_request("resources/templates/list", {}, token=self.require_token())
 
     def read_resource(self, uri: str) -> dict[str, Any]:
-        session_id = self._mcp_session_id
         try:
             return self._mcp_request("resources/read", {"uri": uri}, token=self.require_token())
         except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
             error = (exc.raw_result or {}).get("error")
             data = error.get("data") if isinstance(error, Mapping) else None
             if isinstance(data, Mapping) and data.get("recoveryAction") == "read_live_target":
-                raise McpWriteReceiptUnavailable() from exc
-            # The existing exact-match 404 path clears a rejected session.
-            # A failed discovery without a previously rejected session must retain its own error.
-            if (isinstance(exc, ExternalHttpBridgeError) and session_id
-                    and not self._mcp_session_id and is_write_receipt_alias(uri)):
                 raise McpWriteReceiptUnavailable() from exc
             raise
 
