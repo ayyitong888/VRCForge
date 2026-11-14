@@ -178,7 +178,7 @@ from avatar_composition_workflow_skills import (
     AVATAR_COMPOSITION_RUNTIME_CONTRACT_FIELDS,
     AVATAR_COMPOSITION_WORKFLOW_SKILLS,
 )
-from unity_mcp_core_client import capture_unity_mcp_core_call_audits
+from unity_mcp_core_client import bind_runtime_core_dispatch, capture_unity_mcp_core_call_audits
 from execution_target import (
     ExecutionTargetBindingRegistry,
     ExecutionTargetError,
@@ -5769,13 +5769,23 @@ class AgentGateway:
         previous_stream_context = self._runtime_session_state.stream_context()
         resource_token = self._mcp_resource_context.set(self._mcp_resource_context.get())
         try:
-            response_payload = self._runtime_message_impl_body(
-                owned_params,
-                agent_name=agent_name,
-                task_continuation=task_continuation,
-                continuation_shutdown_guard=continuation_shutdown_guard,
-                child_read_roots=child_read_roots,
-            )
+            def admit_core_dispatch(*, write: bool, settlement_read: bool) -> bool:
+                return self._runtime_session_state.admit_core_dispatch(
+                    session_id=str(owned_params.get("_resolvedRuntimeSessionId") or ""),
+                    turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
+                    client_turn_id=str(owned_params.get("_resolvedRuntimeClientTurnId") or ""),
+                    write=write,
+                    settlement_read=settlement_read,
+                )
+
+            with bind_runtime_core_dispatch(admit_core_dispatch):
+                response_payload = self._runtime_message_impl_body(
+                    owned_params,
+                    agent_name=agent_name,
+                    task_continuation=task_continuation,
+                    continuation_shutdown_guard=continuation_shutdown_guard,
+                    child_read_roots=child_read_roots,
+                )
             response_payload = planner_policy.public_runtime_payload(response_payload)
             return response_payload
         except Exception as exc:
@@ -9517,6 +9527,13 @@ class AgentGateway:
         )
         if native_binding:
             consumed_steer_input_ids[:] = native_turn.consumed_steer_input_ids
+        stop_identity = {"session_id": session_id, "turn_id": turn_id, "client_turn_id": client_turn_id}
+        stop_flags = {}
+        if self._runtime_session_state.dispatch_stopped(**stop_identity):
+            stop_flags = {
+                "dispatchStopped": True,
+                "unityWriteMayHaveExecuted": self._runtime_session_state.core_write_admitted(**stop_identity),
+            }
         continuation_event = project_runtime_turn_event(
             {
                 "continuationSource": continuation_source or foreground_source,
@@ -9527,11 +9544,12 @@ class AgentGateway:
                 "plan": top_plan,
                 "timeline": timeline,
                 "contextUsage": context_usage,
+                **stop_flags,
                 **({"model": actual_response_model} if actual_response_model else {}),
             }
         )
         terminal_record = self._runtime_run_ledger.append(
-            self._runtime_run_ledger.build_run_from_turn(
+            {**self._runtime_run_ledger.build_run_from_turn(
                 event="runtime_turn_completed",
                 status=run_status,
                 agent_name=agent_name,
@@ -9552,7 +9570,7 @@ class AgentGateway:
                 usage_reconciliation=usage_reconciliation,
                 context_compaction=planner_policy.runtime_compaction_audit_view(runtime_compaction),
                 cancellation_reason=cancellation_reason if run_status == "cancelled" else None,
-            )
+            ), **stop_flags}
         )
 
         payload = {
@@ -9564,6 +9582,7 @@ class AgentGateway:
             "observe": observe,
             "plan": top_plan,
             "task": ensure_dict(top_plan.get("task")) or task_loop.snapshot(),
+            **stop_flags,
         }
         if ensure_dict(terminal_record).get("completedAt"):
             payload["completedAt"] = terminal_record["completedAt"]
@@ -9882,7 +9901,9 @@ class AgentGateway:
             raise AgentGatewayError(f"Runtime session was not found: {session_id}", status_code=404)
         return {"ok": True, "session": session}
 
-    def request_runtime_cancel(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def request_runtime_cancel(
+        self, params: dict[str, Any] | None = None, *, defer_cleanup: Callable[..., Any] | None = None,
+    ) -> dict[str, Any]:
         params = params or {}
         turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
         client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
@@ -9894,13 +9915,21 @@ class AgentGateway:
         if not turn_id and session_id and ":question:" in client_turn_id and self.questions.cancel_queued_runtime_continuation(
             session_id=session_id, client_turn_id=client_turn_id,
         ):
-            return {"ok": True, "status": "cancelled", "sessionId": session_id, "clientTurnId": client_turn_id}
-        target = self._runtime_session_state.mark_cancel_requested(
-            session_id=session_id,
-            turn_id=turn_id,
-            client_turn_id=client_turn_id,
-            reason=reason,
-        )
+            return {"ok": True, "status": "cancelled", "sessionId": session_id,
+                    "clientTurnId": client_turn_id, "dispatchStopped": True}
+        with self._lock:
+            target = self._runtime_session_state.mark_cancel_requested(
+                session_id=session_id,
+                turn_id=turn_id,
+                client_turn_id=client_turn_id,
+                reason=reason,
+            )
+            accepted = bool(target and all(target) and self._runtime_session_state.owns_turn(
+                session_id=target[0], turn_id=target[1], client_turn_id=target[2],
+            ))
+            unity_write_may_have_executed = bool(accepted and self._runtime_session_state.core_write_admitted(
+                session_id=target[0], turn_id=target[1], client_turn_id=target[2],
+            ))
         with self._runtime_continuation_condition:
             self._runtime_continuation_condition.notify_all()
         if target is None:
@@ -9909,8 +9938,26 @@ class AgentGateway:
                 status_code=409,
             )
         session_id, turn_id, client_turn_id = target
+        event = None
+        if accepted:
+            event = self._runtime_run_ledger.append({
+                "event": "runtime_turn_cancel_requested",
+                "status": "cancel_requested",
+                "sessionId": session_id,
+                "turnId": turn_id,
+                "clientTurnId": client_turn_id,
+                "reason": reason,
+                "cancellationReason": reason,
+                "dispatchStopped": True,
+                "unityWriteMayHaveExecuted": unity_write_may_have_executed,
+            })
+            if defer_cleanup is not None:
+                defer_cleanup(self._cancel_runtime_owned_work, session_id=session_id, turn_id=turn_id,
+                              client_turn_id=client_turn_id, reason=reason, stop_event=event)
+                return {"ok": True, "status": "cancel_requested", "event": event, "dispatchStopped": True,
+                        "unityWriteMayHaveExecuted": unity_write_may_have_executed}
         return self._cancel_runtime_owned_work(
-            session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id, reason=reason,
+            session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id, reason=reason, stop_event=event,
         )
 
     def _cancel_turn_questions_at_pause(self, session_id: str, turn_id: str, client_turn_id: str) -> None:
@@ -9929,6 +9976,7 @@ class AgentGateway:
 
     def _cancel_runtime_owned_work(
         self, *, session_id: str, turn_id: str, client_turn_id: str, reason: str,
+        stop_event: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # Internal task cleanup also owns resources after its runtime turn ended.
         # Public Stop must first validate the active identity in request_runtime_cancel.
@@ -9974,6 +10022,8 @@ class AgentGateway:
             "clientTurnId": resolved_client_turn_id,
             "reason": reason,
             "cancellationReason": reason,
+            **{key: stop_event[key] for key in ("dispatchStopped", "unityWriteMayHaveExecuted")
+               if stop_event is not None and key in stop_event},
         }
         cancelled_desktop_action_ids: list[str] = []
         cancelled_shell_session_ids: list[str] = []
@@ -10045,11 +10095,13 @@ class AgentGateway:
             event["subAgentLookupFailed"] = True
         if failed_subagent_task_ids or subagent_lookup_failed:
             event["subAgentCancelPartialFailure"] = True
-        self._runtime_run_ledger.append(event)
+        if stop_event is None or any(key.endswith("Ids") or key.startswith("subAgent") for key in event):
+            self._runtime_run_ledger.append(event)
         return {
             "ok": True,
             "status": "cancel_requested",
             "event": event,
+            **{key: event[key] for key in ("dispatchStopped", "unityWriteMayHaveExecuted") if key in event},
             "cancelledDesktopActionIds": cancelled_desktop_action_ids,
             "cancelledShellSessionIds": cancelled_shell_session_ids,
             "cancelledSubAgentTaskIds": cancelled_subagent_task_ids,

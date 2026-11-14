@@ -804,6 +804,7 @@
     "captureBatch": "Capture {{index}}",
     "positionNavigation": "Conversation position",
     "jumpToTurn": "Jump to turn {{index}}: {{preview}}",
+    "stoppedUnityWriteUnconfirmed": "Stopped. The Unity write may have run. Read the current state before trying again.",
     "transportInterrupted": "Connection interrupted · execution status unconfirmed",
     "markdown": {
       "copy": "Copy code",

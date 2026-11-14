@@ -73,6 +73,7 @@ export type RuntimeTurnEvent = {
   ok?: boolean;
   status?: string;
   continuationSource?: string;
+  unityWriteMayHaveExecuted?: boolean;
   sessionId?: string;
   turnId?: string;
   clientTurnId?: string;
@@ -400,6 +401,7 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
     ...(event.status ? { status: event.status } : {}),
     ...(event.continuationSource === "foreground_interrupted" ? { status: "interrupted" } : {}),
     continuationSource: event.continuationSource,
+    unityWriteMayHaveExecuted: event.unityWriteMayHaveExecuted,
     session_id: sessionId,
     sessionId,
     turn_id: turnId,

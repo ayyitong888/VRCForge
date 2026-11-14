@@ -20,6 +20,7 @@ _RUN_NOTIFICATION_FIELDS = (
     "sessionId", "clientTurnId", "turnId", "status", "startedAt", "createdAt", "updatedAt",
     "agent", "nextStep", "reason", "cancellationReason",
 )
+_RUN_NOTIFICATION_FLAGS = ("dispatchStopped", "unityWriteMayHaveExecuted")
 
 
 def _terminal_continuation(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -717,6 +718,10 @@ class AgentRuntimeRunLedger:
                         reason = event.get("cancellationReason") or event.get("reason")
                         if reason:
                             merged["cancellationReason"] = reason
+                    if previous.get("status") == "cancelled":
+                        for flag in _RUN_NOTIFICATION_FLAGS:
+                            if event.get(flag) is True:
+                                merged[flag] = True
                 else:
                     for identity_key in ("sessionId", "turnId"):
                         if not event.get(identity_key) and previous.get(identity_key):
@@ -741,7 +746,8 @@ class AgentRuntimeRunLedger:
                 "schema": "vrcforge.runtime_runs.v1",
                 "runs": [
                     self._ports.redact({
-                        key: run[key] for key in _RUN_NOTIFICATION_FIELDS if isinstance(run.get(key), str)
+                        **{key: run[key] for key in _RUN_NOTIFICATION_FIELDS if isinstance(run.get(key), str)},
+                        **{key: run[key] for key in _RUN_NOTIFICATION_FLAGS if isinstance(run.get(key), bool)},
                     })
                     for run in runs
                 ],

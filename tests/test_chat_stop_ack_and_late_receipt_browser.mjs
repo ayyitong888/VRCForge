@@ -63,7 +63,7 @@ function Harness(){
  const updateChat=useCallback((id,fn)=>{let changed=false;latest.current=latest.current.map(c=>{if(c.id!==id)return c;const n=fn(c);changed||=n!==c;return n;});if(changed)setChats(latest.current);window.chats=latest.current;return changed;},[]);
  const appendToChat=useCallback((id,item)=>updateChat(id,c=>({...c,items:[...c.items,item]})),[updateChat]);
  const prepareTurnContext=()=>window.holdPreparation?new Promise(resolve=>{window.finishPreparation=resolve;}):Promise.resolve(null);
- const controller=useChatRunController({endpoint,runtimeConnected:!new URLSearchParams(location.search).has('cold'),sessionId:'session',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=> 'owner',updateChat,appendToChat,touchChat:c=>c,startRuntime:async()=> 'http://started-runtime',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),prepareTurnContext,persistChatsNow:async()=>{},chats,bindRuntimeProviderConnection:settings.bindRuntimeProviderConnection});
+ const controller=useChatRunController({endpoint,runtimeConnected:!new URLSearchParams(location.search).has('cold'),sessionId:'session',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=> 'owner',updateChat,appendToChat,touchChat:c=>c,startRuntime:async()=> 'http://started-runtime',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),prepareTurnContext,persistChatsNow:()=>window.holdStopPersistence?new Promise(resolve=>{window.releaseStopPersistence=resolve;}):Promise.resolve(),chats,bindRuntimeProviderConnection:settings.bindRuntimeProviderConnection});
  const deliver=useRuntimeTurnContinuationDelivery({chats,appendToChat,updateChat});
  const delta=useRuntimeTurnActivity({endpoint:'http://isolated-fixture',runtimeConnected:true,chats,runs,updateChat,deliver});
  window.controller=controller;window.chats=chats;window.delta=delta;
@@ -76,6 +76,7 @@ function Harness(){
  window.setRuns=setRuns;
  const {currentTurn,stopCurrentRun}=controller;
  const activeRuntimeCancelTarget=runtimeActivityCancelTarget(chats,chats.find(chat=>chat.id===activeChatId),runs);
+ window.observedCancelTarget=activeRuntimeCancelTarget;
  const activeDesktopActions=[{actionId:'desktop-b',sessionId:'other-session',clientTurnId:'peer'}];
  const stopObservedRuntimeTurn=(target,reason)=>window.observedStops.push({...target,reason});
  const cancelDesktopAction=id=>window.desktopStops.push(id);
@@ -197,6 +198,21 @@ try{
  await page.waitForFunction(()=>window.chats[0].items.some(i=>i.type==='agent'&&i.response.plan.nextStep==='cancelled'));
  assert.equal(await page.evaluate(()=>window.sendCount),1,'stop requests never resubmit a write-bearing model turn');
  console.log('PASS pending/rejected/accepted Stop acknowledgements retain the real reader until backend terminal receipt');
+ await reload();await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
+ await page.evaluate(()=>{window.holdStopPersistence=true;window.controller.stopCurrentRun();window.cancelResolve({ok:true,status:'cancel_requested',dispatchStopped:true,unityWriteMayHaveExecuted:true});});
+ await page.waitForFunction(()=>window.sendSignal.aborted && !window.controller.currentTurn && !window.controller.sending,null,{timeout:2000});
+ assert.equal(await page.evaluate(()=>typeof window.releaseStopPersistence),'function','stopped turn still persists');
+ await page.evaluate(()=>{window.holdStopPersistence=false;window.releaseStopPersistence();});
+ await page.getByText('chat.stoppedUnityWriteUnconfirmed',{exact:true}).waitFor();
+ assert.equal(await page.getByRole('button',{name:'chat.retryMessage',exact:true}).count(),0,'a stopped Unity write cannot be replayed from the chat');
+ await page.evaluate(()=>{window.setRuns([{...window.identity,status:'cancel_requested',dispatchStopped:true,unityWriteMayHaveExecuted:true,updatedAt:'stopped'}]);});
+ await page.waitForFunction(()=>!window.observedCancelTarget);
+ assert.equal(await page.evaluate(()=>window.sendCount),1,'a confirmed stop never resubmits');
+ await page.evaluate(()=>{window.ledgerStatus='cancelled';window.receipt={ok:true,sessionId:'session',clientTurnId:'cid',status:'completed',response:{ok:true,status:'cancelled',...window.identity,observe:{},plan:{reply:'',summary:'',nextStep:'cancelled',planner:'fixture',shellNeeded:false},timeline:[]}};window.setRuns([{...window.identity,status:'cancelled',updatedAt:'settled'}]);});
+ await page.waitForFunction(()=>window.chats[0].items.find(i=>i.type==='agent')?.response.status==='cancelled');
+ assert.equal(await page.evaluate(()=>window.chats[0].items.filter(i=>i.type==='agent').length),1,'late terminal receipt replaces the local stop marker');
+ console.log('PASS confirmed Stop frees the chat while a dispatched Unity write is settling');
+
  await reload();await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
  await page.evaluate(()=>{window.controller.applyRuntimeDelta({type:'agentRuntimeDelta',sessionId:'session',clientTurnId:'cid',textDelta:'Accepted partial dialogue'});window.sendReject(new Error('Response transport cancellation uncertain'));});
  await page.waitForFunction(()=>window.chats[0].items.some(i=>i.type==='agent'));

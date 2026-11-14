@@ -44,6 +44,8 @@ class AgentRuntimeSessionState:
         "_ports",
         "_sessions",
         "_cancelled_targets",
+        "_stopped_core_dispatches",
+        "_admitted_core_writes",
         "_active_turns",
         "_waiting_turns",
         "_finalizing_turns",
@@ -64,6 +66,8 @@ class AgentRuntimeSessionState:
         # is represented with empty turn/client fields and intentionally keeps
         # the supported "stop every turn in this session" behavior.
         self._cancelled_targets: dict[tuple[str, str, str], str] = {}
+        self._stopped_core_dispatches: set[tuple[str, str, str]] = set()
+        self._admitted_core_writes: set[tuple[str, str, str]] = set()
         self._active_turns: dict[tuple[str, str], str] = {}
         self._waiting_turns: dict[tuple[str, str], tuple[str, threading.Event]] = {}
         self._finalizing_turns: set[tuple[str, str]] = set()
@@ -126,6 +130,8 @@ class AgentRuntimeSessionState:
         with self._ports.shared_state_lock:
             self._sessions.clear()
             self._cancelled_targets.clear()
+            self._stopped_core_dispatches.clear()
+            self._admitted_core_writes.clear()
             self._active_turns.clear()
             for _turn, cancelled in self._waiting_turns.values():
                 cancelled.set()
@@ -229,6 +235,8 @@ class AgentRuntimeSessionState:
             self._cancelled_targets = {
                 target: reason for target, reason in self._cancelled_targets.items() if target[0] != session_id
             }
+            self._stopped_core_dispatches = {target for target in self._stopped_core_dispatches if target[0] != session_id}
+            self._admitted_core_writes = {target for target in self._admitted_core_writes if target[0] != session_id}
             self._final_responses.pop(session_id, None)
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
@@ -1177,6 +1185,7 @@ class AgentRuntimeSessionState:
                 ]
                 if active:
                     for (_active_session_id, active_client_turn_id), active_turn_id in active:
+                        self._stopped_core_dispatches.add((session_id, active_turn_id, active_client_turn_id))
                         self._cancelled_targets.setdefault(
                             (session_id, active_turn_id, active_client_turn_id), reason
                         )
@@ -1219,12 +1228,38 @@ class AgentRuntimeSessionState:
             if matching or session_id or turn_id:
                 self._cancelled_targets.setdefault(target, reason)
             if matching:
+                self._stopped_core_dispatches.add(target)
                 waiting = self._waiting_turns.get((target[0], target[2]))
                 if waiting:
                     waiting[1].set()
             if target[0] and target[2]:
                 self._steer_mailboxes.pop((target[0], target[2]), None)
             return target
+
+    def admit_core_dispatch(
+        self, *, session_id: str, turn_id: str, client_turn_id: str, write: bool, settlement_read: bool,
+    ) -> bool:
+        target = (session_id, turn_id, client_turn_id)
+        with self._ports.shared_state_lock:
+            if self._active_turns.get((session_id, client_turn_id)) != turn_id:
+                return False
+            if target in self._stopped_core_dispatches or self.cancel_requested(
+                session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+            ):
+                # A transaction whose write was already sent may still verify
+                # it. The turn cannot start another business write.
+                return settlement_read
+            if write:
+                self._admitted_core_writes.add(target)
+            return True
+
+    def core_write_admitted(self, *, session_id: str, turn_id: str, client_turn_id: str) -> bool:
+        with self._ports.shared_state_lock:
+            return (session_id, turn_id, client_turn_id) in self._admitted_core_writes
+
+    def dispatch_stopped(self, *, session_id: str, turn_id: str, client_turn_id: str) -> bool:
+        with self._ports.shared_state_lock:
+            return (session_id, turn_id, client_turn_id) in self._stopped_core_dispatches
 
     def queue_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> threading.Event | None:
         """Track an admitted request waiting for this session's current owner."""
@@ -1284,6 +1319,9 @@ class AgentRuntimeSessionState:
             if active_turn_id:
                 self._finalizing_turns.add(key)
             self._active_turns.pop(key, None)
+            target = (session_id, active_turn_id or turn_id, client_turn_id)
+            self._stopped_core_dispatches.discard(target)
+            self._admitted_core_writes.discard(target)
             self._steer_mailboxes.pop(key, None)
             self._steer_seen_ids.pop(key, None)
             # A completed turn must not leave cancellation/steer state behind

@@ -13,8 +13,9 @@ import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from unity_mcp_core_auth import (
     TRANSPORT_SCHEMA, MODERN_PROTOCOL_VERSION, MINIMUM_CORE_PROTOCOL_VERSION,
@@ -34,6 +35,7 @@ from unity_mcp_tool_contract import (
     PRODUCT_VERSION,
     READ_ONLY_TOOL_NAMES,
     SCAN_SCOPE_TOOL_NAMES,
+    is_direct_read_call,
 )
 
 
@@ -51,6 +53,45 @@ _ACTIVE_CALL_AUDIT_CAPTURE: ContextVar[list[dict[str, Any]] | None] = ContextVar
     "vrcforge_unity_mcp_call_audit_capture",
     default=None,
 )
+_RUNTIME_CORE_DISPATCH: ContextVar[Callable[..., bool] | None] = ContextVar(
+    "vrcforge_runtime_core_dispatch", default=None,
+)
+
+
+@dataclass
+class _RuntimeCoreWriteSettlement:
+    write_admitted: bool = False
+
+
+_RUNTIME_CORE_WRITE_SETTLEMENT: ContextVar[_RuntimeCoreWriteSettlement | None] = ContextVar(
+    "vrcforge_runtime_core_write_settlement", default=None,
+)
+
+
+@contextmanager
+def bind_runtime_core_dispatch(admit: Callable[..., bool] | None) -> Iterator[None]:
+    token = _RUNTIME_CORE_DISPATCH.set(admit)
+    try:
+        yield
+    finally:
+        _RUNTIME_CORE_DISPATCH.reset(token)
+
+
+@contextmanager
+def bind_runtime_core_write_settlement() -> Iterator[None]:
+    """Permit readback for the same approved handler that already sent a write."""
+    token = _RUNTIME_CORE_WRITE_SETTLEMENT.set(_RuntimeCoreWriteSettlement())
+    try:
+        yield
+    finally:
+        _RUNTIME_CORE_WRITE_SETTLEMENT.reset(token)
+
+
+class UnityMcpRuntimeStopped(UnityMcpCoreError):
+    """The current runtime stopped before this business request was sent."""
+
+    cause_code = "runtime_core_dispatch_stopped"
+    retryable = False
 
 
 class UnityMcpCoreBusyError(UnityMcpCoreError):
@@ -633,9 +674,24 @@ class UnityMcpCoreClient:
                 metadata["io.vrcforge/executionTargetDigest"] = execution_target_digest(execution_target)
                 metadata["io.vrcforge/executionTarget"] = execution_target
         request_params["_meta"] = metadata
-        self._write_line(connection, authenticated_core_request(
+        frame = authenticated_core_request(
             self._connection.discovery_token, request_id, method, request_params,
-        ))
+        )
+        admit = _RUNTIME_CORE_DISPATCH.get()
+        if admit is not None and method == "tools/call":
+            lane = (execution_context or {}).get("lane")
+            name = str(params.get("name") or "")
+            arguments = params.get("arguments") or {}
+            if lane != "app_safety_control":
+                read = is_direct_read_call(name, arguments) or is_readonly_job_poll(name, arguments, execution_context)
+                write = lane in {"approved_write", "external_mcp_write"} and not read
+                settlement = _RUNTIME_CORE_WRITE_SETTLEMENT.get()
+                settlement_read = bool(read and settlement and settlement.write_admitted)
+                if not admit(write=write, settlement_read=settlement_read):
+                    raise UnityMcpRuntimeStopped("The runtime turn stopped before sending this Unity tool call.")
+                if settlement is not None and write:
+                    settlement.write_admitted = True
+        self._write_line(connection, frame)
 
     def _receive_modern_response(self, connection: socket.socket, expected_id: int) -> Any:
         return self._validate_response(self._read_line(connection), expected_id, require_complete=True)

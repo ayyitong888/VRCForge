@@ -51,6 +51,104 @@ def test_canonical_argument_hash_is_ordered_and_type_preserving() -> None:
         canonical_arguments_sha256({"value": float("nan")})
 
 
+def test_internal_stop_ack_keeps_live_receipt_and_blocks_next_core_dispatch(core_files, tmp_path):
+    from unity_mcp_core_client import UnityMcpRuntimeStopped, bind_runtime_core_dispatch, bind_runtime_core_write_settlement
+
+    project, descriptor_path, descriptor = core_files
+    gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
+    owner = {"session_id": "session", "turn_id": "turn", "client_turn_id": "client"}
+    state = gateway.runtime_sessions
+    assert state.begin_turn(**owner)
+    seen = []
+    submitted = threading.Event()
+    release = threading.Event()
+    errors = []
+    receipts = []
+    cleanup = []
+
+    def serve(connection, requests):
+        discover = _read_line(connection)
+        _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {
+            "jsonrpc": "2.0", "id": discover["message"]["id"], "result": _discovery_result(discover),
+        }})
+        try:
+            request = _read_line(connection)["message"]
+        except RuntimeError as exc:
+            assert str(exc) == "connection closed"
+            return
+        requests.append(request)
+        if request["method"] == "tools/call":
+            if request["params"]["name"] == "vrc_set_property":
+                submitted.set()
+                assert release.wait(5)
+            result = _successful_tool_result()
+        else:
+            result = {"schema": "vrcforge.write-operation.v1", "status": "done", "executionId": "submitted"}
+        _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {
+            "jsonrpc": "2.0", "id": request["id"], "result": result,
+        }})
+
+    def run():
+        try:
+            with bind_runtime_core_dispatch(lambda **kwargs: state.admit_core_dispatch(**owner, **kwargs)):
+                client = UnityMcpCoreClient(project, timeout_seconds=5)
+                context = {"lane": "approved_write", "executionId": "submitted"}
+                with bind_runtime_core_write_settlement():
+                    receipts.append(client._request("tools/call", {"name": "vrc_set_property", "arguments": {}},
+                                                    execution_context=context))
+                    receipts.append(client._request("server/write-operation", {"executionId": "submitted"}))
+                    receipts.append(client._request("tools/call", {"name": "vrc_get_property", "arguments": {}}))
+                    with pytest.raises(UnityMcpRuntimeStopped):
+                        client._request("tools/call", {"name": "vrc_set_property", "arguments": {}},
+                                        execution_context={**context, "executionId": "must-not-send"})
+                client._request("tools/call", {"name": "vrc_get_property", "arguments": {}})
+        except Exception as exc:
+            errors.append(exc)
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(5)
+    _write_descriptor(descriptor_path, descriptor, listener.getsockname()[1])
+    server_errors = []
+
+    def run_server():
+        try:
+            for _ in range(5):
+                connection, _ = listener.accept()
+                with connection:
+                    connection.settimeout(5)
+                    serve(connection, seen)
+        except Exception as exc:
+            server_errors.append(exc)
+
+    server = threading.Thread(target=run_server, daemon=True)
+    server.start()
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert submitted.wait(2), errors
+        acknowledged = gateway.request_runtime_cancel(owner, defer_cleanup=lambda *args, **kwargs: cleanup.append((args, kwargs)))
+        assert acknowledged["dispatchStopped"] is True
+        assert acknowledged["unityWriteMayHaveExecuted"] is True
+        assert len(cleanup) == 1 and worker.is_alive()
+        notified = gateway.runtime_runs.list_runs(notification_only=True)["runs"][0]
+        assert notified["dispatchStopped"] is True
+        assert notified["unityWriteMayHaveExecuted"] is True
+    finally:
+        release.set()
+        worker.join(5)
+        listener.close()
+        server.join(5)
+    assert not worker.is_alive() and not server.is_alive() and not server_errors
+    assert len(receipts) == 3
+    assert [(request["method"], request["params"].get("name")) for request in seen] == [
+        ("tools/call", "vrc_set_property"), ("server/write-operation", None), ("tools/call", "vrc_get_property"),
+    ]
+    assert len(errors) == 1
+    assert errors[0].cause_code == "runtime_core_dispatch_stopped"
+
+
 def test_project_core_connection_limit_is_canonical_bounded_and_retryable(tmp_path: Path) -> None:
     project = tmp_path / "Project"
     project.mkdir()

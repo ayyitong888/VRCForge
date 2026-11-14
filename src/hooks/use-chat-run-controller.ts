@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { markRuntimeStreamStopping } from "../lib/runtime-stream-owner";
 import {
   applyAgentRuntimeDeltaToStreamingItem,
-  finalizeCancelledStreamingTurn,
+  finalizeInterruptedStreamingTurn,
   normalizeAgentRuntimePhase,
   normalizeAgentRuntimeTimelineEvent,
   type AgentRuntimeDeltaEvent,
@@ -111,6 +111,7 @@ type DispatchedTurn = {
   turnId?: string;
   confirmProviderConnection?: () => void;
   followup?: FollowupAdmission;
+  stopAcknowledgement?: { unityWriteMayHaveExecuted: boolean };
 };
 
 export type SubmitTurnOptions = {
@@ -1853,6 +1854,10 @@ export function useChatRunController({
       // the exact runtime receipt owns the eventual execution status.
       const interrupted = cause instanceof AgentTurnDeliveryUnconfirmedError
         || abortController.signal.aborted || text.toLowerCase().includes("cancel");
+      const stopped = dispatchedTurnRef.current?.chatId === chatId
+        && dispatchedTurnRef.current.clientTurnId === turn.id
+        && dispatchedTurnRef.current.sessionId === chatSessionId
+        ? dispatchedTurnRef.current.stopAcknowledgement : undefined;
       const queueFailure = cause instanceof ApiError && cause.detail && typeof cause.detail === "object"
         ? cause.detail as { code?: string; message?: string } : null;
       if (presentingFollowup && !followup?.admitted) {
@@ -1892,7 +1897,7 @@ export function useChatRunController({
               ? { ...item, queuedFrom: true, queueStatus: "delivery_unverified" }
               : item),
           }));
-          if (persistChatsNow) await persistChatsNow().catch(() => undefined);
+          if (persistChatsNow && !stopped) await persistChatsNow().catch(() => undefined);
         }
       }
       if (background) {
@@ -1913,32 +1918,17 @@ export function useChatRunController({
           ...touchChat(current),
           items: current.items.map((item) => {
             if (item.type !== "streaming" || item.clientTurnId !== turn.id) return item;
-            const placeholder = finalizeCancelledStreamingTurn(item, {
+            return finalizeInterruptedStreamingTurn(stopped ? item : { ...item, turnId: undefined }, {
               sessionId: chatSessionId,
               cancelledText: text,
               elapsedSeconds,
+              stopAcknowledgement: stopped,
             });
-            return {
-              ...placeholder,
-              id: `interrupted-${turn.id}`,
-              response: {
-                ...placeholder.response,
-                status: "interrupted",
-                continuationSource: "foreground_interrupted",
-                turnId: "",
-                turn_id: "",
-                plan: {
-                  ...placeholder.response.plan,
-                  summary: "",
-                  reply: placeholder.response.plan.reply === text ? "" : placeholder.response.plan.reply,
-                  nextStep: "interrupted",
-                },
-              },
-            };
           }),
         }));
         if (persistChatsNow) {
-          await persistChatsNow().catch(() => undefined);
+          if (stopped) void persistChatsNow().catch(reportChatSaveError);
+          else await persistChatsNow().catch(() => undefined);
         }
         if (isRuntimeSessionVerificationError(text)) handleRuntimeSessionFailure(text);
         return false;
@@ -2000,8 +1990,7 @@ export function useChatRunController({
     for (const turn of queueRef.current) {
       if (turn.chatId === current.chatId && turn.sessionId === sessionId) markQueuedTurnStatus(turn, "paused");
     }
-    // Keep pending turns durable and visible; only the backend terminal receipt
-    // may transition the active turn to cancelled.
+    // Keep the user's queued messages paused and available for explicit resume.
     // React state can lag while a send completes; the ref is the CAS owner
     // for the currently active turn and avoids cancelling a stale turn.
     const controller = activeTurnAbortRef.current;
@@ -2033,12 +2022,15 @@ export function useChatRunController({
         .then((result) => {
           if (!result.ok) {
             rejectStop(result.status || "Agent cancellation was not accepted.");
+          } else if (result.dispatchStopped && dispatchedTurnRef.current === owner) {
+            owner.stopAcknowledgement = { unityWriteMayHaveExecuted: result.unityWriteMayHaveExecuted === true };
+            // The backend owns any submitted write through settlement. Stop
+            // waiting here and reconcile the original receipt by exact ID.
+            controller?.abort();
           }
           void refreshRuntimeRuns(false, owner.endpoint).catch(() => undefined);
         }, (cause) => rejectStop(cause instanceof Error ? cause.message : String(cause)));
     }
-    // A cancel request only asks the backend to stop. Keep the owned response
-    // reader alive until its real terminal receipt, including in-flight tools.
     return true;
   }
 

@@ -598,6 +598,8 @@ export type AgentRuntimeResponse = {
     reason?: string;
   }>;
   continuationSource?: string;
+  dispatchStopped?: boolean;
+  unityWriteMayHaveExecuted?: boolean;
   goalDeliveryId?: string;
   backgroundGoalSkipped?: boolean;
   backgroundGoalDeferred?: boolean;
@@ -765,6 +767,8 @@ export type AgentTurnResponseRecovery = {
 };
 
 export type AgentRuntimeRun = {
+  dispatchStopped?: boolean;
+  unityWriteMayHaveExecuted?: boolean;
   id?: string;
   schema?: string;
   event?: string;

@@ -3664,7 +3664,9 @@ def app_agent_runtime_timeline(
 
 
 @app.post("/api/app/agent/runs/cancel")
-async def app_agent_runtime_cancel(cancel_request: AgentRuntimeCancelRequest) -> dict[str, Any]:
+async def app_agent_runtime_cancel(
+    cancel_request: AgentRuntimeCancelRequest, background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
     try:
         payload = await asyncio.to_thread(
             AGENT_GATEWAY.request_runtime_cancel,
@@ -3673,10 +3675,14 @@ async def app_agent_runtime_cancel(cancel_request: AgentRuntimeCancelRequest) ->
                 "turnId": cancel_request.turn_id,
                 "clientTurnId": cancel_request.client_turn_id,
                 "reason": cancel_request.reason,
-            }
+            },
+            defer_cleanup=background_tasks.add_task,
         )
     except AgentGatewayError as exc:
         raise runtime_http_error("agent_runtime_request_failed", exc.status_code, exc) from exc
+    if payload.get("dispatchStopped") is True:
+        EVENT_BUS.broadcast_from_sync("agentRuntimeCancel", payload)
+        return payload
     await EVENT_BUS.broadcast("agentRuntimeCancel", payload)
     await EVENT_BUS.broadcast(
         "agentRuntimeRuns",

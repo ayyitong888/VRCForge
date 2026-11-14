@@ -804,6 +804,7 @@
     "captureBatch": "第 {{index}} 次截圖",
     "positionNavigation": "對話位置",
     "jumpToTurn": "跳至第 {{index}} 輪：{{preview}}",
+    "stoppedUnityWriteUnconfirmed": "已停止。Unity 寫入可能已執行，請先讀取目前狀態。",
     "transportInterrupted": "連線中斷，執行狀態待核對",
     "markdown": {
       "copy": "複製程式碼",

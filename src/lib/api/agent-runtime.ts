@@ -353,7 +353,7 @@ export async function fetchAgentRuns(
 export async function requestAgentRunCancel(
   endpoint: string,
   payload: { sessionId?: string; turnId?: string; clientTurnId?: string; reason?: string },
-): Promise<{ ok: boolean; status?: string; event?: AgentRuntimeRun }> {
+): Promise<{ ok: boolean; status?: string; event?: AgentRuntimeRun; dispatchStopped?: boolean; unityWriteMayHaveExecuted?: boolean }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("request_agent_run_cancel", { request: { ...payload, timeoutMs: 30000 } });
   }

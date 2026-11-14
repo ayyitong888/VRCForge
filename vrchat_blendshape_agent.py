@@ -40,7 +40,9 @@ from approved_unity_execution import (
     current_approved_unity_execution,
 )
 from external_tool_result_contract import build_external_tool_error
-from unity_mcp_core_client import APP_UNITYPACKAGE_IMPORT_POLL_LANE, UnityMcpCoreClient, UnityMcpCoreError, is_readonly_job_poll
+from unity_mcp_core_client import (
+    APP_UNITYPACKAGE_IMPORT_POLL_LANE, UnityMcpCoreClient, UnityMcpCoreError, UnityMcpRuntimeStopped, is_readonly_job_poll,
+)
 from unity_mcp_tool_contract import READ_ONLY_TOOL_NAMES, is_direct_read_call
 from unity_editor_window_probe import probe_unity_reload_dialog
 
@@ -4540,6 +4542,15 @@ def invoke_unity_mcp(
             # identifier terminal.  Only an exception leaves transport outcome
             # uncertain and closes the remaining plan.
             claim.complete()
+        except UnityMcpRuntimeStopped as exc:
+            claim.uncertain()
+            raise _unity_mcp_pre_route_error(
+                str(exc),
+                cause_code=exc.cause_code,
+                retryable=False,
+                core_tool=tool_name,
+                failure_phase="runtime_dispatch",
+            ) from exc
         except UnityMcpCoreError as exc:
             claim.uncertain()
             raise UnityMcpError(

@@ -804,6 +804,7 @@
     "captureBatch": "第 {{index}} 次截图",
     "positionNavigation": "对话位置",
     "jumpToTurn": "跳到第 {{index}} 轮：{{preview}}",
+    "stoppedUnityWriteUnconfirmed": "已停止。Unity 写入可能已执行，请先读取当前状态。",
     "transportInterrupted": "连接中断，执行状态待核对",
     "markdown": {
       "copy": "复制代码",

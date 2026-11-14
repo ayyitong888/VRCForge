@@ -804,6 +804,7 @@
     "captureBatch": "撮影 {{index}}",
     "positionNavigation": "会話内の位置",
     "jumpToTurn": "{{index}} 番目へ移動：{{preview}}",
+    "stoppedUnityWriteUnconfirmed": "停止しました。Unity への書き込みが実行された可能性があります。現在の状態を確認してください。",
     "transportInterrupted": "接続が中断されました。実行状態は未確認です",
     "markdown": {
       "copy": "コードをコピー",

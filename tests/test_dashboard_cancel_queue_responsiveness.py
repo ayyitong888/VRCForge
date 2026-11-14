@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from fastapi import BackgroundTasks
 import pytest
 
 
@@ -46,7 +47,7 @@ def test_runtime_mutation_does_not_block_event_loop(operation):
         try:
             await asyncio.sleep(0)
             before = ticks
-            result = await route(request)
+            result = await (route(request, BackgroundTasks()) if operation == "cancel" else route(request))
             assert result["ok"] is True
             assert ticks - before >= 3, f"{operation} blocked the event loop"
         finally:
@@ -55,5 +56,34 @@ def test_runtime_mutation_does_not_block_event_loop(operation):
                 await task
             except asyncio.CancelledError:
                 pass
+
+    asyncio.run(exercise())
+
+def test_runtime_cancel_acknowledges_stop_before_owned_work_cleanup():
+    cleaned = []
+
+    def request_stop(params, *, defer_cleanup):
+        defer_cleanup(cleaned.append, (params["session_id"], params["turnId"], params["clientTurnId"]))
+        return {"ok": True, "status": "cancel_requested", "dispatchStopped": True}
+
+    async def exercise():
+        gateway = SimpleNamespace(request_runtime_cancel=request_stop)
+        background = BackgroundTasks()
+        notifications = []
+        namespace = {
+            "asyncio": asyncio,
+            "AGENT_GATEWAY": gateway,
+            "EVENT_BUS": SimpleNamespace(broadcast_from_sync=lambda *event: notifications.append(event)),
+            "AgentGatewayError": RuntimeError,
+        }
+        route = load_route("app_agent_runtime_cancel", namespace)
+        request = SimpleNamespace(session_id="session", turn_id="turn", client_turn_id="cid", reason="user_stop")
+        payload = await route(request, background)
+
+        assert payload["dispatchStopped"] is True
+        assert notifications == [("agentRuntimeCancel", payload)]
+        assert not cleaned
+        await background()
+        assert cleaned == [("session", "turn", "cid")]
 
     asyncio.run(exercise())

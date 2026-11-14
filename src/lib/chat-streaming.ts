@@ -272,6 +272,32 @@ export function finalizeCancelledStreamingTurn(
   };
 }
 
+export function finalizeInterruptedStreamingTurn(
+  item: StreamingConversationItem,
+  options: CancelledStreamingTurnOptions & { stopAcknowledgement?: { unityWriteMayHaveExecuted: boolean } },
+): AgentConversationItem {
+  const placeholder = finalizeCancelledStreamingTurn(item, options);
+  const { response } = placeholder;
+  return {
+    ...placeholder,
+    id: `interrupted-${item.clientTurnId}`,
+    response: {
+      ...response,
+      status: "interrupted",
+      continuationSource: "foreground_interrupted",
+      ...(options.stopAcknowledgement ? { dispatchStopped: true, ...options.stopAcknowledgement } : {}),
+      turnId: item.turnId || "",
+      turn_id: item.turnId || "",
+      plan: {
+        ...response.plan,
+        summary: "",
+        reply: response.plan.reply === options.cancelledText ? "" : response.plan.reply,
+        nextStep: "interrupted",
+      },
+    },
+  };
+}
+
 const STREAMING_DIALOGUE_FIELDS = ["reply", "summary"] as const;
 
 export function extractReplyTextFromPartialJson(value: string): string {

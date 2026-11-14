@@ -119,12 +119,13 @@ export function buildAgentTimelineRows({
     ] : []),
     <div key="transport-interrupted" data-agent-transport-interrupted role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-      <span>{t("chat.transportInterrupted")}</span>
+      <span>{t(response.unityWriteMayHaveExecuted ? "chat.stoppedUnityWriteUnconfirmed"
+        : response.dispatchStopped ? "chat.cancelled" : "chat.transportInterrupted")}</span>
     </div>,
   ] : cancelled ? [...rows,
     <div key="turn-cancelled" data-agent-turn-cancelled role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
-      <span>{t("chat.cancelled")}</span>
+      <span>{t(response.unityWriteMayHaveExecuted ? "chat.stoppedUnityWriteUnconfirmed" : "chat.cancelled")}</span>
     </div>,
   ] : isWaitingForSubAgent(response.plan) ? [...rows,
     <div key="waiting-for-subagent" data-agent-waiting-for-subagent role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">

@@ -80,6 +80,7 @@ from agent_gateway import (
     validate_frozen_approved_unity_execution_plan,
 )
 from operation_context import bind_operation_context
+from unity_mcp_core_client import bind_runtime_core_write_settlement
 from execution_target import (
     ExecutionTargetError,
     execution_target_digest,
@@ -2263,7 +2264,7 @@ class AgentApprovalTransactionService:
                                 arguments_digest=handler_arguments_digest,
                             )
                         failure_layer = "approved_write_execution"
-                        with capture_unity_mcp_core_call_audits() as core_call_audits:
+                        with bind_runtime_core_write_settlement(), capture_unity_mcp_core_call_audits() as core_call_audits:
                             result = self._call_write_handler(
                                 write_handler,
                                 target_tool,
@@ -2328,7 +2329,7 @@ class AgentApprovalTransactionService:
                                     arguments_digest=handler_arguments_digest,
                                 )
                             failure_layer = "approved_write_execution"
-                            with capture_unity_mcp_core_call_audits() as core_call_audits:
+                            with bind_runtime_core_write_settlement(), capture_unity_mcp_core_call_audits() as core_call_audits:
                                 result = self._call_write_handler(
                                     write_handler,
                                     target_tool,
@@ -2371,7 +2372,7 @@ class AgentApprovalTransactionService:
                         arguments_digest=handler_arguments_digest,
                     )
                 failure_layer = "approved_write_execution"
-                with capture_unity_mcp_core_call_audits() as core_call_audits:
+                with bind_runtime_core_write_settlement(), capture_unity_mcp_core_call_audits() as core_call_audits:
                     result = self._call_write_handler(
                         write_handler,
                         target_tool,

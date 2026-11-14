@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { AgentRuntimeResponse, AgentRuntimeRun, AgentTurnResponseRecovery } from "../lib/api/types";
 import { fetchAgentRunTimeline, fetchAgentTurnResponse, type AgentRunTimelinePage } from "../lib/api/agent-runtime";
 import type { ChatThread } from "../lib/chat-types";
-import { applyAgentRuntimeDeltaToStreamingItem, type AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
+import { applyAgentRuntimeDeltaToStreamingItem, finalizeInterruptedStreamingTurn, type AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import { mergeRuntimeTimelines, materializeRuntimeTimeline } from "../lib/chat-timeline-presentation";
 import { normalizeAgentRuntimeTimelineEvent } from "../lib/chat-streaming";
 import { type RuntimeTurnEvent } from "./use-runtime-turn-continuation";
@@ -78,10 +78,12 @@ export function runtimeActivityCancelTarget(
   const candidates = new Map<string, Identity & { turnId: string }>();
   for (const run of newestRunsByClientTurn(runs).values()) {
     const { sessionId, clientTurnId, turnId } = runIdentity(run);
-    if (!isActiveRuntimeRunStatus(run.status) || !sessionId || sessionId !== chat.sessionId
+    if (run.dispatchStopped || !isActiveRuntimeRunStatus(run.status) || !sessionId || sessionId !== chat.sessionId
       || !clientTurnId || !turnId || clientTurnId.includes(":question:")) continue;
     const identity = { sessionId, clientTurnId, turnId };
-    if (runtimeActivityOwner(chats, identity)?.id !== chat.id || hasAuthoritativeReply(chat, identity)) continue;
+    if (runtimeActivityOwner(chats, identity)?.id !== chat.id || hasAuthoritativeReply(chat, identity)
+      || chat.items.some((item) => item.type === "agent" && item.response.dispatchStopped
+        && responseMatchesIdentity(item.response, identity))) continue;
     candidates.set(generationKey(identity), identity);
   }
   const matching = [...candidates.values()];
@@ -134,6 +136,17 @@ export function projectRuntimeTurnActivity(chat: ChatThread, run: AgentRuntimeRu
   const sessionId = String(run.sessionId || "").trim();
   const clientTurnId = String(run.clientTurnId || "").trim();
   if (!sessionId || !clientTurnId || chat.sessionId !== sessionId || hasReply(chat, { sessionId, clientTurnId, turnId: run.turnId })) return chat;
+  if (run.dispatchStopped) {
+    const stream = chat.items.find((item) => isExternalRuntimeStream(item) && item.clientTurnId === clientTurnId
+      && (!item.turnId || item.turnId === run.turnId));
+    if (!stream || stream.type !== "streaming") return chat;
+    const elapsedSeconds = run.startedAt ? Math.max(0, Math.round((Date.now() - Date.parse(run.startedAt)) / 1000) || 0) : 0;
+    const stopped = finalizeInterruptedStreamingTurn({ ...stream, turnId: run.turnId }, {
+      sessionId, elapsedSeconds, cancelledText: "",
+      stopAcknowledgement: { unityWriteMayHaveExecuted: run.unityWriteMayHaveExecuted === true },
+    });
+    return { ...chat, items: chat.items.map((item) => item === stream ? stopped : item) };
+  }
   const stopping = run.status === "cancelling" || run.status === "cancel_requested";
   if (chat.items.some((item) => item.type === "streaming" && item.clientTurnId === clientTurnId)) {
     const streamChat = coalesceRuntimeTurnStreams(chat, clientTurnId);
@@ -178,6 +191,7 @@ export function runtimeEventFromExactResponse(state: AgentTurnResponseRecovery, 
   return {
     schema: "vrcforge.runtime_turn_event.v1", continuationSource: "foreground_completed",
     ok: response.ok, status: response.status,
+    unityWriteMayHaveExecuted: response.unityWriteMayHaveExecuted,
     sessionId: identity.sessionId, clientTurnId: identity.clientTurnId, turnId,
     plan: response.plan, timeline: response.timeline, contextUsage: response.contextUsage,
     consumedSteerInputIds: response.consumedSteerInputIds, model: response.model,
@@ -279,7 +293,7 @@ export function useRuntimeTurnActivity(params: Params) {
       activities.current.set(key, activity);
       latest.current.updateChat(owner.id, (chat) => projectRuntimeTurnActivity(chat, run));
     } else if (run.status === "cancelling" || run.status === "cancel_requested") {
-      latest.current.updateChat(owner.id, (chat) => markRuntimeStreamStopping(chat, identity.clientTurnId, true));
+      latest.current.updateChat(owner.id, (chat) => projectRuntimeTurnActivity(chat, run));
     }
     const stamp = JSON.stringify([run.turnId, run.status, run.updatedAt, run.eventCount]);
     // The ledger can settle before the response is durable. Existing runtime
@@ -348,7 +362,7 @@ export function useRuntimeTurnActivity(params: Params) {
     if (!owner || hasAuthoritativeReply(owner, identity)) return;
     const key = identityKey(identity);
     const snapshot = latestRuns.current.get(key);
-    if (snapshot?.turnId && delta.turnId && snapshot.turnId !== delta.turnId) return;
+    if (snapshot?.dispatchStopped || (snapshot?.turnId && delta.turnId && snapshot.turnId !== delta.turnId)) return;
     const activity = activities.current.get(key);
     if (activity?.turnId && delta.turnId && activity.turnId !== delta.turnId) return;
     if (!activity) observe({ ...identity, status: "running" });

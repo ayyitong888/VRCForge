@@ -261,6 +261,8 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
         "sessionId": session_id,
         "turnId": turn_id,
         "clientTurnId": _text(payload.get("clientTurnId"), 240),
+        **{key: payload[key] for key in ("dispatchStopped", "unityWriteMayHaveExecuted")
+           if isinstance(payload.get(key), bool)},
         "plan": {
             "summary": _text(plan.get("summary"), 1200),
             "reply": _text(plan.get("reply"), reply_limit),
