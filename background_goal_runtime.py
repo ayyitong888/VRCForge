@@ -179,6 +179,9 @@ def classify_runtime_plan_outcome(plan: Any) -> tuple[str, str]:
     if next_step == "paused":
         return "parked", "step_limit_reached" if plan.get("stepLimitReached") else "paused"
     if next_step == "done":
+        gate = plan.get("completionGate")
+        if isinstance(gate, dict) and gate.get("reason") == "preview_rejection_reported":
+            return "parked", "preview_rejection_reported"
         return "completed", "done"
     return "", ""
 

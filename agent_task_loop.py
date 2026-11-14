@@ -2321,6 +2321,27 @@ class AgentTaskLoop:
             gated["task"] = self.snapshot("completion_unverified")
             return gated
 
+        if next_step == "done" and honest_incomplete_reply and isinstance(claim, Mapping) and claim.get("satisfied") is False:
+            reported_ids = claim.get("evidenceActionIds") or claim.get("evidence_action_ids")
+            if isinstance(reported_ids, list) and len(reported_ids) == 1 and isinstance(reported_ids[0], str):
+                action_id = reported_ids[0]
+                action = self._actions.get(action_id, {})
+                outcome = action.get("outcome") or {}
+                if (
+                    action.get("_nativeReadObservation") is True
+                    and action.get("status") == "failed"
+                    and not self.action_blocks_completion(action_id)
+                    and outcome.get("failureLayer") == "unity_core_preview"
+                    and outcome.get("failurePhase") == "preview_rejected"
+                    and outcome.get("commitState") == "not_started"
+                    and outcome.get("mutationStarted") is False
+                ):
+                    gated["completionGate"] = {
+                        "status": "reported", "reason": "preview_rejection_reported", "actionId": action_id,
+                    }
+                    gated["task"] = self.snapshot("completed")
+                    return gated
+
         if not completed_ids:
             # An explicit model-authored claim that marks the task done with
             # no completed action at all is a blind completion claim.

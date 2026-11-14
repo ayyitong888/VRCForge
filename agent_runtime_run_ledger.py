@@ -1191,10 +1191,18 @@ class AgentRuntimeRunLedger:
             and str(question_payload.get("status") or "").strip() == "needs_user_action"
         ):
             return "blocked"
+        completion = _ensure_dict(top_plan.get("completionGate"))
+        reported_preview = (
+            top_plan.get("nextStep") == "done"
+            and completion.get("reason") == "preview_rejection_reported"
+            and completion.get("status") == "reported"
+            and bool(completion.get("actionId"))
+            and completion["actionId"] == question_payload.get("actionId")
+        )
         payloads = [
             _ensure_dict(payload)
             for payload in (shell_payload, skill_payload, write_payload)
-            if isinstance(payload, dict)
+            if isinstance(payload, dict) and not (reported_preview and payload is skill_payload)
         ]
         statuses = {
             str(payload.get("status") or "").strip().lower().replace("-", "_")
@@ -1225,6 +1233,8 @@ class AgentRuntimeRunLedger:
             return "blocked"
         if plan_outcome == "failed":
             return "failed"
+        if reported_preview:
+            return "completed"
         if plan_outcome == "parked":
             return "blocked"
         return "completed"

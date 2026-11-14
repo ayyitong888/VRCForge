@@ -8611,6 +8611,8 @@ class AgentGateway:
                     native_read_observation=native_read_observation,
                 )
                 step_payload["outcome"] = task_action["outcome"]
+                if action_kind == "skill":
+                    step_payload["actionId"] = task_action["actionId"]
                 if loop_state:
                     loop_state[-1]["actionId"] = task_action["actionId"]
                     loop_state[-1]["outcome"] = task_action["outcome"]

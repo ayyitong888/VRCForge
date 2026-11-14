@@ -4795,7 +4795,7 @@ class RuntimePlannerService:
                     "type": "object", "additionalProperties": False,
                     "properties": {"satisfied": {"type": "boolean"},
                                    "evidence_action_ids": {"type": "array", "items": {"type": "string"},
-                                       "description": "Cite completed actionIds for read-only success; optional after write/shell. The host verifies outstanding requirements."}},
+                                       "description": "Cite completed actionIds for read-only success; optional after write/shell. For reporting an expected read-only preview rejection, use satisfied=false and cite only its actionId. The host verifies outstanding requirements."}},
                 },
                 "checkpoint_choice": {"type": "object", "additionalProperties": False,
                     "required": ["mode", "quote"], "properties": {
@@ -4901,6 +4901,8 @@ class RuntimePlannerService:
             ". Cite completed actionIds in evidence_action_ids for read-only success; optional after write/shell. "
             "Only verified outcomes support success; unrelated successes "
             "do not resolve failures. Otherwise answer honestly without claiming completion. "
+            "If the user only asked you to report an expected read-only Unity preview rejection with commitState=not_started, "
+            "reply with satisfied=false and cite only that preview's actionId in evidence_action_ids. "
             f"{RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION}"
             f"{RUNTIME_TROUBLESHOOTING_INSTRUCTION}"
             f"{RUNTIME_EVIDENCE_COMPLETION_INSTRUCTION}"

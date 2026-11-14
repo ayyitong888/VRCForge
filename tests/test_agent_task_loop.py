@@ -1831,3 +1831,39 @@ def test_checkpoint_from_applied_write_is_inline_after_approval_continuation() -
         outcome={"status": "needs_user_action"},
     )
     assert "writeTransaction" not in pending
+
+
+def test_report_of_rejected_preview_keeps_the_action_failed() -> None:
+    from agent_runtime_run_ledger import AgentRuntimeRunLedger
+    from background_goal_runtime import classify_runtime_plan_outcome
+
+    loop = AgentTaskLoop("Report the rejection of a read-only preview")
+    action = loop.record_action(
+        kind="skill", tool="vrcforge_preview_scene_object_duplicate", arguments={},
+        raw_result={"ok": False}, native_read_observation=True,
+        outcome={"status": "failed", "failureLayer": "unity_core_preview",
+                 "failurePhase": "preview_rejected", "commitState": "not_started",
+                 "mutationStarted": False},
+    )
+    plan = {"planner": "llm", "nextStep": "done", "reply": "The preview rejected the missing object.",
+            "completionClaim": {"satisfied": False, "evidence_action_ids": [action["actionId"]]}}
+    reported = loop.gate_terminal(plan)
+    assert reported["nextStep"] == "done"
+    assert reported["completionGate"] == {
+        "status": "reported", "reason": "preview_rejection_reported", "actionId": action["actionId"],
+    }
+    assert "taskCompletion" not in reported
+    assert reported["task"]["actions"][0]["status"] == "failed"
+    assert classify_runtime_plan_outcome(reported) == ("parked", "preview_rejection_reported")
+    ledger_args = {"top_plan": reported, "shell_payload": None, "write_payload": None, "approval_id": ""}
+    assert AgentRuntimeRunLedger.turn_run_status(
+        **ledger_args, skill_payload={"actionId": action["actionId"], "status": "failed", "ok": False},
+    ) == "completed"
+    assert AgentRuntimeRunLedger.turn_run_status(
+        **ledger_args, skill_payload={"actionId": "other", "status": "failed", "ok": False},
+    ) == "failed"
+    assert loop.gate_terminal({**plan, "completionClaim": {
+        "satisfied": True, "evidence_action_ids": [action["actionId"]],
+    }})["nextStep"] != "done"
+    loop.require_action(kind="write", tool="vrcforge_duplicate_scene_object")
+    assert loop.gate_terminal(plan)["nextStep"] != "done"
