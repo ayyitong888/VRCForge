@@ -11,7 +11,10 @@ import dashboard_server
 import pytest
 
 from agent_gateway import AgentGateway, redact_runtime_tool_result, redact_sensitive
-from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
+from agent_runtime_run_ledger import AgentRuntimeRunLedger
+from agent_runtime_skill_executor import (
+    AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts, checkpoint_restore_absence_paths,
+)
 from agent_tool_result_contract import normalize_agent_tool_result
 from runtime_planner_service import RuntimePlannerService
 
@@ -345,7 +348,7 @@ def test_direct_visual_failure_uses_provider_error_not_tool_description() -> Non
             "ok": False,
             "status": "needs_user_action",
             "summary": (
-                "DeepSeek · deepseek-chat (source=main, errorType=provider_rejected): "
+                "DeepSeek 路 deepseek-chat (source=main, errorType=provider_rejected): "
                 "HTTP 400 images are not supported. Original images were discarded."
             ),
             "error": {
@@ -499,3 +502,58 @@ def test_projected_skill_blocked_entrypoint_has_canonical_non_success_outcome() 
     assert result["status"] == "blocked"
     assert result["outcome"]["status"] == "needs_user_action"
     assert "not allowed" in result["outcome"]["summary"]
+
+
+@pytest.mark.parametrize(
+    ("source", "restore_ok", "deleted_path", "requested_path", "failure", "expected"),
+    [
+        ("approval_finished", True, "Assets/Temp.mat", "Assets/Temp.mat", None, "completed"),
+        ("approval_finished", True, "Assets/Temp.mat", "Assets/Other.mat", None, "failed"),
+        ("approval_finished", True, "Assets/Temp.mat", "Assets/Temp.mat", "Unity Core disconnected", "failed"),
+        ("approval_finished", False, "Assets/Temp.mat", "Assets/Temp.mat", None, "failed"),
+        ("foreground_completed", True, "Assets/Temp.mat", "Assets/Temp.mat", None, "failed"),
+    ],
+)
+def test_restore_readback_reports_only_proven_absence_as_success(
+    source, restore_ok, deleted_path, requested_path, failure, expected
+) -> None:
+    continuation = {
+        "source": source,
+        "context": {"tool": "vrcforge_restore_checkpoint"},
+        "execution": {
+            "ok": restore_ok,
+            "status": "applied" if restore_ok else "failed",
+            "result": {
+                "ok": restore_ok, "status": "restored" if restore_ok else "failed",
+                "deletedFiles": [deleted_path],
+            },
+        },
+    }
+    error = failure or f"No asset found at '{requested_path}'."
+    executor, _ = make_executor(tools={
+        "vrcforge_get_asset_info": FakeTool(
+            "vrcforge_get_asset_info",
+            handler=lambda _: {"ok": False, "success": False, "code": error, "error": error},
+        ),
+    })
+    params = {"assetPath": requested_path}
+    raw = executor.execute("vrcforge_get_asset_info", params, "agent")
+    step = executor.execute(
+        "vrcforge_get_asset_info", params, "agent",
+        restored_absent_paths=checkpoint_restore_absence_paths(continuation),
+    )
+
+    assert AgentRuntimeRunLedger.turn_run_status(
+        top_plan={"nextStep": "done"},
+        shell_payload=None,
+        skill_payload=step,
+        write_payload=None,
+        approval_id="",
+    ) == expected
+    if expected == "completed":
+        assert step["ok"] and step["status"] == "executed"
+        assert step["outcome"]["status"] == "ok"
+        assert step["result"] == {"ok": True, "assetPath": requested_path, "exists": False}
+    else:
+        assert step == raw
+        assert step["outcome"]["status"] == "failed"

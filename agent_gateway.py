@@ -116,7 +116,11 @@ from agent_runtime_followup_queue import AgentRuntimeFollowupQueue, FollowupQueu
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_runtime_event_projection import project_runtime_turn_event
 from request_usage_reconciliation import reconcile_request_usage
-from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
+from agent_runtime_skill_executor import (
+    AgentRuntimeSkillExecutor,
+    AgentRuntimeSkillExecutorPorts,
+    checkpoint_restore_absence_paths,
+)
 from internal_tool_blocks import CONVERSATION_TOOL_NAMES
 from agent_task_loop import (
     SUB_AGENT_TASK_TOOLS,
@@ -6233,6 +6237,7 @@ class AgentGateway:
             general_allowed_roots = host_scope_roots()
         continuation_context = ensure_dict(ensure_dict(task_continuation).get("context"))
         continuation_completion = ensure_dict(ensure_dict(task_continuation).get("completion"))
+        restored_absent_paths = checkpoint_restore_absence_paths(ensure_dict(task_continuation))
         if continuation_context and continuation_completion:
             task_loop = AgentTaskLoop.from_approval_context(
                 continuation_context,
@@ -8479,6 +8484,7 @@ class AgentGateway:
                             step_params,
                             agent_name,
                             owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
+                            restored_absent_paths=restored_absent_paths,
                         )
                 finally:
                     if material_capture_token is not None:

@@ -13,6 +13,38 @@ from external_tool_result_contract import (
 )
 
 
+def checkpoint_restore_absence_paths(continuation: dict[str, Any]) -> frozenset[str]:
+    """Read the deleted paths from this turn's successful approved restore."""
+    context = continuation.get("context") or {}
+    execution = continuation.get("execution") or {}
+    result = execution.get("result") or {}
+    if (
+        continuation.get("source") != "approval_finished"
+        or context.get("tool") != "vrcforge_restore_checkpoint"
+        or execution.get("status") != "applied"
+        or result.get("status") != "restored"
+        or result.get("ok") is not True
+    ):
+        return frozenset()
+    return frozenset(result.get("deletedFiles") or ())
+
+
+def _interpret_restore_asset_readback(
+    result: Any, params: dict[str, Any], removed_paths: frozenset[str],
+) -> Any:
+    path = str(params.get("asset_path") or params.get("assetPath") or "").replace("\\", "/").strip()
+    if (
+        path in removed_paths
+        and isinstance(result, dict)
+        and result.get("ok") is False
+        and result.get("code") == f"No asset found at '{path}'."
+    ):
+        # The installed Core reports an absent path using this exact error code.
+        # The current restore receipt supplies the intent which makes it a verified read.
+        return {"ok": True, "assetPath": path, "exists": False}
+    return result
+
+
 def _result_approval_id(result: Any) -> str:
     if not isinstance(result, dict):
         return ""
@@ -88,8 +120,9 @@ class AgentRuntimeSkillExecutor:
         owner_id: str = "",
         *,
         read_scope: ReadScope | None = None,
+        restored_absent_paths: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
-        payload = self._execute(tool_name, params, agent_name, owner_id, read_scope)
+        payload = self._execute(tool_name, params, agent_name, owner_id, read_scope, restored_absent_paths)
         if not isinstance(payload.get("outcome"), dict):
             outcome = normalize_agent_tool_result(
                 payload,
@@ -150,6 +183,7 @@ class AgentRuntimeSkillExecutor:
         agent_name: str,
         owner_id: str,
         read_scope: ReadScope | None,
+        restored_absent_paths: frozenset[str],
     ) -> dict[str, Any]:
         config = self._ports.ensure_config()
         tool = self._ports.tool_for_name(tool_name)
@@ -212,6 +246,8 @@ class AgentRuntimeSkillExecutor:
             result = self._ports.redact_runtime_result(
                 self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
             )
+            if tool.name == "vrcforge_get_asset_info" and restored_absent_paths:
+                result = _interpret_restore_asset_readback(result, tool_params, restored_absent_paths)
             outcome = normalize_agent_tool_result(
                 result,
                 fallback_summary=tool.description,
