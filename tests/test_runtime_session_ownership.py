@@ -138,6 +138,27 @@ def test_stop_before_admission_is_consumed_without_starting_provider(tmp_path, s
     assert not state.cancel_requested(session_id="s", client_turn_id="ca")
 
 
+@pytest.mark.parametrize("waiting", [False, True])
+def test_desktop_stop_acknowledges_next_turn_without_cancelling_current_owner(tmp_path, waiting):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    state = gateway.runtime_sessions
+    assert state.begin_turn(session_id="s", turn_id="old", client_turn_id="old-cid")
+    if waiting:
+        queued = state.queue_turn(session_id="s", turn_id="next", client_turn_id="next-cid")
+        assert queued is not None and not queued.is_set()
+
+    result = gateway.request_runtime_cancel(
+        {"sessionId": "s", "clientTurnId": "next-cid"}, defer_cleanup=lambda *_args, **_kwargs: None,
+    )
+
+    assert result["dispatchStopped"] is True
+    assert result["unityWriteMayHaveExecuted"] is False
+    assert not state.cancel_requested(session_id="s", turn_id="old", client_turn_id="old-cid")
+    if not waiting:
+        queued = state.queue_turn(session_id="s", turn_id="next", client_turn_id="next-cid")
+    assert queued is not None and queued.is_set()
+
+
 def test_waiting_turn_is_fifo_and_other_session_remains_concurrent(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     state = gateway.runtime_sessions

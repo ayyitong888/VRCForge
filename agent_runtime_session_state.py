@@ -1198,11 +1198,9 @@ class AgentRuntimeSessionState:
                     self._cancelled_targets.setdefault((session_id, "", ""), reason)
                 return (session_id, "", "")
 
-            # When one or more turn identities are supplied, all of them must
-            # resolve to one active target.  A known partial collision is
-            # rejected instead of allowing an OR match to cancel another turn;
-            # an entirely unknown tuple is retained for a turn that is about
-            # to begin.
+            # Desktop can stop a request by its session and client turn ID
+            # before admission assigns a server turn ID. Reserve that exact
+            # pair without touching any active turn under either ID alone.
             active_targets = [
                 (active_session_id, active_turn_id, active_client_id)
                 for (active_session_id, active_client_id), active_turn_id in admitted.items()
@@ -1220,7 +1218,7 @@ class AgentRuntimeSessionState:
                 or (turn_id and target[1] == turn_id)
                 or (client_turn_id and target[2] == client_turn_id)
             ]
-            if colliding and len(matching) != 1:
+            if colliding and len(matching) != 1 and (turn_id or not (session_id and client_turn_id)):
                 return None
             target = matching[0] if matching else (session_id, turn_id, client_turn_id)
             # A client ID can be reused in another session. An unscoped
@@ -1243,9 +1241,7 @@ class AgentRuntimeSessionState:
         with self._ports.shared_state_lock:
             if self._active_turns.get((session_id, client_turn_id)) != turn_id:
                 return False
-            if target in self._stopped_core_dispatches or self.cancel_requested(
-                session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
-            ):
+            if target in self._stopped_core_dispatches:
                 # A transaction whose write was already sent may still verify
                 # it. The turn cannot start another business write.
                 return settlement_read

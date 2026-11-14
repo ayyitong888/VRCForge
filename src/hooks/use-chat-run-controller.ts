@@ -1678,6 +1678,10 @@ export function useChatRunController({
       if (midTurnCompactionApplied && persistChatsNow) {
         void persistChatsNow().catch(reportChatSaveError);
       }
+      if (response.dispatchStopped) {
+        void Promise.allSettled([refresh(targetEndpoint), refreshRuntimeRuns(false, targetEndpoint)]);
+        return false;
+      }
       await refresh(targetEndpoint);
       await refreshRuntimeRuns(false, targetEndpoint);
       return true;

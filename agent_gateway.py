@@ -9930,10 +9930,10 @@ class AgentGateway:
                 client_turn_id=client_turn_id,
                 reason=reason,
             )
-            accepted = bool(target and all(target) and self._runtime_session_state.owns_turn(
+            exact_turn = bool(target and all(target) and self._runtime_session_state.dispatch_stopped(
                 session_id=target[0], turn_id=target[1], client_turn_id=target[2],
             ))
-            unity_write_may_have_executed = bool(accepted and self._runtime_session_state.core_write_admitted(
+            unity_write_may_have_executed = bool(exact_turn and self._runtime_session_state.core_write_admitted(
                 session_id=target[0], turn_id=target[1], client_turn_id=target[2],
             ))
         with self._runtime_continuation_condition:
@@ -9944,8 +9944,13 @@ class AgentGateway:
                 status_code=409,
             )
         session_id, turn_id, client_turn_id = target
+        # Before admission the client identity reserves only its own stop.
+        # There is no worker or tool result to clean up at this point.
+        if defer_cleanup is not None and session_id and client_turn_id and not turn_id:
+            return {"ok": True, "status": "cancel_requested", "dispatchStopped": True,
+                    "unityWriteMayHaveExecuted": False}
         event = None
-        if accepted:
+        if exact_turn:
             event = self._runtime_run_ledger.append({
                 "event": "runtime_turn_cancel_requested",
                 "status": "cancel_requested",
