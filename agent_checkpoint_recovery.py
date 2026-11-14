@@ -1718,6 +1718,8 @@ class AgentCheckpointRecoveryService:
                 ),
             )
         else:
+            # Both disk-only and Editor-backed restores have passed their existing completion path.
+            result.update(committed=True, commitState="committed", persistenceState="persisted")
             self._record_restore_success(recovery, result)
         return result
 

@@ -70,3 +70,35 @@ def test_menu_checkpoint_refuses_missing_preview_footprint(tmp_path, monkeypatch
     monkeypatch.setattr(server, "manage_expression_menu_sync", lambda *a, **kw: {"ok": True, "plan": {"rootMenuPath": "Assets/Root.asset"}})
     monkeypatch.setattr(server, "prepare_unity_checkpoint_sync", lambda *a: pytest.fail("must not guess the target from root or logical path"))
     assert server.prepare_authoritative_unity_checkpoint_sync(tmp_path, {"_checkpointTargetTool": "vrcforge_manage_expression_menu"})["ok"] is False
+
+@pytest.mark.parametrize("reload_ok", [True, False])
+def test_archive_restore_without_asset_baseline_reports_its_settlement(tmp_path, monkeypatch, reload_ok):
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    gateway = _gateway(tmp_path)
+    service = gateway.checkpoint_recovery
+    checkpoint = {
+        "id": "remove-temp", "strategy": "archive", "projectRoot": str(tmp_path),
+        "targetTool": "vrcforge_duplicate_project_asset",
+    }
+    cls = type(service)
+    monkeypatch.setattr(cls, "_load_checkpoint", lambda *_: checkpoint)
+    monkeypatch.setattr(cls, "_checkpoint_available", lambda *_: {"ok": True})
+    monkeypatch.setattr(cls, "_restore_archive_checkpoint", lambda *_: {
+        "ok": True, "restoredFiles": [], "deletedFiles": ["Assets/Temporary.mat", "Assets/Temporary.mat.meta"],
+    })
+    monkeypatch.setattr(cls, "_cleanup_checkpoint_restore_unity_caches", lambda *_: {})
+    service.checkpoint_restore_prepare_handler = lambda _, **kwargs: {"ok": True, "scenes": []}
+    service.checkpoint_restore_handler = lambda *_: {"ok": reload_ok}
+    result = service.restore_checkpoint({"checkpointId": "remove-temp", "confirmRestore": True})
+    outcome = normalize_agent_tool_result(result, write=True, fallback_summary="Checkpoint restore")
+    if reload_ok:
+        assert outcome["status"] == "ok"
+        assert outcome["committed"] is True
+        assert outcome["commitState"] == "complete"
+        assert outcome["readbackState"] != "verified"
+        assert not outcome.get("recovery", {}).get("required")
+    else:
+        assert outcome["status"] == "failed"
+        assert outcome["commitState"] == "unknown"
+        assert outcome["checkpointRecoveryRequired"] is True
