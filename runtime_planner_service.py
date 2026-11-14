@@ -3966,7 +3966,7 @@ class RuntimePlannerService:
                 return payload["text"]
             # Control facts remain directly available, independent of paging
             # supporting evidence. Raw/private result fields are not promoted.
-            control_step = {key: step[key] for key in ("kind", "status", "actionId", "supersededBy", "outcome") if key in step}
+            control_step = {key: step[key] for key in ("kind", "status", "actionId", "checkpointId", "supersededBy", "outcome") if key in step}
             control_step["outcome"] = {
                 key: value for key, value in ensure_dict(step.get("outcome")).items()
                 if key not in {"observed", "expected", "delta", "evidence", "causeChain"}
@@ -4062,6 +4062,9 @@ class RuntimePlannerService:
             action_id = str(step.get("actionId") or "").strip()
             if action_id:
                 fields.append("actionId=" + sanitize_planner_observation_text(action_id, None))
+            checkpoint_id = step.get("checkpointId")
+            if checkpoint_id:
+                fields.append("checkpointId=" + sanitize_planner_observation_text(checkpoint_id, None))
             superseded_by = (
                 str(step.get("supersededBy") or "").strip()
                 if step.get("status") == "superseded" else ""
@@ -4574,7 +4577,7 @@ class RuntimePlannerService:
                     "schema",
                 ):
                     value = result.get(key)
-                    if value not in (None, ""):
+                    if value not in (None, "") and (key != "checkpointId" or value != checkpoint_id):
                         fields.append(f"{key}={sanitize_planner_observation_text(value, None)}")
                 for key in ("error", "reason"):
                     value = result.get(key)

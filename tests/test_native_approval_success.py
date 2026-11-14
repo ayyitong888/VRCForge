@@ -109,7 +109,10 @@ def test_native_pending_write_approval_apply_resume_readback_and_final_evidence(
         if item.get("role") == "tool" and item.get("tool_call_id") == "write"
     ]
     assert len(write_results) == 1
-    assert '"status": "completed"' in write_results[0]["content"]
+    observations = json.loads(write_results[0]["content"])["observations"]
+    assert len(observations) == 1
+    assert "checkpointId=" + applied["checkpoint"]["id"] in observations[0]["observation"]
+    assert '"readback":{"text":"hello"}' in observations[0]["observation"]
     assert len(handler_calls) == 1
     assert len(model.requests) == 3
 
@@ -285,3 +288,23 @@ def test_native_pending_restart_approve_executes_once_and_resumes_from_durable_s
         restarted.resume_runtime_task_after_approval(restored, applied)
     assert duplicate.value.status_code == 409
     assert len(restarted_calls) == 1 and len(resumed_model.requests) == 1
+
+def test_native_auto_approved_write_returns_its_checkpoint_inline(tmp_path: Path) -> None:
+    from tests.test_native_permission_modes import _set_mode
+
+    project = _project(tmp_path)
+    gateway, _model, writes, _ = _setup_write(project, [*_write_replies(project), finish])
+    _set_mode(gateway, "roslyn_full_auto")
+    result = gateway.runtime_message({
+        "message": "write fixture",
+        "sessionId": "native-auto-checkpoint",
+        "clientTurnId": "auto-checkpoint-turn",
+        "projectRoot": str(project),
+    })
+    assert result["plan"]["nextStep"] == "done"
+    assert len(writes) == 1
+    approval = next(iter(gateway._approvals.values()))
+    assert approval["status"] == "applied"
+    snapshot = next(iter(gateway.runtime_sessions._native_conversations.values()))
+    reply = next(m for m in snapshot["messages"] if m.get("tool_call_id") == "write")
+    assert "checkpointId=" + approval["checkpoint"]["id"] in reply["content"]

@@ -1783,3 +1783,51 @@ def test_current_question_wait_precedes_older_failed_action_without_erasing_it()
     actions = gated["task"]["actions"]
     assert any(item["status"] == "failed" for item in actions)
     assert any(item["status"] == "needs_user_action" for item in actions)
+
+def test_checkpoint_from_applied_write_is_inline_after_approval_continuation() -> None:
+    from runtime_planner_service import RuntimePlannerService
+
+    tool = "vrcforge_duplicate_project_asset"
+    loop = AgentTaskLoop("Duplicate a temporary asset", session_id="session", project_root="D:/Unity")
+    args = {"destinationAssetPath": "Assets/Temporary.mat"}
+    action = loop.record_action(
+        kind="write", tool=tool, arguments=args,
+        raw_result={
+            "status": "applied",
+            "approval": {"id": "appr_copy", "status": "applied", "targetTool": tool},
+            "checkpoint": {"id": "ckpt_copy", "ok": True},
+        },
+        outcome={"status": "ok", "summary": "Copy complete"},
+    )
+    assert action["writeTransaction"]["checkpointId"] == "ckpt_copy"
+
+    next_tool = "vrcforge_set_material_shader"
+    seed = loop.approval_seed(requested_kind="write", requested_tool=next_tool)
+    context = approval_task_context(seed, tool=next_tool, arguments=args)
+    assert context is not None
+    continued = AgentTaskLoop.from_approval_context(
+        context,
+        {"status": "completed", "tool": next_tool, "outcome": {"status": "ok"}},
+        execution={
+            "status": "applied",
+            "approval": {"id": "appr_edit", "status": "applied", "targetTool": next_tool},
+            "checkpoint": {"id": "ckpt_edit", "ok": True},
+        },
+    )
+    observations = {item["tool"]: item for item in continued.planner_observations()}
+    for name, checkpoint in ((tool, "ckpt_copy"), (next_tool, "ckpt_edit")):
+        step = observations[name]
+        assert step["checkpointId"] == checkpoint
+        text = RuntimePlannerService.complete_model_information(None, step, native_contract=True)
+        assert "checkpointId=" + checkpoint in text
+
+    pending = loop.record_action(
+        kind="write", tool=next_tool, arguments=args,
+        raw_result={
+            "status": "pending",
+            "approval": {"id": "appr_pending", "status": "pending"},
+            "checkpoint": {"id": "ckpt_pending", "ok": True},
+        },
+        outcome={"status": "needs_user_action"},
+    )
+    assert "writeTransaction" not in pending

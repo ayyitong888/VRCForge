@@ -4988,6 +4988,9 @@ class AgentGateway:
         if checkpoint is not None:
             payload["checkpoint"] = checkpoint
             payload["checkpointId"] = checkpoint.get("id", "")
+        elif outcome_status == "ok" and tool in {"vrcforge_create_project_checkpoint", "vrcforge_restore_checkpoint"}:
+            if checkpoint_id := ensure_dict(applied.get("result")).get("checkpointId"):
+                payload["checkpointId"] = checkpoint_id
         recovery = self._external_mcp_recovery_projection(applied.get("recovery"))
         if recovery is not None:
             payload["recovery"] = recovery
@@ -6448,14 +6451,17 @@ class AgentGateway:
         )
         approved_execution = ensure_dict(ensure_dict(task_continuation).get("execution"))
         approved_result = approved_execution.get("result")
-        if (continuation_context.get("tool") == "vrcforge_manage_fx_animator"
-                and isinstance(approved_result, dict)
-                and approved_result.get("schema") == "vrcforge.fx_animator_write.v1"
-                and isinstance(approved_result.get("writeVerification"), dict)):
+        if (continuation_completion.get("status") == "completed"
+                and continuation_context.get("kind") == "write"
+                and isinstance(approved_result, dict)):
             action_id = str(continuation_context.get("requestedActionId") or "")
             completed_step = next((item for item in steps if item.get("actionId") == action_id), None)
             completed_observation = next((item for item in loop_state if item.get("actionId") == action_id), None)
             if completed_step is not None and completed_observation is not None:
+                if continuation_context.get("tool") == "vrcforge_restore_checkpoint":
+                    approved_result = {key: approved_result[key] for key in
+                                       ("ok", "status", "checkpointId", "restored", "restoredFileCount", "deletedFileCount")
+                                       if key in approved_result}
                 completed_step["result"] = approved_result
                 reader = result_continuation(session_id, turn_id, project_root, completed_step,
                                              planner_policy.sanitize_planner_observation_text)
@@ -8606,6 +8612,8 @@ class AgentGateway:
                 if loop_state:
                     loop_state[-1]["actionId"] = task_action["actionId"]
                     loop_state[-1]["outcome"] = task_action["outcome"]
+                    if transaction := task_action.get("writeTransaction"):
+                        loop_state[-1]["checkpointId"] = transaction["checkpointId"]
                     if task_action.get("correctedActionId"):
                         loop_state[-1]["correctionForActionId"] = task_action[
                             "correctedActionId"

@@ -1469,6 +1469,16 @@ class AgentApprovalTransactionService:
         if approval:
             payload["approval_id"] = approval
             payload["approvalId"] = approval
+        if approval_status == "applied":
+            checkpoint = ensure_dict(approval_record.get("checkpoint"))
+            if checkpoint:
+                # Preserve the existing transaction facts without copying the approval or archive.
+                payload["approval"] = {
+                    "id": approval,
+                    "status": approval_status,
+                    "targetTool": tool_name,
+                    "checkpoint": {"id": checkpoint.get("id"), "ok": checkpoint.get("ok")},
+                }
         if linked_task.get("actionId"):
             payload["taskActionId"] = str(linked_task.get("actionId"))
         if task_completion:
@@ -2478,6 +2488,8 @@ class AgentApprovalTransactionService:
                     observation = self._ports.native_result_observation({
                         "kind": "write", "status": "executed", "tool": target_tool,
                         "actionId": native_context.get("actionId") or "",
+                        "checkpointId": ensure_dict(checkpoint).get("id")
+                        if completion_status == "ok" else "",
                         "result": result, "outcome": completion_outcome,
                     })
                     applied_audit["nativeResult"] = {
@@ -3078,7 +3090,11 @@ class AgentApprovalTransactionService:
             # of the session's automatic pre-write checkpoint choice. It uses
             # the existing disk archive/restore implementation and needs no
             # synthetic approval, live Editor binding, or second checkpoint.
-            return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
+            archive = self._ports.checkpoint.create_archive_checkpoint(project_root, record)
+            if archive.get("ok") is True:
+                return {**archive, "checkpointId": archive["id"], "committed": True,
+                        "commitState": "committed", "persistenceState": "persisted"}
+            return archive
 
     def _create_pre_write_checkpoint_locked(
         self,

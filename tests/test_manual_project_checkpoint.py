@@ -70,6 +70,9 @@ def test_manual_checkpoint_archives_and_restores_project_files_including_package
     result = receipt["result"]
     assert result["ok"] is True and result["status"] == "ready"
     assert result["targetTool"] == tool
+    assert receipt["checkpointId"] == result["id"]
+    assert receipt["outcome"]["commitState"] == "complete"
+    assert receipt["outcome"]["persistenceState"] == "persisted"
     assert set(result["pathspecs"]) == {"Assets", "Packages", "ProjectSettings"}
     with zipfile.ZipFile(result["archivePath"]) as archive:
         assert {"Assets/asset.txt", "Packages/manifest.json", "ProjectSettings/ProjectVersion.txt"} <= set(archive.namelist())
@@ -86,6 +89,9 @@ def test_manual_checkpoint_archives_and_restores_project_files_including_package
         "checkpointId": result["id"], "projectRoot": str(project), "confirmRestore": True,
     })
     assert restored["ok"] is True, restored
+    assert restored["commitState"] == "committed"
+    assert restored["persistenceState"] == "persisted"
+    assert "persistedReadback" not in restored
     for relative, content in original.items():
         assert (project / relative).read_bytes() == content
     assert not (project / "Packages/new-package.txt").exists()

@@ -3615,3 +3615,14 @@ def test_shared_public_behavior_covers_opening_milestones_cadence_and_final():
     assert "do not narrate every tool call" in instruction
     assert "reveal private reasoning, or invent progress" in instruction
     assert "final answer self-contained and complete" in instruction
+
+def test_paged_write_observation_keeps_checkpoint_id_inline() -> None:
+    planner = service()
+    step = {"index": 0, "kind": "write", "status": "executed", "tool": "vrcforge_set_material_shader",
+            "checkpointId": "ckpt_edit", "outcome": {"status": "ok"}}
+    step.update(retain_model_information("complete", "turn", "", step,
+                                         {"text": "receipt details " * MAX_PAGE_CHARS},
+                                         sanitize_planner_observation_text))
+    assert step["modelInformationRead"]["page"]["hasMore"]
+    projected = planner.native_result_observation(step)["observation"]
+    assert "checkpointId=ckpt_edit" in projected.split("; modelInformationPage=")[0]
