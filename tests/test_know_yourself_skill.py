@@ -328,6 +328,25 @@ def test_unsupported_unity_editor_version_blocks_before_dependency_setup() -> No
     assert version_step["supportedSeries"] == ["2022.3"]
 
 
+def test_unity_6_readiness_reports_pending_validation_without_downgrade_guidance() -> None:
+    report = build_know_yourself_report(
+        doctor_report=_doctor(),
+        unity_status=_unity(),
+        tool_registry=_tool_registry(),
+        skill_registry=_skill_registry(),
+        project_context={"editorVersion": "6000.0.67f1", "selectedProjectRunning": True},
+        compile_diagnostics=_compile_clean(),
+    )
+
+    version_step = next(item for item in report["preparation"] if item["id"] == "supported_editor_version")
+    assert version_step["status"] == "pending_validation"
+    assert version_step["ready"] is False
+    assert report["readyForUnityWork"] is False
+    assert report["nextAction"]["id"] == "await_unity_editor_validation"
+    assert "2022.3" not in report["message"]
+    assert "copy" in report["message"]
+
+
 def test_dependencies_ready_require_explicit_unity_editor_activation() -> None:
     report = _report(unity=_unity(connected=False, registered=False, matched=None, tools=False))
 

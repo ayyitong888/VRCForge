@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 
 KNOW_YOURSELF_SCHEMA = "vrcforge.know_yourself.v1"
-SUPPORTED_UNITY_EDITOR_SERIES = ("2022.3",)
+VERIFIED_UNITY_EDITOR_SERIES = ("2022.3",)
 
 _CALLER_CONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar(
     "vrcforge_know_yourself_caller", default="internal_agent"
@@ -56,7 +56,7 @@ _PREPARATION_ACTIONS: dict[str, dict[str, Any]] = {
     "supported_editor_version": {
         "id": "use_supported_unity_editor",
         "kind": "user_configuration",
-        "instruction": "Open the project with a supported Unity 2022.3 LTS editor before continuing setup.",
+        "instruction": "Check the officially supported VRChat editor and SDK versions before continuing setup.",
         "approvalRequired": False,
     },
     "editor_plugin_present": {
@@ -159,6 +159,21 @@ def _provider_projection(report: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _preparation_action(step: Mapping[str, Any]) -> dict[str, Any]:
+    if step["id"] == "supported_editor_version" and step["status"] == "pending_validation":
+        return {
+            "id": "await_unity_editor_validation",
+            "kind": "user_configuration",
+            "instruction": (
+                "VRCForge compatibility with Unity 6 is pending validation. "
+                "When the official VRChat Unity 6 SDK public beta is available, "
+                "use a copy of the project for compatibility testing."
+            ),
+            "approvalRequired": False,
+        }
+    return _PREPARATION_ACTIONS[step["id"]]
+
+
 def _preparation_steps(
     report: Mapping[str, Any],
     project_context: Mapping[str, Any],
@@ -190,9 +205,16 @@ def _preparation_steps(
             project_ready = status == "ok"
             supported = project_ready and any(
                 editor_version == series or editor_version.startswith(f"{series}.")
-                for series in SUPPORTED_UNITY_EDITOR_SERIES
+                for series in VERIFIED_UNITY_EDITOR_SERIES
             )
-            version_status = "ok" if supported else "unknown" if not project_ready or not editor_version else "error"
+            if not project_ready or not editor_version or editor_version == "Unknown":
+                version_status = "unknown"
+            elif supported:
+                version_status = "ok"
+            elif re.fullmatch(r"6000\.\d+(?:\.\d+[abfp]\d+)?", editor_version):
+                version_status = "pending_validation"
+            else:
+                version_status = "error"
             steps.append(
                 {
                     "id": "supported_editor_version",
@@ -201,7 +223,7 @@ def _preparation_steps(
                     "status": version_status,
                     "ready": supported,
                     "editorVersion": editor_version,
-                    "supportedSeries": list(SUPPORTED_UNITY_EDITOR_SERIES),
+                    "supportedSeries": list(VERIFIED_UNITY_EDITOR_SERIES),
                 }
             )
     newtonsoft = checks.get("package.newtonsoft", {})
@@ -649,7 +671,7 @@ def _blocking_gap_projection(
                     "observedStatus": observed,
                     "reasonCode": f"{gap_id}_{observed}",
                     "evidenceStatus": "unavailable" if observed == "unknown" else "observed",
-                    "nextActionId": _PREPARATION_ACTIONS[gap_id]["id"],
+                    "nextActionId": _preparation_action(step)["id"],
                 }
             )
             continue
@@ -742,7 +764,7 @@ def _readiness_sequence(
         {
             **step,
             "reasonCode": None if step["ready"] else f"{step['id']}_{step['status']}",
-            "nextActionId": _PREPARATION_ACTIONS[step["id"]]["id"],
+            "nextActionId": _preparation_action(step)["id"],
         }
         for step in preparation
     ]
@@ -838,7 +860,7 @@ def _next_action(
 ) -> dict[str, Any]:
     for step in preparation:
         if not step["ready"]:
-            return {**_PREPARATION_ACTIONS[step["id"]], "blockedBy": step["id"]}
+            return {**_preparation_action(step), "blockedBy": step["id"]}
 
     selected_project_running = project_context.get("selectedProjectRunning")
     if selected_project_running is not True:
