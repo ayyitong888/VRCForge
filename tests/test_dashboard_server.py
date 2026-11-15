@@ -15527,6 +15527,82 @@ class DashboardServerTests(unittest.TestCase):
             self.assertNotIn(internal_dir, mock_popen.call_args.kwargs["env"]["PATH"])
             self.assertEqual([call.args[0] for call in mock_set_dll_directory.call_args_list], [None, internal_dir])
 
+    def test_editor_resolution_matches_project_version_and_rejects_stale_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "AvatarProject"
+            version_file = project / "ProjectSettings" / "ProjectVersion.txt"
+            version_file.parent.mkdir(parents=True)
+            old = root / "custom" / "Editor" / "Unity.exe"
+            new = root / "Unity" / "Hub" / "Editor" / "6000.0.67f1" / "Editor" / "Unity.exe"
+            for editor in (old, new):
+                editor.parent.mkdir(parents=True)
+                editor.touch()
+            versions = {old.resolve(): "2022.3.22f1", new.resolve(): "6000.0.67f1"}
+            resolve = dashboard_server.resolve_unity_editor_path_for_repair
+            with (
+                patch.dict(os.environ, {"ProgramFiles": str(root), "ProgramFiles(x86)": "", "LOCALAPPDATA": ""}),
+                patch.object(dashboard_server.DASHBOARD_STATE, "unity_editor_path", str(old)),
+                patch("dashboard_server.list_running_unity_processes", return_value=[]),
+                patch("dashboard_server.read_unity_editor_version", side_effect=versions.get),
+            ):
+                version_file.write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+                self.assertEqual(resolve(project), (old.resolve(), "settings"))
+                version_file.write_text("m_EditorVersion: 6000.0.67f1\n", encoding="utf-8")
+                self.assertEqual(resolve(project, str(old)), (new.resolve(), "unity-hub"))
+                new.unlink()
+                self.assertEqual(resolve(project), (None, "not-found"))
+
+    def test_project_launch_routes_use_the_matching_editor_over_stale_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "AvatarProject"
+            for folder in ("Assets", "Packages", "ProjectSettings"):
+                (project / folder).mkdir(parents=True)
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 6000.0.67f1\n", encoding="utf-8",
+            )
+            old = root / "old" / "Editor" / "Unity.exe"
+            new = root / "Unity" / "Hub" / "Editor" / "6000.0.67f1" / "Editor" / "Unity.exe"
+            for editor in (old, new):
+                editor.parent.mkdir(parents=True)
+                editor.touch()
+            versions = {old.resolve(): "2022.3.22f1", new.resolve(): "6000.0.67f1"}
+            with (
+                patch.dict(os.environ, {"ProgramFiles": str(root), "ProgramFiles(x86)": "", "LOCALAPPDATA": ""}),
+                patch.object(dashboard_server.DASHBOARD_STATE, "unity_editor_path", str(old)),
+                patch.object(dashboard_server.DASHBOARD_STATE, "selected_project_path", ""),
+                patch.object(dashboard_server.DASHBOARD_STATE, "unity_instance", ""),
+                patch.object(type(dashboard_server.PROJECT_SNAPSHOT_SELECTION), "persist_selected_project_path", return_value=str(project)),
+                patch("dashboard_server.list_running_unity_processes", return_value=[]),
+                patch("dashboard_server.read_unity_editor_version", side_effect=versions.get),
+                patch("dashboard_server.install_vrcforge_into_unity_project", return_value={"summary": "Installed"}),
+                patch("dashboard_server.launch_unity_subprocess") as launch,
+                TestClient(dashboard_server.app) as client,
+            ):
+                response = client.post("/api/projects/open", json={"projectPath": str(project)})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(Path(launch.call_args.args[0][0]), new.resolve())
+
+                install_args = {"projectPath": str(project), "launch_unity": True}
+                launch.reset_mock()
+                response = client.post("/api/projects/install", json=install_args)
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.json()["details"]["launchedUnity"])
+                self.assertEqual(Path(launch.call_args.args[0][0]), new.resolve())
+
+                new.unlink()
+                launch.reset_mock()
+                response = client.post("/api/projects/open", json={"projectPath": str(project)})
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("Unity Hub", response.json()["detail"])
+                launch.assert_not_called()
+
+                response = client.post("/api/projects/install", json=install_args)
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(response.json()["details"]["launchedUnity"])
+                launch.assert_not_called()
+
     def test_open_project_route_accepts_project_path_alias_and_uses_editor_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -15544,7 +15620,11 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.DASHBOARD_STATE.unity_editor_path = str(editor)
             try:
                 for payload in ({"projectPath": str(project)}, {"project_path": str(project)}):
-                    with patch("dashboard_server.subprocess.Popen") as mock_popen:
+                    with (
+                        patch("dashboard_server.subprocess.Popen") as mock_popen,
+                        patch("dashboard_server.read_unity_editor_version", return_value="2022.3.22f1"),
+                        patch("dashboard_server.list_running_unity_processes", return_value=[]),
+                    ):
                         with TestClient(dashboard_server.app) as client:
                             response = client.post("/api/projects/open", json=payload)
                     self.assertEqual(response.status_code, 200)

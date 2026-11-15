@@ -580,6 +580,7 @@ from session_store_integrity import (
     scan_session_stores,
 )
 from project_chat_store_read_service import inspect_project_chat_store
+from unity_editor_executable import read_unity_editor_version
 from shader_adapter_registry import (
     PRIMARY_AVATAR_ENCRYPTION_ADAPTER_IDS,
     normalize_shader_family_id,
@@ -11395,9 +11396,13 @@ async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
             Path(project_path),
             require_verified_source=bool(getattr(sys, "frozen", False)),
         )
-        if request.launch_unity and DASHBOARD_STATE.unity_editor_path:
-            launch_unity_subprocess([DASHBOARD_STATE.unity_editor_path, "-projectPath", project_path], Path(DASHBOARD_STATE.unity_editor_path), Path(project_path))
-            install_result["launchedUnity"] = True
+        if request.launch_unity:
+            editor_path, _ = await asyncio.to_thread(resolve_unity_editor_path_for_repair, Path(project_path))
+            install_result["launchedUnity"] = editor_path is not None
+            if editor_path is not None:
+                launch_unity_subprocess([str(editor_path), "-projectPath", project_path], editor_path, Path(project_path))
+            else:
+                install_result["unityLaunchMessage"] = "Open the project with its matching Unity editor using Unity Hub."
     except Exception as exc:  # noqa: BLE001
         await emit_log_async("error", "project", "Project installation failed.", {"projectPath": project_path, "error": str(exc)})
         raise runtime_http_error("workflow_request_failed", 500, exc) from exc
@@ -11419,11 +11424,11 @@ async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
     if live_connection is not None and live_connection.is_frozen():
         raise HTTPException(status_code=409, detail="Opening another project is blocked during the fixed live run.")
     project_path = resolve_target_project(request.project_path)
-    editor_path = DASHBOARD_STATE.unity_editor_path
-    if not editor_path or not Path(editor_path).exists():
+    editor_path, _ = await asyncio.to_thread(resolve_unity_editor_path_for_repair, Path(project_path))
+    if editor_path is None:
         raise HTTPException(
             status_code=400,
-            detail="Unity editor path is empty or does not exist. Update dashboard settings before opening a project.",
+            detail="No Unity editor matches this project's version. Open it in Unity Hub or configure the matching editor path.",
         )
 
     try:
@@ -11434,11 +11439,12 @@ async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Unable to persist the selected Unity project: {exc}") from exc
     DASHBOARD_STATE.unity_instance = Path(project_path).name
-    launch_unity_subprocess([editor_path, "-projectPath", project_path], Path(editor_path), Path(project_path))
+    editor_executable = str(editor_path)
+    launch_unity_subprocess([editor_executable, "-projectPath", project_path], editor_path, Path(project_path))
     payload = serialize_dashboard_state()
     await EVENT_BUS.broadcast("state", payload)
-    await emit_log_async("info", "project", "Opened Unity project.", {"projectPath": project_path, "unityEditorPath": editor_path})
-    return {"ok": True, "projectPath": project_path, "unityEditorPath": editor_path}
+    await emit_log_async("info", "project", "Opened Unity project.", {"projectPath": project_path, "unityEditorPath": editor_executable})
+    return {"ok": True, "projectPath": project_path, "unityEditorPath": editor_executable}
 
 
 @app.post("/api/unity/status")
@@ -19509,6 +19515,10 @@ def wait_for_unity_tools_ready(
 
 
 def resolve_unity_editor_path_for_repair(project_root: Path, requested_path: str = "") -> tuple[Path | None, str]:
+    editor_version = parse_editor_version(project_root / "ProjectSettings" / "ProjectVersion.txt")
+    if not editor_version or editor_version == "Unknown":
+        return None, "not-found"
+
     candidates: list[tuple[str, Path]] = []
     if requested_path.strip():
         candidates.append(("request", Path(requested_path.strip()).expanduser()))
@@ -19521,22 +19531,20 @@ def resolve_unity_editor_path_for_repair(project_root: Path, requested_path: str
         if executable and unity_process_exactly_matches_project(process, project_root):
             candidates.append(("running-unity-project", Path(executable)))
 
-    editor_version = parse_editor_version(project_root / "ProjectSettings" / "ProjectVersion.txt")
-    if editor_version and editor_version != "Unknown":
-        for base_value in [
-            os.environ.get("ProgramFiles", ""),
-            os.environ.get("ProgramFiles(x86)", ""),
-            os.environ.get("LOCALAPPDATA", ""),
-        ]:
-            if not base_value:
-                continue
-            base = Path(base_value)
-            candidates.extend(
-                [
-                    ("unity-hub", base / "Unity" / "Hub" / "Editor" / editor_version / "Editor" / "Unity.exe"),
-                    ("unity-hub", base / "Programs" / "Unity" / "Hub" / "Editor" / editor_version / "Editor" / "Unity.exe"),
-                ]
-            )
+    for base_value in [
+        os.environ.get("ProgramFiles", ""),
+        os.environ.get("ProgramFiles(x86)", ""),
+        os.environ.get("LOCALAPPDATA", ""),
+    ]:
+        if not base_value:
+            continue
+        base = Path(base_value)
+        candidates.extend(
+            [
+                ("unity-hub", base / "Unity" / "Hub" / "Editor" / editor_version / "Editor" / "Unity.exe"),
+                ("unity-hub", base / "Programs" / "Unity" / "Hub" / "Editor" / editor_version / "Editor" / "Unity.exe"),
+            ]
+        )
 
     seen: set[str] = set()
     for source, candidate in candidates:
@@ -19548,7 +19556,7 @@ def resolve_unity_editor_path_for_repair(project_root: Path, requested_path: str
         if key in seen:
             continue
         seen.add(key)
-        if resolved.exists():
+        if resolved.is_file() and read_unity_editor_version(resolved) == editor_version:
             return resolved, source
     return None, "not-found"
 
