@@ -46,6 +46,7 @@ import { ProtectionWorkspace } from "./components/protection/protection-workspac
 import { ComputerUseActivitySurface } from "./components/runtime/computer-use-activity-surface";
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
+import type { SettingsSearchSelection } from "./lib/settings-search";
 import { CheckpointQuotaNotice } from "./components/settings/checkpoint-quota-notice";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { TransientFailureToast } from "./components/ui/transient-failure-toast";
@@ -340,6 +341,7 @@ export default function App() {
   const [pendingApprovalPanelOpen, setPendingApprovalPanelOpen] = useState(false);
   const [approvalReveal, setApprovalReveal] = useState<{ chatId: string; approvalId: string } | null>(null);
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
+  const [settingsSearchSelection, setSettingsSearchSelection] = useState<SettingsSearchSelection | null>(null);
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
   const [developerOptionsEverEnabled, setDeveloperOptionsEverEnabled] = useState(false);
@@ -3287,6 +3289,7 @@ export default function App() {
   }
 
   function openSettingsSection(section: SettingsSection = "general") {
+    setSettingsSearchSelection(null);
     setActiveSettingsSection(section);
     if (activeView !== "settings") {
       void openSettings();
@@ -4252,6 +4255,10 @@ export default function App() {
           onOpenCheckpoints={() => void openCheckpoints()}
           onOpenSettings={() => openSettingsSection("general")}
           onOpenSettingsSection={openSettingsSection}
+          onSelectSettingsSearchResult={(entry) => {
+            openSettingsSection(entry.section);
+            setSettingsSearchSelection((previous) => ({ entry, requestId: (previous?.requestId || 0) + 1 }));
+          }}
           onBackFromSettings={returnFromOnboardingSettings}
           onRefreshProjects={() => void refreshProjectList()}
           onSelectProject={newConversationForProject}
@@ -4473,6 +4480,7 @@ export default function App() {
           ) : activeView === "settings" ? (
             <SettingsWorkspace
               activeSection={activeSettingsSection}
+              searchSelection={settingsSearchSelection}
               endpoint={endpoint}
               developerOptionsEnabled={developerOptionsEnabled}
               developerOptionsEverEnabled={developerOptionsEverEnabled}

@@ -487,7 +487,7 @@ export function Composer({
                 <X className="h-3.5 w-3.5" />
               </button>
             ) : null}
-            <div className={cn("relative", questionPromptVisible && "col-start-5 row-start-1")}>
+            <div className={questionPromptVisible ? "static col-start-5 row-start-1" : "relative"}>
               <button
                 type="button"
                 className={cn(
@@ -505,7 +505,7 @@ export function Composer({
               </button>
               {modeMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setModeMenuOpen(false)} /> : null}
               {modeMenuOpen ? (
-                <div className="absolute bottom-10 left-0 z-30 w-72 rounded-lg border border-border bg-card p-1.5 shadow-panel">
+                <div className={cn("absolute bottom-10 z-30 w-72 rounded-lg border border-border bg-card p-1.5 shadow-panel", questionPromptVisible ? "right-0" : "left-0")}>
                   {EXECUTION_MODES.map((mode) => {
                     const modeVisual = permissionVisualState(undefined, mode.value);
                     return (
@@ -588,7 +588,7 @@ export function Composer({
               "flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1",
               questionPromptVisible ? "col-start-4 row-start-1 max-w-[min(28vw,16rem)] flex-nowrap whitespace-nowrap" : "col-span-2 col-start-1 row-start-2 xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:flex-nowrap xl:whitespace-nowrap",
             )}>
-              <span className="min-w-0 break-words text-sm text-muted-foreground" title={providerModelLabel} aria-label={providerModelLabel}>
+              <span className="min-w-0 truncate text-sm text-muted-foreground" title={providerModelLabel} aria-label={providerModelLabel}>
                 {providerModelLabel}
               </span>
               {providerReasoningEndpoint && onProviderReasoningActivated ? (

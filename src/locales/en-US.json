@@ -330,6 +330,17 @@
     "desktopActionRecorded": "{{action}} recorded ({{status}})."
   },
   "settings": {
+    "telegramBotToken": "Bot token",
+    "telegramOwnerId": "Owner Telegram user ID",
+    "telegramProjects": "Allowed project paths (optional; one exact absolute path per line)",
+    "telegramConnection": "Telegram connection",
+    "telegramProxy": "Proxy address",
+    "searchPlaceholder": "Search settings",
+    "searchClear": "Clear search",
+    "searchResults": "Search results",
+    "searchCount": "{{count}} settings found",
+    "searchEmpty": "No matching settings",
+    "searchTelegramDescription": "Telegram bot token, owner user ID, allowed projects, connection and proxy address.",
     "title": "Settings",
     "subtitle": "Configure permission mode, model provider, and global custom instructions.",
     "permissionMode": "Permission Mode",

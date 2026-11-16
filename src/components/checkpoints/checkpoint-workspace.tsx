@@ -9,6 +9,10 @@ import { OutputBlock } from "../ui/output-block";
 
 export type AdjustmentCheckpointPreview = AgentCheckpointPreview & { adjustmentCheckpoint?: AdjustmentCheckpoint };
 
+const CHECKPOINT_WORKSPACE_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 26rem), 1fr))",
+};
+
 export function CheckpointWorkspace({
   checkpoints,
   interruptedRecoveries,
@@ -79,8 +83,8 @@ export function CheckpointWorkspace({
   const adjustmentChangedFiles = adjustmentPreview?.changedFiles || [];
   const adjustmentWorkingTreeStatus = adjustmentPreview?.workingTreeStatus || [];
   return (
-    <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
-      <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
+    <div className="min-h-0 min-w-0 flex-1 overflow-auto px-6 py-8">
+      <div className="mx-auto grid max-w-6xl items-start gap-6" style={CHECKPOINT_WORKSPACE_GRID}>
         <div className="grid min-w-0 gap-6">
           {interruptedRecoveries.length > 0 || recoveryPreview ? <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-4 flex items-center gap-2">

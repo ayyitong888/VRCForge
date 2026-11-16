@@ -330,6 +330,17 @@
     "desktopActionRecorded": "{{action}} 已記錄：{{status}}。"
   },
   "settings": {
+    "telegramBotToken": "機器人 Token",
+    "telegramOwnerId": "擁有者 Telegram 數字使用者 ID",
+    "telegramProjects": "允許存取的專案路徑（可選，每行一個完整絕對路徑）",
+    "telegramConnection": "Telegram 連線方式",
+    "telegramProxy": "代理位址",
+    "searchPlaceholder": "搜尋設定",
+    "searchClear": "清除搜尋",
+    "searchResults": "搜尋結果",
+    "searchCount": "找到 {{count}} 項設定",
+    "searchEmpty": "找不到相關設定",
+    "searchTelegramDescription": "Telegram 機器人 Token、擁有者使用者 ID、授權專案、連線方式和代理位址。",
     "title": "設定",
     "subtitle": "配置權限模式、模型供應商與全域自訂指令。",
     "permissionMode": "權限模式",

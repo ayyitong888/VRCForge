@@ -2,6 +2,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, Copy, Download, Loader2, Refr
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChatRecoveryMarker, DoctorCheck, DoctorFixMode, DoctorFixResult, DoctorReport, DoctorSkillTriageRow } from "../../lib/api";
+import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
@@ -73,28 +74,36 @@ export function DoctorWorkspace({
             <DoctorSummaryTile label={t("doctor.error")} value={summary?.errorCount ?? 0} tone="danger" />
             <DoctorSummaryTile label={t("doctor.unknown")} value={summary?.unknownCount ?? 0} tone="muted" />
           </div>
-          <div className="mt-5 flex flex-wrap justify-end gap-2">
+          <div className="mt-5 space-y-3">
             {message ? (
-              <Badge tone={messageTone} className="mr-auto shrink-0">
+              <p
+                role="status"
+                className={cn(
+                  "min-w-0 whitespace-pre-wrap break-words text-sm leading-6 [overflow-wrap:anywhere]",
+                  messageTone === "danger" ? "text-destructive" : messageTone === "warn" ? "text-amber-800 dark:text-amber-300" : "text-emerald-700 dark:text-emerald-300",
+                )}
+              >
                 {message}
-              </Badge>
+              </p>
             ) : null}
-            <Button type="button" variant="outline" onClick={onOpenSettings}>
-              <Settings className="h-4 w-4" />
-              {t("doctor.settings")}
-            </Button>
-            <Button type="button" variant="outline" onClick={onExportSupportBundle} disabled={exportingSupportBundle}>
-              {exportingSupportBundle ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              {t("doctor.supportBundle")}
-            </Button>
-            <Button type="button" variant="outline" onClick={onCopy} disabled={!report}>
-              <Copy className="h-4 w-4" />
-              {t("connector.copy")}
-            </Button>
-            <Button type="button" onClick={onRefresh} disabled={loading}>
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              {t("doctor.retry")}
-            </Button>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button type="button" variant="outline" onClick={onOpenSettings}>
+                <Settings className="h-4 w-4" />
+                {t("doctor.settings")}
+              </Button>
+              <Button type="button" variant="outline" onClick={onExportSupportBundle} disabled={exportingSupportBundle}>
+                {exportingSupportBundle ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                {t("doctor.supportBundle")}
+              </Button>
+              <Button type="button" variant="outline" onClick={onCopy} disabled={!report}>
+                <Copy className="h-4 w-4" />
+                {t("connector.copy")}
+              </Button>
+              <Button type="button" onClick={onRefresh} disabled={loading}>
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                {t("doctor.retry")}
+              </Button>
+            </div>
           </div>
         </section>
 

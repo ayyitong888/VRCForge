@@ -330,6 +330,17 @@
     "desktopActionRecorded": "{{action}} を記録しました: {{status}}。"
   },
   "settings": {
+    "telegramBotToken": "ボットトークン",
+    "telegramOwnerId": "所有者の Telegram ユーザー ID",
+    "telegramProjects": "アクセスを許可するプロジェクトパス（任意、1 行につき 1 つの絶対パス）",
+    "telegramConnection": "Telegram 接続方法",
+    "telegramProxy": "プロキシアドレス",
+    "searchPlaceholder": "設定を検索",
+    "searchClear": "検索をクリア",
+    "searchResults": "検索結果",
+    "searchCount": "{{count}} 件の設定が見つかりました",
+    "searchEmpty": "一致する設定はありません",
+    "searchTelegramDescription": "Telegram ボットトークン、所有者ユーザー ID、許可するプロジェクト、接続方法とプロキシアドレス。",
     "title": "設定",
     "subtitle": "権限モード、モデルプロバイダ、グローバルカスタム指示を設定します。",
     "permissionMode": "権限モード",

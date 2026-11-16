@@ -330,6 +330,17 @@
     "desktopActionRecorded": "{{action}} 已记录：{{status}}。"
   },
   "settings": {
+    "telegramBotToken": "机器人 Token",
+    "telegramOwnerId": "所有者 Telegram 数字用户 ID",
+    "telegramProjects": "允许访问的项目路径（可选，每行一个完整绝对路径）",
+    "telegramConnection": "Telegram 连接方式",
+    "telegramProxy": "代理地址",
+    "searchPlaceholder": "搜索设置",
+    "searchClear": "清除搜索",
+    "searchResults": "搜索结果",
+    "searchCount": "找到 {{count}} 项设置",
+    "searchEmpty": "没有找到相关设置",
+    "searchTelegramDescription": "Telegram 机器人 Token、所有者用户 ID、授权项目、连接方式和代理地址。",
     "title": "设置",
     "subtitle": "配置权限模式、模型供应商与全局自定义指令。",
     "permissionMode": "权限模式",
