@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
+import jsonPatch from "fast-json-patch";
 
 const { chromium } = createRequire(import.meta.url)(
   process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright",
@@ -68,37 +69,42 @@ createRoot(document.getElementById("root")).render(<Harness />);
   }],
 });
 
-let chats = [{
+let chat = {
   id: "chat-fixture", sessionId: "session-fixture", title: "start", projectPath: "", projectType: "general",
   revision: 0, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", items: [],
-}];
+};
 let postCount = 0;
 const persistedTitles = [];
 let releaseFirstPost;
 let firstPostHeld;
 const firstPostStarted = new Promise((resolve) => { firstPostHeld = resolve; });
-const digest = () => Object.fromEntries(chats.map((chat) => [
-  chat.id,
-  createHash("sha256").update(JSON.stringify(chat)).digest("hex"),
-]));
+const digest = () => createHash("sha256").update(JSON.stringify(chat)).digest("hex");
+const source = () => ({ storeId: "chat.app", scope: "app", exists: true, digest: digest(), status: "ok" });
 const shapeOf = (value) => value && typeof value === "object" && !Array.isArray(value)
   ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "items").map(([key, child]) => [key, shapeOf(child)]))
   : true;
 const server = createServer(async (request, response) => {
+  const url = new URL(request.url, "http://127.0.0.1");
   if (request.url === "/fixture.js") {
     response.setHeader("Content-Type", "text/javascript");
     response.end(bundle.outputFiles[0].text);
     return;
   }
-  if (request.url?.startsWith("/api/app/chats") && request.method === "GET") {
+  if (url.pathname === "/api/app/chats" && request.method === "GET") {
+    const { items, ...metadata } = chat;
+    const catalog = url.searchParams.get("catalog") === "1";
+    assert.ok(catalog || (url.searchParams.get("chatId") === chat.id && url.searchParams.get("full") === "1"));
     response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({
-      ok: true, chats, count: chats.length, sources: [], recoveries: [], writeBlocked: false,
-      chatDigests: digest(), chatMetadataShapes: Object.fromEntries(chats.map((chat) => [chat.id, shapeOf(chat)])),
+    response.end(JSON.stringify(catalog ? {
+      ok: true, entries: [{ ...metadata, sourceProjectPath: "", sourceStoreId: source().storeId }],
+      sources: [source()], recoveries: [], writeBlocked: false, pendingChatIds: [],
+    } : {
+      ok: true, chats: [chat], sourceRevision: source(), hasOlder: false, nextBefore: null,
+      chatDigests: { [chat.id]: digest() }, chatMetadataShapes: { [chat.id]: shapeOf(chat) },
     }));
     return;
   }
-  if (request.url === "/api/app/chats" && request.method === "POST") {
+  if (url.pathname === "/api/app/chats/single" && request.method === "POST") {
     let raw = "";
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
@@ -107,12 +113,15 @@ const server = createServer(async (request, response) => {
       firstPostHeld();
       await new Promise((resolve) => { releaseFirstPost = resolve; });
     }
-    chats = body.chats;
-    persistedTitles.push(chats[0]?.title);
+    assert.equal(body.chatId, chat.id);
+    assert.deepEqual(body.sourceRevisions, [source()]);
+    assert.equal(body.chatPatch.baseDigest, digest());
+    chat = jsonPatch.applyPatch(chat, body.chatPatch.metadataPatch, true, false).newDocument;
+    persistedTitles.push(chat.title);
     response.setHeader("Content-Type", "application/json");
     response.end(JSON.stringify({
-      ok: true, sourceRevisions: [], chatDigests: digest(),
-      chatMetadataShapes: Object.fromEntries(chats.map((chat) => [chat.id, shapeOf(chat)])),
+      ok: true, sourceRevisions: [source()], chatDigests: { [chat.id]: digest() },
+      chatMetadataShapes: { [chat.id]: shapeOf(chat) },
     }));
     return;
   }
@@ -129,7 +138,8 @@ try {
   await page.addInitScript(() => localStorage.setItem("vrcforge_developer_options_enabled", "true"));
   await page.route("**/*", (route) => route.request().url().startsWith(origin) ? route.continue() : route.abort());
   await page.goto(origin);
-  await page.waitForFunction(() => window.sessions?.chats.length === 1);
+  await page.waitForFunction(() => window.sessions?.chatStorageReady);
+  await page.evaluate(() => window.sessions.loadChat("chat-fixture"));
   await page.evaluate(() => window.sessions.updateChat("chat-fixture", (chat) => ({ ...chat, title: "v1" })));
   await firstPostStarted;
   for (let index = 2; index <= 5; index += 1) {
@@ -150,13 +160,13 @@ try {
   assert.equal(await page.evaluate(() => window.barrierSettled), false, "explicit persistence remains pending behind the active write");
   releaseFirstPost();
   await page.waitForFunction(() => window.barrierSettled === true);
-  assert.ok(postCount >= 2 && postCount <= 3, "the explicit barrier resolves only after its queued write reaches storage");
+  assert.equal(postCount, 2, "the explicit barrier resolves only after its queued write reaches storage");
   assert.deepEqual(persistedTitles.slice(0, 2), ["v1", "v5"], "the barrier persisted every mutation made before it was requested");
   await page.waitForFunction(() => window.__storageTrace.filter((event) => event.kind === "save" && event.stage === "resolved").length >= 3);
   await page.waitForTimeout(150);
-  assert.equal(postCount, 3, "the explicit barrier and the pending autosave each retain their own write operation");
-  assert.deepEqual(persistedTitles, ["v1", "v5", "v5"], "the trailing autosave remains current after the explicit barrier");
-  assert.equal(chats[0].title, "v5", "the coalesced write contains the newest chat snapshot");
+  assert.equal(postCount, 2, "the trailing autosave resolves without sending a patch already persisted by the barrier");
+  assert.deepEqual(persistedTitles, ["v1", "v5"], "the coalesced save persists the newest chat revision exactly once");
+  assert.equal(chat.title, "v5", "the coalesced write contains the newest chat snapshot");
   await page.waitForTimeout(1000);
   await page.evaluate(() => window.sessions.persistChatsNow());
   await page.waitForTimeout(200);

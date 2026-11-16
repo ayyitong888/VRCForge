@@ -722,6 +722,66 @@ def test_list_runs_append_reads_only_new_bytes_and_filters_unrelated_approvals(t
     assert sum(size for _, size in reads) == ledger.log_path.stat().st_size - offset
 
 
+def test_startup_index_skips_legacy_row_outside_json_decoder_limits(tmp_path: Path) -> None:
+    ledger, _ = make_ledger(tmp_path)
+    ledger.log_path.parent.mkdir(parents=True)
+    ledger.log_path.write_text('{"legacyValue":' + '9' * 5000 + '}\n', encoding="utf-8")
+    ledger.append({"event": "probe", "sessionId": "target"})
+
+    assert ledger.recover_interrupted_runs() == 0
+    assert [row["event"] for row in ledger.list_runs(session_id="target")["events"]] == ["probe"]
+
+
+def test_startup_index_reads_scoped_rows_and_late_approval_links(tmp_path: Path, monkeypatch) -> None:
+    ledger, _ = make_ledger(tmp_path)
+    ledger.append({"event": "approval_applied", "approvalId": "approval-old", "status": "completed"})
+    ledger.append({"event": "runtime_turn_started", "sessionId": "target", "clientTurnId": "c", "turnId": "t"})
+    ledger.append({"event": "noise", "sessionId": "other", "payload": "x" * 300_000})
+    ledger.recover_interrupted_runs()
+    plain, _ = make_ledger(tmp_path)
+    expected = plain.list_runs(session_id="target")
+    opened_path = ledger.log_path
+    original_open = Path.open
+    bytes_read = 0
+
+    class MeasuredFile:
+        def __init__(self, file):
+            self.file = file
+
+        def __getattr__(self, name):
+            return getattr(self.file, name)
+
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+
+        def read(self, *args):
+            nonlocal bytes_read
+            data = self.file.read(*args)
+            bytes_read += len(data)
+            return data
+
+    def measure_open(path, *args, **kwargs):
+        file = original_open(path, *args, **kwargs)
+        return MeasuredFile(file) if path == opened_path and args == ("rb",) else file
+
+    monkeypatch.setattr(Path, "open", measure_open)
+    assert ledger.list_runs(session_id="target") == expected
+    assert bytes_read < 4_096
+
+    ledger.append({"event": "approval_requested", "sessionId": "target", "approvalId": "approval-old"})
+    assert ledger.list_runs(session_id="target") == plain.list_runs(session_id="target")
+    assert any(event["event"] == "approval_applied" for event in ledger.list_runs(session_id="target")["events"])
+
+    replacement = opened_path.with_suffix(".replacement")
+    replacement.write_text('{"event":"replacement","sessionId":"target"}\n', encoding="utf-8")
+    replacement.replace(opened_path)
+    assert [event["event"] for event in ledger.list_runs(session_id="target")["events"]] == ["replacement"]
+
+
 def test_list_runs_keeps_session_wide_approval_ids_across_client_queries(tmp_path: Path) -> None:
     ledger, _lock = make_ledger(tmp_path)
     ledger.append({"event": "runtime_turn_completed", "status": "completed",

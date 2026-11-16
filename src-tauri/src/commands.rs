@@ -529,6 +529,11 @@ pub(crate) struct DesktopAgentListRequest {
 pub(crate) struct DesktopChatListRequest {
     project_paths: Option<Vec<String>>,
     known_chat_digests: Option<std::collections::BTreeMap<String, String>>,
+    catalog: Option<bool>,
+    chat_id: Option<String>,
+    chat_project_path: Option<String>,
+    before: Option<String>,
+    full: Option<bool>,
     timeout_ms: Option<u64>,
 }
 
@@ -3540,8 +3545,10 @@ pub async fn save_agent_notes(request: DesktopJsonBodyRequest) -> Result<serde_j
 }
 
 #[tauri::command]
-pub async fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::Value, String> {
-    blocking_backend_json_request(move || {
+pub async fn fetch_chats(
+    request: DesktopChatListRequest,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
+    blocking_backend_json_request_with_error_envelope(move || {
         let mut query = Vec::new();
         for project_path in request.project_paths.unwrap_or_default() {
             if !project_path.trim().is_empty() {
@@ -3552,23 +3559,52 @@ pub async fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::
             }
         }
         if let Some(known) = request.known_chat_digests {
-            let encoded = serde_json::to_string(&known).map_err(|error| error.to_string())?;
+            let encoded = serde_json::to_string(&known)
+                .map_err(|error| BackendJsonErrorEnvelope::transport(error.to_string()))?;
             if encoded.len() > 65536 {
-                return Err("known chat digests exceed the request limit".to_string());
+                return Err(BackendJsonErrorEnvelope::transport(
+                    "known chat digests exceed the request limit",
+                ));
             }
-            query.push(format!("knownChatDigests={}", percent_encode_query_component(&encoded)));
+            query.push(format!(
+                "knownChatDigests={}",
+                percent_encode_query_component(&encoded)
+            ));
+        }
+        if request.catalog == Some(true) {
+            query.push("catalog=1".to_string());
+        }
+        for (key, value) in [
+            ("chatId", request.chat_id),
+            ("chatProjectPath", request.chat_project_path),
+            ("before", request.before),
+        ] {
+            if let Some(value) = value {
+                query.push(format!(
+                    "{key}={}",
+                    percent_encode_query_component(&value)
+                ));
+            }
+        }
+        if request.full == Some(true) {
+            query.push("full=1".to_string());
         }
         let timeout = bounded_backend_request_timeout(request.timeout_ms, 60_000);
         let deadline = Instant::now()
             .checked_add(timeout)
-            .ok_or_else(|| "chat snapshot timeout is invalid".to_string())?;
+            .ok_or_else(|| {
+                BackendJsonErrorEnvelope::transport("chat snapshot timeout is invalid")
+            })?;
+        let timed_out = || BackendJsonErrorEnvelope::transport("chat snapshot request timed out");
         let mut assembler = ChatSnapshotAssembler::new();
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining < Duration::from_secs(1) {
-                return Err("chat snapshot request timed out".to_string());
+                return Err(timed_out());
             }
-            let (offset, digest) = assembler.next_request()?;
+            let (offset, digest) = assembler
+                .next_request()
+                .map_err(BackendJsonErrorEnvelope::transport)?;
             let mut page_query = query.clone();
             page_query.push("snapshotPage=1".to_string());
             page_query.push(format!("textOffset={offset}"));
@@ -3578,24 +3614,28 @@ pub async fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::
                     percent_encode_query_component(&digest)
                 ));
             }
-            let response = backend_json_request(
+            let response = backend_json_request_with_error_envelope(
                 "GET",
                 format!("/api/app/chats?{}", page_query.join("&")),
                 None,
                 Some(remaining.as_millis().max(1) as u64),
             )?;
             if Instant::now() >= deadline {
-                return Err("chat snapshot request timed out".to_string());
+                return Err(timed_out());
             }
-            let page: ChatSnapshotPage = serde_json::from_value(response)
-                .map_err(|error| format!("chat snapshot page is invalid: {error}"))?;
-            if assembler.append_page(page)? {
+            let page: ChatSnapshotPage = serde_json::from_value(response).map_err(|error| {
+                BackendJsonErrorEnvelope::transport(format!("chat snapshot page is invalid: {error}"))
+            })?;
+            if assembler
+                .append_page(page)
+                .map_err(BackendJsonErrorEnvelope::transport)?
+            {
                 break;
             }
         }
-        let chats = assembler.finish()?;
+        let chats = assembler.finish().map_err(BackendJsonErrorEnvelope::transport)?;
         if Instant::now() >= deadline {
-            return Err("chat snapshot request timed out".to_string());
+            return Err(timed_out());
         }
         Ok(sanitize_chat_snapshot_response(chats))
     })
@@ -3610,6 +3650,22 @@ pub async fn save_chats(
         backend_json_request_with_error_envelope(
             "POST",
             "/api/app/chats".to_string(),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn save_chat_record(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
+    blocking_backend_json_request_with_error_envelope(move || {
+        backend_json_request_with_error_envelope(
+            "POST",
+            "/api/app/chats/single".to_string(),
             Some(request.body),
             request.timeout_ms.or(Some(60_000)),
         )

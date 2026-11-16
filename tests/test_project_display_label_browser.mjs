@@ -28,12 +28,19 @@ const bundle = await build({
         {name:"VRCForge",path:"C:/fixture/right/VRCForge",projectType:"unity",sources:["fixture"]},
       ];
       const noop = () => {};
+      window.projectIndexRequests = 0;
+      const request = window.fetch.bind(window);
+      window.fetch = (url, options) => {
+        if (new URL(url, location.origin).pathname === "/api/app/project-index/scan") {
+          window.projectIndexRequests += 1;
+        }
+        return request(url, options);
+      };
       function Fixture(){
         const management = useProjectManagement({
           endpoint: location.origin,
-          runtimeConnected: false,
+          runtimeConnected: true,
           activeProjectPath: projects[0].path,
-          activeProjectType: "unity",
           projects,
           refresh: async () => {},
           refreshProjects: async () => {},
@@ -43,7 +50,7 @@ const bundle = await build({
           onActiveProjectHidden: noop,
         });
         const [activeChat, setActiveChat] = React.useState("a");
-        return <main style={{ width: 190 }}>{management.projectItems.map((project) =>
+        return <main style={{ width: 190 }} data-project-prefs-ready={management.projectPrefsReady}>{management.projectItems.map((project) =>
           <div data-testid={project.path.includes("left") ? "left" : "right"} key={project.path}>
             <span data-legacy-label>{management.projectDisplayLabel(project)}</span>
             <SidebarProject name={management.projectDisplayName(project)} detail={management.projectDisplayDetail(project)}
@@ -82,6 +89,16 @@ const server = createServer((request, response) => {
     response.end('<div id="root"></div><script src="/fixture.js"></script>');
     return;
   }
+  if (request.url === "/api/app/projects/prefs") {
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ ok: true, customPaths: [], customProjects: [], hiddenPaths: [] }));
+    return;
+  }
+  if (request.url === "/api/app/project-index/scan") {
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ ok: true, schema: "vrcforge.project_memory_index.v1" }));
+    return;
+  }
   response.statusCode = 404;
   response.end();
 });
@@ -91,6 +108,7 @@ try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   browser = await chromium.launch({ headless: true, channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge" });
   const page = await browser.newPage();
+  await page.clock.install();
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.getByTestId("left").waitFor({ timeout: 3000 });
   const left = await page.getByTestId("left").locator("[data-legacy-label]").innerText();
@@ -110,6 +128,10 @@ try {
   await page.getByRole("button", { name: "B", exact: true }).click();
   assert.equal(await page.locator('[aria-current="page"]').innerText(), "B");
   console.log("same-name sidebar projects remain distinct and expose the current conversation");
+  await page.locator('main[data-project-prefs-ready="true"]').waitFor({ timeout: 3000 });
+  await page.clock.runFor(1500);
+  assert.equal(await page.evaluate(() => window.projectIndexRequests), 0, "opening the project list must not start an unused project index scan");
+  console.log("PASS project labels stay distinct and connecting does not start an unused project index scan");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

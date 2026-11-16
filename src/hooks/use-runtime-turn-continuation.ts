@@ -338,6 +338,8 @@ export function useQuestionContinuationActivity({
 
 type UseRuntimeTurnContinuationParams = {
   chats: ChatThread[];
+  catalogChats?: ChatThread[];
+  loadChat?: (chatId: string) => Promise<ChatThread | undefined>;
   appendToChat: (chatId: string, item: ConversationItem) => void;
   updateChat?: (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean;
   onContinuation?: (event: RuntimeTurnEvent, owner: ChatThread) => void;
@@ -429,23 +431,29 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
 
 export function useRuntimeTurnContinuationDelivery({
   chats,
+  catalogChats,
+  loadChat,
   appendToChat,
   updateChat,
   onContinuation,
 }: UseRuntimeTurnContinuationParams) {
   const chatsRef = useRef(chats);
+  const catalogRef = useRef(catalogChats);
+  const loadChatRef = useRef(loadChat);
   const appendToChatRef = useRef(appendToChat);
   const updateChatRef = useRef(updateChat);
   const pendingRef = useRef(new Map<string, RuntimeTurnEvent>());
   const deliveredRef = useRef(new Set<string>());
   const deliveredOrderRef = useRef<string[]>([]);
   chatsRef.current = chats;
+  catalogRef.current = catalogChats;
+  loadChatRef.current = loadChat;
   appendToChatRef.current = appendToChat;
   updateChatRef.current = updateChat;
   const onContinuationRef = useRef(onContinuation);
   onContinuationRef.current = onContinuation;
 
-  const deliver = useCallback((value: unknown): boolean => {
+  const deliver = useCallback((value: unknown, loadLiveOwner = false): boolean => {
     const event = runtimeTurnEvent(value);
     if (!event) {
       return false;
@@ -460,12 +468,14 @@ export function useRuntimeTurnContinuationDelivery({
       return true;
     }
     const candidates = chatsRef.current.filter((chat) => chat.sessionId === event.sessionId);
+    const unloaded = (catalogRef.current || []).filter((chat) => chat.sessionId === event.sessionId
+      && !candidates.some((loaded) => loaded.id === chat.id));
     const exactOwners = candidates.filter((chat) => chat.items.some((item) =>
       (item.type === "user" || item.type === "streaming") && item.clientTurnId === event.clientTurnId));
     const questionId = event.continuationSource === "question_answered"
       ? event.clientTurnId?.match(/:question:([^:]+)(?::feedback:[1-9]\d*)?$/)?.[1]
       : undefined;
-    const ownerChat = questionId
+    const ownerChat = unloaded.length ? undefined : questionId
       ? questionContinuationOwner(candidates, {
         questionId, sessionId: event.sessionId,
         runtimeContinuation: { questionId, sessionId: event.sessionId, clientTurnId: event.clientTurnId },
@@ -479,6 +489,10 @@ export function useRuntimeTurnContinuationDelivery({
           break;
         }
         pendingRef.current.delete(oldest);
+      }
+      if (loadLiveOwner) {
+        const hydrate = loadChatRef.current;
+        if (hydrate) void Promise.allSettled(unloaded.map((chat) => hydrate(chat.id)));
       }
       return false;
     }
@@ -572,7 +586,7 @@ export function useRuntimeTurnContinuationDelivery({
     for (const event of [...pendingRef.current.values()]) {
       deliver(event);
     }
-  }, [chats, deliver]);
+  }, [catalogChats, chats, deliver]);
 
   return deliver;
 }

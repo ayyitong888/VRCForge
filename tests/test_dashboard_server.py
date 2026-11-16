@@ -612,6 +612,15 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertIn("unityStatus", message["payload"])
                 self.assertNotIn("api_key", json.dumps(message["payload"]).lower())
 
+    def test_desktop_websocket_hello_does_not_build_full_health(self) -> None:
+        with patch.object(dashboard_server, "build_dashboard_socket_payload", return_value={"health": {}}) as build_payload:
+            with TestClient(dashboard_server.app) as client:
+                with client.websocket_connect("/ws", headers={"Origin": "tauri://localhost"}) as websocket:
+                    message = websocket.receive_json()
+                    self.assertEqual(message["type"], "hello")
+                    self.assertEqual(message["payload"], {})
+            build_payload.assert_not_called()
+
     def test_websocket_uses_header_or_cookie_instead_of_query_token(self) -> None:
         original_required = dashboard_server.APP_AUTH_REQUIRED
         original_token = dashboard_server.APP_SESSION_TOKEN

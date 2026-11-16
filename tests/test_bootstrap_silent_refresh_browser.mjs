@@ -115,4 +115,43 @@ foregroundRace.calls[2].item.resolve({ id: 'latest-after-foreground', health: { 
 await latestSilent;
 assert.deepEqual(foregroundRace.applied.map((item) => item.id), ['foreground', 'latest-after-foreground']);
 
+let runBoundaryEffect;
+const findRunBoundaryEffect = (node) => {
+  if (ts.isCallExpression(node) && node.expression.getText(sourceFile) === 'useEffect') {
+    const dependencies = node.arguments[1];
+    if (dependencies && ts.isArrayLiteralExpression(dependencies)
+      && dependencies.elements.some((item) => item.getText(sourceFile) === 'chatRunSending')) {
+      runBoundaryEffect = node.arguments[0].getText(sourceFile);
+    }
+  }
+  if (!runBoundaryEffect) ts.forEachChild(node, findRunBoundaryEffect);
+};
+findRunBoundaryEffect(sourceFile);
+assert.ok(runBoundaryEffect, 'App must refresh the configuration lease at chat run boundaries');
+const previousChatRunSendingRef = { current: null };
+const boundaryRefreshes = [];
+const runBoundary = new Function(
+  'chatRunSending', 'runtimeConnected', 'endpoint', 'previousChatRunSendingRef', 'refreshSilently',
+  `(${runBoundaryEffect})();`,
+);
+const renderBoundary = (sending, connected, endpoint = 'endpoint-A') => runBoundary(
+  sending, connected, endpoint, previousChatRunSendingRef, () => boundaryRefreshes.push(endpoint),
+);
+renderBoundary(false, false);
+renderBoundary(false, true);
+assert.deepEqual(boundaryRefreshes, [], 'accepting the initial bootstrap must not fetch a second one');
+renderBoundary(true, true);
+renderBoundary(false, true);
+assert.deepEqual(boundaryRefreshes, ['endpoint-A', 'endpoint-A'], 'send and terminal boundaries refresh the lease');
+renderBoundary(false, false);
+renderBoundary(false, true, 'endpoint-B');
+assert.equal(boundaryRefreshes.length, 2, 'reconnect bootstrap already carries the current lease');
+renderBoundary(true, true, 'endpoint-B');
+assert.equal(boundaryRefreshes.at(-1), 'endpoint-B', 'the next run uses the reconnected endpoint');
+renderBoundary(true, false, 'endpoint-B');
+renderBoundary(true, true, 'endpoint-B');
+assert.equal(boundaryRefreshes.length, 4, 'reconnecting with an active run still checks its configuration lease');
+renderBoundary(true, true, 'endpoint-C');
+assert.equal(boundaryRefreshes.at(-1), 'endpoint-C', 'an endpoint change with an active run refreshes the new lease');
+
 console.log(JSON.stringify({ status: 'passed', coalescedCalls: h.calls.length, staleSessionSuppressed: true }));

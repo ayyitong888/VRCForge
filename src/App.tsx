@@ -44,6 +44,7 @@ import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { ComputerUseActivitySurface } from "./components/runtime/computer-use-activity-surface";
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
+import type { SettingsSearchSelection } from "./lib/settings-search";
 import { CheckpointQuotaNotice } from "./components/settings/checkpoint-quota-notice";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { TransientFailureToast } from "./components/ui/transient-failure-toast";
@@ -58,9 +59,8 @@ import {
   resolveOnboardingLaunchState,
 } from "./components/onboarding/onboarding-language-gate-state";
 import { OutfitImportPanel } from "./components/project/outfit-import-panel";
-import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
-import type { ProjectType } from "./lib/chat-types";
+import type { ChatThread, ProjectType } from "./lib/chat-types";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { VskOpenDialog } from "./components/skills/vsk-open-dialog";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
@@ -338,6 +338,7 @@ export default function App() {
   const [approvalReveal, setApprovalReveal] = useState<{ chatId: string; approvalId: string } | null>(null);
   const [reviewQuestionReveal, setReviewQuestionReveal] = useState<{ chatId: string; questionId: string } | null>(null);
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
+  const [settingsSearchSelection, setSettingsSearchSelection] = useState<SettingsSearchSelection | null>(null);
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
   const [developerOptionsEverEnabled, setDeveloperOptionsEverEnabled] = useState(false);
@@ -457,6 +458,7 @@ export default function App() {
   const bootstrapSilentRefreshPromiseRef = useRef<Promise<void> | null>(null);
   const bootstrapSilentPendingTargetRef = useRef<string | null>(null);
   const bootstrapSilentActiveTargetRef = useRef<string | null>(null);
+  const previousChatRunSendingRef = useRef<{ endpoint: string; sending: boolean } | null>(null);
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
   const desktopEventRuntimeTimerRef = useRef<number | null>(null);
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
@@ -724,10 +726,6 @@ export default function App() {
     renamingProjectPath,
     projectRenameDraft,
     setProjectRenameDraft,
-    projectIndex,
-    projectIndexProject,
-    loadingProjectIndex,
-    projectIndexError,
     outfitPackagePath,
     setOutfitPackagePath,
     outfitImportPlan,
@@ -753,7 +751,6 @@ export default function App() {
     startRenameProject,
     commitRenameProject,
     openProjectFolder,
-    scanActiveProjectIndex,
     planActiveOutfitImport,
     requestActiveOutfitImport,
     editingProjectPath,
@@ -770,7 +767,6 @@ export default function App() {
     endpoint,
     runtimeConnected,
     activeProjectPath,
-    activeProjectType,
     projects,
     refresh,
     refreshProjects: (target?: string) => refreshProjectList(target, { throwOnError: true, allowDuringStartup: true }),
@@ -790,6 +786,7 @@ export default function App() {
     chatStorageReady,
     activeChat,
     displayChat,
+    previewChat,
     activeChatPending,
     activeChatId,
     setActiveChatId,
@@ -801,6 +798,10 @@ export default function App() {
     deleteTargetId,
     setDeleteTargetId,
     chatSidebar,
+    sidebarChats,
+    loadChat,
+    loadOlderChatMessages,
+    hasOlderChatMessages,
     chatRecoveries,
     chatPersistenceBlocked,
     chatStorageError,
@@ -851,7 +852,7 @@ export default function App() {
   );
   persistChatsNowRef.current = persistChatsNow;
   const openChatById = (chatId: string) => {
-    const chat = getChatById(chatId);
+    const chat = sidebarChats.find((entry) => entry.id === chatId);
     if (!chat) return;
     openChat(chat);
     setActiveView("chat");
@@ -859,14 +860,19 @@ export default function App() {
   useChatDeepLinks(chatStorageReady, openChatById);
   const sessionHandoff = useSessionHandoff(endpoint, activeChatId);
   const handoffTargetChats = useMemo(() => {
-    const sourceScope = normalizeProjectPathKey(activeChat?.projectPath || "");
-    return chats
+    const sourceScope = normalizeProjectPathKey(displayChat?.projectPath || "");
+    return sidebarChats
       .filter((chat) => chat.id !== activeChatId && normalizeProjectPathKey(chat.projectPath || "") === sourceScope)
       .slice(0, 32)
       .map((chat) => ({ id: chat.id, title: chat.title || t("header.currentSession") }));
-  }, [activeChat?.projectPath, activeChatId, chats, t]);
-  const updateHandoffCardStatus = (handoffId: string, status: string) => {
+  }, [displayChat?.projectPath, activeChatId, sidebarChats, t]);
+  const updateHandoffCardStatus = async (handoffId: string, status: string) => {
     if (!activeChatId) return;
+    const owner = await loadChat(activeChatId).catch((cause) => {
+      reportChatSaveError(cause);
+      return undefined;
+    });
+    if (!owner) return;
     updateChat(activeChatId, (chat) => ({
       ...chat,
       items: chat.items.map((item) => item.type === "handoff_card" && item.handoffId === handoffId ? { ...item, status } : item),
@@ -877,13 +883,13 @@ export default function App() {
   const pauseSessionHandoff = (handoffId: string) => { void sessionHandoff.pause(handoffId).then(() => updateHandoffCardStatus(handoffId, "paused")); };
   const resumeSessionHandoff = (handoffId: string) => { void sessionHandoff.resume(handoffId).then(() => updateHandoffCardStatus(handoffId, "pending_review")); };
   const replySessionHandoff = (handoffId: string, text: string) => {
-    const card = activeChat?.items.find((item) => item.type === "handoff_card" && item.handoffId === handoffId);
+    const card = displayChat?.items.find((item) => item.type === "handoff_card" && item.handoffId === handoffId);
     if (!card || card.type !== "handoff_card" || !card.sourceChatId || !card.targetChatId) return;
     void replyToSessionHandoff(endpoint, card.targetChatId, card.sourceChatId, handoffId, text);
   };
   const sidebarProjectItems = useMemo(
-    () => sortSidebarProjects(projectItems, chats, pinnedProjectSet, projectOrder),
-    [chats, pinnedProjectSet, projectItems, projectOrder],
+    () => sortSidebarProjects(projectItems, sidebarChats, pinnedProjectSet, projectOrder),
+    [sidebarChats, pinnedProjectSet, projectItems, projectOrder],
   );
   chatSessionActionsRef.current = { selectProject, newConversation };
   useDashboardProjectSelection({
@@ -915,6 +921,8 @@ export default function App() {
   const settledQuestionContinuationKeysRef = useRef(new Set<string>());
   const deliverRuntimeTurnContinuation = useRuntimeTurnContinuationDelivery({
     chats,
+    catalogChats: sidebarChats,
+    loadChat,
     appendToChat,
     updateChat,
     onContinuation: (event: RuntimeTurnEvent, ownerChat) => {
@@ -952,12 +960,14 @@ export default function App() {
   }
 
   const conversation = displayChat?.items ?? [];
+  const visibleChat = displayChat ?? previewChat;
   const conversationScroll = useConversationScroll({
     chatKey: `${endpoint}\n${activeChatId || ""}`,
     endRef: conversationEndRef,
+    loadOlder: hasOlderChatMessages ? loadOlderChatMessages : undefined,
   });
-  const sessionId = activeChat?.sessionId ?? "";
-  const activeRuntimeProjectPath = activeChat?.projectPath || activeProjectPath;
+  const sessionId = displayChat?.sessionId ?? "";
+  const activeRuntimeProjectPath = displayChat?.projectPath || activeProjectPath;
   const hasAgentRuntimeScope = Boolean(sessionId || activeRuntimeProjectPath);
   const latestEditableUserItemId = latestConversationItemId(conversation, (item) => item.type === "user");
   const latestRetryableItemId = latestConversationItemId(conversation, isRetryableConversationItem);
@@ -966,20 +976,20 @@ export default function App() {
     (item) => item.status === "pending" && approvalBelongsToRuntimeScope(item, runtimeScope),
   );
   const pendingApprovalItems = projectPendingApprovalItems.filter(
-    (item) => displayChat && pendingApprovalOwner(item, chats)?.id === displayChat.id,
+    (item) => displayChat && pendingApprovalOwner(item, sidebarChats)?.id === displayChat.id,
   );
   const pendingApprovals = projectPendingApprovalItems.length;
   const externalMcpApprovalItems = runtimeConnected ? bootstrap?.externalMcpConfirmations ?? [] : [];
   const pendingApprovalInbox = [...projectPendingApprovalItems, ...externalMcpApprovalItems];
   const openPendingApprovalOwner = useCallback((approval: AgentApproval) => {
-    const owner = pendingApprovalOwner(approval, chats);
+    const owner = pendingApprovalOwner(approval, sidebarChats);
     if (!owner) return false;
     openChat(owner);
     setSelectedSubAgentPanelOpen(false);
     setPendingApprovalPanelOpen(false);
     setApprovalReveal({ chatId: owner.id, approvalId: approval.id });
     return true;
-  }, [openChat, chats]);
+  }, [openChat, sidebarChats]);
   const hasUnresolvedRuntimeState = (chatId: string, targetSessionId: string): boolean => {
     const asRecord = (value: unknown): Record<string, unknown> | undefined => (
       typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined
@@ -1061,6 +1071,8 @@ export default function App() {
       ? (event) => console.debug("[vrcforge:steer-delivery]", event)
       : undefined,
     chats,
+    sidebarChats,
+    loadChat,
     chatStorageReady,
     runtimeQueueVersion,
     hasPendingChildDelivery: (ownerSessionId) => subAgentTasksRef.current.some(
@@ -1118,14 +1130,14 @@ export default function App() {
     setAgentApprovals,
     setError,
     chatIdForSessionId: (ownerSessionId) =>
-      chats.find((chat) => chat.sessionId === ownerSessionId)?.id || "",
+      sidebarChats.find((chat) => chat.sessionId === ownerSessionId)?.id || "",
   });
   const applyFollowupReceiptRef = useRef(applyFollowupReceipt);
   applyFollowupReceiptRef.current = applyFollowupReceipt;
   useEffect(() => {
     for (const run of runtimeRuns) applyFollowupReceiptRef.current(run);
   }, [runtimeRuns, queued]);
-  const activeRuntimeCancelTarget = runtimeActivityCancelTarget(chats, activeChat || undefined, runtimeRuns);
+  const activeRuntimeCancelTarget = runtimeActivityCancelTarget(chats, displayChat || undefined, runtimeRuns);
   const scopedAgentQuestions = hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : [];
   const dismissedAgentQuestion = scopedAgentQuestions.find((question) => question.status === "pending" && dismissedQuestionIds.has(question.questionId));
   const questionReview = useMemo(
@@ -1210,7 +1222,7 @@ export default function App() {
     refreshSignal: backgroundGoalRefreshSignal,
     notificationsEnabled: backgroundGoalNotificationsEnabled,
     onGoalDelivery: async (goal, delivery) => {
-      const targetChat = chats.find((chat) => chat.id === delivery.chatId);
+      const targetChat = await loadChat(delivery.chatId).catch(() => undefined);
       if (!targetChat || compacting) {
         return "retry";
       }
@@ -1596,7 +1608,7 @@ export default function App() {
     void listen<unknown>(AGENT_QUESTION_NOTIFICATION_ACTION_EVENT, (event) => {
       const action = parseAgentQuestionNotificationAction(event.payload);
       if (!action || !active) return;
-      let chat = chats.find((item) => item.id === action.chatId);
+      let chat = sidebarChats.find((item) => item.id === action.chatId);
       void (async () => {
         let question = agentQuestions.find((item) => item.questionId === action.questionId);
         if (!question || !chat) {
@@ -1608,7 +1620,7 @@ export default function App() {
           });
           question = result.questions.find((item) => item.questionId === action.questionId);
           if (!chat && question?.sessionId) {
-            chat = chats.find((item) => item.sessionId === question?.sessionId);
+            chat = sidebarChats.find((item) => item.sessionId === question?.sessionId);
           }
         }
         if (!active || !question) return;
@@ -1638,7 +1650,7 @@ export default function App() {
       active = false;
       unlistenQuestionAction?.();
     };
-  }, [agentQuestions, chats, endpoint, openChat, setActiveView, setError]);
+  }, [agentQuestions, sidebarChats, endpoint, openChat, setActiveView, setError]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -1972,6 +1984,13 @@ export default function App() {
         (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(workspaceProjectPath),
       )) || shortPath(workspaceProjectPath)
     : t("workspace.noProjectSelected");
+  async function loadQuestionOwner(question: AgentQuestion) {
+    const ownerSessionId = question.runtimeContinuation?.sessionId || question.sessionId;
+    const candidates = sidebarChats.filter((chat) => chat.sessionId === ownerSessionId);
+    const loaded = await Promise.all(candidates.map((chat) => loadChat(chat.id)));
+    if (loaded.some((chat) => !chat)) return undefined;
+    return questionContinuationOwner(loaded.filter((chat): chat is ChatThread => Boolean(chat)), question);
+  }
   const persistQuestionAnswer = (chatId: string, answerItem: Extract<ConversationItem, { type: "question_answer" }>) => {
     updateChat(chatId, (chat) => {
       const index = chat.items.findIndex((item) => item.type === "question_answer" && item.id === answerItem.id);
@@ -1986,8 +2005,8 @@ export default function App() {
     setActiveView("chat");
     const answeredQuestion = agentQuestions.find((item) => item.questionId === questionId);
     if (!answeredQuestion) return;
-    const answerChat = questionContinuationOwner(chats, answeredQuestion);
     try {
+      const answerChat = await loadQuestionOwner(answeredQuestion);
       const payload = await answerAgentQuestion(endpoint, questionId, {
         answer: value,
         selectedOptionId: optionId,
@@ -2284,7 +2303,10 @@ export default function App() {
   useEffect(() => {
     // Refresh the authoritative config lease at request/terminal boundaries,
     // including a foreground reply that becomes an approval/question wait.
-    if (runtimeConnected) void refreshSilently();
+    const previous = previousChatRunSendingRef.current;
+    previousChatRunSendingRef.current = runtimeConnected ? { endpoint, sending: chatRunSending } : null;
+    const wasSending = previous?.endpoint === endpoint && previous.sending;
+    if (runtimeConnected && chatRunSending !== wasSending) void refreshSilently();
   }, [chatRunSending, runtimeConnected, endpoint]);
 
   useEffect(() => {
@@ -2382,7 +2404,7 @@ export default function App() {
       if (eventType === "agentRuntimeTurn") {
         const receipt = event.payload?.payload as RuntimeTurnEvent | undefined;
         if (receipt) applyFollowupReceiptRef.current(receipt);
-        deliverRuntimeTurnContinuation(receipt);
+        deliverRuntimeTurnContinuation(receipt, true);
       }
       if (eventType === "chatStorageChanged") {
         notifyChatStorageChanged(event.payload?.originId);
@@ -3028,8 +3050,8 @@ export default function App() {
       || Boolean(editingMessage && hasUnresolvedRuntimeState(editingMessage.chatId, getChatById(editingMessage.chatId)?.sessionId || "")),
   };
 
-  function editConversationMessage(itemId: string) {
-    const chat = getChatById(activeChatId);
+  async function editConversationMessage(itemId: string) {
+    const chat = await loadChat(activeChatId).catch(() => undefined);
     if (!chat) {
       return;
     }
@@ -3173,12 +3195,12 @@ export default function App() {
     return true;
   }
 
-  function retryConversationItem(itemId: string) {
+  async function retryConversationItem(itemId: string) {
     if (isChatRunActive() || compacting) {
       setError(t("chat.cannotActionWhileRunning"));
       return;
     }
-    const chat = getChatById(activeChatId);
+    const chat = await loadChat(activeChatId).catch(() => undefined);
     if (!chat) {
       return;
     }
@@ -3290,7 +3312,8 @@ export default function App() {
       setError(t("compact.busy"));
       return;
     }
-    if (!activeChat || activeChat.items.length === 0) {
+    const owner = await loadChat(activeChatId).catch(() => undefined);
+    if (!owner || owner.items.length === 0) {
       setError(t("compact.noContent"));
       return;
     }
@@ -3304,7 +3327,7 @@ export default function App() {
     }
     const limit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
     await runContextCompaction({
-      chatId: activeChat.id,
+      chatId: owner.id,
       endpoint: targetEndpoint,
       trigger: "manual",
       phase: "standalone",
@@ -3315,6 +3338,7 @@ export default function App() {
   }
 
   function openSettingsSection(section: SettingsSection = "general") {
+    setSettingsSearchSelection(null);
     setActiveSettingsSection(section);
     if (activeView !== "settings") {
       void openSettings();
@@ -3447,6 +3471,11 @@ export default function App() {
       return;
     }
     setError("");
+    const owner = activeChatId ? await loadChat(activeChatId).catch(() => undefined) : undefined;
+    if (activeChatId && !owner) {
+      setError(t("chat.sessionRestoreFailed"));
+      return;
+    }
     if (pendingReplyQuestionId) {
       if (replySubmitInFlightRef.current) return;
       const question = agentQuestions.find((item) => item.questionId === pendingReplyQuestionId);
@@ -3455,8 +3484,8 @@ export default function App() {
         return;
       }
       replySubmitInFlightRef.current = true;
-      const answerChat = questionContinuationOwner(chats, question);
       try {
+        const answerChat = await loadQuestionOwner(question);
         const payload = await answerAgentQuestion(endpoint, pendingReplyQuestionId, {
           answer: composerMessage,
           selectedOptionId: "custom",
@@ -3548,7 +3577,7 @@ export default function App() {
     const turn: QueuedTurn = {
       id: nextClientTurnId,
       chatId: ownerChatId,
-      planMode: activeChat?.planMode === true,
+      planMode: owner?.planMode === true,
       text: message,
       attachments,
       providerLabel: providerSnapshot.providerLabel,
@@ -4253,6 +4282,15 @@ export default function App() {
   ) : null;
 
   const desktopWindow = isTauri();
+  const runtimeStartupPhase = hasStartupIssue || smokeMode || activeView !== "chat"
+    ? undefined
+    : !runtimeConnected
+      ? backgroundRuntimeReady ? "loadingWorkspace" : "starting"
+      : !chatStorageReady ? "loadingChats" : undefined;
+  const cachedListAvailable = Boolean(
+    (!runtimeConnected && cachedProjectSnapshot?.projects?.length)
+    || (!chatStorageReady && (chatSidebar.temporaryChats.length || chatSidebar.projectChatsByPath.size || chatSidebar.testChats.length)),
+  );
 
 
   return (
@@ -4296,6 +4334,10 @@ export default function App() {
           onOpenCheckpoints={() => void openCheckpoints()}
           onOpenSettings={() => openSettingsSection("general")}
           onOpenSettingsSection={openSettingsSection}
+          onSelectSettingsSearchResult={(entry) => {
+            openSettingsSection(entry.section);
+            setSettingsSearchSelection((previous) => ({ entry, requestId: (previous?.requestId || 0) + 1 }));
+          }}
           onBackFromSettings={returnFromOnboardingSettings}
           onRefreshProjects={() => void refreshProjectList()}
           onSelectProject={newConversationForProject}
@@ -4339,7 +4381,7 @@ export default function App() {
             hideWindowHeader={desktopWindow}
             activeProjectLabel={activeProjectPath ? activeProjectName : t("sidebar.tempChat")}
             activeView={activeView}
-            activeChatTitle={displayChat ? displayChat.title || t("header.currentSession") : activeChatPending ? t("header.currentSession") : ""}
+            activeChatTitle={visibleChat ? visibleChat.title || t("header.currentSession") : activeChatPending ? t("header.currentSession") : ""}
             theme={theme}
             showDoctorStartupPrompt={showDoctorStartupPrompt}
             hasStartupIssue={hasStartupIssue}
@@ -4349,6 +4391,8 @@ export default function App() {
             loadingDoctor={loadingDoctor}
             loading={loading}
             runtimeStarting={runtimeStartingRef.current}
+            runtimeStartupPhase={runtimeStartupPhase}
+            cachedListAvailable={cachedListAvailable}
             error={error}
             chatStorageError={chatStorageError?.message || ""}
             chatStorageNeedsDoctor={chatStorageError?.kind === "blocked" || chatStorageError?.kind === "conflict"}
@@ -4468,6 +4512,7 @@ export default function App() {
           ) : activeView === "settings" ? (
             <SettingsWorkspace
               activeSection={activeSettingsSection}
+              searchSelection={settingsSearchSelection}
               endpoint={endpoint}
               developerOptionsEnabled={developerOptionsEnabled}
               developerOptionsEverEnabled={developerOptionsEverEnabled}
@@ -4587,7 +4632,7 @@ export default function App() {
             <ChatWorkspace
               projectPromptTitle={projectPromptTitle}
               conversationPending={activeChatPending}
-              conversationPendingMessage={chatStorageReady ? t("chat.sessionRestoreFailed") : t("common.loading")}
+              conversationPendingMessage={t("common.loading")}
               input={input}
               setInput={setInput}
               sending={sending}
@@ -4613,10 +4658,15 @@ export default function App() {
               onSwitchMode={switchMode}
               onOpenChatById={openChatById}
               commands={slashCommands}
-              planMode={activeChat?.planMode === true}
+              planMode={displayChat?.planMode === true}
               onPlanModeChange={(planMode) => {
-                const chatId = ensureActiveChat();
-                updateChat(chatId, (chat) => ({ ...chat, planMode }));
+                if (!activeChatId) {
+                  updateChat(ensureActiveChat(), (chat) => ({ ...chat, planMode }));
+                  return;
+                }
+                void loadChat(activeChatId).then((chat) => {
+                  if (chat) updateChat(chat.id, (current) => ({ ...current, planMode }));
+                }).catch(reportChatSaveError);
               }}
               actions={composerActions}
               onAction={runExplicitWorkspaceAction}
@@ -4646,7 +4696,8 @@ export default function App() {
                 name: project.name || shortPath(project.path || ""),
               }))}
               onBindProject={bindProject}
-              conversation={conversation}
+              conversation={previewChat?.items ?? conversation}
+              readOnlyHistory={Boolean(previewChat)}
               attachmentPayloads={displayChat?.attachmentPayloads}
               queued={visibleQueued}
               agentQuestions={scopedAgentQuestions}
@@ -4673,8 +4724,8 @@ export default function App() {
               onStopQuestionContinuation={stopRuntimeQuestionContinuation}
               conversationEndRef={conversationEndRef}
               onConversationMouseUp={handleConversationMouseUp}
-              onConversationScroll={(scrollElement) => {
-                conversationScroll.onScroll(scrollElement);
+              onConversationScroll={(scrollElement, requestOlder) => {
+                conversationScroll.onScroll(scrollElement, requestOlder && hasOlderChatMessages);
                 if (selectionMenu) {
                   setSelectionMenu(null);
                 }
@@ -4922,7 +4973,7 @@ export default function App() {
         chatMenu={chatMenu}
         selectionMenu={activeView === "chat" && !selectedSubAgentPanelOpen && !showProjectModal ? selectionMenu : null}
         deleteTargetId={deleteTargetId}
-        chats={chats}
+        chats={sidebarChats}
         customPathSet={customPathSet}
         collapsedProjects={collapsedProjects}
         pinnedProjectSet={pinnedProjectSet}

@@ -2290,6 +2290,50 @@ def test_background_schedule_epoch_closes_blocker_to_task_race(
     assert env.provider_calls == []
 
 
+@pytest.mark.parametrize("dreaming_due", [False, True])
+def test_background_schedule_can_be_cancelled_while_blocker_is_running(
+    memory_review_dashboard: DashboardMemoryReviewHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    dreaming_due: bool,
+) -> None:
+    env = memory_review_dashboard
+    host = env.host
+    assert host is not None
+    env.configure("bounded_background", scope="user")
+    monkeypatch.setattr(host.service, "due_dreaming", lambda: {"due": dreaming_due})
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        finished = asyncio.Event()
+        release = threading.Event()
+
+        def blocker() -> str:
+            loop.call_soon_threadsafe(entered.set)
+            try:
+                # Bound the fixture if the scheduler calls the blocker on the event loop.
+                return "" if release.wait(timeout=2) else "blocker_deadline"
+            finally:
+                loop.call_soon_threadsafe(finished.set)
+
+        schedule = asyncio.create_task(host.schedule_due_background(blocker))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            assert not finished.is_set()
+            assert schedule.cancel() is True
+            with pytest.raises(asyncio.CancelledError):
+                await schedule
+        finally:
+            release.set()
+            await asyncio.gather(schedule, return_exceptions=True)
+        await asyncio.wait_for(finished.wait(), timeout=5)
+        assert host._idle_gate.snapshot()["active"] is False  # noqa: SLF001
+        assert not host.background_active
+
+    asyncio.run(scenario())
+    assert env.provider_calls == []
+
+
 def test_interactive_start_revokes_paid_background_before_late_commit(
     memory_review_dashboard: DashboardMemoryReviewHarness,
     monkeypatch: pytest.MonkeyPatch,
@@ -2456,6 +2500,28 @@ def test_background_schedule_is_blocked_while_project_write_is_applying(
     assert asyncio.run(
         env.host.schedule_due_background(dashboard_server.memory_review_background_blocker)
     ) is False
+
+
+def test_background_blocker_uses_live_turn_ownership_not_approval_history(
+    memory_review_dashboard: DashboardMemoryReviewHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = dashboard_server.AGENT_GATEWAY
+    monkeypatch.setattr(dashboard_server, "BACKEND_OWNER_LEASE", SimpleNamespace(owned=True))
+    monkeypatch.setattr(type(gateway.approval_transactions), "list_approvals", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(type(gateway.checkpoint_recovery), "_active_apply_recoveries", lambda _service: [])
+    monkeypatch.setattr(type(gateway.runtime_runs), "list_runs", lambda *_args, **_kwargs: {"runs": [{"status": "applying"}]})
+
+    assert dashboard_server.memory_review_background_blocker() == ""
+
+    session = gateway.runtime_sessions
+    turn = {"session_id": "startup-live", "turn_id": "turn-1", "client_turn_id": "client-1"}
+    assert session.begin_turn(**turn)
+    try:
+        assert dashboard_server.memory_review_background_blocker() == "interactive_run_active"
+    finally:
+        session.finish_turn(**turn)
+        session.clear_finalizing_turn(session_id=turn["session_id"], client_turn_id=turn["client_turn_id"])
 
 
 def test_runtime_snapshot_exposes_only_review_unread_summary(

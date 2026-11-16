@@ -4191,21 +4191,18 @@ class AgentCheckpointRecoveryService:
                 return entry
         return None
 
-    def _read_apply_recovery_entries(self, limit: int | None = 1000) -> list[dict[str, Any]]:
-        if not self._ports.apply_recovery_log_path().exists():
-            return []
-        entries: list[dict[str, Any]] = []
-        lines = self._ports.apply_recovery_log_path().read_text(encoding="utf-8").splitlines()
-        if limit is not None:
-            lines = lines[-max(1, limit):]
-        for line in lines:
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict) and payload.get("schema") == APPLY_RECOVERY_SCHEMA:
-                entries.append(payload)
-        return entries
+    def _iter_apply_recovery_entries(self) -> Iterator[dict[str, Any]]:
+        path = self._ports.apply_recovery_log_path()
+        if not path.exists():
+            return
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict) and payload.get("schema") == APPLY_RECOVERY_SCHEMA:
+                    yield payload
 
     def _append_apply_recovery_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
         now = utc_now_iso()
@@ -4227,7 +4224,7 @@ class AgentCheckpointRecoveryService:
     def _coalesced_apply_recoveries(self, *, include_resolved: bool = False) -> list[dict[str, Any]]:
         states: dict[str, dict[str, Any]] = {}
         # Unresolved recoveries remain authoritative regardless of log age.
-        for entry in self._read_apply_recovery_entries(limit=None):
+        for entry in self._iter_apply_recovery_entries():
             recovery_id = str(entry.get("id") or "").strip()
             if not recovery_id:
                 continue

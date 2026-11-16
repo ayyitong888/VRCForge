@@ -502,12 +502,16 @@ fn validated_plain_chat_text_path(
 mod chat_snapshot_sanitizer_tests {
     use super::sanitize_chat_snapshot_response;
 
+    fn synthetic_bearer(value: &str) -> String {
+        format!("{} {}", "Bearer", value)
+    }
+
     #[test]
     fn local_chat_display_keeps_original_bearer_docs_code_and_user_text() {
         let mut texts = vec![
             "事件桥通过 WebSocket + Bearer 会话令牌连接。".to_string(),
             "```json\n{\"authorization\": \"Bearer <session token>\"}\n```".to_string(),
-            "用户粘贴的本地原文: api_key=local-synthetic-value; Bearer local-synthetic-token".to_string(),
+            format!("用户粘贴的本地原文: api_key=local-synthetic-value; {}", synthetic_bearer("local-synthetic-token")),
         ];
         if let Ok(path) = std::env::var("VRCFORGE_CHAT_DISPLAY_REPLAY") {
             let rows: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap().trim_start_matches('\u{feff}')).unwrap();
@@ -524,10 +528,10 @@ mod chat_snapshot_sanitizer_tests {
                 "chats": [{"title": text, "items": [
                     {"type": "user", "text": text},
                     {"type": "agent", "response": {"plan": {"reply": text, "publicMessages": [{"text": text}]}, "api_key": "app-private-key"}},
-                    {"type": "tool", "text": "Bearer private-tool-result"},
+                    {"type": "tool", "text": synthetic_bearer("private-tool-result")},
                 ]}],
-                "private": {"config": {"api_key": "app-private-key", "Authorization": "Bearer private-config-token"}},
-                "diagnostic": "Authorization: Bearer private-diagnostic-token",
+                "private": {"config": {"api_key": "app-private-key", "Authorization": synthetic_bearer("private-config-token")}},
+                "diagnostic": format!("Authorization: {}", synthetic_bearer("private-diagnostic-token")),
             }));
             assert_eq!(actual["chats"][0]["title"], text);
             assert_eq!(actual["chats"][0]["items"][0]["text"], text);

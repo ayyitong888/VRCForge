@@ -362,6 +362,7 @@ fn main() {
             revoke_skill_package_signer,
             save_agent_notes,
             session_handoff_action,
+            save_chat_record,
             save_chats,
             select_unity_project,
             select_adjustment_checkpoint,

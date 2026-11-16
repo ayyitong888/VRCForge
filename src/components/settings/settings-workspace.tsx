@@ -1,10 +1,11 @@
 import { version as appVersion } from "../../../package.json";
 import { Check, ChevronDown, Eye, Globe, Loader2, RefreshCw } from "lucide-react";
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SUPPORTED_LOCALES } from "../../i18n";
 import type { SettingsSection } from "../../lib/app-view";
+import { focusSettingsSearchResult, type SettingsSearchSelection } from "../../lib/settings-search";
 import { loadStartupAnimationEnabled, persistStartupAnimationEnabled, type RunningEnterAction } from "../../lib/app-preferences";
 import type {
   DiagnosticsStatus,
@@ -39,6 +40,7 @@ import { AgentQuestionNotificationSoundSettings } from "./agent-question-notific
 
 type SettingsWorkspaceProps = {
   activeSection: SettingsSection;
+  searchSelection?: SettingsSearchSelection | null;
   endpoint: string;
   developerOptionsEnabled: boolean;
   developerOptionsEverEnabled: boolean;
@@ -146,6 +148,7 @@ type SettingsWorkspaceProps = {
 
 export function SettingsWorkspace({
   activeSection,
+  searchSelection,
   endpoint,
   developerOptionsEnabled,
   developerOptionsEverEnabled,
@@ -251,6 +254,8 @@ export function SettingsWorkspace({
   onSaveNotes,
 }: SettingsWorkspaceProps) {
   const { t } = useTranslation();
+  const settingsRoot = useRef<HTMLDivElement>(null);
+  const focusedSearchSelection = useRef<SettingsSearchSelection | null>(null);
   const [startupAnimationEnabled, setStartupAnimationEnabled] = useState(loadStartupAnimationEnabled);
   const [providerPanel, setProviderPanel] = useState<"subscription" | "api" | null>(null);
   const visibleProvider = providerPanel ?? (apiProvider === "chatgpt" ? "subscription" : "api");
@@ -258,6 +263,20 @@ export function SettingsWorkspace({
   const currentPermissionVisual = permissionVisualState(permission);
   const visionKeySaved = hasSavedProviderKey(visionProvider, visionConfig);
   const visibleSection: SettingsSection = activeSection === "developer" && !developerOptionsEnabled ? "general" : activeSection;
+  useLayoutEffect(() => {
+    if (!searchSelection || focusedSearchSelection.current === searchSelection) return;
+    const { entry } = searchSelection;
+    if (entry.section !== visibleSection || (entry.developerOnly && !developerOptionsEnabled)) return;
+    const targetProvider = entry.panel === "account" ? "subscription" : entry.panel === "api" ? "api" : null;
+    if (targetProvider && visibleProvider !== targetProvider) {
+      setProviderPanel(targetProvider);
+      return;
+    }
+    if (settingsRoot.current) {
+      focusSettingsSearchResult(settingsRoot.current, entry, t(entry.labelKey));
+      focusedSearchSelection.current = searchSelection;
+    }
+  }, [searchSelection, visibleSection, visibleProvider, developerOptionsEnabled, t]);
   const updateDeveloperOptions = async (enabled: boolean, developerChallengeId?: string) => {
     await onDeveloperOptionsChange(enabled, developerChallengeId);
     if (!enabled && visibleSection === "developer") {
@@ -266,13 +285,13 @@ export function SettingsWorkspace({
   };
 
   return (
-    <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10" data-vrcforge-settings-scroll>
+    <div ref={settingsRoot} className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-8 sm:px-6 sm:py-10 [&_[data-settings-search-match]]:rounded-sm [&_[data-settings-search-match]]:outline [&_[data-settings-search-match]]:outline-2 [&_[data-settings-search-match]]:outline-offset-4 [&_[data-settings-search-match]]:outline-ring" data-vrcforge-settings-scroll>
       <div className="mx-auto w-full max-w-3xl">
         {visibleSection === "general" ? (
           <>
             <h1 className="text-xl font-semibold text-foreground">{t("settings.navGeneral")}</h1>
 
-            <section className="mt-6">
+            <section className="mt-6" data-settings-panel="startup-animation">
               <label className="flex items-center justify-between gap-5">
                 <span className="min-w-0">
                   <span id="settings-startup-animation-label" className="block text-base font-semibold">
@@ -302,7 +321,7 @@ export function SettingsWorkspace({
               </label>
             </section>
 
-            <section className="mt-6">
+            <section className="mt-6" data-settings-panel="appearance">
               <ThemeCustomizationPanel
                 value={themeCustomization}
                 backgroundError={themeBackgroundError}
@@ -311,7 +330,7 @@ export function SettingsWorkspace({
               />
             </section>
 
-            <section className="mt-6">
+            <section className="mt-6" data-settings-panel="language">
               <h2 className="text-base font-semibold">
                 <Globe className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
                 {t("settings.language")}
@@ -337,7 +356,7 @@ export function SettingsWorkspace({
               </div>
             </section>
 
-            <section className="mt-6">
+            <section className="mt-6" data-settings-panel="enter">
               <label className="block text-sm font-semibold" htmlFor="settings-running-enter-action">
                 {t("settings.runningEnterAction")}
               </label>
@@ -352,7 +371,7 @@ export function SettingsWorkspace({
               </select>
             </section>
 
-            <section className="mt-6">
+            <section className="mt-6" data-settings-panel="notifications">
               <BackgroundGoalSettings
                 enabled={backgroundGoalNotificationsEnabled}
                 saving={savingAdvancedSettings}
@@ -361,11 +380,11 @@ export function SettingsWorkspace({
               />
             </section>
 
-            <section className="mt-6">
+            <section className="mt-6" data-settings-panel="sounds">
               <AgentQuestionNotificationSoundSettings />
             </section>
 
-            <section className="mt-6">
+            <section className="mt-6" data-settings-panel="diagnostics">
                 <DiagnosticsSettingsPanel
                 endpoint={endpoint}
                 developerOptionsEnabled={developerOptionsEnabled}
@@ -379,14 +398,14 @@ export function SettingsWorkspace({
               />
             </section>
 
-            <section className="mt-6" data-vrcforge-about>
+            <section className="mt-6" data-vrcforge-about data-settings-panel="about">
               <h2 className="text-base font-semibold">{t("settings.aboutTitle")}</h2>
               <div className="mt-4 rounded-xl border border-border bg-card p-4">
                 <div className="text-sm font-semibold">{t("settings.aboutProduct", { version: appVersion })}</div>
                 <div className="mt-2 text-sm text-muted-foreground">{t("settings.aboutMcp")}</div>
                 <div className="mt-2 text-sm text-muted-foreground">{t("settings.aboutSafety")}</div>
                 <div className="mt-2 text-xs text-muted-foreground">{t("settings.aboutLicense")}</div>
-                <div className="mt-4 border-t border-border pt-4">
+                <div className="mt-4 border-t border-border pt-4" data-settings-panel="onboarding">
                   <h3 className="text-sm font-semibold">{t("settings.onboarding")}</h3>
                   <p className="mt-1 text-sm text-muted-foreground">{t("settings.onboardingDesc")}</p>
                   <div className="mt-4">
@@ -399,7 +418,7 @@ export function SettingsWorkspace({
               </div>
             </section>
 
-            <section className="mt-6 pb-6">
+            <section className="mt-6 pb-6" data-settings-panel="developer-toggle">
               <DeveloperOptionsControl
                 endpoint={endpoint}
                 enabled={developerOptionsEnabled}
@@ -412,7 +431,7 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "permissions" ? (
-        <section className="pb-6">
+        <section className="pb-6" data-settings-panel="permissions">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.permissionMode")}</h2>
             <Badge tone={currentPermissionVisual.badgeTone} className="shrink-0">
@@ -478,7 +497,7 @@ export function SettingsWorkspace({
             ))}
           </div>
           <fieldset disabled={providerConfigurationLocked} className="mt-4 min-w-0 disabled:opacity-60">
-            <div id="subscription-model-settings" hidden={visibleProvider !== "subscription"}
+            <div id="subscription-model-settings" data-settings-panel="account" hidden={visibleProvider !== "subscription"}
               data-onboarding-provider={visibleProvider === "subscription" && apiProvider === "chatgpt" ? "connection" : undefined}>
               <ChatGptOAuthSettings
                 endpoint={endpoint}
@@ -494,7 +513,7 @@ export function SettingsWorkspace({
                 onProviderConfigChanged={onProviderConfigChanged}
               />
             </div>
-            <div id="api-model-settings" hidden={visibleProvider !== "api"}>
+            <div id="api-model-settings" data-settings-panel="api" hidden={visibleProvider !== "api"}>
               {visibleProvider === "api" ? (
                 <ProviderSetup
                   provider={apiProvider}
@@ -531,7 +550,7 @@ export function SettingsWorkspace({
               ) : null}
             </div>
           </fieldset>
-          <details className="group mt-6 rounded-xl border border-border bg-card px-4">
+          <details className="group mt-6 rounded-xl border border-border bg-card px-4" data-settings-panel="vision">
             <summary className="flex min-w-0 cursor-pointer list-none flex-wrap items-center gap-2 rounded-md py-3 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
               <Eye className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
               <span>{t("settings.visionProfile")}</span>
@@ -566,7 +585,7 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "developer" && developerOptionsEnabled ? (
-        <section className="pb-6">
+        <section className="pb-6" data-settings-panel="computer-use">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.computerUse")}</h2>
             <Badge tone={computerUseEnabled ? "warn" : "muted"} className="shrink-0">
@@ -596,10 +615,10 @@ export function SettingsWorkspace({
               </Button>
             </div>
           </div>
-          <div className="mt-6">
+          <div className="mt-6" data-settings-panel="identity">
             <DiagnosticIdentityMap status={diagnosticsStatus} />
           </div>
-          <div className="mt-6 rounded-lg border border-border bg-card p-4">
+          <div className="mt-6 rounded-lg border border-border bg-card p-4" data-settings-panel="compaction">
             <div className="text-sm font-medium">{t("settings.compactDebugTitle")}</div>
             <div className="mt-1 text-xs text-muted-foreground">{t("settings.compactDebugDesc")}</div>
             <div className="mt-3 space-y-2">
@@ -622,7 +641,7 @@ export function SettingsWorkspace({
         </section>
         ) : null}
 
-        <section className="pb-6" hidden={visibleSection !== "memory"}>
+        <section className="pb-6" data-settings-panel="memory" hidden={visibleSection !== "memory"}>
           <MemoryReviewSettings
             endpoint={endpoint}
             runtimeConnected={runtimeConnected}
@@ -632,7 +651,7 @@ export function SettingsWorkspace({
         </section>
 
         {visibleSection === "storage" ? (
-        <section className="pb-6">
+        <section className="pb-6" data-settings-panel="checkpoints">
           <CheckpointStoragePanel
             status={connectorStatus}
             loading={loadingConnectors}
@@ -651,13 +670,13 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "storage" ? (
-        <section className="pb-6">
+        <section className="pb-6" data-settings-panel="data-root">
           <DataRootSettingsPanel endpoint={endpoint} />
         </section>
         ) : null}
 
         {visibleSection === "connectors" ? (
-        <section className="grid gap-6 pb-6">
+        <section className="grid gap-6 pb-6" data-settings-panel="connectors">
           <ExternalAgentConnectorsPanel
             status={connectorStatus}
             loading={loadingConnectors}
@@ -672,7 +691,7 @@ export function SettingsWorkspace({
             onUninstall={(client, configPath) => onRunConnectorAction(client, "uninstall", configPath)}
             onCopy={onCopyConnectorText}
           />
-          <details className="rounded-lg border border-border bg-card p-3">
+          <details className="rounded-lg border border-border bg-card p-3" data-settings-panel="telegram">
             <summary className="cursor-pointer text-sm font-semibold">{t("connector.telegramRemoteAccess")}</summary>
             <div className="mt-4">
               <TelegramSettingsPanel endpoint={endpoint} selectedProjectPath={selectedProjectPath} />
@@ -682,7 +701,7 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "instructions" ? (
-        <section className="pb-6">
+        <section className="pb-6" data-settings-panel="instructions">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.customInstructions")}</h2>
             {notesMessage ? (

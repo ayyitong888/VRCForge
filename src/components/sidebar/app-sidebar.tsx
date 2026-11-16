@@ -24,6 +24,8 @@ import type { SidebarChatGroupsWithTimes } from "../../lib/sidebar-view";
 import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
 import { groupSidebarProjects } from "../../lib/sidebar-project-order";
 import { cn } from "../../lib/utils";
+import type { SettingsSearchEntry } from "../../lib/settings-search";
+import { SettingsSearchNavigation } from "../settings/settings-search-navigation";
 import { useSidebarChatOrder } from "../../hooks/use-sidebar-chat-order";
 import { SidebarChat, SidebarChatList, SidebarProject, SidebarProjectList, SidebarSection, type DragHandleProps } from "./sidebar";
 
@@ -67,6 +69,7 @@ type AppSidebarProps = {
   onOpenCheckpoints: () => void;
   onOpenSettings: () => void;
   onOpenSettingsSection: (section: SettingsSection) => void;
+  onSelectSettingsSearchResult?: (entry: SettingsSearchEntry) => void;
   onBackFromSettings: () => void;
   onRefreshProjects: () => void;
   onReorderProjects?: (orderedPaths: string[]) => void;
@@ -115,6 +118,7 @@ export function AppSidebar({
   onOpenCheckpoints,
   onOpenSettings,
   onOpenSettingsSection,
+  onSelectSettingsSearchResult,
   onBackFromSettings,
   onRefreshProjects,
   onReorderProjects,
@@ -149,13 +153,13 @@ export function AppSidebar({
     return (
       <aside
         className={cn(
-          "sidebar-scrollbar flex h-full min-w-0 flex-col overflow-y-auto border-r border-border/80 bg-sidebar px-2 py-3 transition-[width] max-md:[&_nav_button]:justify-center max-md:[&_nav_button]:px-0 max-md:[&_nav_span]:hidden",
+          "sidebar-scrollbar flex h-full min-w-0 flex-col overflow-y-auto border-r border-border/80 bg-sidebar px-2 py-3 transition-[width]",
           collapsed ? "items-stretch [&_nav_button]:justify-center [&_nav_button]:px-0 [&_nav_span]:hidden" : "md:px-3",
         )}
       >
         <div className={cn("flex h-9 items-center gap-2 px-2", collapsed ? "justify-center" : "justify-between")}>
           <Settings className="h-4 w-4 shrink-0 text-primary" />
-          {collapsed ? null : <div className="hidden min-w-0 flex-1 truncate text-sm font-semibold md:block">{t("sidebar.settings")}</div>}
+          {collapsed ? null : <div className="min-w-0 flex-1 truncate text-sm font-semibold">{t("sidebar.settings")}</div>}
         </div>
         <nav className="mt-4 space-y-0.5">
           <SidebarNavButton
@@ -164,18 +168,26 @@ export function AppSidebar({
             onClick={onBackFromSettings}
           />
         </nav>
-        {collapsed ? null : <div className="mt-4 px-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("settings.navPersonal")}</div>}
-        <nav className="mt-2 space-y-0.5">
-          {settingsNavItems.map((item) => (
-            <SidebarNavButton
-              key={item.section}
-              icon={item.icon}
-              label={item.label}
-              active={activeSettingsSection === item.section}
-              onClick={() => onOpenSettingsSection(item.section)}
-            />
-          ))}
-        </nav>
+        {collapsed ? null : (
+          <SettingsSearchNavigation
+            developerOptionsEnabled={developerOptionsEnabled}
+            onSelect={(entry) => onSelectSettingsSearchResult ? onSelectSettingsSearchResult(entry) : onOpenSettingsSection(entry.section)}
+          >
+            <div className="px-3 pb-1 pt-4 text-xs font-medium text-muted-foreground">{t("settings.navPersonal")}</div>
+            <nav className="mt-2 space-y-0.5">
+              {settingsNavItems.map((item) => (
+                <SidebarNavButton
+                  key={item.section}
+                  icon={item.icon}
+                  label={item.label}
+                  active={activeSettingsSection === item.section}
+                  onClick={() => onOpenSettingsSection(item.section)}
+                />
+              ))}
+            </nav>
+          </SettingsSearchNavigation>
+        )}
+        {collapsed ? <nav className="mt-4 space-y-0.5">{settingsNavItems.map((item) => <SidebarNavButton key={item.section} icon={item.icon} label={item.label} active={activeSettingsSection === item.section} onClick={() => onOpenSettingsSection(item.section)} />)}</nav> : null}
       </aside>
     );
   }

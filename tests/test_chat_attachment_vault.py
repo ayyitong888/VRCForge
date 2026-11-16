@@ -221,6 +221,18 @@ class VaultStoreTests(unittest.TestCase):
         self.assertEqual(outcome["deletedFiles"], 0)
         self.assertIn(stored["payloadHash"], self.vault._index)
 
+    def test_scoped_retention_drops_only_the_named_chat_reference(self) -> None:
+        data = make_png_bytes(pad=b"shared" * 8)
+        first = self.vault.ingest(data=data, name="first.png", declared_type="image/png", chat_id="chat-a")
+        self.vault.ingest(data=data, name="second.png", declared_type="image/png", chat_id="chat-b")
+        digest = first["payloadHash"]
+        self._age_entry(digest)
+        self.vault.retain({"chat-a": {digest}, "chat-b": {digest}})
+        outcome = self.vault.retain_chat("chat-a", set())
+        self.assertEqual(outcome["droppedRefs"], 1)
+        self.assertEqual(outcome["deletedFiles"], 0)
+        self.assertEqual(set(self.vault._index[digest]["chats"]), {"chat-b"})
+
     def test_restart_rehydration_drops_entries_with_missing_files(self) -> None:
         keep = make_png_bytes(pad=b"keep" * 8)
         lost = make_png_bytes(pad=b"lost" * 8)

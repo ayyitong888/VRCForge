@@ -39,7 +39,7 @@ assert.doesNotMatch(hook, /createdAt: lastTimestamp \|\||completedAt \|\| new Da
 const replyIdPrefix = hook.match(/id: `([^`$]+)\$\{continuationId\}`/)?.[1];
 assert.ok(replyIdPrefix, "continuation reply must have an app-owned identity");
 assert.equal(replyIdPrefix.includes("sk-"), false, "continuation ids must survive the bridge secret-prefix filter instead of collapsing to [redacted]");
-assert.match(app, /eventType === "agentRuntimeTurn"[\s\S]*?const receipt = event\.payload\?\.payload[\s\S]*?deliverRuntimeTurnContinuation\(receipt\)/);
+assert.match(app, /eventType === "agentRuntimeTurn"[\s\S]*?const receipt = event\.payload\?\.payload[\s\S]*?deliverRuntimeTurnContinuation\(receipt, true\)/);
 assert.match(app, /bootstrap\?\.runtimeContinuations \?\? \[\]/);
 assert.match(app, /for \(const continuation of bootstrap\?\.runtimeContinuations/);
 assert.match(app, /deliverRuntimeTurnContinuation\(continuation\)/);

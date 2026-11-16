@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
+import jsonPatch from "fast-json-patch";
 
 const { chromium } = createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
 const owner = { id: "chat", sessionId: "session", title: "Existing", projectPath: "", projectType: "general" };
@@ -17,6 +19,18 @@ const titledOwner = { ...owner, id: "titled-chat", sessionId: "", title: "Named 
 let serverChats = [{ ...owner, items: [original, receipt, { ...cancelled, attachments: [{ id: "external-note", name: "note.txt", size: 0, type: "text/plain" }] }] },
   { ...titledOwner, items: [] }];
 let blocked = true;
+const saveReceipts = new Map();
+const digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const source = () => ({ storeId: "chat.app", scope: "app", exists: true, digest: digest(serverChats), status: "ok" });
+const shape = (value) => value && typeof value === "object" && !Array.isArray(value)
+  ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, shape(child)])) : true;
+const metadataShape = (chat) => { const { items, ...metadata } = chat; return shape(metadata); };
+function applyChatPatch(previous, patch) {
+  const metadata = jsonPatch.applyPatch(previous, patch.metadataPatch, true, false).newDocument;
+  const items = new Map(previous.items.map((item) => [item.id, item]));
+  return { ...metadata, items: patch.itemOrder.map((id) => patch.newItems[id]
+    ?? jsonPatch.applyPatch(items.get(id), patch.itemPatches[id] ?? [], true, false).newDocument) };
+}
 const bundle = await build({
   stdin: { resolveDir: process.cwd(), loader: "tsx", contents: `
     import React from "react";
@@ -63,21 +77,52 @@ const bundle = await build({
   bundle: true, write: false, format: "esm", jsx: "automatic", define: { "process.env.NODE_ENV": '"test"' },
 });
 const server = createServer(async (request, response) => {
+  const url = new URL(request.url, "http://localhost");
   if (request.url === "/api/app/agent/chats/delete-session" && request.method === "DELETE") {
     response.setHeader("Content-Type", "application/json");
     response.end(JSON.stringify({ ok: true, removed: true }));
     return;
   }
-  if (request.url.startsWith("/api/app/chats")) {
+  if (url.pathname === "/api/app/chats/single" && request.method === "POST") {
     response.setHeader("Content-Type", "application/json");
-    if (request.method === "POST") {
-      if (blocked) { response.statusCode = 409; response.end("{}"); return; }
-      let body = "";
-      for await (const chunk of request) body += chunk;
-      serverChats = JSON.parse(body).chats;
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    const body = JSON.parse(raw);
+    assert.ok(body.chatSaveId);
+    const saveKey = body.chatOriginId + ":" + body.chatSaveId;
+    if (saveReceipts.has(saveKey)) { response.end(JSON.stringify(saveReceipts.get(saveKey))); return; }
+    if (blocked || JSON.stringify(body.sourceRevisions) !== JSON.stringify([source()])) {
+      response.statusCode = 409;
+      response.end(JSON.stringify({ detail: { code: blocked ? "chat_store_recovery_required" : "chat_store_snapshot_changed" } }));
+      return;
     }
-    response.end(JSON.stringify({ ok: true, chats: serverChats, count: serverChats.length,
-      sources: [], recoveries: blocked ? [{ status: "invalid" }] : [], writeBlocked: blocked }));
+    const previous = serverChats.find(({ id }) => id === body.chatId);
+    if (body.chatPatch) assert.equal(body.chatPatch.baseDigest, digest(previous));
+    if (body.chat) assert.equal(previous, undefined, "full single records only create new chats");
+    const updated = body.delete ? null : body.chat ?? applyChatPatch(previous, body.chatPatch);
+    serverChats = updated
+      ? previous ? serverChats.map((chat) => chat.id === updated.id ? updated : chat) : [...serverChats, updated]
+      : serverChats.filter(({ id }) => id !== body.chatId);
+    const saved = { ok: true, sourceRevisions: [source()],
+      chatDigests: updated ? { [updated.id]: digest(updated) } : {},
+      chatMetadataShapes: updated ? { [updated.id]: metadataShape(updated) } : {} };
+    saveReceipts.set(saveKey, saved);
+    response.end(JSON.stringify(saved));
+    return;
+  }
+  if (url.pathname === "/api/app/chats" && request.method === "GET") {
+    response.setHeader("Content-Type", "application/json");
+    if (url.searchParams.get("catalog") === "1") {
+      response.end(JSON.stringify({ ok: true,
+        entries: serverChats.map(({ items, ...metadata }) => ({ ...metadata, sourceProjectPath: "", sourceStoreId: "chat.app" })),
+        sources: [source()], recoveries: blocked ? [{ status: "invalid" }] : [], writeBlocked: blocked, pendingChatIds: [] }));
+      return;
+    }
+    assert.equal(url.searchParams.get("full"), "1");
+    const chat = serverChats.find(({ id }) => id === url.searchParams.get("chatId"));
+    assert.ok(chat, "record reads target a catalog entry");
+    response.end(JSON.stringify({ ok: true, chats: [chat], sourceRevision: source(), hasOlder: false, nextBefore: null,
+      chatDigests: { [chat.id]: digest(chat) }, chatMetadataShapes: { [chat.id]: metadataShape(chat) } }));
     return;
   }
   if (request.url === "/fixture.js") {
@@ -136,5 +181,6 @@ try {
   console.log("PASS: exact user inputs survive a blocked restart, queue state is safe, and only canonical acknowledgements prune local records");
 } finally {
   await browser?.close();
+  server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
 }

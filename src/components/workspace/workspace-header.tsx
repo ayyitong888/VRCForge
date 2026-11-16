@@ -1,4 +1,4 @@
-import { AlertTriangle, Moon, Sun } from "lucide-react";
+import { AlertTriangle, Loader2, Moon, Sun } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ActiveView } from "../../lib/app-view";
 import type { ThemeMode } from "../../lib/app-preferences";
@@ -18,6 +18,8 @@ export function WorkspaceHeader({
   loadingDoctor,
   loading,
   runtimeStarting,
+  runtimeStartupPhase,
+  cachedListAvailable,
   error,
   chatStorageError,
   chatStorageNeedsDoctor,
@@ -41,6 +43,8 @@ export function WorkspaceHeader({
   loadingDoctor: boolean;
   loading: boolean;
   runtimeStarting?: boolean;
+  runtimeStartupPhase?: "starting" | "loadingWorkspace" | "loadingChats";
+  cachedListAvailable?: boolean;
   error: string;
   chatStorageError?: string;
   chatStorageNeedsDoctor?: boolean;
@@ -79,6 +83,14 @@ export function WorkspaceHeader({
           </Button>
         </div>
       </header>}
+
+      {runtimeStartupPhase && !runtimeStarting ? (
+        <div role="status" className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-xs text-muted-foreground md:px-5">
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+          <span>{t(`header.runtimeStartup.${runtimeStartupPhase}`)}</span>
+          {cachedListAvailable ? <span>{t("header.runtimeStartup.cachedList")}</span> : null}
+        </div>
+      ) : null}
 
       {runtimeStarting && !hasStartupIssue ? (
         <div role="status" className="px-4 py-1 text-xs text-muted-foreground">{t("header.reconnecting")}</div>

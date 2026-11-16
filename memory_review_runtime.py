@@ -96,6 +96,25 @@ class MemoryReviewIdleGate:
             observed_epoch = self._epoch
         if blocker():
             return None
+        return self._claim(observed_epoch, on_revoke)
+
+    async def try_acquire_async(
+        self,
+        blocker: Callable[[], str],
+        on_revoke: Callable[[], Any],
+    ) -> int | None:
+        """Check live blockers in a worker and claim on the awaiting event loop."""
+        if not callable(blocker) or not callable(on_revoke):
+            raise TypeError("idle gate callbacks must be callable")
+        with self._lock:
+            observed_epoch = self._epoch
+        # A cancelled scheduler may leave the check running, but only this
+        # coroutine can claim a generation once the check returns.
+        if await asyncio.to_thread(blocker):
+            return None
+        return self._claim(observed_epoch, on_revoke)
+
+    def _claim(self, observed_epoch: int, on_revoke: Callable[[], Any]) -> int | None:
         with self._lock:
             if self._epoch != observed_epoch or self._active_generation:
                 return None

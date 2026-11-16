@@ -1337,8 +1337,10 @@ class AgentRuntimeSessionState:
             }
             return undrained
 
-    def session_busy(self, session_id: str) -> bool:
+    def session_busy(self, session_id: str | None = None) -> bool:
         with self._ports.shared_state_lock:
+            if session_id is None:
+                return bool(self._active_turns or self._finalizing_turns or self._waiting_turns)
             return any(key[0] == session_id for key in (*self._active_turns, *self._finalizing_turns, *self._waiting_turns))
 
     def owns_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> bool:

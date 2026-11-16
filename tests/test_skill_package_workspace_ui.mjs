@@ -28,9 +28,7 @@ assert.ok(api.includes("payload.key || {}"), "official key status must unwrap th
 assert.ok(api.includes("publicKeyPath"), "official key status must preserve the public key path field");
 assert.ok(source.includes("<details"), "advanced governance/export areas should be collapsible");
 assert.ok(source.includes("role=\"switch\""), "package enable control must use the switch affordance");
-assert.match(source, /relative h-7 w-12 shrink-0 overflow-hidden/, "skill switches must clip the moving thumb to their own track");
-assert.match(source, /absolute left-0 top-1\/2 h-5 w-5 -translate-y-1\/2/, "skill switch thumbs must share their track's vertical center while remaining anchored inside its left edge");
-assert.match(source, /translate-x-\[26px\].*translate-x-\[2px\]/, "skill switch thumb positions must be symmetric inside the 48px track");
+// Thumb containment and symmetric alignment are measured in test_switch_alignment_browser.mjs.
 assert.ok(source.includes("break-words font-medium") && source.includes("break-all text-muted-foreground"), "long official Skill names and IDs must wrap instead of truncating");
 assert.ok(source.includes("advancedActions"), "package governance actions must be behind an advanced disclosure");
 assert.ok(source.includes("preparePackageExport(pkg)"), "package rows must offer export preparation");

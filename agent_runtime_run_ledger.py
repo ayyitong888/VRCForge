@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import copy
 from collections import OrderedDict, deque
@@ -8,7 +9,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, BinaryIO, Callable, NamedTuple
 
 from background_goal_runtime import classify_runtime_plan_outcome, classify_runtime_step_failure
 from runtime_planner_service import public_runtime_payload
@@ -61,6 +62,76 @@ def _ensure_list(value: Any) -> list[Any]:
     if value is None:
         return []
     return [value]
+
+
+def _event_approval_ids(event: dict[str, Any]) -> set[str]:
+    ids = {str(event.get("approvalId") or "").strip()}
+    ids.update(str(item).strip() for item in _ensure_list(event.get("approvalIds")))
+    return ids - {""}
+
+
+class _RunRow(NamedTuple):
+    offset: int
+    length: int
+    client_turn_id: Any
+    project_root: str
+
+
+class _RunScopeIndex:
+    """Process-local byte locations derived from the authoritative JSONL."""
+
+    def __init__(self, stat: os.stat_result) -> None:
+        self.identity = (stat.st_dev, stat.st_ino)
+        self.size = stat.st_size
+        self.mtime_ns = stat.st_mtime_ns
+        self.offset = 0
+        self.sessions: dict[str, list[_RunRow]] = {}
+        self.approvals: dict[str, list[_RunRow]] = {}
+        self.session_approvals: dict[str, set[str]] = {}
+        self.start_times: dict[tuple[str, str], str] = {}
+
+    def record(self, event: dict[str, Any], offset: int, length: int) -> None:
+        session = event.get("sessionId")
+        if event.get("event") == "runtime_turn_started" and session and event.get("turnId") and event.get("createdAt"):
+            self.start_times[(str(session), str(event["turnId"]))] = str(event["createdAt"])
+        row = _RunRow(offset, length, event.get("clientTurnId"), str(event.get("projectRoot") or ""))
+        approvals = _event_approval_ids(event)
+        if isinstance(session, str) and session:
+            self.sessions.setdefault(session, []).append(row)
+            if approvals:
+                self.session_approvals.setdefault(session, set()).update(approvals)
+        for approval in approvals:
+            self.approvals.setdefault(approval, []).append(row)
+
+    def advance(self, source: BinaryIO, stat: os.stat_result) -> None:
+        source.seek(self.offset)
+        while self.offset < stat.st_size:
+            line = source.readline(stat.st_size - self.offset)
+            if not line.endswith(b"\n"):
+                break
+            try:
+                event = json.loads(line.decode("utf-8", errors="replace"))
+            except (ValueError, RecursionError):
+                event = None
+            if isinstance(event, dict):
+                self.record(event, self.offset, len(line))
+            self.offset += len(line)
+        self.size, self.mtime_ns = stat.st_size, stat.st_mtime_ns
+
+    def select(self, source: BinaryIO, *, session_id: str, client_turn_id: str,
+               project_matches: Callable[[str], bool], limit: int,
+               include_approvals: bool) -> tuple[list[dict[str, Any]], set[str]]:
+        approvals = set(self.session_approvals.get(session_id, ())) if include_approvals else set()
+        rows = {row.offset: row for row in self.sessions.get(session_id, ())}
+        for approval in approvals:
+            rows.update((row.offset, row) for row in self.approvals[approval])
+        selected = [row for _, row in sorted(rows.items())
+                    if (not client_turn_id or row.client_turn_id == client_turn_id) and project_matches(row.project_root)]
+        events = []
+        for row in selected[-limit:]:
+            source.seek(row.offset)
+            events.append(json.loads(source.read(row.length).decode("utf-8", errors="replace")))
+        return events, approvals
 
 
 def _public_event(value: dict[str, Any]) -> dict[str, Any]:
@@ -127,7 +198,7 @@ class AgentRuntimeRunLedgerPorts:
 class AgentRuntimeRunLedger:
     """Persist and project runtime-run events without owning runtime execution."""
 
-    __slots__ = ("_ports", "_instance_nonce", "_list_runs_cache", "_shell_continuation_states_cache")
+    __slots__ = ("_ports", "_instance_nonce", "_list_runs_cache", "_shell_continuation_states_cache", "_run_scope_index")
 
     def __init__(self, ports: AgentRuntimeRunLedgerPorts) -> None:
         self._ports = ports
@@ -139,6 +210,7 @@ class AgentRuntimeRunLedger:
         # append boundary; never retain/parse the complete JSONL in memory.
         self._list_runs_cache: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
         self._shell_continuation_states_cache: dict[str, dict[str, Any]] | None = None
+        self._run_scope_index: _RunScopeIndex | None = None
 
     @property
     def log_path(self) -> Path:
@@ -261,14 +333,16 @@ class AgentRuntimeRunLedger:
             interrupted: set[tuple[str, str, str]] = set()
             continuation_rows: deque[tuple[int, dict[str, Any]]] = deque(maxlen=512)
             shell_states: dict[str, dict[str, Any]] = {}
-            start_times: dict[tuple[str, str], str] = {}
             consumed_offset = 0
             ordinal = 0
+            self._run_scope_index = None
             try:
                 source = self.log_path.open("rb")
             except FileNotFoundError:
                 self._shell_continuation_states_cache = {}
                 return 0
+            scope_index = _RunScopeIndex(os.fstat(source.fileno()))
+
             def owned_events():
                 # Existing ledgers can be large. Older records have no live
                 # owner marker; parse only start and continuation rows until
@@ -283,26 +357,24 @@ class AgentRuntimeRunLedger:
                             break
                         consumed_offset = byte_offset
                         ordinal += 1
-                        if (b'"continuationEvent"' not in line
+                        skip_recovery = (b'"continuationEvent"' not in line
                                 and b'"runtime_turn_started"' not in line
                                 and b'"shellContinuationState"' not in line
-                                and not starts and b'"runtimeOwnerNonce"' not in line):
-                            continue
+                                and not starts and b'"runtimeOwnerNonce"' not in line)
                         try:
                             event = json.loads(line.decode("utf-8", errors="replace"))
-                        except json.JSONDecodeError:
+                        except (ValueError, RecursionError):
                             continue
                         if isinstance(event, dict):
+                            scope_index.record(event, byte_offset - len(line), len(line))
+                            if skip_recovery:
+                                continue
                             shell_state = str(event.get("shellContinuationState") or "").strip()
                             shell_session_id = str(event.get("shellSessionId") or "").strip()
                             if shell_state in {"pending", "dispatching", "delivered", "interrupted"} and shell_session_id:
                                 shell_states[shell_session_id] = event
                             if isinstance(event.get("continuationEvent"), dict):
                                 continuation_rows.append((ordinal, event))
-                            if (event.get("event") == "runtime_turn_started"
-                                    and event.get("sessionId") and event.get("turnId")
-                                    and event.get("createdAt")):
-                                start_times[(str(event["sessionId"]), str(event["turnId"]))] = str(event["createdAt"])
                             yield event
             for event in owned_events():
                 key = self._turn_key(event)
@@ -379,6 +451,9 @@ class AgentRuntimeRunLedger:
             # by the ordinary incremental reader.
             try:
                 stat = self.log_path.stat()
+                if scope_index.identity == (stat.st_dev, stat.st_ino):
+                    scope_index.offset = consumed_offset
+                    self._run_scope_index = scope_index
                 direct_events = list(continuation_rows)
                 events = [row for _, row in direct_events[-512:]]
                 self._list_runs_cache[("continuations", "", "", "", 512)] = {
@@ -390,7 +465,7 @@ class AgentRuntimeRunLedger:
                     # value before returning, so copying the large event trees
                     # here only duplicates the recovery scan's result.
                     "events": events,
-                    "start_times": dict(start_times),
+                    "start_times": dict(scope_index.start_times),
                     "approval_ids": set(),
                     "direct_events": direct_events[-512:],
                     "approval_events": [],
@@ -501,6 +576,7 @@ class AgentRuntimeRunLedger:
                 project_matches=lambda _value: True,
                 event_approval_ids=lambda _event: set(),
                 limit=0,
+                indexed_approvals=False,
             )
         started_turn_ids = [
             str(row.get("turnId") or "").strip()
@@ -646,11 +722,6 @@ class AgentRuntimeRunLedger:
                 return True
             return self._ports.normalize_path(candidate) == normalized_project_root
 
-        def event_approval_ids(event: dict[str, Any]) -> set[str]:
-            ids = {str(event.get("approvalId") or "").strip()}
-            ids.update(str(item).strip() for item in _ensure_list(event.get("approvalIds")))
-            return {item for item in ids if item}
-
         cache_key = (session_id, normalized_project_root, client_turn_id,
                      max(1, min(int(limit), 200)))
         with self._ports.shared_state_lock:
@@ -659,13 +730,14 @@ class AgentRuntimeRunLedger:
                 session_id=session_id,
                 client_turn_id=client_turn_id,
                 project_matches=project_matches,
-                event_approval_ids=event_approval_ids,
+                event_approval_ids=_event_approval_ids,
                 limit=max(limit * 8, 100),
                 copy_events=not notification_only,
+                indexed_approvals=True,
             )
         filtered_events: list[dict[str, Any]] = []
         for event in events:
-            related_by_approval = bool(related_approval_ids.intersection(event_approval_ids(event)))
+            related_by_approval = bool(related_approval_ids.intersection(_event_approval_ids(event)))
             if session_id and str(event.get("sessionId") or "") != session_id and not related_by_approval:
                 continue
             if client_turn_id and str(event.get("clientTurnId") or "") != client_turn_id:
@@ -771,6 +843,7 @@ class AgentRuntimeRunLedger:
         event_matches: Callable[[dict[str, Any]], bool] | None = None,
         raw_line_matches: Callable[[bytes], bool] | None = None,
         copy_events: bool = True,
+        indexed_approvals: bool | None = None,
     ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str], set[str]]:
         """Read one query window once, then consume only appended JSONL rows.
 
@@ -798,7 +871,38 @@ class AgentRuntimeRunLedger:
             events = copy.deepcopy(cached_events) if copy_events else list(cached_events)
             return (events, dict(cached["start_times"]),
                     set(cached["approval_ids"]))
-        if incremental:
+        index = self._run_scope_index
+        if index is not None and session_id and indexed_approvals is not None:
+            if (index.identity != identity or stat.st_size < index.size
+                    or (stat.st_size == index.size and stat.st_mtime_ns != index.mtime_ns)):
+                self._run_scope_index = None
+            else:
+                try:
+                    with path.open("rb") as source:
+                        opened = os.fstat(source.fileno())
+                        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+                            stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+                        ):
+                            raise OSError("Runtime ledger changed before indexed read")
+                        if stat.st_size > index.size:
+                            index.advance(source, stat)
+                        events, approval_ids = index.select(
+                            source, session_id=session_id, client_turn_id=client_turn_id,
+                            project_matches=project_matches, limit=limit, include_approvals=indexed_approvals,
+                        )
+                except (OSError, json.JSONDecodeError):
+                    self._run_scope_index = None
+                else:
+                    self._list_runs_cache[cache_key] = {
+                        "identity": identity, "mtime_ns": stat.st_mtime_ns, "offset": index.offset,
+                        "events": events, "start_times": dict(index.start_times), "approval_ids": approval_ids,
+                    }
+                    self._list_runs_cache.move_to_end(cache_key)
+                    while len(self._list_runs_cache) > 32:
+                        self._list_runs_cache.popitem(last=False)
+                    return (copy.deepcopy(events) if copy_events else list(events),
+                            dict(index.start_times), set(approval_ids))
+        if incremental and "direct_events" in cached:
             self._list_runs_cache.move_to_end(cache_key)
             offset = cached["offset"]
             direct_events = deque(cached["direct_events"], maxlen=limit or None)

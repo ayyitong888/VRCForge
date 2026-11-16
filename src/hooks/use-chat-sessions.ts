@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { fetchChats, saveChats, type ChatRecoveryMarker, type ChatSaveReceipt, type ChatSourceRevision, type StoredChats } from "../lib/api";
+import { fetchChatCatalog, fetchChatRecord, saveChatRecord, type ChatCatalogEntry, type ChatSaveReceipt, type ChatRecoveryMarker, type ChatSourceRevision, type StoredChats } from "../lib/api";
 import { deleteChatPermanentlyApi } from "../lib/api/app";
 import { ApiError } from "../lib/api/http";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
@@ -22,7 +22,6 @@ import {
   snapshotChatFingerprints,
   sourceRevisionsFromPayload,
 } from "../lib/chat-storage-reconcile";
-import { expandChatRefresh } from "../lib/chat-refresh-snapshot";
 import { buildChatStoragePatches } from "../lib/chat-storage-delta";
 import { chatStorageOriginId } from "../lib/chat-storage-origin";
 import { acknowledgeLocalChatInputs, readLocalChatInputs, removeLocalChatInputs, restoreLocalChatInputs } from "../lib/chat-local-inputs";
@@ -32,7 +31,7 @@ import {
   saveChatSidebarCache,
   type ChatSidebarCacheEntry,
 } from "../lib/chat-sidebar-cache";
-import { readChatTranscriptCache, removeChatTranscriptCache, writeChatTranscriptCache } from "../lib/chat-transcript-cache";
+import { removeChatTranscriptCache } from "../lib/chat-transcript-cache";
 import {
   cacheChatContextUsageFast,
   cacheChatTimestampsFast,
@@ -49,6 +48,7 @@ import type { ChatThread, ConversationItem, ProjectType } from "../lib/chat-type
 import { normalizeProjectPathKey } from "../lib/project-path";
 import { chatSidebarActivity, type SidebarChatActivity } from "../lib/sidebar-view";
 import { latestChatReplyMarker } from "../lib/chat-unread";
+import { useChatHistoryPages } from "./use-chat-history-pages";
 
 type InitialChatState = {
   chats: ChatThread[];
@@ -69,6 +69,8 @@ type ChatStorageError = {
 type PendingChatSave = {
   endpoint: string;
   snapshot: ChatThread[];
+  chatId: string;
+  deleted?: boolean;
   saveVersion: number;
   submit: () => Promise<ChatSaveReceipt>;
 };
@@ -146,8 +148,8 @@ export function useChatSessions({
 }: UseChatSessionsParams) {
   const { i18n, t } = useTranslation();
   const [chats, setChats] = useState<ChatThread[]>(() => initialChatState.chats);
-  const [sidebarCacheEntries, setSidebarCacheEntries] = useState<ChatSidebarCacheEntry[]>(() => loadChatSidebarCache());
-  const [cachedDisplayChat, setCachedDisplayChat] = useState<{ endpoint: string; chat: ChatThread } | null>(null);
+  const [sidebarCacheEntries] = useState<ChatSidebarCacheEntry[]>(() => loadChatSidebarCache());
+  const [catalog, setCatalog] = useState<ChatCatalogEntry[] | null>(null);
   const [chatStorageLoadSucceeded, setChatStorageLoadSucceeded] = useState(false);
   const [chatStorageReady, setChatStorageReady] = useState(false);
   const [activeChatId, setActiveChatId] = useState(() => initialChatState.activeChatId);
@@ -167,6 +169,11 @@ export function useChatSessions({
   const chatAutosaveFailureVersionRef = useRef<number | null>(null);
   const chatTimestampCacheTimerRef = useRef<number | null>(null);
   const chatsRef = useRef<ChatThread[]>(initialChatState.chats);
+  const catalogRef = useRef<ChatCatalogEntry[]>([]);
+  const pendingChatIdsRef = useRef<string[]>([]);
+  const loadingChatsRef = useRef(new Map<string, Promise<ChatThread | undefined>>());
+  const endpointRef = useRef(endpoint);
+  endpointRef.current = endpoint;
   const chatsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const chatsAutosavePendingRef = useRef<Promise<void> | null>(null);
   const chatsAutosaveRerunRequestedRef = useRef(false);
@@ -191,46 +198,29 @@ export function useChatSessions({
   const chatStorageConflictRef = useRef(false);
   const chatStorageRecoveryBlockedRef = useRef(false);
   const chatDeletedIdsRef = useRef<Set<string>>(new Set());
-  const pendingCachedDeletesRef = useRef(new Set<string>());
   const chatSidebarActivityCacheRef = useRef(new WeakMap<ChatThread, SidebarChatActivity | null>());
 
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
-  const selectedSidebarEntry = sidebarCacheEntries.find((entry) => entry.id === activeChatId);
-  const selectedProjectPath = selectedSidebarEntry?.projectPath ?? activeProjectPath;
-  // This provisional snapshot is display-only. It must never enter chatsRef,
-  // reconciliation, an outgoing model request, or the authoritative save queue.
-  const displayChat = useMemo<ChatThread | null>(() => {
-    if (activeChat || chatStorageLoadSucceeded) return activeChat;
-    if (cachedDisplayChat?.endpoint === endpoint
-      && cachedDisplayChat.chat.id === activeChatId
-      && normalizeProjectPathKey(cachedDisplayChat.chat.projectPath) === normalizeProjectPathKey(selectedProjectPath)) {
-      return cachedDisplayChat.chat;
-    }
-    return selectedSidebarEntry ? { ...selectedSidebarEntry, items: [] } : null;
-  }, [activeChat, activeChatId, cachedDisplayChat, chatStorageLoadSucceeded, endpoint, selectedProjectPath, selectedSidebarEntry]);
-  const activeChatPending = Boolean(activeChatId && !activeChat && !chatStorageLoadSucceeded);
+  const selectedEntry = catalog?.find((entry) => entry.id === activeChatId);
+  const cachedSource = catalog === null && !activeChat
+    ? sidebarCacheEntries.find((entry) => entry.id === activeChatId)?.sourceProjectPath
+    : undefined;
+  const usingCachedSource = cachedSource !== undefined;
+  const history = useChatHistoryPages(
+    endpoint, activeChatId, selectedEntry?.sourceProjectPath ?? cachedSource, activeChat,
+    runtimeConnected && projectPrefsReady, !usingCachedSource, () => setError(t("chat.sessionRestoreFailed")),
+  );
+  const displayChat = usingCachedSource ? null : history.chat;
+  const previewChat = usingCachedSource ? history.chat : null;
+  const activeChatPending = usingCachedSource || (history.pending && (!chatStorageLoadSucceeded || Boolean(selectedEntry)));
 
-  useEffect(() => {
-    if (!activeChatPending) return;
-    let cancelled = false;
-    void readChatTranscriptCache(endpoint, activeChatId, selectedProjectPath).then((chat) => {
-      if (!cancelled && chat) setCachedDisplayChat({ endpoint, chat });
-    });
-    return () => { cancelled = true; };
-  }, [activeChatId, activeChatPending, endpoint, selectedProjectPath]);
-
-  useEffect(() => {
-    if (!activeChat || !chatStorageLoadSucceeded || activeChat.items.some((item) => item.type === "streaming")) return;
-    void writeChatTranscriptCache(endpoint, activeChat);
-  }, [activeChat, chatStorageLoadSucceeded, endpoint]);
   const sidebarChats = useMemo<ChatThread[]>(() => {
-    if (chatStorageLoadSucceeded || sidebarCacheEntries.length === 0) return chats;
-    const authoritativeIds = new Set(chats.map((chat) => chat.id));
-    const cached = sidebarCacheEntries
-      .filter((entry) => !authoritativeIds.has(entry.id))
-      .map((entry) => ({ ...entry, items: [] }));
-    return [...chats, ...cached];
-  }, [chatStorageLoadSucceeded, chats, sidebarCacheEntries]);
+    const loadedIds = new Set(chats.map((chat) => chat.id));
+    const entries = catalog ?? sidebarCacheEntries;
+    return [...chats, ...entries
+      .filter((entry) => !loadedIds.has(entry.id) && !chatDeletedIdsRef.current.has(entry.id))
+      .map((entry) => ({ ...entry, items: [] }))];
+  }, [catalog, chats, sidebarCacheEntries]);
 
   const chatSidebarBase = useMemo(() => {
     const activityByChat = new Map<string, SidebarChatActivity>();
@@ -282,24 +272,8 @@ export function useChatSessions({
   }, [activeView, activeChat, chatContentVisible]);
 
   useEffect(() => {
-    if (chatStorageLoadSucceeded) {
-      saveChatSidebarCache(chats);
-      setSidebarCacheEntries(chats.map(({ id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt }) => ({
-        id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt,
-      })));
-      return;
-    }
-    if (chats.length > 0) {
-      const byId = new Map(sidebarCacheEntries.map((entry) => [entry.id, entry]));
-      for (const chat of chats) {
-        const { id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt } = chat;
-        byId.set(id, { id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt });
-      }
-      const merged = [...byId.values()];
-      saveChatSidebarCache(merged.map((entry) => ({ ...entry, items: [] } as ChatThread)));
-      setSidebarCacheEntries(merged);
-    }
-  }, [chatStorageLoadSucceeded, chats]);
+    if (catalog) saveChatSidebarCache(sidebarChats, catalog);
+  }, [catalog, sidebarChats]);
 
   useEffect(() => {
     chatRestoreMountedRef.current = true;
@@ -317,6 +291,7 @@ export function useChatSessions({
       ...customProjectPaths,
       activeProjectPath,
       ...snapshot.map((chat) => chat.projectPath),
+      ...catalogRef.current.map((chat) => chat.sourceProjectPath),
     ];
     const selected = new Map<string, string>();
     for (const value of paths) {
@@ -327,6 +302,82 @@ export function useChatSessions({
       selected.set(normalizeProjectPathKey(path) || path.toLowerCase(), path);
     }
     return [...selected.values()];
+  }
+
+  async function fetchLoadedChatSnapshot(
+    projectPaths: string[],
+    isCurrent: () => boolean = () => true,
+  ): Promise<StoredChats<unknown>> {
+    const response = await fetchChatCatalog(endpoint, projectPaths);
+    if (!isCurrent()) return { ...response, path: "", exists: false, count: 0, chats: [] };
+    const entries = new Map(response.entries.map((entry) => [entry.id, entry]));
+    catalogRef.current = response.entries;
+    pendingChatIdsRef.current = response.pendingChatIds;
+    setCatalog(response.entries);
+    const localInputs = await readLocalChatInputs(endpoint).catch(() => []);
+    const ids = new Set([
+      ...localInputs.map((input) => input.owner.id),
+      ...Object.keys(chatBaselineFingerprintsRef.current),
+      ...chatsRef.current.filter((chat) => entries.has(chat.id)).map((chat) => chat.id),
+    ]);
+    const records = await Promise.all([...ids].map(async (id) => {
+      const entry = entries.get(id);
+      if (!entry) return null;
+      return await fetchChatRecord(endpoint, id, entry.sourceProjectPath, { full: true });
+    }));
+    const bodies = records.flatMap((record) => record?.chats ?? []);
+    const digests = Object.assign({}, ...records.map((record) => record?.chatDigests));
+    const shapes = Object.assign({}, ...records.map((record) => record?.chatMetadataShapes));
+    for (const [id, baseline] of Object.entries(chatBaselineFingerprintsRef.current)) {
+      if (ids.has(id) || !baseline) continue;
+      bodies.push(baseline);
+      digests[id] = chatServerDigestsRef.current?.[id];
+      shapes[id] = chatServerMetadataShapesRef.current?.[id];
+    }
+    return {
+      ...response,
+      path: "",
+      exists: true,
+      chats: bodies,
+      count: bodies.length,
+      chatDigests: digests,
+      chatMetadataShapes: shapes,
+    };
+  }
+
+  function mergeSourceRevisions(revisions: ChatSourceRevision[]) {
+    const merged = new Map(chatSourceRevisionsRef.current.map((revision) => [revision.storeId, revision]));
+    for (const revision of revisions) merged.set(revision.storeId, revision);
+    chatSourceRevisionsRef.current = [...merged.values()];
+  }
+
+  async function loadChat(chatId: string): Promise<ChatThread | undefined> {
+    const existing = getChatById(chatId);
+    if (existing) return existing;
+    const entry = catalogRef.current.find((row) => row.id === chatId);
+    if (!entry) return undefined;
+    const key = JSON.stringify([endpoint, chatId]);
+    const pending = loadingChatsRef.current.get(key);
+    if (pending) return pending;
+    const loading = fetchChatRecord(endpoint, chatId, entry.sourceProjectPath, { full: true }).then((result) => {
+      const loaded = getChatById(chatId);
+      if (loaded) return loaded;
+      const normalized = normalizeStoredChatSnapshot(result.chats);
+      const chat = normalized.chats.find((record) => record.id === chatId);
+      if (!chat || !chatRestoreMountedRef.current || endpointRef.current !== endpoint) return undefined;
+      const digests = chatDigestsFromPayload(result.chatDigests, [chat]);
+      const shapes = chatMetadataShapesFromPayload(result.chatMetadataShapes, [chat]);
+      if (result.sourceRevision) mergeSourceRevisions([result.sourceRevision]);
+      Object.assign(chatBaselineFingerprintsRef.current, snapshotChatFingerprints([chat], projectDurableChatFingerprint));
+      Object.assign(chatServerDigestsRef.current ??= {}, digests);
+      Object.assign(chatServerMetadataShapesRef.current ??= {}, shapes);
+      chatsRef.current = [...chatsRef.current, chat];
+      setChats(chatsRef.current);
+      if (normalized.shouldPersist) markChatsDirty();
+      return chat;
+    }).finally(() => loadingChatsRef.current.delete(key));
+    loadingChatsRef.current.set(key, loading);
+    return loading;
   }
 
   function traceChatStorage(stage: "enqueued" | "started" | "resolved" | "failed", details: {
@@ -443,7 +494,7 @@ export function useChatSessions({
     const recoveringFromDamagedSource = chatStorageRecoveryBlockedRef.current
       || recoveries.some((recovery) => recovery.status === "recovered");
     const { chats: unfilteredRemoteChats, shouldPersist } = normalizeStoredChatSnapshot(
-      expandChatRefresh(payload, chatBaselineFingerprintsRef.current, chatServerDigestsRef.current),
+      payload.chats,
       chatsLoadedRef.current ? chatsRef.current : [],
     );
     const unfilteredRemoteFingerprints = recoveringFromDamagedSource
@@ -530,12 +581,6 @@ export function useChatSessions({
     chatServerMetadataShapesRef.current = remoteShapes;
     chatsRef.current = restoredChats;
     setChats(restoredChats);
-    for (const chatId of pendingCachedDeletesRef.current) {
-      if (restoredChats.some((chat) => chat.id === chatId)) {
-        pendingCachedDeletesRef.current.delete(chatId);
-        void deleteChatPermanently(chatId);
-      }
-    }
     chatPersistenceBlockedRef.current = false;
     chatStorageRecoveryBlockedRef.current = false;
     chatStorageConflictRef.current = false;
@@ -559,32 +604,45 @@ export function useChatSessions({
     saveVersion: number,
     clearDirty: boolean,
   ): Promise<void> {
-    if (chatPersistenceBlockedRef.current) {
-      throw new Error(t("chat.sessionSaveBlocked"));
+    if (chatPersistenceBlockedRef.current) throw new Error(t("chat.sessionSaveBlocked"));
+    await settlePendingChatSave();
+    const baseline = chatBaselineFingerprintsRef.current;
+    const digests = chatServerDigestsRef.current ??= {};
+    const shapes = chatServerMetadataShapesRef.current ??= {};
+    for (const chat of snapshot) {
+      const previous = baseline[chat.id];
+      if (chatStorageValuesEqual(chat, previous)) continue;
+      const owner = catalogRef.current.find((entry) => entry.id === chat.id);
+      const projectPath = owner?.sourceProjectPath ?? previous?.projectPath ?? chat.projectPath;
+      const patch = buildChatStoragePatches([chat], baseline, digests, shapes)?.[chat.id];
+      const request = { chatId: chat.id, projectPath, sourceRevisions: chatSourceRevisionsRef.current,
+        ...(patch ? { chatPatch: patch } : { chat }) };
+      const chatSaveId = globalThis.crypto.randomUUID();
+      pendingChatSaveRef.current = { endpoint, snapshot: [chat], chatId: chat.id, saveVersion,
+        submit: () => saveChatRecord(endpoint, request, chatSaveId) };
+      await settlePendingChatSave();
     }
-    const acknowledgedVersion = await settlePendingChatSave(clearDirty);
-    if (acknowledgedVersion === saveVersion) return;
-    const chatPatches = buildChatStoragePatches(
-      snapshot,
-      chatBaselineFingerprintsRef.current,
-      chatServerDigestsRef.current,
-      chatServerMetadataShapesRef.current,
-    );
-    const sourceRevisions = chatSourceRevisionsRef.current;
-    const chatSaveId = globalThis.crypto.randomUUID();
-    pendingChatSaveRef.current = {
-      endpoint,
-      snapshot,
-      saveVersion,
-      submit: () => saveChats(endpoint, snapshot, sourceRevisions, chatPatches, chatSaveId),
-    };
-    await settlePendingChatSave(clearDirty);
+    for (const chatId of [...chatDeletedIdsRef.current]) {
+      const owner = catalogRef.current.find((entry) => entry.id === chatId);
+      const projectPath = owner?.sourceProjectPath ?? baseline[chatId]?.projectPath;
+      if (projectPath !== undefined) {
+        const request = { chatId, projectPath, sourceRevisions: chatSourceRevisionsRef.current, delete: true as const };
+        const chatSaveId = globalThis.crypto.randomUUID();
+        pendingChatSaveRef.current = { endpoint, snapshot: [], chatId, deleted: true, saveVersion,
+          submit: () => saveChatRecord(endpoint, request, chatSaveId) };
+        await settlePendingChatSave();
+      }
+    }
+    if (chatsSaveVersionRef.current === saveVersion) {
+      if (clearDirty) chatsDirtyRef.current = false;
+      chatDeletedIdsRef.current.clear();
+    }
+    clearResolvedChatStorageError();
   }
 
-  async function settlePendingChatSave(clearDirty: boolean): Promise<number | undefined> {
+  async function settlePendingChatSave(): Promise<void> {
     const pending = pendingChatSaveRef.current;
-    if (!pending || pending.endpoint !== endpoint) return undefined;
-    const { snapshot, saveVersion } = pending;
+    if (!pending || pending.endpoint !== endpoint) return;
     let result: ChatSaveReceipt;
     try {
       result = await pending.submit();
@@ -593,34 +651,44 @@ export function useChatSessions({
       throw cause;
     }
     pendingChatSaveRef.current = null;
-    const nextServerDigests = chatDigestsFromPayload(result.chatDigests, snapshot);
-    const nextServerShapes = chatMetadataShapesFromPayload(result.chatMetadataShapes, snapshot);
-    if (chatServerDigestsRef.current !== undefined && nextServerDigests === undefined) {
+    const { snapshot, chatId, deleted } = pending;
+    const digests = chatServerDigestsRef.current ??= {};
+    const shapes = chatServerMetadataShapesRef.current ??= {};
+    const baseline = chatBaselineFingerprintsRef.current;
+    if (result.sourceRevisions) mergeSourceRevisions(result.sourceRevisions);
+    if (deleted) {
+      delete baseline[chatId];
+      delete digests[chatId];
+      delete shapes[chatId];
+      chatDeletedIdsRef.current.delete(chatId);
+      catalogRef.current = catalogRef.current.filter((entry) => entry.id !== chatId);
+      setCatalog(catalogRef.current);
+      return;
+    }
+    const savedDigests = chatDigestsFromPayload(result.chatDigests, snapshot);
+    const savedShapes = chatMetadataShapesFromPayload(result.chatMetadataShapes, snapshot);
+    if (savedDigests === undefined) {
       throw new Error("Chat storage acknowledgement omitted chat version metadata after it was established.");
     }
-    if (nextServerDigests !== undefined && nextServerShapes === undefined) {
+    if (savedShapes === undefined) {
       throw new Error("Chat storage acknowledgement omitted chat metadata shape after it was established.");
     }
-    if (result.sourceRevisions) {
-      chatSourceRevisionsRef.current = result.sourceRevisions;
+    Object.assign(digests, savedDigests);
+    Object.assign(shapes, savedShapes);
+    const chat = snapshot[0];
+    const owner = catalogRef.current.find((entry) => entry.id === chatId);
+    Object.assign(baseline, snapshotChatFingerprints(snapshot, projectDurableChatFingerprint));
+    if (owner && owner.sourceProjectPath !== chat.projectPath) {
+      catalogRef.current = catalogRef.current.map((entry) => entry.id === chatId
+        ? { ...entry, sourceProjectPath: chat.projectPath } : entry);
+      setCatalog(catalogRef.current);
     }
-    chatBaselineFingerprintsRef.current = snapshotChatFingerprints(snapshot, projectDurableChatFingerprint);
-    chatServerDigestsRef.current = nextServerDigests;
-    chatServerMetadataShapesRef.current = nextServerShapes;
     if (result.ok === true) void acknowledgeLocalChatInputs(endpoint, snapshot).catch(() => undefined);
-    if (chatsSaveVersionRef.current === saveVersion) {
-      if (clearDirty) {
-        chatsDirtyRef.current = false;
-      }
-      chatDeletedIdsRef.current.clear();
-    }
-    clearResolvedChatStorageError();
-    return saveVersion;
   }
 
   async function settlePendingChatSaveBeforeRead(): Promise<void> {
     try {
-      await settlePendingChatSave(true);
+      await settlePendingChatSave();
     } catch (cause) {
       // A definite conflict is handled by the authoritative read and merge.
       if (!(cause instanceof ApiError) || cause.status !== 409) throw cause;
@@ -648,7 +716,7 @@ export function useChatSessions({
         if (attempt > 0 || !(cause instanceof ApiError) || cause.status !== 409) {
           throw cause;
         }
-        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths(), chatServerDigestsRef.current);
+        const payload = await fetchLoadedChatSnapshot(collectChatStorageProjectPaths());
         const outcome = await reconcileFetchedChatStorage(payload);
         if (outcome.status !== "ready") {
           throw cause;
@@ -690,7 +758,7 @@ export function useChatSessions({
             return { status: "cancelled", chats: chatsRef.current, shouldPersist: false } satisfies ChatStorageLoadOutcome;
           }
           await settlePendingChatSaveBeforeRead();
-          const payload = await fetchChats<unknown>(endpoint, restoreProjectPaths);
+          const payload = await fetchLoadedChatSnapshot(restoreProjectPaths, isCurrentRestore);
           return reconcileFetchedChatStorage(
             payload,
             () => isCurrentRestore(),
@@ -701,7 +769,9 @@ export function useChatSessions({
         }
         chatsLoadedRef.current = true;
         setChatStorageLoadSucceeded(true);
-        setChatStorageReady(true);
+        void Promise.allSettled(pendingChatIdsRef.current.map(loadChat)).then(() => {
+          if (isCurrentRestore()) setChatStorageReady(true);
+        });
         if (outcome.chats.length > 0) {
           const initialSaveVersion = chatsSaveVersionRef.current;
           if (outcome.shouldPersist && !chatPersistenceBlockedRef.current) {
@@ -741,7 +811,7 @@ export function useChatSessions({
     try {
       const reloaded = await enqueueChatStorageOperation(async () => {
         await settlePendingChatSaveBeforeRead();
-        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths(), chatServerDigestsRef.current);
+        const payload = await fetchLoadedChatSnapshot(collectChatStorageProjectPaths());
         const outcome = await reconcileFetchedChatStorage(payload);
         if (outcome.status !== "ready") {
           return false;
@@ -818,13 +888,13 @@ export function useChatSessions({
     setResolvingChatStorageConflict(true);
     try {
       return await enqueueChatStorageOperation(async () => {
-        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths(), chatServerDigestsRef.current);
+        const payload = await fetchLoadedChatSnapshot(collectChatStorageProjectPaths());
         if (payload.writeBlocked === true || (payload.recoveries || []).length > 0) {
           await reconcileFetchedChatStorage(payload);
           return false;
         }
         const sourceRevisions = sourceRevisionsFromPayload(payload.sources);
-        const { chats: remoteChats } = normalizeStoredChatSnapshot(expandChatRefresh(payload, chatBaselineFingerprintsRef.current, chatServerDigestsRef.current));
+        const { chats: remoteChats } = normalizeStoredChatSnapshot(payload.chats);
         const remoteDigests = chatDigestsFromPayload(payload.chatDigests, remoteChats);
         const remoteShapes = chatMetadataShapesFromPayload(payload.chatMetadataShapes, remoteChats);
         if (chatServerDigestsRef.current !== undefined && remoteDigests === undefined) {
@@ -1052,11 +1122,11 @@ export function useChatSessions({
   }
 
   function togglePinChat(chatId: string) {
-    updateChat(chatId, (chat) => ({ ...chat, pinned: !chat.pinned }));
+    void loadChat(chatId).then(() => updateChat(chatId, (chat) => ({ ...chat, pinned: !chat.pinned }))).catch(reportChatSaveError);
   }
 
   function toggleTestChat(chatId: string) {
-    updateChat(chatId, (chat) => ({ ...chat, isTestChat: !chat.isTestChat }));
+    void loadChat(chatId).then(() => updateChat(chatId, (chat) => ({ ...chat, isTestChat: !chat.isTestChat }))).catch(reportChatSaveError);
   }
 
   function startRenameChat(chat: ChatThread) {
@@ -1068,7 +1138,7 @@ export function useChatSessions({
     if (!cancel && renamingChatId) {
       const title = renameDraft.trim();
       if (title) {
-        updateChat(renamingChatId, (chat) => ({ ...chat, title, titleSource: "manual" }));
+        void loadChat(renamingChatId).then(() => updateChat(renamingChatId, (chat) => ({ ...chat, title, titleSource: "manual" }))).catch(reportChatSaveError);
       }
     }
     setRenamingChatId("");
@@ -1076,20 +1146,17 @@ export function useChatSessions({
   }
 
   async function deleteChatPermanently(chatId: string) {
-    const removedSnapshot = chatsRef.current.find((chat) => chat.id === chatId) || null;
-    if (!removedSnapshot) {
-      // A cached row has no authoritative transcript yet. Keep it visible and
-      // replay the normal delete only after the restore supplies the real chat.
-      pendingCachedDeletesRef.current.add(chatId);
-      return;
-    }
+    const removedSnapshot = await loadChat(chatId).catch((cause) => {
+      reportChatSaveError(cause);
+      return undefined;
+    });
+    if (!removedSnapshot) return;
     const removedIndex = removedSnapshot ? chatsRef.current.indexOf(removedSnapshot) : -1;
     chatDeletedIdsRef.current.add(chatId);
     markChatsDirty();
     const next = chatsRef.current.filter((chat) => chat.id !== chatId);
     chatsRef.current = next;
     setChats(next);
-    setSidebarCacheEntries((current) => current.filter((entry) => entry.id !== chatId));
     removeChatFromSidebarCache(chatId);
     if (activeChatId === chatId) {
       setActiveChatId("");
@@ -1106,10 +1173,15 @@ export function useChatSessions({
       // The user explicitly deleted this conversation. Discard its pending
       // local inputs first so a crash after server deletion cannot recreate it.
       await removeLocalChatInputs(endpoint, chatId).catch(() => undefined);
-      await persistChatsNow();
+      try {
+        await persistChatsNow();
+      } catch (cause) {
+        if (chatDeletedIdsRef.current.has(chatId)) throw cause;
+        reportChatSaveError(cause);
+      }
       durableDeletionCommitted = true;
       await removeChatTranscriptCache(endpoint, chatId, removedSnapshot.projectPath);
-      if (runtimeSessionId && !chatsRef.current.some((chat) => chat.sessionId.trim() === runtimeSessionId)) {
+      if (runtimeSessionId && ![...chatsRef.current, ...catalogRef.current].some((chat) => chat.sessionId.trim() === runtimeSessionId)) {
         const result = await deleteChatPermanentlyApi(endpoint, runtimeSessionId);
         if (result.ok !== true) throw new ApiError("Runtime cleanup did not return success.", 0);
       }
@@ -1121,10 +1193,6 @@ export function useChatSessions({
         restored.splice(Math.min(removedIndex, restored.length), 0, removedSnapshot);
         chatsRef.current = restored;
         setChats(restored);
-        saveChatSidebarCache(restored);
-        setSidebarCacheEntries(restored.map(({ id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt }) => ({
-          id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt,
-        })));
         markChatsDirty();
         if (rollbackUnchangedSave && chatAutosaveFailureVersionRef.current === deleteSaveVersion) {
           chatAutosaveFailureVersionRef.current = chatsSaveVersionRef.current;
@@ -1143,7 +1211,7 @@ export function useChatSessions({
     setActiveProjectPath(projectPath);
     setActiveProjectType?.(projectType);
     if (activeChatId) {
-      updateChat(activeChatId, (chat) => ({ ...chat, projectPath, projectType }));
+      void loadChat(activeChatId).then(() => updateChat(activeChatId, (chat) => ({ ...chat, projectPath, projectType }))).catch(reportChatSaveError);
     }
   }
 
@@ -1156,9 +1224,16 @@ export function useChatSessions({
     setActiveChatId("");
   }
 
-  function archiveProjectChats(path: string, archived: boolean) {
+  async function archiveProjectChats(path: string, archived: boolean) {
     const key = normalizeProjectPathKey(path);
     if (!key) {
+      return;
+    }
+    try {
+      const affected = sidebarChats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === key);
+      await Promise.all(affected.map((chat) => loadChat(chat.id)));
+    } catch (cause) {
+      reportChatSaveError(cause);
       return;
     }
     markChatsDirty();
@@ -1184,7 +1259,7 @@ export function useChatSessions({
     setActiveView("chat");
     setActiveProjectPath(projectPath);
     setActiveProjectType?.(projectType);
-    const latest = sortChatsByPin(chats.filter((chat) => (
+    const latest = sortChatsByPin(sidebarChats.filter((chat) => (
       normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(projectPath) && !chat.archived
     )))[0];
     setActiveChatId(latest ? latest.id : "");
@@ -1197,6 +1272,7 @@ export function useChatSessions({
     activeChat,
     displayChat,
     activeChatPending,
+    previewChat,
     activeChatId,
     setActiveChatId,
     chatMenu,
@@ -1207,6 +1283,10 @@ export function useChatSessions({
     deleteTargetId,
     setDeleteTargetId,
     chatSidebar,
+    sidebarChats,
+    loadChat,
+    loadOlderChatMessages: history.loadOlder,
+    hasOlderChatMessages: history.hasOlder,
     chatRecoveries,
     chatPersistenceBlocked,
     chatStorageError,

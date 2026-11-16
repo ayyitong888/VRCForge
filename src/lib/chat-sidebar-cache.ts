@@ -4,8 +4,8 @@ export const CHAT_SIDEBAR_CACHE_KEY = "vrcforge_chat_sidebar_cache";
 
 export type ChatSidebarCacheEntry = Pick<
   ChatThread,
-  "id" | "sessionId" | "title" | "projectPath" | "projectType" | "pinned" | "archived" | "createdAt" | "updatedAt" | "lastViewedAt"
->;
+  "id" | "sessionId" | "title" | "projectPath" | "projectType" | "pinned" | "archived" | "isTestChat" | "createdAt" | "updatedAt" | "lastViewedAt"
+> & { sourceProjectPath?: string };
 
 function toEntry(value: unknown): ChatSidebarCacheEntry | null {
   if (!value || typeof value !== "object") return null;
@@ -20,9 +20,11 @@ function toEntry(value: unknown): ChatSidebarCacheEntry | null {
     projectType,
     pinned: candidate.pinned === true,
     archived: candidate.archived === true,
+    isTestChat: candidate.isTestChat === true,
     createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : "",
     updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : "",
     lastViewedAt: typeof candidate.lastViewedAt === "string" ? candidate.lastViewedAt : undefined,
+    sourceProjectPath: typeof candidate.sourceProjectPath === "string" ? candidate.sourceProjectPath : undefined,
   };
 }
 
@@ -36,9 +38,13 @@ export function loadChatSidebarCache(): ChatSidebarCacheEntry[] {
   }
 }
 
-export function saveChatSidebarCache(chats: ReadonlyArray<ChatThread>): void {
+export function saveChatSidebarCache(
+  chats: ReadonlyArray<ChatThread>,
+  catalog: ReadonlyArray<{ id: string; sourceProjectPath: string }>,
+): void {
   try {
-    const entries: ChatSidebarCacheEntry[] = chats.map(({ id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt }) => ({
+    const sourcePaths = new Map(catalog.map((entry) => [entry.id, entry.sourceProjectPath]));
+    const entries: ChatSidebarCacheEntry[] = chats.map(({ id, sessionId, title, projectPath, projectType, pinned, archived, isTestChat, createdAt, updatedAt, lastViewedAt }) => ({
       id,
       sessionId,
       title,
@@ -46,9 +52,11 @@ export function saveChatSidebarCache(chats: ReadonlyArray<ChatThread>): void {
       projectType,
       pinned,
       archived,
+      isTestChat,
       createdAt,
       updatedAt,
       lastViewedAt,
+      sourceProjectPath: sourcePaths.get(id),
     }));
     window.localStorage.setItem(CHAT_SIDEBAR_CACHE_KEY, JSON.stringify(entries));
   } catch {

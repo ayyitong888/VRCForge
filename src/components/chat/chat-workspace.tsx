@@ -130,6 +130,7 @@ export function ChatWorkspace({
   projectPromptTitle,
   conversationPending = false,
   conversationPendingMessage,
+  readOnlyHistory = false,
   input,
   setInput,
   sending,
@@ -237,6 +238,7 @@ export function ChatWorkspace({
   projectPromptTitle: string;
   conversationPending?: boolean;
   conversationPendingMessage?: string;
+  readOnlyHistory?: boolean;
   input: string;
   setInput: (value: string) => void;
   sending: boolean;
@@ -304,7 +306,7 @@ export function ChatWorkspace({
   onStopQuestionContinuation?: (question: AgentQuestion) => void | Promise<void>;
   conversationEndRef: Ref<HTMLDivElement>;
   onConversationMouseUp: () => void;
-  onConversationScroll: (scrollElement: HTMLDivElement) => void;
+  onConversationScroll: (scrollElement: HTMLDivElement, requestOlder?: boolean) => void;
   showScrollToBottom: boolean;
   onScrollToBottom: () => void;
   pendingApprovalForResponse: (response: AgentRuntimeResponse) => AgentApproval | null;
@@ -437,6 +439,7 @@ export function ChatWorkspace({
   );
   const unboundQuestionEntries = pendingQuestionsByOrigin.get(undefined)?.map((question) => renderQuestionEntry(question, true));
   const conversationRenderScope = sessionHandoffSourceChatId || "chat";
+  const historyInteraction = readOnlyHistory ? { inert: "" } : undefined;
   const conversationItemKeyOccurrences = new Map<string, number>();
   const [steeringReveal, setSteeringReveal] = useState<{ ownerKey: string; sequence: number }>();
   const { navigationMarkers, steeringAnchorsByOwner } = useMemo(() => {
@@ -488,7 +491,7 @@ export function ChatWorkspace({
     return { navigationMarkers: markers, steeringAnchorsByOwner };
   }, [conversationItems, conversationRenderScope, steeringProjection.initialUsersByTurnId, steeringProjection.messagesByTurnId]);
   const historyScrollRef = useRef<HTMLDivElement>(null);
-  const questionCapturePreviews = (question: AgentQuestion) => capturePreviewsForQuestion(question, conversationItems);
+  const questionCapturePreviews = (question: AgentQuestion) => readOnlyHistory ? [] : capturePreviewsForQuestion(question, conversationItems);
   const questionResourceImageContext = (question: AgentQuestion) => {
     const capturePreviews = questionCapturePreviews(question);
     if (!capturePreviews.length || !resourceImageEndpoint || !resourceChatId || !resourceProjectPath) return undefined;
@@ -746,15 +749,18 @@ export function ChatWorkspace({
           ref={historyScrollRef}
           className="app-scrollbar h-full overflow-auto pl-7 pr-4 py-6 md:pl-8 md:pr-6 md:py-8"
           data-chat-history-scroll
-          onMouseUp={onConversationMouseUp}
+          onMouseUp={readOnlyHistory ? undefined : onConversationMouseUp}
           onScroll={(event) => onConversationScroll(event.currentTarget)}
+          onWheel={(event) => {
+            if (event.deltaY < 0 && event.currentTarget.scrollTop === 0) onConversationScroll(event.currentTarget, true);
+          }}
         >
           <div className="mx-auto max-w-3xl space-y-7">
           <BackgroundGoalCatchUpCard
             deliveries={backgroundGoalDeliveries}
             providerWarnings={backgroundGoalProviderWarnings}
-            onRendered={onBackgroundGoalCatchUpRendered}
-            onProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
+            onRendered={readOnlyHistory ? undefined : onBackgroundGoalCatchUpRendered}
+            onProviderWarningsRendered={readOnlyHistory ? undefined : onBackgroundGoalProviderWarningsRendered}
             onDismiss={onBackgroundGoalCatchUpDismiss}
           />
           {(() => {
@@ -780,7 +786,7 @@ export function ChatWorkspace({
             const renderKey = conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences);
             if (item.type === "handoff_card") {
               return (
-                <div key={renderKey} data-chat-nav-anchor={renderKey}>
+                <div key={renderKey} data-chat-nav-anchor={renderKey} {...historyInteraction}>
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <SessionHandoffCard
                   handoff={{
@@ -805,7 +811,7 @@ export function ChatWorkspace({
                 </div>
               );
             }
-            const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
+            const approval = !readOnlyHistory && item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
             const turnId = item.type === "agent" ? item.response.clientTurnId : item.type === "streaming" ? item.clientTurnId : "";
             const turnSessionId = runtimeSessionId || (item.type === "agent" ? item.response.sessionId || item.response.session_id : "");
             const runtimeActive = turnId && turnSessionId ? runtimeTurnActivityStatus(runtimeRuns, turnSessionId, turnId) : undefined;
@@ -824,6 +830,7 @@ export function ChatWorkspace({
               : null;
             return (
               <div key={renderKey} data-chat-nav-anchor={renderKey} data-conversation-item-id={item.id}
+                {...historyInteraction}
                 data-chat-task={taskId} data-chat-task-continuation={taskContinuation || undefined}
                 style={taskContinuation ? { marginTop: "0.75rem" } : undefined}>
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
@@ -858,7 +865,7 @@ export function ChatWorkspace({
                     />
                   </div>
                 ) : undefined}
-                chatResourceImageContext={resourceImageEndpoint && resourceChatId && resourceProjectPath ? {
+                chatResourceImageContext={!readOnlyHistory && resourceImageEndpoint && resourceChatId && resourceProjectPath ? {
                   endpoint: resourceImageEndpoint,
                   chatId: resourceChatId,
                   projectPath: resourceProjectPath,

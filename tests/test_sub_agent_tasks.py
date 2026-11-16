@@ -798,6 +798,23 @@ def _write_result_sidecar(tmp_path, task_id: str, payload: dict) -> None:
     (result_dir / f"{task_id}.json").write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
 
+def test_restart_preserves_jsonl_records_containing_unicode_line_separators(tmp_path):
+    task_id = "sub_unicode_separator"
+    _write_task_projection(tmp_path, task_id, "completed")
+    log = tmp_path / "sub-agent-events.jsonl"
+    entry = json.loads(log.read_text(encoding="utf-8"))
+    entry["task"]["task"] = "first paragraph\u2028second paragraph"
+    log.write_text(json.dumps(entry, ensure_ascii=False) + '\n{"task":', encoding="utf-8")
+
+    registry = SubAgentTaskRegistry(tmp_path, roles=[], handlers={}, reconcile_on_init=False)
+
+    restored = registry.get_task(task_id)
+    assert restored["ok"] is True
+    assert restored["task"]["task"] == entry["task"]["task"]
+    assert [event["taskId"] for event in restored["task"]["events"]] == [task_id]
+    assert registry.recent_events(limit=1) == []
+
+
 def test_merge_task_adopted_records_terminal_decision_and_event(tmp_path):
     registry = SubAgentTaskRegistry(
         tmp_path,
@@ -1279,14 +1296,14 @@ def test_refresh_from_disk_is_transactional_on_projection_read_error(tmp_path, m
     original_task = registry.get_task(task_id, include_events=False)["task"]
     registry.start()
     event_log = registry._event_log_path()
-    original_read_text = Path.read_text
+    original_open = Path.open
 
     def fail_event_log_read(path: Path, *args, **kwargs):
         if path == event_log:
             raise PermissionError("event log temporarily locked")
-        return original_read_text(path, *args, **kwargs)
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", fail_event_log_read)
+    monkeypatch.setattr(Path, "open", fail_event_log_read)
     with pytest.raises(PermissionError, match="temporarily locked"):
         registry.reconcile_startup(refresh_from_disk=True)
 

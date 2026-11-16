@@ -167,12 +167,12 @@ export function DiagnosticsSettingsPanel({
           className="mt-5 w-full cursor-pointer accent-primary"
         />
         <div
-          className="mt-1 grid gap-1 text-center text-[11px] text-muted-foreground"
-          style={{ gridTemplateColumns: `repeat(${availableLevels.length}, minmax(0, 1fr))` }}
+          className="mx-2 mt-1 grid justify-between text-center text-[11px] text-muted-foreground"
+          style={{ gridTemplateColumns: `repeat(${availableLevels.length}, 0px)` }}
           aria-hidden="true"
         >
           {availableLevels.map((level) => (
-            <span key={level}>{t(logLevelLabelKey(level))}</span>
+            <span key={level} className="w-max -translate-x-1/2">{t(logLevelLabelKey(level))}</span>
           ))}
         </div>
 

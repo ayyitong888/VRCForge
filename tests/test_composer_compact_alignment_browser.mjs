@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import test from "node:test";
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
 import { build } from "esbuild";
@@ -15,12 +16,13 @@ const bundle = await build({
     import { createRoot } from "react-dom/client";
     import { Composer } from "./src/components/chat/composer";
     import { initializeI18n } from "./src/i18n";
+    window.submissions = 0;
     function Fixture() {
       const [input, setInput] = useState("");
-      const [questionPromptVisible, setQuestionPromptVisible] = useState(true);
-      window.setQuestionPromptVisible = setQuestionPromptVisible;
-      return <Composer input={input} setInput={setInput} sending={false} questionPromptVisible={questionPromptVisible}
-        providerLabel="ChatGPT" model="gpt-6.1-sol" onSubmit={() => {}} onSwitchMode={() => {}} />;
+      const [layout, setLayout] = useState({ questionPromptVisible: true, providerLabel: "ChatGPT", model: "gpt-6.1-sol" });
+      window.setComposerLayout = (patch) => setLayout(current => ({ ...current, ...patch }));
+      return <Composer input={input} setInput={setInput} sending={false} {...layout}
+        onSubmit={event => { event?.preventDefault(); window.submissions += 1; }} onSwitchMode={() => {}} />;
     }
     void initializeI18n().then(() => createRoot(document.getElementById("root")).render(<Fixture />));
   ` },
@@ -65,7 +67,7 @@ try {
   const twoLines = await assertCentered("two-line draft");
   assert.equal(twoLines.height, oneLine.height + twoLines.lineHeight, "the textarea still grows by one line");
   await input.fill("");
-  await page.evaluate(() => window.setQuestionPromptVisible(false));
+  await page.evaluate(() => window.setComposerLayout({ questionPromptVisible: false }));
   const regularHeight = () => input.evaluate((element) => element.offsetHeight);
   await page.waitForFunction(() => !document.querySelector("textarea").className.includes("row-start-1"));
   assert.equal(await regularHeight(), oneLine.height, "an empty ordinary composer uses one line");
@@ -76,6 +78,49 @@ try {
   await input.fill("");
   assert.equal(await regularHeight(), oneLine.height, "clearing a draft restores the compact height");
   console.log("question and ordinary composers fit their drafts and keep compact empty states");
+  console.log("compact question composer centers placeholder and drafts with its controls");
+
+  await page.setViewportSize({ width: 1360, height: 900 });
+  await test("long model label cannot cover Send in a narrow desktop content pane", async () => {
+    const providerLabel = "A deliberately long provider display name";
+    const model = "example-model-with-long-provider-qualified-identifier-20261116";
+    await page.evaluate(({ providerLabel, model }) => {
+      document.getElementById("root").style.cssText = "width:370px;margin:440px 0 0 440px";
+      window.setComposerLayout({ questionPromptVisible: false, providerLabel, model });
+    }, { providerLabel, model });
+    await page.locator(`span[title="${providerLabel} · ${model}"]`).waitFor();
+    await input.fill("send from narrow pane");
+    const send = page.locator("[data-composer-send]");
+    const geometry = await send.evaluate(button => {
+      const rect = button.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+      const form = button.closest("form");
+      return { reachable: button === hit || button.contains(hit), overflow: form.scrollWidth - form.clientWidth };
+    });
+    assert.ok(geometry.reachable, `Send is covered; composer overflow=${geometry.overflow}px`);
+    assert.ok(geometry.overflow <= 1, `model label overflows by ${geometry.overflow}px`);
+    await send.click();
+    assert.equal(await page.evaluate(() => window.submissions), 1);
+  });
+
+  await test("pending-question permission menu opens toward the available content", async () => {
+    await page.evaluate(() => {
+      document.getElementById("root").style.cssText = "width:360px;margin:440px 0 0 440px";
+      window.setComposerLayout({ questionPromptVisible: true, providerLabel: "ChatGPT", model: "gpt-6.1-sol" });
+    });
+    await page.locator('span[title="ChatGPT · gpt-6.1-sol"]').waitFor();
+    const permission = page.locator("button:has(svg.lucide-shield)");
+    await permission.click();
+    const menu = permission.locator("..").locator("div.absolute");
+    const menuRect = await menu.boundingBox();
+    const formRect = await page.locator("form").boundingBox();
+    assert.ok(menuRect.x >= formRect.x - 1, "permission menu must remain inside the content's left edge");
+    assert.ok(menuRect.x + menuRect.width <= formRect.x + formRect.width + 1,
+      `permission menu overflows content by ${menuRect.x + menuRect.width - formRect.x - formRect.width}px`);
+    assert.ok(menuRect.y >= 0 && menuRect.y + menuRect.height <= page.viewportSize().height,
+      "permission menu must remain visible vertically");
+    assert.equal(await menu.locator("button").count(), 3);
+  });
 } finally {
   await browser.close();
 }

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { build } from "esbuild";
+import jsonPatch from "fast-json-patch";
 const require=createRequire(import.meta.url);
 const {chromium}=require(process.env.VRCFORGE_PLAYWRIGHT_PATH||"playwright");
 const app=readFileSync("src/App.tsx","utf8");
@@ -22,9 +24,11 @@ setActiveView:noop,setError:noop,expandProjectGroup:noop,initialChatState:initia
 window.notify=sessions.notifyChatStorageChanged;
 window.originId=chatStorageOriginId();
 window.persist=sessions.persistChatsNow;
+window.sessions=sessions;
+window.setTitle=title=>sessions.updateChat('chat',chat=>({...chat,title}));
 window.localEdit=()=>sessions.updateChat('chat',chat=>({...chat,title:'local-dirty'}));
 window.localAppend=()=>sessions.appendToChat('chat',{id:'local-extra',type:'user',text:'local-added'});
-return <pre id="state">{JSON.stringify({chats:sessions.chats,blocked:sessions.chatPersistenceBlocked})}</pre>}
+return <pre id="state">{JSON.stringify({ready:sessions.chatStorageReady,chats:sessions.chats,blocked:sessions.chatPersistenceBlocked})}</pre>}
 const root=createRoot(document.getElementById('root'));root.render(<Fixture/>);window.unmount=()=>root.unmount();
 `},bundle:true,write:false,format:"esm",jsx:"automatic",define:{"process.env.NODE_ENV":'"test"'},plugins:(process.env.VRCFORGE_TEST_LEGACY_CHAT_ECHO==="1"||process.env.VRCFORGE_TEST_LEGACY_CHAT_RELOAD_QUEUE==="1")?[{
 name:"legacy-chat-storage-control",setup(builder){builder.onLoad({filter:/use-chat-sessions\.ts$/},async(args)=>{
@@ -43,18 +47,48 @@ return {contents,loader:"tsx"};
 });}
 }]:[]});
 let gets=0,posts=0,postOriginIds=[],postBodies=[];
-const chat={id:"chat",sessionId:"session",title:"initial",revision:0,projectPath:"",projectType:"general",
+const chat={id:"chat",sessionId:"session",title:"initial",revision:0,projectPath:"C:/fixture/project",projectType:"unity",
 createdAt:"2026-01-01T00:00:00Z",updatedAt:"2026-01-01T00:00:00Z",items:[{id:"u1",type:"user",text:"initial",createdAt:"2026-01-01T00:00:00Z"}]};
 let chats=[chat];
+let sourceProjectPath='';
+const saveReceipts=new Map();
+const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const sources=()=>[
+  {storeId:'chat.app',scope:'app',exists:true,digest:digest(sourceProjectPath?[]:chats),status:'ok'},
+  {storeId:'chat.project',scope:'project',projectPath:chat.projectPath,exists:true,digest:digest(chats),status:'ok'},
+];
+const source=()=>sources()[sourceProjectPath?1:0];
+const shape=value=>value&&typeof value==='object'&&!Array.isArray(value)
+  ?Object.fromEntries(Object.entries(value).map(([key,child])=>[key,shape(child)])):true;
+const metadataShape=chat=>{const {items,...metadata}=chat;return shape(metadata);};
+function applyChatPatch(previous,patch){
+  const metadata=jsonPatch.applyPatch(previous,patch.metadataPatch,true,false).newDocument;
+  const items=new Map(previous.items.map(item=>[item.id,item]));
+  return {...metadata,items:patch.itemOrder.map(id=>patch.newItems[id]??jsonPatch.applyPatch(items.get(id),patch.itemPatches[id]??[],true,false).newDocument)};
+}
 let nextGetHold=null;
 function holdNextGet(){
 let release;let markStarted;const gate=new Promise(resolve=>{release=resolve;});
 const started=new Promise(resolve=>{markStarted=resolve;});nextGetHold={gate,markStarted};return {started,release};}
 const server=createServer(async(req,res)=>{
-if(req.url.startsWith('/api/app/chats')){res.setHeader('Content-Type','application/json');
-if(req.method==='POST'){posts++;let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);postOriginIds.push(body.chatOriginId);postBodies.push(body);chats=body.chats;res.end(JSON.stringify({ok:true,sourceRevisions:[]}));return;}
-gets++;const snapshot=chats;const held=nextGetHold;nextGetHold=null;if(held){held.markStarted();await held.gate;}
-res.end(JSON.stringify({ok:true,chats:snapshot,count:snapshot.length,sources:[],recoveries:[],writeBlocked:false}));return;}
+const url=new URL(req.url,'http://localhost');
+if(url.pathname==='/api/app/chats/single'&&req.method==='POST'){
+res.setHeader('Content-Type','application/json');posts++;let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);postOriginIds.push(body.chatOriginId);postBodies.push(body);
+assert.ok(body.chatSaveId);const saveKey=body.chatOriginId+':'+body.chatSaveId;
+if(saveReceipts.has(saveKey)){res.end(JSON.stringify(saveReceipts.get(saveKey)));return;}
+assert.equal(body.chatId,chat.id);assert.deepEqual(body.sourceRevisions,sources());
+if(body.projectPath!==sourceProjectPath){res.statusCode=404;res.end(JSON.stringify({detail:'Chat no longer exists in the former source'}));return;}
+const previous=chats.find(item=>item.id===body.chatId);
+if(body.chatPatch)assert.equal(body.chatPatch.baseDigest,digest(previous));
+const updated=body.chat??applyChatPatch(previous,body.chatPatch);chats=chats.map(item=>item.id===updated.id?updated:item);
+sourceProjectPath=updated.projectPath;
+const receipt={ok:true,sourceRevisions:sources(),chatDigests:{[updated.id]:digest(updated)},chatMetadataShapes:{[updated.id]:metadataShape(updated)}};
+saveReceipts.set(saveKey,receipt);res.end(JSON.stringify(receipt));return;}
+if(url.pathname==='/api/app/chats'&&req.method==='GET'){res.setHeader('Content-Type','application/json');gets++;
+if(url.searchParams.get('catalog')==='1'){res.end(JSON.stringify({ok:true,entries:chats.map(({items,...metadata})=>({...metadata,sourceProjectPath,sourceStoreId:source().storeId})),sources:sources(),recoveries:[],writeBlocked:false,pendingChatIds:[]}));return;}
+assert.equal(url.searchParams.get('chatId'),chat.id);assert.equal(url.searchParams.get('full'),'1');
+const snapshot=structuredClone(chats);const revision=source();const held=nextGetHold;nextGetHold=null;if(held){held.markStarted();await held.gate;}
+res.end(JSON.stringify({ok:true,chats:snapshot,sourceRevision:revision,hasOlder:false,nextBefore:null,chatDigests:Object.fromEntries(snapshot.map(item=>[item.id,digest(item)])),chatMetadataShapes:Object.fromEntries(snapshot.map(item=>[item.id,metadataShape(item)]))}));return;}
 if(req.url==='/fixture.js'){res.setHeader('Content-Type','text/javascript');res.end(bundle.outputFiles[0].text);return;}
 res.end('<div id="root"></div><script type="module" src="/fixture.js"></script>');});
 await new Promise(done=>server.listen(0,'127.0.0.1',done));
@@ -63,24 +97,32 @@ try{
 browser=await chromium.launch({headless:true,channel:process.env.VRCFORGE_BROWSER_CHANNEL||'msedge'});
 const page=await browser.newPage();const origin='http://127.0.0.1:'+server.address().port;
 await page.route('**/*',route=>route.request().url().startsWith(origin)?route.continue():route.abort());
-await page.goto(origin);await page.waitForFunction(()=>document.querySelector('#state')?.textContent.includes('initial'));
+await page.goto(origin);await page.waitForFunction(()=>window.sessions?.chatStorageReady);
+await page.evaluate(()=>window.sessions.loadChat('chat'));
+await page.waitForFunction(()=>document.querySelector('#state')?.textContent.includes('initial'));
 const before=gets;
 const originId=await page.evaluate(()=>window.originId);
 await page.evaluate((id)=>{window.notify(id);window.notify(id);window.notify(id);},originId);
 await page.waitForTimeout(220);assert.equal(gets,before,'the originating webview ignores its own precise storage echo');
 const beforeOwnWrite=posts;
+await page.evaluate(()=>window.setTitle('own-save'));
 await page.evaluate(()=>window.persist());
 assert.equal(posts,beforeOwnWrite+1,'explicit persistence should complete without waiting behind a self-triggered reload');
 assert.equal(postOriginIds.at(-1),originId,'the write carries the exact per-webview origin identity');
 await page.evaluate((id)=>{window.notify(id);window.notify(id);window.notify(id);},originId);
 await page.waitForTimeout(220);assert.equal(gets,before,'self write echoes do not queue a full reload');
+assert.equal(postBodies.at(-1).projectPath,'','the first save uses the catalog source of the equivalent app/project copies');
+await page.evaluate(()=>window.setTitle('after-source-normalization'));
+await page.evaluate(()=>window.persist());
+assert.equal(postBodies.at(-1).projectPath,chat.projectPath,'the second save uses the normalized project source even though metadata.projectPath never changed');
 const beforeLostAck=posts;
+await page.evaluate(()=>window.setTitle('lost-ack-save'));
 const discardSaveResponse=async(route)=>{
   if(route.request().method()!=='POST')return route.continue();
   await route.fetch();
   await route.abort();
 };
-await page.route('**/api/app/chats',discardSaveResponse,{times:2});
+await page.route('**/api/app/chats/single',discardSaveResponse,{times:2});
 await page.evaluate(()=>window.persist().then(()=>{throw new Error('expected transport error');},()=>{}));
 await page.evaluate(()=>window.persist());
 assert.equal(posts,beforeLostAck+3,'one retry per save attempt, then the next attempt recovers the pending receipt');
@@ -94,10 +136,10 @@ await page.evaluate(()=>{window.notify();window.notify();window.notify();});
 await heldReload.started;
 chats=[{...chats[0],items:[...chats[0].items,{id:'u3',type:'user',text:'telegram-visible-latest',createdAt:'2026-01-01T00:00:02Z'}]}];
 for(let index=0;index<3;index++){await page.evaluate(()=>window.notify());await page.waitForTimeout(220);}
-assert.equal(gets,before+1,'external events during an active reload must not start concurrent reads');
+assert.equal(gets,before+2,'an active catalog plus selected-record reload must not start concurrent reads');
 heldReload.release();
 await page.waitForFunction(()=>document.querySelector('#state')?.textContent.includes('telegram-visible-latest'));
-await page.waitForTimeout(250);assert.equal(gets,before+2,'events during an active reload collapse into one trailing refresh');
+await page.waitForTimeout(250);assert.equal(gets,before+4,'events during an active reload collapse into one trailing catalog plus selected-record refresh');
 await page.evaluate(()=>window.localAppend());
 chats=[{...chats[0],items:[...chats[0].items,{id:'remote-extra',type:'user',text:'remote-added'}]}];
 await page.evaluate(()=>window.notify());

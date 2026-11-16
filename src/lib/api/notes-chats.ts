@@ -1,6 +1,8 @@
 import { ApiError, hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 import type { AgentNotes } from "./types";
-import type { ChatStoragePatches } from "../chat-storage-delta";
+import type { ChatStoragePatch, ChatStoragePatches } from "../chat-storage-delta";
+import type { ChatSidebarCacheEntry } from "../chat-sidebar-cache";
+import type { ChatThread } from "../chat-types";
 import { chatStorageOriginId } from "../chat-storage-origin";
 
 export async function fetchAgentNotes(endpoint: string): Promise<AgentNotes> {
@@ -87,20 +89,76 @@ export async function requestChatTitle(
 }
 
 export async function fetchChats<T>(endpoint: string, projectPaths: string[] = [], knownChatDigests?: Record<string, string>): Promise<StoredChats<T>> {
+  return fetchChatStorage<StoredChats<T>>(endpoint, { projectPaths, knownChatDigests });
+}
+
+export type ChatCatalogEntry = ChatSidebarCacheEntry & {
+  sourceProjectPath: string;
+  sourceStoreId: string;
+};
+
+export type ChatCatalog = {
+  ok: boolean;
+  entries: ChatCatalogEntry[];
+  sources: ChatSourceRevision[];
+  recoveries: ChatRecoveryMarker[];
+  writeBlocked: boolean;
+  pendingChatIds: string[];
+};
+
+export type ChatRecordSnapshot<T> = StoredChats<T> & {
+  hasOlder: boolean;
+  nextBefore: string | null;
+  sourceRevision?: ChatSourceRevision | null;
+};
+
+export function fetchChatCatalog(endpoint: string, projectPaths: string[], signal?: AbortSignal): Promise<ChatCatalog> {
+  return fetchChatStorage<ChatCatalog>(endpoint, { projectPaths, catalog: true }, signal);
+}
+
+export function fetchChatRecord<T = unknown>(
+  endpoint: string,
+  chatId: string,
+  sourceProjectPath: string,
+  options: { before?: string; full?: boolean; signal?: AbortSignal } = {},
+): Promise<ChatRecordSnapshot<T>> {
+  return fetchChatStorage<ChatRecordSnapshot<T>>(endpoint, {
+    chatId, chatProjectPath: sourceProjectPath, before: options.before, full: options.full,
+  }, options.signal);
+}
+
+type ChatStorageQuery = {
+  projectPaths?: string[];
+  knownChatDigests?: Record<string, string>;
+  catalog?: boolean;
+  chatId?: string;
+  chatProjectPath?: string;
+  before?: string;
+  full?: boolean;
+};
+
+async function fetchChatStorage<T>(
+  endpoint: string,
+  query: ChatStorageQuery,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<T>("fetch_chats", { request: { ...query, timeoutMs: 60000 } }, signal);
+  }
   const params = new URLSearchParams();
-  for (const projectPath of projectPaths) {
+  for (const projectPath of query.projectPaths ?? []) {
     if (projectPath.trim()) {
       params.append("projectPath", projectPath);
     }
   }
-  if (knownChatDigests !== undefined) params.set("knownChatDigests", JSON.stringify(knownChatDigests));
-  const suffix = params.toString() ? `?${params.toString()}` : "";
-  if (hasTauriInternals()) {
-    return invokeTauriWithAbort<StoredChats<T>>("fetch_chats", {
-      request: { projectPaths, knownChatDigests, timeoutMs: 60000 },
-    });
-  }
-  return requestJson<StoredChats<T>>(`${endpoint}/api/app/chats${suffix}`);
+  if (query.knownChatDigests !== undefined) params.set("knownChatDigests", JSON.stringify(query.knownChatDigests));
+  if (query.catalog) params.set("catalog", "1");
+  if (query.chatId !== undefined) params.set("chatId", query.chatId);
+  if (query.chatProjectPath !== undefined) params.set("chatProjectPath", query.chatProjectPath);
+  if (query.before !== undefined) params.set("before", query.before);
+  if (query.full) params.set("full", "1");
+  const suffix = params.size ? `?${params.toString()}` : "";
+  return requestJson<T>(`${endpoint}/api/app/chats${suffix}`, { signal });
 }
 
 export type ChatSaveReceipt = {
@@ -113,6 +171,36 @@ export type ChatSaveReceipt = {
   chatDigests?: Record<string, string>;
   chatMetadataShapes?: Record<string, Record<string, unknown>>;
 };
+
+export type ChatRecordSaveRequest = {
+  chatId: string;
+  projectPath: string;
+  sourceRevisions: ChatSourceRevision[];
+  chat?: ChatThread;
+  chatPatch?: ChatStoragePatch;
+  delete?: true;
+};
+
+export async function saveChatRecord(
+  endpoint: string,
+  record: ChatRecordSaveRequest,
+  chatSaveId = globalThis.crypto.randomUUID(),
+): Promise<ChatSaveReceipt> {
+  const body = { ...record, chatOriginId: chatStorageOriginId(), chatSaveId };
+  const submit = () => hasTauriInternals()
+    ? invokeTauriWithAbort<ChatSaveReceipt>("save_chat_record", { request: { body, timeoutMs: 60000 } })
+    : requestJson<ChatSaveReceipt>(`${endpoint}/api/app/chats/single`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  try {
+    return await submit();
+  } catch (cause) {
+    if (!(cause instanceof ApiError) || cause.status !== 0) throw cause;
+    return submit();
+  }
+}
 
 export async function saveChats<T>(
   endpoint: string,

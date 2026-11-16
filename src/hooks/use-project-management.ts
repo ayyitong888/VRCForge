@@ -6,9 +6,8 @@ import {
   planOutfitImport,
   requestOutfitImport,
   saveProjectPrefs,
-  scanProjectIndex,
 } from "../lib/api";
-import type { AppBootstrap, OutfitImportPlanResult, ProjectIndexScanResult, ProjectPrefs } from "../lib/api";
+import type { AppBootstrap, OutfitImportPlanResult, ProjectPrefs } from "../lib/api";
 import type { ProjectType } from "../lib/chat-types";
 import { isAbsoluteLocalPath, isTauriRuntime } from "../lib/app-runtime";
 import {
@@ -20,8 +19,6 @@ import {
 import { normalizeProjectPathKey, projectKey, shortPath } from "../lib/project-path";
 import { loadProjectPrefsCache, saveProjectPrefsCache } from "../lib/project-prefs-cache";
 
-const PROJECT_INDEX_BACKGROUND_DELAY_MS = 1200;
-
 type ProjectEntry = NonNullable<NonNullable<AppBootstrap["health"]["projects"]>["projects"]>[number] & {
   activeMcp?: boolean;
 };
@@ -30,7 +27,6 @@ type UseProjectManagementParams = {
   endpoint: string;
   runtimeConnected: boolean;
   activeProjectPath: string;
-  activeProjectType: ProjectType;
   projects: ProjectEntry[];
   refresh: (target?: string) => Promise<void>;
   refreshProjects?: (target?: string) => Promise<void>;
@@ -44,7 +40,6 @@ export function useProjectManagement({
   endpoint,
   runtimeConnected,
   activeProjectPath,
-  activeProjectType,
   projects,
   refresh,
   refreshProjects,
@@ -67,10 +62,6 @@ export function useProjectManagement({
   const [projectUiPrefs, setProjectUiPrefs] = useState<ProjectUiPrefs>(() => loadProjectUiPrefs());
   const [renamingProjectPath, setRenamingProjectPath] = useState("");
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
-  const [projectIndex, setProjectIndex] = useState<ProjectIndexScanResult | null>(null);
-  const [projectIndexProject, setProjectIndexProject] = useState("");
-  const [loadingProjectIndex, setLoadingProjectIndex] = useState(false);
-  const [projectIndexError, setProjectIndexError] = useState("");
   const [editingProjectPath, setEditingProjectPath] = useState("");
   const [editProjectPathDraft, setEditProjectPathDraft] = useState("");
   const [outfitPackagePath, setOutfitPackagePath] = useState("");
@@ -155,19 +146,6 @@ export function useProjectManagement({
     }
     void fetchProjectPrefsOnce();
   }, [runtimeConnected, endpoint, projectPrefsReady]);
-
-  useEffect(() => {
-    if (!runtimeConnected || !activeProjectPath || activeProjectType !== "unity") {
-      setProjectIndex(null);
-      setProjectIndexProject("");
-      setProjectIndexError("");
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      void scanActiveProjectIndex(activeProjectPath, true);
-    }, PROJECT_INDEX_BACKGROUND_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [runtimeConnected, endpoint, activeProjectPath, activeProjectType]);
 
   async function fetchProjectPrefsOnce() {
     try {
@@ -445,38 +423,6 @@ export function useProjectManagement({
     }
   }
 
-  async function scanActiveProjectIndex(projectPath = activeProjectPath, silent = false) {
-    if (!projectPath) {
-      return;
-    }
-    setLoadingProjectIndex(true);
-    if (!silent) {
-      setProjectIndexError("");
-    }
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const payload = await scanProjectIndex(targetEndpoint, { projectPath });
-      if (normalizeProjectPathKey(projectPath) === normalizeProjectPathKey(activeProjectPath)) {
-        setProjectIndex(payload);
-        setProjectIndexProject(projectPath);
-        setProjectIndexError(payload.ok ? "" : payload.error || "Project index scan failed.");
-      }
-    } catch (cause) {
-      if (normalizeProjectPathKey(projectPath) === normalizeProjectPathKey(activeProjectPath)) {
-        setProjectIndexError(cause instanceof Error ? cause.message : String(cause));
-      }
-    } finally {
-      setLoadingProjectIndex(false);
-    }
-  }
-
   async function planActiveOutfitImport() {
     const packagePath = outfitPackagePath.trim();
     if (!packagePath) {
@@ -566,10 +512,6 @@ export function useProjectManagement({
     renamingProjectPath,
     projectRenameDraft,
     setProjectRenameDraft,
-    projectIndex,
-    projectIndexProject,
-    loadingProjectIndex,
-    projectIndexError,
     outfitPackagePath,
     setOutfitPackagePath,
     outfitImportPlan,
@@ -595,7 +537,6 @@ export function useProjectManagement({
     startRenameProject,
     commitRenameProject,
     openProjectFolder,
-    scanActiveProjectIndex,
     planActiveOutfitImport,
     requestActiveOutfitImport,
     editingProjectPath,

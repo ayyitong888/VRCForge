@@ -1127,6 +1127,7 @@ from dashboard_api_models import (
     AdvancedSettingsRequest,
     AgentNotesRequest,
     ChatTranscriptsRequest,
+    SingleChatTranscriptRequest,
     SessionHandoffSendRequest,
     ChatAttachmentUploadBeginRequest,
     ChatAttachmentUploadFinishRequest,
@@ -5368,6 +5369,174 @@ def chat_record_fingerprint(chat: dict[str, Any]) -> str:
     return chat_content_digest(chat)
 
 
+def _read_packed_chat_source(
+    target: SessionStoreTarget, scope: str, project_path: str = "", *, self_heal: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    document: dict[str, Any] = {}
+
+    def collect_document(payload: Any) -> None:
+        nonlocal document
+        document = payload
+
+    scan = scan_session_store(target, on_valid_json=collect_document)
+    recovery = None
+    if self_heal and scan["status"] == "needs_repair":
+        with CHAT_TRANSCRIPTS_LOCK:
+            scan = scan_session_store(target, on_valid_json=collect_document)
+            if scan["status"] == "needs_repair":
+                repaired = repair_session_store(target, scan)
+                if repaired.get("status") in {"repaired", "quarantined"}:
+                    recovery = chat_recovered_marker(repaired, scope=scope)
+                    scan = scan_session_store(target, on_valid_json=collect_document)
+    source = {"storeId": scan["storeId"], "scope": scope, "exists": scan["exists"],
+              "digest": scan["digest"], "status": scan["status"]}
+    if project_path:
+        source["projectPath"] = project_path
+    if scan["status"] not in {"ok", "missing"}:
+        recovery = chat_recovery_marker(scan, scope=scope)
+    return document, source, recovery
+
+
+def _chat_scope_target(project_path: str) -> tuple[SessionStoreTarget, str, str]:
+    if not project_path.strip():
+        return chat_store_target(chat_transcripts_path(), scope="app"), "app", ""
+    root = resolve_chat_project_root(project_path)
+    if root is None:
+        raise HTTPException(status_code=409, detail={"code": "chat_store_project_unavailable"})
+    path = project_chat_transcripts_path(str(root))
+    if path is None:
+        raise HTTPException(status_code=409, detail={"code": "chat_store_project_unsafe"})
+    return chat_store_target(path, scope="project", project_path=str(root)), "project", str(root)
+
+
+def _owned_chat(record: dict[str, Any], project_path: str) -> dict[str, Any]:
+    chat = sanitize_chat_transcript(record)
+    return {**chat, "projectPath": project_path} if project_path else chat
+
+
+def _chat_source_blocked(recovery: dict[str, Any] | None) -> None:
+    if recovery and recovery["status"] != "recovered":
+        raise HTTPException(status_code=409, detail={"code": "chat_store_recovery_required", "recovery": recovery})
+
+
+def _hydrated_chat_fingerprint(chat: dict[str, Any], target: SessionStoreTarget, source: dict[str, Any]) -> str:
+    from chat_transcript_pages import hydrate_chat
+
+    try:
+        return chat_record_fingerprint(hydrate_chat(chat, target.path))
+    except (OSError, ValueError) as exc:
+        marker = chat_recovery_marker({**source, "status": "needs_repair", "reason": "chat_archive_unavailable"}, scope=source["scope"])
+        raise HTTPException(status_code=409, detail={"code": "chat_store_recovery_required", "recovery": marker}) from exc
+
+
+def read_chat_catalog(requested_project_paths: list[str]) -> dict[str, Any]:
+    from chat_transcript_pages import sidebar_entry
+
+    index, index_source, index_recovery = _read_packed_chat_source(chat_project_index_target(), "app-index", self_heal=True)
+    indexed_paths = index.get("projectPaths", [])
+    indexed_keys = {path.strip().casefold() for path in indexed_paths}
+    targets = [_chat_scope_target("")]
+    sources = [index_source]
+    recoveries = [index_recovery] if index_recovery else []
+    seen_targets = {targets[0][0].store_id}
+    for project_path in dict.fromkeys([*indexed_paths, *requested_project_paths]):
+        if not project_path.strip():
+            continue
+        try:
+            target = _chat_scope_target(project_path)
+        except HTTPException as exc:
+            indexed = project_path.strip().casefold() in indexed_keys
+            store_id = f"chat.unavailable.{hashlib.sha256(project_path.encode('utf-8', errors='replace')).hexdigest()[:16]}"
+            reason = "project_unavailable" if exc.detail["code"] == "chat_store_project_unavailable" else "symlink_refused"
+            unavailable = {"storeId": store_id, "scope": "project", "projectPath": project_path,
+                           "exists": False, "digest": "", "status": "unsupported", "reason": reason,
+                           "unavailable": True, "indexed": indexed}
+            sources.append(unavailable)
+            if indexed or reason == "symlink_refused":
+                recoveries.append(chat_recovery_marker(unavailable, scope="project"))
+            continue
+        if target[0].store_id not in seen_targets:
+            targets.append(target)
+            seen_targets.add(target[0].store_id)
+    for project_path in requested_project_paths:
+        remember_chat_project_path(project_path)
+
+    records: dict[str, tuple[dict[str, Any], SessionStoreTarget, dict[str, Any]]] = {}
+    entries: list[dict[str, Any]] = []
+    pending_ids: list[str] = []
+    duplicate_ids: set[str] = set()
+    for target, scope, root in targets:
+        document, source, recovery = _read_packed_chat_source(target, scope, root, self_heal=scope == "app")
+        sources.append(source)
+        if recovery:
+            recoveries.append(recovery)
+        for record in document.get("chats", []):
+            chat = _owned_chat(record, root)
+            if is_empty_chat_transcript(chat):
+                continue
+            chat_id = chat["id"]
+            if chat_id in records:
+                previous, previous_target, previous_source = records[chat_id]
+                try:
+                    equivalent = previous == chat or (
+                        _hydrated_chat_fingerprint(previous, previous_target, previous_source)
+                        == _hydrated_chat_fingerprint(chat, target, source)
+                    )
+                except HTTPException as exc:
+                    recoveries.append(exc.detail["recovery"])
+                    continue
+                if not equivalent and chat_id not in duplicate_ids:
+                    duplicate_ids.add(chat_id)
+                    store_id = f"chat.merge.{hashlib.sha256(chat_id.encode('utf-8', errors='replace')).hexdigest()[:16]}"
+                    recoveries.append(chat_recovery_marker({"storeId": store_id, "status": "unsupported",
+                                                           "reason": "duplicate_chat_id_conflict", "invalidCount": 1}, scope="merge"))
+                continue
+            records[chat_id] = (chat, target, source)
+            entries.append({**sidebar_entry(chat), "sourceProjectPath": root, "sourceStoreId": target.store_id})
+            if any(item.get("type") == "user" and item.get("clientTurnId") and isinstance(item.get("queueEnvelope"), dict)
+                   and item.get("queueStatus") in ("queued", "waiting_for_resources", "paused", "steering")
+                   for item in chat["items"]):
+                pending_ids.append(chat_id)
+
+    return {"ok": True, "entries": entries, "sources": sources, "pendingChatIds": pending_ids,
+            "recoveries": recoveries, "writeBlocked": any(item["status"] != "recovered" for item in recoveries)}
+
+
+def read_single_chat(chat_id: str, project_path: str, *, before: str | None, full: bool) -> dict[str, Any]:
+    from chat_transcript_pages import hydrate_chat, read_chat_page
+    from chat_snapshot_transport import chat_metadata_shapes
+
+    target, scope, root = _chat_scope_target(project_path)
+    document, source, recovery = _read_packed_chat_source(target, scope, root, self_heal=scope == "app")
+    _chat_source_blocked(recovery)
+    record = next((chat for chat in document.get("chats", []) if chat["id"] == chat_id), None)
+    if record is None or is_empty_chat_transcript(chat := _owned_chat(record, root)):
+        raise HTTPException(status_code=404, detail={"code": "chat_not_found"})
+    end = len(chat["items"])
+    if before is not None:
+        try:
+            cursor = json.loads(before)
+        except (ValueError, RecursionError):
+            cursor = None
+        if full or not isinstance(cursor, list) or len(cursor) != 2 or cursor[0] != chat_id or not isinstance(cursor[1], str):
+            raise HTTPException(status_code=422, detail={"code": "chat_page_cursor_invalid"})
+        anchors = [index for index, item in enumerate(chat["items"]) if item["id"] == cursor[1]]
+        if len(anchors) != 1:
+            raise HTTPException(status_code=409, detail={"code": "chat_store_snapshot_changed", "storeId": target.store_id})
+        end = anchors[0]
+    try:
+        if full:
+            hydrated = hydrate_chat(chat, target.path)
+            return {"ok": True, "chats": [hydrated], "sourceRevision": source, "hasOlder": False, "nextBefore": None,
+                    "chatDigests": chat_digests([hydrated]), "chatMetadataShapes": chat_metadata_shapes([hydrated])}
+        page, start = read_chat_page(chat, target.path, end)
+    except (OSError, ValueError) as exc:
+        marker = chat_recovery_marker({**source, "status": "needs_repair", "reason": "chat_archive_unavailable"}, scope=scope)
+        raise HTTPException(status_code=409, detail={"code": "chat_store_recovery_required", "recovery": marker}) from exc
+    next_before = json.dumps([chat_id, chat["items"][start]["id"]], separators=(",", ":")) if start > 0 else None
+    return {"ok": True, "chats": [page], "sourceRevision": source, "hasOlder": start > 0, "nextBefore": next_before}
+
+
 @app.get("/api/app/chats")
 def read_chat_transcripts(request: Request) -> dict[str, Any]:
     # Keep transport dependencies local: the installed dashboard replaces this
@@ -5390,7 +5559,15 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
         if bytes(raw_name).lower() == b"authorization":
             authorization = bytes(raw_value).decode("latin-1")
             break
-    principal_hash = _snapshot_principal_hash(authorization)
+    catalog = request.query_params.get("catalog") == "1"
+    selected_chat_id = request.query_params.get("chatId", "")
+    selected_project_path = request.query_params.get("chatProjectPath", "")
+    before = request.query_params.get("before")
+    full = request.query_params.get("full") == "1"
+    principal_hash = _snapshot_principal_hash(
+        json.dumps([authorization, catalog, selected_chat_id, selected_project_path, before, full])
+        if catalog or selected_chat_id else authorization
+    )
     cache_context = (principal_hash, requested_project_paths)
     if request.query_params.get("snapshotPage") == "1":
         try:
@@ -5406,6 +5583,13 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
             )
             if cached_page is not None:
                 return cached_page
+
+    if catalog or selected_chat_id:
+        with CHAT_TRANSCRIPTS_LOCK:
+            snapshot = read_chat_catalog(requested_project_paths) if catalog else read_single_chat(
+                selected_chat_id, selected_project_path, before=before, full=full,
+            )
+        return chat_snapshot_response(snapshot, request.query_params, cache_context=cache_context)
 
     with CHAT_TRANSCRIPTS_LOCK:
         app_path = chat_transcripts_path()
@@ -5578,6 +5762,46 @@ async def write_chat_transcripts(request: ChatTranscriptsRequest, background_tas
     return {**receipt, "automaticCapture": await publish(automatic_groups)}
 
 
+@app.post("/api/app/chats/single")
+async def write_single_chat(request: SingleChatTranscriptRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    save_key = (request.chat_origin_id, request.chat_save_id) if request.chat_origin_id and request.chat_save_id else None
+
+    def commit():
+        with CHAT_TRANSCRIPTS_LOCK:
+            if save_key is not None and save_key in CHAT_SAVE_RECEIPTS:
+                return CHAT_SAVE_RECEIPTS[save_key], None
+            receipt, chat, project_path = write_single_chat_storage(request)
+            if save_key is not None:
+                CHAT_SAVE_RECEIPTS[save_key] = receipt
+                if len(CHAT_SAVE_RECEIPTS) > CHAT_SAVE_RECEIPT_LIMIT:
+                    del CHAT_SAVE_RECEIPTS[next(iter(CHAT_SAVE_RECEIPTS))]
+            return receipt, (chat, project_path)
+
+    async def publish(chat: dict[str, Any] | None, project_path: str) -> dict[str, int]:
+        try:
+            await EVENT_BUS.broadcast("chatStorageChanged", {"source": "app", "originId": request.chat_origin_id, "chatId": request.chat_id})
+        except Exception as exc:
+            emit_log("warn", "socket", "Could not broadcast committed chat storage change.", {"error": str(exc)})
+        if chat is None:
+            return {}
+        scope = MemoryScope("project", project_scope_key(project_path)) if project_path else MemoryScope("user", "user")
+        try:
+            automatic_capture = await asyncio.to_thread(capture_automatic_memory_after_chat_storage, [(scope, project_path, [chat])])
+            if automatic_capture.get("acceptedCount") or automatic_capture.get("conflictCount"):
+                await MEMORY_REVIEW.notify_review_changed()
+            return automatic_capture
+        except Exception:
+            return {}
+
+    receipt, notification = await asyncio.to_thread(commit)
+    if notification is None:
+        return receipt
+    if save_key is not None:
+        background_tasks.add_task(publish, *notification)
+        return receipt
+    return {**receipt, "automaticCapture": await publish(*notification)}
+
+
 def capture_automatic_memory_after_chat_storage(
     groups: list[tuple[MemoryScope, str, list[dict[str, Any]]]],
 ) -> dict[str, int]:
@@ -5687,7 +5911,7 @@ for _handoff_action_name in ("deliver", "accept", "dismiss", "cancel", "pause", 
 
 
 
-def _chat_source_revision_map(request: ChatTranscriptsRequest) -> dict[str, dict[str, Any]]:
+def _chat_source_revision_map(request: ChatTranscriptsRequest | SingleChatTranscriptRequest) -> dict[str, dict[str, Any]]:
     revisions: dict[str, dict[str, Any]] = {}
     for item in request.source_revisions:
         if not isinstance(item, dict):
@@ -5726,19 +5950,21 @@ def _assert_chat_source_writable(
             if (bool(cached_source.get("exists")) != bool(source.get("exists"))
                     or not hmac.compare_digest(str(cached_source.get("digest") or ""), str(source.get("digest") or ""))):
                 raise HTTPException(status_code=409, detail={"code": "chat_store_snapshot_changed", "storeId": target.store_id})
-    if recovery:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "chat_store_recovery_required", "recovery": recovery},
-        )
-    expected = revisions.get(target.store_id)
+    _chat_source_blocked(recovery)
+    _assert_chat_source_revision(source, revisions)
+    return source
+
+
+def _assert_chat_source_revision(source: dict[str, Any], revisions: dict[str, dict[str, Any]]) -> None:
+    store_id = source["storeId"]
+    expected = revisions.get(store_id)
     if expected is None:
         if bool(source.get("exists")):
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "chat_store_snapshot_changed",
-                    "storeId": target.store_id,
+                    "storeId": store_id,
                 },
             )
     else:
@@ -5751,10 +5977,9 @@ def _assert_chat_source_writable(
                 status_code=409,
                 detail={
                     "code": "chat_store_snapshot_changed",
-                    "storeId": target.store_id,
+                    "storeId": store_id,
                 },
             )
-    return source
 
 
 def _assert_no_current_chat_source_id_conflicts(
@@ -5810,6 +6035,203 @@ def _assert_no_current_chat_source_id_conflicts(
         source_project_path = str(resolve_chat_project_root(project_path) or project_path)
         for chat in project_chats:
             admit({**chat, "projectPath": source_project_path})
+
+
+def write_single_chat_storage(request: SingleChatTranscriptRequest) -> tuple[dict[str, Any], dict[str, Any] | None, str]:
+    from chat_snapshot_transport import chat_metadata_shapes
+    from chat_storage_delta import ChatStoragePatchError, materialize_chat_patches
+
+    if sum((request.chat is not None, request.chat_patch is not None, request.delete)) != 1:
+        raise HTTPException(status_code=422, detail={"code": "chat_single_operation_required"})
+    revisions = _chat_source_revision_map(request)
+    chat_id = request.chat_id
+    with CHAT_TRANSCRIPTS_LOCK:
+        origin_target, origin_scope, origin_root = _chat_scope_target(request.project_path)
+        origin_document, origin_source, origin_recovery = _read_packed_chat_source(origin_target, origin_scope, origin_root)
+        _chat_source_blocked(origin_recovery)
+        origin_records = origin_document.get("chats", [])
+        old_record = next((chat for chat in origin_records if chat["id"] == chat_id), None)
+        previous_chat = _owned_chat(old_record, origin_root) if old_record is not None else None
+        reuse = None
+        if request.chat is not None:
+            if old_record is not None:
+                raise HTTPException(status_code=409, detail={"code": "chat_already_exists"})
+            updated = request.chat
+        else:
+            _assert_chat_source_revision(origin_source, revisions)
+            if previous_chat is None:
+                raise HTTPException(status_code=404, detail={"code": "chat_not_found"})
+            updated = None
+            if request.chat_patch is not None:
+                try:
+                    records, reuse = decode_archived_chats_with_reuse([previous_chat], origin_target.path)
+                    if not is_valid_chat_record(records[0]):
+                        raise ValueError("Invalid archived chat")
+                except (OSError, ValueError) as exc:
+                    marker = chat_recovery_marker({**origin_source, "status": "needs_repair", "reason": "chat_archive_unavailable"}, scope=origin_scope)
+                    raise HTTPException(status_code=409, detail={"code": "chat_store_recovery_required", "recovery": marker}) from exc
+                try:
+                    [updated] = materialize_chat_patches(records, [{"id": chat_id}], {chat_id: request.chat_patch.model_dump(by_alias=True)})
+                except ChatStoragePatchError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail={
+                        "code": "chat_patch_base_changed" if exc.status_code == 409 else "chat_patch_invalid", "message": str(exc),
+                    }) from exc
+
+        # The old snapshot reader admitted equivalent app/project copies as
+        # one chat. A scoped mutation must remove those same copies atomically,
+        # or a rename forks them and a deletion resurrects the other source.
+        copies = {origin_target.path: (origin_document, origin_source, old_record)} if old_record is not None else {}
+        seen = {origin_target.store_id}
+        project_paths = [*load_chat_project_index_paths(), *CHAT_REQUESTED_PROJECT_PATHS.values(),
+                         *(str(source.get("projectPath") or "") for source in revisions.values())]
+        for project_path in ["", *project_paths]:
+            try:
+                target, scope, root = _chat_scope_target(project_path)
+            except HTTPException:
+                continue
+            if target.store_id in seen:
+                continue
+            seen.add(target.store_id)
+            document, source, recovery = _read_packed_chat_source(target, scope, root)
+            duplicate = next((record for record in document.get("chats", []) if record["id"] == chat_id), None)
+            if duplicate is None:
+                continue
+            if request.chat is not None:
+                raise HTTPException(status_code=409, detail={"code": "chat_already_exists"})
+            _chat_source_blocked(recovery)
+            _assert_chat_source_revision(source, revisions)
+            candidate = _owned_chat(duplicate, root)
+            if candidate != previous_chat and (
+                _hydrated_chat_fingerprint(candidate, target, source)
+                != _hydrated_chat_fingerprint(previous_chat, origin_target, origin_source)
+            ):
+                raise HTTPException(status_code=409, detail={"code": "chat_store_duplicate_id_conflict"})
+            copies[target.path] = (document, source, duplicate)
+
+        destination_target, destination_scope, destination_root = origin_target, origin_scope, origin_root
+        destination_document, destination_source = origin_document, origin_source
+        archive_writes: dict[Path, bytes] = {}
+        packed = None
+        if updated is not None:
+            if updated.get("id") != chat_id or not is_valid_chat_record(updated):
+                raise HTTPException(status_code=422, detail={"code": "chat_record_invalid"})
+            updated = sanitize_chat_transcript(updated)
+            if is_empty_chat_transcript(updated):
+                raise HTTPException(status_code=422, detail={"code": "chat_record_empty"})
+            destination_target, destination_scope, destination_root = _chat_scope_target(updated.get("projectPath", ""))
+            if destination_target.store_id != origin_target.store_id:
+                destination_document, destination_source, destination_recovery = _read_packed_chat_source(
+                    destination_target, destination_scope, destination_root,
+                )
+                _chat_source_blocked(destination_recovery)
+                if destination_target.path not in copies and any(chat["id"] == chat_id for chat in destination_document.get("chats", [])):
+                    raise HTTPException(status_code=409, detail={"code": "chat_already_exists"})
+                reuse = None
+            if request.chat is not None or destination_target.store_id != origin_target.store_id:
+                _assert_chat_source_revision(destination_source, revisions)
+            updated = _owned_chat(updated, destination_root)
+            try:
+                [packed], blobs = encode_archived_chats([updated], reuse=reuse)
+                archive_writes = {chat_archive_blob_path(destination_target.path, digest): blob["data"]
+                                  for digest, blob in blobs.items()}
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise HTTPException(status_code=422, detail={"code": "chat_record_invalid"}) from exc
+
+        documents: dict[Path, tuple[dict[str, Any], dict[str, Any]]] = {}
+        for path, (document, source, _) in copies.items():
+            records = []
+            for record in document["chats"]:
+                if record["id"] != chat_id:
+                    records.append(record)
+                elif path == destination_target.path and packed is not None:
+                    records.append(packed)
+            documents[path] = ({**document, "chats": records}, source)
+        if packed is not None and destination_target.path not in copies:
+            records = [*destination_document.get("chats", []), packed]
+            documents[destination_target.path] = ({**destination_document, "chats": records}, destination_source)
+
+        emptied_projects = {normalize_chat_project_key(source["projectPath"])
+                            for document, source in documents.values()
+                            if source["scope"] == "project" and not document["chats"]}
+        if (packed is not None and destination_root) or emptied_projects:
+            index_target = chat_project_index_target()
+            index_document, index_source, index_recovery = _read_packed_chat_source(index_target, "app-index")
+            _chat_source_blocked(index_recovery)
+            project_paths = index_document.get("projectPaths", [])
+            next_paths = list(project_paths)
+            if emptied_projects:
+                next_paths = [path for path in next_paths if normalize_chat_project_key(path) not in emptied_projects]
+            if packed is not None and destination_root:
+                destination_key = normalize_chat_project_key(destination_root)
+                if all(normalize_chat_project_key(path) != destination_key for path in next_paths):
+                    next_paths.append(destination_root)
+            if next_paths != project_paths:
+                _assert_chat_source_revision(index_source, revisions)
+                if len(next_paths) > index_target.max_list_items:
+                    raise HTTPException(status_code=413, detail={"code": "chat_project_index_full"})
+                documents[index_target.path] = ({**index_document, "version": 1, "projectPaths": next_paths}, index_source)
+
+        serialized: dict[Path, bytes] = {}
+        source_revisions: list[dict[str, Any]] = []
+        try:
+            for path, (document, source) in documents.items():
+                if "chats" in document:
+                    if len(document["chats"]) > CHAT_TRANSCRIPTS_MAX_CHATS:
+                        raise HTTPException(status_code=413, detail={"code": "chat_store_record_limit"})
+                    has_archived = any(is_archived_transcript_item(item) for record in document["chats"] for item in record["items"])
+                    document["version"] = 2 if has_archived else document.get("version", 1)
+                    if source["scope"] == "project":
+                        document.setdefault("scope", "project")
+                data = json.dumps(document, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                if len(data) > CHAT_TRANSCRIPTS_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail={"code": "chat_store_size_limit"})
+                serialized[path] = data
+                source_revisions.append({**source, "exists": True, "status": "ok", "digest": hashlib.sha256(data).hexdigest()})
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "chat_record_invalid"}) from exc
+
+        snapshots: dict[Path, bytes | None] = {}
+        parent_existence: dict[Path, bool] = {}
+        try:
+            snapshots, parent_existence = snapshot_chat_storage_files([*archive_writes, *serialized])
+            for path, (_, source) in documents.items():
+                previous = snapshots[path]
+                current = {**source, "exists": previous is not None,
+                           "digest": hashlib.sha256(previous).hexdigest() if previous is not None else ""}
+                _assert_chat_source_revision(current, {source["storeId"]: source})
+            for path, data in archive_writes.items():
+                previous = snapshots[path]
+                if previous is not None and previous != data:
+                    raise OSError("Chat evidence archive integrity conflict")
+                if previous is None:
+                    atomic_write_bytes(path, data)
+            for path, data in serialized.items():
+                atomic_write_bytes(path, data)
+        except OSError as exc:
+            rolled_back = restore_chat_storage_files(snapshots, parent_existence)
+            raise HTTPException(status_code=500, detail=(
+                "Unable to write chat storage; all source files were restored." if rolled_back else
+                "Unable to write chat storage and exact rollback could not be verified; run Doctor before retrying."
+            )) from exc
+
+        cleanup = {"deletedCount": 0, "leftBehindCount": 0}
+        for path, (_, _, removed) in copies.items():
+            pruned = prune_chat_archive_blobs(path, [removed], documents[path][0]["chats"])
+            for key in cleanup:
+                cleanup[key] += pruned[key]
+        changed = [updated] if updated is not None else []
+        vault_retention: dict[str, Any] = {}
+        try:
+            # Apply this chat's retention in commit order. A newer save must
+            # not have its references dropped by an earlier save finishing late.
+            vault_chat_id = chat_id.strip()
+            refs = collect_vault_attachment_refs(changed)
+            vault_retention = chat_attachment_vault_store().retain_chat(vault_chat_id, refs.get(vault_chat_id, set()))
+        except Exception:
+            pass
+        return ({"ok": True, "sourceRevisions": source_revisions, "chatDigests": chat_digests(changed),
+                 "chatMetadataShapes": chat_metadata_shapes(changed), "archiveCleanup": cleanup,
+                 "vaultRetention": vault_retention}, updated, destination_root)
 
 
 def write_chat_transcripts_storage(
@@ -10306,7 +10728,10 @@ async def dashboard_socket(websocket: WebSocket) -> None:
         return
     await EVENT_BUS.connect(websocket)
     try:
-        await EVENT_BUS.send_to_client(websocket, "hello", await asyncio.to_thread(build_dashboard_socket_payload))
+        # The desktop bridge only forwards the hello event type. Its bootstrap
+        # request owns the data load; the legacy dashboard still consumes the payload.
+        payload = {} if origin == "tauri://localhost" else await asyncio.to_thread(build_dashboard_socket_payload)
+        await EVENT_BUS.send_to_client(websocket, "hello", payload)
         while True:
             await websocket.receive_text()
     except (WebSocketDisconnect, RuntimeError):
@@ -18957,12 +19382,7 @@ def memory_review_background_blocker() -> str:
         return "active_desktop_action"
     if int(RUNTIME_LANE_BUDGET.snapshot().get("interactive") or 0) > 0:
         return "interactive_lane_active"
-    runs = AGENT_GATEWAY.runtime_runs.list_runs(limit=100).get("runs") or []
-    if any(
-        str(item.get("status") or "").strip().casefold() in {"running", "applying"}
-        for item in runs
-        if isinstance(item, dict)
-    ):
+    if AGENT_GATEWAY.runtime_sessions.session_busy():
         return "interactive_run_active"
     return ""
 

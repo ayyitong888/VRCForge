@@ -27,9 +27,25 @@ const functions = ["refresh", "refreshWithRetry", "refreshStartupWithMetrics", "
 const bundle = await build({
   stdin: {
     resolveDir: process.cwd(),
-    loader: "ts",
+    loader: "tsx",
     contents: `
+      import React from "react";
+      import { createRoot } from "react-dom/client";
+      import i18n from "i18next";
+      import { initReactI18next } from "react-i18next";
+      import en from "./src/locales/en-US.json";
+      import { WorkspaceHeader } from "./src/components/workspace/workspace-header";
       import { fetchBootstrap, refreshProjects } from "./src/lib/api/app";
+      await i18n.use(initReactI18next).init({ lng: "en", resources: { en: { translation: en } } });
+      const root = createRoot(document.getElementById("root"));
+      const noop = () => {};
+      window.renderStartupHeader = (runtimeStartupPhase, cachedListAvailable = false) => root.render(
+        <WorkspaceHeader activeProjectLabel="Project" activeView="chat" activeChatTitle="" theme="light"
+          showDoctorStartupPrompt={false} hasStartupIssue={false} healthErrors={0} healthWarnings={0}
+          startupIssue="" loadingDoctor={false} loading={false} error="" onToggleTheme={noop}
+          onOpenDoctor={noop} onRetryStartupOrHealth={noop} onDismissDoctorPrompt={noop}
+          onStartRuntime={noop} runtimeStartupPhase={runtimeStartupPhase} cachedListAvailable={cachedListAvailable} />
+      );
       const createHarness = (endpoint) => {
         let bootstrap = { health: { projects: null } };
         const bootstrapRequestSequenceRef = { current: 0 };
@@ -109,6 +125,19 @@ try {
   browser = await chromium.launch({ headless: true, channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge" });
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.evaluate(() => window.renderStartupHeader("starting", true));
+  const startupStatus = page.getByRole("status");
+  await startupStatus.getByText("Starting the local runtime…").waitFor({ timeout: 3000 });
+  await startupStatus.getByText("You can browse the cached list.").waitFor({ timeout: 3000 });
+  assert.equal(await page.getByRole("button").first().isEnabled(), true, "the header remains usable");
+  await page.evaluate(() => window.renderStartupHeader("loadingWorkspace", true));
+  await startupStatus.getByText("Runtime connected. Syncing the workspace…").waitFor({ timeout: 3000 });
+  await page.evaluate(() => window.renderStartupHeader("loadingChats"));
+  await startupStatus.getByText("Loading conversations…").waitFor({ timeout: 3000 });
+  assert.equal(await startupStatus.getByText("You can browse the cached list.").count(), 0);
+  await page.evaluate(() => window.renderStartupHeader());
+  await startupStatus.waitFor({ state: "hidden", timeout: 3000 });
+
   await page.evaluate(() => { window.testApi = window.createHarness(location.origin); });
   let startupTimeout;
   await Promise.race([

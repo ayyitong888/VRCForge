@@ -904,6 +904,20 @@ class ChatTranscriptsRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class SingleChatTranscriptRequest(BaseModel):
+    chat_id: str = Field(alias="chatId", min_length=1)
+    project_path: str = Field(default="", alias="projectPath")
+    source_revisions: list[dict[str, Any]] = Field(default_factory=list, alias="sourceRevisions")
+    chat: dict[str, Any] | None = None
+    chat_patch: ChatSnapshotPatch | None = Field(default=None, alias="chatPatch")
+    delete: bool = False
+    chat_origin_id: str | None = Field(default=None, alias="chatOriginId", max_length=64)
+
+    chat_save_id: str | None = Field(default=None, alias="chatSaveId", min_length=1, max_length=64)
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+
 class SessionHandoffSendRequest(BaseModel):
     source_chat_id: str = Field(alias="sourceChatId", min_length=1, max_length=180)
     target_chat_id: str = Field(alias="targetChatId", min_length=1, max_length=180)

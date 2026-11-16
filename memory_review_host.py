@@ -1777,7 +1777,7 @@ class MemoryReviewHost:
             return False
         dreaming_due = await asyncio.to_thread(self.service.due_dreaming)
         if dreaming_due.get("due"):
-            generation = self._idle_gate.try_acquire(
+            generation = await self._idle_gate.try_acquire_async(
                 blocker,
                 self._cancel_background_from_idle_gate,
             )
@@ -1807,7 +1807,7 @@ class MemoryReviewHost:
         )
         if not due.get("due"):
             return False
-        generation = self._idle_gate.try_acquire(
+        generation = await self._idle_gate.try_acquire_async(
             blocker,
             self._cancel_background_from_idle_gate,
         )

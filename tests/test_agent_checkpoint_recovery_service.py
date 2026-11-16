@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import tempfile
@@ -13,7 +14,7 @@ import pytest
 
 import agent_checkpoint_recovery
 from agent_checkpoint_recovery import AgentCheckpointRecoveryService
-from agent_gateway import AgentGateway
+from agent_gateway import APPLY_RECOVERY_SCHEMA, AgentGateway
 
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -116,6 +117,32 @@ def _restore_workspaces(roots: dict[str, Path]) -> list[Path]:
         for root in roots.values()
         for path in root.parent.glob(f".{root.name}.vrcforge-restore-*")
     )
+
+
+def test_apply_recovery_replays_unicode_separators_and_partial_updates(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    ledger = tmp_path / "audit" / "apply-recoveries.jsonl"
+    ledger.parent.mkdir(exist_ok=True)
+    rows = [
+        {"id": "active", "status": "applying", "reason": "Line one\u2028Line two", "updatedAt": "2026-01-01"},
+        {"id": "resolved", "status": "applying", "updatedAt": "2026-01-02"},
+        {"id": "active", "checkpointId": "checkpoint", "updatedAt": "2026-01-03"},
+        {"id": "resolved", "status": "restored", "updatedAt": "2026-01-04"},
+    ]
+    with ledger.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps({"schema": APPLY_RECOVERY_SCHEMA, **row}, ensure_ascii=False) + "\n")
+        handle.write('{"id": "truncated')
+
+    service = gateway.checkpoint_recovery
+    active = service.list_interrupted_apply_recoveries()
+    assert active["blockingWrites"] is True
+    assert active["activeCount"] == 1
+    assert [item["id"] for item in active["recoveries"]] == ["active"]
+    assert active["recoveries"][0]["reason"] == "Line one\u2028Line two"
+    assert active["recoveries"][0]["checkpointId"] == "checkpoint"
+    all_recoveries = service.list_interrupted_apply_recoveries({"includeResolved": True})
+    assert [item["id"] for item in all_recoveries["recoveries"]] == ["resolved", "active"]
 
 
 def test_interrupted_recovery_preview_forwards_bound_execution_target(

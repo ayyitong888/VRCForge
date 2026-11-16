@@ -219,6 +219,8 @@ type UseChatRunControllerParams = {
   reportChatSaveError: (cause: unknown) => void;
   traceSteerDelivery?: (event: SteerDeliveryTraceEvent) => void;
   chats?: ChatThread[];
+  sidebarChats?: ChatThread[];
+  loadChat?: (chatId: string) => Promise<ChatThread | undefined>;
   chatStorageReady?: boolean;
   runtimeQueueVersion?: number;
   hasPendingChildDelivery?: (sessionId: string) => boolean;
@@ -249,6 +251,8 @@ export function useChatRunController({
   reportChatSaveError,
   traceSteerDelivery,
   chats,
+  sidebarChats,
+  loadChat,
   chatStorageReady = true,
   runtimeQueueVersion = 0,
   hasPendingChildDelivery,
@@ -331,11 +335,13 @@ export function useChatRunController({
     if (interruptedSteerRecovered) void persistChatsNow?.().catch(() => undefined);
     }
 
-    void listAgentRunFollowups(endpoint, { includeTerminal: false }).then(({ items }) => {
+    void listAgentRunFollowups(endpoint, { includeTerminal: false }).then(async ({ items }) => {
       if (cancelled) return;
       const next = [...queueRef.current];
       for (const entry of items || []) {
         if (!entry.queueId || !entry.clientTurnId || !entry.sessionId) continue;
+        if (entry.questionId || entry.continuationSource === "question_answered"
+          || entry.clientTurnId.startsWith("question-answer:")) continue;
         // A live claim belongs to an in-flight dispatch whose turn stream
         // already owns the UI; re-syncing it would resurrect a ghost copy.
         if (!initialRestore && (entry.status === "claimed"
@@ -344,10 +350,16 @@ export function useChatRunController({
         const existingTurn = next.find((candidate) => candidate.queueId === entry.queueId
           || (candidate.id === entry.clientTurnId && candidate.queueLaneId === entry.sessionId
             && (!entry.runtimeSessionId || candidate.sessionId === entry.runtimeSessionId)));
-        if (entry.questionId || entry.continuationSource === "question_answered"
-          || entry.clientTurnId.startsWith("question-answer:")) continue;
         const laneId = entry.sessionId;
-        const owner = resolveFollowupRestoreOwner(entry, chats || [], existingTurn?.chatId);
+        const candidates = loadChat ? (sidebarChats || []).filter((candidate) =>
+          candidate.id === entry.sessionId || candidate.id === existingTurn?.chatId
+          || candidate.sessionId === (entry.runtimeSessionId || entry.sessionId)) : [];
+        const hydrated = await Promise.all(candidates.map((candidate) => loadChat!(candidate.id).catch(() => undefined)));
+        if (cancelled) return;
+        if (hydrated.some((candidate) => !candidate)) continue;
+        const owners = new Map((chats || []).map((chat) => [chat.id, chat]));
+        for (const candidate of hydrated) if (candidate) owners.set(candidate.id, candidate);
+        const owner = resolveFollowupRestoreOwner(entry, [...owners.values()], existingTurn?.chatId);
         let chat = owner.chat || owner.staleChat;
         if (!chat && owner.allowFallback) {
           const createdChatId = ensureActiveChat();
@@ -729,6 +741,14 @@ export function useChatRunController({
   }
 
   async function submitTurn(turn: QueuedTurn, options: SubmitTurnOptions = {}): Promise<SubmitTurnResult> {
+    if (loadChat && turn.chatId && !getChatById(turn.chatId)) {
+      try {
+        if (!await loadChat(turn.chatId)) throw new Error(t("chat.sessionRestoreFailed"));
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        return "not_accepted";
+      }
+    }
     if (options.deliveryMode === "queue") return enqueueFollowupTurn(turn);
     const visibleOwnerChatId = turn.chatId && getChatById(turn.chatId) ? turn.chatId : ensureActiveChat();
     const visibleOwnerChat = getChatById(visibleOwnerChatId);
@@ -1324,6 +1344,9 @@ export function useChatRunController({
       setCurrentTurn(activeTurn);
     }
     try {
+      if (loadChat && !getChatById(chatId) && !await loadChat(chatId)) {
+        throw new Error(t("chat.sessionRestoreFailed"));
+      }
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();

@@ -471,7 +471,11 @@ class ChatAttachmentVault:
         with self._lock:
             return self._retain_locked(live_refs)
 
-    def _retain_locked(self, live_refs: dict[str, set[str]]) -> dict[str, int]:
+    def retain_chat(self, chat_id: str, live_refs: set[str]) -> dict[str, int]:
+        with self._lock:
+            return self._retain_locked({chat_id: live_refs}, chat_id=chat_id)
+
+    def _retain_locked(self, live_refs: dict[str, set[str]], *, chat_id: str | None = None) -> dict[str, int]:
         """Synchronize full-transcript live references without evicting them under quota."""
 
         self._load()
@@ -486,17 +490,19 @@ class ChatAttachmentVault:
         for payload_hash in list(self._index.keys()):
             entry = self._index[payload_hash]
             live_chats = entry.setdefault("liveChats", {})
-            for chat_id in list(entry["chats"].keys()):
-                if payload_hash in normalized.get(chat_id, set()):
-                    entry["chats"][chat_id] = now
-                    live_chats[chat_id] = now
+            for owner in list(entry["chats"].keys()):
+                if chat_id is not None and owner != chat_id:
                     continue
-                was_live = chat_id in live_chats
-                live_chats.pop(chat_id, None)
-                last_seen = float(entry["chats"].get(chat_id) or entry["storedAt"])
+                if payload_hash in normalized.get(owner, set()):
+                    entry["chats"][owner] = now
+                    live_chats[owner] = now
+                    continue
+                was_live = owner in live_chats
+                live_chats.pop(owner, None)
+                last_seen = float(entry["chats"].get(owner) or entry["storedAt"])
                 if not was_live and now - last_seen <= ORPHAN_GRACE_SECONDS:
                     continue
-                entry["chats"].pop(chat_id, None)
+                entry["chats"].pop(owner, None)
                 dropped_refs += 1
             if not entry["chats"]:
                 self._delete_entry(payload_hash, entry)
