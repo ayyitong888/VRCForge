@@ -484,9 +484,16 @@ def unity_compile_step() -> StepResult:
             output += "\n--- Unity log ---\n" + log_output
         compile_error = re.search(r"(?:error CS\d+|Compilation failed|Scripts have compiler errors)", output, re.IGNORECASE)
         clean_exit = "Exiting batchmode successfully now!" in output
-        ok = result.returncode == 0 and compile_error is None and clean_exit
+        core_assembly = project / "Library" / "ScriptAssemblies" / "VRCForge.Editor.dll"
+        core_compiled = core_assembly.is_file()
+        ok = result.returncode == 0 and compile_error is None and clean_exit and core_compiled
         if not clean_exit:
             output += "\nUnity success marker was not observed.\n"
+        if not core_compiled:
+            output += (
+                "\nUnity did not compile VRCForge.Editor.dll. Use a disposable VRChat Avatar project template "
+                "with the SDK and Newtonsoft.Json available to the Core assembly.\n"
+            )
     except (OSError, shutil.Error) as exc:
         output += f"\nUnity isolation setup failed: {type(exc).__name__}: {exc}\n"
     cleanup_error = cleanup_directory(temp_root)

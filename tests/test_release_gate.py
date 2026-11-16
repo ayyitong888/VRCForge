@@ -135,3 +135,29 @@ def test_cleanup_directory_retries_windows_readonly_files(tmp_path: Path) -> Non
 
     assert release_gate.cleanup_directory(root) == ""
     assert not root.exists()
+
+
+def test_unity_compile_gate_rejects_clean_exit_without_compiled_core(tmp_path, monkeypatch):
+    template = tmp_path / "template"
+    (template / "Packages").mkdir(parents=True)
+    (template / "ProjectSettings").mkdir()
+    monkeypatch.setattr(release_gate, "_find_unity_editor", lambda: tmp_path / "Unity.exe")
+    monkeypatch.setattr(release_gate, "_find_unity_template_project", lambda: template)
+
+    def run_unity(command, **_):
+        project = Path(command[command.index("-projectPath") + 1])
+        output = project / "Library" / "ScriptAssemblies"
+        output.mkdir(parents=True)
+        (output / "VRCForge.Setup.Editor.dll").write_bytes(b"setup")
+        if compile_core:
+            (output / "VRCForge.Editor.dll").write_bytes(b"core")
+        return release_gate.CommandResult(0, "Exiting batchmode successfully now!")
+
+    monkeypatch.setattr(release_gate, "run_command", run_unity)
+    compile_core = False
+    missing = release_gate.unity_compile_step()
+    assert not missing.ok
+    assert "VRCForge.Editor.dll" in missing.output
+
+    compile_core = True
+    assert release_gate.unity_compile_step().ok
