@@ -72,7 +72,7 @@ assert.ok(panel.includes("availableDiagnosticLogLevels(developerOptionsEnabled)"
 assert.ok(panel.includes("normalizeDiagnosticLogLevel("));
 assert.ok(panel.includes("const effectiveSelectedLevel = normalizeDiagnosticLogLevel(selectedLevel, developerOptionsEnabled)"));
 assert.ok(panel.includes("max={availableLevels.length - 1}"));
-assert.ok(panel.includes("gridTemplateColumns: `repeat(${availableLevels.length}, minmax(0, 1fr))`"));
+assert.ok(panel.includes("availableLevels.map((level) =>"), "every available log level needs its visible label");
 assert.ok(panel.includes("data-vrcforge-log-level-description={effectiveSelectedLevel}"));
 assert.ok(panel.includes("data-vrcforge-log-trace-locked"));
 assert.ok(panel.includes('t("settings.logLevelAriaValue"'));

@@ -410,7 +410,7 @@ export function VisionProfileSetup({
             type="checkbox"
             checked={enabled}
             onChange={(event) => onEnabledChange(event.target.checked)}
-            className="mt-0.5 h-4 w-4 accent-primary"
+            className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
           />
           <span>
             <span className="block font-medium text-foreground">{i18n.t("vision.enabledLabel")}</span>

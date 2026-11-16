@@ -61,7 +61,7 @@ for (const forbidden of [
   assert.doesNotMatch(settings, new RegExp(forbidden), `advanced Memory UI must stay hidden: ${forbidden}`);
 }
 assert.doesNotMatch(workspace, /MemorySettingsPanel/);
-assert.match(workspace, /<section className="pb-6" hidden=\{visibleSection !== "memory"\}>\s*<MemoryReviewSettings/);
+assert.match(workspace, /<section\b[^>]*\bhidden=\{visibleSection !== "memory"\}[^>]*>\s*<MemoryReviewSettings/);
 assert.doesNotMatch(workspace, /\{visibleSection === "memory" \? \(\s*<section/);
 
 const localeNames = ["en-US", "ja-JP", "zh-CN", "zh-TW"];

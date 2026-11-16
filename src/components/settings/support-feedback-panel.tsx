@@ -107,7 +107,7 @@ export function SupportFeedbackPanel({ endpoint }: { endpoint: string }) {
         ))}
       </div>
       <label className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
-        <input type="checkbox" checked={bundleReady} onChange={(event) => { previewRequestSequence.current += 1; setBundleReady(event.currentTarget.checked); setPreview(""); }} />
+        <input type="checkbox" className="mt-px h-3.5 w-3.5 shrink-0 accent-primary" checked={bundleReady} onChange={(event) => { previewRequestSequence.current += 1; setBundleReady(event.currentTarget.checked); setPreview(""); }} />
         <span>{t("settings.supportFeedbackBundleReady")}</span>
       </label>
       <div className="mt-3 flex flex-wrap gap-2">

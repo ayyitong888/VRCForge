@@ -683,8 +683,8 @@ function SkillSwitch({ checked, busy, label, onChange }: { checked: boolean; bus
       )}
     >
       <span className={cn(
-        "absolute left-0 top-1/2 h-5 w-5 -translate-y-1/2 rounded-full bg-white shadow-sm transition-transform",
-        checked ? "translate-x-6" : "translate-x-[2px]",
+        "absolute left-[3px] top-1/2 h-5 w-5 -translate-y-1/2 rounded-full bg-white shadow-sm transition-transform",
+        checked ? "translate-x-5" : "translate-x-0",
       )} />
     </button>
   );
