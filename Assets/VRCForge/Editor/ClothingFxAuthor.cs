@@ -30,6 +30,8 @@ namespace VRCForge.Editor
         {
             var receipts = new List<TransactionReceipt>();
             var assetDir = "";
+            var mutationStarted = false;
+            var failurePhase = "preflight";
             try
             {
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
@@ -65,6 +67,11 @@ namespace VRCForge.Editor
                 var fxControllerPath = AssetDatabase.GetAssetPath(fxController);
                 var parametersPath = AssetDatabase.GetAssetPath(parametersAsset);
                 var menuPath = AssetDatabase.GetAssetPath(menuAsset);
+                var clipPlans = PlanClips(fxController, resolvedPaths.Keys, assetDir);
+                var affectedAssets = clipPlans.Values.SelectMany(plan => new[] { plan.On, plan.Off }).Distinct()
+                    .Select(path => AssetDatabase.LoadAssetAtPath<AnimationClip>(path)).Cast<UnityEngine.Object>()
+                    .Concat(new UnityEngine.Object[] { fxController, parametersAsset, menuAsset }).ToArray();
+                var saveScope = new WardrobeAssetSaveScope(affectedAssets);
                 var controllerReceipt = new TransactionReceipt { Asset = fxControllerPath, Before = DescribeAsset(fxController) };
                 var parametersReceipt = new TransactionReceipt { Asset = parametersPath, Before = DescribeAsset(parametersAsset) };
                 var menuReceipt = new TransactionReceipt { Asset = menuPath, Before = DescribeAsset(menuAsset) };
@@ -74,6 +81,7 @@ namespace VRCForge.Editor
 
                 var created = new List<object>();
                 var skipped = new List<object>();
+                var authoredClips = new Dictionary<string, (AnimationClip Clip, bool Active, List<string> Paths)>();
                 foreach (var item in items.OfType<JObject>())
                 {
                     var displayName = FirstNonEmpty(item, "displayName", "name");
@@ -94,50 +102,72 @@ namespace VRCForge.Editor
                         continue;
                     }
 
-                    var clipOnPath = ExistingStateClipPath(fxController, paramName, displayName + "_ON")
-                        ?? GeneratedAssetPaths.ValidateNewAssetPath($"{assetDir}/{clipName}_ON.anim");
-                    var clipOffPath = ExistingStateClipPath(fxController, paramName, displayName + "_OFF")
-                        ?? GeneratedAssetPaths.ValidateNewAssetPath($"{assetDir}/{clipName}_OFF.anim");
+                    (var clipOnPath, var clipOffPath) = clipPlans[item];
                     var clipOnReceipt = new TransactionReceipt { Asset = clipOnPath, Before = DescribeAsset(AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOnPath)) };
                     var clipOffReceipt = new TransactionReceipt { Asset = clipOffPath, Before = DescribeAsset(AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOffPath)) };
                     receipts.Add(clipOnReceipt);
                     receipts.Add(clipOffReceipt);
+                    mutationStarted = true;
+                    failurePhase = "unity_mutation";
                     var clipOn = LoadOrCreateClip(clipOnPath, clipName + "_ON");
                     var clipOff = LoadOrCreateClip(clipOffPath, clipName + "_OFF");
                     var binding = new EditorCurveBinding { path = resolvedPaths[item], type = typeof(GameObject), propertyName = "m_IsActive" };
                     AnimationUtility.SetEditorCurve(clipOn, binding, AnimationCurve.Constant(0f, 0f, 1f));
                     AnimationUtility.SetEditorCurve(clipOff, binding, AnimationCurve.Constant(0f, 0f, 0f));
-                    clipOnReceipt.After = DescribeAsset(clipOn);
-                    clipOnReceipt.Status = "succeeded";
-                    clipOffReceipt.After = DescribeAsset(clipOff);
-                    clipOffReceipt.Status = "succeeded";
+                    EditorUtility.SetDirty(clipOn);
+                    EditorUtility.SetDirty(clipOff);
+                    if (!authoredClips.ContainsKey(clipOnPath)) authoredClips.Add(clipOnPath, (clipOn, true, new List<string>()));
+                    if (!authoredClips.ContainsKey(clipOffPath)) authoredClips.Add(clipOffPath, (clipOff, false, new List<string>()));
+                    authoredClips[clipOnPath].Paths.Add(binding.path);
+                    authoredClips[clipOffPath].Paths.Add(binding.path);
 
                     EnsureFxLayer(fxController, displayName, paramName, clipOn, clipOff, newLayerWriteDefaults);
                     EnsureExpressionParameter(parametersAsset, paramName);
                     EnsureMenuToggle(menuAsset, displayName, paramName);
-                    controllerReceipt.After = DescribeAsset(fxController);
-                    controllerReceipt.Status = "succeeded";
-                    parametersReceipt.After = DescribeAsset(parametersAsset);
-                    parametersReceipt.Status = "succeeded";
-                    menuReceipt.After = DescribeAsset(menuAsset);
-                    menuReceipt.Status = "succeeded";
                     created.Add(new { displayName, parameterName = paramName, sampleObjectPath = objectPath });
                 }
 
-                EditorUtility.SetDirty(fxController);
-                EditorUtility.SetDirty(parametersAsset);
-                EditorUtility.SetDirty(menuAsset);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
-                controllerReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<AnimatorController>(fxControllerPath));
-                parametersReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(parametersPath));
-                menuReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(menuPath));
+                object readback = null;
+                if (mutationStarted)
+                {
+                    var names = resolvedPaths.Keys.Select(ItemParameterName).Distinct().ToArray();
+                    var expectedController = WardrobeToggleReadback.DescribeController(fxController, names, names);
+                    var expectedExpressionAssets = ExpressionWritePersistence.Capture(parametersAsset);
+                    expectedExpressionAssets.Add(menuPath, JToken.Parse(EditorJsonUtility.ToJson(menuAsset)));
+                    var expectedCurves = authoredClips.ToDictionary(pair => pair.Key, pair =>
+                        WardrobeToggleReadback.CaptureActiveCurves(pair.Value.Clip, pair.Value.Paths, pair.Value.Active));
+
+                    failurePhase = "asset_save";
+                    EditorUtility.SetDirty(fxController);
+                    EditorUtility.SetDirty(parametersAsset);
+                    EditorUtility.SetDirty(menuAsset);
+                    saveScope.Save(authoredClips.Values.Select(clip => (UnityEngine.Object)clip.Clip).ToArray());
+                    failurePhase = "persisted_readback";
+                    var controller = WardrobeToggleReadback.ReadController(fxControllerPath, expectedController, names, names);
+                    var expressions = WardrobeToggleReadback.ReadExpressionAssets(expectedExpressionAssets);
+                    var curves = expectedCurves.Select(pair => WardrobeToggleReadback.ReadActiveCurves(pair.Key, pair.Value)).ToArray();
+                    readback = new { persisted = true, controller, expressions, curves };
+                    foreach (var receipt in receipts)
+                    {
+                        receipt.After = DescribeAsset(AssetDatabase.LoadMainAssetAtPath(receipt.Asset));
+                        receipt.Status = "succeeded";
+                    }
+                }
 
                 return VRCForgeToolResult.Completed(
                     $"Authored {created.Count} clothing FX item(s).",
                     new
                     {
+                        schema = "vrcforge.clothing_fx_write.v1",
                         ok = true,
+                        preview = false,
+                        verified = mutationStarted,
+                        persistedReadback = mutationStarted,
+                        mutationStarted,
+                        mutationApplied = mutationStarted,
+                        committed = true,
+                        commitState = mutationStarted ? "committed" : "no_change",
+                        readback,
                         createdCount = created.Count,
                         skippedCount = skipped.Count,
                         created,
@@ -156,8 +186,59 @@ namespace VRCForge.Editor
                 }
                 return VRCForgeToolResult.FailedWithException($"Clothing FX authoring failed: {ex.Message}\n{ex.StackTrace}",
                     ex,
-                    new { transaction = BuildTransaction(receipts, assetDir) });
+                    new { schema = "vrcforge.clothing_fx_write.v1", ok = false, verified = false, mutationStarted,
+                        committed = false, commitState = mutationStarted ? "unknown" : "not_started", failurePhase,
+                        checkpointRecoveryRequired = mutationStarted, retryable = false, transaction = BuildTransaction(receipts, assetDir) });
             }
+        }
+
+        private static Dictionary<JObject, (string On, string Off)> PlanClips(AnimatorController controller,
+            IEnumerable<JObject> items, string assetDir)
+        {
+            var result = new Dictionary<JObject, (string On, string Off)>();
+            var planned = new Dictionary<string, (string Display, string On, string Off)>(StringComparer.Ordinal);
+            var clipDirections = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in items)
+            {
+                var display = FirstNonEmpty(item, "displayName", "name");
+                if (string.IsNullOrWhiteSpace(display)) display = "Clothing";
+                var parameter = ResolveParameterName(item, display);
+                WardrobeToggleReadback.RequireParameterType(controller, parameter, AnimatorControllerParameterType.Bool);
+                if (!planned.TryGetValue(parameter, out var plan))
+                {
+                    var layers = controller.layers.Where(layer => layer.name == parameter).ToArray();
+                    if (layers.Length > 1) throw new InvalidOperationException("Clothing FX layer is ambiguous: " + parameter);
+                    var clipName = FirstNonEmpty(item, "animationClipName");
+                    if (string.IsNullOrWhiteSpace(clipName)) clipName = "FX_" + SanitizeName(display) + "_Toggle";
+                    var onPath = layers.Length == 0 ? GeneratedAssetPaths.ValidateNewAssetPath($"{assetDir}/{clipName}_ON.anim")
+                        : ExistingStateClipPath(controller, parameter, display + "_ON");
+                    var offPath = layers.Length == 0 ? GeneratedAssetPaths.ValidateNewAssetPath($"{assetDir}/{clipName}_OFF.anim")
+                        : ExistingStateClipPath(controller, parameter, display + "_OFF");
+                    if (onPath == null || offPath == null)
+                        throw new InvalidOperationException("Existing clothing FX layer has no matching editable On/Off clips: " + parameter);
+                    AddClipDirection(clipDirections, onPath, true);
+                    AddClipDirection(clipDirections, offPath, false);
+                    plan = (display, onPath, offPath);
+                    planned.Add(parameter, plan);
+                }
+                if (plan.Display != display)
+                    throw new InvalidOperationException("One clothing FX parameter cannot target differently named On/Off states: " + parameter);
+                result.Add(item, (plan.On, plan.Off));
+            }
+            return result;
+        }
+
+        private static void AddClipDirection(IDictionary<string, bool> clips, string path, bool active)
+        {
+            if (clips.TryGetValue(path, out var established) && established != active)
+                throw new InvalidOperationException("A clothing animation clip cannot contain both On and Off results: " + path);
+            clips[path] = active;
+        }
+
+        private static string ItemParameterName(JObject item)
+        {
+            var display = FirstNonEmpty(item, "displayName", "name");
+            return ResolveParameterName(item, string.IsNullOrWhiteSpace(display) ? "Clothing" : display);
         }
 
         private static object DescribeAsset(UnityEngine.Object asset)
@@ -283,10 +364,10 @@ namespace VRCForge.Editor
         {
             var layer = controller.layers.FirstOrDefault(item => item.name == layerName);
             if (layer?.stateMachine == null) return null;
-            var state = layer.stateMachine.states.FirstOrDefault(item => item.state != null && item.state.name == stateName).state;
-            var clip = state?.motion as AnimationClip;
+            var states = layer.stateMachine.states.Where(item => item.state != null && item.state.name == stateName).ToArray();
+            var clip = states.Length == 1 ? states[0].state.motion as AnimationClip : null;
             var path = clip != null ? AssetDatabase.GetAssetPath(clip) : "";
-            return string.IsNullOrWhiteSpace(path) ? null : path;
+            return !string.IsNullOrWhiteSpace(path) && AssetDatabase.LoadMainAssetAtPath(path) == clip ? path : null;
         }
 
         private static void EnsureAssetFolder(string assetPath)

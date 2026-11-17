@@ -49,6 +49,84 @@ static void Main(){var a=new VRCAvatarDescriptor{name="Avatar",transform=new Tra
 '''.replace('BODIES',bodies))
 
 
+def test_wardrobe_toggle_readback_requires_the_exact_reloaded_curve(tmp_path):
+    source = (ROOT / 'Assets/VRCForge/Editor/WardrobeOutfitPartWriter.cs').read_text(encoding='utf-8-sig')
+    animation = (ROOT / 'Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs').read_text(encoding='utf-8-sig')
+    bodies = '\n'.join(method(source, marker) for marker in (
+        'internal static Dictionary<string, AnimationCurve> CaptureActiveCurves',
+        'internal static object ReadActiveCurves',
+        'private static T Reload<T>',
+    )) + '\n' + method(source, 'private static EditorCurveBinding ActiveBinding') + ';\n' + method(animation, 'internal static bool CurvesEqual')
+    run(tmp_path, r'''
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace UnityEngine { class Object {} }
+class GameObject {}
+class EditorCurveBinding { public string path, propertyName; public Type type; }
+class AnimationClip : UnityEngine.Object {
+    public string name = "Hat";
+    public AnimationCurve Curve;
+}
+class Keyframe {
+    public float time, value, inTangent, outTangent, inWeight, outWeight;
+    public int weightedMode;
+}
+class AnimationCurve {
+    public Keyframe[] keys;
+    public int length => keys.Length;
+    public int preWrapMode, postWrapMode;
+}
+static class AnimationUtility {
+    public static AnimationCurve GetEditorCurve(AnimationClip clip, EditorCurveBinding binding) =>
+        binding.path == "Avatar/Hat" && binding.type == typeof(GameObject) && binding.propertyName == "m_IsActive"
+            ? clip.Curve : null;
+}
+[Flags] enum ImportAssetOptions { ForceSynchronousImport = 1, ForceUpdate = 2 }
+static class AssetDatabase {
+    public static AnimationClip Loaded, Persisted;
+    public static int ImportCount;
+    public static T LoadAssetAtPath<T>(string path) where T : UnityEngine.Object => Loaded as T;
+    public static void ImportAsset(string path, ImportAssetOptions options) {
+        if (options != (ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate))
+            throw new Exception("Readback must reload serialized values synchronously.");
+        ImportCount++;
+        Loaded = Persisted;
+    }
+}
+static class EditorUtility { public static bool IsDirty(UnityEngine.Object asset) => false; }
+class Probe {
+    class WriteAnimationCurveTool {
+        public static bool CurvesEqual(AnimationCurve expected, AnimationCurve actual) => Probe.CurvesEqual(expected, actual);
+    }
+    BODIES
+    static AnimationClip Clip(float value, float weight = 0f) => new AnimationClip {
+        Curve = new AnimationCurve { keys = new[] { new Keyframe { value = value, outWeight = weight } } }
+    };
+    static void Check(bool ok, string message) { if (!ok) throw new Exception(message); }
+    static bool Reject(Action action) {
+        try { action(); return false; } catch (InvalidOperationException) { return true; }
+    }
+    static void Main() {
+        var path = "Assets/Hat.anim";
+        var authored = Clip(1f);
+        var expected = CaptureActiveCurves(authored, new[] { "Avatar/Hat" }, true);
+        AssetDatabase.Loaded = authored;
+        AssetDatabase.Persisted = Clip(1f);
+        Check(ReadActiveCurves(path, expected) != null && AssetDatabase.ImportCount == 1, "Exact persisted curve was rejected.");
+        AssetDatabase.Loaded = authored;
+        AssetDatabase.Persisted = Clip(0f);
+        Check(Reject(() => ReadActiveCurves(path, expected)), "Stale in-memory On curve hid wrong persisted value.");
+        AssetDatabase.Persisted = Clip(1f, 0.8f);
+        Check(Reject(() => ReadActiveCurves(path, expected)), "Changed serialized key weight was accepted.");
+        AssetDatabase.Persisted = new AnimationClip();
+        Check(Reject(() => ReadActiveCurves(path, expected)), "Missing persisted binding was accepted.");
+    }
+}
+'''.replace('BODIES', bodies))
+
+
 def test_clothing_toggle_applies_resolved_write_defaults_only_to_new_states(tmp_path):
     relative = 'Assets/VRCForge/Editor/ClothingFxAuthor.cs'
     revision = os.environ.get('VRCFORGE_CLOTHING_BINDING_GIT_REF')

@@ -64,6 +64,8 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var mutationStarted = false;
+            var failurePhase = "preflight";
             try
             {
                 @params = @params ?? new JObject();
@@ -236,15 +238,20 @@ namespace VRCForge.Editor
                 }
 
                 // ---- APPLY -------------------------------------------------------
-                var saveScope = new WardrobeAssetSaveScope(fxController,
-                    !boolParamExists ? parametersAsset : null,
-                    addMenuToggle ? descriptor.expressionsMenu : null);
-                var sceneSaveScope = new WardrobeSceneSaveScope(
-                    setObjectsDefaultOff && !defaultOn && resolvedTargets.Any(item => item.gameObject.activeSelf)
-                        ? descriptor.gameObject : null);
-                AvatarAuthoringCrudCore.EnsureAssetFolder(clipDir);
+                var rootMenu = addMenuToggle ? descriptor.expressionsMenu : null;
+                var saveScope = new WardrobeAssetSaveScope(fxController, !boolParamExists ? parametersAsset : null, rootMenu);
+                var menusBefore = ExpressionWritePersistence.Capture(rootMenu);
+                var sceneBefore = setObjectsDefaultOff && !defaultOn && resolvedTargets.Any(item => item.gameObject.activeSelf)
+                    ? ComponentCrudCore.ResolveSavedSceneFor(descriptor.gameObject) : null;
+                var sceneTargets = sceneBefore == null ? Array.Empty<GameObject>() : resolvedTargets.Select(item =>
+                    SceneObjectCopyCore.ResolveUniqueGameObject(sceneBefore.Scene, GetTransformPath(item), "outfit part target")).ToArray();
+                WardrobeToggleReadback.RequireParameterType(fxController, parameterName, AnimatorControllerParameterType.Int);
+                WardrobeToggleReadback.RequireParameterType(fxController, partParameterName, AnimatorControllerParameterType.Bool);
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Add outfit part '{partName}'");
+                mutationStarted = true;
+                failurePhase = "unity_mutation";
+                AvatarAuthoringCrudCore.EnsureAssetFolder(clipDir);
 
                 // a. Ensure the Bool expression parameter.
                 if (!boolParamExists)
@@ -336,9 +343,10 @@ namespace VRCForge.Editor
                 // e. Add the menu toggle bound to the part bool.
                 string appliedMenuPath = "";
                 bool menuToggleAdded = false;
+                string toggleAssetPath = null;
                 if (addMenuToggle)
                 {
-                    var target = ResolveOrCreatePartMenu(descriptor.expressionsMenu, subMenuName, menuAssetDir, menuAssetPath, out appliedMenuPath);
+                    var target = ResolveOrCreatePartMenu(rootMenu, subMenuName, menuAssetDir, menuAssetPath, out appliedMenuPath);
                     if (target != null)
                     {
                         Undo.RegisterCompleteObjectUndo(target, "Add outfit part menu toggle");
@@ -352,21 +360,62 @@ namespace VRCForge.Editor
                         });
                         EditorUtility.SetDirty(target);
                         menuToggleAdded = true;
+                        toggleAssetPath = AssetDatabase.GetAssetPath(target);
                     }
                 }
 
-                saveScope.Save(fxController, !boolParamExists ? parametersAsset : null,
-                    addMenuToggle ? descriptor.expressionsMenu : null, onClip, offClip);
-                sceneSaveScope.Save();
-                AssetDatabase.Refresh();
+                var expectedController = WardrobeToggleReadback.DescribeController(fxController, new[] { layerName },
+                    new[] { parameterName, partParameterName });
+                var expectedParameters = ExpressionWritePersistence.Capture(parametersAsset);
+                var expectedMenus = ExpressionWritePersistence.Capture(rootMenu).Where(pair =>
+                    !menusBefore.TryGetValue(pair.Key, out var before) || !JToken.DeepEquals(pair.Value, before))
+                    .ToDictionary(pair => pair.Key, pair => pair.Value);
+                var expectedOn = WardrobeToggleReadback.CaptureActiveCurves(onClip, onObjects, true);
+                var expectedOff = WardrobeToggleReadback.CaptureActiveCurves(offClip, onObjects, false);
+                failurePhase = "asset_save";
+                saveScope.Save(fxController, !boolParamExists ? parametersAsset : null, rootMenu, onClip, offClip);
+                var sceneAfter = sceneBefore == null ? null : ComponentCrudCore.SaveAndResolveScene(sceneBefore);
+                failurePhase = "persisted_readback";
+                var controllerReadback = WardrobeToggleReadback.ReadController(fxControllerPath, expectedController,
+                    new[] { layerName }, new[] { parameterName, partParameterName });
+                var parameterReadback = WardrobeToggleReadback.ReadExpressionAssets(expectedParameters);
+                var menuReadback = WardrobeToggleReadback.ReadExpressionAssets(expectedMenus);
+                var curves = new[]
+                {
+                    WardrobeToggleReadback.ReadActiveCurves(createdOnClipPath, expectedOn),
+                    WardrobeToggleReadback.ReadActiveCurves(createdOffClipPath, expectedOff)
+                };
+                var objects = Array.Empty<object>();
+                if (sceneAfter != null)
+                {
+                    if (sceneAfter.FileDigest == sceneBefore.FileDigest)
+                        throw new InvalidOperationException("Outfit part scene write did not change the saved scene.");
+                    objects = sceneTargets.Select(target =>
+                    {
+                        var path = GetTransformPath(target.transform);
+                        var saved = SceneObjectCopyCore.ResolveUniqueGameObject(sceneAfter.Scene, path, "saved outfit part target");
+                        if (saved != target || saved.activeSelf)
+                            throw new InvalidOperationException("Outfit part target did not persist inactive: " + path);
+                        return (object)new { path, activeSelf = saved.activeSelf };
+                    }).ToArray();
+                }
                 Undo.CollapseUndoOperations(undoGroup);
 
                 return VRCForgeToolResult.Completed(
                     $"Added part '{partName}' (bool '{partParameterName}') gated on '{parameterName}' == {outfitValue} on '{descriptor.name}'.",
                     new
                     {
+                        schema = "vrcforge.outfit_part_write.v1",
                         ok = true,
                         preview = false,
+                        verified = true,
+                        persistedReadback = true,
+                        mutationStarted = true,
+                        mutationApplied = true,
+                        committed = true,
+                        commitState = "committed",
+                        readback = new { persisted = true, controller = controllerReadback, parameters = parameterReadback,
+                            menus = menuReadback, toggleAssetPath, curves, scenePath = sceneAfter?.Path, objects },
                         action = "add_outfit_part",
                         avatarPath = avatarRootPath,
                         avatarName = descriptor.name,
@@ -390,7 +439,10 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.FailedWithException($"Add outfit part failed: {ex.Message}\n{ex.StackTrace}", ex);
+                return VRCForgeToolResult.FailedWithException("outfit_part_write_failed", $"Add outfit part failed: {ex.Message}", ex,
+                    new { schema = "vrcforge.outfit_part_write.v1", ok = false, verified = false, mutationStarted,
+                        committed = false, commitState = mutationStarted ? "unknown" : "not_started", failurePhase,
+                        checkpointRecoveryRequired = mutationStarted, retryable = false });
             }
         }
 
@@ -740,6 +792,83 @@ namespace VRCForge.Editor
             public bool willCreate;
             public string newSubMenuName;
             public string menuPathDisplay;
+        }
+    }
+
+    internal static class WardrobeToggleReadback
+    {
+        internal static void RequireParameterType(AnimatorController controller, string name, AnimatorControllerParameterType type)
+        {
+            var existing = controller.parameters.Where(parameter => parameter.name == name).ToArray();
+            if (existing.Length > 1 || (existing.Length == 1 && existing[0].type != type))
+                throw new InvalidOperationException($"FX controller parameter '{name}' must have a unique {type} binding.");
+        }
+
+        internal static JToken DescribeController(AnimatorController controller, string[] layerNames, string[] parameterNames)
+        {
+            var controllerState = ManageFxAnimatorTool.DescribeForBatch(controller);
+            return new JObject
+            {
+                ["layers"] = new JArray(controllerState["layers"].Where(layer => layerNames.Contains(layer.Value<string>("name")))),
+                ["parameters"] = new JArray(controllerState["parameters"].Where(parameter => parameterNames.Contains(parameter.Value<string>("name"))))
+            };
+        }
+
+        internal static object ReadController(string path, JToken expected, string[] layerNames, string[] parameterNames)
+        {
+            var actual = DescribeController(Reload<AnimatorController>(path), layerNames, parameterNames);
+            if (!JToken.DeepEquals(actual, expected))
+                throw new InvalidOperationException("Persisted wardrobe controller graph differs from the authored graph: " + path);
+            return new { path, state = actual };
+        }
+
+        internal static string[] ReadExpressionAssets(IReadOnlyDictionary<string, JToken> expected)
+        {
+            foreach (var pair in expected)
+            {
+                var asset = Reload<UnityEngine.Object>(pair.Key);
+                if (!JToken.DeepEquals(JToken.Parse(EditorJsonUtility.ToJson(asset)), pair.Value))
+                    throw new InvalidOperationException("Persisted wardrobe expression state differs from the authored state: " + pair.Key);
+            }
+            return expected.Keys.ToArray();
+        }
+
+        internal static Dictionary<string, AnimationCurve> CaptureActiveCurves(AnimationClip clip, IEnumerable<string> paths, bool active)
+        {
+            var expected = new Dictionary<string, AnimationCurve>(StringComparer.Ordinal);
+            foreach (var path in paths.Distinct())
+            {
+                var curve = AnimationUtility.GetEditorCurve(clip, ActiveBinding(path));
+                if (curve == null || curve.length == 0 || curve.keys.Any(key => key.time != 0f || key.value != (active ? 1f : 0f)))
+                    throw new InvalidOperationException($"Authored active-state curve does not match '{path}' on '{clip.name}'.");
+                expected.Add(path, curve);
+            }
+            return expected;
+        }
+
+        internal static object ReadActiveCurves(string path, IReadOnlyDictionary<string, AnimationCurve> expected)
+        {
+            var clip = Reload<AnimationClip>(path);
+            foreach (var pair in expected)
+            {
+                var curve = AnimationUtility.GetEditorCurve(clip, ActiveBinding(pair.Key));
+                if (!WriteAnimationCurveTool.CurvesEqual(pair.Value, curve))
+                    throw new InvalidOperationException($"Persisted active-state curve differs for '{pair.Key}' in '{path}'.");
+            }
+            return new { path, bindings = expected.Keys.ToArray() };
+        }
+
+        private static EditorCurveBinding ActiveBinding(string path) =>
+            new EditorCurveBinding { path = path, type = typeof(GameObject), propertyName = "m_IsActive" };
+
+        private static T Reload<T>(string path) where T : UnityEngine.Object
+        {
+            var asset = AssetDatabase.LoadAssetAtPath<T>(path);
+            if (asset == null || EditorUtility.IsDirty(asset))
+                throw new InvalidOperationException("Wardrobe asset is missing or unsaved: " + path);
+            AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+            return AssetDatabase.LoadAssetAtPath<T>(path)
+                ?? throw new InvalidOperationException("Persisted wardrobe asset could not be reloaded: " + path);
         }
     }
 }
