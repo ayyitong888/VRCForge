@@ -8,11 +8,13 @@ import remarkGfm from "remark-gfm";
 import remarkCjkFriendly from "remark-cjk-friendly";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import { findAndReplace } from "mdast-util-find-and-replace";
 import { useTranslation } from "react-i18next";
 
 import { isInternalRuntimeUrl } from "../../lib/runtime-url";
 import { cn } from "../../lib/utils";
 import { chatFileHref, localChatFilePath, openChatFile } from "../../lib/chat-file-link";
+import { chatIdFromDeepLink, OpenChatLinkContext } from "../../lib/chat-deep-link";
 import { MarkdownCodeBlock } from "./markdown-code-block";
 import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 import { loadChatResourceImage, type ChatResourceImageContext as ChatResourceImageRequestContext } from "../../lib/api/chat-resource-image";
@@ -35,7 +37,7 @@ export function ChatMarkdown({ text, variant = "agent", allowImages = true }: { 
       data-testid={`chat-markdown-${variant}`}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkMath, remarkChatFileLinks]}
+        remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkMath, remarkChatDeepLinks, remarkChatFileLinks]}
         remarkRehypeOptions={{ clobberPrefix: "" }}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], [scopeMarkdownFragments, clobberPrefix], [rehypeKatex, { trust: false }]]}
         components={components}
@@ -88,7 +90,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   },
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href || []), "vrcforge-file"],
+    href: [...(defaultSchema.protocols?.href || []), "vrcforge-file", "vrcforge"],
     src: [
       ...new Set([...(defaultSchema.protocols?.src || []), "data", "vrcforge"]),
     ],
@@ -110,6 +112,8 @@ function buildChatMarkdownComponents(inverted: boolean, allowImages: boolean): C
     h6: ({ node: _node, ...props }) => <h6 className={cn("mb-2 mt-4 text-xs font-semibold uppercase leading-snug first:mt-0", mutedClass)} {...props} />,
     p: ({ node: _node, ...props }) => <p className={cn("my-3 first:mt-0 last:mb-0", inverted && "whitespace-pre-wrap")} {...props} />,
     a: ({ node: _node, href, ...props }) => {
+      const chatId = chatIdFromDeepLink(href || "");
+      if (chatId) return <ChatDeepLink chatId={chatId} href={href} className={linkClass} {...props} />;
       const filePath = localChatFilePath(String(href || ""));
       if (filePath) return <ChatFileLink path={filePath} className={linkClass} {...props} />;
       const safeHref = safeMarkdownUrlTransform(String(href || ""));
@@ -163,6 +167,29 @@ function remarkChatFileLinks() {
       }
     });
   };
+}
+
+function remarkChatDeepLinks() {
+  return (tree: Parameters<typeof findAndReplace>[0]) => {
+    // Recognize copied URLs in prose without rewriting explicit links or code.
+    const urlPattern = /(?<![^\s(<\[{"“‘：，。！？、（【「『])vrcforge:\/\/chat\/[a-z\d._~%-]+(?![a-z\d._~%/?#-])/gi;
+    findAndReplace(tree, [urlPattern, (match: string) => {
+      const url = match.replace(/\.+$/, "");
+      if (!chatIdFromDeepLink(url)) return false;
+      const link = { type: "link" as const, url, children: [{ type: "text" as const, value: url }] };
+      const punctuation = match.slice(url.length);
+      return punctuation ? [link, { type: "text", value: punctuation }] : link;
+    }], { ignore: ["link", "linkReference"] });
+  };
+}
+
+function ChatDeepLink({ chatId, children, className, href, title }: ComponentPropsWithoutRef<"a"> & { chatId: string }) {
+  const open = useContext(OpenChatLinkContext);
+  if (!open) return <span>{children}</span>;
+  return <a className={className} href={href} title={title} onClick={event => {
+    event.preventDefault();
+    open(chatId);
+  }}>{children}</a>;
 }
 
 function ChatFileLink({ path, children, className }: ComponentPropsWithoutRef<"a"> & { path: string }) {
@@ -249,6 +276,9 @@ function safeMarkdownUrlTransform(url: string, key?: string, tagName?: string, r
   }
   if (key === "href" && tagName === "a" && resourceContext && trimmed.startsWith("vrcforge-file:")) {
     return chatFileHref(trimmed) || "";
+  }
+  if (key === "href" && tagName === "a" && chatIdFromDeepLink(trimmed)) {
+    return trimmed;
   }
   if (isInternalRuntimeUrl(trimmed)) {
     return "";

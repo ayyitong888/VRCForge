@@ -1,5 +1,6 @@
 import { projectDiscoveryState } from "./lib/project-discovery-state";
 import { useChatDeepLinks } from "./hooks/use-chat-deep-links";
+import { chatDeepLink, OpenChatLinkContext } from "./lib/chat-deep-link";
 import { conversationQuoteFromSelection, dismissConversationQuoteOnOutsidePointerDown } from "./lib/chat-selection-quote";
 import { hasRecentConnectorSelfTest } from "./lib/connector-verification";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -869,11 +870,19 @@ export default function App() {
   persistChatsNowRef.current = persistChatsNow;
   const openChatById = (chatId: string) => {
     const chat = sidebarChats.find((entry) => entry.id === chatId);
-    if (!chat) return;
+    if (!chat) return false;
     openChat(chat);
-    setActiveView("chat");
+    return true;
   };
-  useChatDeepLinks(chatStorageReady, openChatById);
+  const openChatLink = (chatId: string) => {
+    const missingChat = t("chat.linkTargetMissing");
+    if (openChatById(chatId)) {
+      setError(current => current === missingChat ? "" : current);
+    } else {
+      setError(missingChat);
+    }
+  };
+  useChatDeepLinks(chatStorageReady, openChatLink);
   const sessionHandoff = useSessionHandoff(endpoint, activeChatId);
   const handoffTargetChats = useMemo(() => {
     const sourceScope = normalizeProjectPathKey(displayChat?.projectPath || "");
@@ -3049,19 +3058,22 @@ export default function App() {
   }
 
   function copyConversationItem(item: ConversationItem) {
-    const text = conversationItemText(item, t);
-    const trimmed = text.trim();
-    if (!trimmed) {
+    const text = conversationItemText(item, t).trim();
+    if (!text) {
       showTransientNotice("error", "copy", t("chat.copyFailed", { reason: t("chat.copyNoText") }));
       return;
     }
+    copyChatText(text, t("chat.copiedMessage"));
+  }
+
+  function copyChatText(text: string, successMessage: string) {
     if (!navigator.clipboard?.writeText) {
       showTransientNotice("error", "copy", t("chat.copyFailed", { reason: t("chat.copyClipboardUnavailable") }));
       return;
     }
-    void navigator.clipboard.writeText(trimmed).then(
+    void navigator.clipboard.writeText(text).then(
       () => {
-        showTransientNotice("success", "copy", t("chat.copiedMessage"));
+        showTransientNotice("success", "copy", successMessage);
       },
       (cause) => {
         const reason = cause instanceof Error ? cause.message : String(cause || "");
@@ -4367,6 +4379,7 @@ export default function App() {
 
 
   return (
+    <OpenChatLinkContext.Provider value={openChatLink}>
     <main className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground" data-desktop-window={desktopWindow || undefined}>
       <DesktopTitlebar theme={theme} onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")} />
       <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)]" style={{ gridTemplateColumns: workspaceGridColumns }}>
@@ -5079,6 +5092,7 @@ export default function App() {
         onTogglePinChat={togglePinChat}
         onToggleTestChat={toggleTestChat}
         onStartRenameChat={startRenameChat}
+        onCopyChatLink={(chatId) => copyChatText(chatDeepLink(chatId), t("chat.copiedChatLink"))}
         onDeleteChat={setDeleteTargetId}
         onCancelDeleteChat={() => setDeleteTargetId("")}
         onConfirmDeleteChat={deleteChatPermanently}
@@ -5120,5 +5134,6 @@ export default function App() {
       <VskOpenDialog ready={runtimeConnected} onPreflight={preflightVskPackage} onImport={importVskPackage} onManage={() => void openSkills()} />
 
     </main>
+    </OpenChatLinkContext.Provider>
   );
 }

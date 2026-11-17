@@ -977,6 +977,8 @@
     "retryMessage": "Retry",
     "regenerateMessage": "Regenerate",
     "copiedMessage": "Message copied",
+    "copiedChatLink": "Chat link copied",
+    "linkTargetMissing": "Chat not found.",
     "copyNoText": "There is no message text to copy.",
     "copyClipboardUnavailable": "The system clipboard is unavailable.",
     "copyUnknownReason": "The clipboard rejected the copy request.",
@@ -1292,6 +1294,7 @@
     "unpinChat": "Unpin",
     "pinChat": "Pin Chat",
     "renameChat": "Rename Chat",
+    "copyChatLink": "Copy Chat Link",
     "markTestChat": "Mark as test chat",
     "unmarkTestChat": "Unmark test chat",
     "permanentDelete": "Delete Permanently"

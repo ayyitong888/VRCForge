@@ -17,8 +17,26 @@ const merges = [];
 const date = "2026-10-28T10:00:00Z";
 const chatA = { id: "surface-A", sessionId: "surface-session-A", title: "Surface A", projectPath: "", projectType: "general", createdAt: date, updatedAt: date, revision: 0, items: [] };
 const chatB = { ...chatA, id: "surface-B", sessionId: "surface-session-B", title: "Surface B" };
-const fixtureChats = [chatA, chatB];
-const catalog = fixtureChats.map((chat) => ({ ...chat, sourceProjectPath: "", sourceStoreId: "app" }));
+const chatC = { ...chatB, id: "surface-C", sessionId: "surface-session-C", title: "Surface C", projectPath: "E:/fixtures/other-project", projectType: "unity" };
+const userLink = "vrcforge://chat/surface-B";
+if (issue === "chat-links") {
+  const tool = "vrcforge_send_message";
+  const source = { id: "link-target", type: "user", text: "Other project transcript", createdAt: date,
+    forwardedByAgent: true, forwardedFrom: { sourceChatId: chatA.id, sourceClientTurnId: "source-turn", sourceActionId: "source-action" } };
+  chatC.items = [source];
+  chatA.items = [{ id: "link-user", type: "user", text: `详见：${userLink}。 无效链接：${userLink}?command=write`, createdAt: date }];
+  chatB.items = [{ id: "link-agent", type: "agent", createdAt: date, response: {
+    ok: true, sessionId: chatB.sessionId, turnId: "link-agent-turn",
+    plan: { reply: "[另一个项目](vrcforge://chat/surface-C \"中文标题\") · [Missing chat](vrcforge://chat/unknown)" },
+    steps: [{ actionId: "lookup-action", result: { chatId: chatC.id } }],
+    timeline: [
+      { id: "lookup-call", kind: "tool_call", timestamp: date, sequence: 1, payload: { actionId: "lookup-action", tool, status: "started" } },
+      { id: "lookup-receipt", kind: "tool_result", timestamp: date, sequence: 2, payload: { actionId: "lookup-action", tool, status: "ok" } },
+    ],
+  } }];
+}
+const fixtureChats = issue === "chat-links" ? [chatA, chatB, chatC] : [chatA, chatB];
+const catalog = fixtureChats.map((chat) => ({ ...chat, sourceProjectPath: chat.projectPath, sourceStoreId: "app" }));
 const chatDigests = Object.fromEntries(fixtureChats.map((chat, index) => [chat.id, String(index + 1).repeat(64)]));
 const chatMetadataShapes = Object.fromEntries(fixtureChats.map((chat) => [
   chat.id, Object.fromEntries(Object.keys(chat).map((field) => [field, true])),
@@ -107,6 +125,7 @@ async function waitFor(predicate, label) {
 const baselineModules = new Set([
   "src/App.tsx", "src/components/subagents/sub-agent-sidebar.tsx", "src/hooks/use-composer-draft.ts",
   "src/lib/api/sub-agents.ts", "src/lib/subagent-delegate.ts", "src/lib/subagent-state.ts",
+  ...(issue === "chat-links" ? ["src/components/chat/chat-markdown.tsx", "src/components/sidebar/sidebar-menus.tsx", "src/hooks/use-chat-deep-links.ts"] : []),
 ]);
 const scratch = await mkdtemp(resolve(tmpdir(), "vrcforge-subagent-surface-"));
 const frontend = resolve(scratch, "frontend");
@@ -142,7 +161,7 @@ try {
   const origin = `http://127.0.0.1:${ui.address().port}`;
   browser = await chromium.launch({ channel: process.platform === "win32" ? "msedge" : undefined, headless: true });
 
-  const open = async (desktop = false) => {
+  const open = async (desktop = false, startupUrl = "") => {
     const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
     currentPage = page;
     page.setDefaultTimeout(8000);
@@ -150,7 +169,7 @@ try {
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Failed to load resource")) console.error(message.text());
     });
-    await page.addInitScript(({ desktop, base }) => {
+    await page.addInitScript(({ desktop, base, startupUrl, linkProjectPath }) => {
       localStorage.setItem("vrcforge_onboarded", "true");
       localStorage.setItem("vrcforge-locale", "en-US");
       localStorage.setItem("vrcforge_startup_animation", "false");
@@ -172,7 +191,8 @@ try {
           if (command === "plugin:event|listen") { listeners.set(++nextId, args); return nextId; }
           if (command === "start_backend") return { mode: "attached", started: true, endpoint: base, message: "fixture" };
           if (command === "take_pending_vsk_paths") return [];
-          if (command === "plugin:deep-link|get_current") return [];
+          if (command === "plugin:deep-link|get_current") return startupUrl ? [startupUrl] : [];
+          if (command === "fetch_project_prefs" && linkProjectPath) return { ok: true, customPaths: [linkProjectPath] };
           const request = args?.request || {};
           let path;
           if (command === "fetch_app_bootstrap") path = "/api/app/bootstrap";
@@ -191,7 +211,7 @@ try {
           return (await fetch(base + path)).json();
         },
       };
-    }, { desktop, base });
+    }, { desktop, base, startupUrl, linkProjectPath: issue === "chat-links" ? chatC.projectPath : "" });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin === origin || url.origin === base) return route.continue();
@@ -200,7 +220,7 @@ try {
       return route.fulfill({ response });
     });
     await page.goto(origin, { waitUntil: "domcontentloaded" });
-    await page.getByText("Surface A", { exact: true }).first().click();
+    if (!startupUrl) await page.getByText("Surface A", { exact: true }).first().click();
     await page.locator("[data-chat-composer-dock] textarea:not([disabled])").first().waitFor();
     return page;
   };
@@ -209,6 +229,37 @@ try {
     await page.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).first().click();
     return page.locator("[data-vrcforge-subagent-workspace-surface]");
   };
+
+  if (issue === "chat-links") {
+    const page = await open(true, "vrcforge://chat/surface-A");
+    await page.getByRole("link", { name: userLink, exact: true }).waitFor();
+    assert.equal(await page.getByRole("link", { name: /command=write/ }).count(), 0);
+    await page.locator('[data-vrcforge-chat-id="surface-A"]').click({ button: "right" });
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.getByRole("menuitem", { name: "Copy Chat Link" }).click();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "vrcforge://chat/surface-A");
+    await page.getByRole("link", { name: userLink, exact: true }).click();
+    await page.getByRole("link", { name: "Missing chat" }).click();
+    await page.getByText("Chat not found.").waitFor();
+    const projectLink = page.getByRole("link", { name: "另一个项目" });
+    assert.equal(await projectLink.getAttribute("href"), "vrcforge://chat/surface-C");
+    assert.equal(await projectLink.getAttribute("title"), "中文标题");
+    await projectLink.click();
+    await page.getByText("Other project transcript", { exact: true }).waitFor();
+    await page.locator('[data-open-conversation="surface-A"]').click();
+    await page.getByRole("link", { name: userLink, exact: true }).click();
+    const processGroup = page.locator("[data-agent-turn-process-group] > div > button[aria-expanded]");
+    if (await processGroup.first().getAttribute("aria-expanded") === "false") await processGroup.first().click();
+    const toolGroup = page.locator("[data-agent-tool-call-group] > div > button[aria-expanded]");
+    if (await toolGroup.first().getAttribute("aria-expanded") === "false") await toolGroup.first().click();
+    await page.getByRole("button", { name: "Called unity_send_message" }).click();
+    await page.locator('[data-open-conversation="surface-C"]').click();
+    await page.getByText("Other project transcript", { exact: true }).waitFor();
+    await page.evaluate(() => window.subAgentEvent("deep-link://new-url", ["vrcforge://chat/surface-A"]));
+    await page.getByRole("link", { name: userLink, exact: true }).waitFor();
+    assert.equal(posts.length, 0);
+    console.log("PASS real app chat links: copy, Chinese prose and Markdown, cross-project navigation, missing chat, existing source and receipt buttons, cold and warm delivery");
+  }
 
   if (issue === "all" || issue === "race") {
     const page = await open();

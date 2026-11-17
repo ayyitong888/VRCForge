@@ -24,7 +24,7 @@ assert.match(timeline, /data-open-conversation/, "the timeline renders the jump 
 assert.match(timeline, /conversationResultChatId\(detail\)/, "the jump reads the result chatId, not prose");
 
 assert.match(workspace, /onOpenChatById=\{onOpenChatById\}/, "the workspace threads the callback to cards");
-assert.match(app, /onOpenChatById=\{\(chatId\) =>/, "App wires the callback");
+assert.match(app, /onOpenChatById=\{openChatById\}/, "App wires the same chat selection used by deep links");
 
 for (const locale of ["zh-CN", "zh-TW", "en-US", "ja-JP"]) {
   const messages = JSON.parse(await readFile(new URL(`../src/locales/${locale}.json`, import.meta.url), "utf8"));

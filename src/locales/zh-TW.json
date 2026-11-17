@@ -969,6 +969,8 @@
     "retryMessage": "重試",
     "regenerateMessage": "重新生成",
     "copiedMessage": "已複製訊息",
+    "copiedChatLink": "已複製對話連結",
+    "linkTargetMissing": "找不到此對話。",
     "copyNoText": "沒有可複製的訊息文字。",
     "copyClipboardUnavailable": "系統剪貼簿目前無法使用。",
     "copyUnknownReason": "剪貼簿拒絕了複製要求。",
@@ -1284,6 +1286,7 @@
     "unpinChat": "取消置頂",
     "pinChat": "置頂對話",
     "renameChat": "重新命名對話",
+    "copyChatLink": "複製對話連結",
     "markTestChat": "標記為測試會話",
     "unmarkTestChat": "取消測試標記",
     "permanentDelete": "永久刪除"

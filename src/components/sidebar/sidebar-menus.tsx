@@ -6,6 +6,7 @@ import {
   ChevronRight,
   EyeOff,
   FolderOpen,
+  Link,
   MessageSquare,
   Pencil,
   Pin,
@@ -52,6 +53,7 @@ type SidebarMenusProps = {
   onTogglePinChat: (chatId: string) => void;
   onToggleTestChat: (chatId: string) => void;
   onStartRenameChat: (chat: ChatThread) => void;
+  onCopyChatLink: (chatId: string) => void;
   onDeleteChat: (chatId: string) => void;
   onCancelDeleteChat: () => void;
   onConfirmDeleteChat: (chatId: string) => void;
@@ -84,6 +86,7 @@ export function SidebarMenus({
   onTogglePinChat,
   onToggleTestChat,
   onStartRenameChat,
+  onCopyChatLink,
   onDeleteChat,
   onCancelDeleteChat,
   onConfirmDeleteChat,
@@ -150,6 +153,7 @@ export function SidebarMenus({
           onTogglePinChat={onTogglePinChat}
           onToggleTestChat={onToggleTestChat}
           onStartRenameChat={onStartRenameChat}
+          onCopyChatLink={onCopyChatLink}
           onDeleteChat={onDeleteChat}
         />
       ) : null}
@@ -338,6 +342,7 @@ function ChatContextMenu({
   onTogglePinChat,
   onToggleTestChat,
   onStartRenameChat,
+  onCopyChatLink,
   onDeleteChat,
 }: {
   menu: ChatMenuState;
@@ -346,6 +351,7 @@ function ChatContextMenu({
   onTogglePinChat: (chatId: string) => void;
   onToggleTestChat: (chatId: string) => void;
   onStartRenameChat: (chat: ChatThread) => void;
+  onCopyChatLink: (chatId: string) => void;
   onDeleteChat: (chatId: string) => void;
 }) {
   const { t } = useTranslation();
@@ -372,6 +378,14 @@ function ChatContextMenu({
           label={t("contextMenu.renameChat")}
           onClick={() => {
             onStartRenameChat(chat);
+            onClose();
+          }}
+        />
+        <MenuButton
+          icon={<Link className="h-4 w-4 shrink-0" />}
+          label={t("contextMenu.copyChatLink")}
+          onClick={() => {
+            onCopyChatLink(chat.id);
             onClose();
           }}
         />
