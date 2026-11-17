@@ -104,8 +104,38 @@ fn extract_payload(setup: &Path, info: &PayloadInfo, destination: &Path, mut com
     let mut source = File::open(setup).map_err(|e| e.to_string())?.take(info.executable_bytes);
     let mut uninstaller = File::create(destination.join("Uninstall.exe")).map_err(|e| format!("Cannot create the new uninstaller: {e}"))?;
     std::io::copy(&mut source, &mut uninstaller).map_err(|e| format!("Cannot write the new uninstaller: {e}"))?;
+    // The uninstaller retains only the executable prefix. Its header must not
+    // refer to the installer signature and checksum for the removed payload.
+    if let Some(header) = &info.signing_header {
+        uninstaller.seek(SeekFrom::Start(header.checksum)).and_then(|_| uninstaller.write_all(&[0; 4]))
+            .and_then(|_| uninstaller.seek(SeekFrom::Start(header.directory)))
+            .and_then(|_| uninstaller.write_all(&[0; 8]))
+            .map_err(|e| format!("Cannot clear the installer signature from the uninstaller header: {e}"))?;
+    }
     uninstaller.sync_all().map_err(|e| format!("Cannot finish writing the uninstaller: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires the built offline installer in VRCFORGE_TEST_SIGNED_SETUP"]
+fn extracts_signed_offline_installer_into_temporary_directory() {
+    let setup = PathBuf::from(std::env::var_os("VRCFORGE_TEST_SIGNED_SETUP").unwrap());
+    let info = crate::payload::inspect_file(&setup).unwrap();
+    assert!(info.signing_header.is_some());
+    assert!(info.download_url.is_none());
+    let destination = tempfile::tempdir().unwrap();
+    let mut extracted_bytes = 0;
+    extract_payload(&setup, &info, destination.path(), |bytes| extracted_bytes = bytes).unwrap();
+    assert_eq!(extracted_bytes, info.app_bytes);
+    for path in ["VRCForge.exe", "backend/vrcforge_backend.exe", "dashboard/index.html", "VERSION"] {
+        assert!(destination.path().join(path).is_file(), "missing {path}");
+    }
+    let uninstaller = fs::read(destination.path().join("Uninstall.exe")).unwrap();
+    assert_eq!(uninstaller.len() as u64, info.executable_bytes);
+    let header = info.signing_header.unwrap();
+    assert_eq!(&uninstaller[header.directory as usize..header.directory as usize + 8], &[0; 8]);
+    println!("Extracted {extracted_bytes} bytes, including the desktop app, backend and dashboard; generated an unsigned uninstaller with a valid unsigned PE header.");
 }
 
 pub fn install(app: &tauri::AppHandle, user: &platform::UserContext, request: &InstallRequest) -> Result<SetupResult, String> {
