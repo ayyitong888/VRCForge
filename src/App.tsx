@@ -179,7 +179,7 @@ import {
   AGENT_QUESTION_NOTIFICATION_ACTION_EVENT,
   parseAgentQuestionNotificationAction,
 } from "./lib/agent-question-notifications";
-import { pickSubAgentName, reconcileSelectedSubAgent, updateSubAgentList } from "./lib/subagent-state";
+import { latestSubAgentTask, pickSubAgentName, reconcileSelectedSubAgent, reconcileSubAgentList, updateSubAgentList } from "./lib/subagent-state";
 import {
   AgentApproval,
   AgentQuestion,
@@ -464,6 +464,8 @@ export default function App() {
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
   const desktopEventRuntimeTimerRef = useRef<number | null>(null);
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
+  const subAgentListRequestRef = useRef(0);
+  const appliedSubAgentListRequestRef = useRef(0);
   const subAgentHandoffBusyRef = useRef(new Set<string>());
   const subAgentActionBusyRef = useRef(new Set<string>());
   const subAgentInspectRequestRef = useRef(0);
@@ -1592,7 +1594,7 @@ export default function App() {
           openChat(chat);
           setActiveView("chat");
           subAgentSelectionIntentRef.current = task.id;
-          setSelectedSubAgent(task);
+          setSelectedSubAgent((current) => latestSubAgentTask(current, task));
           setSubAgentList((current) => updateSubAgentList(current, task));
           setSelectedSubAgentPanelOpen(true);
         } catch (cause) {
@@ -2458,8 +2460,8 @@ export default function App() {
         }
       })
       .catch(() => undefined);
-    void listen("vrcforge-backend-event-status", () => {
-      // Status is intentionally quiet; the normal runtime banner remains the user-facing signal.
+    void listen<{ status?: string }>("vrcforge-backend-event-status", (event) => {
+      if (event.payload?.status === "connected") scheduleSubAgentRefresh();
     })
       .then((unlisten) => {
         if (active) {
@@ -2576,9 +2578,11 @@ export default function App() {
   useEffect(() => {
     if (!runtimeConnected) {
       setSubAgentList(null);
+      setLoadingSubAgents(false);
       return;
     }
     void loadSubAgents(false);
+    return () => { appliedSubAgentListRequestRef.current = subAgentListRequestRef.current; };
   }, [runtimeConnected, endpoint]);
 
   useEffect(() => {
@@ -3809,7 +3813,8 @@ export default function App() {
         if (task.handoffStatus === "handoff_pending") {
           const acknowledged = await acknowledgeSubAgentHandoff(endpoint, task.id, task.revision);
           setSubAgentList((current) => updateSubAgentList(current, acknowledged.task));
-          setSelectedSubAgent((current) => (current?.id === acknowledged.task.id ? acknowledged.task : current));
+          setSelectedSubAgent((current) => (current?.id === acknowledged.task.id
+            ? latestSubAgentTask(current, acknowledged.task) : current));
         }
       } catch {
         // Leave handoff_pending durable; the next event/poll retries the exact
@@ -3824,17 +3829,20 @@ export default function App() {
     if (!runtimeConnected && !includeEvents) {
       return;
     }
+    const requestId = ++subAgentListRequestRef.current;
     setLoadingSubAgents(true);
     try {
       const payload = await fetchSubAgents(endpoint, true);
-      setSubAgentList(payload);
+      if (requestId <= appliedSubAgentListRequestRef.current) return;
+      appliedSubAgentListRequestRef.current = requestId;
+      setSubAgentList((current) => reconcileSubAgentList(current, payload));
       setSelectedSubAgent((current) => reconcileSelectedSubAgent(current, payload.tasks));
       setSubAgentError("");
-      await reconcileSubAgentHandoffs(payload.tasks);
     } catch (cause) {
+      if (requestId !== subAgentListRequestRef.current) return;
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoadingSubAgents(false);
+      if (requestId === subAgentListRequestRef.current) setLoadingSubAgents(false);
     }
   }
 
@@ -3890,7 +3898,7 @@ export default function App() {
           ...(skillArguments?.trim() ? { skillArguments: skillArguments.trim() } : {}),
         },
       });
-      setSelectedSubAgent(payload.task);
+      setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
       setSelectedSubAgentPanelOpen(true);
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
       await reconcileSubAgentHandoffs([payload.task]);
@@ -3921,7 +3929,7 @@ export default function App() {
     try {
       const payload = await cancelSubAgent(endpoint, taskId);
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
-      setSelectedSubAgent((current) => (current?.id === payload.task.id ? payload.task : current));
+      setSelectedSubAgent((current) => (current?.id === payload.task.id ? latestSubAgentTask(current, payload.task) : current));
       await refreshSelectedSubAgentTask(taskId, "if-current");
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
@@ -3944,7 +3952,7 @@ export default function App() {
       ) {
         return;
       }
-      setSelectedSubAgent(payload.task);
+      setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
       subAgentSelectionIntentRef.current = payload.task.id;
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
     } catch (cause) {
@@ -3968,7 +3976,7 @@ export default function App() {
       ) {
         return true;
       }
-      setSelectedSubAgent(payload.task);
+      setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
       subAgentSelectionIntentRef.current = payload.task.id;
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
       return true;
@@ -3991,13 +3999,13 @@ export default function App() {
     if ((mode === "select" && requestId !== subAgentInspectRequestRef.current) || !selectionIsCurrent) {
       return payload.task;
     }
-    setSelectedSubAgent(payload.task);
+    setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
     return payload.task;
   }
 
   async function inspectSubAgentTask(taskId: string) {
     const task = subAgentTasksRef.current.find((item) => item.id === taskId);
-    if (task) setSelectedSubAgent(task);
+    if (task) setSelectedSubAgent((current) => latestSubAgentTask(current, task));
     setSubAgentError("");
     setSelectedSubAgentPanelOpen(true);
     try {
@@ -4028,7 +4036,7 @@ export default function App() {
         expectedRevision: latest.task.revision,
       });
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
-      setSelectedSubAgent((current) => (current && current.id === payload.task.id ? payload.task : current));
+      setSelectedSubAgent((current) => (current && current.id === payload.task.id ? latestSubAgentTask(current, payload.task) : current));
       await reconcileSubAgentHandoffs([payload.task]);
       await loadSubAgents(true);
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
@@ -4134,16 +4142,8 @@ export default function App() {
           source: "selection-menu",
         },
       });
-      setSelectedSubAgent(payload.task);
-      setSubAgentList((current) => ({
-        ok: true,
-        schema: current?.schema || "vrcforge.sub_agent_tasks.v2",
-        tasks: [payload.task, ...(current?.tasks || []).filter((taskItem) => taskItem.id !== payload.task.id)],
-        count: (current?.count || 0) + 1,
-        roles: current?.roles,
-        maxConcurrent: current?.maxConcurrent,
-        runningCount: (current?.runningCount || 0) + 1,
-      }));
+      setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
+      setSubAgentList((current) => updateSubAgentList(current, payload.task));
       await reconcileSubAgentHandoffs([payload.task]);
       void loadSubAgents(false);
     } catch (cause) {

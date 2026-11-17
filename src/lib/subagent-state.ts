@@ -54,6 +54,7 @@ export function pickSubAgentName(): string {
 
 export function updateSubAgentList(current: SubAgentTaskList | null, task: SubAgentTask): SubAgentTaskList {
   const existing = current?.tasks || [];
+  task = latestSubAgentTask(existing.find((item) => item.id === task.id), task);
   const tasks = [task, ...existing.filter((item) => item.id !== task.id)];
   return {
     ok: true,
@@ -66,6 +67,20 @@ export function updateSubAgentList(current: SubAgentTaskList | null, task: SubAg
   };
 }
 
+export function latestSubAgentTask(current: SubAgentTask | null | undefined, incoming: SubAgentTask): SubAgentTask {
+  if (!current || current.id !== incoming.id) return incoming;
+  if ((current.revision ?? 0) > (incoming.revision ?? 0)) return current;
+  return { ...current, ...incoming };
+}
+
+export function reconcileSubAgentList(
+  current: SubAgentTaskList | null,
+  incoming: SubAgentTaskList,
+): SubAgentTaskList {
+  const existing = new Map(current?.tasks.map((task) => [task.id, task]));
+  return { ...incoming, tasks: incoming.tasks.map((task) => latestSubAgentTask(existing.get(task.id), task)) };
+}
+
 export function reconcileSelectedSubAgent(
   selected: SubAgentTask | null,
   tasks: SubAgentTask[],
@@ -74,5 +89,5 @@ export function reconcileSelectedSubAgent(
     return null;
   }
   const updated = tasks.find((task) => task.id === selected.id);
-  return updated ? { ...selected, ...updated } : null;
+  return updated ? latestSubAgentTask(selected, updated) : selected;
 }

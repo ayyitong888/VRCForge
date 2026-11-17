@@ -120,6 +120,7 @@ class SubAgentTaskRegistry:
         reconcile_on_init: bool = True,
         lane_budget: RuntimeLaneBudget | None = None,
         task_finished: Callable[[dict[str, Any]], None] | None = None,
+        worker_terminal: Callable[[], None] | None = None,
         wait_parent_idle: Callable[..., bool] | None = None,
         defer_projection_load: bool = False,
     ) -> None:
@@ -129,6 +130,7 @@ class SubAgentTaskRegistry:
         self.max_concurrent = max(1, min(int(max_concurrent), SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT))
         self._lane_budget = lane_budget
         self._task_finished = task_finished or (lambda _event: None)
+        self._worker_terminal = worker_terminal
         self._wait_parent_idle = wait_parent_idle
         self._tasks: dict[str, SubAgentTask] = {}
         self._cancel_events: dict[str, threading.Event] = {}
@@ -764,7 +766,11 @@ class SubAgentTaskRegistry:
             finish_lifecycle()
             if self._lane_budget is not None:
                 self._lane_budget.release(task_id)
-        self._notify_task_finished(task_id)
+        try:
+            if self._worker_terminal is not None:
+                self._worker_terminal()
+        finally:
+            self._notify_task_finished(task_id)
 
     def _notify_task_finished(self, task_id: str) -> None:
         """Notify the app after terminal state is durable and its lane is free."""

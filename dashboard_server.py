@@ -1604,11 +1604,14 @@ def broadcast_runtime_status(payload: dict[str, Any]) -> None:
         telegram_service.observe_runtime_status(payload)
 
 
+def _publish_sub_agent_worker_terminal() -> None:
+    EVENT_BUS.broadcast_from_sync("subAgentTasks", {})
+
+
 def _sub_agent_task_finished(event: dict[str, Any]) -> None:
     """Project one durable worker terminal event back to its owning task."""
 
     try:
-        EVENT_BUS.broadcast_from_sync("subAgentTasks", SUB_AGENT_COLLABORATION.list_tasks())
         continuation = AGENT_GATEWAY.resume_runtime_task_after_sub_agent(event)
         if continuation is not None:
             broadcast_runtime_turn_completed(continuation)
@@ -2103,6 +2106,7 @@ SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
         build_roles=lambda: _SUB_AGENT_ROLES,
         build_handlers=lambda gateway: build_sub_agent_role_handlers(gateway, _SUB_AGENT_ROLES),
         task_finished=_sub_agent_task_finished,
+        worker_terminal=_publish_sub_agent_worker_terminal,
         defer_projection_load=True,
     )
 )
