@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { fetchChatCatalog, fetchChatRecord, saveChatRecord, type ChatCatalogEntry, type ChatSaveReceipt, type ChatRecoveryMarker, type ChatSourceRevision, type StoredChats } from "../lib/api";
 import { deleteChatPermanentlyApi } from "../lib/api/app";
 import { ApiError } from "../lib/api/http";
+import type { ProjectRecycleResult } from "../lib/api/project";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
 import { DEVELOPER_OPTIONS_ENABLED_KEY } from "../lib/app-preferences";
 import { normalizeAttachmentPayloadVault, normalizeCompactedAttachmentReferences } from "../lib/attachment-payloads";
@@ -1248,8 +1249,8 @@ export function useChatSessions({
     }
   }
 
-  async function recycleProjectWithChats(path: string, recycle: () => Promise<string>) {
-    await enqueueChatStorageOperation(async () => {
+  async function recycleProjectWithChats(path: string, recycle: () => Promise<ProjectRecycleResult>) {
+    return enqueueChatStorageOperation(async () => {
       // Drain chat writes before removing their project directory, then discard
       // its loaded state before autosaves can resume.
       if (chatsDirtyRef.current) {
@@ -1259,8 +1260,8 @@ export function useChatSessions({
       } else {
         await settlePendingChatSave();
       }
-      const recycledPath = await recycle();
-      const keys = new Set([path, recycledPath].map(normalizeProjectPathKey));
+      const result = await recycle();
+      const keys = new Set([path, result.path].map(normalizeProjectPathKey));
       const removed = (entry: { projectPath?: string; sourceProjectPath?: string }) =>
         keys.has(normalizeProjectPathKey(entry.projectPath))
         || keys.has(normalizeProjectPathKey(entry.sourceProjectPath));
@@ -1291,6 +1292,7 @@ export function useChatSessions({
       if (keys.has(normalizeProjectPathKey(activeProjectPath)) || ids.has(activeChatId)) {
         newConversation("", "general");
       }
+      return result;
     }, "recycle-project");
   }
 

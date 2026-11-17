@@ -1250,7 +1250,7 @@
     "restoreArchived": "Restore Archived Chats",
     "hideProject": "Hide Project",
     "deleteProject": "Delete Project",
-    "deleteProjectDescription": "The entire Unity folder, including assets and project chats, will move to the Windows Recycle Bin. The project will also be removed from Unity Hub, VCC, and ALCOM.",
+    "deleteProjectDescription": "The project will be removed from Unity Hub, VCC, and ALCOM. Its entire Unity folder, including assets and project chats, will move to the Windows Recycle Bin. If the folder is too large or the Recycle Bin is unavailable, it will be permanently deleted without a backup.",
     "deleteProjectPrompt": "Type DeLeTe exactly to confirm deletion.",
     "deletingProject": "Deleting…",
     "removeProject": "Remove Project",

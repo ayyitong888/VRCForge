@@ -7,8 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import dashboard_server as server
+import project_recycle
 from project_catalog_registration_service import ProjectCatalogRegistrationService
-from project_recycle import validate_project
+from project_recycle import ProjectRemoval, validate_project
 
 
 def unity_project(path):
@@ -67,17 +68,59 @@ def test_recycle_route_requires_confirmation_and_only_removes_selected_project(t
 
     def blocked(_path: Path):
         raise OSError("Windows refused the recycle operation")
-    monkeypatch.setattr(server, "recycle_project_folder", blocked)
+    monkeypatch.setattr(server, "remove_project_folder", blocked)
     originals = {file: file.read_bytes() for file in (index, prefs, selection, hub)}
     assert client.post(url, headers=headers, json={"path": path, "confirmation": "DeLeTe"}).status_code == 409
     assert project.exists() and all(file.read_bytes() == content for file, content in originals.items())
 
     recovery = tmp_path / "recycled"
-    monkeypatch.setattr(server, "recycle_project_folder", lambda p: p.rename(recovery))
+    def remove(p):
+        p.rename(recovery)
+        return ProjectRemoval("recycle")
+    monkeypatch.setattr(server, "remove_project_folder", remove)
     response = client.post(url, headers=headers, json={"path": path, "confirmation": "DeLeTe"})
     assert response.status_code == 200, response.text
+    assert response.json()["deletionMode"] == "recycle"
     assert not project.exists() and recovery.exists() and other.exists()
     assert json.loads(index.read_bytes())["projectPaths"] == [other_path]
     assert [row["path"] for row in json.loads(prefs.read_bytes())["customProjects"]] == [other_path]
     assert json.loads(selection.read_bytes())["selectedProjectPath"] == ""
     assert list(json.loads(hub.read_bytes())["data"]) == [other_path]
+
+
+def test_permanent_fallback_only_when_recycle_explicitly_unavailable(tmp_path, monkeypatch):
+    project = unity_project(tmp_path / "project")
+    other = unity_project(tmp_path / "other")
+
+    def denied(_):
+        raise PermissionError("sharing violation")
+
+    def cannot_recycle(_):
+        raise project_recycle._RecycleUnavailable("bin size limit")
+
+    monkeypatch.setattr(project_recycle, "_recycle_project_folder", denied)
+    with pytest.raises(PermissionError):
+        project_recycle.remove_project_folder(project)
+    assert project.exists()
+
+    monkeypatch.setattr(project_recycle, "_recycle_project_folder", cannot_recycle)
+    assert project_recycle.remove_project_folder(project) == ProjectRemoval("permanent")
+    assert list(tmp_path.iterdir()) == [other]
+
+
+def test_failed_purge_reports_remaining_files_at_staging_path(tmp_path, monkeypatch):
+    project = unity_project(tmp_path / "project")
+
+    def cannot_recycle(_):
+        raise project_recycle._RecycleUnavailable("bin size limit")
+
+    def fail_purge(path):
+        (path / "ProjectSettings" / "ProjectVersion.txt").unlink()
+        raise PermissionError("file in use")
+
+    monkeypatch.setattr(project_recycle, "_recycle_project_folder", cannot_recycle)
+    monkeypatch.setattr(project_recycle.shutil, "rmtree", fail_purge)
+    outcome = project_recycle.remove_project_folder(project)
+    [remainder] = tmp_path.iterdir()
+    assert not project.exists() and outcome.mode == "permanent"
+    assert str(remainder) in outcome.cleanup_warning

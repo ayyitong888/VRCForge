@@ -8,7 +8,7 @@ import {
   requestOutfitImport,
   saveProjectPrefs,
 } from "../lib/api";
-import type { AppBootstrap, OutfitImportPlanResult, ProjectPrefs } from "../lib/api";
+import type { AppBootstrap, OutfitImportPlanResult, ProjectPrefs, ProjectRecycleResult } from "../lib/api";
 import type { ProjectType } from "../lib/chat-types";
 import { isAbsoluteLocalPath, isTauriRuntime } from "../lib/app-runtime";
 import {
@@ -301,12 +301,12 @@ export function useProjectManagement({
     );
   }
 
-  async function recycleProject(path: string, confirmation: string): Promise<string> {
+  async function recycleProject(path: string, confirmation: string): Promise<ProjectRecycleResult> {
     if (!canRecycleProject(path)) throw new Error(t("project.invalidProjectRoot"));
     const target = runtimeConnected ? endpoint : await startRuntime();
     if (!target) throw new Error(t("project.runtimeRequired"));
-    const recycledPath = await recycleUnityProject(target, path, confirmation);
-    const keys = new Set([path, recycledPath].map(normalizeProjectPathKey));
+    const result = await recycleUnityProject(target, path, confirmation);
+    const keys = new Set([path, result.path].map(normalizeProjectPathKey));
     const keepPath = (value: string) => !keys.has(normalizeProjectPathKey(value));
     const withoutRecycledProject = (prefs: ProjectPrefs): ProjectPrefs => ({
       customPaths: prefs.customPaths.filter(keepPath),
@@ -316,7 +316,7 @@ export function useProjectManagement({
     setRecycledProjectKeys((current) => new Set([...current, ...keys]));
     setProjectPrefs(withoutRecycledProject);
     saveProjectPrefsCache(withoutRecycledProject(projectPrefs));
-    return recycledPath;
+    return result;
   }
 
   function projectDisplayName(project?: { path?: string; name?: string }): string {

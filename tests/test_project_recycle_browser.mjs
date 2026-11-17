@@ -64,7 +64,10 @@ const bundle = await build({
             onToggleTestChat={noop} onStartRenameChat={noop} onDeleteChat={noop}
             onCancelDeleteChat={noop} onConfirmDeleteChat={noop}
             canRecycleProject={management.canRecycleProject}
-            onRecycleProject={(path,confirmation)=>sessions.recycleProjectWithChats(path,()=>management.recycleProject(path,confirmation))}
+            onRecycleProject={async(path,confirmation)=>{
+              const result = await sessions.recycleProjectWithChats(path,()=>management.recycleProject(path,confirmation));
+              window.cleanupWarning = result.cleanupWarning;
+            }}
           />
         </>;
       }
@@ -110,7 +113,7 @@ const server = createServer(async (req, res) => {
       json(res, 409, { detail: "Close Unity Editor before deleting this project." });
     } else {
       projectRecycled = true;
-      json(res, 200, { ok: true, path: body.path });
+      json(res, 200, { ok: true, path: body.path, deletionMode: "permanent", cleanupWarning: "Some staged files remain." });
     }
   } else if (url.pathname === "/api/app/chats/single" && req.method === "POST") {
     chatWrites.push(url.pathname);
@@ -140,6 +143,7 @@ try {
   const confirm = dialog.getByRole("button", { name: "Delete Project" });
   await openDialog();
   assert.equal(await dialog.getByText(target.path).isVisible(), true);
+  assert.match(await dialog.textContent(), /too large or the Recycle Bin is unavailable, it will be permanently deleted without a backup/);
   assert.equal(await confirm.isDisabled(), true);
   for (const value of ["delete", "DELETE", "Delete", "DeLeTe "]) {
     await input.fill(value);
@@ -165,6 +169,7 @@ try {
   assert.equal(await page.getByRole("button", { name: `Menu ${retained.path}` }).isVisible(), true);
   assert.equal(await page.getByTestId("active").textContent(), "");
   assert.equal(await page.getByTestId("chats").textContent(), "chat-1");
+  assert.equal(await page.evaluate(() => window.cleanupWarning), "Some staged files remain.");
   assert.deepEqual(requests, [
     { path: target.path, confirmation: "DeLeTe" }, { path: target.path, confirmation: "DeLeTe" },
   ]);

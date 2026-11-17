@@ -610,7 +610,7 @@ from path_to_skill_controller import (
     PathToSkillWriteService,
 )
 from project_catalog_discovery import ProjectCatalogDiscovery, ProjectCatalogDiscoveryPorts
-from project_recycle import recycle_project_folder, validate_project as validate_project_for_recycle
+from project_recycle import remove_project_folder, validate_project as validate_project_for_recycle
 from project_catalog_registration_service import (
     ProjectCatalogRegistrationError,
     ProjectCatalogRegistrationService,
@@ -10807,7 +10807,10 @@ def recycle_unity_project_sync(path: str) -> dict[str, Any]:
                for row in runs):
             raise ValueError("Stop the active Agent run for this project before deleting it.")
 
+        removal = None
+
         def commit() -> None:
+            nonlocal removal
             require_closed_managers()
             index = chat_project_index_path()
             prefs = project_prefs_path()
@@ -10839,7 +10842,7 @@ def recycle_unity_project_sync(path: str) -> dict[str, Any]:
                     written[target] = original
                 if validate_project_for_recycle(path, protected) != project or not os.path.samestat(project.stat(), identity):
                     raise OSError("The project path changed during deletion.")
-                recycle_project_folder(project)
+                removal = remove_project_folder(project)
             except Exception:
                 if not restore_chat_storage_files(written, {}):
                     raise OSError("Project deletion failed and VRCForge project metadata could not be fully restored.")
@@ -10851,7 +10854,10 @@ def recycle_unity_project_sync(path: str) -> dict[str, Any]:
             DASHBOARD_STATE.selected_project_path = ""
             DASHBOARD_STATE.unity_instance = ""
     PROJECT_SNAPSHOT_SELECTION.schedule_project_snapshot_refresh(force=True)
-    return {"ok": True, "path": display, "catalogs": catalogs}
+    result = {"ok": True, "path": display, "catalogs": catalogs, "deletionMode": removal.mode}
+    if removal.cleanup_warning:
+        result["cleanupWarning"] = removal.cleanup_warning
+    return result
 
 
 @app.post("/api/projects/recycle")
@@ -10863,7 +10869,9 @@ async def recycle_unity_project(request: Request, body: ProjectRecycleRequest) -
         result = await asyncio.to_thread(recycle_unity_project_sync, body.path)
     except (ValueError, OSError, ProjectCatalogRegistrationError, UnityProcessDiscoveryUnavailable) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await emit_log_async("info", "project", "Unity project moved to the Windows Recycle Bin.", {"projectPath": result["path"]})
+    await emit_log_async("warn" if result.get("cleanupWarning") else "info", "project",
+                         result.get("cleanupWarning") or "Unity project removed.",
+                         {"projectPath": result["path"], "deletionMode": result["deletionMode"]})
     return result
 
 

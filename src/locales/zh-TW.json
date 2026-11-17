@@ -1244,7 +1244,7 @@
     "restoreArchived": "恢復歸檔會話",
     "hideProject": "隱藏專案",
     "deleteProject": "刪除專案",
-    "deleteProjectDescription": "整個 Unity 專案（含素材和專案聊天）將移到 Windows 資源回收筒，並從 Unity Hub、VCC 和 ALCOM 的專案清單移除。",
+    "deleteProjectDescription": "專案將從 Unity Hub、VCC 和 ALCOM 的清單移除。整個 Unity 專案（含素材和專案聊天）將移到 Windows 資源回收筒。如果專案太大或資源回收筒無法使用，會直接永久刪除，且不保留備份。",
     "deleteProjectPrompt": "請輸入 DeLeTe 確認刪除，區分大小寫。",
     "deletingProject": "正在刪除…",
     "removeProject": "移除專案",

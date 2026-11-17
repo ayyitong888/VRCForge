@@ -4992,8 +4992,10 @@ export default function App() {
         onRemoveCustomProject={removeCustomProject}
         canRecycleProject={canRecycleProject}
         onRecycleProject={async (path, confirmation) => {
-          await recycleProjectWithChats(path, () => recycleProject(path, confirmation));
-          void refreshManagedProjectList();
+          const { cleanupWarning } = await recycleProjectWithChats(path, () => recycleProject(path, confirmation));
+          void refreshManagedProjectList().then(() => {
+            if (cleanupWarning) setError(cleanupWarning);
+          });
         }}
         onAskInNewSession={askInNewSession}
         onAddSelectionToComposer={addSelectionToComposer}

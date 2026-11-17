@@ -1250,7 +1250,7 @@
     "restoreArchived": "恢复归档会话",
     "hideProject": "隐藏项目",
     "deleteProject": "删除项目",
-    "deleteProjectDescription": "整个 Unity 工程（含素材和项目聊天）将移入 Windows 回收站，并从 Unity Hub、VCC 和 ALCOM 的项目列表移除。",
+    "deleteProjectDescription": "项目将从 Unity Hub、VCC 和 ALCOM 的列表移除。整个 Unity 工程（含素材和项目聊天）将移入 Windows 回收站。如果工程过大或回收站不可用，将直接永久删除，不留备份。",
     "deleteProjectPrompt": "请输入 DeLeTe 确认删除，区分大小写。",
     "deletingProject": "正在删除…",
     "removeProject": "移除项目",
