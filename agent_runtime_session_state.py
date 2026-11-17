@@ -814,7 +814,8 @@ class AgentRuntimeSessionState:
         except (TypeError, ValueError):
             return False
         required = {"exposureLayer", "projectContextActive", "allowedRuntimeActions", "availableToolNames"}
-        optional = {"planMode", "modeConstraint", "projectPath", "loadedToolBlocks", "shellExecutor", "compactionRecoveryInformation", "checkpointChoice"}
+        optional = {"planMode", "modeConstraint", "projectPath", "loadedToolBlocks", "shellExecutor",
+                    "compactionRecoveryInformation", "checkpointChoice", "executionMode"}
         if not isinstance(state, dict) or not required <= state.keys() or state.keys() - required - optional:
             return False
         if not isinstance(state["exposureLayer"], str) or state["exposureLayer"] not in {"planning", "execution"} or not isinstance(state["projectContextActive"], bool):
@@ -824,6 +825,7 @@ class AgentRuntimeSessionState:
                 return False
         return (all(isinstance(state[key], str) for key in ("modeConstraint", "projectPath") if key in state)
                 and ("planMode" not in state or isinstance(state["planMode"], bool))
+                and ("executionMode" not in state or state["executionMode"] in ("approval", "auto", "roslyn_full_auto"))
                 and ("checkpointChoice" not in state or (
                     isinstance(state["checkpointChoice"], dict)
                     and state["checkpointChoice"].get("mode") in {"skip", "require"}

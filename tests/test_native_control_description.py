@@ -46,3 +46,20 @@ def test_native_control_schema_is_fixed_and_runtime_state_describes_allowed_acti
         assert 'do not use shell or enter_execution in user-selected Plan' in control['description']
     if layer == 'execution':
         assert 'enter_execution' not in state['allowedRuntimeActions']
+
+
+def test_permission_and_checkpoint_use_host_state_in_both_protocols():
+    planner = RuntimePlannerService(catalog=Catalog(), desktop=None)
+    observe = {"runtime": {"executionMode": "auto", "gatewayEnabled": False},
+               "checkpointChoice": {"mode": "skip", "quote": "omit actual user quote"}}
+    request, _ = planner._build_native_plan_request(
+        [], observe=observe, exposure_layer="planning", project_context_active=False, project_path=None,
+        internal_tool_blocks=["core"], global_instructions="", project_instructions="",
+    )
+    state = json.loads(request["messages"][-1]["content"].split(": ", 1)[1])
+    legacy = planner._build_llm_plan_prompt("inspect", [], observe=observe, project_context_active=False)
+    assert state["executionMode"] == "auto"
+    assert state["checkpointChoice"] == {"mode": "skip"}
+    assert '"checkpointChoice":{"mode":"skip"},"executionMode":"auto"' in legacy
+    assert "gatewayEnabled" not in request["messages"][-1]["content"]
+    assert "omit actual user quote" not in legacy

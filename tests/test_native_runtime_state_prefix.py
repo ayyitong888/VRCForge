@@ -68,6 +68,24 @@ def test_retained_state_survives_native_store_reload(tmp_path):
     assert retained in reloaded.native_conversation("s", binding="b")["messages"]
 
 
+@pytest.mark.parametrize("mode", ["approval", "auto", "roslyn_full_auto"])
+def test_execution_mode_reaches_provider_and_survives_reload(tmp_path, mode):
+    store = NativeHistoryStore(tmp_path / "native")
+    state, planner, model, turn = fixture(prior=False, limit=500_000, store=store)
+    planner._llm_plan_agent_turn(
+        "Inspect", {"runtime": {"executionMode": mode}}, [],
+        native_turn=turn, project_context_active=False,
+    )
+    retained = model.requests[-1]["messages"][-1]
+    assert json.loads(retained["content"].split(": ", 1)[1])["executionMode"] == mode
+    assert retained in state.native_conversation("s", binding="b")["messages"]
+    reloaded, *_ = fixture(prior=False, limit=500_000, store=store)
+    assert retained in reloaded.native_conversation("s", binding="b")["messages"]
+    invalid = {**retained, "content": retained["content"].replace(f'"{mode}"', '"unsupported"')}
+    with pytest.raises(ValueError, match="host-built structured data"):
+        state.append_native_runtime_state("s", binding="b", message=invalid)
+
+
 def test_sixth_model_response_drains_all_tool_calls_before_budget_pause(tmp_path):
     from tests.test_native_runtime_gateway import call, setup_gateway
     replies = [call(f"read-{i}", "vrcforge_read_text_file", {"path": f"{i}.txt"}) for i in range(6)]
