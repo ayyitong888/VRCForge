@@ -22,7 +22,6 @@ def isolated_gateway(root: Path) -> Iterator[None]:
         AgentGatewayConfig(
             enabled=True,
             require_token=False,
-            allow_write_requests=True,
             execution_mode="full",
         )
     )
@@ -62,7 +61,7 @@ def test_installed_skill_stdio_branch_loads_only_when_requested(
 
     class GatewayBridge:
         @staticmethod
-        def preflight() -> dict[str, object]:
+        def preflight(_exposure_layer=None) -> dict[str, object]:
             return {"runtimeOnline": True}
 
         @staticmethod

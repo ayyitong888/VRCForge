@@ -650,10 +650,10 @@ class PackagedModelPartSmoke:
         gateway = self._app_request(
             "POST",
             "/api/app/external-agent/gateway",
-            {"enabled": True, "allowWriteRequests": True},
+            {"enabled": True},
         )
         gateway_state = _mapping(gateway.get("gateway"))
-        if gateway_state.get("enabled") is not True or gateway_state.get("allowWriteRequests") is not True:
+        if gateway_state.get("enabled") is not True:
             raise PackagedModelPartSmokeError("The isolated write-request lane was not enabled.")
 
     def _approve(self, approval_id: str) -> dict[str, Any]:

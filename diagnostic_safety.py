@@ -31,7 +31,6 @@ def permission_security_state(permission: dict[str, Any] | None) -> dict[str, An
         ),
         "fullPermission": mode == "roslyn_full_auto",
         "roslynRiskAcknowledged": bool(permission.get("roslynRiskAcknowledged")),
-        "allowWriteRequests": bool(permission.get("allowWriteRequests")),
     }
 
 
@@ -67,7 +66,6 @@ def build_safety_posture(
         "schema": SAFETY_POSTURE_SCHEMA,
         "execution": {
             "mode": mode,
-            "allowWriteRequests": bool(permission.get("allowWriteRequests")),
             "fullPermission": full_permission,
         },
         "approval": {

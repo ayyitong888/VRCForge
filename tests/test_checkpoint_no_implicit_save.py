@@ -24,7 +24,6 @@ def _gateway(tmp_path: Path) -> AgentGateway:
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
     return gateway
 
@@ -198,14 +197,14 @@ def test_production_play_registration_prepare_execute_never_checkpoints(
 
 
 @pytest.mark.parametrize(("name", "arguments"), PLAY_TOOLS)
-def test_production_play_registration_denies_unauthorized_write_before_checkpoint(
+def test_production_play_registration_denies_disconnected_external_write_before_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, arguments: dict
 ) -> None:
     gateway = _gateway(tmp_path)
     project = _project(tmp_path)
     gateway._write_handlers[name] = copy(server.AGENT_GATEWAY._write_handlers[name])
     config = gateway.ensure_config()
-    config.allow_write_requests = False
+    config.enabled = False
     gateway.save_config(config)
     service = gateway.approval_transactions
 
@@ -220,8 +219,8 @@ def test_production_play_registration_denies_unauthorized_write_before_checkpoin
         lambda *_args, **_kwargs: pytest.fail("unauthorized request reached execution"),
     )
 
-    with pytest.raises(AgentGatewayError):
-        service.prepare_external_mcp_write(
+    with pytest.raises(AgentGatewayError, match="Gateway is disabled"):
+        gateway.call_external_mcp_tool(
             name, {"projectPath": str(project), **arguments}
         )
 
@@ -234,7 +233,7 @@ def test_production_safe_backup_copies_sources_without_pre_save(tmp_path, monkey
 
 
 def test_production_safe_backup_still_requires_authorization(tmp_path, monkeypatch):
-    test_production_play_registration_denies_unauthorized_write_before_checkpoint(
+    test_production_play_registration_denies_disconnected_external_write_before_checkpoint(
         tmp_path, monkeypatch, "vrcforge_create_safe_backup",
         {"assetPaths": ["Assets"], "includeOpenScenes": True, "refreshAssets": False},
     )

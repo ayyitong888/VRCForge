@@ -19,7 +19,7 @@ def installed_guide(tmp_path):
     gateway = app.AGENT_GATEWAY
     previous = gateway.config_path, gateway.audit_dir
     gateway.configure_paths(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
-    gateway.save_config(AgentGatewayConfig(enabled=True, allow_write_requests=False))
+    gateway.save_config(AgentGatewayConfig(enabled=True, execution_mode="approval"))
     with app.SKILL_PACKAGE_WRITE_LOCK, gateway.skills.write_lock:
         deliver_bundled_guide(app.SKILL_PACKAGE_PROJECTION, gateway.skills.user_skills_dir, version="1.8.1")
     try:
@@ -99,9 +99,6 @@ def test_loaded_real_guide_explicit_exit_restores_task_scope_not_user_permission
     audit_after = gateway.audit_log_path.read_text(encoding="utf-8")
     assert audit_after.startswith(audit_before)
     assert "vrcforge_exit_skill" in audit_after
-    assert gateway.ensure_config().allow_write_requests is False
-    with pytest.raises(Exception, match="disabled|not allowed|write requests"):
-        gateway.approval_transactions.create_apply_request({"target_tool": "vrcforge_install_unity_core", "arguments": {"projectPath": "denied"}})
     # Caller-supplied names/session IDs cannot acquire another turn's loop.
     outside = gateway.runtime_skills.execute("vrcforge_exit_skill", {"name": SKILL_NAME, "reason": "outside"}, "test")
     assert outside["ok"] is False

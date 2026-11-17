@@ -102,16 +102,16 @@ user-data config; plaintext gateway tokens are not written into client config.
 The external-agent success path is:
 
 ```text
-MCP read/plan -> execution exposure (Gateway config external_mcp_exposure_layer=execution) -> supervised write Tool call -> VRCForge approval -> checkpoint -> apply -> validation -> restore request -> VRCForge approval -> rollback proof
+Enable external access in VRCForge -> supervised write tool -> current Permission Mode -> checkpoint -> apply -> validation -> approved rollback if needed
 ```
 
 `vrcforge_request_apply` and the other wrapper Tools are internal to the
-VRCForge App agent loop and are never advertised to external clients. External
-stdio sessions start in the planning layer; moving them to execution is a
-Gateway config decision (`external_mcp_exposure_layer` in the Gateway config
-file, or an explicit `--exposure-layer` / `VRCFORGE_MCP_EXPOSURE_LAYER` pin at
-bridge launch). Exposure only changes Tool visibility: every write still
-requires VRCForge approval and a checkpoint.
+VRCForge App agent loop. Enable external access manually in the app before
+connecting. Connected agents follow the same three Permission Modes as the
+built-in agent. VRCForge owns the approval decision and checkpoint. In Auto
+Approve, requests without a user objective recorded by VRCForge need manual
+confirmation. For a read-only stdio connection, set `--exposure-layer planning` or
+`VRCFORGE_MCP_EXPOSURE_LAYER=planning` at launch.
 
 Developers and release testers can run:
 

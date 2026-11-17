@@ -92,7 +92,7 @@ def test_runtime_observation_category_does_not_authorize_write_tools(tmp_path, m
         lambda params: calls.append(params) or {"ok": True},
         write=True,
     )
-    monkeypatch.setattr(gateway, "ensure_config", lambda: SimpleNamespace(allow_write_requests=True))
+    monkeypatch.setattr(gateway, "ensure_config", lambda: SimpleNamespace())
 
     result = gateway.runtime_skills.execute(
         "vrcforge_unapproved_observation_write", {}, "runtime-route-regression"

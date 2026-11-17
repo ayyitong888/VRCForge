@@ -126,7 +126,7 @@ def test_stdio_preflight_uses_explicit_gateway_config_env(monkeypatch: Any, tmp_
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout='{"ok":true,"runtimeOnline":true,"gatewayEnabled":true,"allowWriteRequests":true,"manifestToolCount":1,"advertisesRequestApply":true}',
+            stdout='{"ok":true,"runtimeOnline":true,"gatewayEnabled":true,"writeReady":true,"manifestToolCount":1,"advertisesRequestApply":false}',
             stderr="",
         )
 
@@ -135,6 +135,7 @@ def test_stdio_preflight_uses_explicit_gateway_config_env(monkeypatch: Any, tmp_
     result = bridge.check_stdio_bridge_preflight()
 
     assert result["ok"] is True
+    assert result["writeReady"] is True
     assert seen_env["VRCFORGE_AGENT_BASE_URL"] == "http://127.0.0.1:8782"
     assert seen_env["VRCFORGE_AGENT_GATEWAY_CONFIG"] == str(bridge.gateway_config_path)
 

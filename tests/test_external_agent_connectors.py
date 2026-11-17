@@ -54,7 +54,7 @@ def test_deepseek_harness_patch_uses_official_insert_row_shape_and_standard_prof
     assert "token" not in json.dumps(patch, ensure_ascii=False).casefold()
 
 
-def test_deepseek_harness_defers_exposure_to_existing_gateway_config(tmp_path, monkeypatch) -> None:
+def test_stdio_connector_uses_execution_unless_client_selects_planning(tmp_path, monkeypatch) -> None:
     from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge, parse_args
 
     monkeypatch.delenv("VRCFORGE_MCP_EXPOSURE_LAYER", raising=False)
@@ -66,9 +66,12 @@ def test_deepseek_harness_defers_exposure_to_existing_gateway_config(tmp_path, m
         base_url="http://127.0.0.1:17831", config_path=config,
         timeout_seconds=30, start_runtime=False,
     )
-    for layer in ("execution", "planning"):
-        config.write_text(json.dumps({"external_mcp_exposure_layer": layer}), encoding="utf-8")
-        assert bridge.resolve_exposure_layer(parsed.exposure_layer) == layer
+    config.write_text(json.dumps({"external_mcp_exposure_layer": "planning"}), encoding="utf-8")
+    assert bridge.resolve_exposure_layer(parsed.exposure_layer) == "execution"
+    assert bridge.resolve_exposure_layer("planning") == "planning"
+    monkeypatch.setenv("VRCFORGE_MCP_EXPOSURE_LAYER", "planning")
+    assert bridge.resolve_exposure_layer(None) == "planning"
+    assert bridge.resolve_exposure_layer("execution") == "execution"
 
 
 def test_connector_bundle_uses_loopback_endpoint_and_env_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:

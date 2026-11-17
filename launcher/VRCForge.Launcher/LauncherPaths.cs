@@ -82,7 +82,6 @@ internal sealed class LauncherPaths
         bool changed = false;
         changed |= EnsureJsonValue(config, "enabled", false);
         changed |= EnsureJsonValue(config, "require_token", true);
-        changed |= EnsureJsonValue(config, "allow_write_requests", true);
         changed |= EnsureJsonValue(config, "allow_roslyn_advanced", false);
         changed |= EnsureJsonValue(config, "approval_timeout_seconds", 600);
         if (!config.TryGetPropertyValue("token", out JsonNode? tokenNode) || string.IsNullOrWhiteSpace(tokenNode?.GetValue<string>()))

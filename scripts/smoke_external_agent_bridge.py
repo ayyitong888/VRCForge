@@ -140,7 +140,6 @@ class ExternalAgentBridgeSmoke:
             "ok": bool(payload.get("runtimeAlive")),
             "runtimeAlive": bool(payload.get("runtimeAlive")),
             "enabled": bool(payload.get("enabled")),
-            "allowWriteRequests": bool(payload.get("allowWriteRequests")),
             "executionMode": ensure_dict(payload.get("permission")).get("executionMode"),
             "pendingApprovalCount": payload.get("pendingApprovalCount"),
         }
@@ -176,12 +175,11 @@ class ExternalAgentBridgeSmoke:
         enabled = self.request_app_json(
             "POST",
             "/api/app/external-agent/gateway",
-            {"enabled": True, "allowWriteRequests": True},
+            {"enabled": True},
         )
         return {
             "ok": bool(enabled.get("gateway", {}).get("enabled")),
             "previousEnabled": self.previous_gateway.get("enabled"),
-            "previousAllowWriteRequests": self.previous_gateway.get("allowWriteRequests"),
         }
 
     def check_stdio_bridge_preflight(self) -> dict[str, Any]:
@@ -232,7 +230,7 @@ class ExternalAgentBridgeSmoke:
             "cwd": cwd,
             "runtimeOnline": bool(payload.get("runtimeOnline")),
             "gatewayEnabled": bool(payload.get("gatewayEnabled")),
-            "allowWriteRequests": bool(payload.get("allowWriteRequests")),
+            "writeReady": bool(payload.get("writeReady")),
             "manifestToolCount": payload.get("manifestToolCount"),
             "advertisesRequestApply": bool(payload.get("advertisesRequestApply")),
             "advertisesDirectApply": bool(payload.get("advertisesDirectApply")),
@@ -693,10 +691,7 @@ class ExternalAgentBridgeSmoke:
     def restore_previous_state(self) -> None:
         if self.app_token and self.previous_gateway is not None:
             try:
-                payload = {
-                    "enabled": bool(self.previous_gateway.get("enabled")),
-                    "allowWriteRequests": bool(self.previous_gateway.get("allowWriteRequests")),
-                }
+                payload = {"enabled": bool(self.previous_gateway.get("enabled"))}
                 self.request_app_json("POST", "/api/app/external-agent/gateway", payload)
                 self.step("cleanup.gateway_restore", {"ok": True, **payload})
             except Exception as exc:  # noqa: BLE001

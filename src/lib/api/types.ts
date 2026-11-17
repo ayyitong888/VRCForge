@@ -21,7 +21,6 @@ export type PermissionState = {
   permissionLabel?: string;
   roslynRiskAcknowledged: boolean;
   roslynFullAutoEverEnabled?: boolean;
-  allowWriteRequests: boolean;
   allowRoslynAdvanced: boolean;
   roslynEnvEnabled: boolean;
 };
@@ -134,7 +133,6 @@ export type AgentManifest = {
   tools: AgentTool[];
   skills: AgentSkill[];
   writeTargets: Array<{ name: string; description: string; riskLevel: string; advanced: boolean }>;
-  allowWriteRequests: boolean;
   allowRoslynAdvanced: boolean;
   executionMode: string;
   roslynFullAuto: boolean;

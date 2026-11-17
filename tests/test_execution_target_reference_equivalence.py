@@ -106,7 +106,7 @@ def _gateway_with_registered_handlers(tmp_path: Path, monkeypatch) -> AgentGatew
         assert gateway._tools[name].handler is registered.handler
     monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
     monkeypatch.setattr(
-        gateway, "ensure_config", lambda: SimpleNamespace(allow_write_requests=True)
+        gateway, "ensure_config", lambda: SimpleNamespace()
     )
     return gateway
 

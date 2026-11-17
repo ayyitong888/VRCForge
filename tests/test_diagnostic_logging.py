@@ -354,7 +354,6 @@ def test_error_threshold_keeps_only_essential_baseline_and_real_errors() -> None
         permission = {
             "executionMode": "approval",
             "perActionApproval": True,
-            "allowWriteRequests": True,
         }
         advanced = {
             "developerOptionsEnabled": False,
@@ -391,7 +390,6 @@ def test_safety_posture_describes_auto_execution_and_restore_exception_truthfull
             "perActionApproval": False,
             "autoApprove": True,
             "autoApproveDangerousRequiresApproval": False,
-            "allowWriteRequests": True,
             "roslynRiskAcknowledged": True,
             "roslynFullAutoEverEnabled": True,
         },
@@ -1057,7 +1055,6 @@ def test_trace_gate_dynamic_levels_and_atomic_disable_downgrade() -> None:
     permission = {
         "executionMode": "approval",
         "perActionApproval": True,
-        "allowWriteRequests": True,
     }
 
     def update_advanced(*, developer_options_enabled: bool, computer_use_enabled: bool):
@@ -1141,7 +1138,6 @@ def test_permission_and_advanced_flag_changes_emit_safe_essential_security_evide
         "autoApprove": False,
         "autoApproveDangerousRequiresApproval": False,
         "roslynRiskAcknowledged": False,
-        "allowWriteRequests": True,
     }
     advanced = {
         "developerOptionsEnabled": False,
@@ -1293,7 +1289,6 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
                 return_value={
                     "executionMode": "approval",
                     "perActionApproval": True,
-                    "allowWriteRequests": True,
                     "roslynRiskAcknowledged": False,
                 },
             ),

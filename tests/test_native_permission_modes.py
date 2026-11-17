@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -12,18 +13,16 @@ from agent_question_service import AgentQuestionServiceError
 from package_install_workflow_service import PackageInstallWorkflowService
 from runtime_planner_service import RuntimePlannerService
 from tests.test_native_runtime_continuations import _run, _write_gateway
-from tests.test_native_runtime_gateway import NativeModel, NativeTurn, call, finish, run, runtime_state
+from tests.test_native_runtime_gateway import NativeModel, NativeTurn, call, finish, run
 from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntimePlannerDesktop
 
 
 MODES = ("approval", "auto", "roslyn_full_auto")
 
 
-@pytest.mark.parametrize("mode, allow_writes", [
-    ("approval", True), ("auto", True), ("roslyn_full_auto", True), ("roslyn_full_auto", False),
-])
+@pytest.mark.parametrize("mode", MODES)
 def test_native_vpm_install_uses_local_permission_with_external_gateway_disabled(
-    tmp_path: Path, monkeypatch, mode: str, allow_writes: bool,
+    tmp_path: Path, monkeypatch, mode: str,
 ) -> None:
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
@@ -50,10 +49,12 @@ def test_native_vpm_install_uses_local_permission_with_external_gateway_disabled
     ))
     config = gateway.ensure_config()
     config.enabled = False
-    config.allow_write_requests = allow_writes
     config.execution_mode = mode
     config.roslyn_risk_acknowledged = mode == "roslyn_full_auto"
     gateway.save_config(config)
+    legacy_config = json.loads(gateway.config_path.read_text(encoding="utf-8"))
+    legacy_config["allow_write_requests"] = False
+    gateway.config_path.write_text(json.dumps(legacy_config), encoding="utf-8")
     workflow = PackageInstallWorkflowService(replace(
         dashboard_server.PACKAGE_INSTALL_WORKFLOWS._ports,
         create_apply_request=gateway.approval_transactions.create_apply_request,
@@ -85,11 +86,6 @@ def test_native_vpm_install_uses_local_permission_with_external_gateway_disabled
         gateway.call_external_mcp_tool(tool_name, arguments, agent_name="internal-runtime")
     assert not installed
     response = run(gateway, tmp_path, projectRoot=str(project), message=f"Install {package_id}.")
-    if not allow_writes:
-        assert model_tool_name not in runtime_state(model.requests[1])["availableToolNames"]
-        assert not gateway.approval_transactions.list_approvals()
-        assert not installed
-        return
     attempts = [step for step in response["steps"] if step["tool"] == tool_name]
     assert len(attempts) == 1, (response["plan"], response["steps"])
     step, = attempts
@@ -106,7 +102,6 @@ def test_native_vpm_install_uses_local_permission_with_external_gateway_disabled
 def _set_mode(gateway: AgentGateway, mode: str) -> None:
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = mode
     config.roslyn_risk_acknowledged = mode == "roslyn_full_auto"
     gateway.save_config(config)

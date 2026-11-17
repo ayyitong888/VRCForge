@@ -173,9 +173,9 @@ class ShaderAdapterApplyRollbackSmoke:
             raise RuntimeError("Gateway token was not found.")
         status = self.request_app_json("GET", "/api/app/external-agent/connectors")
         self.previous_gateway = ensure_dict(status.get("gateway"))
-        updated = self.request_app_json("POST", "/api/app/external-agent/gateway", {"enabled": True, "allowWriteRequests": True})
+        updated = self.request_app_json("POST", "/api/app/external-agent/gateway", {"enabled": True})
         gateway = ensure_dict(updated.get("gateway"))
-        return {"ok": bool(gateway.get("enabled")) and bool(gateway.get("allowWriteRequests")), "previous": self.previous_gateway, "current": gateway}
+        return {"ok": bool(gateway.get("enabled")), "previous": self.previous_gateway, "current": gateway}
 
     def assert_unity_tool(self) -> dict[str, Any]:
         payload = self.request_app_json("POST", "/api/unity/tools", {"projectPath": self.project_root})
@@ -570,7 +570,7 @@ class ShaderAdapterApplyRollbackSmoke:
                 self.step("cleanup.permission_restore", {"ok": False, "error": str(exc)})
         if self.previous_gateway is not None:
             try:
-                payload = {"enabled": bool(self.previous_gateway.get("enabled")), "allowWriteRequests": bool(self.previous_gateway.get("allowWriteRequests"))}
+                payload = {"enabled": bool(self.previous_gateway.get("enabled"))}
                 self.request_app_json("POST", "/api/app/external-agent/gateway", payload)
                 self.step("cleanup.gateway_restore", {"ok": True, **payload})
             except Exception as exc:  # noqa: BLE001

@@ -28,7 +28,6 @@ export type ExternalAgentConnectorStatus = {
   gateway: {
     enabled: boolean;
     requiresToken: boolean;
-    allowWriteRequests: boolean;
     tokenConfigured: boolean;
     approvalTokenConfigured: boolean;
     configPath?: string;
@@ -242,7 +241,6 @@ export async function updateExternalAgentGateway(
   endpoint: string,
   request: {
     enabled?: boolean;
-    allowWriteRequests?: boolean;
     revokeToken?: boolean;
     checkpointArchiveMaxSizeMb?: number;
     checkpointArchiveMaxCount?: number;

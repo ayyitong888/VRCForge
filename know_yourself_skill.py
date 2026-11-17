@@ -500,7 +500,6 @@ def _authorization_projection(permission_state: Mapping[str, Any]) -> dict[str, 
         mode = "unknown"
     return {
         "mode": mode,
-        "writeRequestsEnabled": permission_state.get("allowWriteRequests") is True,
         "perActionApproval": permission_state.get("perActionApproval") is True,
         "automaticApproval": permission_state.get("autoApprove") is True,
         "dangerousActionsRequireExplicitApproval": permission_state.get("fullPermission") is not True,
@@ -588,15 +587,16 @@ def _self_knowledge_projection(
         read_blockers.append("no_registered_read_or_plan_capability")
 
     write_blockers = list(gaps)
-    if authorization.get("writeRequestsEnabled") is not True:
-        write_blockers.append("write_requests_disabled")
+    has_permission_mode = authorization.get("mode") in {"step_approval", "automatic_approval", "full_permission"}
+    if not has_permission_mode:
+        write_blockers.append("permission_mode_unavailable")
     if write_tool_count == 0:
         write_blockers.append("no_registered_guarded_write_capability")
     write_blockers.append("read_only_baseline_required")
 
     write_available_after_baseline = bool(
         ready
-        and authorization.get("writeRequestsEnabled") is True
+        and has_permission_mode
         and write_tool_count > 0
     )
 

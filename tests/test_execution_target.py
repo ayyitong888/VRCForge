@@ -46,7 +46,7 @@ def test_external_write_result_reuses_digest_for_reference_projection(tmp_path, 
     target = _target(tmp_path)
     reference = {"schema": EXECUTION_TARGET_REF_SCHEMA, "ref": "vrcforge-target-test"}
     gateway._write_handlers[name] = object()
-    monkeypatch.setattr(gateway, "ensure_config", lambda: SimpleNamespace(enabled=True, allow_write_requests=True))
+    monkeypatch.setattr(gateway, "ensure_config", lambda: SimpleNamespace(enabled=True))
     monkeypatch.setattr(gateway, "_guard_external_mcp_project_scope", lambda *_args: None)
     monkeypatch.setattr(gateway, "_external_mcp_write_handler_block", lambda *_args: True)
     monkeypatch.setattr(gateway, "_validate_external_mcp_execution_target", lambda *_args, **_kwargs: target)

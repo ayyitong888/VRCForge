@@ -56,9 +56,9 @@ def _ports(*, calls: list[dict[str, Any]]) -> DoctorReadinessReportPorts:
     return DoctorReadinessReportPorts(
         build_health=lambda: health,
         serialize_api_config=lambda: {"provider": "openai", "configured": True, "apiKeyRequired": True, "apiKeyPresent": True, "model": "model", "base_url": "https://example.invalid"},
-        safe_agent_health=lambda: {"enabled": True, "requiresToken": True, "mcpUrl": "http://127.0.0.1:8757/mcp", "pendingApprovalCount": 0, "allowWriteRequests": False},
+        safe_agent_health=lambda: {"enabled": True, "requiresToken": True, "mcpUrl": "http://127.0.0.1:8757/mcp", "pendingApprovalCount": 0},
         safe_agent_manifest=lambda: {"writeTargets": ["request"]},
-        safe_permission_state=lambda: {"allowWriteRequests": False},
+        safe_permission_state=lambda: {"executionMode": "approval"},
         selected_project_path_from_health=lambda payload: str(payload["projects"]["selectedProjectPath"]),
         doctor_check=_check,
         doctor_check_from_component=_component_check,
@@ -128,7 +128,7 @@ def test_doctor_readiness_service_projects_existing_schema_from_fake_ports() -> 
     ]
     by_id = {item["id"]: item for item in report["checks"]}
     assert by_id["provider.test"]["status"] == "unknown"
-    assert by_id["external.security_contract"]["status"] == "warning"
+    assert by_id["external.security_contract"]["status"] == "ok"
 
 
 def test_dashboard_constructs_doctor_report_service_with_frozen_ports() -> None:

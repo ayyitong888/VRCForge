@@ -60,8 +60,7 @@ def _skill_registry() -> dict[str, Any]:
 
 def _permission_state() -> dict[str, Any]:
     return {"executionMode": "approval", "perActionApproval": True, "autoApprove": False,
-            "autoApproveDangerousRequiresApproval": False, "fullPermission": False,
-            "allowWriteRequests": True}
+            "autoApproveDangerousRequiresApproval": False, "fullPermission": False}
 
 
 def _service(*, unity: dict[str, Any] | None = None, process_error: bool = False, calls: list[dict[str, Any]] | None = None) -> KnowYourselfReadinessService:

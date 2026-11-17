@@ -9,11 +9,13 @@ const fixture = [
   'import { initializeI18n } from "./src/i18n";',
   'import { ExternalAgentConnectorsPanel } from "./src/components/settings/external-agent-connectors-panel";',
   'window.copies = [];',
+  'window.gatewayChanges = [];',
   'function Fixture() {',
   '  const [status, setStatus] = useState(null);',
   '  window.setConnectorStatus = setStatus;',
   '  return <ExternalAgentConnectorsPanel status={status} loading={false} runtimeConnected={true}',
-  '    message="" selectedProjectPath="project-a" onCopy={(text) => window.copies.push(text)} />;',
+  '    message="" selectedProjectPath="project-a" onCopy={(text) => window.copies.push(text)}',
+  '    onToggleGateway={(enabled) => window.gatewayChanges.push(enabled)} />;',
   '}',
   'initializeI18n().then(() => createRoot(document.getElementById("root")).render(<Fixture />));',
 ].join("\n");
@@ -40,7 +42,7 @@ try {
   const config = '{"mcpServers":{"fixture":{}}}';
   const setup = {
     ok: true, contextProjectPath: "project-a",
-    gateway: { enabled: false, allowWriteRequests: true },
+    gateway: { enabled: false },
     clients: { deepseekHarness: { installed: true } },
     clientConfigs: { generic: { text: config } },
     connectorActions: { deepseekHarness: {
@@ -48,13 +50,22 @@ try {
       verificationExpiresAt: now + 60, handshake: { ready: true },
     } },
   };
-  const show = (next) => page.evaluate((value) => window.setConnectorStatus(value), next);
+  const show = async (next, nextVerification) => {
+    await page.evaluate((value) => window.setConnectorStatus(value), next);
+    await page.locator(`[data-connector-verification="${nextVerification}"]`).waitFor();
+  };
   const summary = page.locator("[data-connector-gateway]");
   const verification = page.locator("[data-connector-verification]");
-  await show(setup);
+  await show(setup, "disabled");
   assert.equal(await summary.getAttribute("data-connector-gateway", { timeout: 1500 }), "disabled");
   assert.equal(await summary.getAttribute("data-connector-config"), "installed");
   assert.equal(await verification.getAttribute("data-connector-verification"), "disabled");
+  assert.equal(await page.locator("button[aria-pressed]").count(), 1);
+  const gatewayToggle = page.getByRole("button", { name: /Connect external Agents/ });
+  assert.equal(await gatewayToggle.getAttribute("aria-pressed"), "false");
+  assert.equal(await page.getByText(/You enable external access here\. External agents follow the app’s current Permission Mode \(Restricted, Auto Approve, or Full Permission\)/).count(), 1);
+  await gatewayToggle.click();
+  assert.deepEqual(await page.evaluate(() => window.gatewayChanges), [true]);
   const details = page.locator("[data-connector-agent-instructions] details");
   assert.equal(await details.getAttribute("open"), null);
   await page.getByRole("button", { name: "Copy general connection instructions" }).click();
@@ -62,15 +73,18 @@ try {
   await details.locator("summary").click();
   assert.equal(await details.locator("pre").textContent(), config);
 
-  await show({ ...setup, gateway: { ...setup.gateway, enabled: true, pendingApprovalCount: 2 } });
+  await show({ ...setup, gateway: { ...setup.gateway, enabled: true, pendingApprovalCount: 2 } }, "bridge-checked");
   assert.equal(await summary.getAttribute("data-connector-gateway"), "enabled");
   assert.equal(await verification.getAttribute("data-connector-verification"), "bridge-checked");
-  assert.match(await summary.innerText(), /2 operations need confirmation/);
-  await show({ ...setup, gateway: { enabled: true }, connectorActions: {} });
+  assert.match(await summary.innerText(), /2 operations awaiting approval/);
+  assert.equal(await gatewayToggle.getAttribute("aria-pressed"), "true");
+  await gatewayToggle.click();
+  assert.deepEqual(await page.evaluate(() => window.gatewayChanges), [true, false]);
+  await show({ ...setup, gateway: { enabled: true }, connectorActions: {} }, "unchecked");
   assert.equal(await verification.getAttribute("data-connector-verification"), "unchecked");
   await show({ ...setup, gateway: { enabled: true }, connectorActions: { deepseekHarness: {
     ...setup.connectorActions.deepseekHarness, verificationExpiresAt: now - 1,
-  } } });
+  } } }, "expired");
   assert.equal(await verification.getAttribute("data-connector-verification"), "expired");
   console.log("PASS: gateway, configuration, verification, pending approvals and expandable copyable config.");
 } finally {

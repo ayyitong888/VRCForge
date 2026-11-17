@@ -61,7 +61,7 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ]),
   ...group("storage", "data-root", [["settings.dataRootTitle", "settings.dataRootDesc"]]),
   ...group("connectors", "connectors", [
-    ["connector.title", "connector.configStatusHint"], ["connector.gateway"], ["connector.allowProjectChanges", "connector.writePolicyHint"],
+    ["connector.title", "connector.configStatusHint"], ["connector.gateway", "connector.permissionModeHint"],
     ["connector.chooseHost"], ["connector.genericPathLabel", "connector.genericPathPlaceholder"], ["connector.agentSetupTitle", "connector.agentSetupHint"],
   ]),
   ...group("connectors", "telegram", [

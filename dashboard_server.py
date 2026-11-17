@@ -7892,7 +7892,6 @@ def external_agent_status_sync(project_path: str | None = None, generic_config_p
         "gateway": {
             "enabled": bool(config.enabled),
             "requiresToken": bool(config.require_token),
-            "allowWriteRequests": bool(config.allow_write_requests),
             "tokenConfigured": bool(config.token),
             "approvalTokenConfigured": bool(config.approval_token),
             "configPath": str(AGENT_GATEWAY.config_path),
@@ -7924,13 +7923,6 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
     config = AGENT_GATEWAY.ensure_config()
     if params.get("enabled") is not None:
         config.enabled = bool(params.get("enabled"))
-    write_setting_provided = params.get("allowWriteRequests") is not None or params.get("allow_write_requests") is not None
-    if write_setting_provided:
-        config.allow_write_requests = bool(params.get("allowWriteRequests", params.get("allow_write_requests")))
-    if write_setting_provided or params.get("enabled") is True:
-        # The UI's write toggle also controls the catalogue standard stdio
-        # clients see. Execution approval/checkpoint policy stays independent.
-        config.external_mcp_exposure_layer = "execution" if config.allow_write_requests else "planning"
     checkpoint_limit = params.get("checkpointArchiveMaxSizeMb", params.get("checkpoint_archive_max_size_mb"))
     checkpoint_count = params.get("checkpointArchiveMaxCount", params.get("checkpoint_archive_max_count"))
     prune_summary: dict[str, Any] | None = None
@@ -8769,7 +8761,6 @@ def safe_startup_agent_health(
             "mcpUrl": f"{AGENT_GATEWAY.public_base_url}/mcp",
             "restUrl": f"{AGENT_GATEWAY.public_base_url}/api/agent",
             "pendingApprovalCount": pending_count if approvals_ok else None,
-            "allowWriteRequests": config.allow_write_requests,
             "allowRoslynAdvanced": AGENT_GATEWAY.roslyn_available(config),
             **({"error": approvals_error or "Approval state could not be loaded."} if not approvals_ok else {}),
         }
@@ -10228,12 +10219,8 @@ def build_doctor_service_context() -> dict[str, Any]:
         trusted_count = 0
         skill_registry_readable = False
     execution_mode = str(gateway_config.execution_mode or "approval")
-    broad_writes = bool(
-        gateway_config.enabled
-        and gateway_config.allow_write_requests
-        and execution_mode in {"auto", "roslyn_full_auto"}
-    )
-    full_permission = bool(gateway_config.allow_write_requests and execution_mode == "roslyn_full_auto")
+    broad_writes = bool(gateway_config.enabled and execution_mode in {"auto", "roslyn_full_auto"})
+    full_permission = execution_mode == "roslyn_full_auto"
     packaged = bool(getattr(sys, "frozen", False))
     backend_path = Path(sys.executable) if packaged else runtime_paths.ROOT_DIR / "backend" / "vrcforge_backend.exe"
     return {
@@ -17765,7 +17752,6 @@ class _RuntimePlannerCatalog:
             for projection in projections
             for handler in [AGENT_GATEWAY._write_handlers.get(projection.internal_name)]
             if handler is not None and projection.internal_name not in AGENT_GATEWAY._tools
-            and gateway_config.allow_write_requests
             and AGENT_GATEWAY._write_handler_visible(handler, gateway_config, layer)
         )
         routable_write_tools = tuple(
@@ -31098,7 +31084,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER") or None,
         help=(
             "With --agent-mcp-stdio, pin the tool catalogue for this stdio client. "
-            "When omitted, the Gateway config key external_mcp_exposure_layer decides; planning is the fallback."
+            "When omitted, the execution catalogue is used and writes follow the App's approval mode."
         ),
     )
     parser.add_argument("--cli", action="store_true", help="Run the VRCForge CLI against the local desktop runtime.")
@@ -31237,7 +31223,7 @@ def main() -> int:
             start_runtime=start_runtime,
         )
         if args.preflight:
-            print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))
+            print(json.dumps(bridge.preflight(args.exposure_layer), ensure_ascii=False, indent=2, sort_keys=True))
             return 0
         run_stdio_server(
             bridge,

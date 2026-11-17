@@ -112,7 +112,7 @@ def test_find_vrcforge_executable_prefers_current_packaged_root(monkeypatch, tmp
 def test_preflight_does_not_launch_runtime_when_start_disabled(monkeypatch, tmp_path: Path) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
     config = tmp_path / "agent_gateway.json"
-    config.write_text('{"token":"test-token","enabled":true,"allow_write_requests":true}', encoding="utf-8")
+    config.write_text('{"token":"test-token","enabled":true}', encoding="utf-8")
     bridge = module.VRCForgeBridge(
         base_url="http://127.0.0.1:8757",
         config_path=config,
@@ -146,7 +146,7 @@ def test_preflight_does_not_launch_runtime_when_start_disabled(monkeypatch, tmp_
 def test_preflight_missing_token_uses_canonical_external_error(monkeypatch, tmp_path: Path) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
     config = tmp_path / "agent_gateway.json"
-    config.write_text('{"enabled":true,"allow_write_requests":true}', encoding="utf-8")
+    config.write_text('{"enabled":true}', encoding="utf-8")
     monkeypatch.delenv("VRCFORGE_AGENT_TOKEN", raising=False)
     bridge = module.VRCForgeBridge(
         base_url="http://127.0.0.1:8757",
@@ -168,7 +168,7 @@ def test_preflight_missing_token_uses_canonical_external_error(monkeypatch, tmp_
 def test_preflight_http_rejection_preserves_gateway_layer_and_raw_result(monkeypatch, tmp_path: Path) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
     config = tmp_path / "agent_gateway.json"
-    config.write_text('{"token":"test-token","enabled":false,"allow_write_requests":true}', encoding="utf-8")
+    config.write_text('{"token":"test-token","enabled":false}', encoding="utf-8")
     bridge = module.VRCForgeBridge(
         base_url="http://127.0.0.1:8757",
         config_path=config,
@@ -201,7 +201,7 @@ def test_preflight_http_rejection_preserves_gateway_layer_and_raw_result(monkeyp
 def test_call_tool_preserves_structured_pre_routing_provenance_rejection_across_http_bridge(monkeypatch, tmp_path: Path) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
     config = tmp_path / "agent_gateway.json"
-    config.write_text('{"token":"test-token","enabled":true,"allow_write_requests":true}', encoding="utf-8")
+    config.write_text('{"token":"test-token","enabled":true}', encoding="utf-8")
     bridge = module.VRCForgeBridge(
         base_url="http://127.0.0.1:8757",
         config_path=config,
@@ -295,8 +295,7 @@ def test_stdio_bridge_protocol_profile_and_exposure_are_explicit() -> None:
 
     defaults = module.parse_args([])
     assert defaults.protocol_profile == "auto"
-    # An omitted exposure layer defers to VRCForgeBridge.resolve_exposure_layer
-    # (env pin, then the Gateway config key, then planning).
+    # With no explicit selection, the bridge uses the App's execution policy.
     assert defaults.exposure_layer is None
     assert defaults.timeout == 30.0
     assert defaults.tool_timeout == 360.0
@@ -855,7 +854,7 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
 def test_bridge_uses_http_mcp_for_manifest_and_tool_calls(monkeypatch, tmp_path: Path) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
     config = tmp_path / "agent_gateway.json"
-    config.write_text('{"token":"test-token","enabled":true,"allow_write_requests":true}', encoding="utf-8")
+    config.write_text('{"token":"test-token","enabled":true}', encoding="utf-8")
     bridge = module.VRCForgeBridge(
         base_url="http://127.0.0.1:8757",
         config_path=config,

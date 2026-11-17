@@ -4424,8 +4424,11 @@ class DashboardServerTests(unittest.TestCase):
         gateway = dashboard_server.AGENT_GATEWAY
         config = gateway.ensure_config()
         config.enabled = True
-        config.allow_write_requests = True
+        config.execution_mode = "approval"
         gateway.save_config(config)
+        legacy_config = json.loads(gateway.config_path.read_text(encoding="utf-8"))
+        legacy_config["allow_write_requests"] = False
+        gateway.config_path.write_text(json.dumps(legacy_config), encoding="utf-8")
         name = "vrcforge_external_app_approval_probe"
         executed = []
         gateway.approval_transactions.register_write_handler(
@@ -5322,18 +5325,16 @@ class DashboardServerTests(unittest.TestCase):
         package_service.load_registry.return_value = {"governance": {}}
         package_service.list_installed.return_value = []
         cases = (
-            ("disabled", "disabled", False, False, False, False, "ok", "ok"),
-            ("approval", "approval", True, True, False, False, "ok", "ok"),
-            ("auto", "auto", True, True, True, False, "warning", "warning"),
-            ("full", "roslyn_full_auto", True, True, True, True, "warning", "warning"),
-            ("full-write-disabled", "roslyn_full_auto", True, False, False, False, "ok", "ok"),
+            ("disabled", "approval", False, False, False, "ok", "ok"),
+            ("approval", "approval", True, False, False, "ok", "ok"),
+            ("auto", "auto", True, True, False, "warning", "warning"),
+            ("full", "roslyn_full_auto", True, True, True, "warning", "warning"),
         )
-        for case, mode, enabled, allow_write, broad, full, external_status, process_status in cases:
+        for case, mode, enabled, broad, full, external_status, process_status in cases:
             with self.subTest(case=case):
                 config = SimpleNamespace(
                     execution_mode=mode,
                     enabled=enabled,
-                    allow_write_requests=allow_write,
                     developer_options_enabled=False,
                     require_token=True,
                     token="x" * 32,
@@ -8603,7 +8604,7 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_production_runtime_catalog_hides_planning_writes_but_preserves_their_kind(self) -> None:
         gateway = dashboard_server.AGENT_GATEWAY
-        config = replace(gateway.ensure_config(), enabled=True, allow_write_requests=True)
+        config = replace(gateway.ensure_config(), enabled=True)
         real_write_handlers = {
             name
             for name, handler in gateway._write_handlers.items()
@@ -9626,7 +9627,7 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertEqual(enabled.status_code, 200)
         self.assertTrue(enabled.json()["gateway"]["enabled"])
-        self.assertFalse(enabled.json()["gateway"]["allowWriteRequests"])
+        self.assertNotIn("allowWriteRequests", enabled.json()["gateway"])
         self.assertEqual(revoked.status_code, 200)
         self.assertTrue(revoked.json()["gateway"]["tokenConfigured"])
         self.assertEqual(old_token_manifest.status_code, 401)
@@ -9634,38 +9635,19 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("approval_token", serialized)
         self.assertNotIn(original_token.lower(), serialized)
 
-    def test_external_gateway_write_toggle_controls_standard_stdio_catalogue(self) -> None:
-        from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge
-
+    def test_enabling_external_gateway_preserves_existing_permission_and_checkpoint_settings(self) -> None:
         gateway = dashboard_server.AGENT_GATEWAY
         config = gateway.ensure_config()
-        config.allow_write_requests = True
-        config.external_mcp_exposure_layer = "planning"
-        config.execution_mode = "approval"
+        config.execution_mode = "auto"
         gateway.save_config(config)
         checkpoint_limits = (config.checkpoint_archive_max_size_mb, config.checkpoint_archive_max_count)
-        bridge = VRCForgeBridge(
-            base_url="http://127.0.0.1:8757", config_path=gateway.config_path,
-            timeout_seconds=5, start_runtime=False,
-        )
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("VRCFORGE_MCP_EXPOSURE_LAYER", None)
-            with TestClient(dashboard_server.app) as client:
-                for settings, layer in (
-                    ({"enabled": True}, "execution"),
-                    ({"allowWriteRequests": False}, "planning"),
-                    ({"allowWriteRequests": True}, "execution"),
-                ):
-                    with self.subTest(settings=settings):
-                        response = client.post("/api/app/external-agent/gateway", json=settings)
-                        self.assertEqual(response.status_code, 200, response.text)
-                        self.assertEqual(bridge.resolve_exposure_layer(None), layer)
-                        persisted = gateway.ensure_config()
-                        self.assertEqual(persisted.execution_mode, "approval")
-                        self.assertEqual((persisted.checkpoint_archive_max_size_mb, persisted.checkpoint_archive_max_count), checkpoint_limits)
-                        tools = {tool["name"] for tool in gateway.build_external_mcp_tools(layer, ["skills/vsk"])}
-                        for name in ("vrcforge_write_path_to_skill", "vrcforge_import_skill_package", "vrcforge_export_skill_package"):
-                            self.assertEqual(name in tools, layer == "execution", name)
+        with TestClient(dashboard_server.app) as client:
+            response = client.post("/api/app/external-agent/gateway", json={"enabled": True})
+        self.assertEqual(response.status_code, 200, response.text)
+        persisted = gateway.ensure_config()
+        self.assertTrue(persisted.enabled)
+        self.assertEqual(persisted.execution_mode, "auto")
+        self.assertEqual((persisted.checkpoint_archive_max_size_mb, persisted.checkpoint_archive_max_count), checkpoint_limits)
 
     def test_external_agent_gateway_checkpoint_archive_limit_prunes_old_archives(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -10684,7 +10666,7 @@ class DashboardServerTests(unittest.TestCase):
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "tools/list",
-                    "params": {"_meta": meta, "exposureLayer": "execution", "toolBlocks": ["*"]},
+                    "params": {"_meta": meta, "toolBlocks": ["*"]},
                 },
             )
             self.assertEqual(listed.status_code, 200)

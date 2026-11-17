@@ -81,13 +81,15 @@ def test_production_registration_approval_execute_pure_reimport_never_checkpoint
     assert not result.get('recovery')
 
 
-def test_registered_reimport_disabled_write_authority_rejected(tmp_path):
+def test_registered_reimport_disconnected_external_call_rejected(tmp_path):
     gateway=_gateway(tmp_path);project=_project(tmp_path)
     gateway._write_handlers[NAME]=copy(server.AGENT_GATEWAY._write_handlers[NAME])
-    config=gateway.ensure_config();config.allow_write_requests=False;gateway.save_config(config)
+    config = gateway.ensure_config()
+    config.enabled = False
+    gateway.save_config(config)
     from agent_gateway import AgentGatewayError
-    with pytest.raises(AgentGatewayError):
-        gateway.approval_transactions.prepare_external_mcp_write(NAME,{'projectPath':str(project),'reimportAssets':[item()]})
+    with pytest.raises(AgentGatewayError, match="Gateway is disabled"):
+        gateway.call_external_mcp_tool(NAME, {'projectPath': str(project), 'reimportAssets': [item()]})
 
 
 

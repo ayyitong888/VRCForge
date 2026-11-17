@@ -173,7 +173,6 @@ def _permission_state(**overrides: Any) -> dict[str, Any]:
         "autoApprove": False,
         "autoApproveDangerousRequiresApproval": False,
         "fullPermission": False,
-        "allowWriteRequests": True,
         **overrides,
     }
 
@@ -728,7 +727,6 @@ def test_ready_report_explains_capabilities_boundaries_and_safe_probes() -> None
     assert report["operatingBoundaries"]["skillMutatesUnityProject"] is False
     assert report["authorization"] == {
         "mode": "step_approval",
-        "writeRequestsEnabled": True,
         "perActionApproval": True,
         "automaticApproval": False,
         "dangerousActionsRequireExplicitApproval": True,

@@ -98,6 +98,8 @@ def review_auto_approval(
     objective = redact_sensitive({
         "objective": task_context.get("objective") or task_context.get("userObjective") or "",
     }).get("objective") or ""
+    if record.get("source") == "external_mcp" and not str(objective).strip():
+        return "manual"
     evidence = {
         "approvalId": str(record.get("id") or record.get("approvalId") or ""),
         "tool": str(record.get("targetTool") or record.get("tool") or ""),

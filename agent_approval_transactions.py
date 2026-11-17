@@ -1310,7 +1310,6 @@ class AgentApprovalTransactionService:
             "permissionLabel": permission_context["permissionLabel"],
             "roslynRiskAcknowledged": bool(config.roslyn_risk_acknowledged),
             "roslynFullAutoEverEnabled": bool(config.roslyn_risk_acknowledged),
-            "allowWriteRequests": bool(config.allow_write_requests),
             "allowRoslynAdvanced": self._ports.roslyn_available(config),
             "legacyRoslynEnvEnabled": False,
         }
@@ -1327,11 +1326,6 @@ class AgentApprovalTransactionService:
 
             previous = self.permission_state(config)
             config.execution_mode = mode
-            if entering_full_permission:
-                # Selecting Full Permission is the user's explicit global
-                # choice to enable write capability; do not leave a hidden
-                # legacy master switch silently disabling it.
-                config.allow_write_requests = True
             if acknowledge_roslyn_risk and entering_full_permission:
                 config.roslyn_risk_acknowledged = True
             config.allow_roslyn_advanced = False
@@ -1501,9 +1495,6 @@ class AgentApprovalTransactionService:
         internal_runtime: bool = False,
     ) -> dict[str, Any]:
         config = self._ports.ensure_config()
-        if not config.allow_write_requests:
-            raise AgentGatewayError("Agent Gateway write requests are disabled.", status_code=403)
-
         target_tool = str(params.get("target_tool") or params.get("targetTool") or "").strip()
         if not target_tool:
             raise AgentGatewayError("target_tool is required.")
@@ -4201,7 +4192,7 @@ class AgentApprovalTransactionService:
                 raise AgentGatewayError("The automatic approval reviewer did not return a decision.", status_code=503)
             if decision == "allow_auto":
                 current_config = self._ports.ensure_config()
-                if current_config.allow_write_requests and normalize_execution_mode(current_config.execution_mode) == "auto":
+                if normalize_execution_mode(current_config.execution_mode) == "auto":
                     normalized_status = approval["status"] = "approved"
         if normalized_status == "approved":
             approval["approvedAt"] = utc_now_iso()
@@ -4246,9 +4237,6 @@ class AgentApprovalTransactionService:
         """Prepare one real MCP write under the user's selected permission policy."""
 
         config = self._ports.ensure_config()
-        if not config.allow_write_requests:
-            raise AgentGatewayError("Agent Gateway write requests are disabled.", status_code=403)
-
         normalized_target = str(target_tool or "").strip()
         if not normalized_target:
             raise AgentGatewayError("A write target is required.")
@@ -4354,13 +4342,14 @@ class AgentApprovalTransactionService:
             if effective_risk_level in {"high", "critical"} and not full_permission
             else ""
         )).strip()
-        if normalize_execution_mode(config.execution_mode) == "approval" and not confirmation_reason:
+        if execution_mode == "approval" and not confirmation_reason:
             confirmation_reason = "Current permission mode requires user confirmation for each write."
-        if normalize_execution_mode(config.execution_mode) == "auto":
-            confirmation_reason = (
-                "For external MCP calls, Auto mode uses manual approval for each write."
-                + (" " + confirmation_reason if confirmation_reason else "")
-            )
+        elif execution_mode == "auto" and not confirmation_reason:
+            confirmation_reason = mandatory_confirmation_reason or destructive_reason
+            if effective_risk_level != base_risk_level and not confirmation_reason:
+                confirmation_reason = "These arguments elevate the write risk and require manual approval."
+        if normalized_target == PROJECT_CHAT_CHECKPOINT_TARGET and not confirmation_reason:
+            confirmation_reason = "Project chat repair requires explicit confirmation in VRCForge."
         if authoritative_preview_only:
             confirmation_reason = ""
 
@@ -4392,6 +4381,7 @@ class AgentApprovalTransactionService:
             "argumentsDigest": arguments_digest,
             "preview": preview if preview is not None else summarize_params(arguments),
             "riskLevel": effective_risk_level,
+            "permissionMode": execution_mode,
             "requiresUserConfirmation": bool(confirmation_reason),
             "confirmationReason": confirmation_reason,
             "approvedUnityExecutionPlan": approved_execution_plan,
@@ -4416,6 +4406,21 @@ class AgentApprovalTransactionService:
                 raise AgentGatewayError(str(exc), status_code=400) from exc
             if _requires_pre_write_checkpoint(write_handler, arguments) and not authoritative_preview_only:
                 prepared["checkpointUserPolicy"] = checkpoint_policy
+        if execution_mode == "auto" and not confirmation_reason and not authoritative_preview_only:
+            operation_id = f"mcpwrite_{secrets.token_hex(16)}"
+            review = self._review_write_approval({
+                "id": operation_id,
+                "source": "external_mcp",
+                "targetTool": normalized_target,
+                "arguments": copy.deepcopy(arguments),
+                "preview": copy.deepcopy(prepared["preview"]),
+                "riskLevel": effective_risk_level,
+            })
+            if review == "allow_auto":
+                prepared["_externalOperationId"] = operation_id
+            else:
+                prepared["requiresUserConfirmation"] = True
+                prepared["confirmationReason"] = "The independent approval reviewer requires manual confirmation."
         return prepared
 
     def _build_external_mcp_execution_plan(
@@ -4717,9 +4722,12 @@ class AgentApprovalTransactionService:
 
         with self._ports.state.shared_state_lock:
             current_config = self._ports.ensure_config()
+            current_mode = normalize_execution_mode(current_config.execution_mode)
             if (
                 not prepared.get("requiresUserConfirmation")
-                and normalize_execution_mode(current_config.execution_mode) in {"approval", "auto"}
+                and (current_mode == "approval" or (
+                    current_mode == "auto" and prepared.get("permissionMode") != "auto"
+                ))
             ):
                 raise AgentGatewayError(
                     "Permission changed after write preparation. Prepare this operation again under the current permission mode.",

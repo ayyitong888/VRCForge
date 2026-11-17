@@ -432,7 +432,6 @@ def evaluate_packaged_planning_manifest(payload: Any) -> tuple[bool, dict[str, A
         and payload.get("ok") is True
         and payload.get("enabled") is True
         and payload.get("requiresToken") is True
-        and payload.get("allowWriteRequests") is False
         and payload.get("exposureLayer") == "planning"
         and write_targets == []
         and not invalid_tools
@@ -442,7 +441,6 @@ def evaluate_packaged_planning_manifest(payload: Any) -> tuple[bool, dict[str, A
         "ok": payload.get("ok") if isinstance(payload, dict) else None,
         "enabled": payload.get("enabled") if isinstance(payload, dict) else None,
         "requiresToken": payload.get("requiresToken") if isinstance(payload, dict) else None,
-        "allowWriteRequests": payload.get("allowWriteRequests") if isinstance(payload, dict) else None,
         "exposureLayer": payload.get("exposureLayer") if isinstance(payload, dict) else None,
         "writeTargetsEmpty": write_targets == [],
         "allToolsReadOnly": not invalid_tools,
@@ -708,7 +706,6 @@ def main() -> int:
                 "enabled": True,
                 "require_token": True,
                 "token": gateway_token,
-                "allow_write_requests": False,
             },
             indent=2,
         )

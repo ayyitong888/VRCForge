@@ -415,14 +415,9 @@ class AgentGatewayConfig:
     approval_token: str = ""
     token_created_at: str = ""
     token_rotated_at: str = ""
-    allow_write_requests: bool = True
     allow_roslyn_advanced: bool = False
     approval_timeout_seconds: int = 600
     execution_mode: str = "approval"
-    # Visibility-only exposure entry for external stdio MCP sessions; writes
-    # remain gated by allow_write_requests plus the per-operation approval chain.
-    # Literal because the exposure constants are defined after this dataclass.
-    external_mcp_exposure_layer: str = "planning"
     roslyn_risk_acknowledged: bool = False
     developer_options_enabled: bool = False
     developer_options_ever_enabled: bool = False
@@ -2578,11 +2573,9 @@ class AgentGateway:
             defaults = {
                 "enabled": False,
                 "require_token": True,
-                "allow_write_requests": True,
                 "allow_roslyn_advanced": False,
                 "approval_timeout_seconds": 600,
                 "execution_mode": "approval",
-                "external_mcp_exposure_layer": "planning",
                 "roslyn_risk_acknowledged": False,
                 "developer_options_enabled": False,
                 "developer_options_ever_enabled": False,
@@ -2609,16 +2602,9 @@ class AgentGateway:
                 approval_token=str(raw.get("approval_token") or ""),
                 token_created_at=str(raw.get("token_created_at") or ""),
                 token_rotated_at=str(raw.get("token_rotated_at") or ""),
-                allow_write_requests=bool(raw.get("allow_write_requests", True)),
                 allow_roslyn_advanced=bool(raw.get("allow_roslyn_advanced", False)),
                 approval_timeout_seconds=int(raw.get("approval_timeout_seconds", 600)),
                 execution_mode=normalize_execution_mode(raw.get("execution_mode")),
-                external_mcp_exposure_layer=(
-                    raw.get("external_mcp_exposure_layer")
-                    if str(raw.get("external_mcp_exposure_layer") or "").strip().lower()
-                    in {EXPOSURE_LAYER_PLANNING, EXPOSURE_LAYER_EXECUTION}
-                    else EXPOSURE_LAYER_PLANNING
-                ),
                 roslyn_risk_acknowledged=bool(raw.get("roslyn_risk_acknowledged", False)),
                 developer_options_enabled=bool(raw.get("developer_options_enabled", False)),
                 developer_options_ever_enabled=bool(raw.get("developer_options_ever_enabled", False)),
@@ -2663,13 +2649,9 @@ class AgentGateway:
                 "approval_token": config.approval_token,
                 "token_created_at": str(config.token_created_at or ""),
                 "token_rotated_at": str(config.token_rotated_at or ""),
-                "allow_write_requests": bool(config.allow_write_requests),
                 "allow_roslyn_advanced": bool(config.allow_roslyn_advanced),
                 "approval_timeout_seconds": int(config.approval_timeout_seconds),
                 "execution_mode": normalize_execution_mode(config.execution_mode),
-                "external_mcp_exposure_layer": normalize_exposure_layer(
-                    config.external_mcp_exposure_layer
-                ),
                 "roslyn_risk_acknowledged": bool(config.roslyn_risk_acknowledged),
                 "developer_options_enabled": bool(config.developer_options_enabled),
                 "developer_options_ever_enabled": bool(config.developer_options_ever_enabled),
@@ -2766,7 +2748,6 @@ class AgentGateway:
             "mcpUrl": f"{self.public_base_url}/mcp",
             "restUrl": f"{self.public_base_url}/api/agent",
             "requiresToken": config.require_token,
-            "allowWriteRequests": config.allow_write_requests,
             "allowRoslynAdvanced": self.roslyn_available(config),
             "executionMode": normalize_execution_mode(config.execution_mode),
             "roslynFullAuto": normalize_execution_mode(config.execution_mode) == "roslyn_full_auto",
@@ -2811,7 +2792,7 @@ class AgentGateway:
                 "toolBlock": block,
             }
             tools.append(serialized)
-        if layer == EXPOSURE_LAYER_EXECUTION and config.allow_write_requests:
+        if layer == EXPOSURE_LAYER_EXECUTION:
             for handler in self._write_handlers.values():
                 block = self._external_mcp_write_handler_block(handler, config)
                 if not block or block not in selected_blocks:
@@ -3602,7 +3583,6 @@ class AgentGateway:
             "mcpUrl": f"{self.public_base_url}/mcp",
             "restUrl": f"{self.public_base_url}/api/agent",
             "pendingApprovalCount": len(pending),
-            "allowWriteRequests": config.allow_write_requests,
             "allowRoslynAdvanced": self.roslyn_available(config),
             "permission": self.approval_transactions.permission_state(config),
             "userConstraints": self._serialize_user_constraints(user_constraints, include_error=True),
@@ -4253,10 +4233,7 @@ class AgentGateway:
             if prompt_skill_provenance is not None:
                 result["promptSkillProvenance"] = prompt_skill_provenance
             return result
-        if (
-            not self._external_mcp_write_handler_block(write_handler, config)
-            or not config.allow_write_requests
-        ):
+        if not self._external_mcp_write_handler_block(write_handler, config):
             raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
 
         if "confirmation" not in arguments:
@@ -11156,8 +11133,7 @@ class AgentGateway:
         }
 
     def _serialize_write_registry_entry(self, handler: AgentWriteHandler, config: AgentGatewayConfig) -> dict[str, Any]:
-        visible = self._write_handler_visible(handler, config)
-        available = visible and bool(config.allow_write_requests)
+        available = self._write_handler_visible(handler, config)
         shared = self.shared_agent_tool_descriptor(
             handler.name,
             write=True,
@@ -11181,9 +11157,9 @@ class AgentGateway:
             "requiresApproval": True,
             "requiresCheckpoint": bool(handler.pre_write_checkpoint_required),
             "rollbackPolicy": rollback_policy,
-            "availableInDesktop": visible,
+            "availableInDesktop": available,
             "availableInMcp": available,
-            "availableInCli": visible,
+            "availableInCli": available,
             "inputsSchema": shared["inputSchema"],
             "outputsSchema": shared["outputSchema"],
             "fallbacks": ["vrcforge_request_apply"],
@@ -11283,8 +11259,6 @@ class AgentGateway:
             return self._desktop.browser_model_invocable()
         if tool.advanced and not self.roslyn_available(config):
             return False
-        if tool.write and not config.allow_write_requests:
-            return False
         if exposure_layer == EXPOSURE_LAYER_PLANNING and tool.write:
             return False
         return True
@@ -11308,7 +11282,7 @@ def create_agent_mcp_app(
     on_connection_changed: Callable[[], None] | None = None,
 ):
     def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
-        exposure_layer = normalize_exposure_layer(params.get("exposureLayer"))
+        exposure_layer = normalize_exposure_layer(params.get("exposureLayer", EXPOSURE_LAYER_EXECUTION))
         return gateway.build_external_mcp_tools(
             exposure_layer,
             tool_blocks=params.get("toolBlocks"),

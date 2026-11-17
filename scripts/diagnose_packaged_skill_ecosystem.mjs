@@ -2394,7 +2394,6 @@ $payload | ConvertTo-Json -Depth 8 -Compress
         require_token: true,
         token: agentGatewayToken,
         approval_token: agentApprovalToken,
-        allow_write_requests: true,
         allow_roslyn_advanced: false,
         approval_timeout_seconds: 600,
         execution_mode: "approval",

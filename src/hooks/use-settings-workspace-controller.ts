@@ -21,7 +21,6 @@ import { markdownSmokeAgentNotes } from "../lib/markdown-smoke";
 
 type GatewaySettingsRequest = {
   enabled?: boolean;
-  allowWriteRequests?: boolean;
   revokeToken?: boolean;
   checkpointArchiveMaxSizeMb?: number;
   checkpointArchiveMaxCount?: number;

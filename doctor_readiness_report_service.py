@@ -203,7 +203,7 @@ class DoctorReadinessReportService:
             "Agent Gateway is enabled." if gateway_enabled else "Agent Gateway is disabled.",
             "External Codex, Claude Code, and MCP clients can only use VRCForge through this supervised bridge.",
             "Enable the gateway only when connecting an external agent; keep it disabled otherwise.",
-            {"enabled": gateway_enabled, "requiresToken": agent_health.get("requiresToken"), "mcpUrl": agent_health.get("mcpUrl"), "pendingApprovalCount": agent_health.get("pendingApprovalCount"), "allowWriteRequests": agent_health.get("allowWriteRequests")},
+            {"enabled": gateway_enabled, "requiresToken": agent_health.get("requiresToken"), "mcpUrl": agent_health.get("mcpUrl"), "pendingApprovalCount": agent_health.get("pendingApprovalCount")},
             ["retry", "open_settings", "copy_diagnostic_summary"],
         ))
 
@@ -258,22 +258,13 @@ class DoctorReadinessReportService:
                 "Open logs or verify vrc-get/VCC/ALCOM manually.", {"error": str(exc)},
             ))
 
-        external_writes_blocked = not bool(permission.get("allowWriteRequests", True))
-        if external_writes_blocked:
-            checks.append(self._ports.doctor_check(
-                "external.security_contract", "External agent write contract", "warning",
-                "External write requests are disabled by permission state.",
-                "External agents should request writes; VRCForge must own approval, checkpoint, apply, validation, and restore.",
-                "Enable write requests only when a trusted local agent needs supervised writes.", {"permission": permission},
-            ))
-        else:
-            checks.append(self._ports.doctor_check(
-                "external.security_contract", "External agent write contract", "ok",
-                "External agents can request supervised writes; direct approval still belongs to VRCForge.",
-                "This prevents Codex, Claude Code, and other MCP clients from bypassing approval/checkpoint policy.",
-                "Keep gateway tokens private and revoke the gateway when external work is finished.",
-                {"permission": permission, "writeTargets": len(agent_manifest.get("writeTargets") or [])},
-            ))
+        checks.append(self._ports.doctor_check(
+            "external.security_contract", "External agent write contract", "ok",
+            "External writes follow the permission mode selected in VRCForge.",
+            "VRCForge owns approval, checkpoints, execution, validation, and restore.",
+            "Enable external access manually in VRCForge and keep gateway tokens private.",
+            {"permission": permission, "writeTargets": len(agent_manifest.get("writeTargets") or [])},
+        ))
 
         checks = self._ports.merge_registered_checks(checks)
         summary = self._ports.doctor_summary(checks)

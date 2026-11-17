@@ -319,7 +319,6 @@ def _external_gateway(tmp_path: Path, *, execution_mode: str = "approval") -> Ag
     gateway = _gateway(tmp_path)
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = execution_mode
     gateway.save_config(config)
     return gateway
@@ -2865,7 +2864,6 @@ def test_full_permission_never_auto_executes_checkpoint_restore(
     config.enabled = True
     config.execution_mode = execution_mode
     config.roslyn_risk_acknowledged = True
-    config.allow_write_requests = True
     gateway.save_config(config)
 
     result = gateway.approval_transactions.create_apply_request(
@@ -2887,11 +2885,8 @@ def test_full_permission_never_auto_executes_checkpoint_restore(
     assert executed == []
 
 
-def test_selecting_full_permission_enables_the_write_capability_it_promises(tmp_path: Path) -> None:
+def test_selecting_full_permission_persists_the_app_policy(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
-    config = gateway.ensure_config()
-    config.allow_write_requests = False
-    gateway.save_config(config)
 
     updated = gateway.approval_transactions.update_permission_state(
         "roslyn_full_auto",
@@ -2899,8 +2894,7 @@ def test_selecting_full_permission_enables_the_write_capability_it_promises(tmp_
     )
 
     assert updated["permission"]["fullPermission"] is True
-    assert updated["permission"]["allowWriteRequests"] is True
-    assert gateway.ensure_config().allow_write_requests is True
+    assert gateway.ensure_config().execution_mode == "roslyn_full_auto"
 
 
 @pytest.mark.parametrize(
@@ -2927,7 +2921,6 @@ def test_auto_mode_honors_independent_reviewer_decision(
     config = gateway.ensure_config()
     config.enabled = True
     config.execution_mode = "auto"
-    config.allow_write_requests = True
     gateway.save_config(config)
 
     result = gateway.approval_transactions.create_apply_request(
@@ -2979,7 +2972,6 @@ def test_handler_manual_approval_policy_cannot_be_disabled_by_the_caller(
     config.execution_mode = execution_mode
     config.roslyn_risk_acknowledged = execution_mode == "roslyn_full_auto"
     config.allow_roslyn_advanced = execution_mode == "roslyn_full_auto"
-    config.allow_write_requests = True
     gateway.save_config(config)
 
     result = gateway.approval_transactions.create_apply_request(
@@ -3028,7 +3020,6 @@ def test_auto_mode_still_asks_independent_reviewer_before_static_manual_policy(t
     config = gateway.ensure_config()
     config.enabled = True
     config.execution_mode = "auto"
-    config.allow_write_requests = True
     gateway.save_config(config)
 
     result = gateway.approval_transactions.create_apply_request(

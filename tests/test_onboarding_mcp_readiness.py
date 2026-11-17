@@ -13,7 +13,6 @@ def test_first_run_diagnosis_is_discoverable_and_callable_without_unity(tmp_path
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = False
     gateway.save_config(config)
     observed = {"projectDiscovery": {"state": "empty", "projectCount": 0}}
     gateway.register_tool(
@@ -35,7 +34,6 @@ def test_external_gateway_binds_trusted_caller_for_provider_independent_readines
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = False
     gateway.save_config(config)
 
     def handler(params: dict[str, object]) -> dict[str, object]:

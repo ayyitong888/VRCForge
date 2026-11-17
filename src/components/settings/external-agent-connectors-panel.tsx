@@ -44,7 +44,6 @@ type ExternalAgentConnectorsPanelProps = {
   selectedProjectPath: string;
   onRefresh: () => void;
   onToggleGateway: (enabled: boolean) => void;
-  onToggleWriteRequests: (enabled: boolean) => void;
   onRevoke: () => void;
   onInstall: (client: ExternalAgentConnectorClient, configPath?: string) => void;
   onUninstall: (client: ExternalAgentConnectorClient, configPath?: string) => void;
@@ -59,7 +58,6 @@ export function ExternalAgentConnectorsPanel({
   selectedProjectPath,
   onRefresh,
   onToggleGateway,
-  onToggleWriteRequests,
   onRevoke,
   onInstall,
   onUninstall,
@@ -203,10 +201,7 @@ export function ExternalAgentConnectorsPanel({
           <div data-onboarding-external="gateway" className="grid">
             <ConnectorToggle label={t("connector.gateway")} checked={Boolean(gateway?.enabled)} disabled={loading || !status} onChange={onToggleGateway} />
           </div>
-          <ConnectorToggle label={t("connector.allowProjectChanges")} checked={Boolean(gateway?.allowWriteRequests)} disabled={loading || !status} onChange={onToggleWriteRequests} />
-          <p className="text-xs text-muted-foreground">
-            {t(gatewayState === "disabled" && gateway?.allowWriteRequests ? "connector.writePolicySaved" : "connector.writePolicyHint")}
-          </p>
+          <p className="text-xs text-muted-foreground">{t("connector.permissionModeHint")}</p>
         </section>
 
         <section className="grid gap-2 border-t border-border pt-4">

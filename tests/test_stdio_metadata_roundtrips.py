@@ -15,8 +15,7 @@ BLOCK = "avatar_structure/mesh_shape_data"
 def session(monkeypatch, tmp_path, request):
     exposure = getattr(request, "param", "execution")
     config = tmp_path / "config.json"
-    config.write_text(json.dumps({"token": "fixture-token", "enabled": True,
-                                  "allow_write_requests": True}), encoding="utf-8")
+    config.write_text(json.dumps({"token": "fixture-token", "enabled": True}), encoding="utf-8")
     bridge = stdio.VRCForgeBridge(base_url="http://127.0.0.1:1", config_path=config,
                                  timeout_seconds=.1, start_runtime=False)
     calls, routers = [], []

@@ -303,16 +303,16 @@ def test_provider_turn_binding_uses_frozen_native_route():
             assert metadata.native_binding == ""
 
 
-def test_runtime_catalog_reads_one_config_snapshot_per_turn_and_refreshes_next_turn(monkeypatch):
+def test_runtime_catalog_reads_one_config_snapshot_per_turn_and_keeps_planning_read_only(monkeypatch):
     gateway = dashboard_server.AGENT_GATEWAY
     original_ensure_config = gateway.ensure_config
-    configs = [replace(original_ensure_config(), allow_write_requests=True)]
+    config = original_ensure_config()
     config_reads = 0
 
     def current_config():
         nonlocal config_reads
         config_reads += 1
-        return configs[0]
+        return config
 
     monkeypatch.setattr(gateway, "ensure_config", current_config)
     catalog = dashboard_server._RuntimePlannerCatalog()
@@ -322,8 +322,7 @@ def test_runtime_catalog_reads_one_config_snapshot_per_turn_and_refreshes_next_t
     assert first_read_count == 1
     assert any(tool.write for tool in first.visible_tools)
 
-    configs[0] = replace(configs[0], allow_write_requests=False)
-    second = catalog.read(EXPOSURE_LAYER_EXECUTION)
+    second = catalog.read(EXPOSURE_LAYER_PLANNING)
     assert config_reads == first_read_count + 1
     assert not any(tool.write for tool in second.visible_tools)
 
@@ -814,7 +813,6 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
         name
         for name, handler in gateway._write_handlers.items()
         if name in routable_writes
-        and config.allow_write_requests
         and gateway._write_handler_visible(handler, config, EXPOSURE_LAYER_EXECUTION)
     }
     expected_execution.update(visible_execution_writes)

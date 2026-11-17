@@ -268,7 +268,7 @@ def main() -> int:
         start_runtime=args.start_runtime and not args.no_start,
     )
     if args.preflight:
-        print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(bridge.preflight(args.exposure_layer), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
     with bridge.connected_host():
@@ -311,8 +311,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("planning", "execution"),
         default=os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER") or None,
         help=(
-            "Pin the tool catalogue exposed to this stdio client. When omitted, "
-            "the Gateway config key external_mcp_exposure_layer decides; planning is the fallback."
+            "Select planning for a read-only catalogue. The default execution catalogue "
+            "uses the App's current permission mode for writes."
         ),
     )
     return parser.parse_args(argv)
@@ -400,23 +400,14 @@ class VRCForgeBridge:
         self._mcp_session_last_used = 0.0
 
     def resolve_exposure_layer(self, cli_value: str | None) -> str:
-        """CLI pin > env > Gateway config key > planning.
-
-        The Gateway config is the durable, App-owned execution entry for
-        external stdio sessions; it only changes tool visibility, while every
-        write remains subject to Gateway approval and checkpoint policy.
-        """
+        """An explicit CLI or environment pin selects a catalogue, not write authority."""
         explicit = str(cli_value or os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER", "") or "").strip().lower()
         if explicit in {"planning", "execution"}:
             return explicit
-        configured = str(
-            read_json_file(self.resolve_config_path()).get("external_mcp_exposure_layer") or ""
-        ).strip().lower()
-        if configured in {"planning", "execution"}:
-            return configured
-        return "planning"
+        return "execution"
 
-    def preflight(self) -> dict[str, Any]:
+    def preflight(self, exposure_layer: str | None = None) -> dict[str, Any]:
+        layer = self.resolve_exposure_layer(exposure_layer)
         config_path = self.resolve_config_path()
         config = read_json_file(config_path)
         token = str(os.environ.get("VRCFORGE_AGENT_TOKEN") or config.get("token") or "")
@@ -429,12 +420,11 @@ class VRCForgeBridge:
             "tokenSource": "env" if os.environ.get("VRCFORGE_AGENT_TOKEN") else "config" if token else "missing",
             "tokenConfigured": bool(token),
             "gatewayEnabled": bool(config.get("enabled")),
-            "allowWriteRequests": bool(config.get("allow_write_requests", True)),
             "runtimeOnline": False,
             "manifestToolCount": 0,
             "advertisesRequestApply": False,
             "advertisesDirectApply": False,
-            "externalMcpExposureLayer": self.resolve_exposure_layer(None),
+            "externalMcpExposureLayer": layer,
             "error": "",
         }
 
@@ -486,9 +476,9 @@ class VRCForgeBridge:
                 {"exposureLayer": "planning", "toolBlocks": ["*"]},
                 token=token,
             )
-            manifest = self._mcp_request(
+            manifest = planning_manifest if layer == "planning" else self._mcp_request(
                 "tools/list",
-                {"exposureLayer": "execution", "toolBlocks": ["*"]},
+                {"exposureLayer": layer, "toolBlocks": ["*"]},
                 token=token,
             )
             planning_tools = planning_manifest.get("tools") if isinstance(planning_manifest, dict) else []
@@ -504,7 +494,6 @@ class VRCForgeBridge:
             }
             report["runtimeOnline"] = True
             report["gatewayEnabled"] = bool(config.get("enabled"))
-            report["allowWriteRequests"] = bool(config.get("allow_write_requests", True))
             report["manifestToolCount"] = len(tool_names)
             report["advertisesRequestApply"] = "vrcforge_request_apply" in tool_names
             report["advertisesDirectApply"] = bool(HIDDEN_EXTERNAL_TOOLS & tool_names)
@@ -521,10 +510,7 @@ class VRCForgeBridge:
                 and actual_write_names.isdisjoint(planning_names)
                 and not bool(HIDDEN_EXTERNAL_TOOLS & (tool_names | planning_names))
             )
-            report["writeReady"] = bool(
-                report["readReady"] and config.get("allow_write_requests", True)
-                and actual_write_names
-            )
+            report["writeReady"] = bool(report["readReady"] and actual_write_names)
             # Read-only/planning clients are fully connected without write
             # authority. Report write readiness separately; never demand a
             # hidden legacy write wrapper as proof of a working connection.
@@ -538,7 +524,7 @@ class VRCForgeBridge:
                     failure_phase="tool_manifest_validation",
                     details={
                         "planningToolCount": len(planning_names),
-                        "executionToolCount": len(tool_names),
+                        "executionToolCount": len(tool_names) if layer == "execution" else 0,
                         "actualWriteToolCount": len(actual_write_names),
                     },
                 )
@@ -1689,7 +1675,7 @@ def run_stdio_server(
                 )
         nonlocal tool_list_revision
         if tool_name == "vrcforge_bridge_preflight":
-            return bridge.preflight()
+            return bridge.preflight(requested_layer["value"])
         if tool_name == "vrcforge_list_prompts":
             cursor = arguments.get("cursor", "")
             page_size = arguments.get("pageSize", 100)

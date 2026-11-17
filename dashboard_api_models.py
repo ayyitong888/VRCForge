@@ -969,7 +969,6 @@ class ExternalAgentConnectorRequest(BaseModel):
 
 class ExternalAgentGatewayUpdateRequest(BaseModel):
     enabled: bool | None = None
-    allow_write_requests: bool | None = Field(default=None, alias="allowWriteRequests")
     revoke_token: bool = Field(default=False, alias="revokeToken")
     checkpoint_archive_max_size_mb: int | None = Field(default=None, alias="checkpointArchiveMaxSizeMb")
     delete_checkpoint_archive_ids: list[str] | None = Field(default=None, alias="deleteCheckpointArchiveIds")

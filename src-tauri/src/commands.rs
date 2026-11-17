@@ -302,7 +302,6 @@ pub(crate) struct DesktopExternalAgentConnectorsRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopExternalAgentGatewayRequest {
     enabled: Option<bool>,
-    allow_write_requests: Option<bool>,
     revoke_token: Option<bool>,
     checkpoint_archive_max_size_mb: Option<i64>,
     checkpoint_archive_max_count: Option<i64>,
@@ -3848,7 +3847,6 @@ pub async fn update_external_agent_gateway(
             "/api/app/external-agent/gateway".to_string(),
             Some(serde_json::json!({
                 "enabled": request.enabled,
-                "allowWriteRequests": request.allow_write_requests,
                 "revokeToken": request.revoke_token.unwrap_or(false),
                 "checkpointArchiveMaxSizeMb": request.checkpoint_archive_max_size_mb,
                 "checkpointArchiveMaxCount": request.checkpoint_archive_max_count,

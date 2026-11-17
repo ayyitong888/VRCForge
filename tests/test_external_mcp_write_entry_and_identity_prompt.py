@@ -4,14 +4,13 @@ Replays the 2026-10-25 external-agent blockers:
 - bind -> prompts/get(identityLockUri) must validate ref-form anchors;
 - gateway rejections must reach stdio hosts as structured errors, not
   "Internal MCP server error";
-- external stdio exposure must have a Gateway-config execution entry.
+- default stdio execution and explicitly pinned planning use separate catalogues.
 """
 import importlib
 import json
 
 from pathlib import Path
 
-import agent_gateway
 import execution_target
 import pytest
 
@@ -233,10 +232,10 @@ def test_stdio_prompt_method_surfaces_gateway_message(monkeypatch):
     assert "gateway said no" in response["error"]["message"]
 
 
-def test_exposure_layer_resolves_from_gateway_config(tmp_path, monkeypatch):
+def test_default_exposure_is_execution_and_explicit_planning_is_supported(tmp_path, monkeypatch):
     config_path = tmp_path / "agent_gateway.json"
     config_path.write_text(
-        json.dumps({"token": "t", "external_mcp_exposure_layer": "execution"}), encoding="utf-8"
+        json.dumps({"token": "t", "external_mcp_exposure_layer": "planning"}), encoding="utf-8"
     )
     monkeypatch.delenv("VRCFORGE_MCP_EXPOSURE_LAYER", raising=False)
     bridge = VRCForgeBridge(
@@ -247,36 +246,35 @@ def test_exposure_layer_resolves_from_gateway_config(tmp_path, monkeypatch):
     )
     assert bridge.resolve_exposure_layer(None) == "execution"
     assert bridge.resolve_exposure_layer("planning") == "planning"
-    monkeypatch.setenv("VRCFORGE_MCP_EXPOSURE_LAYER", "execution")
+    monkeypatch.setenv("VRCFORGE_MCP_EXPOSURE_LAYER", "planning")
     missing = VRCForgeBridge(
         base_url="http://127.0.0.1:8757",
         config_path=tmp_path / "missing.json",
         timeout_seconds=5,
         start_runtime=False,
     )
-    assert missing.resolve_exposure_layer(None) == "execution"
-    monkeypatch.delenv("VRCFORGE_MCP_EXPOSURE_LAYER", raising=False)
     assert missing.resolve_exposure_layer(None) == "planning"
+    assert missing.resolve_exposure_layer("execution") == "execution"
+    monkeypatch.delenv("VRCFORGE_MCP_EXPOSURE_LAYER", raising=False)
+    assert missing.resolve_exposure_layer(None) == "execution"
 
 
-def test_gateway_config_persists_external_mcp_exposure_layer(tmp_path):
+def test_gateway_config_saves_only_the_current_permission_fields(tmp_path):
     config_path = tmp_path / "config" / "gateway.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
-        json.dumps({"enabled": True, "token": "t", "external_mcp_exposure_layer": "execution"}), encoding="utf-8"
+        json.dumps({
+            "enabled": True, "token": "t", "execution_mode": "auto",
+            "allow_write_requests": False, "external_mcp_exposure_layer": "planning",
+        }), encoding="utf-8"
     )
     gateway = AgentGateway(config_path, tmp_path / "audit")
     config = gateway.ensure_config()
-    assert config.external_mcp_exposure_layer == "execution"
-    config.external_mcp_exposure_layer = agent_gateway.EXPOSURE_LAYER_PLANNING
     gateway.save_config(config)
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
-    assert persisted["external_mcp_exposure_layer"] == "planning"
-
-    config_path.write_text(
-        json.dumps({"enabled": True, "token": "t", "external_mcp_exposure_layer": "sudo"}), encoding="utf-8"
-    )
-    assert gateway.ensure_config().external_mcp_exposure_layer == "planning"
+    assert persisted["execution_mode"] == "auto"
+    assert "allow_write_requests" not in persisted
+    assert "external_mcp_exposure_layer" not in persisted
 
 
 def test_http_bridge_error_extracts_jsonrpc_message_not_envelope_repr():
