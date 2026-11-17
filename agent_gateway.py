@@ -5694,32 +5694,12 @@ class AgentGateway:
             )
             return False
 
-    def resume_runtime_task_after_sub_agent(
-        self,
-        event: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        """Resume one original task from a durable sub-agent terminal event."""
-
-        event = event if isinstance(event, dict) else {}
-        task_id = str(event.get("subAgentTaskId") or "").strip()
-        if not task_id:
-            return None
-        prepared = prepare_sub_agent_task_continuation(
-            event.get("taskSeed") if isinstance(event.get("taskSeed"), dict) else None,
-            event,
-        )
+    @staticmethod
+    def _prepare_subagent_parent_result(event: dict[str, Any]) -> dict[str, Any] | None:
+        prepared = prepare_sub_agent_task_continuation(ensure_dict(event.get("taskSeed")), event)
         if prepared is None:
             return None
-        completion_key = f"subagent:{task_id}"
-        with self._lock:
-            if completion_key in self._runtime_shell_completion_ids:
-                return None
-            self._runtime_shell_completion_ids.add(completion_key)
-            self._runtime_shell_completion_order.append(completion_key)
-            while len(self._runtime_shell_completion_order) > 512:
-                expired = self._runtime_shell_completion_order.pop(0)
-                self._runtime_shell_completion_ids.discard(expired)
-        params = ensure_dict(prepared.get("params"))
+        task_id = str(event.get("subAgentTaskId") or "").strip()
         continuation = ensure_dict(prepared.get("taskContinuation"))
         result = ensure_dict(event.get("result"))
         result_summary = result.get("summaryText") or result.get("summary") or event.get("summary")
@@ -5749,6 +5729,61 @@ class AgentGateway:
         final_report = result.get("finalReport")
         if isinstance(final_report, str) and final_report.strip():
             continuation["_subAgentFinalReport"] = final_report
+        return prepared
+
+    def resume_runtime_task_after_sub_agent(
+        self,
+        event: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Resume the original task once with all of its dispatched child receipts."""
+
+        event = ensure_dict(event)
+        task_id = str(event.get("subAgentTaskId") or "").strip()
+        if not task_id:
+            return None
+        batch = event.get("batchResults")
+        if isinstance(batch, list):
+            prepared_members = [self._prepare_subagent_parent_result(member) for member in batch]
+            if not prepared_members or any(member is None for member in prepared_members):
+                return None
+            prepared = prepared_members[-1]
+            continuation = ensure_dict(prepared.get("taskContinuation"))
+            continuation["_subAgentBatch"] = [
+                ensure_dict(member.get("taskContinuation")) for member in prepared_members[:-1]
+            ]
+            # A child cancelled on its own is independent evidence. If the
+            # parent already consumed Stop while launching children, recover
+            # that disposition from its original durable turn.
+            continuation["terminalPlan"] = None
+            context = continuation["context"]
+            parent_turn_id = context.get("usageParentTurnId") or context["turnId"]
+            stopped = self._runtime_run_ledger.read_events(
+                limit=1, contains=parent_turn_id,
+                predicate=lambda row: (
+                    row.get("sessionId") == context.get("sessionId")
+                    and row.get("turnId") == parent_turn_id
+                    and row.get("clientTurnId") == context.get("clientTurnId")
+                    and (row.get("event") == "runtime_turn_cancel_requested"
+                         or (row.get("event") == "runtime_turn_completed" and row.get("status") == "cancelled"))
+                ),
+            )
+            if stopped:
+                continuation["_parentStopReason"] = stopped[0].get("cancellationReason") or "user_stop"
+        else:
+            prepared = self._prepare_subagent_parent_result(event)
+            if prepared is None:
+                return None
+            continuation = ensure_dict(prepared.get("taskContinuation"))
+        completion_key = f"subagent:{task_id}"
+        with self._lock:
+            if completion_key in self._runtime_shell_completion_ids:
+                return None
+            self._runtime_shell_completion_ids.add(completion_key)
+            self._runtime_shell_completion_order.append(completion_key)
+            while len(self._runtime_shell_completion_order) > 512:
+                expired = self._runtime_shell_completion_order.pop(0)
+                self._runtime_shell_completion_ids.discard(expired)
+        params = ensure_dict(prepared.get("params"))
         self._signal_background_activity("sub_agent_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
@@ -6187,7 +6222,7 @@ class AgentGateway:
         subagent_parent_turn = None
         if continuation.get("source") == "sub_agent_finished":
             seed = continuation_context
-            parent_turn_id = str(seed.get("turnId") or "")
+            parent_turn_id = str(seed.get("usageParentTurnId") or seed.get("turnId") or "")
             parent_client_id = str(seed.get("clientTurnId") or "")
             if seed.get("sessionId") == session_id and parent_turn_id and parent_client_id:
                 subagent_parent_turn = (session_id, parent_turn_id, parent_client_id)
@@ -6253,12 +6288,14 @@ class AgentGateway:
         scoped_general_roots = tuple(general_allowed_roots)
         if full_permission and agent_name != "sub-agent":
             general_allowed_roots = host_scope_roots()
+        batch_continuations = continuation.get("_subAgentBatch", [])
         restored_absent_paths = checkpoint_restore_absence_paths(ensure_dict(task_continuation))
         if continuation_context and continuation_completion:
             task_loop = AgentTaskLoop.from_approval_context(
                 continuation_context,
                 continuation_completion,
                 execution=ensure_dict(task_continuation).get("execution"),
+                previous_completions=[(member["context"], member["completion"]) for member in batch_continuations],
             )
         else:
             task_loop = AgentTaskLoop(
@@ -6481,14 +6518,19 @@ class AgentGateway:
                 completed_step["resultRead"] = reader
                 completed_observation.update({"result": approved_result, "resultRead": reader})
         native_binding = self.runtime_planner.native_conversation_binding(project_root)
-        final_report = ensure_dict(task_continuation).get("_subAgentFinalReport")
-        if continuation_observation and isinstance(final_report, str):
+        for member in [*batch_continuations, continuation]:
+            observation = ensure_dict(member.get("plannerObservation"))
+            if member is not continuation and observation:
+                loop_state.append(observation)
+            final_report = member.get("_subAgentFinalReport")
+            if not observation or not isinstance(final_report, str):
+                continue
             report_step = {
-                "index": -1, "tool": continuation_observation["tool"],
-                "actionId": "sub-agent-report:" + str(continuation_observation["result"]["taskId"]),
+                "index": -1, "tool": observation["tool"],
+                "actionId": "sub-agent-report:" + str(observation["result"]["taskId"]),
             }
             preview = self.runtime_planner.complete_model_information(
-                continuation_observation, native_contract=bool(native_binding),
+                observation, native_contract=bool(native_binding),
             )
             report_text = planner_policy.sanitize_planner_observation_text(final_report, None, preserve_whitespace=True)
             retained = retain_model_information(
@@ -6497,7 +6539,7 @@ class AgentGateway:
                 planner_policy.sanitize_planner_observation_text,
             )
             model_context_steps.append({**report_step, **retained})
-            continuation_observation.update(retained)
+            observation.update(retained)
         try:
             native_turn = NativeRuntimeTurn(
                 self._runtime_session_state, self.runtime_planner, session_id, turn_id,
@@ -6505,6 +6547,7 @@ class AgentGateway:
                 continuation_completion, continuation_observation,
                 initial_history=history, client_turn_id=client_turn_id,
                 project_context_active=project_context_active,
+                subagent_batch=([*batch_continuations, continuation] if "_subAgentBatch" in continuation else None),
                 on_steer_consumed=lambda ids: (self._settle_async_question_steers(ids, session_id=session_id, client_turn_id=client_turn_id, turn_id=turn_id), self._runtime_status_changed({
                     "sessionId": session_id, "turnId": turn_id,
                     "clientTurnId": client_turn_id, "consumedSteerInputIds": ids,
@@ -6912,6 +6955,7 @@ class AgentGateway:
             reason = self._runtime_session_state.consume_cancel_reason(
                 session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
             )
+            reason = reason or continuation.get("_parentStopReason")
             if reason is not None:
                 cancellation_reason = reason
             return reason is not None
@@ -7405,6 +7449,7 @@ class AgentGateway:
         # A final assistant response is the ordinary termination boundary.
         # Optional model-turn limits support automation. Tool-call count is
         # telemetry only; normal turns end at the model's final response.
+        subagent_batch_started = False
         for step_index in count():
             if take_runtime_cancellation():
                 discard_runtime_compaction_for_cancel()
@@ -7557,6 +7602,8 @@ class AgentGateway:
             planner_observe.pop("modelTurnBudget", None)
             native_turn.settle(flush_steers=not budget_decision.get("paused"))
             queued_native_action = bool(native_binding and native_turn.has_queued_calls)
+            if subagent_batch_started and not queued_native_action:
+                break
             # Steer may discard the queue after the first budget check. A fresh
             # provider request must still obey the original model-turn cap.
             if not queued_native_action and budget_decision.get("paused"):
@@ -8451,6 +8498,8 @@ class AgentGateway:
                         provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
+                    if native_turn.subagent_batch_call_ids:
+                        step_params["_taskSeed"]["_nativeSubAgentBatchCallIds"] = list(native_turn.subagent_batch_call_ids)
                 if step_tool == "vrcforge_vision_audit_multi":
                     step_params["_runtimeSessionId"] = session_id
                     step_params["_taskSeed"] = runtime_approval_seed(
@@ -9162,6 +9211,11 @@ class AgentGateway:
                 )
                 break  # 进入审批等待 → 本轮收尾。
             if task_action.get("status") == "running" and task_action.get("runtimeStatus") != "polling":
+                if step_tool in SUB_AGENT_TASK_TOOLS and native_turn.subagent_batch_call_ids:
+                    subagent_batch_started = True
+                    if native_turn.has_queued_calls:
+                        native_turn.park_subagent_call()
+                        continue
                 # Background Shell and sub-agent tasks own the next decision
                 # after their durable terminal event.  Never continue against
                 # a seed that predates later tool calls.

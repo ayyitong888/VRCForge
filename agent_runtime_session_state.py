@@ -942,25 +942,32 @@ class AgentRuntimeSessionState:
             self._save_native(session_id, candidate)
 
     def settle_native_call(self, session_id: str, *, binding: str, call_id: str, content: str) -> None:
+        self.settle_native_calls(session_id, binding=binding, results={call_id: content})
+
+    def settle_native_calls(self, session_id: str, *, binding: str, results: dict[str, str]) -> None:
+        if not results:
+            return
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
-        call_id = self._native_required(call_id, "call id")
-        if not isinstance(content, str):
-            raise ValueError("native tool content must be string")
         with self._ports.shared_state_lock:
             snapshot = self._native_conversations.get(session_id)
             if snapshot is None or snapshot["binding"] != binding:
                 raise ValueError("native conversation binding mismatch")
             pending = self._native_pending(snapshot)
             all_calls = {call["id"] for item in snapshot["messages"] for call in item.get("tool_calls", []) or []}
-            if call_id in all_calls and call_id not in pending:
-                raise ValueError("native call is already settled")
-            if call_id not in pending:
-                raise ValueError("native call is unknown")
             candidate = copy.deepcopy(snapshot)
-            candidate["messages"].append({"role": "tool", "tool_call_id": call_id, "content": content})
-            if candidate.get("activeDispatchCallId") == call_id:
-                candidate["activeDispatchCallId"] = ""
+            for call_id, content in results.items():
+                call_id = self._native_required(call_id, "call id")
+                if not isinstance(content, str):
+                    raise ValueError("native tool content must be string")
+                if call_id in all_calls and call_id not in pending:
+                    raise ValueError("native call is already settled")
+                if call_id not in pending:
+                    raise ValueError("native call is unknown")
+                pending.remove(call_id)
+                candidate["messages"].append({"role": "tool", "tool_call_id": call_id, "content": content})
+                if candidate.get("activeDispatchCallId") == call_id:
+                    candidate["activeDispatchCallId"] = ""
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
 

@@ -180,6 +180,7 @@ class SubAgentTaskRegistry:
             self._reconcile_interrupted_tasks_locked()
             self._interrupt_dispatched_parent_continuations_locked()
             self._stage_existing_parent_continuations_locked()
+            self._reconcile_parent_batches_locked()
             pending_continuations = [
                 task.id
                 for task in self._tasks.values()
@@ -225,6 +226,9 @@ class SubAgentTaskRegistry:
                     task.parent_continuation_status != "interrupted"
                     or not isinstance(seed, dict)
                 ):
+                    continue
+                batch = self._parent_batch_locked(task)
+                if batch and batch[-1].id != task.id:
                     continue
                 events.append(
                     {
@@ -384,7 +388,7 @@ class SubAgentTaskRegistry:
                     continue
                 seed = task.params.get("_taskSeed")
                 seed = seed if isinstance(seed, dict) else {}
-                if parent_turn_id and str(seed.get("turnId") or "") != parent_turn_id:
+                if parent_turn_id and str(seed.get("usageParentTurnId") or seed.get("turnId") or "") != parent_turn_id:
                     continue
                 if parent_client_turn_id and str(seed.get("clientTurnId") or "") != parent_client_turn_id:
                     continue
@@ -393,13 +397,16 @@ class SubAgentTaskRegistry:
 
     def parent_delivery_pending(self, session_id: str) -> bool:
         with self._lock:
-            return any(
-                task.parent_session_id == session_id
-                and isinstance(task.params.get("_taskSeed"), dict)
-                and (task.status in _RUNNING_STATUSES
-                     or task.parent_continuation_status in {"pending", "dispatching"})
-                for task in self._tasks.values()
-            )
+            for task in self._tasks.values():
+                if task.parent_session_id != session_id or not isinstance(task.params.get("_taskSeed"), dict):
+                    continue
+                if task.status in _RUNNING_STATUSES or task.parent_continuation_status == "dispatching":
+                    return True
+                if task.parent_continuation_status == "pending":
+                    batch = self._parent_batch_locked(task)
+                    if not batch or batch[-1].parent_continuation_status not in {"delivered", "interrupted"}:
+                        return True
+            return False
 
     def get_task(self, task_id: str, include_events: bool = True) -> dict[str, Any]:
         with self._lock:
@@ -798,8 +805,47 @@ class SubAgentTaskRegistry:
             handler_done.wait()
             release_execution()
 
+    def _parent_batch_locked(self, task: SubAgentTask) -> list[SubAgentTask]:
+        seed = task.params.get("_taskSeed")
+        if not isinstance(seed, dict):
+            return []
+        call_ids = seed.get("_nativeSubAgentBatchCallIds")
+        if not isinstance(call_ids, list) or not call_ids:
+            return []
+        siblings: dict[str, SubAgentTask] = {}
+        for sibling in self._tasks.values():
+            sibling_seed = sibling.params.get("_taskSeed")
+            if (sibling.parent_session_id == task.parent_session_id and isinstance(sibling_seed, dict)
+                    and sibling_seed.get("clientTurnId") == seed.get("clientTurnId")
+                    and sibling_seed.get("_nativeSubAgentBatchCallIds") == call_ids
+                    and (call_id := sibling_seed.get("_nativeCallId")) in call_ids):
+                siblings[call_id] = sibling
+        return [siblings[call_id] for call_id in call_ids if call_id in siblings]
+
+    @staticmethod
+    def _parent_terminal_event(task: SubAgentTask) -> dict[str, Any]:
+        seed = task.params.get("_taskSeed")
+        cancelled = task.cancel_requested or task.status == "cancelled"
+        return {
+            "schema": "vrcforge.sub_agent_terminal.v1",
+            "subAgentTaskId": task.id,
+            "status": "cancelled" if cancelled else task.status,
+            "parentSessionId": task.parent_session_id,
+            "taskSeed": copy.deepcopy(seed) if isinstance(seed, dict) else None,
+            "summary": "Sub-agent task was cancelled." if cancelled else task.summary,
+            "error": "Sub-agent task was cancelled." if cancelled else task.error,
+            "result": copy.deepcopy(task.result) if not cancelled and isinstance(task.result, dict) else None,
+        }
+
+    def _record_parent_delivery_locked(self, task: SubAgentTask, status: str, **details: Any) -> SubAgentTask:
+        updated = copy.deepcopy(task)
+        updated.parent_continuation_status = status
+        return self._commit_task_event_locked(
+            task, updated, f"parent_continuation_{status}", {"terminalStatus": task.status, **details},
+        )
+
     def _notify_task_finished(self, task_id: str) -> None:
-        """Notify the app as soon as terminal state is durable."""
+        """Claim and deliver once after the parent yields and every sibling is terminal."""
 
         with self._lock:
             task = self._tasks.get(task_id)
@@ -817,83 +863,43 @@ class SubAgentTaskRegistry:
                 return
         with self._lock:
             task = self._tasks.get(task_id)
-            if (
-                self._shutdown
-                or not self._accepting
-                or task is None
-                or task.status not in _PARENT_CONTINUATION_TERMINAL_STATUSES
-                or task.parent_continuation_status != "pending"
-                or task_id in self._parent_continuations_inflight
-            ):
+            if self._shutdown or not self._accepting or task is None:
                 return
-            self._parent_continuations_inflight.add(task_id)
-            dispatching = copy.deepcopy(task)
-            dispatching.parent_continuation_status = "dispatching"
+            batch = self._parent_batch_locked(task)
+            members = batch or [task]
+            if any(member.parent_continuation_status != "pending" for member in members):
+                return
+            # The last started call has the latest parent task seed. Its
+            # durable claim represents the whole receipt across restart.
+            owner = members[-1]
+            owner_id = owner.id
+            self._parent_continuations_inflight.add(owner_id)
             try:
-                task = self._commit_task_event_locked(
-                    task,
-                    dispatching,
-                    "parent_continuation_dispatching",
-                    {"terminalStatus": task.status},
-                )
+                owner = self._record_parent_delivery_locked(owner, "dispatching")
+                if batch:
+                    results = [self._parent_terminal_event(member) for member in members]
+                    event = {**results[-1], "batchResults": results}
+                else:
+                    event = self._parent_terminal_event(owner)
             except Exception:
-                self._clear_parent_continuation_inflight_locked(task_id)
+                self._clear_parent_continuation_inflight_locked(owner_id)
                 raise
-            seed = task.params.get("_taskSeed")
-            # Stop may arrive after the worker finished but before the result
-            # was delivered. Keep its report, and settle the parent's pending
-            # tool as cancelled so it does not request the model again.
-            cancelled = task.cancel_requested or task.status == "cancelled"
-            event = {
-                "schema": "vrcforge.sub_agent_terminal.v1",
-                "subAgentTaskId": task.id,
-                "status": "cancelled" if cancelled else task.status,
-                "parentSessionId": task.parent_session_id,
-                "taskSeed": copy.deepcopy(seed) if isinstance(seed, dict) else None,
-                "summary": "Sub-agent task was cancelled." if cancelled else task.summary,
-                "error": "Sub-agent task was cancelled." if cancelled else task.error,
-                "result": copy.deepcopy(task.result) if not cancelled and isinstance(task.result, dict) else None,
-            }
+        status, details = "delivered", {}
         try:
             self._task_finished(event)
         except Exception:
-            with self._lock:
-                self._clear_parent_continuation_inflight_locked(task_id)
-                current = self._tasks.get(task_id)
-                if current is not None and current.parent_continuation_status == "dispatching":
-                    interrupted = copy.deepcopy(current)
-                    interrupted.parent_continuation_status = "interrupted"
-                    try:
-                        self._commit_task_event_locked(
-                            current,
-                            interrupted,
-                            "parent_continuation_interrupted",
-                            {
-                                "terminalStatus": current.status,
-                                "reason": "callback_failed_after_dispatch",
-                            },
-                        )
-                    except Exception:
-                        pass
-            return
+            status, details = "interrupted", {"reason": "callback_failed_after_dispatch"}
         with self._lock:
-            self._clear_parent_continuation_inflight_locked(task_id)
-            current = self._tasks.get(task_id)
-            if current is None or current.parent_continuation_status != "dispatching":
-                return
-            delivered = copy.deepcopy(current)
-            delivered.parent_continuation_status = "delivered"
+            self._clear_parent_continuation_inflight_locked(owner_id)
             try:
-                self._commit_task_event_locked(
-                    current,
-                    delivered,
-                    "parent_continuation_delivered",
-                    {"terminalStatus": current.status},
-                )
+                self._record_parent_delivery_locked(self._tasks[owner_id], status, **details)
+                for member in members[:-1]:
+                    current = self._tasks[member.id]
+                    if current.parent_continuation_status == "pending":
+                        self._record_parent_delivery_locked(current, status, **details)
             except Exception:
-                # The durable dispatching marker deliberately survives. On
-                # restart it becomes interrupted instead of replaying a
-                # continuation that may already have produced side effects.
+                # Recovery uses the owner's claim/outcome without replaying
+                # a callback that could already have affected its parent.
                 return
 
     def _clear_parent_continuation_inflight_locked(self, task_id: str) -> None:
@@ -1129,7 +1135,7 @@ class SubAgentTaskRegistry:
         )
         seed = task.params.get("_taskSeed")
         if isinstance(seed, dict):
-            payload.setdefault("parentTurnId", str(seed.get("turnId") or "")[:180])
+            payload.setdefault("parentTurnId", str(seed.get("usageParentTurnId") or seed.get("turnId") or "")[:180])
             payload.setdefault("parentClientTurnId", str(seed.get("clientTurnId") or "")[:240])
         payload.setdefault("displayName", task.display_name)
         if task.handler == "llm_readonly":
@@ -1195,7 +1201,7 @@ class SubAgentTaskRegistry:
 
     def _task_snapshot(self, task: SubAgentTask, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         seed = task.params.get("_taskSeed")
-        parent_turn_id = str(seed.get("turnId") or "")[:180] if isinstance(seed, dict) else ""
+        parent_turn_id = str(seed.get("usageParentTurnId") or seed.get("turnId") or "")[:180] if isinstance(seed, dict) else ""
         parent_client_turn_id = str(seed.get("clientTurnId") or "")[:240] if isinstance(seed, dict) else ""
         return {
             "id": task.id,
@@ -1712,6 +1718,16 @@ class SubAgentTaskRegistry:
                     "reason": "process_restart_after_dispatch",
                 },
             )
+
+    def _reconcile_parent_batches_locked(self) -> None:
+        for task in list(self._tasks.values()):
+            if task.parent_continuation_status != "pending":
+                continue
+            batch = self._parent_batch_locked(task)
+            if batch and batch[-1].parent_continuation_status in {"delivered", "interrupted"}:
+                self._record_parent_delivery_locked(
+                    task, batch[-1].parent_continuation_status, reason="batch_owner_reconciled",
+                )
 
     def _revision_conflict(self, task: SubAgentTask) -> dict[str, Any]:
         return {

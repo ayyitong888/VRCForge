@@ -1524,6 +1524,7 @@ class AgentTaskLoop:
         completion: Mapping[str, Any],
         *,
         execution: Mapping[str, Any] | None = None,
+        previous_completions: list[tuple[Mapping[str, Any], Mapping[str, Any]]] | None = None,
     ) -> AgentTaskLoop:
         loop = cls(
             _bounded_text(context.get("objective"), None),
@@ -1571,6 +1572,15 @@ class AgentTaskLoop:
         loop._skill_policy = _bounded_skill_policy(
             context.get("skillPolicy") or loop._skill_context
         )
+        for previous_context, previous_completion in previous_completions or ():
+            loop._apply_approval_completion(previous_context, previous_completion)
+        loop._apply_approval_completion(context, completion, execution=execution)
+        return loop
+
+    def _apply_approval_completion(
+        self, context: Mapping[str, Any], completion: Mapping[str, Any],
+        *, execution: Mapping[str, Any] | None = None,
+    ) -> None:
         completion_outcome = completion.get("outcome")
         current_target = action_target(context.get("requestedArguments"))
         current_seed = {
@@ -1586,8 +1596,8 @@ class AgentTaskLoop:
         }
         transaction = _write_transaction_from_execution(
             execution,
-            task_id=loop.task_id,
-            session_id=loop.session_id,
+            task_id=self.task_id,
+            session_id=self.session_id,
             action_id=_bounded_text(current_seed["actionId"], 80),
             kind=_bounded_text(current_seed["kind"], 32),
             tool=_bounded_text(current_seed["tool"], 160),
@@ -1596,13 +1606,12 @@ class AgentTaskLoop:
             current_seed["writeTransaction"] = transaction
         current = _bounded_action(current_seed)
         if current is not None:
-            loop._actions[current["actionId"]] = current
+            self._actions[current["actionId"]] = current
             if (
                 current["tool"] == "vrcforge_capture_multi_screenshot"
                 and current["status"] == "completed"
             ):
-                loop._remember_managed_visual_capture(current["actionId"])
-        return loop
+                self._remember_managed_visual_capture(current["actionId"])
 
     def _remember_managed_visual_capture(self, action_id: Any) -> None:
         bounded = _bounded_text(action_id, 80)

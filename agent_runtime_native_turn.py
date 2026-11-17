@@ -147,6 +147,7 @@ class NativeRuntimeTurn:
         retain_recovery: Callable[[dict[str, Any]], str] | None = None,
         project_context_active: bool = False,
         on_steer_consumed: Callable[[list[str]], None] | None = None,
+        subagent_batch: list[dict[str, Any]] | None = None,
     ) -> None:
         self._state = owner
         self._planner = planner
@@ -167,6 +168,8 @@ class NativeRuntimeTurn:
         self._consumed_steer_input_ids: list[str] = []
         self._on_steer_consumed = on_steer_consumed
         self._queued_calls: list[dict[str, Any]] = []
+        self.subagent_batch_call_ids: tuple[str, ...] = ()
+        self._parked_subagent_calls = False
         self._terminal_runtime_notice_written = False
         self._queued_public_content: str | None = None
         self._queued_public_messages: list[dict[str, str]] = []
@@ -194,9 +197,39 @@ class NativeRuntimeTurn:
             if restored["turnId"] != saved_native["turnId"]:
                 raise ValueError("Native continuation belongs to an earlier user turn.")
             pending_ids = state._native_pending(saved_native) & state._native_pending(restored)
-            if not pending_ids:
+            if not pending_ids and subagent_batch is None:
                 raise ValueError("Native continuation has already been settled.")
-            if pending_ids:
+            retained = self._retained_tool_definitions(restored["messages"])
+
+            def result_content(
+                context: Mapping[str, Any], completion: Mapping[str, Any],
+                observation: Mapping[str, Any] | None,
+            ) -> str:
+                action_id = context.get("requestedActionId")
+                return json.dumps({
+                    "status": completion.get("status") or "completed",
+                    "observations": [
+                        planner.native_result_observation(
+                            item, project_context_active=self._project_context_active,
+                            retained_tool_definitions=retained,
+                        )
+                        for item in loop_state if item.get("actionId") == action_id or item is observation
+                    ],
+                    "actionId": action_id or "",
+                }, ensure_ascii=False)
+
+            if subagent_batch is not None:
+                receipts = {}
+                for member in subagent_batch:
+                    context = member["context"]
+                    call_id = context.get("_nativeCallId")
+                    if call_id in pending_ids:
+                        receipts[call_id] = result_content(context, member["completion"], member["plannerObservation"])
+                state.settle_native_calls(session_id, binding=saved_binding, results=receipts)
+                if pending_ids.difference(receipts):
+                    # A crash can leave proposals without a registered child.
+                    state.normalize_native_pending(session_id, binding=saved_binding)
+            elif pending_ids:
                 # The first still-pending call is the only dispatched action;
                 # later calls remain proposals in the immutable assistant receipt.
                 pending_calls = [call for item in restored["messages"]
@@ -209,25 +242,10 @@ class NativeRuntimeTurn:
                 self.admitted_tool_names = set(admitted_names)
                 if self._queued_calls and not self.admitted_tool_names:
                     raise ValueError("Native continuation tool scope is missing.")
-                pending_ids = {active_id}
-                resumed_result = {
-                    "status": continuation_completion.get("status") or "completed",
-                    "observations": [
-                        planner.native_result_observation(item, project_context_active=self._project_context_active,
-                                                          retained_tool_definitions=self._retained_tool_definitions(restored["messages"]))
-                        for item in loop_state
-                        if item.get("actionId") == continuation_context.get("requestedActionId")
-                        or item is continuation_observation
-                    ],
-                    "actionId": continuation_context.get("requestedActionId") or "",
-                }
-                for call_id in sorted(pending_ids):
-                    state.settle_native_call(
-                        session_id,
-                        binding=saved_binding,
-                        call_id=call_id,
-                        content=json.dumps(resumed_result, ensure_ascii=False),
-                    )
+                state.settle_native_call(
+                    session_id, binding=saved_binding, call_id=active_id,
+                    content=result_content(continuation_context, continuation_completion, continuation_observation),
+                )
             if binding != saved_binding:
                 raise ValueError("Provider settings changed. The action result was saved; send a new message to continue with the selected provider.")
         else:
@@ -389,6 +407,7 @@ class NativeRuntimeTurn:
             return
         self._state.append_native_assistant(self._session_id, binding=self._binding, message=receipt)
         self._argument_failure_counted = False
+        self.subagent_batch_call_ids = ()
         # New receipt: nothing is dispatched yet; the marker proves queued
         # calls never launched until mark_native_dispatch fires.
         if receipt.get("tool_calls"):
@@ -431,6 +450,11 @@ class NativeRuntimeTurn:
             "tool_calls": [copy.deepcopy(call)],
             **({"publicMessages": public_messages} if public_messages else {}),
         }
+
+    def park_subagent_call(self) -> None:
+        """Keep the started child's call unresolved while admitting its siblings."""
+        self._native_decision = None
+        self._parked_subagent_calls = True
 
     def reject_queued_receipt(self) -> None:
         """Bind one whole-receipt admission failure to every unexecuted call."""
@@ -569,7 +593,7 @@ class NativeRuntimeTurn:
         if terminal is not None:
             self._settle_unexecuted(str(terminal.get("nextStep") or "terminal"))
             self._append_terminal_runtime_notice(terminal)
-        if self._queued_calls:
+        if self._queued_calls or self._parked_subagent_calls:
             return
         self.output_truncation.flush_feedback(self)
         while flush_steers and self._native_steers:

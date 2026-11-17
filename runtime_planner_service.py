@@ -3034,6 +3034,14 @@ class RuntimePlannerService:
                                     action_kind="control", tool_name="native_batch", arguments=None,
                                     validation=rejection, phase=phase,
                                 )
+                            if len(calls) > 1:
+                                delegate_names = {
+                                    tool.name for tool in native_tools
+                                    if tool.runtime_name in SUB_AGENT_TASK_TOOLS and not tool.write
+                                }
+                                if all(payload and payload.get("skill_tool") in delegate_names
+                                       for payload, _ in proposals):
+                                    native_turn.subagent_batch_call_ids = tuple(native_call_ids)
                             if calls:
                                 receipt = native_turn.next_receipt()
                                 native_call_ids = [receipt["tool_calls"][0]["id"]]
