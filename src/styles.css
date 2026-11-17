@@ -45,8 +45,7 @@ textarea,
 
 [data-chat-quote-content]::selection,
 [data-chat-quote-content] *::selection {
-  background-color: hsl(var(--primary));
-  color: hsl(var(--primary-foreground));
+  background-color: hsl(var(--primary) / 0.28);
 }
 
 button,

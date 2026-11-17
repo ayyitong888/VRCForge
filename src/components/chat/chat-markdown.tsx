@@ -142,7 +142,7 @@ function buildChatMarkdownComponents(inverted: boolean, allowImages: boolean): C
       const language = className.match(/(?:^|\s)language-([A-Za-z0-9_+-]+)/)?.[1];
       return <MarkdownCodeBlock code={markdownCodeText(codeProps.children)} language={language} inverted={inverted} />;
     },
-    code: ({ node: _node, className, ...props }) => <code className={cn("rounded px-1 py-0.5 font-mono text-[0.92em]", softBgClass, className)} {...props} />,
+    code: ({ node: _node, className, ...props }) => <code className={cn("rounded font-mono", softBgClass, className)} {...props} />,
     strong: ({ node: _node, ...props }) => <strong className={cn("font-semibold", textClass)} {...props} />,
     em: ({ node: _node, ...props }) => <em className="italic" {...props} />,
     del: ({ node: _node, ...props }) => <del className={mutedClass} {...props} />,

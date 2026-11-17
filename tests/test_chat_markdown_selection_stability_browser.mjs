@@ -4,10 +4,13 @@ import {createServer} from 'node:http';
 import {readFile,writeFile} from 'node:fs/promises';
 import {dirname} from 'node:path';
 import {build} from 'esbuild';
+import postcss from 'postcss';
+import tailwind from 'tailwindcss';
 
 const {chromium}=createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH||'playwright');
 const uri=`vrcforge://scene-capture-preview/8d886299-9be1-4baf-8e1f-e205f3a8e5fc?context=runtime%3Asession-fixture&revision=1&store=${'1'.repeat(32)}`;
-const text=`Stable **selection** remains attached while resource context objects change. Drag this answer without losing the selected text.\n\n![Preview](${uri})`;
+const text=`Stable **selection** remains attached while resource context objects change. Drag this answer without losing the selected text.\n\nRun \`npm test\` now.\n\n![Preview](${uri})`;
+const css=(await postcss([tailwind('tailwind.config.ts')]).process('@tailwind base; @tailwind utilities;', {from:undefined})).css;
 const bundle=await build({stdin:{resolveDir:process.cwd(),loader:'tsx',contents:`
 import React,{useEffect,useState} from 'react';import {createRoot} from 'react-dom/client';
 import {ChatMarkdown,ChatResourceImageContext} from './src/components/chat/chat-markdown';
@@ -15,7 +18,7 @@ import {initializeI18n} from './src/i18n';
 function Harness(){const [tick,setTick]=useState(0);const [turn,setTurn]=useState('turn-first');const [enabled,setEnabled]=useState(true);useEffect(()=>{const timer=setInterval(()=>setTick(n=>n+1),50);return()=>clearInterval(timer)},[]);window.__changeTurn=setTurn;window.__setEnabled=setEnabled;window.__renders=tick;return <ChatResourceImageContext.Provider value={enabled?{endpoint:location.origin,chatId:'chat-fixture',projectPath:'D:/fixture-project',sessionId:'session-fixture',clientTurnId:turn}:null}><ChatMarkdown text={${JSON.stringify(text)}}/></ChatResourceImageContext.Provider>;}
 void initializeI18n().then(()=>createRoot(document.getElementById('root')).render(<Harness/>));
 `},bundle:true,write:false,format:'iife',platform:'browser',jsx:'automatic',plugins:process.env.VRCFORGE_MARKDOWN_BEFORE?[{name:'original-markdown',setup(api){api.onLoad({filter:/chat-markdown\.tsx$/},async args=>({contents:await readFile(process.env.VRCFORGE_MARKDOWN_BEFORE,'utf8'),resolveDir:dirname(args.path),loader:'tsx'}));}}]:[]});
-const server=createServer((_req,res)=>{res.setHeader('Content-Type','text/html');res.end(`<style>body{font:20px sans-serif;margin:24px}#root{width:620px;user-select:text}</style><div id="root"></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`)});
+const server=createServer((_req,res)=>{res.setHeader('Content-Type','text/html');res.end(`<style>${css}\nbody{font:20px sans-serif;margin:24px}#root{width:620px;user-select:text}</style><div id="root"></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`)});
 let browser;
 try{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));browser=await chromium.launch({channel:'msedge',headless:true});const page=await browser.newPage();
@@ -33,6 +36,14 @@ try{
  if(process.env.VRCFORGE_MARKDOWN_STABILITY_REPORT)await writeFile(process.env.VRCFORGE_MARKDOWN_STABILITY_REPORT,JSON.stringify(report,null,2));
  assert.equal(report.disconnectedSamples,0,'real pointer drag must retain its original text and strong DOM nodes through fresh equal-field context values');
  assert.ok(selected.length>20&&selected.includes('selection'),'real mouseup retains the selected answer text');
+ const codeGaps=await page.locator('.chat-markdown code').evaluate(code=>{
+   function textRect(node){const range=document.createRange();range.selectNodeContents(node);return range.getBoundingClientRect();}
+   const before=textRect(code.previousSibling);
+   const inline=textRect(code.firstChild);
+   const after=textRect(code.nextSibling);
+   return [inline.left-before.right,after.left-inline.right];
+ });
+ assert.ok(codeGaps.every(gap=>Math.abs(gap)<=1),`selection should reach inline code on both sides: ${codeGaps}`);
  assert.equal(calls.length,1,'equal-field context rerenders do not refetch or remount the authenticated image');
  await page.evaluate(()=>window.__changeTurn('turn-second'));await page.waitForFunction(()=>window.__renders>65);
  await page.waitForFunction(()=>document.querySelector('img')?.getAttribute('src')?.startsWith('data:image/png;base64,'));

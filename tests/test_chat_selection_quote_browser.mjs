@@ -127,15 +127,17 @@ try {
     "the first press outside clears the quote before the clicked control runs");
   assert.equal(await page.locator("#quote-menu").isVisible(), false);
 
-  for (const [primary, expected] of [["22 100% 50%", "rgb(255, 94, 0)"], ["120 100% 25%", "rgb(0, 128, 0)"]]) {
+  for (const [primary, expected] of [["22 100% 50%", "rgba(255, 94, 0, 0.28)"], ["120 100% 25%", "rgba(0, 128, 0, 0.28)"]]) {
     const colors = await page.evaluate((accent) => {
       document.documentElement.style.setProperty("--primary", accent);
       document.documentElement.style.setProperty("--primary-foreground", "0 0% 100%");
-      const message = getComputedStyle(document.querySelector("#user-message"), "::selection");
+      const element = document.querySelector("#user-message");
+      element.style.color = "rgb(24, 25, 26)";
+      const message = getComputedStyle(element, "::selection");
       const code = getComputedStyle(document.querySelector("#code-body"), "::selection");
       return [message.backgroundColor, message.color, code.backgroundColor];
     }, primary);
-    assert.deepEqual(colors, [expected, "rgb(255, 255, 255)", expected]);
+    assert.deepEqual(colors, [expected, "rgb(24, 25, 26)", expected]);
   }
   console.log("PASS quote selection, first outside press, toolbar action, and theme-following highlights");
 } finally {
