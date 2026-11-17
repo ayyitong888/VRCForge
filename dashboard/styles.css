@@ -1351,23 +1351,43 @@ textarea {
   color: var(--md-on-surface-variant);
 }
 
-::-webkit-scrollbar {
-  width: 0.75rem;
-  height: 0.75rem;
+:root {
+  --scrollbar-thumb: color-mix(in srgb, var(--md-primary) 75%, var(--md-on-surface-variant));
 }
 
-::-webkit-scrollbar-track {
-  background: var(--md-surface-container-low);
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+    scrollbar-width: thin;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-track-piece,
+::-webkit-scrollbar-corner {
+  background-color: transparent;
+}
+
+::-webkit-scrollbar-button {
+  display: none;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--md-outline-variant);
-  border-radius: 999px;
-  border: 3px solid var(--md-surface-container-low);
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background-color: var(--scrollbar-thumb);
+  background-clip: padding-box;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--md-outline);
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--md-primary);
 }
 
 @keyframes spin {

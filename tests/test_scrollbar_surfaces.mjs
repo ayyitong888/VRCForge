@@ -25,11 +25,13 @@ const html = `
     <div id="app" class="app-scrollbar surface" data-surface="app"><div class="content"></div></div>
     <div id="sidebar" class="sidebar-scrollbar surface bg-sidebar" data-surface="sidebar"><div class="content"></div></div>
     <div id="quote" class="surface" data-surface="quote"><div class="content"></div></div>
+    <pre id="code" class="surface"><code class="content"></code></pre>
+    <textarea id="input" class="surface">line one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\nline nine\nline ten</textarea>
   </div></main></div>`;
 
 function surfaceSnapshot(page) {
   return page.evaluate(() => {
-    const ids = ["generic", "app", "sidebar", "quote"];
+    const ids = ["generic", "app", "sidebar", "quote", "code", "input"];
     const read = (id) => {
       const element = document.getElementById(id);
       const style = getComputedStyle(element);
@@ -38,6 +40,7 @@ function surfaceSnapshot(page) {
         corner: getComputedStyle(element, "::-webkit-scrollbar-corner").backgroundColor,
         button: getComputedStyle(element, "::-webkit-scrollbar-button").backgroundColor,
         thumbBorder: getComputedStyle(element, "::-webkit-scrollbar-thumb").borderTopColor,
+        thumb: getComputedStyle(element, "::-webkit-scrollbar-thumb").backgroundColor,
         scrollbarColor: style.scrollbarColor,
         background: style.backgroundColor,
         overflowX: style.overflowX,
@@ -59,7 +62,7 @@ try {
     body { margin: 0; }
     #surface-root { display: grid; grid-template-columns: repeat(2, 260px); gap: 12px; padding: 12px; }
     .surface { width: 260px; height: 150px; overflow: scroll; background: hsl(var(--card)); }
-    .content { width: 520px; height: 420px; background: hsl(var(--card)); }
+    .content { display: block; width: 520px; height: 420px; background: hsl(var(--card)); }
     #sidebar { background: hsl(var(--sidebar)); }
   ` });
   const check = async (mode) => {
@@ -71,11 +74,26 @@ try {
     await page.evaluate((palette) => {
       if (palette === "default") delete document.documentElement.dataset.vrcforgePalette;
       else document.documentElement.dataset.vrcforgePalette = palette;
-    }, mode.includes("sunset") ? "sunset" : "default");
+      document.documentElement.style.setProperty("--vrcforge-custom-accent-h", "143");
+      document.documentElement.style.setProperty("--vrcforge-custom-accent-s", "70%");
+      document.documentElement.style.setProperty("--vrcforge-custom-accent-light-l", "42%");
+      document.documentElement.style.setProperty("--vrcforge-custom-accent-dark-l", "62%");
+    }, mode.split("-")[0]);
     const snapshot = await surfaceSnapshot(page);
+    const expectedThumb = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "color-mix(in srgb, hsl(var(--primary)) 75%, hsl(var(--muted-foreground)))";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    });
+    for (const [surface, style] of Object.entries(snapshot)) {
+      assert.equal(style.thumb, expectedThumb, `${mode}: ${surface} thumb follows the theme accent`);
+    }
     assert.equal(snapshot.generic.track, "rgba(0, 0, 0, 0)", `${mode}: generic track follows surface`);
     assert.equal(snapshot.generic.corner, "rgba(0, 0, 0, 0)", `${mode}: generic corner follows surface`);
-    assert.match(snapshot.generic.scrollbarColor, /transparent|rgba\(0, 0, 0, 0\)/i, `${mode}: generic Firefox track is transparent`);
+    assert.equal(snapshot.generic.scrollbarColor, "auto", `${mode}: Chromium uses the shared thumb hover styling`);
     assert.equal(snapshot.app.track, "rgba(0, 0, 0, 0)", `${mode}: app track follows surface`);
     assert.equal(snapshot.app.corner, "rgba(0, 0, 0, 0)", `${mode}: app corner follows surface`);
     assert.equal(snapshot.quote.track, "rgba(0, 0, 0, 0)", `${mode}: quote track follows overlay surface`);
@@ -91,7 +109,11 @@ try {
     return snapshot;
   };
   const snapshots = {};
-  for (const mode of ["default-light", "default-dark", "sunset-light", "sunset-dark"]) snapshots[mode] = await check(mode);
+  for (const mode of ["default-light", "default-dark", "sunset-light", "sunset-dark", "custom-light", "custom-dark"]) {
+    snapshots[mode] = await check(mode);
+  }
+  assert.notEqual(snapshots["default-light"].generic.thumb, snapshots["sunset-light"].generic.thumb);
+  assert.notEqual(snapshots["sunset-light"].generic.thumb, snapshots["custom-light"].generic.thumb);
   await page.evaluate(() => {
     document.documentElement.dataset.vrcforgeWallpaper = "active";
     document.documentElement.dataset.vrcforgeWallpaperScope = "app";
@@ -100,7 +122,21 @@ try {
   assert.equal(wallpaper.sidebar.background, "rgba(0, 0, 0, 0)", "app wallpaper makes the nested sidebar surface transparent");
   assert.equal(wallpaper.sidebar.track, "rgba(0, 0, 0, 0)", "app wallpaper nested sidebar keeps transparent track");
   assert.equal(wallpaper.sidebar.corner, "rgba(0, 0, 0, 0)", "app wallpaper nested sidebar keeps transparent corner");
-  console.log(JSON.stringify({ snapshots, wallpaper }));
+  const dashboardCss = readFileSync(resolve(root, "dashboard/styles.css"), "utf8").replace(/^@import .+;\r?\n/, "");
+  await page.setContent(`<style>${dashboardCss}</style><pre id="code" style="height:20px;overflow:auto">one\ntwo\nthree</pre>`);
+  const dashboard = await page.locator("#code").evaluate((element) => {
+    element.style.color = "color-mix(in srgb, var(--md-primary) 75%, var(--md-on-surface-variant))";
+    return {
+      thumb: getComputedStyle(element, "::-webkit-scrollbar-thumb").backgroundColor,
+      expectedThumb: getComputedStyle(element).color,
+      track: getComputedStyle(element, "::-webkit-scrollbar-track").backgroundColor,
+      overflow: element.scrollHeight > element.clientHeight,
+    };
+  });
+  assert.equal(dashboard.thumb, dashboard.expectedThumb, "the dashboard uses its own theme accent");
+  assert.equal(dashboard.track, "rgba(0, 0, 0, 0)", "the dashboard track follows its surface");
+  assert.ok(dashboard.overflow, "the dashboard code block scrolls");
+  console.log("PASS unified scrollbars on desktop surfaces, inputs, code, and the dashboard");
 } finally {
   await browser.close();
 }

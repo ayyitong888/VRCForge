@@ -69,8 +69,6 @@
     --border: 220 13% 91%;
     --input: 220 13% 91%;
     --ring: 221 83% 53%;
-    --scrollbar-track: 220 14% 96%;
-    --scrollbar-thumb: 220 10% 58%;
   }
 
   html[data-theme="dark"],
@@ -93,8 +91,6 @@
     --border: 224 16% 26%;
     --input: 224 16% 26%;
     --ring: 221 83% 62%;
-    --scrollbar-track: 228 24% 9%;
-    --scrollbar-thumb: 224 12% 40%;
   }
 
   html[data-vrcforge-palette="ocean"] {
@@ -181,8 +177,6 @@
     --muted-foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 42%;
     --border: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 86%;
     --input: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 86%;
-    --scrollbar-track: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 94%;
-    --scrollbar-thumb: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 58%;
   }
 
   html[data-theme="dark"][data-vrcforge-palette="ocean"],
@@ -279,8 +273,6 @@
     --muted-foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 70%;
     --border: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 26%;
     --input: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 26%;
-    --scrollbar-track: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 9%;
-    --scrollbar-thumb: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 40%;
   }
 
   html,
@@ -301,10 +293,19 @@
 
   * {
     @apply border-border;
-    /* Let each surface provide the track behind its thumb; a fixed global
-       track reads as a bright strip on wallpaper, cards, and overlays. */
-    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
-    scrollbar-width: thin;
+  }
+
+  :root,
+  .dark {
+    --scrollbar-thumb: color-mix(in srgb, hsl(var(--primary)) 75%, hsl(var(--muted-foreground)));
+  }
+
+  /* Chromium's standard scrollbar properties override its thumb hover rules. */
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-color: var(--scrollbar-thumb) transparent;
+      scrollbar-width: thin;
+    }
   }
 
   *::-webkit-scrollbar {
@@ -329,8 +330,13 @@
     min-height: 32px;
     border: 2px solid transparent;
     border-radius: 9999px;
-    background-color: hsl(var(--scrollbar-thumb));
+    background-color: var(--scrollbar-thumb);
     background-clip: padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover,
+  *::-webkit-scrollbar-thumb:active {
+    background-color: hsl(var(--primary));
   }
 
   body {
@@ -614,80 +620,4 @@
     }
   }
 
-  .app-scrollbar {
-    color-scheme: light;
-    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
-    scrollbar-width: thin;
-  }
-
-  .dark .app-scrollbar {
-    color-scheme: dark;
-    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
-  }
-
-  .sidebar-scrollbar {
-    --scrollbar-local-thumb: hsl(var(--scrollbar-thumb));
-    --scrollbar-local-thumb-hover: hsl(220 10% 48%);
-    color-scheme: light;
-    scrollbar-color: var(--scrollbar-local-thumb) transparent;
-    scrollbar-width: thin;
-  }
-
-  .dark .sidebar-scrollbar {
-    --scrollbar-local-thumb: hsl(224 12% 42%);
-    --scrollbar-local-thumb-hover: hsl(224 12% 54%);
-    color-scheme: dark;
-  }
-
-  .app-scrollbar::-webkit-scrollbar,
-  .sidebar-scrollbar::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-
-  .app-scrollbar::-webkit-scrollbar-track,
-  .app-scrollbar::-webkit-scrollbar-track-piece,
-  .app-scrollbar::-webkit-scrollbar-corner {
-    background-color: transparent;
-  }
-
-  .app-scrollbar::-webkit-scrollbar-button {
-    width: 0;
-    height: 0;
-    display: none;
-    background-color: transparent;
-  }
-
-  .app-scrollbar::-webkit-scrollbar-thumb {
-    min-height: 32px;
-    border: 2px solid transparent;
-    border-radius: 9999px;
-    background-color: hsl(var(--scrollbar-thumb));
-    background-clip: padding-box;
-  }
-
-  .sidebar-scrollbar::-webkit-scrollbar-track,
-  .sidebar-scrollbar::-webkit-scrollbar-track-piece,
-  .sidebar-scrollbar::-webkit-scrollbar-corner {
-    background-color: transparent;
-  }
-
-  .sidebar-scrollbar::-webkit-scrollbar-button {
-    width: 0;
-    height: 0;
-    display: none;
-    background-color: transparent;
-  }
-
-  .sidebar-scrollbar::-webkit-scrollbar-thumb {
-    min-height: 32px;
-    border: 2px solid transparent;
-    border-radius: 9999px;
-    background-color: var(--scrollbar-local-thumb);
-    background-clip: padding-box;
-  }
-
-  .sidebar-scrollbar::-webkit-scrollbar-thumb:hover {
-    background-color: var(--scrollbar-local-thumb-hover);
-  }
 }
