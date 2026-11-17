@@ -20,6 +20,8 @@ export function ProjectPickerModal({
   onRemoveCustomProject,
   onRestoreProject,
   onNewProjectPathChange,
+  onBrowseProjectFolder,
+  pickingProjectFolder = false,
   onClearError,
   onAddProjectPath,
   onRefreshProjects,
@@ -47,6 +49,8 @@ export function ProjectPickerModal({
   onRemoveCustomProject: (path: string) => void;
   onRestoreProject: (path: string) => void;
   onNewProjectPathChange: (value: string) => void;
+  onBrowseProjectFolder?: () => void;
+  pickingProjectFolder?: boolean;
   onClearError: () => void;
   onAddProjectPath: () => void;
   onRefreshProjects?: () => void;
@@ -81,6 +85,52 @@ export function ProjectPickerModal({
           </button>
         </div>
         <div className="app-scrollbar mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
+          <div>
+            <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.addProjectFolder")}</div>
+            <div className="mb-2 flex gap-3" role="radiogroup" aria-label={t("project.chooseProjectType")}>
+              {(["general", "unity"] as const).map((value) => (
+                <label key={value} className="flex items-center gap-1.5 text-xs">
+                  <input
+                    type="radio"
+                    name="project-type"
+                    value={value}
+                    checked={projectType === value}
+                    disabled={saving || pickingProjectFolder}
+                    onChange={() => onProjectTypeChange?.(value)}
+                  />
+                  {t(value === "general" ? "project.generalProject" : "project.unityProject")}
+                </label>
+              ))}
+            </div>
+            {onBrowseProjectFolder ? (
+              <Button type="button" variant="outline" disabled={saving || pickingProjectFolder} onClick={onBrowseProjectFolder}>
+                {saving || pickingProjectFolder ? <Loader2 className="h-4 w-4 animate-spin" /> : <Folder className="h-4 w-4" />}
+                {t("project.chooseProjectFolder")}
+              </Button>
+            ) : <div className="flex gap-2">
+              <input
+                value={newProjectPath}
+                onChange={(event) => {
+                  onNewProjectPathChange(event.target.value);
+                  onClearError();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    onAddProjectPath();
+                  }
+                }}
+                placeholder={t(projectType === "general" ? "project.generalPathPlaceholder" : "project.pathPlaceholder")}
+                className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+              />
+              <Button type="button" disabled={saving || !newProjectPath.trim()} onClick={onAddProjectPath}>
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {t("common.add")}
+              </Button>
+            </div>}
+            {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
+            {!onBrowseProjectFolder && <p className="mt-2 text-xs text-muted-foreground">{t(projectType === "general" ? "project.generalPathHint" : "project.pathHint")}</p>}
+          </div>
           <div>
             <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
               <span className="flex-1">{t("project.scannedProjects")}</span>
@@ -163,46 +213,6 @@ export function ProjectPickerModal({
               </div>
             </div>
           ) : null}
-          <div>
-            <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.addProjectFolder")}</div>
-            <div className="mb-2 flex gap-3" role="radiogroup" aria-label={t("project.chooseProjectType")}>
-              {(["general", "unity"] as const).map((value) => (
-                <label key={value} className="flex items-center gap-1.5 text-xs">
-                  <input
-                    type="radio"
-                    name="project-type"
-                    value={value}
-                    checked={projectType === value}
-                    onChange={() => onProjectTypeChange?.(value)}
-                  />
-                  {t(value === "general" ? "project.generalProject" : "project.unityProject")}
-                </label>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <input
-                value={newProjectPath}
-                onChange={(event) => {
-                  onNewProjectPathChange(event.target.value);
-                  onClearError();
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-                    event.preventDefault();
-                    onAddProjectPath();
-                  }
-                }}
-                placeholder={t(projectType === "general" ? "project.generalPathPlaceholder" : "project.pathPlaceholder")}
-                className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
-              />
-              <Button type="button" disabled={saving || !newProjectPath.trim()} onClick={onAddProjectPath}>
-                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                {t("common.add")}
-              </Button>
-            </div>
-            {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
-            <p className="mt-2 text-xs text-muted-foreground">{t(projectType === "general" ? "project.generalPathHint" : "project.pathHint")}</p>
-          </div>
         </div>
       </section>
     </div>

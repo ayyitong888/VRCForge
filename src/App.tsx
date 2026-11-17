@@ -711,6 +711,8 @@ export default function App() {
     showProjectModal,
     setShowProjectModal,
     newProjectPath,
+    pickingProjectFolder,
+    browseProjectFolder,
     setNewProjectPath,
     newProjectType,
     setNewProjectType,
@@ -4956,6 +4958,8 @@ export default function App() {
         onRemoveCustomProject={removeCustomProject}
         onRestoreProject={unhideProject}
         onNewProjectPathChange={setNewProjectPath}
+        onBrowseProjectFolder={isTauriRuntime() ? () => void browseProjectFolder() : undefined}
+        pickingProjectFolder={pickingProjectFolder}
         onProjectTypeChange={setNewProjectType}
         onClearError={() => setProjectModalError("")}
         onAddProjectPath={() => void addProjectPath()}

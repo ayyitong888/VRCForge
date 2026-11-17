@@ -52,6 +52,7 @@ export function useProjectManagement({
   const { t } = useTranslation();
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectPath, setNewProjectPath] = useState("");
+  const [pickingProjectFolder, setPickingProjectFolder] = useState(false);
   const [newProjectType, setNewProjectType] = useState<ProjectType>("unity");
   const [savingProjectPrefs, setSavingProjectPrefs] = useState(false);
   const [projectModalError, setProjectModalError] = useState("");
@@ -228,8 +229,8 @@ export function useProjectManagement({
     }
   }
 
-  async function addProjectPath() {
-    const path = newProjectPath.trim();
+  async function addProjectPath(value = newProjectPath) {
+    const path = value.trim();
     if (!path || savingProjectPrefs) {
       return;
     }
@@ -263,6 +264,20 @@ export function useProjectManagement({
       }
     }
     onProjectAdded(path, newProjectType);
+  }
+
+  async function browseProjectFolder() {
+    if (pickingProjectFolder || savingProjectPrefs) return;
+    setPickingProjectFolder(true);
+    setProjectModalError("");
+    try {
+      const selected = await invoke<string | null>("select_folder", { initialPath: newProjectPath || undefined });
+      if (selected) await addProjectPath(selected);
+    } catch (cause) {
+      setProjectModalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPickingProjectFolder(false);
+    }
   }
 
   function removeCustomProject(path: string) {
@@ -532,6 +547,8 @@ export function useProjectManagement({
     showProjectModal,
     setShowProjectModal,
     newProjectPath,
+    pickingProjectFolder,
+    browseProjectFolder,
     setNewProjectPath,
     newProjectType,
     setNewProjectType,
