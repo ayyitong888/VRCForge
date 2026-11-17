@@ -7532,6 +7532,10 @@ class AgentGateway:
                              "planner": "runtime", **budget_decision}
                 self._cancel_turn_questions_at_pause(session_id, turn_id, client_turn_id)
                 break
+            if native_binding and not queued_native_action:
+                planner_observe["skippedNativeQuestions"] = self.questions.skipped_native_questions(
+                    session_id=session_id, project_root=project_root, binding=native_binding,
+                )
             planner_started = time.perf_counter()
             plan = self.runtime_planner.plan_agent_turn(
                 message,

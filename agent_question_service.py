@@ -52,6 +52,7 @@ CALL_USER_USAGE_INSTRUCTION = (
 )
 QUESTION_CONFIRMATION_INSTRUCTION = (
     "If a tool already created a pending confirmation, reuse the existing confirmation card. "
+    "A skippedQuestions receipt in host runtime context means the user skipped that question. Leave work that depends on its answer unresolved, continue independent work, and ask again only if the user reopens it or new facts require a distinct decision. "
     "Use the browser confirmation flow for age checks, cookie choices, or account authorization, and the dedicated approval flow for supervised Unity writes. "
 )
 QUESTION_LANGUAGE_INSTRUCTION = (
@@ -796,6 +797,29 @@ class AgentQuestionService:
                 or (project_root and self._scope.normalize_path(owner_project) != self._scope.normalize_path(project_root))):
             raise AgentQuestionServiceError("Question does not belong to this session and project.", status_code=404)
         return self._redact(question)
+
+    def skipped_native_questions(self, *, session_id: str, project_root: str, binding: str) -> list[dict[str, str]]:
+        """Return saved skips with their owner call identity for a native request."""
+        expected_project = self._scope.normalize_path(project_root) if project_root else ""
+        receipts = []
+        for question in self._project(include_answered=True).values():
+            if (question.get("sessionId") != session_id or question.get("status") != "answered"
+                    or question.get("selectedOptionId") != "skip"):
+                continue
+            seed = question.get("runtimeTaskSeed")
+            if not isinstance(seed, Mapping):
+                continue
+            native_call_id = seed.get("_nativeCallId")
+            conversation = seed.get("_nativeConversation")
+            if (not isinstance(native_call_id, str) or not native_call_id
+                    or not isinstance(conversation, Mapping) or conversation.get("binding") != binding):
+                continue
+            owner_project = str(question.get("projectRoot") or "")
+            if (self._scope.normalize_path(owner_project) if owner_project else "") != expected_project:
+                continue
+            receipts.append({"callId": native_call_id, "questionId": str(question["questionId"]),
+                             "question": self._sanitize_answer_for_model(str(question["question"]))})
+        return receipts
 
     def _project(self, *, include_answered: bool = False) -> dict[str, dict[str, object]]:
         return self._persistence.project(include_answered=include_answered)

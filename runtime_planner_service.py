@@ -4986,6 +4986,16 @@ class RuntimePlannerService:
             {"runtimeContextInformation": stable_context_text} if stable_context_text else {}
         )
         turn_context: dict[str, Any] = {"runtimeContextTurn": turn_context_text}
+        skipped_questions = ensure_list(observe.get("skippedNativeQuestions"))
+        if skipped_questions:
+            history_call_ids = {item["tool_call_id"] for item in messages if item.get("role") == "tool"}
+            # A newer turn can already have normalized the older question's
+            # result. Keep that paired result immutable and report the user's
+            # later disposition only where the originating call is in history.
+            matching_skips = [{"questionId": item["questionId"], "question": item["question"]}
+                              for item in skipped_questions if item["callId"] in history_call_ids]
+            if matching_skips:
+                turn_context["skippedQuestions"] = matching_skips
         if ensure_dict(observe.get("skillPolicy")):
             turn_context["skillPolicy"] = dict(ensure_dict(observe.get("skillPolicy")))
         if activated:

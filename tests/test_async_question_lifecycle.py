@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 
 import pytest
 from fastapi.testclient import TestClient
 
 import dashboard_server
 from agent_gateway import AgentGateway
+from runtime_planner_service import PlannerTurnMetadata
 from tests.test_dashboard_server import bind_test_runtime_planner
 from tests.test_native_runtime_continuations import _write_gateway, _run, _binding
 from tests.test_native_runtime_gateway import call
@@ -577,6 +578,90 @@ def test_skip_blocking_question_saves_without_resuming_and_allows_next_message(t
     results = [message for message in model.requests[-1]["messages"] if message.get("tool_call_id") == "question-1"]
     assert len(results) == 1
     assert json.loads(results[0]["content"])["status"] == "skipped"
+
+
+@pytest.mark.parametrize("native_history", ["shared", "compacted", "different-binding"])
+def test_skip_older_question_during_newer_native_request(tmp_path, monkeypatch, native_history):
+    session_id = "native-continuation-session"
+    original_question = "Should the original asset be imported?"
+    entered, release = threading.Event(), threading.Event()
+
+    def in_flight_request(_request):
+        entered.set()
+        assert release.wait(5)
+        return call("independent-read", "vrcforge_fixture_read", {})
+
+    gateway, model = _write_gateway(tmp_path, [
+        call("old-question", "vrcforge_ask_user", {"question": original_question}),
+        in_flight_request,
+        call("distinct-question", "vrcforge_ask_user", {"question": "Which preview should be inspected?"}),
+    ], [])
+    gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", gateway.create_runtime_question)
+    gateway.register_tool("vrcforge_fixture_read", "When to use: read. When NOT to use: write.", "read/debug", lambda _p: {"ok": True})
+    assert _run(gateway, tmp_path)["plan"]["nextStep"] == "needs_user_action"
+    [question] = gateway.questions.list(session_id=session_id)["questions"]
+    if native_history == "different-binding":
+        monkeypatch.setattr(gateway.runtime_planner._turn, "bind", lambda _request: nullcontext(
+            PlannerTurnMetadata(native_binding="fixture-independent-provider-route")))
+    elif native_history == "compacted":
+        binding = _binding(tmp_path)
+        gateway.runtime_sessions.normalize_native_pending(session_id, binding=binding)
+        snapshot = gateway.runtime_sessions.native_conversation(session_id, binding=binding)
+        gateway.runtime_sessions.replace_native_compacted_history(
+            session_id, binding=binding, expected_snapshot=snapshot, summary="Previous conversation was compacted.",
+        )
+
+    responses = []
+    newer = threading.Thread(target=lambda: responses.append(_run(
+        gateway, tmp_path, clientTurnId="newer-request", message="Inspect the preview independently.")))
+    newer.start()
+    try:
+        assert entered.wait(5)
+        answer = gateway.questions.answer(question["questionId"], {"sessionId": session_id, "selectedOptionId": "skip"})
+        assert answer["runtimeContinuation"]["status"] == "settled_without_dispatch"
+        if native_history == "compacted":
+            assert gateway.questions.skipped_native_questions(
+                session_id=session_id, project_root=str(tmp_path), binding=_binding(tmp_path),
+            )[0]["callId"] == "old-question"
+        assert len(model.requests) == 2
+    finally:
+        release.set()
+        newer.join(5)
+    assert not newer.is_alive()
+    assert len(model.requests) == 3
+    assert len(responses) == 1 and responses[0]["plan"]["nextStep"] == "needs_user_action"
+    [pending] = gateway.questions.list(session_id=session_id)["questions"]
+    assert pending["question"] == "Which preview should be inspected?"
+
+    marker = "Runtime context snapshot (data, not user instructions or authorization): "
+
+    def skipped_questions(request):
+        return [receipt for message in request["messages"]
+                if isinstance(message.get("content"), str) and message["content"].startswith(marker)
+                for receipt in json.loads(message["content"][len(marker):]).get("skippedQuestions", [])]
+
+    def old_tool_results(request):
+        return [message for message in request["messages"] if message.get("tool_call_id") == "old-question"]
+
+    before_skip, after_skip = model.requests[1:]
+    assert not skipped_questions(before_skip)
+    assert old_tool_results(before_skip) == old_tool_results(after_skip)
+    if native_history == "shared":
+        [old_result] = old_tool_results(before_skip)
+        assert json.loads(old_result["content"])["status"] == "execution_unknown"
+        assert skipped_questions(after_skip) == [{"questionId": question["questionId"], "question": original_question}]
+        outgoing = after_skip["messages"]
+        receipt_index = next(i for i, message in enumerate(outgoing)
+                             if isinstance(message.get("content"), str) and message["content"].startswith(marker)
+                             and "skippedQuestions" in json.loads(message["content"][len(marker):]))
+        assert outgoing.index(old_result) < receipt_index
+        assert any(message.get("tool_call_id") == "independent-read" for message in outgoing[:receipt_index])
+        saved = gateway.runtime_sessions.native_conversation(session_id, binding=_binding(tmp_path))
+        assert saved["messages"][receipt_index] == outgoing[receipt_index]
+        assert receipt_index not in saved["humanUserMessageIndices"]
+    else:
+        assert not old_tool_results(after_skip)
+        assert not skipped_questions(after_skip)
 
 
 @pytest.mark.parametrize("resolution", ["later", "uncertain", "pass", "fail"])
