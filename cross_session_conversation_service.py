@@ -11,13 +11,13 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, unquote
 
+from agent_runtime_followup_queue import AGENT_RELAY_INPUT_PREFIX
 from background_goal_runtime import classify_runtime_plan_outcome
 
 MAX_CROSS_SESSION_AGENTIC_TURNS = 25
 CHAT_LINK_PREFIX = "vrcforge://chat/"
 _CHAT_LINK = re.compile(r"vrcforge://chat/((?:%[0-9A-Fa-f]{2}|[^%/?#])+)", re.IGNORECASE)
 _INVALID_LINK_ID = re.compile(r"[\\/\x00-\x1f\x7f]")
-AGENT_RELAY_INPUT_PREFIX = "agent-forward-"
 
 
 class CrossSessionConversationError(ValueError):

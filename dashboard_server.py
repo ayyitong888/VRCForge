@@ -174,8 +174,8 @@ from agent_question_service import (
     CALL_USER_USAGE_INSTRUCTION,
 )
 from credential_redaction import redact_credential_text
+from agent_runtime_followup_queue import AGENT_RELAY_INPUT_PREFIX
 from cross_session_conversation_service import (
-    AGENT_RELAY_INPUT_PREFIX,
     CrossSessionConversationError,
     CrossSessionConversationService,
 )

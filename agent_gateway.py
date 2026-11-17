@@ -112,7 +112,7 @@ from agent_native_history_store import NativeHistoryStore
 from agent_runtime_native_turn import NativeRuntimeTurn
 from agent_progress_evidence import accepted_receipt, completion_checks, matched_checks
 from channel_project_selection import TOOL_NAME as PROJECT_SELECTION_TOOL, register_channel_project_selection
-from agent_runtime_followup_queue import AgentRuntimeFollowupQueue, FollowupQueuePorts
+from agent_runtime_followup_queue import AGENT_RELAY_INPUT_PREFIX, AgentRuntimeFollowupQueue, FollowupQueuePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_runtime_event_projection import project_runtime_turn_event
 from request_usage_reconciliation import reconcile_request_usage
@@ -6264,7 +6264,9 @@ class AgentGateway:
             # Child instructions and selected materials are task data. Only the
             # server-owned parent scope can authorize local filesystem access.
             root_candidates = list(child_read_roots) if child_read_roots is not None else [project_root]
-        else:
+        elif not client_turn_id.startswith(AGENT_RELAY_INPUT_PREFIX):
+            # A forwarded message inherits the target's scope. Its quoted
+            # references cannot establish new user-owned filesystem roots.
             root_candidates.extend(extract_explicit_local_roots(message))
         seen_general_roots: set[str] = set()
         for candidate in root_candidates:

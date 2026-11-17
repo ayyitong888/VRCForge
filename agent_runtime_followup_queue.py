@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+AGENT_RELAY_INPUT_PREFIX = "agent-forward-"
+
 
 @dataclass(frozen=True)
 class FollowupQueuePorts:
