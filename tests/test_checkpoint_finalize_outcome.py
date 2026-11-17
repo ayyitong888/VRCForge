@@ -11,7 +11,7 @@ from agent_task_loop import TASK_LOOP_SCHEMA
 def failed_finalization(tmp_path, monkeypatch, request):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
-    config.enabled = config.allow_write_requests = True
+    config.enabled = True
     gateway.save_config(config)
     project = tmp_path / "Project"
     for directory in ("Assets", "Packages", "ProjectSettings"):

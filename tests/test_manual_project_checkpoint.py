@@ -28,7 +28,6 @@ def test_manual_checkpoint_archives_and_restores_project_files_including_package
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "approval"
     gateway.save_config(config)
     tool = "vrcforge_create_project_checkpoint"

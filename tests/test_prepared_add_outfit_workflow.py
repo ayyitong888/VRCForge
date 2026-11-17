@@ -277,7 +277,6 @@ def test_add_outfit_receipt_completes_internal_and_external_transactions(
     gateway = AgentGateway(tmp_path / "app" / "config.json", tmp_path / "app" / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
     service = gateway.approval_transactions
     service.checkpoint_prepare_handler = lambda _root, **_kwargs: {"ok": True}
@@ -348,7 +347,6 @@ def test_add_outfit_transaction_keeps_missing_object_and_core_failure_failed(
     gateway = AgentGateway(tmp_path / "app" / "config.json", tmp_path / "app" / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
     service = gateway.approval_transactions
     service.checkpoint_prepare_handler = lambda _root, **_kwargs: {"ok": True}

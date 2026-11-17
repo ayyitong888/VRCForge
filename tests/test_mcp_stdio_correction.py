@@ -231,7 +231,6 @@ def test_external_write_branch_error_returns_tool_result_before_target_binding(t
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
     name = "vrcforge_duplicate_project_asset"
     gateway.approval_transactions.register_write_handler(name, "Copy asset", "medium", lambda _: {})

@@ -968,7 +968,6 @@ def test_generic_parameter_request_respects_selected_permission_mode(
     )
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = execution_mode
     config.roslyn_risk_acknowledged = execution_mode == "roslyn_full_auto"
     config.allow_roslyn_advanced = execution_mode == "roslyn_full_auto"

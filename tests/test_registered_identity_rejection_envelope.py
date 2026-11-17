@@ -19,7 +19,7 @@ def registered_rejection(monkeypatch, tmp_path):
     import dashboard_server as server
 
     gateway = server.AGENT_GATEWAY
-    config = agent_gateway.AgentGatewayConfig(enabled=True, allow_write_requests=True)
+    config = agent_gateway.AgentGatewayConfig(enabled=True)
     monkeypatch.setattr(gateway, "ensure_config", lambda: config)
     monkeypatch.setattr(agent_gateway, "validate_runtime_execution_target", validate_execution_target)
     name = "vrcforge_manage_fx_animator"

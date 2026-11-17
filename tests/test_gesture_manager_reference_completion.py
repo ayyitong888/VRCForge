@@ -17,7 +17,6 @@ def _registered_fixture(tmp_path, monkeypatch, tool=TOOL, scope="avatar"):
     registered = ds.AGENT_GATEWAY._write_handlers[tool]
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
-    config.allow_write_requests = True
     config.execution_mode = "approval"
     gateway.save_config(config)
     gateway._write_handlers[tool] = registered

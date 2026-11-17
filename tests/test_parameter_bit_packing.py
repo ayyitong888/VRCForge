@@ -1409,7 +1409,6 @@ def test_fastapi_preview_request_and_approved_execution_chain(
     dashboard_server.register_agent_gateway_tools()
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "approval"
     gateway.save_config(config)
     headers = {"Authorization": f"Bearer {config.token}"}

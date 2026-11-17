@@ -224,7 +224,6 @@ def test_gateway_prepare_and_execute_keeps_approval_checkpoint_boundary(tmp_path
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
     service = gateway.approval_transactions
     service.register_write_handler(

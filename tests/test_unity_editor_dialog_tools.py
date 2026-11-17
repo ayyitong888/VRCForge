@@ -148,7 +148,6 @@ def test_standalone_reload_uses_generic_approval_without_core_binding(context, m
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = execution_mode
     config.roslyn_risk_acknowledged = execution_mode == "roslyn_full_auto"
     gateway.save_config(config)
@@ -275,7 +274,6 @@ def test_external_mcp_dismiss_uses_native_lane_without_core(context, monkeypatch
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "roslyn_full_auto"
     config.roslyn_risk_acknowledged = True
     gateway.save_config(config)

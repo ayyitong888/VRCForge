@@ -89,7 +89,6 @@ def test_gateway_read_and_supervised_write_return_operation_and_fresh_readback_c
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "auto"
     gateway.save_config(config)
 

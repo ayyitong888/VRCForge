@@ -83,7 +83,6 @@ def test_approval_preview_and_reviewer_receive_only_same_session_target_failures
 
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     service = gateway.approval_transactions
-    gateway.ensure_config().allow_write_requests = True
     service.register_write_handler("fixture_write", "Fixture write", "medium", lambda args: {"ok": True})
     for index, (session, target, status) in enumerate([
         ("s", "Assets/Body.mat", "rejected"), ("s", "Assets/Body.mat", "failed"),

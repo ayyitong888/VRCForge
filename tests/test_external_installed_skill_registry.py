@@ -21,7 +21,6 @@ def isolated_installed_skill_gateway(root: Path) -> Iterator[Path]:
         AgentGatewayConfig(
             enabled=True,
             require_token=False,
-            allow_write_requests=True,
             execution_mode="full",
         )
     )

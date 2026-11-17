@@ -40,7 +40,6 @@ def _write_gateway(tmp_path, replies, invoked):
     )
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "approval"
     gateway.save_config(config)
     model = NativeModel(replies)

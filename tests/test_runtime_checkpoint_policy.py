@@ -22,7 +22,6 @@ def _service(tmp_path: Path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
     return gateway.approval_transactions
 

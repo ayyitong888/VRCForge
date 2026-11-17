@@ -23,7 +23,6 @@ def app_capture_client(tmp_path, monkeypatch):
     gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "approval"
     gateway.save_config(config)
     for name in ("vrcforge_capture_screenshot", "vrcforge_capture_multi_screenshot"):

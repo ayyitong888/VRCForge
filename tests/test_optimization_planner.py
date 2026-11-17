@@ -748,7 +748,6 @@ def test_mcp_projection_exposes_read_plan_without_direct_apply(
 ) -> None:
     config = replace(
         dashboard_server.AGENT_GATEWAY.ensure_config(),
-        allow_write_requests=True,
     )
     set_gateway_approval_config(monkeypatch, dashboard_server.AGENT_GATEWAY, config)
     manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
@@ -797,7 +796,6 @@ def test_optimizer_apply_requests_are_stable_request_tools_without_direct_apply(
 ) -> None:
     config = replace(
         dashboard_server.AGENT_GATEWAY.ensure_config(),
-        allow_write_requests=True,
     )
     set_gateway_approval_config(monkeypatch, dashboard_server.AGENT_GATEWAY, config)
     manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
@@ -935,7 +933,7 @@ def test_wrapper_only_optimizer_targets_reject_generic_apply_request(monkeypatch
     set_gateway_approval_config(
         monkeypatch,
         dashboard_server.AGENT_GATEWAY,
-        AgentGatewayConfig(enabled=True, allow_write_requests=True),
+        AgentGatewayConfig(enabled=True),
     )
     with pytest.raises(dashboard_server.AgentGatewayError, match="dedicated VRCForge request tool"):
         dashboard_server.AGENT_GATEWAY.approval_transactions.create_apply_request(
@@ -957,7 +955,7 @@ def test_optimizer_apply_request_requires_explicit_approval_even_in_auto_mode(mo
     set_gateway_approval_config(
         monkeypatch,
         dashboard_server.AGENT_GATEWAY,
-        AgentGatewayConfig(enabled=True, allow_write_requests=True, execution_mode="auto"),
+        AgentGatewayConfig(enabled=True, execution_mode="auto"),
     )
     monkeypatch.setattr(
         dashboard_server,
@@ -1008,7 +1006,7 @@ def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch, tmp_pat
     set_gateway_approval_config(
         monkeypatch,
         dashboard_server.AGENT_GATEWAY,
-        AgentGatewayConfig(enabled=True, allow_write_requests=True, execution_mode="auto"),
+        AgentGatewayConfig(enabled=True, execution_mode="auto"),
     )
     try:
         dashboard_server.AGENT_GATEWAY.approval_transactions.register_write_handler(
@@ -1064,7 +1062,6 @@ def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch
         dashboard_server.AGENT_GATEWAY,
         AgentGatewayConfig(
             enabled=True,
-            allow_write_requests=True,
             execution_mode="roslyn_full_auto",
         ),
     )
@@ -1459,7 +1456,6 @@ def test_parameter_optimizer_entry_reprepares_then_runs_the_approved_canonical_w
     )
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "auto"
     gateway.save_config(config)
     monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)

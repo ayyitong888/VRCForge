@@ -104,7 +104,6 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.gateway.configure_paths(root / "agent_gateway.json", root / "agent_gateway")
         config = self.gateway.ensure_config()
         config.enabled = True
-        config.allow_write_requests = True
         config.execution_mode = "approval"
         self.gateway.save_config(config)
         self.gateway.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}

@@ -23,7 +23,6 @@ def isolated_external_vsk_gateway() -> Iterator[Path]:
             AgentGatewayConfig(
                 enabled=True,
                 require_token=False,
-                allow_write_requests=True,
                 execution_mode="full",
             )
         )
@@ -328,7 +327,6 @@ def test_external_vsk_roundtrip_crosses_stdio_and_reads_back_an_isolated_import(
             AgentGatewayConfig(
                 enabled=True,
                 require_token=False,
-                allow_write_requests=True,
                 execution_mode="full",
             )
         )

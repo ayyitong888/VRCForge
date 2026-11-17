@@ -34,7 +34,6 @@ def dispatch_case(tmp_path, monkeypatch):
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "auto"
     gateway.save_config(config)
     gateway._write_handlers[MENU] = copy(dashboard_server.AGENT_GATEWAY._write_handlers[MENU])

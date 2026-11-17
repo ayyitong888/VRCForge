@@ -98,7 +98,6 @@ def _shell_request(gateway, project, *, grant="valid", change_requested_argument
 def _gateway(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
-    config.allow_write_requests = True
     gateway.save_config(config)
     project = tmp_path / "SyntheticUnityProject"
     (project / "Assets").mkdir(parents=True)

@@ -17,7 +17,6 @@ from unity_editor_extension_tools import editor_menu_request
 ])
 def test_original_zcode_menu_argument_failure_leads_receipt(tmp_path, arguments, reason, external_lane):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
-    gateway.ensure_config().allow_write_requests = True
     gateway.approval_transactions.register_write_handler(
         "vrcforge_execute_unity_editor_menu", "Menu fixture", "high",
         lambda _: pytest.fail("invalid arguments must not invoke Unity"),

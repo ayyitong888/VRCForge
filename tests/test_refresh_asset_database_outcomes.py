@@ -165,7 +165,6 @@ def test_package_resolution_refresh_passes_actual_external_write_completion_guar
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
     project = tmp_path / "UnityProject"
     for folder in ("Assets", "Packages", "ProjectSettings"):

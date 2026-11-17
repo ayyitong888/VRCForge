@@ -19,7 +19,6 @@ def _gateway(tmp_path: Path) -> AgentGateway:
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
     return gateway
 

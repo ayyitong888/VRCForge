@@ -343,7 +343,6 @@ def test_allowed_modes_execute_signed_write_through_existing_approval_and_checkp
     gateway.save_config(
         AgentGatewayConfig(
             enabled=True,
-            allow_write_requests=True,
             execution_mode=execution_mode,
         )
     )

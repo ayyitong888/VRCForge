@@ -985,7 +985,6 @@ def test_generic_apply_cannot_forge_shell_classification_snapshot(tmp_path: Path
     gateway = AgentGateway(tmp_path / "agent_gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
 
     with pytest.raises(AgentGatewayError, match="dedicated VRCForge request tool") as raised:

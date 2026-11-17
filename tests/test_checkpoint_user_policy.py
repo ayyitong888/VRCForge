@@ -218,7 +218,6 @@ def test_revoked_task_capability_is_not_recreated_from_old_write_policy(tmp_path
 def test_approved_write_skip_omits_checkpoint_but_keeps_writer_and_persisted_readback(tmp_path, monkeypatch):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
-    config.allow_write_requests = True
     gateway.save_config(config)
     project = tmp_path / "Project"
     project.mkdir()
@@ -266,7 +265,6 @@ def test_approved_write_skip_omits_checkpoint_but_keeps_writer_and_persisted_rea
 def test_default_checkpoint_failure_still_blocks_writer(tmp_path, monkeypatch):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
-    config.allow_write_requests = True
     gateway.save_config(config)
     project = tmp_path / "Project"
     project.mkdir()
@@ -293,7 +291,6 @@ def test_default_checkpoint_failure_still_blocks_writer(tmp_path, monkeypatch):
 def test_roslyn_full_auto_skip_writes_without_reviewer_or_checkpoint(tmp_path, monkeypatch):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
-    config.allow_write_requests = True
     config.execution_mode = "roslyn_full_auto"
     config.allow_roslyn_advanced = True
     config.roslyn_risk_acknowledged = True
@@ -343,7 +340,6 @@ def test_external_request_does_not_receive_app_user_source_authority(monkeypatch
 def test_apply_tool_payload_cannot_supply_keyword_task_context(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
-    config.allow_write_requests = True
     gateway.save_config(config)
     tool = "vrcforge_fixture_untrusted_task_context"
     gateway.approval_transactions.register_write_handler(tool, "Fixture", "medium", lambda _args: {"ok": True})
@@ -382,7 +378,6 @@ def test_app_route_overwrites_client_supplied_source_marker(monkeypatch):
 def test_approval_preserves_skip_for_equivalent_project_path_spelling(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
-    config.allow_write_requests = True
     gateway.save_config(config)
     project = tmp_path / "Project"
     project.mkdir()
@@ -464,7 +459,6 @@ def test_internal_write_argument_choice_uses_current_owner_message(monkeypatch):
 def test_reenabled_session_requires_checkpoint_for_older_pending_skip(tmp_path, monkeypatch):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
-    config.allow_write_requests = True
     gateway.save_config(config)
     project = tmp_path / "Project"
     project.mkdir()

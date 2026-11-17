@@ -12,7 +12,6 @@ def _gateway(tmp_path: Path, execution_mode: str) -> AgentGateway:
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = execution_mode
     config.roslyn_risk_acknowledged = execution_mode in {
         "roslyn_full_auto",

@@ -30,7 +30,6 @@ def _reference():
 def _enable_approval_writes(gateway):
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "approval"
     gateway.save_config(config)
 

@@ -61,7 +61,6 @@ def test_external_chat_repair_is_execution_only_and_keeps_real_approval_boundary
         gateway = AgentGateway(root / "config" / "gateway.json", root / "audit")
         config = gateway.ensure_config()
         config.enabled = True
-        config.allow_write_requests = True
         config.execution_mode = "approval"
         gateway.save_config(config)
         gateway.approval_transactions.register_write_handler(

@@ -30,7 +30,6 @@ def test_external_confirmation_notifies_app_until_rejected_or_expired(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     gateway.save_config(config)
     tool = "vrcforge_badge_confirmation_probe"
     executed = []

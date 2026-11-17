@@ -207,7 +207,6 @@ def test_external_mcp_direct_write_never_uses_internal_pending_refresh_callback(
     config = gateway.ensure_config()
     config.enabled = True
     config.token = "gateway-token"
-    config.allow_write_requests = True
     config.execution_mode = "auto"
     gateway.save_config(config)
     observed: list[dict] = []

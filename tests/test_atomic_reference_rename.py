@@ -1275,7 +1275,6 @@ def test_dashboard_fastapi_preview_request_approval_and_apply_are_one_bound_chai
     dashboard_server.register_agent_gateway_tools()
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "approval"
     gateway.save_config(config)
     headers = {"Authorization": f"Bearer {config.token}"}

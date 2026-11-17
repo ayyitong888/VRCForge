@@ -26,7 +26,7 @@ def execute_interrupted_import(receipt, monkeypatch):
          "materializations": [], "targetIndex": 0, "expectedAssetPaths": receipt.status["expectedAssetPaths"],
          "projectIdentity": {"projectPath": str(receipt.project)}})
     gateway = AgentGateway(receipt.root / "config.json", receipt.root / "audit")
-    config = gateway.ensure_config(); config.enabled = True; config.allow_write_requests = True; gateway.save_config(config)
+    config = gateway.ensure_config(); config.enabled = True; gateway.save_config(config)
     service = gateway.approval_transactions
     executions = []
     initial = {**receipt.status, "pending": True, "status": "pending", "commitState": "pending", "startedForThisJob": True}

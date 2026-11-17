@@ -13,7 +13,7 @@ from tests.test_dashboard_server import bind_test_runtime_planner
 ])
 def test_gateway_shell_policy_uses_registered_identity_before_approval(tmp_path, allowed, denied, permitted):
     gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
-    gateway.save_config(AgentGatewayConfig(enabled=True, allow_write_requests=True))
+    gateway.save_config(AgentGatewayConfig(enabled=True))
     bind_test_runtime_planner(gateway, lambda _prompt: '{"action":"reply","reply":"fixture"}')
     plans = iter([
         {"planner": "llm", "skillNeeded": True, "skillTool": "fixture-guide", "skillParams": {},

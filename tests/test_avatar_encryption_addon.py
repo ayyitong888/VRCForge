@@ -18,7 +18,6 @@ def force_gateway_approval_mode(tmp_path):
         token="avatar-encryption-test-token",
         approval_token="avatar-encryption-test-approval-token",
         execution_mode="approval",
-        allow_write_requests=True,
     )
     gateway = dashboard_server.AGENT_GATEWAY
     approval_owner = gateway.approval_transactions

@@ -22,7 +22,7 @@ def docs_profile(tmp_path, monkeypatch):
     gateway = app.AGENT_GATEWAY
     previous = gateway.config_path, gateway.audit_dir
     gateway.configure_paths(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
-    gateway.save_config(AgentGatewayConfig(enabled=True, allow_write_requests=True))
+    gateway.save_config(AgentGatewayConfig(enabled=True))
     try:
         with app.SKILL_PACKAGE_WRITE_LOCK, gateway.skills.write_lock:
             delivery.deliver_bundled_guide(app.SKILL_PACKAGE_PROJECTION, gateway.skills.user_skills_dir, version="1.9.1")

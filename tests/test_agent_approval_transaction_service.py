@@ -29,7 +29,6 @@ def _gateway(root: Path) -> AgentGateway:
 def test_internal_preparation_failure_reaches_native_observation_with_cause(tmp_path: Path, error_type) -> None:
     from test_runtime_planner_service import service as planner_service
     gateway = _gateway(tmp_path)
-    gateway.ensure_config().allow_write_requests = True
     def reject(_args, _preview):
         raise error_type("Prepared outfit expected asset path is invalid.")
     gateway.approval_transactions.register_write_handler(
@@ -97,7 +96,6 @@ def test_auto_approved_write_blocked_by_recovery_keeps_no_write_facts(tmp_path: 
     )
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = "roslyn_full_auto"
     config.roslyn_risk_acknowledged = True
     config.allow_roslyn_advanced = True
@@ -144,7 +142,6 @@ def test_first_visible_write_state_matches_approval_policy(
     service = gateway.approval_transactions
     config = gateway.ensure_config()
     config.enabled = True
-    config.allow_write_requests = True
     config.execution_mode = mode
     config.roslyn_risk_acknowledged = True
     gateway.save_config(config)
@@ -252,7 +249,6 @@ def test_auto_reviewer_receives_raw_owner_execution_target_while_public_receipt_
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway = _gateway(Path(temp_dir))
         config = gateway.ensure_config()
-        config.allow_write_requests = True
         config.execution_mode = "auto"
         gateway.save_config(config)
         reviewed: list[dict[str, object]] = []
@@ -379,7 +375,6 @@ def test_external_gesture_manager_pending_receipt_skips_connection_finalizer() -
         root = Path(temp_dir)
         gateway = _gateway(root)
         config = gateway.ensure_config()
-        config.allow_write_requests = True
         config.execution_mode = "auto"
         gateway.save_config(config)
         finalized = False

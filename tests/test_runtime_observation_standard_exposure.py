@@ -11,7 +11,7 @@ def test_standard_router_loads_runtime_observation_in_gm_leaf(tmp_path, monkeypa
     old_config, old_audit = gateway.config_path, gateway.audit_dir
     gateway.configure_paths(tmp_path / "config.json", tmp_path / "audit")
     gateway.save_config(AgentGatewayConfig(enabled=True, require_token=False,
-                                         allow_write_requests=True, execution_mode="full"))
+                                         execution_mode="full"))
 
     class Bridge:
         def preflight(self):

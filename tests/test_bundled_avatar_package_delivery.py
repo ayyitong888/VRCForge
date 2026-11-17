@@ -27,7 +27,7 @@ def profile(tmp_path, monkeypatch):
     gateway = app.AGENT_GATEWAY
     previous = gateway.config_path, gateway.audit_dir
     gateway.configure_paths(tmp_path / "config/agent_gateway.json", tmp_path / "audit")
-    gateway.save_config(AgentGatewayConfig(enabled=True, allow_write_requests=True))
+    gateway.save_config(AgentGatewayConfig(enabled=True))
     service = SkillPackageService(tmp_path / "skill-packages", vrcforge_version="1.10.3")
     ports = app.SKILL_PACKAGE_PROJECTION._ports
     monkeypatch.setattr(app.SKILL_PACKAGE_PROJECTION, "_ports", replace(ports, installed_package_candidates=service.projection_candidates))
