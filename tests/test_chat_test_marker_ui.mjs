@@ -20,7 +20,7 @@ assert.match(sessions, /function toggleTestChat\(chatId: string\)/);
 assert.match(sessions, /isTestChat: !chat\.isTestChat/);
 assert.match(sessions, /isTestChat: chat\.isTestChat === true/);
 assert.match(sidebar, /data-vrcforge-chat-id/);
-assert.match(sidebar, /isTestChat \?/);
+assert.doesNotMatch(sidebar, /isTestChat/, "the Test Chats group owns the marker, so no extra row badge is rendered");
 assert.match(appSidebar, /chatSidebar\.testChats/);
 assert.match(appSidebar, /sidebar\.testChats/);
 for (const localeFile of localeFiles) {
@@ -28,7 +28,6 @@ for (const localeFile of localeFiles) {
   assert.equal(typeof locale.sidebar?.testChats, "string");
   assert.equal(typeof locale.contextMenu?.markTestChat, "string");
   assert.equal(typeof locale.contextMenu?.unmarkTestChat, "string");
-  assert.equal(typeof locale.contextMenu?.testChat, "string");
 }
 // Test classification is display/storage metadata only; it must not enter the
 // provider request construction path.

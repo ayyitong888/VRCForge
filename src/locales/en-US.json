@@ -1294,7 +1294,6 @@
     "renameChat": "Rename Chat",
     "markTestChat": "Mark as test chat",
     "unmarkTestChat": "Unmark test chat",
-    "testChat": "Test chat",
     "permanentDelete": "Delete Permanently"
   },
   "deleteModal": {

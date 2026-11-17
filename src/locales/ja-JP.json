@@ -1286,7 +1286,6 @@
     "renameChat": "チャット名を変更",
     "markTestChat": "テストチャットとしてマーク",
     "unmarkTestChat": "テストマークを解除",
-    "testChat": "テストチャット",
     "permanentDelete": "完全に削除"
   },
   "deleteModal": {

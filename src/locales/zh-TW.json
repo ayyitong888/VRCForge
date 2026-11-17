@@ -1286,7 +1286,6 @@
     "renameChat": "重新命名對話",
     "markTestChat": "標記為測試會話",
     "unmarkTestChat": "取消測試標記",
-    "testChat": "測試會話",
     "permanentDelete": "永久刪除"
   },
   "deleteModal": {

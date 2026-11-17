@@ -210,6 +210,7 @@ try {
   const testRows = page.locator('[data-vrcforge-chat-id^="test-"]');
   assert.equal(await testRows.count(), 5, "test conversations use the same five-chat preview");
   const testSection = page.locator("section").filter({ has: page.getByText("Test chats", { exact: true }) });
+  assert.equal(await testSection.getByText("Test chat", { exact: true }).count(), 0, "the group label is enough without a badge on every row");
   await testSection.getByRole("button", { name: "More conversations (2)" }).click();
   assert.equal(await testRows.count(), 7, "test conversations can be expanded");
   await testSection.getByRole("button", { name: "Show fewer conversations" }).click();

@@ -271,7 +271,6 @@ export function AppSidebar({
                         unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                         indent
                         pinned={chat.pinned}
-                        isTestChat={chat.isTestChat}
                         renaming={renamingChatId === chat.id}
                         renameDraft={renameDraft}
                         onRenameChange={onChatRenameChange}
@@ -351,7 +350,6 @@ export function AppSidebar({
                         unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                         indent
                         pinned={chat.pinned}
-                        isTestChat={chat.isTestChat}
                         renaming={renamingChatId === chat.id}
                         renameDraft={renameDraft}
                         onRenameChange={onChatRenameChange}
@@ -389,7 +387,6 @@ export function AppSidebar({
                 active={activeView === "chat" && chat.id === activeChatId}
                 unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                 pinned={chat.pinned}
-                isTestChat={chat.isTestChat}
                 renaming={renamingChatId === chat.id}
                 renameDraft={renameDraft}
                 onRenameChange={onChatRenameChange}
@@ -422,7 +419,6 @@ export function AppSidebar({
               active={activeView === "chat" && chat.id === activeChatId}
               unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
               pinned={chat.pinned}
-              isTestChat
               renaming={renamingChatId === chat.id}
               renameDraft={renameDraft}
               onRenameChange={onChatRenameChange}
