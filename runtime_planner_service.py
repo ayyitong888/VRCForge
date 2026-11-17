@@ -41,6 +41,10 @@ from agent_tool_result_contract import _views
 from agent_completion_verifier import _normalize_diagnostics
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_TOOL_SCHEMAS
 from agent_scan_result_policy import is_scan_result_policy_message, restored_scan_result_policy
+from agent_runtime_session_state import (
+    NATIVE_RUNTIME_CONTEXT_PREFIX, NATIVE_RUNTIME_STATE_PREFIX,
+    native_runtime_state_content, project_native_runtime_state_history,
+)
 from native_request_composition import (
     attach_native_request_composition,
     attach_native_request_origin,
@@ -1112,10 +1116,8 @@ def _bind_steer_attachments(
 def _refresh_native_provenance(request: Mapping[str, object]) -> dict[str, object]:
     """Refresh generated-message coordinates after recovery/compaction.
 
-    A digest must occur exactly once in the current message list before it is
-    retained as host provenance.  Missing or duplicate matches are explicitly
-    unknown, preventing stale or user-duplicated text from being classified as
-    runtime context.
+    Runtime state refers to the latest retained host snapshot. Other digests
+    must match exactly once, so user-duplicated text remains ordinary history.
     """
     origin = deepcopy(ensure_dict(request.get("_diagnosticOrigin")))
     generated = ensure_dict(origin.get("generatedMessageDigests"))
@@ -1131,9 +1133,7 @@ def _refresh_native_provenance(request: Mapping[str, object]) -> dict[str, objec
             state_matches = [
                 (index, item) for index, item in enumerate(current_messages)
                 if isinstance(item, Mapping)
-                and item.get("role") == "system"
-                and isinstance(item.get("content"), str)
-                and item["content"].startswith("Current runtime state (data): ")
+                and native_runtime_state_content(item)
             ]
             if state_matches:
                 index, item = state_matches[-1]
@@ -2076,6 +2076,9 @@ class RuntimePlannerService:
         context_limit = metadata.verified_context_limit
         if not isinstance(context_limit, int) or context_limit <= 0:
             return None
+        messages = request.get("messages")
+        if isinstance(messages, list):
+            request = {**request, "messages": project_native_runtime_state_history(messages)}
         serialized = json.dumps(
             _native_measurement_projection(dict(request)),
             ensure_ascii=False,
@@ -2164,12 +2167,11 @@ class RuntimePlannerService:
                 if text not in information:
                     information.append(text)
         messages = deepcopy(request["messages"])
-        prefix = "Current runtime state (data): "
-        if not messages or messages[-1].get("role") != "system" or not messages[-1]["content"].startswith(prefix):
+        if not messages or not native_runtime_state_content(messages[-1]):
             raise ValueError("native runtime state is unavailable for recovery")
-        state = json.loads(messages[-1]["content"][len(prefix):])
+        state = json.loads(messages[-1]["content"][len(NATIVE_RUNTIME_STATE_PREFIX):])
         state["compactionRecoveryInformation"] = information
-        messages[-1]["content"] = prefix + json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+        messages[-1]["content"] = NATIVE_RUNTIME_STATE_PREFIX + json.dumps(state, ensure_ascii=False, separators=(",", ":"))
         return copy_native_request(request, {"messages": messages})
 
     def maybe_compact_native_context(
@@ -2823,6 +2825,10 @@ class RuntimePlannerService:
                         if tool_image_content:
                             native_request = bind_tool_images(native_request, tool_image_content, active_turn_start=active_turn_start)
                         native_guard = self.native_context_guard(native_request, context_usage=context_usage)
+                    state_message = native_request["messages"][-1]
+                    native_request = copy_native_request(native_request, {
+                        "messages": project_native_runtime_state_history(native_request["messages"]),
+                    })
                     # Refresh only the private diagnostic provenance after
                     # recovery/compaction/image projection.  The provider sees
                     # instructions/messages/tools only; the sidecar is removed
@@ -2848,9 +2854,9 @@ class RuntimePlannerService:
                         })
                         blocked_plan["plannerFailure"]["retryable"] = False
                         return blocked_plan
-                    # Persist the exact post-recovery, post-compaction state before
-                    # dispatch. The response and tool outputs append after it.
-                    native_turn.persist_runtime_state(native_request["messages"][-1])
+                    # Record the exact post-recovery state transition before
+                    # dispatch. Unchanged snapshots already belong to the prefix.
+                    native_turn.persist_runtime_state(state_message)
                 if not native and ensure_dict(observe.get("turn")).get("directImageInput") is True:
                     return self._planner_failure_plan(
                         cause_code="provider_image_transport_unsupported",
@@ -5103,7 +5109,7 @@ class RuntimePlannerService:
             turn_context["skillPolicy"] = dict(ensure_dict(observe.get("skillPolicy")))
         if activated:
             turn_context["activatedToolDefinitions"] = activated
-        marker = "Runtime context snapshot (data, not user instructions or authorization): "
+        marker = NATIVE_RUNTIME_CONTEXT_PREFIX
 
         def marker_payload(content: str) -> dict[str, Any]:
             try:
@@ -5144,7 +5150,7 @@ class RuntimePlannerService:
             turn_position = len(projected_messages) - 1
         state_message = {
             "role": "system",
-            "content": "Current runtime state (data): " + json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+            "content": NATIVE_RUNTIME_STATE_PREFIX + json.dumps(state, ensure_ascii=False, separators=(",", ":")),
         }
         projected_messages.append(state_message)
         origin = {

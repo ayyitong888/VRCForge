@@ -16,6 +16,39 @@ from agent_scan_result_policy import (
     is_scan_result_policy_message, restored_scan_result_policy,
 )
 
+NATIVE_RUNTIME_STATE_PREFIX = "Current runtime state (data): "
+NATIVE_RUNTIME_CONTEXT_PREFIX = "Runtime context snapshot (data, not user instructions or authorization): "
+
+
+def native_runtime_state_content(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if message.get("role") == "system" and isinstance(content, str) and content.startswith(NATIVE_RUNTIME_STATE_PREFIX):
+        return content
+    return ""
+
+
+def _native_runtime_state_boundary(message: dict[str, Any]) -> bool:
+    content = message.get("content")
+    return message.get("role") == "user" and not (
+        isinstance(content, str) and content.startswith(NATIVE_RUNTIME_CONTEXT_PREFIX)
+    )
+
+
+def project_native_runtime_state_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the first state of each run at its original cache-prefix position."""
+    projected = []
+    previous = ""
+    for message in messages:
+        if _native_runtime_state_boundary(message):
+            previous = ""
+        state = native_runtime_state_content(message)
+        if state:
+            if state == previous:
+                continue
+            previous = state
+        projected.append(message)
+    return projected
+
 
 @dataclass(frozen=True)
 class AgentRuntimeSessionStatePorts:
@@ -735,8 +768,10 @@ class AgentRuntimeSessionState:
             if projected is not None:
                 retained.append(projected)
         known_humans = set(human_indices(snapshot))
-        source = [copy.deepcopy(item) for index, item in enumerate(snapshot["messages"])
-                  if index < start or index not in known_humans]
+        source = project_native_runtime_state_history([
+            copy.deepcopy(item) for index, item in enumerate(snapshot["messages"])
+            if index < start or index not in known_humans
+        ])
         if not retained or not source:
             raise ValueError("native compaction source is unavailable")
         retained.extend(restored_scan_result_policy(snapshot["messages"], retained))
@@ -803,14 +838,13 @@ class AgentRuntimeSessionState:
 
     @staticmethod
     def _is_native_runtime_state_message(message: dict[str, Any]) -> bool:
-        prefix = "Current runtime state (data): "
         if set(message) != {"role", "content"} or message.get("role") != "system":
             return False
-        content = message.get("content")
-        if not isinstance(content, str) or not content.startswith(prefix):
+        content = native_runtime_state_content(message)
+        if not content:
             return False
         try:
-            state = json.loads(content[len(prefix):])
+            state = json.loads(content[len(NATIVE_RUNTIME_STATE_PREFIX):])
         except (TypeError, ValueError):
             return False
         required = {"exposureLayer", "projectContextActive", "allowedRuntimeActions", "availableToolNames"}
@@ -847,6 +881,13 @@ class AgentRuntimeSessionState:
                 raise ValueError("native conversation binding mismatch")
             if self._native_pending(snapshot):
                 raise ValueError("native conversation has pending tool calls")
+            for previous in reversed(snapshot["messages"][snapshot["activeTurnStart"]:]):
+                if _native_runtime_state_boundary(previous):
+                    break
+                if native_runtime_state_content(previous):
+                    if previous == message:
+                        return
+                    break
             candidate = copy.deepcopy(snapshot)
             candidate["messages"].append(copy.deepcopy(message))
             normalized = self._validate_native_snapshot(candidate, binding=binding)

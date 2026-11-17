@@ -18,19 +18,60 @@ def wire(request):
     ])
 
 
-def test_dispatch_retains_previous_whole_input_and_latest_state_after_tool_result():
+@pytest.mark.parametrize("legacy_duplicate", [False, True])
+def test_dispatch_keeps_cached_prefix_and_omits_unchanged_state_after_tool_result(legacy_duplicate):
     state, planner, model, turn = fixture(prior=False, limit=500_000)
     plan(planner, turn)
     first = wire(model.requests[-1])
+    if legacy_duplicate:
+        snapshot = state.native_conversation("s", binding="b")
+        snapshot["messages"].append(deepcopy(model.requests[-1]["messages"][-1]))
+        state.restore_native_conversation("s", binding="b", snapshot=snapshot)
     state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": None,
         "tool_calls": [{"id": "read-state-prefix", "type": "function", "function": {"name": "read", "arguments": "{}"}}]})
     state.settle_native_call("s", binding="b", call_id="read-state-prefix", content='{"status":"ok","value":"readback"}')
     plan(planner, turn)
     second = wire(model.requests[-1])
     assert second[:len(first)] == first
-    assert second[-1]["role"] == "developer"
-    assert second[-1]["content"].startswith("Current runtime state (data): ")
+    assert second[-1]["type"] == "function_call_output"
+    assert second[-2]["call_id"] == second[-1]["call_id"] == "read-state-prefix"
+    assert sum(item.get("role") == "developer" and str(item.get("content")).startswith(
+        "Current runtime state (data): ") for item in second) == 1
+    assert sum(state._is_native_runtime_state_message(item) for item in
+               state.native_conversation("s", binding="b")["messages"]) == 1 + legacy_duplicate
     assert model.requests[0]["tools"] == model.requests[1]["tools"]
+
+
+def test_state_changes_and_user_turns_each_emit_their_current_permissions():
+    state, planner, model, turn = fixture(prior=False, limit=500_000)
+    planner._llm_plan_agent_turn("Inspect", {}, [], native_turn=turn, project_context_active=False)
+    first = wire(model.requests[-1])
+    for mode in ("auto", "approval", "auto"):
+        planner._llm_plan_agent_turn(
+            "Inspect", {"runtime": {"executionMode": mode}}, [],
+            native_turn=turn, project_context_active=False,
+        )
+        latest = wire(model.requests[-1])
+        assert latest[:len(first)] == first
+        assert json.loads(latest[-1]["content"].split(": ", 1)[1])["executionMode"] == mode
+        first = latest
+    state.append_native_user("s", binding="b", message="Continue after my answer")
+    planner._llm_plan_agent_turn(
+        "Inspect", {"runtime": {"executionMode": "auto"}}, [],
+        native_turn=turn, project_context_active=False,
+    )
+    latest = wire(model.requests[-1])
+    assert latest[:len(first)] == first
+    assert latest[-2]["role"] == "user"
+    assert json.loads(latest[-1]["content"].split(": ", 1)[1])["executionMode"] == "auto"
+    planner._llm_plan_agent_turn(
+        "Inspect", {"planMode": True}, [], native_turn=turn, project_context_active=False,
+    )
+    revoked = wire(model.requests[-1])
+    assert revoked[:len(latest)] == latest
+    current = json.loads(revoked[-1]["content"].split(": ", 1)[1])
+    assert current["planMode"] is True
+    assert current["allowedRuntimeActions"] == ["reply", "correct"]
 
 
 def test_compaction_does_not_duplicate_historical_runtime_states():
