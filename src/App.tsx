@@ -672,8 +672,10 @@ export default function App() {
     return list;
   }, [computerUseEnabled, developerOptionsEnabled, t]);
   // Keep the last known project list visible while backend startup/refresh is still pending.
-  const projects = bootstrap?.health.projects?.projects ?? cachedProjectSnapshot?.projects ?? [];
-  const projectScanState = projectDiscoveryState(bootstrap?.health.projects ?? cachedProjectSnapshot ?? undefined);
+  const projectSnapshot = bootstrap?.health.projects ?? cachedProjectSnapshot ?? undefined;
+  const projects = projectSnapshot?.projects ?? cachedProjectSnapshot?.projects ?? [];
+  const projectScanState = projectDiscoveryState(projectSnapshot);
+  const projectScan = projectSnapshot?.scan;
   const externalAgentGatewayEnabled = Boolean(connectorStatus?.gateway?.enabled);
   const externalAgentVerified = hasRecentConnectorSelfTest(connectorStatus, runtimeConnected, activeProjectPath);
   const chatAvailable = providerConfigured || externalAgentGatewayEnabled;
@@ -772,6 +774,9 @@ export default function App() {
     runtimeConnected,
     activeProjectPath,
     projects,
+    projectScanStartedAt: projectSnapshot?.projects && projectScan?.status === "ready" && !projectScan.refreshing
+      ? projectScan.startedAt
+      : undefined,
     refresh,
     refreshProjects: (target?: string) => refreshProjectList(target, { throwOnError: true, allowDuringStartup: true }),
     startRuntime,

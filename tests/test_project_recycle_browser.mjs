@@ -35,8 +35,9 @@ const bundle = await build({
       const noop = () => {};
       function Fixture(){
         const [activeProjectPath,setActiveProjectPath] = useState(projects[0].path);
+        const [projectScanStartedAt,setProjectScanStartedAt] = useState();
         const management = useProjectManagement({
-          endpoint:location.origin, runtimeConnected:true, activeProjectPath, projects,
+          endpoint:location.origin, runtimeConnected:true, activeProjectPath, projects, projectScanStartedAt,
           refresh:async()=>{}, startRuntime:async()=>null, setError:noop,
           onProjectAdded:noop, onActiveProjectHidden:noop,
         });
@@ -48,6 +49,10 @@ const bundle = await build({
           setError:noop, expandProjectGroup:noop, initialChatState:{chats:[],activeChatId:"chat-0"},
         });
         return <>
+          <button onClick={()=>setProjectScanStartedAt(new Date(Date.now()+1000).toISOString())}>
+            Refresh discovered projects
+          </button>
+          <button onClick={()=>setProjectScanStartedAt(undefined)}>Start next scan</button>
           {management.projectItems.map(project=><button key={project.path} onClick={()=>management.setProjectMenu({
             projectPath:project.path,x:20,y:window.innerHeight-20,
           })}>Menu {project.path}</button>)}
@@ -188,7 +193,12 @@ try {
     { path: target.path, confirmation: "DeLeTe" }, { path: target.path, confirmation: "DeLeTe" },
   ]);
   assert.deepEqual(chatWrites, []);
-  console.log("PASS project recycle dialog: exact DeLeTe confirmation, rejection, exact path, and chat/list removal");
+  await page.getByRole("button", { name: "Refresh discovered projects" }).click();
+  await page.getByRole("button", { name: `Menu ${target.path}` }).waitFor({ state: "visible", timeout: 2000 });
+  await page.getByRole("button", { name: "Start next scan" }).click();
+  assert.equal(await page.getByRole("button", { name: `Menu ${target.path}` }).isVisible(), true);
+  assert.equal(await page.getByTestId("chats").textContent(), "chat-1");
+  console.log("PASS project recycle dialog and rediscovery of a project recreated at the same path");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

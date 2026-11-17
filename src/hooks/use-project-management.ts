@@ -29,6 +29,7 @@ type UseProjectManagementParams = {
   runtimeConnected: boolean;
   activeProjectPath: string;
   projects: ProjectEntry[];
+  projectScanStartedAt?: string;
   refresh: (target?: string) => Promise<void>;
   refreshProjects?: (target?: string) => Promise<void>;
   startRuntime: () => Promise<string | null>;
@@ -42,6 +43,7 @@ export function useProjectManagement({
   runtimeConnected,
   activeProjectPath,
   projects,
+  projectScanStartedAt,
   refresh,
   refreshProjects,
   startRuntime,
@@ -61,7 +63,7 @@ export function useProjectManagement({
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [projectListError, setProjectListError] = useState("");
   const [projectMenu, setProjectMenu] = useState<{ projectPath: string; x: number; y: number } | null>(null);
-  const [recycledProjectKeys, setRecycledProjectKeys] = useState<Set<string>>(() => new Set());
+  const [projectRemovedAt, setProjectRemovedAt] = useState<Map<string, number>>(() => new Map());
   const [projectUiPrefs, setProjectUiPrefs] = useState<ProjectUiPrefs>(() => loadProjectUiPrefs());
   const [renamingProjectPath, setRenamingProjectPath] = useState("");
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
@@ -96,14 +98,19 @@ export function useProjectManagement({
   );
   const projectOrder = useMemo(() => projectUiPrefs.projectOrder || [], [projectUiPrefs.projectOrder]);
   const allProjectItems = useMemo(() => {
+    const scanStartedAt = Date.parse(projectScanStartedAt ?? "");
     const byPath = new Map(
       projects
         .filter((project) => project.projectType !== "general")
         .map((project) => [normalizeProjectPathKey(project.path || ""), project]),
     );
+    for (const [key, removedAt] of projectRemovedAt) {
+      // Only a completed scan that began after removal can rediscover this path.
+      if (!(scanStartedAt > removedAt)) byPath.delete(key);
+    }
     for (const customProject of projectPrefs.customProjects) {
       const key = normalizeProjectPathKey(customProject.path);
-      if (!key || byPath.has(key)) {
+      if (!key || byPath.has(key) || projectRemovedAt.has(key)) {
         continue;
       }
       byPath.set(key, {
@@ -113,10 +120,23 @@ export function useProjectManagement({
         sources: ["custom"],
       });
     }
-    return [...byPath.entries()]
-      .filter(([key]) => !recycledProjectKeys.has(key))
-      .map(([, project]) => project);
-  }, [projectPrefs.customProjects, projects, recycledProjectKeys]);
+    return [...byPath.values()];
+  }, [projectPrefs.customProjects, projects, projectRemovedAt, projectScanStartedAt]);
+  useEffect(() => {
+    if (!projectRemovedAt.size || !projectScanStartedAt) return;
+    const rediscoveredKeys = allProjectItems
+      .map((project) => normalizeProjectPathKey(project.path || ""))
+      .filter((key) => projectRemovedAt.has(key));
+    if (!rediscoveredKeys.length) return;
+
+    setProjectRemovedAt((current) => {
+      const next = new Map(current);
+      for (const key of rediscoveredKeys) {
+        if (current.get(key) === projectRemovedAt.get(key)) next.delete(key);
+      }
+      return next;
+    });
+  }, [allProjectItems, projectRemovedAt, projectScanStartedAt]);
   const projectItems = useMemo(
     () =>
       allProjectItems
@@ -249,8 +269,8 @@ export function useProjectManagement({
       setProjectModalError(t(newProjectType === "general" ? "project.invalidGeneralProjectRoot" : "project.invalidProjectRoot"));
       return;
     }
-    setRecycledProjectKeys((current) => {
-      const next = new Set(current);
+    setProjectRemovedAt((current) => {
+      const next = new Map(current);
       next.delete(normalizeProjectPathKey(path));
       return next;
     });
@@ -328,7 +348,12 @@ export function useProjectManagement({
       customProjects: prefs.customProjects.filter((entry) => keepPath(entry.path)),
       hiddenPaths: prefs.hiddenPaths.filter(keepPath),
     });
-    setRecycledProjectKeys((current) => new Set([...current, ...keys]));
+    const removedAt = Date.now();
+    setProjectRemovedAt((current) => {
+      const next = new Map(current);
+      for (const key of keys) next.set(key, removedAt);
+      return next;
+    });
     setProjectPrefs(withoutRecycledProject);
     saveProjectPrefsCache(withoutRecycledProject(projectPrefs));
     return result;
