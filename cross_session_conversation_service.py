@@ -178,13 +178,16 @@ class CrossSessionConversationService:
     def read_conversation(self, params: Mapping[str, Any]) -> dict[str, Any]:
         host = self._host(params)
         chat_id, target = self._target_chat(params, host)
+        text_offset = params.get("textOffset")
+        if text_offset is not None and (type(text_offset) is not int or text_offset < 0):
+            raise CrossSessionConversationError("textOffset must be a nonnegative integer.")
         client_turn_id = self._text(params.get("clientTurnId"), max_chars=180)
         if client_turn_id:
             try:
                 wait_seconds = min(self.MAX_FOLLOWUP_WAIT_SECONDS, max(0, int(params.get("waitSeconds", 0))))
             except (TypeError, ValueError):
                 wait_seconds = 0
-            return self._read_followup(host, chat_id, target, client_turn_id, wait_seconds)
+            return self._read_followup(host, chat_id, target, client_turn_id, wait_seconds, text_offset or 0)
         items = target.get("items") if isinstance(target.get("items"), list) else []
         try:
             offset = max(0, int(params.get("offset", 0)))
@@ -194,10 +197,7 @@ class CrossSessionConversationService:
             limit = min(self.MAX_READ_LIMIT, max(1, int(params.get("limit", 6))))
         except (TypeError, ValueError):
             limit = 6
-        text_offset = params.get("textOffset")
         if text_offset is not None:
-            if type(text_offset) is not int or text_offset < 0:
-                raise CrossSessionConversationError("textOffset must be a nonnegative integer.")
             limit = 1
         page = []
         total = 0
@@ -236,12 +236,13 @@ class CrossSessionConversationService:
         target: Mapping[str, Any],
         client_turn_id: str,
         wait_seconds: int,
+        text_offset: int,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + wait_seconds
         while True:
             with self._condition:
                 revision = self._runtime_revision
-            result = self._followup_result(host, chat_id, target, client_turn_id)
+            result = self._followup_result(host, chat_id, target, client_turn_id, text_offset)
             if result["status"] not in {"queued", "running"} or not wait_seconds:
                 return result
             with self._condition:
@@ -262,6 +263,7 @@ class CrossSessionConversationService:
         chat_id: str,
         target: Mapping[str, Any],
         client_turn_id: str,
+        text_offset: int,
     ) -> dict[str, Any]:
         items = target.get("items") if isinstance(target.get("items"), list) else []
         item = next((row for row in items if isinstance(row, Mapping)
@@ -296,8 +298,13 @@ class CrossSessionConversationService:
                 return {**result, "status": "failed"}
             text = self._assistant_text({"response": response}, final_only=True)
             if text:
-                result["reply"] = {"text": text[:self.MAX_READ_MESSAGE_CHARS],
-                                   "truncated": len(text) > self.MAX_READ_MESSAGE_CHARS}
+                reply = self._message_text_page(text, text_offset)
+                if reply["truncated"]:
+                    reply["nextTextRequest"] = {
+                        "chatId": chat_id, "clientTurnId": client_turn_id,
+                        "textOffset": text_offset + len(reply["text"]),
+                    }
+                result["reply"] = reply
             plan = response.get("plan") if isinstance(response.get("plan"), Mapping) else {}
             outcome, reason = classify_runtime_plan_outcome(dict(plan))
             if outcome == "parked":
@@ -642,18 +649,21 @@ class CrossSessionConversationService:
             return None
         if not isinstance(text, str) or not text.strip():
             return None
-        if text_offset >= len(text):
-            raise CrossSessionConversationError("textOffset is outside the requested message.")
-        end = text_offset + cls.MAX_READ_MESSAGE_CHARS
         message = {
             "role": role,
-            "text": text[text_offset:end],
-            "truncated": len(text) > end,
+            **cls._message_text_page(text, text_offset),
             "createdAt": cls._text(item.get("createdAt") or item.get("completedAt"), max_chars=48),
         }
         if role == "agent_relay" and isinstance(item.get("forwardedFrom"), Mapping):
             message["forwardedFrom"] = dict(item["forwardedFrom"])
         return message
+
+    @classmethod
+    def _message_text_page(cls, text: str, text_offset: int) -> dict[str, Any]:
+        if text_offset >= len(text):
+            raise CrossSessionConversationError("textOffset is outside the requested message.")
+        end = text_offset + cls.MAX_READ_MESSAGE_CHARS
+        return {"text": text[text_offset:end], "truncated": len(text) > end}
 
     @staticmethod
     def _assistant_text(item: Mapping[str, Any], *, final_only: bool = False) -> str:

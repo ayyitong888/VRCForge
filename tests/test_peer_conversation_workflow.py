@@ -11,12 +11,18 @@ import dashboard_server as host
 from tests.test_native_runtime_gateway import call, setup_gateway
 
 
-@pytest.mark.parametrize("target_plan", [False, True], ids=["app-chat", "general-workspace-plan"])
-def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_path, monkeypatch, target_plan):
+@pytest.mark.parametrize(
+    ("target_plan", "long_reply"),
+    [(False, False), (True, False), (False, True)],
+    ids=["app-chat", "general-workspace-plan", "text-continuation"],
+)
+def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_path, monkeypatch, target_plan, long_reply):
     workspace = str(tmp_path) if target_plan else ""
+    reply_prefix = "a" * 8500 + "\n" if long_reply else ""
     source_id, target_id = "relay-source", "relay-target"
     source_session, target_session = "relay-source-session", "relay-target-session"
     evidence = "The target's glossary uses the term blend shape."
+    reply = reply_prefix + evidence
     state = {}
     calls = []
     release_target = threading.Event()
@@ -33,9 +39,19 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
         })
 
     def source_finishes(request):
-        messages = [row for row in request["messages"] if row.get("tool_call_id") == "read-report"]
+        result_call = "read-report-tail" if reply_prefix else "read-report"
+        messages = [row for row in request["messages"] if row.get("tool_call_id") == result_call]
         assert evidence in json.dumps(messages), messages
         return {"role": "assistant", "content": f"Glossary verification: {evidence}"}
+
+    def source_reads_tail(request):
+        content = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == "read-report")
+        observation = json.loads(content)["observations"][0]["observation"]
+        data = json.JSONDecoder().raw_decode(observation.split("structuredEvidence=", 1)[1])[0]["data"]
+        assert data["completed"]
+        assert data["reply"]["truncated"]
+        assert evidence not in data["reply"]["text"]
+        return call("read-report-tail", "read_conversation", data["reply"]["nextTextRequest"])
 
     def target_starts(request):
         wire = json.dumps(request["messages"])
@@ -70,21 +86,24 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
             if index == 1:
                 return target_starts(request)
             assert index == 2
-            return {"role": "assistant", "content": evidence}
+            return {"role": "assistant", "content": reply}
         if index == 0:
             return call("source-tools", "load_internal_tool_block", {
                 "block": "project_environment/conversations", "tools": ["followup_task", "read_conversation"],
             })
         if index == 1:
             return call("delegate", "followup_task", {
-                "chatId": target_id, "message": "Please verify the glossary terminology.",
+                "chatId": f"vrcforge://chat/{target_id}" if long_reply else target_id,
+                "message": "Please verify the glossary terminology.",
             })
         if index == 2:
             return source_reads(request)
-        assert index == 3
+        if reply_prefix and index == 3:
+            return source_reads_tail(request)
+        assert index == (4 if reply_prefix else 3)
         return source_finishes(request)
 
-    request_count = 5 if target_plan else 7
+    request_count = (5 if target_plan else 7) + int(long_reply)
     gateway, model, _ = setup_gateway(tmp_path, [model_step] * request_count)
     runtime = Mock(wraps=gateway.runtime_message)
     monkeypatch.setattr(gateway, "runtime_message", runtime)
@@ -146,14 +165,17 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
 
     result = asyncio.run(exercise())
     assert result["plan"]["reply"] == f"Glossary verification: {evidence}", (result["plan"], calls)
-    expected_tools = ["followup_task", "read_conversation"]
-    if not target_plan:
-        expected_tools.append("send_message")
-    assert sorted(name for name, _ in calls) == expected_tools
-    assert next(receipt for name, receipt in calls if name == "read_conversation")["status"] == "completed"
+    reads = [receipt for name, receipt in calls if name == "read_conversation"]
+    assert sorted(name for name, _ in calls if name != "read_conversation") == (
+        ["followup_task"] if target_plan else ["followup_task", "send_message"]
+    )
+    assert len(reads) == (2 if reply_prefix else 1)
+    assert all(receipt["status"] == "completed" for receipt in reads)
+    assert "".join(receipt["reply"]["text"] for receipt in reads) == reply
+    assert not reads[-1]["reply"]["truncated"]
     assert len(model.requests) == request_count
     saved = host._load_handoff_chat(target_id, workspace)
-    assert next(item for item in saved["items"] if item.get("id", "").startswith("runtime-reply-"))["response"]["plan"]["reply"] == evidence
+    assert next(item for item in saved["items"] if item.get("id", "").startswith("runtime-reply-"))["response"]["plan"]["reply"] == reply
     target_runtime = next(call.args[0] for call in runtime.call_args_list if call.args[0]["chatId"] == target_id)
     assert target_runtime["_projectType"] == "general"
     assert target_runtime["_projectContextActive"] is False

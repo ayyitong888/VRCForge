@@ -28463,7 +28463,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_read_conversation",
-        "When to use: read a conversation in this scope by chat ID or vrcforge://chat/ link. Use nextOffset for more messages and nextTextRequest for remaining text. To read the result of your followup_task, pass its chatId and clientTurnId with optional waitSeconds up to 25. When NOT to use: transfer attachments, approvals, or write authority. Negative example: do not claim an unread page was inspected.",
+        "When to use: read a conversation in this scope by chat ID or vrcforge://chat/ link. Use nextOffset for more messages. To read the result of your followup_task, pass its chatId and clientTurnId with optional waitSeconds up to 25. For remaining message or reply text, pass its nextTextRequest as arguments. When NOT to use: transfer attachments, approvals, or write authority. Negative example: do not claim an unread page was inspected.",
         "read/debug",
         lambda params: _invoke_cross_session_conversation("read_conversation", params or {}),
     )
