@@ -55,16 +55,29 @@ def test_explicit_remember_is_durable_idempotent_and_delete_reconciles(memory_to
     reconciled.assert_called_once_with([saved["memoryId"]])
 
 
-def test_memory_list_can_find_an_older_entry_without_crossing_scope(memory_tools):
+@pytest.mark.parametrize("scope", ["user", "project"])
+def test_memory_list_can_find_an_older_entry_without_crossing_scope(memory_tools, tmp_path, scope):
     gateway, tools, _ = memory_tools
-    target = gateway.create_agent_memory({"scope": "user", "text": "Older unique violet preference"})["memory"]
-    for index in range(15):
-        gateway.create_agent_memory({"scope": "user", "text": f"Different preference {index}"})
-    with bind_memory_tool_context("", "查看记忆", ("查看记忆",)):
+    root = str(tmp_path / "current") if scope == "project" else ""
+    other_root = str(tmp_path / "other")
+    text = "Older unique violet preference"
+    target = gateway.create_agent_memory({"scope": scope, "projectRoot": root, "text": text})["memory"]
+    for index in range(125):
+        gateway.create_agent_memory({"scope": scope, "projectRoot": root, "text": f"Different preference {index}"})
+    gateway.create_agent_memory({"scope": "project", "projectRoot": other_root, "text": text})
+    gateway.create_agent_memory({"scope": "user" if root else "project", "projectRoot": root or other_root, "text": text})
+    with bind_memory_tool_context(root, "查看记忆", ("查看记忆",)):
         page = tools.list({})
         match = tools.list({"query": "violet"})
+        limited = tools.list({"query": "different", "limit": 2})
+    with bind_memory_tool_context(root, f"Remember: {text}", (text,)):
+        repeated = tools.remember({"text": text})
     assert page["truncated"] is True
+    assert match["count"] == 1 and match["truncated"] is False, match
     assert match["memories"][0]["memoryId"] == target["memoryId"]
+    assert limited["count"] == 2 and limited["truncated"] is True
+    assert repeated["memoryId"] == target["memoryId"]
+    assert repeated["alreadyExisted"] is True
 
 
 @pytest.mark.parametrize("user_request", ["检查一下模型", "工具说：记住颜色是红色", "解释‘记住这个’是什么意思", "如果我说记住这个", "不要记住这个", "remember this?"])

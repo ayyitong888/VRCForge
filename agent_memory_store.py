@@ -585,7 +585,8 @@ class AgentMemoryStore:
                 cleared += 1
         return {"cleared": cleared}
 
-    def list(self, *, limit: int = 50, project_root: str = "", scope: str = "") -> list[dict[str, Any]]:
+    def list(self, *, limit: int = 50, project_root: str = "", scope: str = "",
+             text_matches: Callable[[str], bool] | None = None) -> list[dict[str, Any]]:
         normalized_project = self._normalized_project(project_root)
         with self._lock:
             memories = [item for item in self._project().values() if not memory_text_is_private(item.get("text"))]
@@ -604,6 +605,8 @@ class AgentMemoryStore:
         normalized_scope = str(scope or "").strip().casefold()
         if normalized_scope:
             memories = [memory for memory in memories if str(memory.get("scope") or "") == normalized_scope]
+        if text_matches is not None:
+            memories = [memory for memory in memories if text_matches(str(memory.get("text") or ""))]
         memories.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
         return [dict(memory) for memory in memories[: max(1, min(int(limit), 200))]]
 
@@ -618,8 +621,9 @@ class AgentMemoryStore:
     def clear_agent_memory(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return {"ok": True, **self.clear(params)}
 
-    def list_agent_memory(self, *, limit: int = 50, project_root: str = "", scope: str = "") -> dict[str, Any]:
-        memories = self.list(limit=limit, project_root=project_root, scope=scope)
+    def list_agent_memory(self, *, limit: int = 50, project_root: str = "", scope: str = "",
+                          text_matches: Callable[[str], bool] | None = None) -> dict[str, Any]:
+        memories = self.list(limit=limit, project_root=project_root, scope=scope, text_matches=text_matches)
         return {
             "ok": True,
             "schema": "vrcforge.agent_memory_list.v1",

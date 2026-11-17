@@ -102,14 +102,14 @@ class AgentMemoryTools:
         context = self._context()
         limit = min(12, max(1, int(params.get("limit", 10))))
         query = str(params.get("query") or "").strip().casefold()[:200]
-        payload = self.list_memory(limit=200 if query else limit + 1,
-                                   project_root=context.project_root, scope=self._scope(context))
-        matching = [item for item in payload.get("memories", []) if not query or query in str(item.get("text") or "").casefold()]
-        memories = [{key: safe_memory_record(item).get(key) for key in ("memoryId", "scope", "kind", "text")}
+        payload = self.list_memory(limit=limit + 1, project_root=context.project_root, scope=self._scope(context),
+                                   text_matches=(lambda text: query in text.casefold()) if query else None)
+        matching = payload.get("memories", [])
+        memories = [{key: item.get(key) for key in ("memoryId", "scope", "kind", "text")}
                     for item in matching[:limit]]
         return {"ok": True, "scope": self._scope(context), "memories": memories, "count": len(memories),
-                "truncated": len(matching) > limit or bool(query and len(payload.get("memories", [])) == 200),
-                "summary": f"Read {len(memories)} accepted memories in the current scope. Use query to narrow matching text; search examines at most 200 recent accepted entries."}
+                "truncated": len(matching) > limit,
+                "summary": f"Read {len(memories)} accepted memories in the current scope. Use query to narrow matching text."}
 
     def remember(self, params: Mapping[str, Any]) -> dict[str, Any]:
         context = self._context(mutation="remember")
@@ -119,12 +119,12 @@ class AgentMemoryTools:
             raise PermissionError("Remember exact user-provided wording; assistant, tool and reflection text cannot be promoted through this tool.")
         if memory_text_is_instruction_sensitive(text):
             raise PermissionError("Memory cannot change tool authority or approve future actions.")
-        existing = self.list_memory(limit=200, project_root=context.project_root, scope=self._scope(context))
+        existing = self.list_memory(limit=1, project_root=context.project_root, scope=self._scope(context),
+                                    text_matches=lambda candidate: " ".join(candidate.split()) == normalized)
         for memory in existing.get("memories", []):
-            if " ".join(str(memory.get("text") or "").split()) == normalized:
-                receipt = self._receipt("saved", memory)
-                receipt["alreadyExisted"] = True
-                return receipt
+            receipt = self._receipt("saved", memory)
+            receipt["alreadyExisted"] = True
+            return receipt
         created = self.create_memory({"text": text, "kind": params.get("kind", "preference"),
                                       "scope": self._scope(context), "projectRoot": context.project_root, "source": "explicit_user_request"})
         memory = created["memory"]

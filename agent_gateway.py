@@ -10549,12 +10549,17 @@ class AgentGateway:
         except OSError as exc:
             raise AgentGatewayError("Memory storage is unavailable.", status_code=503) from exc
 
-    def list_agent_memory(self, *, limit: int = 50, project_root: str = "", scope: str = "") -> dict[str, Any]:
+    def list_agent_memory(self, *, limit: int = 50, project_root: str = "", scope: str = "",
+                          text_matches: Callable[[str], bool] | None = None) -> dict[str, Any]:
+        def matches_visible_text(text: str) -> bool:
+            return text_matches(redact_sensitive(safe_memory_record({"text": text})["text"]))
+
         try:
             payload = self._agent_memory_store.list_agent_memory(
                 limit=min(limit, AGENT_MEMORY_MAX_ITEMS),
                 project_root=project_root,
                 scope=scope,
+                text_matches=matches_visible_text if text_matches is not None else None,
             )
         except (ValueError, OSError) as exc:
             raise AgentGatewayError("Memory storage is unavailable.", status_code=503) from exc
