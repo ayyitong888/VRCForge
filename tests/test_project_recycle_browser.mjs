@@ -136,12 +136,12 @@ try {
     await dialog.waitFor({ state: "visible" });
   };
   const dialog = page.getByRole("dialog", { name: "Delete Project" });
-  const input = dialog.getByLabel("Type delete to confirm.");
+  const input = dialog.getByLabel("Type delete to confirm (case insensitive).");
   const confirm = dialog.getByRole("button", { name: "Delete Project" });
   await openDialog();
   assert.equal(await dialog.getByText(target.path).isVisible(), true);
   assert.equal(await confirm.isDisabled(), true);
-  await input.fill("Delete");
+  await input.fill("Delete ");
   await input.press("Enter");
   assert.equal(await confirm.isDisabled(), true);
   await dialog.getByRole("button", { name: "Cancel" }).click();
@@ -149,14 +149,14 @@ try {
   assert.deepEqual(requests, []);
 
   await openDialog();
-  await input.fill("delete");
+  await input.fill("DELETE");
   await confirm.click();
   await dialog.getByRole("alert").waitFor();
   assert.match(await dialog.getByRole("alert").textContent(), /Close Unity Editor/);
   assert.equal(await confirm.isDisabled(), true);
   assert.equal(await page.getByTestId("active").textContent(), target.path);
   assert.match(await page.getByTestId("chats").textContent(), /chat-0/);
-  await input.fill("delete");
+  await input.fill("DeLeTe");
   await confirm.click();
   await dialog.waitFor({ state: "hidden" });
   await page.getByRole("button", { name: `Menu ${target.path}` }).waitFor({ state: "hidden" });
@@ -164,10 +164,10 @@ try {
   assert.equal(await page.getByTestId("active").textContent(), "");
   assert.equal(await page.getByTestId("chats").textContent(), "chat-1");
   assert.deepEqual(requests, [
-    { path: target.path, confirmation: "delete" }, { path: target.path, confirmation: "delete" },
+    { path: target.path, confirmation: "DELETE" }, { path: target.path, confirmation: "DeLeTe" },
   ]);
   assert.deepEqual(chatWrites, []);
-  console.log("PASS project recycle dialog: literal confirmation, rejection, exact path, and chat/list removal");
+  console.log("PASS project recycle dialog: case-insensitive confirmation, rejection, exact path, and chat/list removal");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

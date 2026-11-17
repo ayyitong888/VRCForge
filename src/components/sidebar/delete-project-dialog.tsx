@@ -18,6 +18,7 @@ export function DeleteProjectDialog({
   const [confirmation, setConfirmation] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const confirmationMatches = confirmation.toLowerCase() === "delete";
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -30,7 +31,7 @@ export function DeleteProjectDialog({
   }, [submitting]);
 
   async function submit() {
-    if (submittingRef.current || confirmation !== "delete") return;
+    if (submittingRef.current || !confirmationMatches) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError("");
@@ -74,7 +75,7 @@ export function DeleteProjectDialog({
         {error ? <p role="alert" className="mt-3 break-words text-sm text-destructive">{error}</p> : null}
         <div className="mt-5 flex justify-end gap-2">
           <Button type="button" variant="outline" disabled={submitting} onClick={onCancel}>{t("deleteModal.cancel")}</Button>
-          <Button type="submit" variant="danger" disabled={submitting || confirmation !== "delete"}>
+          <Button type="submit" variant="danger" disabled={submitting || !confirmationMatches}>
             {t(submitting ? "project.deletingProject" : "project.deleteProject")}
           </Button>
         </div>

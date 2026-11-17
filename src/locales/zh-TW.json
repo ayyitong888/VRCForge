@@ -1245,7 +1245,7 @@
     "hideProject": "隱藏專案",
     "deleteProject": "刪除專案",
     "deleteProjectDescription": "整個 Unity 專案（含素材和專案聊天）將移到 Windows 資源回收筒，並從 Unity Hub、VCC 和 ALCOM 的專案清單移除。",
-    "deleteProjectPrompt": "輸入 delete 確認刪除。",
+    "deleteProjectPrompt": "輸入 delete 確認刪除，大小寫不限。",
     "deletingProject": "正在刪除…",
     "removeProject": "移除專案",
     "changes": "專案變更 · {{name}}",
