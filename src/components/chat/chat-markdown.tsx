@@ -14,7 +14,8 @@ import { useTranslation } from "react-i18next";
 import { isInternalRuntimeUrl } from "../../lib/runtime-url";
 import { cn } from "../../lib/utils";
 import { chatFileHref, localChatFilePath, openChatFile } from "../../lib/chat-file-link";
-import { chatIdFromDeepLink, OpenChatLinkContext } from "../../lib/chat-deep-link";
+import { chatIdFromDeepLink, isCodexChatDeepLink, OpenChatLinkContext } from "../../lib/chat-deep-link";
+import { hasTauriInternals, invokeTauriWithAbort } from "../../lib/api/http";
 import { MarkdownCodeBlock } from "./markdown-code-block";
 import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 import { loadChatResourceImage, type ChatResourceImageContext as ChatResourceImageRequestContext } from "../../lib/api/chat-resource-image";
@@ -90,7 +91,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   },
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href || []), "vrcforge-file", "vrcforge"],
+    href: [...(defaultSchema.protocols?.href || []), "vrcforge-file", "vrcforge", "codex"],
     src: [
       ...new Set([...(defaultSchema.protocols?.src || []), "data", "vrcforge"]),
     ],
@@ -114,6 +115,7 @@ function buildChatMarkdownComponents(inverted: boolean, allowImages: boolean): C
     a: ({ node: _node, href, ...props }) => {
       const chatId = chatIdFromDeepLink(href || "");
       if (chatId) return <ChatDeepLink chatId={chatId} href={href} className={linkClass} {...props} />;
+      if (href && isCodexChatDeepLink(href)) return <CodexChatDeepLink href={href} className={linkClass} {...props} />;
       const filePath = localChatFilePath(String(href || ""));
       if (filePath) return <ChatFileLink path={filePath} className={linkClass} {...props} />;
       const safeHref = safeMarkdownUrlTransform(String(href || ""));
@@ -172,10 +174,10 @@ function remarkChatFileLinks() {
 function remarkChatDeepLinks() {
   return (tree: Parameters<typeof findAndReplace>[0]) => {
     // Recognize copied URLs in prose without rewriting explicit links or code.
-    const urlPattern = /(?<![^\s(<\[{"“‘：，。！？、（【「『])vrcforge:\/\/chat\/[a-z\d._~%-]+(?![a-z\d._~%/?#-])/gi;
+    const urlPattern = /(?<![^\s(<\[{"“‘：，。！？、（【「『])(?:vrcforge:\/\/chat|codex:\/\/threads)\/[a-z\d._~%-]+(?![a-z\d._~%/?#-])/gi;
     findAndReplace(tree, [urlPattern, (match: string) => {
       const url = match.replace(/\.+$/, "");
-      if (!chatIdFromDeepLink(url)) return false;
+      if (!chatIdFromDeepLink(url) && !isCodexChatDeepLink(url)) return false;
       const link = { type: "link" as const, url, children: [{ type: "text" as const, value: url }] };
       const punctuation = match.slice(url.length);
       return punctuation ? [link, { type: "text", value: punctuation }] : link;
@@ -190,6 +192,18 @@ function ChatDeepLink({ chatId, children, className, href, title }: ComponentPro
     event.preventDefault();
     open(chatId);
   }}>{children}</a>;
+}
+
+function CodexChatDeepLink({ children, className, href, title }: ComponentPropsWithoutRef<"a"> & { href: string }) {
+  const { t } = useTranslation();
+  const [failed, setFailed] = useState(false);
+  return <><a className={className} href={href} title={title} onClick={event => {
+    if (!hasTauriInternals()) return;
+    event.preventDefault();
+    if (!event.isTrusted) return;
+    setFailed(false);
+    void invokeTauriWithAbort<void>("open_codex_chat_url", { url: href }).catch(() => setFailed(true));
+  }}>{children}</a>{failed && <span role="status" className="ml-2 text-sm text-destructive">{t("chat.externalLinkOpenFailed")}</span>}</>;
 }
 
 function ChatFileLink({ path, children, className }: ComponentPropsWithoutRef<"a"> & { path: string }) {
@@ -277,7 +291,7 @@ function safeMarkdownUrlTransform(url: string, key?: string, tagName?: string, r
   if (key === "href" && tagName === "a" && resourceContext && trimmed.startsWith("vrcforge-file:")) {
     return chatFileHref(trimmed) || "";
   }
-  if (key === "href" && tagName === "a" && chatIdFromDeepLink(trimmed)) {
+  if (key === "href" && tagName === "a" && (chatIdFromDeepLink(trimmed) || isCodexChatDeepLink(trimmed))) {
     return trimmed;
   }
   if (isInternalRuntimeUrl(trimmed)) {

@@ -971,6 +971,7 @@
     "copiedMessage": "メッセージをコピーしました",
     "copiedChatLink": "チャットのリンクをコピーしました",
     "linkTargetMissing": "チャットが見つかりません。",
+    "externalLinkOpenFailed": "Codex のチャットを開けませんでした。",
     "copyNoText": "コピーできるメッセージテキストがありません。",
     "copyClipboardUnavailable": "システムのクリップボードを利用できません。",
     "copyUnknownReason": "クリップボードがコピー要求を拒否しました。",

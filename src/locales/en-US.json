@@ -979,6 +979,7 @@
     "copiedMessage": "Message copied",
     "copiedChatLink": "Chat link copied",
     "linkTargetMissing": "Chat not found.",
+    "externalLinkOpenFailed": "Could not open this Codex chat.",
     "copyNoText": "There is no message text to copy.",
     "copyClipboardUnavailable": "The system clipboard is unavailable.",
     "copyUnknownReason": "The clipboard rejected the copy request.",

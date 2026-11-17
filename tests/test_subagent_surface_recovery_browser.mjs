@@ -20,6 +20,18 @@ const chatA = { id: "surface-A", sessionId: "surface-session-A", title: "Surface
 const chatB = { ...chatA, id: "surface-B", sessionId: "surface-session-B", title: "Surface B" };
 const chatC = { ...chatB, id: "surface-C", sessionId: "surface-session-C", title: "Surface C", projectPath: "E:/fixtures/other-project", projectType: "unity" };
 const userLink = "vrcforge://chat/surface-B";
+const externalChatLink = "codex://threads/019f052c-5b66-7ad3-829b-825371654321";
+if (issue === "external-chat-link") {
+  chatA.items = [{ id: "codex-link", type: "user", createdAt: date, text: [
+    `详见：${externalChatLink}。`,
+    `[原始会话](${externalChatLink} "另一个应用")`,
+    `[查询参数](${externalChatLink}?prompt=write)`,
+    `[片段](${externalChatLink}#run)`,
+    "[新会话](codex://threads/new)",
+    "[自动化](codex://automations)",
+    `[图片](https://example.com/image.png)`,
+  ].join("\n\n") }];
+}
 if (issue === "chat-links") {
   const tool = "vrcforge_send_message";
   const source = { id: "link-target", type: "user", text: "Other project transcript", createdAt: date,
@@ -142,7 +154,7 @@ async function waitFor(predicate, label) {
 const baselineModules = new Set([
   "src/App.tsx", "src/components/subagents/sub-agent-sidebar.tsx", "src/hooks/use-composer-draft.ts",
   "src/lib/api/sub-agents.ts", "src/lib/subagent-delegate.ts", "src/lib/subagent-state.ts",
-  ...(issue === "chat-links" ? ["src/components/chat/chat-markdown.tsx", "src/components/sidebar/sidebar-menus.tsx", "src/hooks/use-chat-deep-links.ts"] : []),
+  ...(["chat-links", "external-chat-link"].includes(issue) ? ["src/components/chat/chat-markdown.tsx", "src/components/sidebar/sidebar-menus.tsx", "src/hooks/use-chat-deep-links.ts"] : []),
 ]);
 const scratch = await mkdtemp(resolve(tmpdir(), "vrcforge-subagent-surface-"));
 const frontend = resolve(scratch, "frontend");
@@ -193,6 +205,7 @@ try {
       if (!desktop) return;
       const callbacks = new Map();
       const listeners = new Map();
+      window.codexOpenUrls = [];
       let nextId = 0;
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_event, id) => listeners.delete(id) };
       window.subAgentEvent = (event, payload) => {
@@ -209,6 +222,7 @@ try {
           if (command === "start_backend") return { mode: "attached", started: true, endpoint: base, message: "fixture" };
           if (command === "take_pending_vsk_paths") return [];
           if (command === "plugin:deep-link|get_current") return startupUrl ? [startupUrl] : [];
+          if (command === "open_codex_chat_url") { window.codexOpenUrls.push(args.url); return; }
           if (command === "fetch_project_prefs" && linkProjectPath) return { ok: true, customPaths: [linkProjectPath] };
           const request = args?.request || {};
           if (command === "select_unity_project") return { ok: true, selectedProjectPath: request.projectPath };
@@ -276,6 +290,27 @@ try {
     assert.deepEqual(handoffs.map(({ sourceChatId, targetChatId, payload }) => [sourceChatId, targetChatId, payload.goal]),
       [["surface-A", "handoff-33", "Continue the isolated handoff"]]);
     console.log("PASS handoff: all same-project targets selectable and one exact submission acknowledged");
+  }
+
+  if (issue === "external-chat-link") {
+    const page = await open(true, "vrcforge://chat/surface-A");
+    await page.getByText("Expand", { exact: true }).click();
+    const bareLink = page.getByRole("link", { name: externalChatLink, exact: true });
+    await bareLink.waitFor();
+    const markdownLink = page.getByRole("link", { name: "原始会话", exact: true });
+    assert.equal(await markdownLink.getAttribute("href"), externalChatLink);
+    assert.equal(await markdownLink.getAttribute("title"), "另一个应用");
+    assert.equal(await page.getByRole("link", { name: /查询参数|片段|新会话|自动化/ }).count(), 0);
+    assert.equal(await page.getByRole("link", { name: "图片" }).getAttribute("href"), "https://example.com/image.png");
+    await page.evaluate(url => window.subAgentEvent("deep-link://new-url", [url]), externalChatLink);
+    assert.deepEqual(await page.evaluate(() => window.codexOpenUrls), []);
+    await bareLink.click();
+    await markdownLink.click();
+    assert.deepEqual(await page.evaluate(() => window.codexOpenUrls), [externalChatLink, externalChatLink]);
+    await page.locator('[data-vrcforge-chat-id="surface-A"][data-vrcforge-chat-active="true"]').waitFor();
+    assert.deepEqual(posts, []);
+    assert.deepEqual(handoffs, []);
+    console.log("PASS external Codex chat links: no auto-open, only existing-chat UUID URLs reach the desktop opener on click");
   }
 
   if (issue === "chat-links") {

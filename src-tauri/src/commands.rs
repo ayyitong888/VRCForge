@@ -1440,6 +1440,25 @@ pub fn open_app_release_url(request: DesktopOpenAppReleaseUrlRequest) -> Result<
     open_validated_external_url(&release_url, "GitHub Releases")
 }
 
+fn is_codex_chat_url(url: &str) -> bool {
+    let Some(id) = url.strip_prefix("codex://threads/") else {
+        return false;
+    };
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
+#[tauri::command]
+pub fn open_codex_chat_url(url: String) -> Result<(), String> {
+    if !is_codex_chat_url(&url) {
+        return Err("Only links to existing Codex chats can be opened.".to_string());
+    }
+    open_validated_external_url(&url, "Codex chat")
+}
+
 // Callers must validate the complete URL first. The fixed platform opener receives only that URL;
 // its short-lived dispatcher is owned by the invoking desktop session, while the browser remains user-owned.
 pub(crate) fn open_validated_external_url(url: &str, target: &str) -> Result<(), String> {
@@ -1500,7 +1519,8 @@ pub(crate) fn bootstrap_query(request: &DesktopBootstrapRequest) -> String {
 #[cfg(test)]
 mod bootstrap_transport_tests {
     use super::{
-        bootstrap_query, validate_app_release_url, DesktopAppUpdateRequest, DesktopBootstrapRequest,
+        bootstrap_query, is_codex_chat_url, validate_app_release_url, DesktopAppUpdateRequest,
+        DesktopBootstrapRequest,
     };
 
     #[test]
@@ -1544,6 +1564,23 @@ mod bootstrap_transport_tests {
             "https://github.com/ayyitong888/VRCForge/releases/tag/v1.7.3/extra"
         )
         .is_err());
+    }
+
+    #[test]
+    fn codex_chat_url_only_accepts_a_canonical_thread_uuid() {
+        let valid = "codex://threads/019f052c-5b66-7ad3-829b-825371654321";
+        assert!(is_codex_chat_url(valid));
+        for suffix in ["?prompt=hello", "#open", "/extra", "\n"] {
+            assert!(!is_codex_chat_url(&format!("{valid}{suffix}")));
+        }
+        for invalid in [
+            "codex://threads/new",
+            "codex://automations",
+            "codex://threads/019f052c-5b66-7ad3-829b-82537165432z",
+            "vrcforge://chat/019f052c-5b66-7ad3-829b-825371654321",
+        ] {
+            assert!(!is_codex_chat_url(invalid));
+        }
     }
 }
 

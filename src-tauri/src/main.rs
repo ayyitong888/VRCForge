@@ -238,6 +238,7 @@ fn main() {
             cancel_sub_agent,
             check_app_update,
             open_app_release_url,
+            open_codex_chat_url,
             open_support_feedback_url,
             check_skills,
             clear_agent_memory,

@@ -977,6 +977,7 @@
     "copiedMessage": "已复制消息",
     "copiedChatLink": "已复制对话链接",
     "linkTargetMissing": "找不到此对话。",
+    "externalLinkOpenFailed": "无法打开这条 Codex 会话链接。",
     "copyNoText": "没有可复制的消息文本。",
     "copyClipboardUnavailable": "系统剪贴板当前不可用。",
     "copyUnknownReason": "剪贴板拒绝了复制请求。",

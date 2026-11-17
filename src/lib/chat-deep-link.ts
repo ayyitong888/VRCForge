@@ -20,3 +20,7 @@ export function chatDeepLink(chatId: string): string {
   );
   return `vrcforge://chat/${encoded}`;
 }
+
+export function isCodexChatDeepLink(value: string): boolean {
+  return /^codex:\/\/threads\/[\da-fA-F]{8}(?:-[\da-fA-F]{4}){3}-[\da-fA-F]{12}$/.test(value);
+}
