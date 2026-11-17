@@ -126,6 +126,18 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "vrcforge_package_install_plan": PACKAGE_INSTALL_INPUT_SCHEMA,
+    "vrcforge_package_install_request": PACKAGE_INSTALL_INPUT_SCHEMA,
+    "vrcforge_inspect_chat_attachment": {
+        "type": "object",
+        "additionalProperties": True,
+        "anyOf": [{"required": ["payloadHash"]}, {"required": ["payload_hash"]}],
+        "properties": {
+            "payloadHash": {"type": "string", "description": "Exact hash returned for this vault attachment."},
+            "payload_hash": {"type": "string", "description": "Alias of payloadHash."},
+            "entryPath": {"type": "string", "description": "Exact text entry from the archive listing."},
+            "maxEntries": {"type": "integer", "description": "Maximum archive entries to list."},
+        },
+    },
     "vrcforge_plan_outfit_import": outfit_import_input_schema(require_project_path=False),
     "vrcforge_get_unitypackage_import_status": {
         "type": "object",

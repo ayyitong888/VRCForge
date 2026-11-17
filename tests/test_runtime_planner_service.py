@@ -377,7 +377,7 @@ def test_native_request_reuses_unity_scope_routing_rules_and_general_exception()
         global_instructions="", project_instructions="",
     )
     assert "current scene, component bindings, or Avatar behavior" in project_request["instructions"]
-    assert "Explicit file-content or file-location tasks should still use the filesystem readers." in project_request["instructions"]
+    assert "Use filesystem readers for file contents or locations." in project_request["instructions"]
 
     general_request, _ = planner._build_native_plan_request(
         [{"role": "user", "content": "inspect"}],
@@ -415,7 +415,6 @@ def test_core_setup_guidance_uses_bound_project_and_existing_approval(native):
     assert "reuse the status tool's Console evidence" in instructions
     assert "unity_install_unity_core" in instructions
     assert "current approval policy" in instructions
-    assert "even when the user only asked for ordinary avatar work" in instructions
     assert "installedAt" in instructions and "ready=true" in instructions
     assert "before resuming the original task" in instructions
     assert "waiting_for_console_snapshot" in instructions and "unity_get_compile_errors" in instructions

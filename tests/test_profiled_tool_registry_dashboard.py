@@ -138,3 +138,17 @@ def test_shared_general_handlers_read_project_but_reject_project_write(monkeypat
     )
     assert written["operation"] == "write_file"
     assert (outside / "allowed.txt").read_text(encoding="utf-8") == "yes"
+
+
+def test_model_catalog_exposes_the_package_and_attachment_arguments_the_owners_need():
+    from runtime_planner_service import validate_planner_tool_arguments
+
+    catalog = dashboard._RuntimePlannerCatalog().read("execution", project_context_active=True)
+    tools = {tool.name: tool for tool in catalog.visible_tools}
+    for name, arguments in (
+        ("unity_package_install_request", {"packageId": "com.example.package", "preferredManager": "vrc-get"}),
+        ("inspect_chat_attachment", {"payloadHash": "sha256-example", "entryPath": "manifest.json"}),
+    ):
+        schema = tools[name].input_schema
+        assert not validate_planner_tool_arguments(schema, {})["ok"]
+        assert validate_planner_tool_arguments(schema, arguments)["ok"]

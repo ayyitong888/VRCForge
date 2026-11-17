@@ -24,9 +24,8 @@ def test_inspection_claims_follow_visible_evidence_scope(native, project):
     else:
         prompt = planner._build_llm_plan_prompt("Inspect only", [], **kwargs)
     for rule in (
-        "A retained result or child reference is not evidence you have read",
-        "Do not recast ambiguous or analysis-required findings as normal or safe",
-        "Distinguish configured behavior from observed runtime effects",
+        "Read a retained result page only if it contains evidence the task still needs",
+        "Distinguish configured bindings from observed behavior",
     ):
         assert (rule in prompt) is project
 

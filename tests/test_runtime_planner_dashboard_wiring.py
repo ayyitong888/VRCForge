@@ -1005,17 +1005,13 @@ def test_no_project_planner_prompt_is_general_and_omits_unity_tools() -> None:
     )
 
     assert "general-purpose local Agent" in prompt
-    assert "Choose autonomously among the visible general Agent tools" in prompt
     assert "bounded read-only list/read/find/search tools" in prompt
-    assert "use Shell for commands, scripts, or processes" in prompt
-    assert "questions, TODO/progress, subagents, attachments, vision, or MCP" in prompt
-    assert "Never repeat an already successful bounded directory listing through Shell" in prompt
-    assert "a top-level directory listing alone is not sufficient evidence" in prompt
-    assert "a reply is invalid after only a top-level directory listing" in prompt
+    assert "Shell for commands, scripts, or processes" in prompt
+    assert "read relevant contents to explain a mechanism" in prompt
     assert "know_yourself" in prompt
-    assert '"completion_claim":{"satisfied":true}' in prompt
-    assert "The host binds the full completed-action evidence" in prompt
-    assert "Optional evidence_action_ids must reference completed actions" in prompt
+    assert "completion_claim.satisfied=true" in prompt
+    assert "The host verifies the full task and outstanding requirements" in prompt
+    assert "cite completed actionIds in completion_claim.evidence_action_ids" in prompt
     assert "avatar_encryption_scan" not in prompt
     assert "scan_project_index" not in prompt
     assert "unity_status" not in prompt
@@ -1060,13 +1056,10 @@ def test_connection_help_prompt_uses_docs_without_a_fixed_readiness_entrypoint()
         project_context_active=False,
     )
 
-    assert "诊断 VRCForge 自身启动、连接或历史日志时" in prompt
     assert "know_yourself" in prompt
-    assert "vrcforge-docs" in prompt
-    assert "it is not a prerequisite" in prompt
-    assert "does not complete an authorized installation or repair" in prompt
-    assert "先发现并加载相应的只读诊断工具块" in prompt
-    assert "不可调用未列出的工具或用普通 Shell 代替这条诊断路径" in prompt
+    assert "consult the relevant installed guide when available" in prompt
+    assert "discover and load the relevant read-only diagnostic tools" in prompt
+    assert "Use visible diagnostics instead of host Shell for those logs" in prompt
 
 
 def test_no_project_planner_rejects_unity_tool_while_project_turn_keeps_it() -> None:

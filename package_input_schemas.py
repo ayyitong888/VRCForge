@@ -12,7 +12,7 @@ PACKAGE_INSTALL_INPUT_SCHEMA: dict[str, Any] = {
         "projectPath": {"type": "string", "description": "Absolute Unity project path."},
         "packageId": {"type": "string", "description": "VPM package identifier."},
         "package_id": {"type": "string", "description": "Existing alias of packageId; prefer packageId for new calls."},
-        "repository": {"type": "string"},
+        "repository": {"type": "string", "description": "Omit to resolve against configured sources. An explicit URL is unsupported."},
         "preferredManager": {"type": "string", "enum": ["", "vrc-get", "vcc", "alcom"]},
         "allowAgentManagedDownload": {"type": "boolean"},
         "includePrerelease": {"type": "boolean"},

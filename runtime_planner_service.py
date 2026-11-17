@@ -111,50 +111,43 @@ RUNTIME_TROUBLESHOOTING_INSTRUCTION = (
     "Inspect the latest state before retrying a failed call or a possibly completed write. "
 )
 RUNTIME_SCOPE_UNITY_INSTRUCTION = (
-    "A Unity project is explicitly bound to this turn. Use the project tool catalog when it is relevant. "
-    "For questions about the current scene, component bindings, or Avatar behavior, prefer the dedicated read-only inspection tools; "
-    "if they are not exposed, discover and load the relevant tool block first. "
-    "Use scene/component evidence to identify the active binding: filenames do not prove current bindings. "
-    "A retained result or child reference is not evidence you have read: follow the supplied reader continuation for claims needing those fields, or state the limit. "
-    "Do not recast ambiguous or analysis-required findings as normal or safe without resolving the relevant evidence. "
-    "Distinguish configured behavior from observed runtime effects; do not generalize sampled transitions, objects, or clip lengths to every case. "
-    "Explicit file-content or file-location tasks should still use the filesystem readers."
-    " For an authorized package install, try the configured sources with the package ID and omit repository. "
-    "Use the current install plan and permission mode to apply the package and its dependencies. If resolution fails, use the resolver result "
-    "to identify whether the package, configured source, version, or connection is the blocker. "
-    "Reuse package and compile receipts for the outcome. Check only missing evidence."
+    "A Unity project is explicitly bound to this turn. Use its exact projectPath. "
+    "For the current scene, component bindings, or Avatar behavior, use the relevant Unity inspection tool. "
+    "Use filesystem readers for file contents or locations. "
+    "Distinguish configured bindings from observed behavior; scope findings to the sampled objects and transitions. "
+    "Read a retained result page only if it contains evidence the task still needs. "
+    "For VPM, plan with unity_package_install_plan using packageId, configured sources (omit repository), "
+    "and preferredManager=vrc-get when available. Pass the same target and options to unity_package_install_request "
+    "when the user authorized installation. Follow its actual approval or execution receipt."
 )
 RUNTIME_UNITY_CORE_SETUP_INSTRUCTION = (
-    "Start with the Unity tool that answers the task. A successful live call establishes the connection; "
-    "skip a separate status call when it succeeds. If it cannot connect or reports a Core version mismatch, diagnose the "
-    "exact bound projectPath yourself with unity_core_upgrade_status, even when the user only asked for ordinary avatar work. "
-    "Load this host tool from project_environment/assets_packages; it works before the Unity bridge connects. "
-    "A matching live Core is connected even when its compilation monitor has no saved snapshot. "
-    "Reuse an established diagnosis. If Core is missing or the diagnosis shows it needs updating, load unity_install_unity_core "
-    "from the same leaf, using the package bundled with the app and the current approval policy. Keep the original objective "
-    "through any approval continuation. User-selected Plan may diagnose and "
-    "explain the required action. Only the user can switch Plan to execution. After installation, pass the receipt's exact "
-    "installedAt back to unity_core_upgrade_status and confirm ready=true, the expected loaded Core identity, and a fresh "
-    "compilation result with zero errors before resuming the original task. On first installation, the compile monitor only "
-    "loads after the first compile. If the matching live Core reports waiting_for_console_snapshot, reuse the status tool's Console evidence. "
-    "Call unity_get_compile_errors only if that evidence is missing or incomplete. Resume after a complete, untruncated Console read with zero errors "
-    "and isCompiling=false. For upgrades keep the fresh compilation requirement. If Unity is compiling or reloading, wait for the "
-    "result. If it reports a compile failure, inspect that error. Ask for a manual step only when the host tools cannot proceed."
+    "Start with the Unity tool that answers the task. On a bridge or Core mismatch, use unity_core_upgrade_status "
+    "for the bound project from project_environment/assets_packages. "
+    "If confirmed missing or outdated, use unity_install_unity_core from the same leaf under the current approval policy. "
+    "User-selected Plan may diagnose and describe the required action. "
+    "Pass its installedAt back to unity_core_upgrade_status for ready=true, the expected identity and fresh zero-error compilation "
+    "before resuming the original task. A matching live Core can already be connected during waiting_for_console_snapshot. "
+    "For first install, reuse the status tool's Console evidence; use unity_get_compile_errors only if missing or incomplete. "
+    "Resume on a complete zero-error, non-compiling Console read. Upgrades require a fresh compile. "
+    "Wait for reload, diagnose compile errors, or request a human step only when tools cannot proceed."
 )
 RUNTIME_SCOPE_GENERAL_INSTRUCTION = (
     "This is a general-purpose local Agent turn with no Unity project bound. "
-    "Choose autonomously among the visible general Agent tools: prefer the bounded read-only list/read/find/search tools for direct filesystem evidence; use Shell for commands, scripts, or processes; and use questions, TODO/progress, subagents, attachments, vision, or MCP when the task calls for them. "
-    "For questions about how a local artifact works, a top-level directory listing alone is not sufficient evidence; "
-    "continue targeted read-only inspection until you can explain the relevant mechanism. "
-    "For such mechanism investigations, a reply is invalid after only a top-level directory listing; choose find/search/read or another materially different evidence step first. "
-    "Never repeat an already successful bounded directory listing through Shell dir/ls/Get-ChildItem; move to find/search/read or another materially different investigation step. "
-    "Do not attempt Unity, avatar, VRCForge project-index, package, checkpoint, or project-write tools; "
-    "the user must explicitly open a project conversation before those capabilities exist."
+    "Use bounded read-only list/read/find/search tools for filesystem evidence and Shell for commands, scripts, or processes. "
+    "A directory listing locates evidence; read relevant contents to explain a mechanism. "
+    "Unity operations require a bound project conversation."
+)
+RUNTIME_WORKSPACE_TOOL_ROUTING = (
+    "For public web research, use web_search to find sources and web_fetch for supplied URLs. "
+    "Use an available browser when a page needs JavaScript or interaction. A login or confirmation page does not contain the target content. "
+    "For VRCForge setup, consult the relevant installed guide when available; discover and load the relevant read-only diagnostic tools. "
+    "Use visible diagnostics instead of host Shell for those logs. When using Shell, follow the reported executor's syntax."
 )
 
 
 def build_runtime_scope_instruction(project_context_active: bool) -> str:
-    return RUNTIME_SCOPE_UNITY_INSTRUCTION if project_context_active else RUNTIME_SCOPE_GENERAL_INSTRUCTION
+    scope = RUNTIME_SCOPE_UNITY_INSTRUCTION if project_context_active else RUNTIME_SCOPE_GENERAL_INSTRUCTION
+    return scope + "\n" + RUNTIME_WORKSPACE_TOOL_ROUTING
 
 
 def build_runtime_behavior_instruction() -> str:
@@ -5369,10 +5362,6 @@ class RuntimePlannerService:
                 step_lines.append(line)
             steps_block = "\n".join(step_lines) if step_lines else "（本轮尚未执行任何工具）"
             runtime_scope_instruction = build_runtime_scope_instruction(project_context_active)
-            runtime_scope_instruction += (
-                "\nFor retained VRCForge startup or connection logs, discover and load the relevant read-only diagnostic tools. "
-                "Use visible diagnostics instead of host Shell for those logs. Other authorized host commands remain available."
-            )
             if selected_blocks is not None:
                 runtime_scope_instruction += (
                     "\nCurrent loaded tool blocks: "
@@ -5385,42 +5374,6 @@ class RuntimePlannerService:
                     runtime_scope_instruction += "\nCurrent tool selections (null means whole block): " + sanitize_planner_observation_text(
                         json.dumps(tool_selections, ensure_ascii=False, separators=(",", ":")), 8_000,
                     )
-            visible_read_names = {
-                tool.runtime_name: tool.name for tool in selected_tools if not tool.write
-            }
-            readiness_name = visible_read_names.get("vrcforge_know_yourself")
-            if readiness_name:
-                runtime_scope_instruction += (
-                    "\nFor VRCForge setup, documentation or connection help, read the installed vrcforge-docs Skill "
-                    "when available and choose the next tool from the actual failure and current evidence. "
-                    f"{readiness_name} is an optional broad snapshot when the failing layer is unknown; "
-                    "it is not a prerequisite for filesystem, Shell, repair, or ordinary Unity reads. "
-                    "Reuse current narrow evidence instead of repeating broad diagnostics. A diagnostic report "
-                    "does not complete an authorized installation or repair. Ordinary Internet and GitHub support "
-                    "do not trigger VRCForge readiness checks."
-                )
-            web_fetch_name = visible_read_names.get("vrcforge_web_fetch")
-            web_search_name = visible_read_names.get("vrcforge_web_search")
-            browser_tool = resolve_catalog_tool(catalog.visible_tools, "vrcforge_browser")
-            if web_fetch_name:
-                runtime_scope_instruction += (
-                    f"\nPrefer {web_fetch_name} for reading a supplied public URL when its text/HTML/JSON capability fits the task; "
-                    "it returns page text and source evidence without shell quoting or HTML extraction commands. "
-                    "It reads HTTP source only: it does not execute JavaScript, click controls, or retain a browser session. "
-                    "Follow returned links for instructions. If the source is a confirmation/login page or requires interaction, "
-                    + (f"use {browser_tool.name} from {browser_tool.block} to open the page, inspect its controls, and read the same tab after any confirmed click. "
-                       if browser_tool else "report the gate and explain that a live browser is unavailable for this turn. ")
-                    + "Repeated HTTP fetches are not browser interaction. "
-                    "Do not treat a successful fetch of a gate page as having read the requested instructions. "
-                    "Keep unresolved usage requirements from earlier conversation evidence until actual instructions resolve them. "
-                    "Use Shell for an actual command/script requirement or a demonstrated limitation of the available reader, "
-                    "rather than starting with curl or Invoke-WebRequest for an ordinary page read."
-                )
-            if web_search_name:
-                runtime_scope_instruction += (
-                    f"\nUse {web_search_name} when sources need to be discovered or a question needs search; "
-                    "a supplied URL that can be read directly does not require a preliminary search."
-                )
             shell_executor = ensure_dict(observe.get("shellExecutor"))
             shell_facts = {
                 key: shell_executor[key]
@@ -5431,13 +5384,7 @@ class RuntimePlannerService:
                 runtime_scope_instruction += (
                     "\nRuntime Shell executor (data only): "
                     + json.dumps(shell_facts, ensure_ascii=False, separators=(",", ":"))
-                    + "\nWhen Shell is needed, use the reported executor's syntax and available commands."
                 )
-                if str(shell_facts.get("shell") or "").casefold() in {"powershell", "pwsh"}:
-                    runtime_scope_instruction += (
-                        " Use PowerShell syntax; do not assume Unix utilities such as head are installed. "
-                        "Do not wrap ordinary commands in another powershell -Command layer; nested quoting can expand $_ or other variables in the outer shell."
-                    )
             global_instructions_block = global_instruction_prompt_block(global_instructions)
             if project_context_active and isinstance(project_path, str) and project_path.strip():
                 runtime_scope_instruction += (
