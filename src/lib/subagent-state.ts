@@ -81,6 +81,12 @@ export function reconcileSubAgentList(
   return { ...incoming, tasks: incoming.tasks.map((task) => latestSubAgentTask(existing.get(task.id), task)) };
 }
 
+export function combineSubAgentLists(global: SubAgentTaskList, scoped: SubAgentTaskList): SubAgentTaskList {
+  const tasks = new Map(global.tasks.map((task) => [task.id, task]));
+  for (const task of scoped.tasks) tasks.set(task.id, latestSubAgentTask(tasks.get(task.id), task));
+  return { ...global, tasks: [...tasks.values()], count: tasks.size };
+}
+
 export function reconcileSelectedSubAgent(
   selected: SubAgentTask | null,
   tasks: SubAgentTask[],

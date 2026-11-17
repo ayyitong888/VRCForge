@@ -66,14 +66,18 @@ export type SubAgentTaskList = {
   runningCount?: number;
 };
 
-export async function fetchSubAgents(endpoint: string, includeEvents = false): Promise<SubAgentTaskList> {
-  const suffix = includeEvents ? "?includeEvents=true" : "";
+export async function fetchSubAgents(
+  endpoint: string, includeEvents = false, parentChatId?: string,
+): Promise<SubAgentTaskList> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<SubAgentTaskList>("fetch_sub_agents", {
-      request: { includeEvents, timeoutMs: 30000 },
+      request: { includeEvents, parentChatId, timeoutMs: 30000 },
     });
   }
-  return requestJson<SubAgentTaskList>(`${endpoint}/api/app/sub-agents${suffix}`);
+  const query = new URLSearchParams();
+  if (includeEvents) query.set("includeEvents", "true");
+  if (parentChatId) query.set("parentChatId", parentChatId);
+  return requestJson<SubAgentTaskList>(`${endpoint}/api/app/sub-agents${query.size ? `?${query}` : ""}`);
 }
 
 export async function createSubAgent(

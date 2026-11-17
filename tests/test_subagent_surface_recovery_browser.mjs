@@ -246,6 +246,28 @@ try {
     await page.close();
   }
 
+  if (issue === "all" || issue === "parent") {
+    catalogOnly = true;
+    tasks = [...Array.from({ length: 50 }, (_, index) => ({ ...taskB, id: `B-${index}` })), taskA];
+    detail = taskA;
+    const page = await open();
+    await page.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).first().waitFor();
+    holdNextParent = chatA.id;
+    await waitFor(() => pending.length === 1, "A refresh must be pending");
+    await page.getByText("Surface B", { exact: true }).first().click();
+    await page.getByText("Surface worker B", { exact: true }).first().waitFor();
+    const lateA = page.waitForResponse((response) => new URL(response.url()).searchParams.get("parentChatId") === chatA.id);
+    pending.shift()();
+    await lateA;
+    await page.evaluate(() => new Promise((frame) => requestAnimationFrame(() => requestAnimationFrame(frame))));
+    assert.equal(await page.getByText("Surface worker B", { exact: true }).first().isVisible(), true);
+    assert.equal(await page.getByText("Surface worker A", { exact: true }).count(), 0);
+    await page.getByText("Surface A", { exact: true }).first().click();
+    await page.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).first().waitFor();
+    await page.close();
+    catalogOnly = false;
+  }
+
   console.log(`PASS App browser and fixture HTTP: ${issue}`);
 } catch (error) {
   console.error(error.message);

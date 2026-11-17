@@ -105,8 +105,10 @@ class SubAgentCollaborationService:
     def shutdown(self, timeout_seconds: float = 5.0) -> dict[str, Any]:
         return self._registry.shutdown(timeout_seconds)
 
-    def list_tasks(self, *, include_events: bool = False, limit: int = 50) -> dict[str, Any]:
-        return self._registry.list_tasks(include_events=include_events, limit=limit)
+    def list_tasks(
+        self, *, include_events: bool = False, limit: int = 50, parent_chat_id: str | None = None
+    ) -> dict[str, Any]:
+        return self._registry.list_tasks(include_events=include_events, limit=limit, parent_chat_id=parent_chat_id)
 
     def active_parent_task_ids(
         self, parent_session_id: str, *, parent_turn_id: str = "", parent_client_turn_id: str = "",

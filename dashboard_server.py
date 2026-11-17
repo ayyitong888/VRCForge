@@ -8426,8 +8426,12 @@ async def app_package_install_request(request: PackageInstallPlanRequest) -> dic
 
 
 @app.get("/api/app/sub-agents")
-def app_list_sub_agents(includeEvents: bool = False, limit: int = 50) -> dict[str, Any]:
-    return SUB_AGENT_COLLABORATION.list_tasks(include_events=includeEvents, limit=limit)
+def app_list_sub_agents(
+    includeEvents: bool = False, limit: int = 50, parentChatId: str | None = None
+) -> dict[str, Any]:
+    return SUB_AGENT_COLLABORATION.list_tasks(
+        include_events=includeEvents, limit=limit, parent_chat_id=parentChatId,
+    )
 
 
 @app.post("/api/app/sub-agents")

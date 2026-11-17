@@ -82,7 +82,7 @@ test("review notification click path uses taskId+revision+parentChatId key and r
 
   assert.equal(/reviewNotificationId\s*=\s*`\$\{action\.taskId\}:\$\{action\.revision\}:\$\{action\.parentChatId\}`/.test(app), true);
   assert.equal(/openChat\(task\.parentChatId\)/.test(app), false);
-  assert.equal(/const\s+chat\s*=\s*getChatById\(task\.parentChatId\)/.test(app), true);
+  assert.equal(/const\s+chat\s*=\s*await loadChat\(task\.parentChatId\)/.test(app), true);
   assert.equal(/openChat\(chat\)/.test(app), true);
 });
 

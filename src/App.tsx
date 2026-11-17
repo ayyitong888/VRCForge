@@ -179,7 +179,7 @@ import {
   AGENT_QUESTION_NOTIFICATION_ACTION_EVENT,
   parseAgentQuestionNotificationAction,
 } from "./lib/agent-question-notifications";
-import { latestSubAgentTask, pickSubAgentName, reconcileSelectedSubAgent, reconcileSubAgentList, updateSubAgentList } from "./lib/subagent-state";
+import { combineSubAgentLists, latestSubAgentTask, pickSubAgentName, reconcileSelectedSubAgent, reconcileSubAgentList, updateSubAgentList } from "./lib/subagent-state";
 import {
   AgentApproval,
   AgentQuestion,
@@ -466,6 +466,7 @@ export default function App() {
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
   const subAgentListRequestRef = useRef(0);
   const appliedSubAgentListRequestRef = useRef(0);
+  const subAgentParentChatRef = useRef("");
   const subAgentHandoffBusyRef = useRef(new Set<string>());
   const subAgentActionBusyRef = useRef(new Set<string>());
   const subAgentInspectRequestRef = useRef(0);
@@ -1453,6 +1454,7 @@ export default function App() {
     if (!taskSnapshot.length) {
       return;
     }
+    const chatIds = new Set(sidebarChats.map((chat) => chat.id));
     const allReviewTasks = taskSnapshot.filter((task) => {
       return (
         isAwaitingMergeReview(task)
@@ -1469,7 +1471,7 @@ export default function App() {
         && Number.isInteger(task.revision)
         && task.revision > 0
         && Boolean(task.parentChatId)
-        && getChatById(task.parentChatId || "")
+        && chatIds.has(task.parentChatId || "")
       );
     });
     const pendingReviewNotificationIds = new Set(allReviewTasks.map((task) => toReviewNotificationId(task)));
@@ -1528,7 +1530,7 @@ export default function App() {
               || currentTask.revision !== task.revision
               || currentTask.parentChatId !== task.parentChatId
               || !isAwaitingMergeReview(currentTask)
-              || !getChatById(currentTask.parentChatId || "")
+              || !chatIds.has(currentTask.parentChatId || "")
             ) {
               knownSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
               inFlightSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
@@ -1544,7 +1546,7 @@ export default function App() {
           }),
       );
     }
-  }, [getChatById, runtimeConnected, subAgentList, t, toReviewNotificationId]);
+  }, [sidebarChats, runtimeConnected, subAgentList, t, toReviewNotificationId]);
 
   useLayoutEffect(() => {
     subAgentReviewRuntimeConnectedRef.current = runtimeConnected;
@@ -1577,14 +1579,13 @@ export default function App() {
             || task.parentChatId !== action.parentChatId
             || task.revision !== action.revision
             || !isAwaitingMergeReview(task)
-            || !getChatById(task.parentChatId)
           ) {
             handledSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
             exhaustedSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
             setError(t("approval.notificationExpired"));
             return;
           }
-          const chat = getChatById(task.parentChatId);
+          const chat = await loadChat(task.parentChatId);
           if (!chat) {
             handledSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
             exhaustedSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
@@ -1603,7 +1604,7 @@ export default function App() {
         }
       })();
     };
-  }, [endpoint, getChatById, openChat, runtimeConnected, t]);
+  }, [endpoint, loadChat, openChat, runtimeConnected, t]);
 
   useEffect(() => {
     if (runtimeConnected) {
@@ -1856,10 +1857,11 @@ export default function App() {
   }
   const subAgentTasks = subAgentList?.tasks ?? [];
   subAgentTasksRef.current = subAgentTasks;
+  const subAgentParentChatId = activeChatId;
+  subAgentParentChatRef.current = subAgentParentChatId;
   const activeSubAgentTasks = useMemo(() => {
-    const parentChatId = activeChat?.id || "";
-    return parentChatId ? subAgentTasks.filter((task) => task.parentChatId === parentChatId) : [];
-  }, [activeChat?.id, subAgentTasks]);
+    return subAgentParentChatId ? subAgentTasks.filter((task) => task.parentChatId === subAgentParentChatId) : [];
+  }, [subAgentParentChatId, subAgentTasks]);
   const activeSubAgentThreads = useMemo(() => groupSubAgentThreads(activeSubAgentTasks), [activeSubAgentTasks]);
   const runningSubAgentTaskCount = useMemo(
     () => activeSubAgentThreads.filter(({ task }) => ["queued", "running", "cancelling"].includes(task.status)).length,
@@ -2583,17 +2585,17 @@ export default function App() {
     }
     void loadSubAgents(false);
     return () => { appliedSubAgentListRequestRef.current = subAgentListRequestRef.current; };
-  }, [runtimeConnected, endpoint]);
+  }, [runtimeConnected, endpoint, subAgentParentChatId]);
 
   useEffect(() => {
     if (smokeMode || !selectedSubAgent) {
       return;
     }
-    if (!activeChat?.id || selectedSubAgent.parentChatId !== activeChat.id) {
+    if (!subAgentParentChatId || selectedSubAgent.parentChatId !== subAgentParentChatId) {
       setSelectedSubAgent(null);
       setSelectedSubAgentPanelOpen(false);
     }
-  }, [activeChat?.id, selectedSubAgent?.id, selectedSubAgent?.parentChatId, smokeMode]);
+  }, [subAgentParentChatId, selectedSubAgent?.id, selectedSubAgent?.parentChatId, smokeMode]);
 
   useEffect(() => {
     if (!runtimeConnected || !hasRunningSubAgents) {
@@ -3830,16 +3832,21 @@ export default function App() {
       return;
     }
     const requestId = ++subAgentListRequestRef.current;
+    const parentChatId = subAgentParentChatRef.current;
     setLoadingSubAgents(true);
     try {
-      const payload = await fetchSubAgents(endpoint, true);
-      if (requestId <= appliedSubAgentListRequestRef.current) return;
+      const [global, scoped] = await Promise.all([
+        fetchSubAgents(endpoint, true),
+        parentChatId ? fetchSubAgents(endpoint, true, parentChatId) : null,
+      ]);
+      if (requestId <= appliedSubAgentListRequestRef.current || parentChatId !== subAgentParentChatRef.current) return;
+      const payload = scoped ? combineSubAgentLists(global, scoped) : global;
       appliedSubAgentListRequestRef.current = requestId;
       setSubAgentList((current) => reconcileSubAgentList(current, payload));
       setSelectedSubAgent((current) => reconcileSelectedSubAgent(current, payload.tasks));
       setSubAgentError("");
     } catch (cause) {
-      if (requestId !== subAgentListRequestRef.current) return;
+      if (requestId !== subAgentListRequestRef.current || parentChatId !== subAgentParentChatRef.current) return;
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (requestId === subAgentListRequestRef.current) setLoadingSubAgents(false);
@@ -4026,7 +4033,7 @@ export default function App() {
       return;
     }
     try {
-      if (!task.parentChatId || !getChatById(task.parentChatId)) {
+      if (!task.parentChatId || !(await loadChat(task.parentChatId))) {
         throw new Error("Sub-agent parent chat is unavailable.");
       }
       const latest = await fetchSubAgent(endpoint, task.id);

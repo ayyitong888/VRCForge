@@ -522,6 +522,7 @@ pub(crate) struct DesktopAgentListRequest {
     project_root: Option<String>,
     client_turn_id: Option<String>,
     chat_id: Option<String>,
+    parent_chat_id: Option<String>,
     scope: Option<String>,
     include_events: Option<bool>,
     include_answered: Option<bool>,
@@ -2075,6 +2076,7 @@ pub(crate) fn agent_list_query(request: &DesktopAgentListRequest) -> String {
     append_query_param(&mut query, "projectRoot", &request.project_root);
     append_query_param(&mut query, "clientTurnId", &request.client_turn_id);
     append_query_param(&mut query, "chatId", &request.chat_id);
+    append_query_param(&mut query, "parentChatId", &request.parent_chat_id);
     append_query_param(&mut query, "scope", &request.scope);
     if request.include_events.unwrap_or(false) {
         query.push("includeEvents=true".to_string());
@@ -2098,6 +2100,14 @@ pub(crate) fn agent_list_query(request: &DesktopAgentListRequest) -> String {
 #[cfg(test)]
 mod agent_list_transport_tests {
     use super::{agent_list_query, DesktopAgentListRequest};
+
+    #[test]
+    fn parent_chat_scope_reaches_the_backend_query() {
+        let request: DesktopAgentListRequest = serde_json::from_value(serde_json::json!({
+            "parentChatId": "chat-a:b", "includeEvents": true
+        })).unwrap();
+        assert_eq!(agent_list_query(&request), "?parentChatId=chat-a%3Ab&includeEvents=true");
+    }
 
     #[test]
     fn answered_questions_flag_reaches_the_backend_without_changing_default() {

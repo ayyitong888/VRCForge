@@ -327,10 +327,24 @@ class SubAgentTaskRegistry:
     def list_roles(self) -> list[dict[str, Any]]:
         return [self._serialize_role(role) for role in self.roles.values()]
 
-    def list_tasks(self, include_events: bool = False, limit: int = 50) -> dict[str, Any]:
+    def list_tasks(
+        self, include_events: bool = False, limit: int = 50, *, parent_chat_id: str | None = None
+    ) -> dict[str, Any]:
         with self._lock:
             tasks = sorted(self._tasks.values(), key=lambda item: item.created_at, reverse=True)
-            tasks = tasks[: max(1, min(int(limit), 200))]
+            page_size = max(1, min(int(limit), 200))
+            if parent_chat_id is None:
+                tasks = tasks[:page_size]
+            else:
+                scoped = [task for task in tasks if task.parent_chat_id == parent_chat_id]
+                # Keep work that still needs attention reachable after the history page fills.
+                tasks = scoped[:page_size] + [
+                    task for task in scoped[page_size:]
+                    if task.status in _RUNNING_STATUSES
+                    or task.parent_continuation_status in {"pending", "dispatching"}
+                    or (task.status in {"completed", "failed", "paused"}
+                        and not task.merge_decision and not task.parent_continuation_status)
+                ]
             payloads = [self._serialize_task(task) for task in tasks]
             if include_events and payloads:
                 events_by_task: dict[str, list[dict[str, Any]]] = {task.id: [] for task in tasks}
