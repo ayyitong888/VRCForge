@@ -14,6 +14,7 @@ const snapshots = [];
 const pending = [];
 const posts = [];
 const merges = [];
+const handoffs = [];
 const date = "2026-10-28T10:00:00Z";
 const chatA = { id: "surface-A", sessionId: "surface-session-A", title: "Surface A", projectPath: "", projectType: "general", createdAt: date, updatedAt: date, revision: 0, items: [] };
 const chatB = { ...chatA, id: "surface-B", sessionId: "surface-session-B", title: "Surface B" };
@@ -35,7 +36,18 @@ if (issue === "chat-links") {
     ],
   } }];
 }
-const fixtureChats = issue === "chat-links" ? [chatA, chatB, chatC] : [chatA, chatB];
+const handoffTargets = Array.from({ length: 35 }, (_, index) => ({
+  ...chatA, id: `handoff-${index + 1}`, sessionId: `handoff-session-${index + 1}`, title: `Handoff target ${index + 1}`,
+}));
+if (issue === "handoff-catalog") {
+  for (const chat of [chatA, ...handoffTargets]) {
+    chat.projectPath = chatC.projectPath;
+    chat.projectType = chatC.projectType;
+  }
+  chatC.projectPath = "E:/fixtures/foreign-project";
+}
+const fixtureChats = issue === "handoff-catalog" ? [chatA, chatB, chatC, ...handoffTargets]
+  : issue === "chat-links" ? [chatA, chatB, chatC] : [chatA, chatB];
 const catalog = fixtureChats.map((chat) => ({ ...chat, sourceProjectPath: chat.projectPath, sourceStoreId: "app" }));
 const chatDigests = Object.fromEntries(fixtureChats.map((chat, index) => [chat.id, String(index + 1).repeat(64)]));
 const chatMetadataShapes = Object.fromEntries(fixtureChats.map((chat) => [
@@ -75,6 +87,11 @@ const backend = createHttpServer(async (req, res) => {
     return respond({ ok: true, count: 2, path: "fixture.json", chatDigests, chatMetadataShapes });
   }
   if (url.pathname === "/api/app/chats/single") return respond({ ok: true, count: 1, path: "fixture.json", chatDigests, chatMetadataShapes });
+  if (url.pathname === "/api/app/session-handoff/send" && req.method === "POST") {
+    const handoff = JSON.parse(await readBody(req));
+    handoffs.push(handoff);
+    return respond({ ok: true, handoff: { id: "fixture-handoff", status: "delivered", source_chat_id: handoff.sourceChatId, target_chat_id: handoff.targetChatId } });
+  }
   if (url.pathname === "/api/app/sub-agents" && req.method === "GET") {
     const parent = url.searchParams.get("parentChatId");
     const rows = parent ? tasks.filter((task) => task.parentChatId === parent) : tasks.slice(0, 50);
@@ -194,6 +211,8 @@ try {
           if (command === "plugin:deep-link|get_current") return startupUrl ? [startupUrl] : [];
           if (command === "fetch_project_prefs" && linkProjectPath) return { ok: true, customPaths: [linkProjectPath] };
           const request = args?.request || {};
+          if (command === "select_unity_project") return { ok: true, selectedProjectPath: request.projectPath };
+          if (command === "refresh_unity_readiness") return { ok: true, health: { ok: true, components: {} } };
           let path;
           if (command === "fetch_app_bootstrap") path = "/api/app/bootstrap";
           else if (command === "fetch_chats") {
@@ -207,11 +226,16 @@ try {
             if (request.parentChatId) query.set("parentChatId", request.parentChatId);
             path = "/api/app/sub-agents?" + query;
           } else if (command === "fetch_sub_agent") path = "/api/app/sub-agents/" + request.id;
+          else if (command === "session_handoff_action" && request.action === "send") {
+            return (await fetch(base + "/api/app/session-handoff/send", {
+              method: "POST", body: JSON.stringify(request.body),
+            })).json();
+          }
           else return { ok: true, items: [], questions: [], runs: [], actions: [], settings: {} };
           return (await fetch(base + path)).json();
         },
       };
-    }, { desktop, base, startupUrl, linkProjectPath: issue === "chat-links" ? chatC.projectPath : "" });
+    }, { desktop, base, startupUrl, linkProjectPath: issue === "chat-links" ? chatC.projectPath : issue === "handoff-catalog" ? chatA.projectPath : "" });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin === origin || url.origin === base) return route.continue();
@@ -229,6 +253,30 @@ try {
     await page.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).first().click();
     return page.locator("[data-vrcforge-subagent-workspace-surface]");
   };
+
+  if (issue === "handoff-catalog") {
+    const page = await open(true, "vrcforge://chat/surface-A");
+    await page.getByText("Surface A", { exact: true }).first().waitFor();
+    const composer = page.locator("[data-chat-composer-dock] textarea:not([disabled])").first();
+    await composer.fill("/handoff");
+    await composer.press("Enter");
+    await composer.press("Enter");
+    const form = page.locator("[data-session-handoff-send][open] form");
+    const target = form.locator("select");
+    await target.waitFor();
+    const values = await target.locator("option").evaluateAll(options => options.map(option => option.value));
+    assert.ok(values.includes("handoff-1"), "existing first target is available");
+    for (const id of ["surface-A", "surface-B", "surface-C"]) assert.ok(!values.includes(id), `out-of-scope or source chat ${id} is absent`);
+    assert.ok(values.includes("handoff-33"), `33rd same-project target is missing from ${values.length - 1} choices`);
+    assert.deepEqual(values.slice(1).sort(), handoffTargets.map(chat => chat.id).sort());
+    await target.selectOption("handoff-33");
+    await form.locator("textarea").fill("Continue the isolated handoff");
+    await form.getByRole("button", { name: "Send", exact: true }).click();
+    await form.getByText("Handoff sent.").waitFor();
+    assert.deepEqual(handoffs.map(({ sourceChatId, targetChatId, payload }) => [sourceChatId, targetChatId, payload.goal]),
+      [["surface-A", "handoff-33", "Continue the isolated handoff"]]);
+    console.log("PASS handoff: all same-project targets selectable and one exact submission acknowledged");
+  }
 
   if (issue === "chat-links") {
     const page = await open(true, "vrcforge://chat/surface-A");

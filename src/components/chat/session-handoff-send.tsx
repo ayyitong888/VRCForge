@@ -25,16 +25,16 @@ export function SessionHandoffSend({
   const [targetChatId, setTargetChatId] = useState("");
   const [goal, setGoal] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "sent" | "failed">("idle");
-  const boundedTargets = useMemo(() => {
+  const availableTargets = useMemo(() => {
     const seen = new Set<string>();
-    return targetChats.slice(0, 32).filter((target) => {
+    return targetChats.filter((target) => {
       const id = target.id.trim();
       if (!id || id === sourceChatId || seen.has(id)) return false;
       seen.add(id);
       return true;
     });
   }, [sourceChatId, targetChats]);
-  const selectedTargetId = boundedTargets.some((target) => target.id === targetChatId) ? targetChatId : "";
+  const selectedTargetId = availableTargets.some((target) => target.id === targetChatId) ? targetChatId : "";
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -74,11 +74,11 @@ export function SessionHandoffSend({
             className="rounded border border-border bg-background px-2 py-1.5 text-foreground"
             value={selectedTargetId}
             required
-            disabled={status === "sending" || boundedTargets.length === 0}
+            disabled={status === "sending" || availableTargets.length === 0}
             onChange={(event) => { setTargetChatId(event.target.value); setStatus("idle"); }}
           >
             <option value="">{t("sessionHandoffSend.chooseTarget", { defaultValue: "Choose a chat" })}</option>
-            {boundedTargets.map((target) => <option key={target.id} value={target.id}>{target.title.slice(0, 120) || target.id.slice(0, 32)}</option>)}
+            {availableTargets.map((target) => <option key={target.id} value={target.id}>{target.title.slice(0, 120) || target.id.slice(0, 32)}</option>)}
           </select>
         </label>
         <textarea
@@ -86,13 +86,13 @@ export function SessionHandoffSend({
           value={goal}
           maxLength={2000}
           required
-          disabled={status === "sending" || boundedTargets.length === 0}
+          disabled={status === "sending" || availableTargets.length === 0}
           placeholder={t("sessionHandoffSend.goalPlaceholder", { defaultValue: "What should the target chat continue?" })}
           onChange={(event) => { setGoal(event.target.value); setStatus("idle"); }}
         />
         <div className="flex items-center justify-between gap-2">
           <span className="text-[11px] text-muted-foreground" aria-live="polite">
-            {boundedTargets.length === 0
+            {availableTargets.length === 0
               ? t("sessionHandoffSend.noTarget", { defaultValue: "No other chat is available in this scope." })
               : status === "sent"
                 ? t("sessionHandoffSend.sent", { defaultValue: "Handoff sent." })

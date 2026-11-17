@@ -888,7 +888,6 @@ export default function App() {
     const sourceScope = normalizeProjectPathKey(displayChat?.projectPath || "");
     return sidebarChats
       .filter((chat) => chat.id !== activeChatId && normalizeProjectPathKey(chat.projectPath || "") === sourceScope)
-      .slice(0, 32)
       .map((chat) => ({ id: chat.id, title: chat.title || t("header.currentSession") }));
   }, [displayChat?.projectPath, activeChatId, sidebarChats, t]);
   const updateHandoffCardStatus = async (handoffId: string, status: string) => {
