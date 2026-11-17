@@ -70,7 +70,6 @@ from agent_gateway import (
     iter_param_leaf_values,
     normalize_execution_mode,
     normalize_exposure_layer,
-    normalize_risk_level,
     redact_sensitive,
     stable_hash,
     summarize_params,
@@ -79,6 +78,12 @@ from agent_gateway import (
     utc_now_iso,
     validate_frozen_approved_unity_execution_plan,
 )
+from agent_approval_policy import (
+    CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON,
+    mandatory_write_confirmation,
+    resolve_write_risk,
+)
+from checkpoint_user_policy import bind_approved_write, bind_external_checkpoint_skip, checkpoint_skip_matches
 from operation_context import bind_operation_context
 from unity_mcp_core_client import bind_runtime_core_write_settlement
 from execution_target import (
@@ -568,40 +573,7 @@ def _gesture_manager_entry_is_pending(tool_name: str, outcome: Mapping[str, Any]
 PENDING_APPROVAL_SNAPSHOT_SCHEMA = "vrcforge.pending-approvals.v1"
 PENDING_APPROVAL_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
 PENDING_APPROVAL_SNAPSHOT_MAX_ITEMS = 128
-CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON = (
-    "Checkpoint restore always requires manual user approval because it can remove "
-    "or replace project files."
-)
-from checkpoint_user_policy import bind_approved_write, bind_external_checkpoint_skip, checkpoint_skip_matches
-CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON = (
-    "Checkpoint restore automatic launch is blocked after three proven zero-effect failures; "
-    "a new invocation requires explicit manual user approval."
-)
-AVATAR_UPLOAD_MANUAL_APPROVAL_REASON = (
-    "VRChat avatar upload always requires one exact user confirmation because remote metadata, "
-    "visibility, thumbnail, or bundle changes cannot be undone by a local checkpoint."
-)
-ROLLBACK_MANUAL_APPROVAL_TOOLS = frozenset(
-    {
-        "vrcforge_rollback_parameters",
-        "vrcforge_rollback_project_lifecycle",
-        "vrcforge_rollback_project_catalog_registration",
-    }
-)
-ROLLBACK_MANUAL_APPROVAL_REASON = "Rollback operations always require explicit manual user confirmation."
 
-
-def _always_manual_approval_reason(target_tool: str, full_permission: bool, handler_reason: str) -> str:
-    """Share the protected-action exceptions between internal and external approval."""
-    if target_tool == "vrcforge_install_user_unity_tools":
-        return handler_reason
-    if target_tool == "vrcforge_restore_checkpoint" and not full_permission:
-        return CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
-    if target_tool in ROLLBACK_MANUAL_APPROVAL_TOOLS:
-        return ROLLBACK_MANUAL_APPROVAL_REASON
-    if target_tool == "vrcforge_build_and_upload_avatar" and not full_permission:
-        return AVATAR_UPLOAD_MANUAL_APPROVAL_REASON
-    return ""
 
 def _checkpoint_failure_result(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     """Keep the preparer's actual rejection visible at either execution boundary."""
@@ -1617,32 +1589,12 @@ class AgentApprovalTransactionService:
                     f"(Could not determine the manual approval policy for {target_tool}.)",
                     status_code=500,
                 ) from exc
-        base_risk_level = normalize_risk_level(write_handler.risk_level)
-        effective_risk_level = base_risk_level
-        risk_escalation_reason = ""
-        if write_handler.risk_level_resolver is not None:
-            try:
-                resolved_risk_level = str(
-                    write_handler.risk_level_resolver(dict(arguments)) or ""
-                ).strip().lower()
-            except Exception as exc:  # noqa: BLE001 - a failed classifier must block the write request.
-                raise AgentGatewayError(
-                    f"{type(exc).__name__}: {exc} "
-                    f"(Could not determine write risk for {target_tool}.)",
-                    status_code=500,
-                ) from exc
-            if resolved_risk_level not in {"low", "medium", "high", "critical"}:
-                raise AgentGatewayError(
-                    f"Write risk resolver returned an invalid level for {target_tool}.",
-                    status_code=500,
-                )
-            risk_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-            if risk_rank[resolved_risk_level] > risk_rank[base_risk_level]:
-                effective_risk_level = resolved_risk_level
-                risk_escalation_reason = (
-                    f"These arguments elevate the request from {base_risk_level} to "
-                    f"{effective_risk_level} risk and require manual approval in Auto Approve mode."
-                )
+        base_risk_level, effective_risk_level = resolve_write_risk(write_handler, arguments)
+        risk_escalation_reason = (
+            f"These arguments elevate the request from {base_risk_level} to "
+            f"{effective_risk_level} risk and require manual approval in Auto Approve mode."
+            if effective_risk_level != base_risk_level else ""
+        )
         requires_explicit_approval = bool(
             params.get("requires_explicit_approval")
             or params.get("requiresExplicitApproval")
@@ -1658,17 +1610,16 @@ class AgentApprovalTransactionService:
         full_permission_auto = execution_mode == "roslyn_full_auto"
         permission_context = self.permission_audit_context(config)
         auto_policy_reason = self._write_auto_manual_approval_reason(target_tool, arguments, preview)
-        always_manual_reason = _always_manual_approval_reason(
-            target_tool, full_permission_auto, mandatory_manual_approval_reason,
+        matching_recovery = (
+            self._matching_restore_recovery(arguments)
+            if target_tool == "vrcforge_restore_checkpoint" and full_permission_auto
+            else None
         )
-        if target_tool == "vrcforge_restore_checkpoint" and full_permission_auto:
-            matching_recovery = self._matching_restore_recovery(arguments)
-            if matching_recovery is None:
-                always_manual_reason = CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
-            elif matching_recovery.get("zeroEffectAutoLaunchBlocked"):
-                always_manual_reason = CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON
-            else:
-                arguments["_vrcforge_incident_restore_auto"] = True
+        always_manual_reason, auto_restore = mandatory_write_confirmation(
+            target_tool, full_permission_auto, mandatory_manual_approval_reason, matching_recovery,
+        )
+        if auto_restore:
+            arguments["_vrcforge_incident_restore_auto"] = True
         requires_explicit_for_mode = bool(always_manual_reason) or (
             False if full_permission_auto else (
                 never_auto_approve
@@ -4375,56 +4326,24 @@ class AgentApprovalTransactionService:
                     status_code=500,
                 ) from exc
 
-        base_risk_level = normalize_risk_level(write_handler.risk_level)
-        effective_risk_level = base_risk_level
-        if write_handler.risk_level_resolver is not None:
-            try:
-                resolved_risk_level = str(
-                    write_handler.risk_level_resolver(dict(arguments)) or ""
-                ).strip().lower()
-            except Exception as exc:  # noqa: BLE001 - safety classification failures fail closed.
-                raise AgentGatewayError(
-                    f"{type(exc).__name__}: {exc} "
-                    f"(Could not determine write risk for {normalized_target}.)",
-                    status_code=500,
-                ) from exc
-            if resolved_risk_level not in {"low", "medium", "high", "critical"}:
-                raise AgentGatewayError(
-                    f"Write risk resolver returned an invalid level for {normalized_target}.",
-                    status_code=500,
-                )
-            risk_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-            if risk_rank[resolved_risk_level] > risk_rank[base_risk_level]:
-                effective_risk_level = resolved_risk_level
+        base_risk_level, effective_risk_level = resolve_write_risk(write_handler, arguments)
 
         destructive_reason = self._write_auto_manual_approval_reason(
             normalized_target,
             arguments,
             preview,
         )
-        full_permission = normalize_execution_mode(config.execution_mode) == "roslyn_full_auto"
-        always_manual_reason = _always_manual_approval_reason(
-            normalized_target, full_permission, mandatory_confirmation_reason,
-        )
+        execution_mode = normalize_execution_mode(config.execution_mode)
+        full_permission = execution_mode == "roslyn_full_auto"
         matching_recovery = (
             self._matching_restore_recovery(arguments)
             if normalized_target == "vrcforge_restore_checkpoint" and full_permission
             else None
         )
-        if (
-            normalized_target == "vrcforge_restore_checkpoint"
-            and full_permission
-            and matching_recovery is None
-        ):
-            always_manual_reason = CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
-        elif (
-            normalized_target == "vrcforge_restore_checkpoint"
-            and full_permission
-            and matching_recovery is not None
-            and matching_recovery.get("zeroEffectAutoLaunchBlocked")
-        ):
-            always_manual_reason = CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON
-        elif normalized_target == "vrcforge_restore_checkpoint" and full_permission:
+        always_manual_reason, auto_restore = mandatory_write_confirmation(
+            normalized_target, full_permission, mandatory_confirmation_reason, matching_recovery,
+        )
+        if auto_restore:
             arguments["_vrcforge_incident_restore_auto"] = True
         confirmation_reason = str(always_manual_reason or (
             (

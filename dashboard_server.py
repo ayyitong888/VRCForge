@@ -4739,6 +4739,31 @@ async def record_external_mcp_app_decision(
     return result
 
 
+async def _publish_app_approval_result(payload: dict[str, Any]) -> None:
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
+    continuation = ensure_dict(payload.get("continuation"))
+    if continuation:
+        continuation = attach_agent_harness_journey_receipt(continuation)
+        persisted = persist_runtime_turn_journey_receipt(continuation)
+        if isinstance(continuation.get("harnessJourneyReceipt"), dict) and not isinstance(
+            ensure_dict(persisted).get("harnessJourneyReceipt"),
+            dict,
+        ):
+            continuation = dict(continuation)
+            continuation.pop("harnessJourneyReceipt", None)
+        payload["continuation"] = continuation
+        await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
+        TELEGRAM_SERVICE.observe_continuation(continuation)
+        await EVENT_BUS.broadcast(
+            "agentRuntimeRuns",
+            await asyncio.to_thread(
+                AGENT_GATEWAY.runtime_runs.list_runs,
+                limit=30,
+                session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
+            ),
+        )
+
+
 @app.post("/api/app/agent/approvals/{approval_id}/approve")
 async def app_agent_approve_and_execute(
     approval_id: str,
@@ -4830,28 +4855,7 @@ async def app_agent_approve_and_execute(
             payload = await asyncio.to_thread(approve_and_execute)
         except AgentGatewayError as exc:
             raise runtime_http_error("approval_request_failed", exc.status_code, exc) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
-    continuation = ensure_dict(payload.get("continuation"))
-    if continuation:
-        continuation = attach_agent_harness_journey_receipt(continuation)
-        persisted = persist_runtime_turn_journey_receipt(continuation)
-        if isinstance(continuation.get("harnessJourneyReceipt"), dict) and not isinstance(
-            ensure_dict(persisted).get("harnessJourneyReceipt"),
-            dict,
-        ):
-            continuation = dict(continuation)
-            continuation.pop("harnessJourneyReceipt", None)
-        payload["continuation"] = continuation
-        await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
-        TELEGRAM_SERVICE.observe_continuation(continuation)
-        await EVENT_BUS.broadcast(
-            "agentRuntimeRuns",
-            await asyncio.to_thread(
-                AGENT_GATEWAY.runtime_runs.list_runs,
-                limit=30,
-                session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
-            ),
-        )
+    await _publish_app_approval_result(payload)
     if linked_delivery_id:
         await broadcast_background_goal_state({})
     return public_approval_http_payload(payload)
@@ -4899,28 +4903,7 @@ async def app_agent_reject(
     except AgentGatewayError as exc:
         raise runtime_http_error("internal_error", exc.status_code, exc) from exc
     denied_goal = payload.get("goalDelivery")
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
-    continuation = ensure_dict(payload.get("continuation"))
-    if continuation:
-        continuation = attach_agent_harness_journey_receipt(continuation)
-        persisted = persist_runtime_turn_journey_receipt(continuation)
-        if isinstance(continuation.get("harnessJourneyReceipt"), dict) and not isinstance(
-            ensure_dict(persisted).get("harnessJourneyReceipt"),
-            dict,
-        ):
-            continuation = dict(continuation)
-            continuation.pop("harnessJourneyReceipt", None)
-        payload["continuation"] = continuation
-        await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
-        TELEGRAM_SERVICE.observe_continuation(continuation)
-        await EVENT_BUS.broadcast(
-            "agentRuntimeRuns",
-            await asyncio.to_thread(
-                AGENT_GATEWAY.runtime_runs.list_runs,
-                limit=30,
-                session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
-            ),
-        )
+    await _publish_app_approval_result(payload)
     if denied_goal is not None:
         await broadcast_background_goal_state({})
     return public_approval_http_payload(payload)
@@ -4971,28 +4954,7 @@ async def app_agent_request_approval_revision(approval_id: str, request: AgentAp
     except AgentGatewayError as exc:
         raise runtime_http_error("config_request_failed", exc.status_code, exc) from exc
     denied_goal = payload.get("goalDelivery")
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
-    continuation = ensure_dict(payload.get("continuation"))
-    if continuation:
-        continuation = attach_agent_harness_journey_receipt(continuation)
-        persisted = persist_runtime_turn_journey_receipt(continuation)
-        if isinstance(continuation.get("harnessJourneyReceipt"), dict) and not isinstance(
-            ensure_dict(persisted).get("harnessJourneyReceipt"),
-            dict,
-        ):
-            continuation = dict(continuation)
-            continuation.pop("harnessJourneyReceipt", None)
-        payload["continuation"] = continuation
-        await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
-        TELEGRAM_SERVICE.observe_continuation(continuation)
-        await EVENT_BUS.broadcast(
-            "agentRuntimeRuns",
-            await asyncio.to_thread(
-                AGENT_GATEWAY.runtime_runs.list_runs,
-                limit=30,
-                session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
-            ),
-        )
+    await _publish_app_approval_result(payload)
     if denied_goal is not None:
         await broadcast_background_goal_state({})
     return public_approval_http_payload(payload)
