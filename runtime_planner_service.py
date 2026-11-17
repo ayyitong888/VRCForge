@@ -121,6 +121,8 @@ RUNTIME_TROUBLESHOOTING_INSTRUCTION = (
 )
 RUNTIME_SCOPE_UNITY_INSTRUCTION = (
     "A Unity project is explicitly bound to this turn. Use its exact projectPath. "
+    "Actively delegate independent parts of multi-step Unity work to available sub-agents. Give each a distinct outcome "
+    "and advance independent work while they run. Use their findings before dependent steps. Run all Unity writes serially. "
     "For the current scene, component bindings, or Avatar behavior, use the relevant Unity inspection tool. "
     "Use filesystem readers for file contents or locations. "
     "Distinguish configured bindings from observed behavior; scope findings to the sampled objects and transitions. "
