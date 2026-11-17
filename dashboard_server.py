@@ -1869,7 +1869,7 @@ def cross_session_conversation_runtime() -> CrossSessionConversationService:
                 create_chat=_create_handoff_chat,
                 save_chat=_save_handoff_chat,
                 enqueue_followup=lambda params: RUNTIME_QUEUE_PORT.enqueue_runtime_followup(dict(params)),
-                list_followups=lambda: RUNTIME_QUEUE_PORT.list_runtime_followups(include_terminal=False),
+                list_followups=lambda: RUNTIME_QUEUE_PORT.list_runtime_followups(),
                 claim_followup=lambda **params: RUNTIME_QUEUE_PORT.claim_runtime_followups(**params),
                 release_followup=lambda queue_id, session_id, claim_token: RUNTIME_QUEUE_PORT.release_runtime_followup(
                     queue_id, session_id, claim_token,
@@ -1880,6 +1880,9 @@ def cross_session_conversation_runtime() -> CrossSessionConversationService:
                 ),
                 submit_steer=lambda params: RUNTIME_QUEUE_PORT.submit_runtime_steer(dict(params)),
                 dispatch_runtime=_dispatch_cross_session_runtime,
+                read_runtime_result=lambda session_id, client_turn_id: AGENT_GATEWAY.get_runtime_session(
+                    session_id, client_turn_id=client_turn_id,
+                ),
                 publish_runtime=lambda _result: None,
                 notify_chat_changed=lambda: EVENT_BUS.broadcast_from_sync(
                     "chatStorageChanged", {"source": "app", "originId": "cross-session-agent"},
@@ -3410,6 +3413,9 @@ async def _execute_app_agent_runtime_message(
                         await asyncio.to_thread(RUNTIME_QUEUE_PORT.ack_runtime_followup, runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
             except (OSError, AgentGatewayError):
                 pass
+        cross_session = globals().get("_CROSS_SESSION_CONVERSATION_SERVICE")
+        if cross_session is not None:
+            cross_session.notify_runtime_available()
     try:
         terminal_event = await asyncio.to_thread(
             AGENT_GATEWAY.runtime_runs.read_terminal_continuation,
@@ -28457,7 +28463,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_read_conversation",
-        "When to use: read public messages in this same project scope; pass an exact chat ID or vrcforge://chat/ link as chatId. Use nextOffset for further messages and each message's nextTextRequest as arguments to read its remaining text. When NOT to use: transfer attachments, approvals, or write authority. Negative example: do not claim that a link or unread page gave you its contents.",
+        "When to use: read a conversation in this scope by chat ID or vrcforge://chat/ link. Use nextOffset for more messages and nextTextRequest for remaining text. To read the result of your followup_task, pass its chatId and clientTurnId with optional waitSeconds up to 25. When NOT to use: transfer attachments, approvals, or write authority. Negative example: do not claim an unread page was inspected.",
         "read/debug",
         lambda params: _invoke_cross_session_conversation("read_conversation", params or {}),
     )
@@ -28475,7 +28481,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_followup_task",
-        "When to use: ask another conversation in this same project scope to take up work now; pass an exact chat ID or vrcforge://chat/ link as chatId. An active target receives the message in its current turn and an idle target is started. When NOT to use: leave a note that should wait for later. Negative example: a queued or accepted task is not a completed result.",
+        "When to use: ask another conversation in this scope by chat ID or vrcforge://chat/ link to take up work in a separate turn once idle. Keep the returned chatId and clientTurnId for read_conversation; use that exact read with waitSeconds to obtain the result. When NOT to use: leave a note that should wait for later. Negative example: a queued or accepted task is not a completed result.",
         "plan/preview",
         lambda params: _invoke_cross_session_conversation("followup_task", params or {}),
     )

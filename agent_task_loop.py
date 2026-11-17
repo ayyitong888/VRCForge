@@ -593,6 +593,8 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         result["preProvider"] = True
     if value.get("_nativeReadObservation") is True:
         result["_nativeReadObservation"] = True
+    if isinstance(value.get("_conversationFollowup"), Mapping):
+        result["_conversationFollowup"] = dict(value["_conversationFollowup"])
     if isinstance(value.get("_runtimeObservation"), Mapping):
         result["_runtimeObservation"] = dict(value["_runtimeObservation"])
         if value.get("runtimeStatus") == "polling":
@@ -1828,6 +1830,12 @@ class AgentTaskLoop:
         job = job_receipt(raw_result)
         if outcome_status == "pending" and job:
             running_state = "polling"
+        # An attributed send completes when the target mailbox accepts it.
+        # Reading a follow-up reports its state without itself becoming a job.
+        if tool in {"vrcforge_send_message", "vrcforge_read_conversation"}:
+            running_state = ""
+        elif tool == "vrcforge_followup_task" and running_state:
+            running_state = "polling"
         if outcome_status == "failed":
             lifecycle = "failed"
         elif outcome_status == "needs_user_action":
@@ -1865,6 +1873,29 @@ class AgentTaskLoop:
             record["_nativeReadObservation"] = True
         if running_state:
             record["runtimeStatus"] = running_state
+        if tool in {"vrcforge_followup_task", "vrcforge_read_conversation"}:
+            receipt = next((view for view in _mapping_views(raw_result)
+                            if view.get("chatId") and view.get("clientTurnId")), None)
+            if receipt is not None:
+                identity = {key: receipt[key] for key in ("chatId", "clientTurnId")}
+                status = receipt.get("status")
+                if tool == "vrcforge_followup_task" and running_state:
+                    record["_conversationFollowup"] = identity
+                elif tool == "vrcforge_read_conversation":
+                    completed = receipt.get("completed") is True and status == "completed"
+                    failed = status in {"failed", "cancelled", "interrupted", "result_unavailable"}
+                    if completed or failed:
+                        for prior in self._actions.values():
+                            if (
+                                prior.get("tool") == "vrcforge_followup_task"
+                                and prior.get("status") == "running"
+                                and prior.get("_conversationFollowup") == identity
+                            ):
+                                prior.update(status="completed" if completed else "failed",
+                                             runtimeStatus=status, completionReadActionId=action_id)
+                                if failed:
+                                    prior["outcome"] = {**prior["outcome"], "status": "failed", "success": False,
+                                                        "summary": f"The target follow-up is {status}."}
         if job and not observation:
             job_id = job.get("jobId", job.get("job_id"))
             if _status(job.get("status")) in TERMINAL_JOB_STATUSES and outcome_status in {"ok", "failed"}:

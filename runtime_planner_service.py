@@ -304,7 +304,7 @@ _PLANNER_SCHEMA_ANNOTATION_KEYS = frozenset({"description", "title", "examples"}
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_list_conversations": ("offset?:integer", "limit?:integer"),
-    "vrcforge_read_conversation": ("chatId:string", "offset?:integer", "limit?:integer", "textOffset?:integer"),
+    "vrcforge_read_conversation": ("chatId:string", "offset?:integer", "limit?:integer", "textOffset?:integer", "clientTurnId?:string", "waitSeconds?:integer"),
     "vrcforge_create_conversation": ("title?:string",),
     "vrcforge_send_message": ("chatId:string", "message:string"),
     "vrcforge_followup_task": ("chatId:string", "message:string"),

@@ -143,7 +143,7 @@ class Harness:
             "sessionId": params["session_id"],
             "clientTurnId": params["clientTurnId"],
             "turnId": "runtime-turn-1",
-            "plan": {"reply": "Completed in the offscreen target."},
+            "plan": {"reply": "Completed in the offscreen target.", "nextStep": "done"},
         }
         with self.lock:
             entry["status"] = "acked"
@@ -298,16 +298,30 @@ class CrossSessionConversationServiceTests(unittest.TestCase):
         self.assertEqual(service.process_pending(), 1)
         self.assertTrue(harness.dispatched[0]["planMode"])
 
-    def test_followup_task_is_delivered_to_busy_active_turn(self):
+    def test_followup_task_waits_for_the_busy_target_and_returns_its_own_reply(self):
         harness = Harness()
         harness.busy.add("offscreen")
         service = harness.service()
         result = service.followup_task({**trusted_context(), "chatId": "offscreen", "message": "Continue with this task."})
-        self.assertEqual(result["status"], "delivered_to_active_turn")
+        self.assertEqual(result["status"], "queued")
         self.assertFalse(result["completed"])
-        self.assertEqual(harness.queue, [])
-        self.assertEqual(harness.dispatched, [])
-        self.assertEqual(harness.steers[0]["targetClientTurnId"], "active-turn")
+        self.assertEqual(service.process_pending(), 0)
+        self.assertEqual(harness.steers, [])
+        lookup = {**trusted_context(action_id="lookup"), "chatId": "offscreen", "clientTurnId": result["clientTurnId"]}
+        self.assertEqual(service.read_conversation(lookup)["status"], "queued")
+
+        harness.busy.clear()
+        restarted = harness.service()
+        self.assertEqual(restarted.process_pending(), 1)
+        report = restarted.read_conversation(lookup)
+        self.assertEqual(report["status"], "completed")
+        self.assertEqual(report["reply"]["text"], "Completed in the offscreen target.")
+        self.assertEqual(report["sourceChatId"], "source")
+        self.assertEqual(report["clientTurnId"], result["clientTurnId"])
+        self.assertEqual(restarted.process_pending(), 0)
+        self.assertEqual(len(harness.dispatched), 1)
+        with self.assertRaises(CrossSessionConversationError):
+            restarted.read_conversation({**lookup, **trusted_context(chat_id="another")})
 
     def test_followup_task_queues_when_active_turn_ends_before_delivery(self):
         harness = Harness()

@@ -1779,7 +1779,7 @@ def test_model_prompt_includes_bounded_input_contract_for_high_confusion_tool() 
     ("tool_name", "required", "optional"),
     [
         ("vrcforge_list_conversations", set(), {"offset", "limit"}),
-        ("vrcforge_read_conversation", {"chatId"}, {"offset", "limit", "textOffset"}),
+        ("vrcforge_read_conversation", {"chatId"}, {"offset", "limit", "textOffset", "clientTurnId", "waitSeconds"}),
         ("vrcforge_create_conversation", set(), {"title"}),
         ("vrcforge_send_message", {"chatId", "message"}, set()),
         ("vrcforge_followup_task", {"chatId", "message"}, set()),
@@ -1793,7 +1793,7 @@ def test_cross_session_tool_schemas_match_queue_and_trigger_contracts(
     assert set(schema["required"]) == required
     assert set(schema["properties"]) == required | optional
     assert "_trustedConversationContext" not in schema["properties"]
-    valid = {name: "target" if name in {"chatId", "message", "title"} else 0 for name in required | optional}
+    valid = {name: "target" if name in {"chatId", "message", "title", "clientTurnId"} else 0 for name in required | optional}
     assert validate_planner_tool_arguments(schema, valid)["ok"] is True
     if required:
         missing_one = dict(valid)
