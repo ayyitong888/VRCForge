@@ -3292,7 +3292,8 @@ async def _execute_app_agent_runtime_message(
     runtime_params = agent_runtime_request_payload(runtime_request)
     browser_requested = False
     browser_adult_confirmed = False
-    if human_user_message and not str(runtime_request.client_turn_id or "").startswith(AGENT_RELAY_INPUT_PREFIX):
+    agent_relay = str(runtime_request.client_turn_id or "").startswith(AGENT_RELAY_INPUT_PREFIX)
+    if human_user_message and not agent_relay:
         # A relay keeps its provenance when the visible chat drains its queue.
         # Only the authenticated App route creates owner authorization. Internal
         # agent-forwarded dispatch reuses this runner without minting that marker.
@@ -3345,6 +3346,21 @@ async def _execute_app_agent_runtime_message(
         # after restart; a new composer's default cannot change that task.
         runtime_params["planMode"] = queued.get("planMode") is True
     try:
+        if followup_claim_token and agent_relay:
+            # The target may have settled before the previous holder could ACK.
+            # A verified exact-turn receipt consumes this lease without replay.
+            recovered = await asyncio.to_thread(
+                AGENT_GATEWAY.get_runtime_session,
+                runtime_request.session_id or "",
+                client_turn_id=runtime_request.client_turn_id or "",
+            )
+            if recovered.get("status") in {"completed", "failed"}:
+                runtime_returned = True
+                response = recovered.get("response")
+                if isinstance(response, dict) and response:
+                    return response
+                return {"ok": False, "status": "failed", "sessionId": runtime_request.session_id,
+                        "clientTurnId": runtime_request.client_turn_id}
         if runtime_request.computer_use_requested:
             AGENT_GATEWAY.desktop.require_computer_use_enabled()
         if runtime_request.goal_delivery_id:
