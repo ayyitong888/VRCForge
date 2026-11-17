@@ -178,6 +178,50 @@ def test_delegated_child_uses_parent_general_read_scope_not_model_text(tmp_path,
         service.shutdown()
 
 
+def test_parent_omitting_role_runs_general_readonly_child_without_project(tmp_path, monkeypatch):
+    from dashboard_api_models import SubAgentCreateRequest
+
+    url = "https://modular-avatar.nadena.dev/docs/reference/merge-armature"
+    source_excerpt = "Merge Armature remaps clothing bones and updates skinned mesh references."
+    request = {"task": f"Read the Merge Armature documentation at {url} and summarize it."}
+    child, _child_model, _ = _child_gateway(tmp_path / "child", [
+        call("fetch", "vrcforge_web_fetch", {"url": url}),
+        {"role": "assistant", "content": source_excerpt},
+    ])
+    fetches = []
+
+    def fetch(arguments):
+        fetches.append(arguments["url"])
+        return {"ok": True, "url": url, "text": source_excerpt}
+
+    child.register_tool("vrcforge_web_fetch", "Read public documentation.", "read/debug", fetch)
+    service = SubAgentCollaborationService(SubAgentCollaborationPorts(
+        artifact_dir=tmp_path / "children", gateway=child, lane_budget=RuntimeLaneBudget(),
+        build_roles=build_sub_agent_roles, build_handlers=build_sub_agent_role_handlers,
+    ))
+    parent, _parent_model, _ = _child_gateway(tmp_path / "parent", [
+        call("delegate", "vrcforge_delegate_subagent", request),
+        _finish,
+    ])
+    monkeypatch.setattr(server, "AGENT_GATEWAY", parent)
+    monkeypatch.setattr(server, "SUB_AGENT_COLLABORATION", service)
+    parent.register_tool(
+        "vrcforge_delegate_subagent", "Delegate a read.", "plan/preview", server.delegate_sub_agent_runtime,
+    )
+    try:
+        parent.runtime_message({"message": request["task"], "sessionId": "general-parent"})
+        task = service.list_tasks()["tasks"][0]
+        service._registry._threads[task["id"]].join(5)
+        detail = service.get_task(task["id"])
+        assert detail["task"]["role"] == SubAgentCreateRequest(**request).role == "llm_readonly"
+        assert detail["task"]["projectPath"] == ""
+        assert detail["task"]["status"] == "completed", detail["task"]
+        assert fetches == [url]
+        assert source_excerpt in detail["task"]["summary"]
+    finally:
+        service.shutdown()
+
+
 def test_plain_text_reply_is_a_successful_terminal_analysis_without_tool_completion_claim(tmp_path):
     gateway, model, invoked = _child_gateway(tmp_path, [
         {"role": "assistant", "content": "The supplied notes support the conclusion because both state the same date."},

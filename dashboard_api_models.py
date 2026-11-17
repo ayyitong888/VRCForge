@@ -9,6 +9,7 @@ from agent_runtime_turn_identity import MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_R
 from chat_attachment_limits import MAX_MESSAGE_ATTACHMENT_ITEMS, validate_message_attachment_counts
 from chat_attachment_vault import ARCHIVE_MAX_BYTES
 from dashboard_foundation import runtime_settings_path
+from sub_agent_tasks import DEFAULT_SUB_AGENT_ROLE
 from unity_shared_input_schemas import ShaderMaterialCategory
 
 
@@ -1192,7 +1193,7 @@ class PackageInstallPlanRequest(BaseModel):
 
 
 class SubAgentCreateRequest(BaseModel):
-    role: str = Field(default="project_index_review")
+    role: str = Field(default=DEFAULT_SUB_AGENT_ROLE)
     task: str = Field(default="")
     display_name: str = Field(default="", alias="displayName")
     parent_chat_id: str = Field(default="", alias="parentChatId")

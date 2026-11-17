@@ -27,6 +27,7 @@ SUB_AGENT_RESULT_SCHEMA = "vrcforge.sub_agent_result.v1"
 _RECOVERY_CHECKPOINT_SCHEMA = "vrcforge.sub_agent_recovery.v1"
 _RECOVERY_BOUNDARY_BYTES = 64
 SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT = 5
+DEFAULT_SUB_AGENT_ROLE = "llm_readonly"
 
 _RUNNING_STATUSES = {"queued", "running", "cancelling"}
 _RETRYABLE_STATUSES = {"completed", "paused", "failed", "cancelled", "interrupted"}
@@ -422,7 +423,7 @@ class SubAgentTaskRegistry:
         _child_session_id: str = "",
         _resume_of: str = "",
     ) -> dict[str, Any]:
-        role_id = str(role or "").strip() or "project_index_review"
+        role_id = str(role or "").strip() or DEFAULT_SUB_AGENT_ROLE
         if role_id not in self.roles:
             raise ValueError(f"Unknown sub-agent role: {role_id}")
         if role_id not in self.handlers:

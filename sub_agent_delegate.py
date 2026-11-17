@@ -16,7 +16,7 @@ from agent_runtime_skill_executor import ReadScope, RuntimeSkillTool
 from agent_task_loop import SUB_AGENT_TASK_TOOLS
 from general_agent_tools import _authorized_path
 from internal_tool_blocks import CONVERSATION_TOOL_NAMES
-from sub_agent_tasks import CancelledError, SubAgentRole
+from sub_agent_tasks import DEFAULT_SUB_AGENT_ROLE, CancelledError, SubAgentRole
 from sub_agent_roles import load_sub_agent_roles
 from unity_tool_schema_projection import canonical_unity_read_tool_input_schema
 
@@ -483,7 +483,8 @@ def build_sub_agent_input_schema(roles: list[SubAgentRole] | None = None) -> dic
             "role": {
                 "type": "string",
                 "enum": role_ids,
-                "description": "Optional; omit to use project_index_review. Choose a role ID from the catalogue: " + "; ".join(
+                "description": f"Optional; omit for {DEFAULT_SUB_AGENT_ROLE} for general read-only research. "
+                "Choose a role ID from the catalogue for specialist work: " + "; ".join(
                     f"{role.id} ({role.title}): {role.description}" for role in roles
                 ),
             },
