@@ -11,12 +11,11 @@ import dashboard_server as host
 from tests.test_native_runtime_gateway import call, setup_gateway
 
 
-@pytest.mark.parametrize(
-    ("target_plan", "long_reply"),
-    [(False, False), (True, False), (False, True)],
-    ids=["app-chat", "general-workspace-plan", "text-continuation"],
-)
-def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_path, monkeypatch, target_plan, long_reply):
+@pytest.mark.parametrize("scenario", ["app-chat", "general-workspace-plan", "text-continuation", "delayed-peer"])
+def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_path, monkeypatch, scenario):
+    delayed = scenario == "delayed-peer"
+    long_reply = scenario == "text-continuation"
+    target_plan = delayed or scenario == "general-workspace-plan"
     workspace = str(tmp_path) if target_plan else ""
     reply_prefix = "a" * 8500 + "\nSnippet:\n    const label = \"blend shape\";\n" if long_reply else ""
     source_id, target_id = "relay-source", "relay-target"
@@ -27,30 +26,45 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
     calls = []
     release_target = threading.Event()
 
+    def tool_data(request, call_id):
+        content = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == call_id)
+        receipt = json.loads(content)
+        assert receipt.get("isError") is not True, receipt
+        observation = receipt["observations"][0]["observation"]
+        return json.JSONDecoder().raw_decode(observation.split("structuredEvidence=", 1)[1])[0]["data"]
+
     def source_reads(request):
-        content = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == "delegate")
-        observation = json.loads(content)["observations"][0]["observation"]
-        evidence_payload = json.JSONDecoder().raw_decode(observation.split("structuredEvidence=", 1)[1])[0]
-        receipt = evidence_payload["data"]
+        receipt = tool_data(request, "delegate")
         assert receipt["status"] == "queued"
-        release_target.set()
+        if not delayed:
+            release_target.set()
         return call("read-report", "read_conversation", {
-            "chatId": target_id, "clientTurnId": receipt["clientTurnId"], "waitSeconds": 5,
+            "chatId": target_id, "clientTurnId": receipt["clientTurnId"], "waitSeconds": 1 if delayed else 5,
+        })
+
+    def source_reads_again(request):
+        pending = tool_data(request, "read-report")
+        assert pending["status"] in {"queued", "running"}
+        assert pending["completed"] is False
+        receipt = tool_data(request, "delegate")
+        assert pending["chatId"] == receipt["chatId"]
+        assert pending["clientTurnId"] == receipt["clientTurnId"]
+        release_target.set()
+        return call("read-settled", "read_conversation", {
+            "chatId": pending["chatId"], "clientTurnId": pending["clientTurnId"], "waitSeconds": 5,
         })
 
     def source_finishes(request):
-        result_call = "read-report-tail" if reply_prefix else "read-report"
-        content = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == result_call)
-        observation = json.loads(content)["observations"][0]["observation"]
-        data = json.JSONDecoder().raw_decode(observation.split("structuredEvidence=", 1)[1])[0]["data"]
-        expected = reply[host.CrossSessionConversationService.MAX_READ_MESSAGE_CHARS:] if reply_prefix else reply
-        assert data["reply"]["text"] == expected
+        result_call = "read-settled" if delayed else "read-report"
+        expected = reply
+        if long_reply:
+            result_call = "read-report-tail"
+            expected = reply[host.CrossSessionConversationService.MAX_READ_MESSAGE_CHARS:]
+        assert tool_data(request, result_call)["reply"]["text"] == expected
         return {"role": "assistant", "content": f"Glossary verification: {evidence}"}
 
     def source_reads_tail(request):
-        content = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == "read-report")
-        observation = json.loads(content)["observations"][0]["observation"]
-        data = json.JSONDecoder().raw_decode(observation.split("structuredEvidence=", 1)[1])[0]["data"]
+        data = tool_data(request, "read-report")
         assert data["completed"]
         assert data["reply"]["truncated"]
         assert evidence not in data["reply"]["text"]
@@ -61,7 +75,7 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
         assert "I maintain the glossary." in wire
         assert f"delegated from conversation {source_id}" in wire
         assert "Please verify the glossary terminology." in wire
-        assert release_target.wait(4)
+        assert release_target.wait(10 if delayed else 4)
         if target_plan:
             return {"role": "assistant", "content": evidence}
         return call("target-note", "send_message", {
@@ -101,12 +115,14 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
             })
         if index == 2:
             return source_reads(request)
+        if index == 3 and delayed:
+            return source_reads_again(request)
         if reply_prefix and index == 3:
             return source_reads_tail(request)
-        assert index == (4 if reply_prefix else 3)
+        assert index == (4 if long_reply or delayed else 3)
         return source_finishes(request)
 
-    request_count = (5 if target_plan else 7) + int(long_reply)
+    request_count = (5 if target_plan else 7) + int(long_reply or delayed)
     gateway, model, _ = setup_gateway(tmp_path, [model_step] * request_count)
     runtime = Mock(wraps=gateway.runtime_message)
     monkeypatch.setattr(gateway, "runtime_message", runtime)
@@ -172,7 +188,10 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
     assert sorted(name for name, _ in calls if name != "read_conversation") == (
         ["followup_task"] if target_plan else ["followup_task", "send_message"]
     )
-    assert len(reads) == (2 if reply_prefix else 1)
+    assert len(reads) == (2 if long_reply or delayed else 1)
+    if delayed:
+        assert reads[0]["status"] in {"queued", "running"}
+        reads = reads[1:]
     assert all(receipt["status"] == "completed" for receipt in reads)
     assert "".join(receipt["reply"]["text"] for receipt in reads) == reply
     assert not reads[-1]["reply"]["truncated"]

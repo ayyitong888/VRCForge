@@ -501,6 +501,15 @@ class NativeRuntimeTurn:
                     # before it can inspect or poll the existing operation.
                     return False
                 result = item.get("result")
+                if (
+                    item.get("tool") == "vrcforge_read_conversation"
+                    and isinstance(result, Mapping)
+                    and result.get("ok") is True
+                    and result.get("clientTurnId")
+                ):
+                    # An exact read returned its observation. A peer may still
+                    # be running, but it owns no callback for this native call.
+                    return False
                 if isinstance(result, Mapping) and str(result.get("status") or "") == "running":
                     # Delegation tools return an executed dispatch envelope
                     # whose nested task is still running. Keep the native call
