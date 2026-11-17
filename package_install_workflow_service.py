@@ -40,8 +40,8 @@ _VPM_INSTALL_TIMEOUT_SECONDS = 300
 _VPM_JSON_READBACK_MAX_BYTES = 4 * 1024 * 1024
 _RUNTIME_COMPATIBILITY_ERROR_MAX_CHARS = 2000
 _VPM_REPOSITORY_INPUT_REJECTION = (
-    "Repository changes are not allowed in the sealed package-install lane; "
-    "configure the source separately and omit repository from the install request."
+    "Omit repository and retry with the same package ID and version using the configured sources. "
+    "A new source requires a separate registration step if the package cannot be resolved."
 )
 
 
@@ -623,7 +623,7 @@ class PackageInstallWorkflowService:
             },
             "hint": (
                 "For a user-requested package installation, read vrcforge_package_install_plan for the exact "
-                "project/package with preferredManager set to preferredCommandInstaller.name when a command "
+                "project/package using configured sources (omit repository), with preferredManager set to preferredCommandInstaller.name when a command "
                 "installer is available, then use vrcforge_package_install_request with the same preference "
                 "when its command-install path is ready. "
                 "The request applies the current App permission policy and checkpoint flow; external MCP Gateway "
@@ -722,7 +722,7 @@ class PackageInstallWorkflowService:
             and not assets_migration_required and not unreadable_state and not explicit_repository,
             "canPrepareUpgradeRequest": upgrade_available and not assets_migration_required
             and not unreadable_state and not explicit_repository,
-            **({"commandInstallBlocker": repository_blocker} if repository_blocker else {}),
+            **({"commandInstallBlocker": repository_blocker, "message": repository_blocker["message"]} if repository_blocker else {}),
         }
 
     def diagnose_install(self, params: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -1695,6 +1695,8 @@ def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypa
     assert blocked["errorCode"] == "vpm_repository_input_unsupported"
     assert blocked["installPlan"]["canExecuteCommandInstall"] is False
     assert blocked["installPlan"]["canCreateInstallRequest"] is False
+    assert "Omit repository" in blocked["installPlan"]["message"]
+    assert "configured sources" in blocked["installPlan"]["message"]
     assert not captured
 
 
