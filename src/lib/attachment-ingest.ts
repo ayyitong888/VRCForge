@@ -17,7 +17,7 @@ import { MAX_ATTACHMENT_PAYLOAD_BYTES, readChatAttachment } from "./conversation
  * data URL for vision while the hash enables a later supervised Unity import.
  */
 
-const VAULT_ARCHIVE_EXTENSIONS = [".zip", ".unitypackage"];
+const VAULT_FILE_EXTENSIONS = [".zip", ".unitypackage", ".pdf"];
 const VAULT_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"];
 
 type VaultUploadResponse = {
@@ -37,7 +37,7 @@ type VaultUploadResponse = {
 
 export function isVaultEligibleFile(file: File): boolean {
   const name = file.name.toLowerCase();
-  if (VAULT_ARCHIVE_EXTENSIONS.some((extension) => name.endsWith(extension))) {
+  if (VAULT_FILE_EXTENSIONS.some((extension) => name.endsWith(extension))) {
     return true;
   }
   return VAULT_IMAGE_EXTENSIONS.some((extension) => name.endsWith(extension));

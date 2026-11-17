@@ -90,6 +90,7 @@ foreach ($package in $bundledAvatarIndex.packages) {
     --hidden-import agent_shell_pty_worker `
     --hidden-import winpty `
     --collect-data winpty `
+    --copy-metadata pypdfium2 `
     --hidden-import tools.vrcforge_agent_mcp_stdio `
     --hidden-import tools.vrcforge_cli `
     --add-data "$bundledGuide;examples/skill-packages/vrcforge-first-run-guide" `

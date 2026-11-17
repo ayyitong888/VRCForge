@@ -126,10 +126,10 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "vrcforge_inspect_chat_attachment": {
         "title": "Chat Attachment Inspection",
-        "inputs": ["Vault payloadHash plus optional entryPath for a bounded single-entry text extract."],
-        "outputs": ["Attachment metadata, guarded archive listing or entry text, or image header dimensions."],
-        "sideEffects": "reads the local attachment vault only; bytes never enter the prompt",
-        "tags": ["attachment", "vault", "inspection"],
+        "inputs": ["Vault payloadHash, optional archive entryPath, or PDF startPage/maxPages and renderScannedPages."],
+        "outputs": ["Guarded archive listing or entry text, image dimensions, or PDF page numbers and text with optional page previews."],
+        "sideEffects": "reads the local attachment vault only",
+        "tags": ["attachment", "vault", "inspection", "pdf"],
     },
     "vrcforge_unity_status": {
         "title": "Unity MCP Status",

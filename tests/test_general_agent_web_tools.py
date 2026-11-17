@@ -96,7 +96,7 @@ def test_web_fetch_rejects_http_failure_and_unsupported_type() -> None:
     with pytest.raises(RuntimeError, match="HTTP 404"):
         web_fetch("https://example.test/missing", client=FakeClient(FakeResponse(b"", 404, {})))
     with pytest.raises(ValueError, match="does not support"):
-        web_fetch("https://example.test/file", client=FakeClient(FakeResponse(b"x", headers={"content-type": "application/pdf"})))
+        web_fetch("https://example.test/file", client=FakeClient(FakeResponse(b"x", headers={"content-type": "application/zip"})))
 
 
 def test_web_fetch_preserves_complete_long_text_and_response_limits():
@@ -209,10 +209,13 @@ def test_web_image_keeps_response_limit_and_rejects_invalid_or_animated_pixels()
 
 
 def test_registered_web_fetch_wrapper_preserves_image_and_text_summaries():
+    from pdf_document_reader import pdf_options
+
     # Compile only this registered handler, without importing/starting the server.
     source = Path("dashboard_server.py").read_text(encoding="utf-8-sig")
     function = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.FunctionDef) and node.name == "general_web_fetch_tool")
-    namespace = {"Any": Any, "general_params": lambda params: dict(params), "bounded_int": lambda value, *_: int(value)}
+    namespace = {"Any": Any, "general_params": lambda params: dict(params),
+                 "bounded_int": lambda value, *_: int(value), "pdf_options": pdf_options}
     exec(compile(ast.Module(body=[function], type_ignores=[]), "dashboard_server.py:web_fetch_handler", "exec"), namespace)
     for response in [FakeResponse(_jpeg(), headers={"content-type": "image/jpg"}), FakeResponse(b"plain original text", headers={"content-type": "text/plain"})]:
         client = FakeClient(response)

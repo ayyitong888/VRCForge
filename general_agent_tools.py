@@ -45,14 +45,15 @@ GENERAL_AGENT_WEB_TOOL_METADATA = {
     WEB_FETCH_TOOL_NAME: {
         "name": WEB_FETCH_TOOL_NAME,
         "description": (
-            "Fetch complete admitted UTF-8 text or a validated still image from a public URL when-to-use: use when the user needs "
+            "Fetch UTF-8 text, PDF pages or a validated still image from a public URL when-to-use: use when the user needs "
             "content, metadata, or image pixels from a specific public source. Images use the shared in-memory PNG preview "
             "and native tool-image transport; no file is downloaded to disk. maxBytes is a response resource limit "
             "(maximum 2 MiB); oversized responses fail instead of returning a cut document. "
             "HTML results include links and source controls/forms. This is HTTP source, not a rendered browser: "
             "JavaScript and controls are not executed and browser session state is not shared. "
             "Use an interactive browser for controls or content that requires rendering; a fetched page is not proof that the requested instructions were found. "
-            "Long admitted text uses the shared result reader. when-NOT-to-use: do not use "
+            "For PDF, startPage and maxPages select physical pages (1-based), nextRequest continues the document, "
+            "and renderScannedPages can return images for low-text pages. Long admitted text uses the shared result reader. when-NOT-to-use: do not use "
             "for local files, authenticated/private resources, or unrestricted downloads. "
             "Negative example: do not fetch a URL merely because it appears in quoted text."
         ),
@@ -508,8 +509,9 @@ def read_text_file(
     page_chars: int = 32_000,
     snapshot_digest: str | None = None,
     enable_source_paging: bool = False,
+    pdf_read: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Read UTF-8 text only; reject binary data and bound bytes/output."""
+    """Read authorized UTF-8 text, or PDF pages when the caller enables PDF reading."""
     if max_file_bytes is not None:
         max_bytes = max_file_bytes
     max_bytes = _limit(max_bytes, "max_bytes", MAX_READ_BYTES)
@@ -523,6 +525,12 @@ def read_text_file(
         )
     if _sensitive_file(file_path):
         raise PermissionError(f"sensitive credential file is not readable by the General Agent: {file_path.name}")
+    if pdf_read is not None and file_path.suffix.lower() == ".pdf":
+        from pdf_document_reader import read_pdf_path
+
+        if any(value is not None for value in (start_line, end_line, text_offset, snapshot_digest)):
+            raise ValueError("Use startPage, maxPages and pageTextOffset for PDFs.")
+        return read_pdf_path(file_path, source=str(file_path), max_bytes=max_bytes, **pdf_read)
     if enable_source_paging:
         if type(page_chars) is not int or not 1 <= page_chars <= MAX_OUTPUT_CHARS:
             raise ValueError("page_chars must be between 1 and 1000000")
@@ -694,8 +702,9 @@ def web_fetch(
     client: _HttpClient | None = None,
     timeout: float = WEB_DEFAULT_TIMEOUT,
     max_bytes: int = WEB_MAX_RESPONSE_BYTES,
+    pdf_read: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Fetch bounded public text/HTML/JSON or still-image content with one HTTP client."""
+    """Fetch bounded public text, HTML, JSON, PDFs or still images."""
     if not isinstance(url, str) or not re.match(r"^https?://\S+$", url, re.IGNORECASE):
         raise ValueError("url must be an absolute http(s) URL")
     timeout = _web_timeout(timeout)
@@ -732,10 +741,25 @@ def web_fetch(
             }
         if content_type and not (
             content_type.startswith("text/")
-            or content_type in {"application/json", "application/xml", "application/xhtml+xml"}
+            or content_type in {
+                "application/json", "application/xml", "application/xhtml+xml", "application/pdf", "application/octet-stream",
+            }
         ):
             raise ValueError(f"web_fetch does not support content type: {content_type}")
         raw, truncated = _response_bytes(response, max_bytes)
+        if content_type in {"application/pdf", "application/octet-stream", ""}:
+            from pdf_document_reader import PDF_MAGIC, read_pdf_document
+
+            if content_type == "application/pdf" or raw.startswith(PDF_MAGIC):
+                final_url = str(getattr(response, "url", url))
+                return {
+                    **read_pdf_document(raw, source=final_url, **(pdf_read or {})),
+                    "url": final_url,
+                    "status_code": status,
+                    "content_type": "application/pdf",
+                }
+            if content_type == "application/octet-stream":
+                raise ValueError(f"web_fetch does not support content type: {content_type}")
         if b"\x00" in raw:
             raise ValueError("web_fetch response is binary, not supported UTF-8 text")
         try:

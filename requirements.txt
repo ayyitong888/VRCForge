@@ -13,6 +13,9 @@ anthropic>=0.34.0
 google-genai>=1.16.1
 openai>=1.30.0
 
+# General Agent PDF text and on-demand page rendering (bundled PDFium).
+pypdfium2>=5,<6
+
 # VRCForge-owned Unity MCP Core client helper. The server is bundled in the
 # Unity package and must not be installed as a Python runtime dependency.
 

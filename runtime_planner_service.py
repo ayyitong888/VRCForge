@@ -1501,6 +1501,33 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
             return ""
         return safe
 
+    if result.get("documentType") == "pdf" and tool in {
+        "vrcforge_web_fetch", "vrcforge_read_text_file", "vrcforge_inspect_chat_attachment",
+    }:
+        evidence.update({
+            "documentType": "pdf",
+            "source": web_url(result.get("source")) if web_evidence else source(result.get("source")),
+            "pageCount": result.get("pageCount"),
+            "hasMore": result.get("hasMore") is True,
+        })
+        request = ensure_dict(result.get("nextRequest"))
+        if request.get("tool") == tool:
+            arguments = ensure_dict(request.get("arguments"))
+            evidence["nextRequest"] = {"tool": tool, "arguments": {
+                key: web_url(value) if key == "url" else value
+                for key, value in arguments.items() if key in {
+                    "path", "projectPath", "url", "payloadHash", "timeout", "maxBytes", "maxPages",
+                    "startPage", "pageTextOffset", "renderScannedPages",
+                } and type(value) in {int, float, str, bool}
+            }}
+        evidence["pages"] = [
+            {**{key: page[key] for key in (
+                "page", "needsVisual", "textOffset", "textContinues", "imageUri", "visualUnavailable",
+            ) if key in page}, "text": content(page.get("text"))}
+            for page in ensure_list(result.get("pages")) if isinstance(page, dict)
+        ]
+        return evidence
+
     if tool == "vrcforge_browser" and isinstance(result.get("snapshot"), str):
         evidence["snapshot"] = content(result["snapshot"])
         if type(result.get("nextOffset")) is int:

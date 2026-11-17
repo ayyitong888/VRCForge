@@ -95,6 +95,7 @@ from general_agent_tools import (
     web_fetch as general_web_fetch,
     web_search as general_web_search,
 )
+from pdf_document_reader import pdf_options, read_pdf_path, set_pdf_next_request
 from local_image_reader import (
     TOOL_DESCRIPTION as LOCAL_IMAGE_READER_DESCRIPTION,
     TOOL_NAME as LOCAL_IMAGE_READER_TOOL_NAME,
@@ -6867,6 +6868,15 @@ def inspect_chat_attachment_sync(params: dict[str, Any]) -> dict[str, Any]:
         "attachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "type", "kind", "category", "extension")},
     }
     try:
+        if resolved["category"] == "document":
+            try:
+                document = read_pdf_path(
+                    path, source=str(resolved["name"]), image_source_id=payload_hash, **pdf_options(params),
+                )
+            except ValueError as exc:
+                raise AgentGatewayError(str(exc), status_code=400) from exc
+            set_pdf_next_request(document, "vrcforge_inspect_chat_attachment", {**params, "payloadHash": payload_hash})
+            return {**result, **document}
         if resolved["category"] == "image":
             result["image"] = inspect_image_bytes(path, str(resolved["kind"]), int(resolved["size"]))
             dimensions = result["image"]
@@ -28079,12 +28089,16 @@ def register_agent_gateway_tools() -> None:
             page_chars=raw.get("pageChars", 32_000),
             snapshot_digest=raw.get("snapshotDigest"),
             enable_source_paging=True,
+            pdf_read=pdf_options(raw),
             max_output_chars=(
                 bounded_int(raw["maxOutputChars"], 32_000, 32_000)
                 if raw.get("maxOutputChars") is not None
                 else None
             ),
         )
+        if result.get("documentType") == "pdf":
+            set_pdf_next_request(result, "vrcforge_read_text_file", raw)
+            return result
         if result.get("hasMore") is True:
             arguments = {key: value for key, value in raw.items() if key in {
                 "path", "projectPath", "startLine", "endLine", "maxBytes", "pageChars",
@@ -28201,7 +28215,10 @@ def register_agent_gateway_tools() -> None:
             str(raw.get("url") or ""),
             timeout=float(raw.get("timeout") or 10.0),
             max_bytes=bounded_int(raw.get("maxBytes", raw.get("max_bytes", 2 * 1024 * 1024)), 2 * 1024 * 1024, 2 * 1024 * 1024),
+            pdf_read=pdf_options(raw),
         )
+        if result.get("documentType") == "pdf":
+            set_pdf_next_request(result, "vrcforge_web_fetch", raw)
         if isinstance(result.get("text"), str):
             result["summary"] = result["text"]
         return result
@@ -28226,7 +28243,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_read_text_file",
-        "when-to-use: read an authorized UTF-8 text file as local evidence. The complete file is decoded and redacted before optional startLine/endLine selection (1-based, inclusive). Large model results use the shared result reader. maxBytes is the inline threshold (default and maximum 4 MiB). Larger files return sanitized source pages after complete validation; follow nextRequest, preserving snapshotDigest. Source changes invalidate continuation. maxOutputChars does not discard source text. when-NOT-to-use: do not use for binary files, writes, secrets, or Unity project changes. Negative example: do not treat a resource-limit failure as proof of file contents.",
+        "when-to-use: read an authorized UTF-8 text file or PDF as local evidence. For PDFs, startPage and maxPages select physical pages (1-based), renderScannedPages includes low-text page images, and maxBytes is the PDF size limit (up to 4 MiB). For UTF-8 text, the complete file is decoded and redacted before optional startLine/endLine selection (1-based, inclusive). maxBytes is the inline threshold (default and maximum 4 MiB), larger files use sanitized source pages with snapshotDigest, and maxOutputChars does not discard source text. Follow nextRequest to continue. when-NOT-to-use: do not use for other binary files, writes, secrets, or Unity project changes. Negative example: do not treat a resource-limit failure as proof of file contents.",
         "read/debug",
         general_read_text_file_tool,
     )
@@ -28502,7 +28519,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.inspect_outfit_package)
     AGENT_GATEWAY.register_tool(
         "vrcforge_inspect_chat_attachment",
-        "Inspect a vault-stored chat attachment by payloadHash: bounded archive listing with bomb/zip-slip guards, single-entry text extract via entryPath, or image header metadata. Read-only; attachment contents stay in the chat and are not copied into Unity projects.",
+        "when-to-use: inspect a vault-stored chat attachment by its exact payloadHash. Read physical PDF pages with startPage/maxPages, optionally render low-text pages with renderScannedPages, and follow nextRequest. Also supports guarded archive listings, single-entry text via entryPath, and image header metadata. when-NOT-to-use: do not use for direct paths, URLs, or writing attachments into Unity. Negative example: use web_fetch for a linked PDF URL.",
         "read/debug",
         inspect_chat_attachment_sync,
     )

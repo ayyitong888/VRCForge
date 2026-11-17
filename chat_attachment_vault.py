@@ -6,7 +6,7 @@ metadata + ``payloadHash``。
 
 安全与生命周期规则：
 - 显式格式白名单 + 魔数嗅探，扩展名与魔数不一致一律拒绝，绝不猜测；
-- 逐格式上限：zip/unitypackage 512MB，图片 64MB；
+- 逐格式上限：zip/unitypackage 512MB，图片 64MB，PDF 10MB；
 - per-chat 配额 + LRU 清理，活引用（仍被 durable transcript 引用）永不清；
 - 归档检查有界：条目数上限、总解压体积上限、压缩比炸弹守卫、zip-slip 拒绝；
 - 重启后从 index.json 重建（文件缺失的条目被丢弃）。
@@ -26,6 +26,8 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Any
+
+from pdf_document_reader import PDF_MAGIC, PDF_MAX_BYTES
 
 VAULT_SCHEMA = "vrcforge.chat_attachment_vault.v1"
 INSPECTION_SCHEMA = "vrcforge.chat_attachment_inspection.v1"
@@ -60,6 +62,7 @@ _EXTENSION_FORMATS: dict[str, tuple[str, str]] = {
     ".jpg": ("image_jpeg", "image"),
     ".jpeg": ("image_jpeg", "image"),
     ".webp": ("image_webp", "image"),
+    ".pdf": ("pdf", "document"),
 }
 
 
@@ -105,10 +108,14 @@ def _magic_matches(kind: str, head: bytes) -> bool:
         return head.startswith(_MAGIC_JPEG)
     if kind == "image_webp":
         return len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    if kind == "pdf":
+        return head.startswith(PDF_MAGIC)
     return False
 
 
 def format_cap_bytes(category: str) -> int:
+    if category == "document":
+        return PDF_MAX_BYTES
     return ARCHIVE_MAX_BYTES if category == "archive" else IMAGE_MAX_BYTES
 
 

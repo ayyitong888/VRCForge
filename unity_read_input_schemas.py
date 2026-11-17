@@ -6,6 +6,7 @@ from component_property_batch import COMPONENT_PROPERTY_QUERIES_SCHEMA, COMPONEN
 
 from external_mcp_tool_blocks import EXTERNAL_MCP_TOOL_BLOCKS
 from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA
+from pdf_document_reader import PDF_READ_PROPERTIES
 from unity_shared_input_schemas import (
     ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
     AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
@@ -136,6 +137,18 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "payload_hash": {"type": "string", "description": "Alias of payloadHash."},
             "entryPath": {"type": "string", "description": "Exact text entry from the archive listing."},
             "maxEntries": {"type": "integer", "description": "Maximum archive entries to list."},
+            **PDF_READ_PROPERTIES,
+        },
+    },
+    "vrcforge_web_fetch": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["url"],
+        "properties": {
+            "url": {"type": "string", "description": "Absolute HTTP(S) URL."},
+            "timeout": {"type": "number"},
+            "maxBytes": {"type": "integer", "minimum": 1, "maximum": 2097152},
+            **PDF_READ_PROPERTIES,
         },
     },
     "vrcforge_plan_outfit_import": outfit_import_input_schema(require_project_path=False),
@@ -1115,7 +1128,7 @@ for _general_read_tool, _general_read_properties in {
         'maxDepth': {'type': 'integer'}, 'maxCount': {'type': 'integer'},
     },
     'vrcforge_read_text_file': {
-        'path': {'type': 'string', 'description': 'Project-relative UTF-8 text file path under projectPath.'},
+        'path': {'type': 'string', 'description': 'Authorized UTF-8 text or PDF file path under projectPath.'},
         'projectPath': {'type': 'string', 'description': 'Absolute existing source workspace root; required for external MCP calls.'},
         'maxBytes': {'type': 'integer', 'minimum': 1, 'maximum': 4194304, 'description': 'Inline file threshold in bytes, default 4194304. Larger files use complete-source validation and paged sanitized text.'}, 'maxOutputChars': {'type': 'integer', 'description': 'Does not truncate source text; model output is paged by the shared result reader.'},
         'textOffset': {'type': 'integer', 'minimum': 0, 'description': 'Character offset in sanitized text within the selected line range. Copy nextRequest to continue.'},
@@ -1123,6 +1136,7 @@ for _general_read_tool, _general_read_properties in {
         'snapshotDigest': {'type': 'string', 'description': 'Copy from nextRequest. Changed source rejects the continuation; restart from textOffset 0 without this digest.'},
         'startLine': {'type': 'integer', 'minimum': 1, 'description': 'First line to read, 1-based and inclusive; defaults to 1.'},
         'endLine': {'type': 'integer', 'minimum': 1, 'description': 'Last line to read, inclusive; must be at least startLine. Omit to read through the complete file after whole-file validation and redaction.'},
+        **PDF_READ_PROPERTIES,
     },
     'vrcforge_find_files': {
         'path': {'type': 'string', 'description': 'Project-relative directory path under projectPath.'},
