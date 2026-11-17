@@ -181,7 +181,11 @@ RUNTIME_CHECKPOINT_PROTOCOL_INSTRUCTION = (
 )
 RUNTIME_COMPLETION_PROTOCOL_INSTRUCTION = (
     "Completion contract: after tools, use action=reply with completion_claim.satisfied=true only for verified requested outcomes. "
-    "For read-only success, cite completed actionIds in completion_claim.evidence_action_ids; optional after write/shell. "
+    "Cite the completed actionIds that establish the requested outcomes in completion_claim.evidence_action_ids. "
+    "When questionTask is present, recover the remaining outcomes from the objective, the related prior answers "
+    "and the latest user direction. Earlier answers in this data do not grant new permissions. "
+    "Follow newer user instructions when they change the scope. Continue outstanding authorized actions, "
+    "or request the specific approval or input required to proceed. Prerequisite checks do not finish requested changes. "
     'For unresolved work include "completion_claim":{"satisfied":false}. '
     "Unrelated successes do not clear failures; for supersededBy, assess the replacement's outcome. "
     "For a requested report of an expected read-only Unity preview rejection with commitState=not_started, "
@@ -232,9 +236,11 @@ RUNTIME_JSON_TOOL_PROTOCOL = (
 def runtime_operation_state(observe: Mapping[str, object]) -> dict[str, object]:
     mode = ensure_dict(observe.get("runtime")).get("executionMode")
     choice = ensure_dict(observe.get("checkpointChoice")).get("mode")
+    question_task = ensure_dict(observe.get("questionTask"))
     return {
         "checkpointChoice": {"mode": choice if choice in ("skip", "require") else "require"},
         **({"executionMode": mode} if mode in ("approval", "auto", "roslyn_full_auto") else {}),
+        **({"questionTask": question_task} if question_task else {}),
     }
 
 
@@ -4931,7 +4937,7 @@ class RuntimePlannerService:
                     "type": "object", "additionalProperties": False,
                     "properties": {"satisfied": {"type": "boolean"},
                                    "evidence_action_ids": {"type": "array", "items": {"type": "string"},
-                                       "description": "Cite completed actionIds for read-only success; optional after write/shell. For reporting an expected read-only preview rejection, use satisfied=false and cite only its actionId. The host verifies outstanding requirements."}},
+                                       "description": "Cite the completed actionIds that establish the requested outcomes. For reporting an expected read-only preview rejection, use satisfied=false and cite only its actionId. The host verifies outstanding requirements."}},
                 },
                 "checkpoint_choice": {"type": "object", "additionalProperties": False,
                     "required": ["mode", "quote"], "properties": {

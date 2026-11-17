@@ -834,6 +834,26 @@ class AgentQuestionService:
         if requested_project and self._scope.normalize_path(requested_project) != self._scope.normalize_path(existing_project):
             raise AgentQuestionServiceError("Question does not belong to this project.", status_code=404)
 
+    def prior_answer_context(self, *, session_id: str, project_root: str, current_question_id: str) -> list[dict[str, str]]:
+        """Recover user decisions omitted from tool-only or compacted history."""
+        with _locked(self._persistence.shared_state_lock):
+            questions = list(self._project(include_answered=True).values())
+        project = self._scope.normalize_path(project_root)
+        answers = []
+        for question in questions:
+            if str(question.get("questionId") or "") == current_question_id:
+                break
+            if (
+                question.get("sessionId") != session_id
+                or self._scope.normalize_path(str(question.get("projectRoot") or "")) != project
+                or question.get("status") != "answered"
+                or question.get("selectedOptionId") == "skip"
+            ):
+                continue
+            if answer := self._sanitize_answer_for_model(str(question.get("answer") or "")):
+                answers.append({"question": str(question.get("question") or "")[:600], "answer": answer[:2000]})
+        return answers[-8:]
+
     def _continuation_prompt(self, question: object, *, answer_text: str | None = None) -> str:
         values = question if isinstance(question, Mapping) else {}
         question_text = str(values.get("question") or "Pending question").strip()

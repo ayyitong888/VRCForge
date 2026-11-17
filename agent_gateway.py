@@ -2219,6 +2219,7 @@ class AgentGateway:
             # Carry the reply and its question context, without restoring an old
             # task's tool proposals, approvals, or snapshot over newer history.
             continuation = {key: continuation[key] for key in ("source", "questionId", "plannerObservation")}
+            continuation["previousObjective"] = str(seed.get("objective") or "")
         self._signal_background_activity("question_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
@@ -6496,6 +6497,20 @@ class AgentGateway:
         except ValueError as exc:
             raise AgentGatewayError(str(exc), status_code=409) from exc
 
+        prior_question_answers = (
+            self.questions.prior_answer_context(
+                session_id=session_id, project_root=project_root,
+                current_question_id=str(continuation.get("questionId") or ""),
+            )
+            if continuation.get("source") == "question_answered" else []
+        )
+        def assess_task_terminal(plan: Mapping[str, Any]) -> dict[str, Any]:
+            return task_loop.gate_terminal(plan, require_completion_claim=bool(
+                prior_question_answers and any(
+                    step.get("actionId") and not step.get("historical") for step in steps
+                )
+            ))
+
         if native_binding and question_reply_turn and continuation_observation:
             self._runtime_session_state.append_native_user(
                 session_id, binding=native_binding, human=False,
@@ -7518,6 +7533,12 @@ class AgentGateway:
             }
             # Host-owned current scope, including activation/exit and approval resume.
             planner_observe["skillPolicy"] = task_loop.planner_projection()["skillPolicy"]
+            if continuation.get("source") == "question_answered":
+                planner_observe["questionTask"] = {
+                    "objective": str(continuation.get("previousObjective") or task_loop.objective),
+                    "priorAnswers": prior_question_answers,
+                    "unmetActions": task_loop.pending_obligations(),
+                }
             # Budget enforcement and the terminal user notice belong to the host,
             # not to model context. Also discard any caller-supplied counter.
             planner_observe.pop("modelTurnBudget", None)
@@ -7762,7 +7783,7 @@ class AgentGateway:
                 and str(plan.get("planner") or "").strip().casefold() == "llm"
                 and task_loop.completed_action_ids()
                 and ensure_dict(
-                    task_loop.gate_terminal(plan).get("completionGate")
+                    assess_task_terminal(plan).get("completionGate")
                 ).get("reason") in {
                     "completion_claim_unbound",
                     "required_action_missing",
@@ -7771,7 +7792,7 @@ class AgentGateway:
             )
             honest_failed_final = (
                 ensure_dict(plan.get("completionClaim")).get("satisfied") is False
-                and ensure_dict(task_loop.gate_terminal(plan).get("completionGate")).get("status") == "failed"
+                and ensure_dict(assess_task_terminal(plan).get("completionGate")).get("status") == "failed"
             )
             for public_message in public_messages:
                 message_phase = public_message.get("phase") or ""
@@ -7877,8 +7898,8 @@ class AgentGateway:
                     "The completion gate has unresolved obligations. Inspect the task requirements; "
                     "perform any remaining authorized actions or explain the specific blocker honestly. "
                     "If complete: action=reply, completion_claim.satisfied=true and cite "
-                    "evidence_action_ids from the executed actions, or rely on a completed write or "
-                    "shell action as grounding. Otherwise inspect/report incomplete. "
+                    "evidence_action_ids that establish the requested outcomes. "
+                    "Otherwise continue the remaining work or report the concrete blocker. "
                     "action=correct retries failed tools only. Host binds IDs."
                 )
                 loop_state.append(
@@ -7900,6 +7921,8 @@ class AgentGateway:
                         },
                     }
                 )
+                if native_binding and not plan.get("nativeCallIds"):
+                    native_turn.append_hidden("Runtime completion feedback (data): " + correction_summary)
                 completion_claim_correction_attempted = True
                 continue
             else:
@@ -9406,7 +9429,7 @@ class AgentGateway:
             }, shell_review_terminal_outcome) or top_plan
             top_plan["task"] = task_loop.snapshot()
         elif isinstance(top_plan, dict):
-            top_plan = task_loop.gate_terminal(top_plan)
+            top_plan = assess_task_terminal(top_plan)
             if (native_binding and last_plan.get("nextStep") == "done"
                     and not last_plan.get("nativeCallIds")
                     and top_plan.get("nextStep") == "done"

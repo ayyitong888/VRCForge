@@ -2205,7 +2205,7 @@ class AgentTaskLoop:
                 return True
         return False
 
-    def gate_terminal(self, plan: Mapping[str, Any]) -> dict[str, Any]:
+    def gate_terminal(self, plan: Mapping[str, Any], *, require_completion_claim: bool = False) -> dict[str, Any]:
         gated = dict(plan)
         next_step = _status(gated.get("nextStep"))
         if next_step in _TERMINAL_BYPASS_STEPS:
@@ -2375,6 +2375,14 @@ class AgentTaskLoop:
             and claim.get("satisfied") in {True, False}
         )
         if planner == "llm" and not model_claim:
+            if next_step == "done" and require_completion_claim:
+                gated.update(
+                    nextStep="completion_unverified",
+                    reply="The resumed work has tool results, but its requested outcome is still unverified.",
+                    completionGate={"status": "failed", "reason": "completion_evidence_missing"},
+                    task=self.snapshot("completion_unverified"),
+                )
+                return gated
             # Natural final / explicit reply without a completion claim: the
             # ledger gates (requirements, failures, running actions) have run.
             # Prose must not mint a verified completion receipt, so the turn
@@ -2388,23 +2396,13 @@ class AgentTaskLoop:
             raw_ids = claim.get("evidenceActionIds") or claim.get("evidence_action_ids")
             if isinstance(raw_ids, list):
                 evidence_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
-            # An explicit satisfied claim must be grounded: either it cites
-            # executed actions as evidence, or a write/shell action completed
-            # this turn. Read-only observations alone cannot ground a
-            # completion claim.
-            mutating_completed = any(
-                _bounded_text((self._actions.get(action_id) or {}).get("kind"), 32) in {"write", "shell"}
-                for action_id in completed_ids
-            )
-            ungrounded_claim = satisfied and not evidence_ids and not mutating_completed
-            if ungrounded_claim:
+            if satisfied and not evidence_ids:
                 gated.update(
                     {
                         "summary": "The completion claim was not grounded in executed action evidence.",
                         "reply": honest_incomplete_reply or (
                             "The tool actions returned, but I cannot honestly mark the task complete "
-                            "because the claim cited no executed action evidence and no write or shell "
-                            "action completed this turn."
+                            "because the claim cited no executed action evidence."
                         ),
                         "continueLoop": False,
                         "nextStep": "completion_unverified",
@@ -2465,7 +2463,7 @@ class AgentTaskLoop:
             "schema": TASK_LOOP_SCHEMA,
             "taskId": self.task_id,
             "status": "completed",
-            "evidenceActionIds": completed_ids,
+            "evidenceActionIds": list(dict.fromkeys(evidence_ids)),
         }
         gated["task"] = self.snapshot("completed")
         return gated

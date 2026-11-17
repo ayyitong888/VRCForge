@@ -3,6 +3,7 @@ import json
 from test_native_runtime_gateway import (
     budgeted_request_history,
     call,
+    finish,
     run,
     setup_gateway,
 )
@@ -25,10 +26,7 @@ def test_native_rejected_completion_call_requests_host_bound_reply_contract(tmp_
                     },
                 },
             ),
-            call("recovered", "vrcforge_runtime_action", {
-                "action": "reply", "reply": "Read complete.",
-                "completion_claim": {"satisfied": True},
-            }),
+            finish,
         ],
     )
 
@@ -43,18 +41,18 @@ def test_native_rejected_completion_call_requests_host_bound_reply_contract(tmp_
     )
     correction_text = rejected_call["content"]
     assert "action=reply" in correction_text
-    assert "omit optional evidence_action_ids" in correction_text
+    assert "cite evidence_action_ids that establish the requested outcomes" in correction_text
     assert "action=correct" in correction_text
     assert "reply_completion_claim" in correction_text
     assert "requiredEvidenceActionIds" in correction_text
     assert "not-executed" not in correction_text
 
-    assert result["plan"]["completionClaim"] == {"satisfied": True}
     expected = [
         action["actionId"]
         for action in result["plan"]["task"]["actions"]
         if action["status"] == "completed"
     ]
     assert expected
+    assert result["plan"]["completionClaim"] == {"satisfied": True, "evidence_action_ids": expected}
     assert result["plan"]["taskCompletion"]["evidenceActionIds"] == expected
     assert json.dumps(result, ensure_ascii=False).find("not-executed") == -1

@@ -7,7 +7,7 @@ verified completion receipt. Codex CLI and Claude Code leave zero-tool
 replies ungated (a plain answer stays an answer); VRCForge keeps that
 property — natural finals end the turn — but fabricate no claim and mint no
 taskCompletion. An explicit claim must cite evidence (executed action ids
-visible in tool results) or follow a completed write/shell action.
+visible in tool results).
 """
 from __future__ import annotations
 
@@ -75,12 +75,29 @@ def test_explicit_claim_citing_read_evidence_passes() -> None:
     assert gated["taskCompletion"]["evidenceActionIds"] == [action_id]
 
 
-def test_explicit_claim_after_completed_write_without_evidence_passes() -> None:
+def test_explicit_claim_after_completed_write_without_evidence_is_unverified() -> None:
     loop = AgentTaskLoop("swap the body texture")
     _record_write(loop)
     gated = loop.gate_terminal(_plan({"satisfied": True}))
-    assert gated["nextStep"] == "done"
-    assert gated["taskCompletion"]["status"] == "completed"
+    assert gated["nextStep"] == "completion_unverified"
+    assert "taskCompletion" not in gated
+
+
+def test_unrelated_completed_shell_action_cannot_ground_an_implicit_claim() -> None:
+    loop = AgentTaskLoop("configure the existing project deliverables")
+    loop.record_action(kind="shell", tool="vrcforge_execute_shell", arguments={"command": "pwd"},
+                       raw_result={"ok": True}, outcome={"status": "ok", "summary": "working directory"})
+    gated = loop.gate_terminal(_plan({"satisfied": True}))
+    assert gated["nextStep"] == "completion_unverified"
+    assert "taskCompletion" not in gated
+
+
+def test_receipt_contains_the_cited_evidence_only() -> None:
+    loop = AgentTaskLoop("swap the body texture")
+    _record_read(loop)
+    action_id = _record_write(loop)
+    gated = loop.gate_terminal(_plan({"satisfied": True, "evidenceActionIds": [action_id]}))
+    assert gated["taskCompletion"]["evidenceActionIds"] == [action_id]
 
 
 def test_natural_final_after_reads_completes_without_receipt() -> None:

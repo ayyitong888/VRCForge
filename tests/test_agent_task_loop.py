@@ -536,7 +536,7 @@ def test_sub_agent_continuation_rejects_a_seed_for_a_different_parent_session() 
 
 
 @pytest.mark.parametrize('reference', ['omitted', 'empty', 'subset', 'all'])
-def test_llm_completion_binds_full_ledger_without_rewriting_model_claim(reference) -> None:
+def test_llm_completion_binds_only_cited_actions_without_rewriting_model_claim(reference) -> None:
     loop = AgentTaskLoop('inspect', session_id='current')
     ids = [loop.record_action(kind='skill', tool='read', arguments={'path': str(n)},
         raw_result={'ok': True}, outcome=ok_outcome())['actionId'] for n in range(2)]
@@ -550,7 +550,7 @@ def test_llm_completion_binds_full_ledger_without_rewriting_model_claim(referenc
         assert result['completionGate']['reason'] == 'completion_evidence_missing'
         return
     assert result['nextStep'] == 'done'
-    assert result['taskCompletion']['evidenceActionIds'] == ids
+    assert result['taskCompletion']['evidenceActionIds'] == claim['evidenceActionIds']
     assert result['completionClaim'] == claim
 
 

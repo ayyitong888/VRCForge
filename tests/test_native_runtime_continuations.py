@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.test_native_runtime_gateway import NativeModel, NativeTurn, call, setup_gateway
+from tests.test_native_runtime_gateway import NativeModel, NativeTurn, call, runtime_state, setup_gateway
 from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntimePlannerDesktop
 from agent_gateway import AgentGateway
 from runtime_planner_service import PlannerModelResult, RuntimePlannerService
@@ -368,6 +368,48 @@ def test_native_question_answer_continuation_keeps_pending_call_and_matches_answ
     assert len(settled_messages) == 1
     assert "yes" in json.dumps(json.loads(settled_messages[0]["content"]))
     assert results
+
+
+def test_question_handoff_recovers_earlier_scope_and_continues_after_prerequisite(tmp_path):
+    session = "native-session"
+    scope = {"sessionId": session, "projectRoot": str(tmp_path)}
+    completed = threading.Event()
+    results = []
+
+    def next_action(request):
+        task = runtime_state(request)["questionTask"]
+        assert task["objective"] == "Continue configuring the project"
+        assert task["priorAnswers"] == [
+            {"question": "Which deliverables?", "answer": "Configure the avatar and all three outfits."}
+        ]
+        assert any("The dependency is installed" in message.get("content", "")
+                   for message in request["messages"] if isinstance(message.get("content"), str))
+        assert any("Runtime completion feedback" in message.get("content", "")
+                   for message in request["messages"] if isinstance(message.get("content"), str))
+        return call("next", "vrcforge_ask_user", {"question": "Which outfit starts enabled?"})
+
+    gateway, model, reads = setup_gateway(tmp_path, [
+        call("question", "vrcforge_ask_user", {"question": "Is the dependency installed?"}),
+        call("prerequisite", "vrcforge_read_text_file", {"path": "a.txt"}),
+        {"role": "assistant", "content": "The dependency is installed. The rest can be configured now."},
+        next_action,
+    ])
+    gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: for writes.",
+                          "plan/preview", gateway.create_runtime_question)
+    prior = gateway.questions.create({**scope, "question": "Which deliverables?"})["question"]
+    gateway.questions.answer(prior["questionId"], {**scope, "answer": "Configure the avatar and all three outfits."})
+    unrelated = gateway.questions.create({**scope, "sessionId": "other", "question": "Other?"})["question"]
+    gateway.questions.answer(unrelated["questionId"], {**scope, "sessionId": "other", "answer": "No."})
+    gateway._runtime_turn_completed = lambda payload: (results.append(payload), completed.set())
+    first = gateway.runtime_message({**scope, "message": "Continue configuring the project", "clientTurnId": "first",
+                                     "maxAgenticTurns": 6})
+    assert first["plan"]["nextStep"] == "needs_user_action"
+    question = gateway.questions.list(**{"session_id": session, "project_root": str(tmp_path)})["questions"][0]
+    gateway.questions.answer(question["questionId"], {**scope, "answer": "The dependency is installed. Continue."})
+    assert completed.wait(5)
+    assert len(model.requests) == 4 and len(reads) == 1
+    assert results[-1]["plan"]["nextStep"] == "needs_user_action"
+    assert gateway.questions.list(session_id=session)["questions"][0]["question"] == "Which outfit starts enabled?"
 
 
 def test_native_stop_cancels_only_matching_question_and_allows_same_session_new_turn(tmp_path):
