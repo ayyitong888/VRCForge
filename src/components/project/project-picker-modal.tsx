@@ -4,6 +4,7 @@ import type { ProjectSnapshot } from "../../lib/api";
 import type { ProjectType } from "../../lib/chat-types";
 import { normalizeProjectPathKey, projectKey, shortPath } from "../../lib/project-path";
 import { Button } from "../ui/button";
+import { HoverScrollText } from "../ui/hover-scroll-text";
 
 type ProjectEntry = NonNullable<ProjectSnapshot["projects"]>[number];
 
@@ -153,7 +154,7 @@ export function ProjectPickerModal({
                         onClick={() => onSelectProject(key)}
                       >
                         <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        <span className="min-w-0 truncate">{project.name || shortPath(project.path || "")}</span>
+                        <HoverScrollText text={project.name || shortPath(project.path || "")} />
                         <span className="min-w-0 truncate text-xs text-muted-foreground">{project.path}</span>
                       </button>
                       {(
@@ -203,7 +204,7 @@ export function ProjectPickerModal({
                 {hiddenProjects.map((project) => (
                   <div key={project.path} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground">
                     <EyeOff className="h-4 w-4 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">{project.name || shortPath(project.path || "")}</span>
+                    <HoverScrollText className="flex-1" text={project.name || shortPath(project.path || "")} />
                     <Button type="button" variant="outline" className="h-7 shrink-0 px-2 text-xs" disabled={saving} onClick={() => onRestoreProject(project.path || "")}>
                       <Eye className="mr-1 h-3.5 w-3.5" />
                       {t("project.restore")}

@@ -9,6 +9,7 @@ import type { ChatThread } from "../../lib/chat-types";
 import type { SidebarChatActivity } from "../../lib/sidebar-view";
 import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
 import { cn } from "../../lib/utils";
+import { HoverScrollText } from "../ui/hover-scroll-text";
 
 const SIDEBAR_PREVIEW_COUNT = 5;
 const SIDEBAR_DRAG_ACTIVATION = { delay: 200, tolerance: 6 };
@@ -298,7 +299,7 @@ export function SidebarProject({
         className="flex min-h-10 min-w-0 flex-1 touch-pan-y select-none items-center gap-2.5 rounded-md px-3 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing"
       >
         <Folder className="h-4 w-4 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">{name}</span>
+        <HoverScrollText className="flex-1" text={name} />
         {pinned ? <Pin className="h-3.5 w-3.5 shrink-0 text-primary/60" /> : null}
         {!onClick && meta ? <span className="max-w-[78px] shrink-0 truncate text-xs text-muted-foreground">{meta}</span> : null}
       </button>
@@ -415,7 +416,7 @@ export function SidebarChat({
         onClick={onClick} className="flex h-full min-w-0 flex-1 touch-pan-y select-none items-center gap-2 rounded-md px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing"
       >
         {indent ? null : <MessageSquare className="h-4 w-4 shrink-0" />}
-        <span className="min-w-0 flex-1 truncate">{title}</span>
+        <HoverScrollText className="flex-1" text={title} />
         {unreadCount > 0 ? (
           <span
             className="inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground"

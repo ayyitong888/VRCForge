@@ -7,9 +7,14 @@ import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
+import postcss from "postcss";
+import tailwindcss from "tailwindcss";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
+const { css } = await postcss([tailwindcss("./tailwind.config.ts")]).process("@tailwind utilities;", { from: undefined });
+const longProjectName = "A project title long enough to scroll across the sidebar";
+const longChatName = "A conversation title long enough to scroll across the sidebar";
 const bundle = await build({
   stdin: {
     resolveDir: process.cwd(),
@@ -57,7 +62,10 @@ const bundle = await build({
               meta="6000.0.1f1" onClick={noop} />
           </div>
         )}{["a", "b"].map(id => <SidebarChat key={id} chatId={id} title={id.toUpperCase()} active={activeChat===id}
-          onClick={() => setActiveChat(id)} />)}</main>;
+          onClick={() => setActiveChat(id)} />)}
+          <SidebarProject name={${JSON.stringify(longProjectName)}} onClick={noop} />
+          <SidebarChat title={${JSON.stringify(longChatName)}} onClick={noop} />
+        </main>;
       }
       createRoot(document.getElementById("root")).render(<Fixture/>);
     `,
@@ -86,7 +94,7 @@ const server = createServer((request, response) => {
   }
   if (request.url === "/") {
     response.setHeader("Content-Type", "text/html");
-    response.end('<div id="root"></div><script src="/fixture.js"></script>');
+    response.end('<style>' + css + '</style><div id="root"></div><script src="/fixture.js"></script>');
     return;
   }
   if (request.url === "/api/app/projects/prefs") {
@@ -132,6 +140,47 @@ try {
   await page.clock.runFor(1500);
   assert.equal(await page.evaluate(() => window.projectIndexRequests), 0, "opening the project list must not start an unused project index scan");
   console.log("PASS project labels stay distinct and connecting does not start an unused project index scan");
+
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  const moveTo = async (label) => {
+    const { x, y, width, height } = await label.boundingBox();
+    await page.mouse.move(x + width / 2, y + height / 2);
+  };
+  const scroll = (label) => label.evaluate((node) => node.scrollLeft);
+  const projectLabel = page.getByText(longProjectName, { exact: true });
+  const chatLabel = page.getByText(longChatName, { exact: true });
+  const projectOverflow = await projectLabel.evaluate((node) => node.scrollWidth - node.clientWidth);
+  assert.ok(projectOverflow > 25, "the project test uses a clipped title");
+  await moveTo(projectLabel);
+  await page.clock.runFor(450);
+  assert.equal(await scroll(projectLabel), 0, "wait half a second before moving");
+
+  await page.clock.runFor(300);
+  const outboundDistance = await scroll(projectLabel);
+  assert.ok(outboundDistance >= 7 && outboundDistance <= 11, "move at about 36 px/s");
+  await page.clock.runFor(Math.ceil(projectOverflow / 0.036) - 250 + 80);
+  assert.equal(await scroll(projectLabel), projectOverflow, "reveal the final characters");
+  await page.clock.runFor(250);
+  assert.equal(await scroll(projectLabel), projectOverflow, "pause at the end");
+  await page.clock.runFor(570);
+  const returnDistance = projectOverflow - await scroll(projectLabel);
+  assert.ok(Math.abs(returnDistance - outboundDistance) <= 2, "return at the same speed");
+  await page.clock.runFor(Math.ceil(projectOverflow / 0.036));
+  assert.equal(await scroll(projectLabel), 0, "restore the leading characters after one cycle");
+
+  await moveTo(chatLabel);
+  await page.clock.runFor(750);
+  assert.ok(await scroll(chatLabel) > 0, "long chat titles use the same behavior");
+  const fittedLabel = page.getByText("B", { exact: true });
+  await moveTo(fittedLabel);
+  assert.equal(await scroll(chatLabel), 0, "leaving a title restores its normal view");
+  await page.clock.runFor(750);
+  assert.equal(await fittedLabel.evaluate((node) => node.style.textOverflow), "", "fitted names never animate");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await moveTo(projectLabel);
+  await page.clock.runFor(750);
+  assert.equal(await scroll(projectLabel), 0, "reduced motion keeps the name still");
+  console.log("PASS clipped sidebar names scroll after a delay, pause, and return at the same speed");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

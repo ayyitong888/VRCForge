@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { ActiveView } from "../../lib/app-view";
 import type { ThemeMode } from "../../lib/app-preferences";
 import { Button } from "../ui/button";
+import { HoverScrollText } from "../ui/hover-scroll-text";
 
 export function WorkspaceHeader({
   hideWindowHeader = false,
@@ -72,10 +73,10 @@ export function WorkspaceHeader({
       {!hideWindowHeader && <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/80 px-3 md:px-5">
         <div className="flex min-w-0 items-center gap-2 text-sm">
           {activeView !== "settings" && <>
-            <span className="truncate text-muted-foreground">{activeProjectLabel}</span>
+            <HoverScrollText className="text-muted-foreground" text={activeProjectLabel} />
             <span className="text-muted-foreground">/</span>
           </>}
-          <span className="truncate font-medium">{activeTitle}</span>
+          <HoverScrollText className="font-medium" text={activeTitle} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Button variant="ghost" className="h-9 w-9 px-0" onClick={onToggleTheme}>
