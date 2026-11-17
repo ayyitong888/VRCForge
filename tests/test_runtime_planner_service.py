@@ -23,6 +23,7 @@ from runtime_planner_service import (
     PlannerTurnMetadata,
     RuntimePlannerService,
     RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION,
+    RUNTIME_TASK_WORKFLOW_INSTRUCTION,
     sanitize_planner_observation_text,
     latest_loop_step_needs_model_correction,
     parse_llm_plan_response,
@@ -1881,8 +1882,8 @@ def test_model_prompt_keeps_unreferenced_matching_definition_local() -> None:
 def test_model_prompt_requires_evidence_grounded_final_reply_without_hiding_safe_updates() -> None:
     prompt = service()._build_llm_plan_prompt("inspect the project", [])
 
-    assert "推断必须明确标注" in prompt
-    assert "不能把 package name 或 private 标记当作产品用途证据" in prompt
+    assert "推断须明确标注" in prompt
+    assert "包名或 private 标记不能证明产品用途" in prompt
     assert "reply 字段是直接展示给用户的对话内容" in prompt
 
 
@@ -3609,12 +3610,10 @@ def test_legacy_prompt_uses_shared_public_behavior_with_json_action_format(layer
 def test_shared_public_behavior_covers_opening_milestones_cadence_and_final():
     instruction = RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION
     assert "before the first tool call explaining the immediate work" in instruction
-    assert "state the finding and next step" in instruction
-    assert "a changed approach, a blocker, or a long wait" in instruction
-    assert "after tool results return" in instruction and "about a minute" in instruction
-    assert "do not narrate every tool call" in instruction
-    assert "reveal private reasoning, or invent progress" in instruction
-    assert "final answer self-contained and complete" in instruction
+    assert "Let the visible list and tool activity show routine progress" in instruction
+    assert "Lead with the actual result" in instruction
+    assert "identify the observed blocker and the specific next action" in instruction
+    assert "Reuse matching receipts" in RUNTIME_TASK_WORKFLOW_INSTRUCTION
 
 def test_paged_write_observation_keeps_checkpoint_id_inline() -> None:
     planner = service()

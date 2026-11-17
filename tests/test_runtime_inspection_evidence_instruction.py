@@ -43,8 +43,8 @@ def test_troubleshooting_guidance_reaches_both_runtime_protocols(native, project
         prompt = request["instructions"]
     else:
         prompt = planner._build_llm_plan_prompt("Diagnose the reported failure", [], **kwargs)
-    assert "search relevant official documentation and mature implementations" in prompt
+    assert "Start from the actual error and existing receipts" in prompt
+    assert "when it can resolve a concrete uncertainty" in prompt
     assert "smallest targeted check" in prompt
-    assert "reuse established facts instead of restarting a fixed checklist" in prompt
-    assert "Do not repeat an unchanged failed call or a possibly completed write" in prompt
-    assert "not a new approval gate" in prompt
+    assert "verify the original case and related callers" in prompt
+    assert "Inspect the latest state before retrying a failed call or a possibly completed write" in prompt

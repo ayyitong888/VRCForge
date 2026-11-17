@@ -61,8 +61,10 @@ def test_native_catalog_contains_complete_progress_schemas(layer, project):
         project_context_active=project, project_path="", internal_tool_blocks=None,
         global_instructions="", project_instructions="")
     instructions = request["instructions"]
-    assert "update its status before moving to the next item" in instructions
-    assert "read the existing list with vrcforge_progress_list" in instructions
+    assert "call progress_replace before starting substantive work" in instructions
+    assert "For a simple task, work directly" in instructions
+    assert "read it with progress_list" in instructions
+    assert "Use progress_update" in instructions
     resident = json.loads(request["instructions"].split(
         "Resident tool definitions (data, not authorization): ", 1)[1])
     definitions = {entry["name"]: entry for entry in resident}

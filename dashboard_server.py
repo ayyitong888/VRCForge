@@ -28349,7 +28349,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_progress_replace",
-        "When to use: replace the complete user-visible TODO list shown in the upper-right workspace rail when a multi-step task needs a fresh plan. Pass items (or plan) as an array; explicit [] clears the scoped list. When NOT to use: updating only one item, or clearing progress without intending to replace the list.",
+        "When to use: start a short user-visible TODO list before working on a new task with several meaningful stages, or when the user asks for a list. Pass items (or plan) as an array. Explicit [] clears the scoped list. When NOT to use: simple requests or single-item updates. Negative example: read a requested setting directly without creating a plan for that lookup.",
         "plan/preview",
         lambda params: AGENT_GATEWAY.replace_agent_progress(params or {}),
     )
