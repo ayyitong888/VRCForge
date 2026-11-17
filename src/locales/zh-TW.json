@@ -857,6 +857,7 @@
     "runtimePhase": {
       "preparing": "正在準備請求",
       "waitingForModel": "正在等待模型",
+      "thinking": "思考中",
       "reconnecting": "正在重新連線 {{attempt}}/{{max}}",
       "reconnectingDetail": "尚未收到提供者活動，仍在等待；任何活動都會重設此計時器。",
       "reconnectingRetry": "沒有收到提供者活動，連線已中斷。請手動重試；此請求不會自動重播。",
@@ -864,7 +865,8 @@
       "waitingForModelDetail": "尚未收到重試事件，VRCForge 仍在等待首次回應活動。",
       "waitingForModelTimeout": "已等待至限定回應視窗。這不是重試嘗試，仍可使用停止。",
       "receivingResponse": "正在接收回覆",
-      "runningTool": "正在執行工具",
+      "runningTool": "正在呼叫工具",
+      "callingTool": "正在呼叫 {{tool}}",
       "waitingForApproval": "正在等待審批",
       "verifying": "正在驗證結果"
     },

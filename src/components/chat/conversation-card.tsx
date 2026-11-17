@@ -651,10 +651,12 @@ export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }
     ? t("chat.runtimePhase.reconnecting", { attempt: reconnectAttempt, max: item.providerRetry?.max || 5 })
     : waitingWindow
       ? t("chat.runtimePhase.waitingForModelProgress", { window: waitingWindow, max: 5 })
-    : streamingPhaseLabel(item.phase, t);
+      : item.phase === "waiting_for_model" && item.providerResponding
+        ? t("chat.runtimePhase.thinking")
+        : streamingPhaseLabel(item.phase, t);
   const activeOperation = item.phase === "running_tool" ? currentStreamingOperation(item.timeline || []) : undefined;
   const label = activeOperation
-    ? t("agent.timeline.runningTool", { tool: activeOperation })
+    ? t("chat.runtimePhase.callingTool", { tool: activeOperation })
     : phaseLabel;
   const reconnecting = reconnectAttempt !== undefined;
   const waiting = waitingWindow !== undefined;
@@ -740,7 +742,7 @@ function streamingPhaseLabel(phase: AgentRuntimePhase | undefined, t: typeof i18
     case "verifying":
       return t("chat.runtimePhase.verifying");
     default:
-      return t("chat.executingHint");
+      return t("chat.runtimePhase.waitingForModel");
   }
 }
 

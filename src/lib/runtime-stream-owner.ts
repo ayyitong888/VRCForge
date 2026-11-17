@@ -32,6 +32,7 @@ export function coalesceRuntimeTurnStreams(chat: ChatThread, clientTurnId: strin
     merged = { ...item, ...merged, text, timeline: mergeRuntimeTimelines(item.timeline || [], merged.timeline || []),
       createdAt: merged.createdAt || item.createdAt, phase: merged.phase || item.phase,
       providerLastActivityAt: merged.providerLastActivityAt || item.providerLastActivityAt,
+      providerResponding: merged.providerResponding ?? item.providerResponding,
       providerRetry: merged.providerRetry || item.providerRetry,
       providerLabel: merged.providerLabel || item.providerLabel, model: merged.model || item.model };
   }

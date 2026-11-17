@@ -857,6 +857,7 @@
     "runtimePhase": {
       "preparing": "リクエストを準備中",
       "waitingForModel": "モデルを待機中",
+      "thinking": "思考中",
       "reconnecting": "再接続中 {{attempt}}/{{max}}",
       "reconnectingDetail": "まだプロバイダーのアクティビティがありません。待機中です。アクティビティがあればタイマーはリセットされます。",
       "reconnectingRetry": "プロバイダーのアクティビティがなく、接続が中断されました。手動で再試行してください。このリクエストは再送されません。",
@@ -864,7 +865,8 @@
       "waitingForModelDetail": "再試行イベントはまだありません。VRCForgeは最初の応答アクティビティを待機しています。",
       "waitingForModelTimeout": "限定された応答待機時間に達しました。これは再試行ではありません。停止は引き続き有効です。",
       "receivingResponse": "応答を受信中",
-      "runningTool": "ツールを実行中",
+      "runningTool": "ツールを呼び出し中",
+      "callingTool": "{{tool}} を呼び出し中",
       "waitingForApproval": "承認を待機中",
       "verifying": "結果を検証中"
     },

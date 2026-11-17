@@ -1,7 +1,35 @@
 """Existing ledger events carry timing; the live/model timeline stays unchanged."""
 import json
 
+import pytest
+
+from agent_runtime_turn_identity import continuation_client_turn_id
 from tests.test_native_runtime_gateway import call, run, setup_gateway
+
+
+@pytest.mark.parametrize("question_count", [3, 4])
+def test_live_runtime_events_use_the_same_identity_as_the_run_ledger(tmp_path, question_count):
+    gateway, _, _ = setup_gateway(tmp_path, [{"role": "assistant", "content": "Finished"}])
+    session_id = "s" * 180
+    client_turn_id = "turn-1700000000000-0123456789abcd"
+    for index in range(question_count):
+        question_id = f"question_20261117_1420{index:02d}_000001_fixture"
+        client_turn_id = continuation_client_turn_id(client_turn_id, "question", question_id)
+    status_events, timeline_events = [], []
+    gateway._runtime_status_changed = status_events.append
+    gateway._runtime_timeline_changed = timeline_events.append
+
+    response = run(gateway, tmp_path, sessionId=session_id, clientTurnId=client_turn_id)
+    records = gateway.runtime_runs.read_events(limit=0)
+    start = next(row for row in records if row["event"] == "runtime_turn_started")
+    terminal = next(row for row in records if row["event"] == "runtime_turn_completed")
+
+    assert len(client_turn_id) > 160
+    assert status_events and timeline_events
+    for event in [start, terminal, response, *status_events, *timeline_events]:
+        assert (event["sessionId"], event["turnId"], event["clientTurnId"]) == (
+            session_id, start["turnId"], client_turn_id,
+        )
 
 
 def test_queued_dispatch_timing_attributes_prior_persistence_without_extra_events(tmp_path, monkeypatch):

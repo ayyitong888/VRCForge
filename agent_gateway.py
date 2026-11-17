@@ -1689,10 +1689,11 @@ class AgentGateway:
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
         ):
             return
+        # These are the same identifiers used by the ledger and provider stream.
         payload = {
-            "sessionId": summarize_text(session_id, 160),
-            "turnId": summarize_text(turn_id, 160),
-            "clientTurnId": summarize_text(client_turn_id, 160),
+            "sessionId": session_id,
+            "turnId": turn_id,
+            "clientTurnId": client_turn_id,
             "phase": phase,
         }
         if started_at:
@@ -6978,9 +6979,9 @@ class AgentGateway:
                 try:
                     self._runtime_timeline_changed(
                         {
-                            "sessionId": summarize_text(session_id, 160),
-                            "turnId": summarize_text(turn_id, 160),
-                            "clientTurnId": summarize_text(client_turn_id, 160),
+                            "sessionId": session_id,
+                            "turnId": turn_id,
+                            "clientTurnId": client_turn_id,
                             "timelineEvent": event,
                         }
                     )

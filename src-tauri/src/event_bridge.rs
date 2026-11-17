@@ -169,20 +169,15 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
             }).collect();
             if !ids.is_empty() { event["consumedSteerInputIds"] = serde_json::Value::Array(ids); }
         }
-        if let Some(value) = runtime_delta
-            .get("sessionId")
-            .and_then(|value| value.as_str())
-        {
-            event["sessionId"] = serde_json::Value::String(value.chars().take(160).collect());
-        }
-        if let Some(value) = runtime_delta.get("turnId").and_then(|value| value.as_str()) {
-            event["turnId"] = serde_json::Value::String(value.chars().take(160).collect());
-        }
-        if let Some(value) = runtime_delta
-            .get("clientTurnId")
-            .and_then(|value| value.as_str())
-        {
-            event["clientTurnId"] = serde_json::Value::String(value.chars().take(160).collect());
+        // Match the terminal event's identity limits. A clipped ID creates
+        // a different live owner that the terminal receipt cannot settle.
+        for (key, max_chars) in [("sessionId", 180), ("turnId", 180), ("clientTurnId", 240)] {
+            if let Some(value) = runtime_delta.get(key).and_then(|value| value.as_str()) {
+                if value.chars().count() > max_chars {
+                    return None;
+                }
+                event[key] = serde_json::Value::String(value.to_owned());
+            }
         }
         if let Some(value) = runtime_delta
             .get("textDelta")
@@ -1374,6 +1369,29 @@ mod tests {
         }))
         .expect("runtime terminal should be forwarded");
         assert_eq!(terminal["payload"]["startedAt"], started_at);
+    }
+
+    #[test]
+    fn question_continuation_delta_preserves_the_terminal_identity() {
+        let event = |client_turn_id: &str| {
+            sanitize_backend_event(serde_json::json!({
+                "type": "agentRuntimeDelta",
+                "payload": {
+                    "sessionId": "s".repeat(180),
+                    "turnId": "backend-turn",
+                    "clientTurnId": client_turn_id,
+                    "phase": "waiting_for_model"
+                }
+            }))
+        };
+        for len in [177, 225, 240] {
+            let suffix = ":question:followup";
+            let id = "q".repeat(len - suffix.len()) + suffix;
+            let delta = event(&id).expect("valid continuation delta");
+            assert_eq!(delta["sessionId"], "s".repeat(180));
+            assert_eq!(delta["clientTurnId"], id);
+        }
+        assert!(event(&"q".repeat(241)).is_none());
     }
 
     #[test]

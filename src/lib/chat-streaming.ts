@@ -209,6 +209,8 @@ export function applyAgentRuntimeDeltaToStreamingItem(
     phase: phase || (delta.textDelta ? "receiving_response" : item.phase),
     timeline,
     providerLastActivityAt,
+    providerResponding: effectivePhase === "waiting_for_model" && !executionEvent && !delta.providerRetry && !delta.textDelta
+      && (delta.activity === true || (!phase && item.providerResponding)),
     providerRetry: delta.providerRetry || (delta.activity === true || (phase && phase !== "waiting_for_model") ? undefined : item.providerRetry),
   };
 }

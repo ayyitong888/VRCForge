@@ -9,8 +9,13 @@ import React, { useCallback, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useRuntimeTurnActivity } from './src/hooks/use-runtime-turn-activity';
 import { useQuestionContinuationActivity, useRuntimeTurnContinuationDelivery } from './src/hooks/use-runtime-turn-continuation';
+import { StreamingPhaseStatus } from './src/components/chat/conversation-card';
+import { initializeI18n, setLocale } from './src/i18n';
 const original = ${JSON.stringify(original)};
-const identity = {sessionId:original.sessionId,clientTurnId:'continuation:question:owned',turnId:'backend-owned'};
+const replayLongId = location.search.includes('continuation-replay');
+const suffix = ':question:owned';
+const clientTurnId = replayLongId ? 'q'.repeat(177 - suffix.length) + suffix : 'continuation' + suffix;
+const identity = {sessionId:original.sessionId,clientTurnId,turnId:'backend-owned'};
 const run = {...identity,status:'running',startedAt:'2026-10-24T00:00:00Z'};
 const question={questionId:'owned',sessionId:identity.sessionId,status:'answered',runtimeContinuationStatus:'running',runtimeContinuation:{...identity,status:'running'}};
 const alias={...original,id:'session-alias-first',items:[]};
@@ -27,8 +32,9 @@ function Harness(){
  const externalDelta=useRuntimeTurnActivity({endpoint:'http://fixture',runtimeConnected:true,chats,runs,updateChat,deliver});
  window.discoverQuestion=()=>setQuestions([question]);
  window.delta=d=>{questionDelta(d);externalDelta(d)};window.deliver=deliver;window.chats=chats;window.setRuns=setRuns;
- return <main>{chats.find(c=>c.id===original.id).items.filter(i=>i.type==='streaming'&&i.clientTurnId===identity.clientTurnId).map(i=><section data-owner={i.id} key={i.id}><output>{i.text}</output>{(i.timeline||[]).map(e=><p data-event={e.id} key={e.id}>{e.payload?.summary}</p>)}</section>)}</main>
-}createRoot(document.getElementById('root')).render(<Harness/>);
+ return <main>{chats.find(c=>c.id===original.id).items.filter(i=>i.type==='streaming'&&(replayLongId||i.clientTurnId===identity.clientTurnId)).map(i=><section data-owner={i.id} key={i.id}><output>{i.text}</output>{(i.timeline||[]).map(e=><p data-event={e.id} key={e.id}>{e.payload?.summary}</p>)}{replayLongId&&<StreamingPhaseStatus item={i} nowMs={Date.now()} showElapsed={false}/>}</section>)}</main>
+}
+void initializeI18n().then(()=>setLocale('zh-CN')).then(()=>createRoot(document.getElementById('root')).render(<Harness/>));
 ` }, bundle:true,write:false,platform:"browser",format:"iife",jsx:"automatic",plugins:[{name:"transport",setup(b){
  b.onResolve({filter:/^\.\.\/lib\/api\/agent-runtime$/},args=>args.importer.endsWith('use-runtime-turn-activity.ts')?{path:'transport',namespace:'fixture'}:undefined);
  b.onLoad({filter:/.*/,namespace:'fixture'},()=>({loader:'js',contents:`export const fetchAgentRunTimeline=()=>new Promise(resolve=>window.pending.push(resolve));export const fetchAgentTurnResponse=async()=>({ok:false});`}));
@@ -59,5 +65,40 @@ try {
  if(mode==='?alias-first') assert.deepEqual(await page.evaluate(()=>window.chats[0].items),[], 'the alias receives neither deltas nor terminal receipts');
  assert.deepEqual(errors,[]);await page.close();
  }
- console.log(`PASS browser actual hooks + DOM (${original.items.length} original items), both discovery orders, shared CID owner, once-only delta, terminal timeline transfer`);
+ // Replay the two old transport projections and the exact question receipt.
+ // Then replay the corrected phase and provider-activity transports.
+ for (const oldTransport of [true, false]) {
+   const page = await browser.newPage();
+   await page.goto(`http://127.0.0.1:${server.address().port}?continuation-replay`);
+   await page.waitForSelector('[data-owner]', { state: 'attached' });
+   await page.getByText("正在等待模型", { exact:true }).waitFor();
+   await page.evaluate(old => {
+     const id = window.identity.clientTurnId;
+     window.delta({type:'agentRuntimeDelta',...window.identity,
+       clientTurnId:old ? id.slice(0,159) + '…' : id,phase:'waiting_for_model'});
+   }, oldTransport);
+   if (oldTransport) await page.waitForFunction(() => document.querySelectorAll('[data-owner]').length === 2);
+   await page.evaluate(old => {
+     const id = window.identity.clientTurnId;
+     window.delta({type:'agentRuntimeDelta',...window.identity,
+       clientTurnId:old ? id.slice(0,160) : id,phase:'waiting_for_model',activity:true});
+   }, oldTransport);
+   await page.waitForFunction(expected => document.querySelectorAll('[data-owner]').length === expected, oldTransport ? 3 : 1);
+   if (!oldTransport) {
+     await page.getByText("思考中", { exact:true }).waitFor();
+     await page.evaluate(() => window.delta({
+       type:'agentRuntimeDelta',...window.identity,phase:'running_tool',
+       timelineEvent:{id:'tool',sequence:10,timestamp:new Date().toISOString(),kind:'tool_call',
+         payload:{tool:'fixture_tool',actionId:'test-tool',status:'started'}},
+     }));
+     await page.getByText("正在调用 fixture_tool", { exact:true }).waitFor();
+   }
+   await page.evaluate(() => window.deliver({
+     schema:'vrcforge.runtime_turn_event.v1',continuationSource:'question_answered',
+     ...window.identity,plan:{reply:'完成',nextStep:'done'},timeline:[],
+   }));
+   await page.waitForFunction(expected => document.querySelectorAll('[data-owner]').length === expected, oldTransport ? 2 : 0);
+   await page.close();
+ }
+ console.log(`PASS browser actual hooks + DOM (${original.items.length} original items), long question replay: 3 → 1 live owners and 2 → 0 after completion`);
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

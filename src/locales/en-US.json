@@ -859,6 +859,7 @@
     "runtimePhase": {
       "preparing": "Preparing request",
       "waitingForModel": "Waiting for model",
+      "thinking": "Thinking",
       "reconnecting": "Reconnecting {{attempt}}/{{max}}",
       "reconnectingDetail": "No provider activity yet. Still waiting; any activity resets this timer.",
       "reconnectingRetry": "No provider activity; the connection was interrupted. Retry manually; this request will not be replayed.",
@@ -866,7 +867,8 @@
       "waitingForModelDetail": "No retry event was received. VRCForge is still waiting for the first response activity.",
       "waitingForModelTimeout": "Still waiting after the bounded response window. This is not a retry attempt; Stop remains available.",
       "receivingResponse": "Receiving response",
-      "runningTool": "Running tool",
+      "runningTool": "Calling tool",
+      "callingTool": "Calling {{tool}}",
       "waitingForApproval": "Waiting for approval",
       "verifying": "Verifying result"
     },
