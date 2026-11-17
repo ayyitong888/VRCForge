@@ -279,7 +279,7 @@ export function ProjectWorkbenchSections({
           {agentProgress.length ? (
             <AgentTodoPanelEmbedded progress={agentProgress} />
           ) : (
-            <div className="rounded-md border border-dashed border-border px-2 py-2 text-xs text-muted-foreground">
+            <div className="px-2 py-2 text-xs text-muted-foreground">
               {t("workspace.noProgress")}
             </div>
           )}
