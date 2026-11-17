@@ -1352,7 +1352,12 @@ textarea {
 }
 
 :root {
-  --scrollbar-thumb: color-mix(in srgb, var(--md-primary) 75%, var(--md-on-surface-variant));
+  --scrollbar-thumb: color-mix(in srgb, var(--md-primary) 55%, transparent);
+}
+
+:where(html, textarea, .console, .blendshape-list, .tuning-list, .table-scroll, .log-stream, .connection-stream,
+  #llm-change-list, #clothes-list, #param-suggestions, #param-diff-list, #shader-materials-table, #vision-result) {
+  scrollbar-gutter: stable;
 }
 
 @supports not selector(::-webkit-scrollbar) {
@@ -1379,7 +1384,8 @@ textarea {
 
 ::-webkit-scrollbar-thumb {
   min-height: 32px;
-  border: 2px solid transparent;
+  box-sizing: border-box;
+  border: 3px solid transparent;
   border-radius: 9999px;
   background-color: var(--scrollbar-thumb);
   background-clip: padding-box;
@@ -1387,6 +1393,7 @@ textarea {
 
 ::-webkit-scrollbar-thumb:hover,
 ::-webkit-scrollbar-thumb:active {
+  border-width: 1px;
   background-color: var(--md-primary);
 }
 

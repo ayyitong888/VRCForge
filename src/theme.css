@@ -297,7 +297,11 @@
 
   :root,
   .dark {
-    --scrollbar-thumb: color-mix(in srgb, hsl(var(--primary)) 75%, hsl(var(--muted-foreground)));
+    --scrollbar-thumb: color-mix(in srgb, hsl(var(--primary)) 55%, transparent);
+  }
+
+  :where(html, textarea, .overflow-auto, .overflow-y-auto, .overflow-scroll, .overflow-y-scroll) {
+    scrollbar-gutter: stable;
   }
 
   /* Chromium's standard scrollbar properties override its thumb hover rules. */
@@ -328,7 +332,8 @@
 
   *::-webkit-scrollbar-thumb {
     min-height: 32px;
-    border: 2px solid transparent;
+    box-sizing: border-box;
+    border: 3px solid transparent;
     border-radius: 9999px;
     background-color: var(--scrollbar-thumb);
     background-clip: padding-box;
@@ -336,6 +341,7 @@
 
   *::-webkit-scrollbar-thumb:hover,
   *::-webkit-scrollbar-thumb:active {
+    border-width: 1px;
     background-color: hsl(var(--primary));
   }
 

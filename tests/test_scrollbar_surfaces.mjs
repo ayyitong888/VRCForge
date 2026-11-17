@@ -16,12 +16,13 @@ const css = (await postcss([tailwindcss(resolve(root, "tailwind.config.ts"))]).p
 const browser = await chromium.launch({
   headless: true,
   channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge",
+  ignoreDefaultArgs: ["--hide-scrollbars"],
 });
 
 const html = `
   <style>${css}</style>
   <div id="root"><main><div id="surface-root">
-    <div id="generic" class="surface" data-surface="generic"><div class="content"></div></div>
+    <div id="generic" class="surface overflow-auto" data-surface="generic"><div class="content"></div></div>
     <div id="app" class="app-scrollbar surface" data-surface="app"><div class="content"></div></div>
     <div id="sidebar" class="sidebar-scrollbar surface bg-sidebar" data-surface="sidebar"><div class="content"></div></div>
     <div id="quote" class="surface" data-surface="quote"><div class="content"></div></div>
@@ -61,7 +62,7 @@ try {
   await page.addStyleTag({ content: `
     body { margin: 0; }
     #surface-root { display: grid; grid-template-columns: repeat(2, 260px); gap: 12px; padding: 12px; }
-    .surface { width: 260px; height: 150px; overflow: scroll; background: hsl(var(--card)); }
+    .surface { width: 260px; height: 150px; overflow: auto; background: hsl(var(--card)); }
     .content { display: block; width: 520px; height: 420px; background: hsl(var(--card)); }
     #sidebar { background: hsl(var(--sidebar)); }
   ` });
@@ -82,7 +83,7 @@ try {
     const snapshot = await surfaceSnapshot(page);
     const expectedThumb = await page.evaluate(() => {
       const probe = document.createElement("span");
-      probe.style.color = "color-mix(in srgb, hsl(var(--primary)) 75%, hsl(var(--muted-foreground)))";
+      probe.style.color = "color-mix(in srgb, hsl(var(--primary)) 55%, transparent)";
       document.body.append(probe);
       const color = getComputedStyle(probe).color;
       probe.remove();
@@ -114,6 +115,45 @@ try {
   }
   assert.notEqual(snapshots["default-light"].generic.thumb, snapshots["sunset-light"].generic.thumb);
   assert.notEqual(snapshots["sunset-light"].generic.thumb, snapshots["custom-light"].generic.thumb);
+  await check("sunset-light");
+  const generic = page.locator("#generic");
+  const widthWithOverflow = await generic.evaluate((element) => element.clientWidth);
+  await generic.evaluate((element) => { element.firstElementChild.hidden = true; });
+  assert.equal(await generic.evaluate((element) => element.clientWidth), widthWithOverflow,
+    "the content width stays put when the scrollbar appears or disappears");
+  await generic.evaluate((element) => { element.firstElementChild.hidden = false; });
+  const bounds = await generic.boundingBox();
+  const gutterX = bounds.x + bounds.width - 10;
+  const middleY = bounds.y + 22;
+  const paintedThumb = async (y) => {
+    const clip = { x: gutterX, y, width: 10, height: 1 };
+    const data = (await page.screenshot({ clip })).toString("base64");
+    return page.evaluate(async (base64) => {
+      const image = new Image();
+      image.src = "data:image/png;base64," + base64;
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width;
+      canvas.height = 1;
+      const context = canvas.getContext("2d");
+      context.drawImage(image, 0, 0);
+      const pixels = context.getImageData(0, 0, image.width, 1).data;
+      const shades = Array.from({ length: image.width }, (_, x) => Array.from(pixels.slice(x * 4, x * 4 + 3)).join(","));
+      return { width: shades.filter((pixel) => pixel !== shades[0]).length, color: shades[5] };
+    }, data);
+  };
+  const normal = await paintedThumb(middleY);
+  await page.mouse.move(gutterX + 5, middleY);
+  const hovered = await paintedThumb(middleY);
+  assert.ok(normal.width > 0 && normal.width < hovered.width, "hover thickens the painted thumb");
+  assert.notEqual(normal.color, hovered.color, "hover paints the exact accent instead of blending with the surface");
+  assert.equal(await generic.evaluate((element) => element.clientWidth), widthWithOverflow, "hover keeps the same gutter");
+  await page.mouse.down();
+  await page.mouse.move(gutterX - 20, middleY + 18);
+  const dragged = await paintedThumb(middleY + 18);
+  await page.mouse.up();
+  assert.ok(await generic.evaluate((element) => element.scrollTop > 0), "the thumb remains draggable");
+  assert.deepEqual(dragged, hovered, "drag keeps the same solid, thick appearance after leaving the gutter");
   await page.evaluate(() => {
     document.documentElement.dataset.vrcforgeWallpaper = "active";
     document.documentElement.dataset.vrcforgeWallpaperScope = "app";
@@ -125,7 +165,7 @@ try {
   const dashboardCss = readFileSync(resolve(root, "dashboard/styles.css"), "utf8").replace(/^@import .+;\r?\n/, "");
   await page.setContent(`<style>${dashboardCss}</style><pre id="code" style="height:20px;overflow:auto">one\ntwo\nthree</pre>`);
   const dashboard = await page.locator("#code").evaluate((element) => {
-    element.style.color = "color-mix(in srgb, var(--md-primary) 75%, var(--md-on-surface-variant))";
+    element.style.color = "color-mix(in srgb, var(--md-primary) 55%, transparent)";
     return {
       thumb: getComputedStyle(element, "::-webkit-scrollbar-thumb").backgroundColor,
       expectedThumb: getComputedStyle(element).color,
