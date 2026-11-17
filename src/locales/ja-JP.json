@@ -823,7 +823,7 @@
     "auto": "自動承認",
     "autoDesc": "通常の操作は自動審査し、高リスクや情報不足の操作は手動で確認します。",
     "roslynFullAuto": "フル権限",
-    "roslynFullAutoDesc": "許可された操作を直接実行します。外部接続は手動で有効にします。"
+    "roslynFullAutoDesc": "AI が操作を直接実行し、操作ごとの確認は行いません。"
   },
   "chat": {
     "captureBatch": "撮影 {{index}}",

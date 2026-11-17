@@ -121,12 +121,12 @@ try {
     assert.ok(menuRect.y >= 0 && menuRect.y + menuRect.height <= page.viewportSize().height,
       "permission menu must remain visible vertically");
     assert.equal(await menu.locator("button").count(), 3);
-    const fullDescription = "Run authorized actions directly. Enable external access manually.";
+    const fullDescription = "AI can run actions directly without asking you to confirm each one.";
     assert.equal(await menu.getByText("Full Permission", { exact: true }).count(), 1);
     assert.equal(await menu.getByText(fullDescription, { exact: true }).isVisible(), true);
 
     await page.evaluate(() => window.setPermissionFixtureLocale("zh-CN"));
-    await menu.getByText("按授权直接执行。外部连接需手动开启。", { exact: true }).waitFor();
+    await menu.getByText("AI 可直接执行操作，不再逐项确认。", { exact: true }).waitFor();
     assert.equal(await menu.getByText("完全权限", { exact: true }).count(), 1);
     assert.equal(await menu.getByText("普通操作自动审核，高风险或信息不足时手动确认。", { exact: true }).isVisible(), true);
   });

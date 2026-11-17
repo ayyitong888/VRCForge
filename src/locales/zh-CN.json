@@ -823,7 +823,7 @@
     "auto": "自动审批",
     "autoDesc": "普通操作自动审核，高风险或信息不足时手动确认。",
     "roslynFullAuto": "完全权限",
-    "roslynFullAutoDesc": "按授权直接执行。外部连接需手动开启。"
+    "roslynFullAutoDesc": "AI 可直接执行操作，不再逐项确认。"
   },
   "chat": {
     "captureBatch": "第 {{index}} 次截图",

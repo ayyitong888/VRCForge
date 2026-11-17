@@ -825,7 +825,7 @@
     "auto": "Auto Approve",
     "autoDesc": "Routine actions are reviewed automatically. Confirm risky or unclear actions.",
     "roslynFullAuto": "Full Permission",
-    "roslynFullAutoDesc": "Run authorized actions directly. Enable external access manually."
+    "roslynFullAutoDesc": "AI can run actions directly without asking you to confirm each one."
   },
   "chat": {
     "captureBatch": "Capture {{index}}",
