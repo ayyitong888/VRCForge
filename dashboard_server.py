@@ -175,6 +175,7 @@ from agent_question_service import (
 )
 from credential_redaction import redact_credential_text
 from cross_session_conversation_service import (
+    AGENT_RELAY_INPUT_PREFIX,
     CrossSessionConversationError,
     CrossSessionConversationService,
 )
@@ -3288,7 +3289,8 @@ async def _execute_app_agent_runtime_message(
     runtime_params = agent_runtime_request_payload(runtime_request)
     browser_requested = False
     browser_adult_confirmed = False
-    if human_user_message:
+    if human_user_message and not str(runtime_request.client_turn_id or "").startswith(AGENT_RELAY_INPUT_PREFIX):
+        # A relay keeps its provenance when the visible chat drains its queue.
         # Only the authenticated App route creates owner authorization. Internal
         # agent-forwarded dispatch reuses this runner without minting that marker.
         runtime_params["_humanUserMessageSource"] = {

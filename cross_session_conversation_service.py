@@ -15,6 +15,7 @@ MAX_CROSS_SESSION_AGENTIC_TURNS = 25
 CHAT_LINK_PREFIX = "vrcforge://chat/"
 _CHAT_LINK = re.compile(r"vrcforge://chat/((?:%[0-9A-Fa-f]{2}|[^%/?#])+)", re.IGNORECASE)
 _INVALID_LINK_ID = re.compile(r"[\\/\x00-\x1f\x7f]")
+AGENT_RELAY_INPUT_PREFIX = "agent-forward-"
 
 
 class CrossSessionConversationError(ValueError):
@@ -284,7 +285,7 @@ class CrossSessionConversationService:
                     "clientTurnId": str(item.get("clientTurnId") or ""),
                     "deduped": True,
                 }
-        client_turn_id = f"agent-forward-{host['clientTurnId'][:64]}-{host['actionId'][:72]}"
+        client_turn_id = f"{AGENT_RELAY_INPUT_PREFIX}{host['clientTurnId'][:64]}-{host['actionId'][:72]}"
         forwarded_text = self.FORWARD_NOTICE + message
         now = self._now()
         active_client_turn_id = self._active_client_turn(chat_id, session_id, host["projectRoot"])
@@ -600,7 +601,7 @@ class CrossSessionConversationService:
             for entry in self._list_followups()
             if isinstance(entry, Mapping)
             and entry.get("status") == "claimed"
-            and str(entry.get("clientTurnId") or "").startswith("agent-forward-")
+            and str(entry.get("clientTurnId") or "").startswith(AGENT_RELAY_INPUT_PREFIX)
             and entry.get("leaseUntil") is not None
             and float(entry.get("leaseUntil")) > now
         ]
@@ -613,7 +614,7 @@ class CrossSessionConversationService:
             if entry.get("status") == "claimed" and float(entry.get("leaseUntil") or 0) > time.time():
                 continue
             client_turn_id = str(entry.get("clientTurnId") or "").strip()
-            if not client_turn_id.startswith("agent-forward-"):
+            if not client_turn_id.startswith(AGENT_RELAY_INPUT_PREFIX):
                 continue
             lane_id = str(entry.get("sessionId") or "").strip()
             chat_id = str(entry.get("chatId") or lane_id).strip()

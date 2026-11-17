@@ -156,3 +156,26 @@ def test_queued_user_turn_waits_for_child_delivery_before_native_history_advance
     assert sent["plan"]["reply"] == "Queued input handled after the report."
     assert gateway.list_runtime_followups(session_id="lane")[0]["status"] == "acked"
     assert len(model.requests) == 3
+
+def test_foreground_dispatch_keeps_queued_agent_relay_attributed(tmp_path, monkeypatch):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    turn_id = "agent-forward-source-tool"
+    relay = "[VRCForge agent relay]\n\nPlease review the glossary."
+    queued = gateway.enqueue_runtime_followup({
+        "sessionId": "chat-b", "runtimeSessionId": "session-b",
+        "clientTurnId": turn_id, "message": relay,
+    })
+    run = Mock(return_value={"ok": True, "sessionId": "session-b", "clientTurnId": turn_id})
+    monkeypatch.setattr(gateway, "runtime_message", run)
+    monkeypatch.setattr(host, "AGENT_GATEWAY", gateway)
+    monkeypatch.setattr(host, "RUNTIME_QUEUE_PORT", gateway)
+    monkeypatch.setattr(host, "TELEGRAM_SERVICE", Mock())
+    monkeypatch.setattr(host, "EVENT_BUS", Mock(broadcast=AsyncMock()))
+    request = host.AgentRuntimeMessageRequest(
+        message=relay, session_id="session-b", chatId="chat-b",
+        clientTurnId=turn_id, followupQueueId=queued["queueId"], followupLaneId="chat-b",
+    )
+    assert asyncio.run(host.app_agent_runtime_message(request))["ok"]
+    runtime_params = run.call_args.args[0]
+    assert runtime_params["message"] == relay
+    assert "_humanUserMessageSource" not in runtime_params
