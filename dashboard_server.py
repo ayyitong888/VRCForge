@@ -1899,7 +1899,7 @@ def _invoke_cross_session_conversation(method_name: str, params: Mapping[str, An
         return method(params)
     except CrossSessionConversationError as exc:
         return {"ok": False, "status": "failed",
-                "error": runtime_error_from_exception("cross_session_conversation_failed", exc)}
+                "error": runtime_error_from_exception("cross_session_conversation_failed", exc, message=str(exc))}
 
 
 def _dispatch_cross_session_runtime(params: dict[str, Any]) -> Mapping[str, Any]:
@@ -28449,13 +28449,13 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_list_conversations",
-        "When to use: find conversations attached to this same project scope using a bounded page. When NOT to use: locate Unity assets or inspect another project. Negative example: do not treat a listed title as proof that its transcript was read.",
+        "When to use: find conversations in this same project scope, including their chatId and shareable chatLink; use nextOffset to page. When NOT to use: locate Unity assets or inspect another project. Negative example: do not treat a listed title or link as proof that its transcript was read.",
         "read/debug",
         lambda params: _invoke_cross_session_conversation("list_conversations", params or {}),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_read_conversation",
-        "When to use: read one bounded page of public messages from a conversation attached to this same project scope. When NOT to use: transfer its complete history, attachments, approvals, or write authority. Negative example: do not claim an unread page was inspected.",
+        "When to use: read public messages in this same project scope; pass an exact chat ID or vrcforge://chat/ link as chatId, and use nextOffset to read further pages. When NOT to use: transfer attachments, approvals, or write authority. Negative example: do not claim that a link or unread page gave you its contents.",
         "read/debug",
         lambda params: _invoke_cross_session_conversation("read_conversation", params or {}),
     )
@@ -28467,13 +28467,13 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_send_message",
-        "When to use: leave an attributed message for another conversation in this same project scope; an active target can receive it during its current turn, while an idle target stays unwoken. When NOT to use: ask the target to start work now. Negative example: this acceptance is not proof the target read or completed the message.",
+        "When to use: leave an attributed message for another conversation in this same project scope; pass an exact chat ID or vrcforge://chat/ link as chatId. An active target can receive it during its current turn, while an idle target stays unwoken. When NOT to use: ask the target to start work now. Negative example: this acceptance is not proof the target read or completed the message.",
         "plan/preview",
         lambda params: _invoke_cross_session_conversation("send_message", params or {}),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_followup_task",
-        "When to use: ask another conversation in this same project scope to take up work now; an active target receives the message in its current turn and an idle target is started. When NOT to use: leave a note that should wait for later. Negative example: a queued or accepted task is not a completed result.",
+        "When to use: ask another conversation in this same project scope to take up work now; pass an exact chat ID or vrcforge://chat/ link as chatId. An active target receives the message in its current turn and an idle target is started. When NOT to use: leave a note that should wait for later. Negative example: a queued or accepted task is not a completed result.",
         "plan/preview",
         lambda params: _invoke_cross_session_conversation("followup_task", params or {}),
     )

@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import copy
+import re
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote, unquote
 
 MAX_CROSS_SESSION_AGENTIC_TURNS = 25
+CHAT_LINK_PREFIX = "vrcforge://chat/"
+_CHAT_LINK = re.compile(r"vrcforge://chat/((?:%[0-9A-Fa-f]{2}|[^%/?#])+)", re.IGNORECASE)
+_INVALID_LINK_ID = re.compile(r"[\\/\x00-\x1f\x7f]")
 
 
 class CrossSessionConversationError(ValueError):
@@ -146,6 +151,7 @@ class CrossSessionConversationService:
                 continue
             records.append({
                 "chatId": chat_id,
+                "chatLink": CHAT_LINK_PREFIX + quote(chat_id, safe=""),
                 "title": self._text(chat.get("title"), max_chars=160),
                 "updatedAt": self._text(chat.get("updatedAt"), max_chars=48),
                 "messageCount": sum(1 for item in (chat.get("items") if isinstance(chat.get("items"), list) else []) if self._public_message(item)),
@@ -157,11 +163,7 @@ class CrossSessionConversationService:
 
     def read_conversation(self, params: Mapping[str, Any]) -> dict[str, Any]:
         host = self._host(params)
-        chat_id = str(params.get("chatId") or "").strip()
-        if not chat_id:
-            raise CrossSessionConversationError("chatId is required.")
-        target = self._load_chat(chat_id, host["projectRoot"])
-        self._assert_target_scope(target, host["projectRoot"])
+        chat_id, target = self._target_chat(params, host)
         items = target.get("items") if isinstance(target.get("items"), list) else []
         transcript = [message for item in items if (message := self._public_message(item)) is not None]
         try:
@@ -177,6 +179,7 @@ class CrossSessionConversationService:
         return {
             "ok": True,
             "chatId": chat_id,
+            "chatLink": CHAT_LINK_PREFIX + quote(chat_id, safe=""),
             "title": self._text(target.get("title"), max_chars=160),
             "messages": page,
             "offset": offset,
@@ -205,7 +208,8 @@ class CrossSessionConversationService:
         if not isinstance(saved, Mapping) or saved.get("id") != chat_id or saved.get("sessionId") != session_id:
             raise CrossSessionConversationError("The stored conversation did not match the requested identity.")
         self._notify_chat_changed()
-        return {"ok": True, "chatId": chat_id, "title": title, "created": True, "readbackVerified": True}
+        return {"ok": True, "chatId": chat_id, "chatLink": CHAT_LINK_PREFIX + quote(chat_id, safe=""),
+                "title": title, "created": True, "readbackVerified": True}
 
     def send_message(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Queue a message for the target; do not start an idle target turn."""
@@ -217,15 +221,13 @@ class CrossSessionConversationService:
 
     def _deliver_message(self, params: Mapping[str, Any], *, trigger_turn: bool) -> dict[str, Any]:
         host = self._host(params)
-        chat_id = str(params.get("chatId") or "").strip()
         raw_message = params.get("message")
         message = raw_message.strip() if isinstance(raw_message, str) else ""
-        if not chat_id or not message:
-            raise CrossSessionConversationError("chatId and message are required.")
+        if not message:
+            raise CrossSessionConversationError("message is required.")
         if len(message) > self.MAX_MESSAGE_CHARS:
             raise CrossSessionConversationError(f"message must be at most {self.MAX_MESSAGE_CHARS} characters.")
-        target = self._load_chat(chat_id, host["projectRoot"])
-        self._assert_target_scope(target, host["projectRoot"])
+        chat_id, target = self._target_chat(params, host)
         session_id = str(target.get("sessionId") or "").strip()
         if not session_id:
             raise CrossSessionConversationError("Target conversation has no session binding.")
@@ -369,6 +371,25 @@ class CrossSessionConversationService:
             "queueId": queued.get("queueId"),
             "sequence": queued.get("sequence"),
         }
+
+    def _target_chat(self, params: Mapping[str, Any], host: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:
+        chat_id = str(params.get("chatId") or "").strip()
+        if not chat_id:
+            raise CrossSessionConversationError("chatId is required.")
+        if chat_id.casefold().startswith("vrcforge:"):
+            link = _CHAT_LINK.fullmatch(chat_id)
+            if not link:
+                raise CrossSessionConversationError("Provide a chat ID or a vrcforge://chat/ link.")
+            try:
+                chat_id = unquote(link[1], errors="strict")
+            except UnicodeDecodeError as exc:
+                raise CrossSessionConversationError("The conversation link contains an invalid chat ID.") from exc
+            if chat_id in {"", ".", ".."} or _INVALID_LINK_ID.search(chat_id):
+                raise CrossSessionConversationError("The conversation link contains an invalid chat ID.")
+        scope = host["projectRoot"]
+        target = self._load_chat(chat_id, scope)
+        self._assert_target_scope(target, scope)
+        return chat_id, target
 
     def _assert_target_scope(self, target: Mapping[str, Any] | None, scope: str) -> None:
         if not isinstance(target, Mapping):

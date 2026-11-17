@@ -727,6 +727,61 @@ class DashboardServerTests(unittest.TestCase):
         load_chat.assert_not_called()
         write_snapshot.assert_called_once_with("chat-1", "ProjectA", updated, expected_revision=3)
 
+    def test_conversation_tools_use_chat_links_with_scoped_durable_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            dashboard_server, "_CROSS_SESSION_CONVERSATION_SERVICE", None,
+        ):
+            chat_id = "chat peer-喵"
+            link = "vrcforge://chat/chat%20peer-%E5%96%B5"
+            project = Path(temp_dir) / "project"
+            foreign = Path(temp_dir) / "foreign"
+            project.mkdir()
+            foreign.mkdir()
+            chats = [
+                {"id": chat_id, "sessionId": "peer-session", "title": "Peer chat", "projectPath": str(project), "revision": 0,
+                 "items": [{"id": "first", "type": "user", "text": "Old request"},
+                           {"id": "second", "type": "agent", "response": {
+                               "plan": {"reply": "Peer answer", "summary": "Peer answer", "planner": "runtime", "shellNeeded": False},
+                           }}]},
+                {"id": "foreign-chat", "projectPath": str(foreign),
+                 "items": [{"id": "foreign", "type": "user", "text": "Foreign transcript"}]},
+            ]
+            dashboard_server.write_chat_transcripts_storage(dashboard_server.ChatTranscriptsRequest(chats=chats))
+            tools = dashboard_server.AGENT_GATEWAY._tools
+            context = {
+                "chatId": "source-chat", "sessionId": "source-session", "projectRoot": str(project),
+                "clientTurnId": "source-turn", "actionId": "send-action",
+            }
+
+            def call(tool, **params):
+                return tools[f"vrcforge_{tool}"].handler({**params, "_trustedConversationContext": context})
+
+            first = call("read_conversation", chatId=link, limit=1)
+            self.assertTrue(first["ok"], first)
+            self.assertEqual(first["messages"][0]["text"], "Old request")
+            self.assertEqual(first["nextOffset"], 1)
+            second = call("read_conversation", chatId=link, offset=first["nextOffset"], limit=1)
+            self.assertEqual(second["messages"][0]["text"], "Peer answer")
+            self.assertIsNone(second["nextOffset"])
+            self.assertEqual(second["chatLink"], link)
+            listed = call("list_conversations")
+            self.assertEqual([row["chatLink"] for row in listed["items"]], [link])
+            for tool, result in [("list_conversations", listed), ("read_conversation", second)]:
+                observation = dashboard_server.RUNTIME_PLANNER.native_result_observation({
+                    "tool": f"vrcforge_{tool}", "kind": "skill", "status": "completed", "result": result,
+                })["observation"]
+                self.assertIn(link, observation)
+            self.assertIn("Peer answer", observation)
+            self.assertEqual(call("read_conversation", chatId=chat_id)["chatId"], chat_id)
+            self.assertFalse(call("read_conversation", chatId="vrcforge://chat/foreign-chat")["ok"])
+            self.assertFalse(call("send_message", chatId=link + "?action=run", message="bad")["ok"])
+            receipt = call("send_message", chatId=link, message="A note for the peer.")
+            self.assertTrue(receipt["ok"], receipt)
+            self.assertEqual(receipt["status"], "queued")
+            latest = call("read_conversation", chatId=link, offset=2)["messages"][0]
+            self.assertEqual(latest["role"], "agent_relay")
+            self.assertEqual(latest["forwardedFrom"]["sourceChatId"], "source-chat")
+
     def test_handoff_target_busy_reads_one_runtime_snapshot(self) -> None:
         with patch.object(
             dashboard_server,
