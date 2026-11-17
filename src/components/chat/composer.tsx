@@ -190,21 +190,6 @@ export function Composer({
   const paletteOpen = actionMenuOpen || (!paletteDismissed && slashMatches.length > 0);
   const paletteCommands: ComposerSlashCommand[] = actionMenuOpen ? commandActions : slashMatches;
   const providerModelLabel = [providerLabel?.trim(), model?.trim()].filter(Boolean).join(" · ");
-  const hasProviderIdentity = Boolean(providerLabel?.trim() || model?.trim());
-  const effectiveContextUsage = contextUsage
-    ?? (hasProviderIdentity
-      ? {
-          used: 0,
-          limit: 0,
-          limitKnown: false,
-          source: "unavailable" as const,
-          exact: false,
-          ratio: 0,
-          label: i18n.t("chat.contextUsageUnavailable"),
-          title: "",
-          warning: false,
-        }
-      : undefined);
   useEffect(() => {
     setPaletteIndex((current) => Math.min(current, Math.max(0, paletteCommands.length - 1)));
   }, [actionMenuOpen, paletteCommands.length, slashQuery]);
@@ -551,8 +536,8 @@ export function Composer({
             "flex shrink-0 items-center gap-2",
             questionPromptVisible ? "contents" : "col-start-2 row-start-1 xl:col-start-3",
           )}>
-            {effectiveContextUsage ? (
-              <ContextUsageMeter usage={effectiveContextUsage} className={questionPromptVisible ? "col-start-6 row-start-1" : ""} />
+            {contextUsage && contextUsage.source !== "unavailable" ? (
+              <ContextUsageMeter usage={contextUsage} className={questionPromptVisible ? "col-start-6 row-start-1" : ""} />
             ) : null}
             {editing && !sending ? (
               <>

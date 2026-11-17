@@ -13,7 +13,7 @@ const { chromium } = require(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright
 const bundle = await build({ stdin: {resolveDir:root,loader:"tsx",contents:`
 import React,{useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {ContextUsageMeter,AttachmentStrip} from './src/components/chat/composer';
+import {Composer,AttachmentStrip} from './src/components/chat/composer';
 import {buildChatContextUsage} from './src/lib/conversation-utils';
 import i18n from './src/i18n';
 import {initReactI18next} from 'react-i18next';
@@ -22,14 +22,17 @@ i18n.use(initReactI18next).init({lng:'zh-CN',resources:{'zh-CN':{translation:mes
 const selected={id:'selection',name:'Selected text',size:12,type:'text/plain',text:'给你三个不同风格的名字，都适合黑白配色的模型：',payloadKind:'text'};
 const regular={...selected,id:'regular',name:'notes.txt'};
 function MeterFixture(){
- const [stage,setStage]=useState('before');
+ const [stage,setStage]=useState('empty');
  window.setMeterStage=setStage;
  const chat={compaction:{status:'applied',generation:'compact',provider:'fixture',model:'fixture',afterTokens:50000}};
  const received={exact:true,inputTokens:120000,lastInputTokens:120000};
- const usage=stage==='before'
-  ? {limitKnown:true,exact:true,ratio:10337/500000,used:10337,limit:500000,label:'',cacheHitRatio:0.8544,cacheUsageStatus:'complete'}
-  : buildChatContextUsage(stage==='measured'?received:undefined,chat,'fixture','fixture',{contextWindow:500000},i18n.t);
- return <ContextUsageMeter usage={usage}/>;
+ const usage=stage==='empty' ? undefined : stage==='before'
+  ? {source:'provider_usage',limitKnown:true,exact:true,ratio:30297/272000,used:30297,limit:272000,label:'',cacheHitRatio:0.7199,cacheUsageStatus:'complete'}
+  : buildChatContextUsage(stage==='measured'?received:undefined,stage==='capacity'?null:chat,'fixture','fixture',{contextWindow:500000},i18n.t);
+ return <div data-meter-stage={stage}>
+   <Composer input="" setInput={()=>{}} sending={false} onSubmit={()=>{}} onSwitchMode={()=>{}}
+     providerLabel="ChatGPT" model="gpt-5.6-terra" contextUsage={usage}/>
+ </div>;
 }
 createRoot(document.getElementById('root')).render(<main style={{padding:'180px 80px'}}>
 <MeterFixture/>
@@ -44,16 +47,22 @@ try {
  await page.setContent(`<style>${css}</style><div id="root"></div>`);
  await page.addScriptTag({content:bundle.outputFiles[0].text});
  const meter=page.locator('[data-context-meter]');
+ await page.locator('textarea').waitFor();
+ assert.equal(await meter.count(),0,'an empty chat shows no context indicator');
+ await page.evaluate(()=>window.setMeterStage('capacity'));
+ await page.locator('[data-meter-stage="capacity"]').waitFor();
+ assert.equal(await meter.count(),0,'model capacity alone shows no context indicator');
+ await page.evaluate(()=>window.setMeterStage('before'));
  await meter.waitFor();
  await meter.hover();
  const visible=page.locator('[data-context-cache-hit-rate]:visible');
  assert.equal(await visible.count(),1,'one custom usage popup on hover');
- assert.match(await visible.innerText(),/85.44%/);
+ assert.match(await visible.innerText(),/71.99%/);
  const screenshot=process.env.VRCFORGE_TOOLTIP_SCREENSHOT;
  if(screenshot){mkdirSync(resolve(screenshot,'..'),{recursive:true});await page.screenshot({path:screenshot});}
  const titles=await meter.evaluate(el=>{const values=[];for(let node=el;node;node=node.parentElement) if(node.getAttribute('title')) values.push(node.getAttribute('title'));return values});
  assert.deepEqual(titles,[],'hover target and ancestors must not also supply native title');
- assert.match(await meter.getAttribute('aria-label'),/10,337/);
+ assert.match(await meter.getAttribute('aria-label'),/30,297/);
  await page.mouse.move(880,780);
  assert.equal(await visible.count(),0);
  await meter.focus();
