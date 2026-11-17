@@ -1245,7 +1245,7 @@
     "hideProject": "プロジェクトを非表示",
     "deleteProject": "プロジェクトを削除",
     "deleteProjectDescription": "アセットやチャット履歴を含む Unity プロジェクト全体を Windows のごみ箱に移動し、Unity Hub、VCC、ALCOM の一覧から削除します。",
-    "deleteProjectPrompt": "確認のため delete と入力してください。大文字と小文字は区別しません。",
+    "deleteProjectPrompt": "削除を確認するには、大文字と小文字を区別して DeLeTe と入力してください。",
     "deletingProject": "削除中…",
     "removeProject": "プロジェクト登録を解除",
     "changes": "プロジェクト変更 · {{name}}",

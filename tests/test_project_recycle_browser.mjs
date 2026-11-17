@@ -136,20 +136,22 @@ try {
     await dialog.waitFor({ state: "visible" });
   };
   const dialog = page.getByRole("dialog", { name: "Delete Project" });
-  const input = dialog.getByLabel("Type delete to confirm (case insensitive).");
+  const input = dialog.getByLabel("Type DeLeTe exactly to confirm deletion.");
   const confirm = dialog.getByRole("button", { name: "Delete Project" });
   await openDialog();
   assert.equal(await dialog.getByText(target.path).isVisible(), true);
   assert.equal(await confirm.isDisabled(), true);
-  await input.fill("Delete ");
-  await input.press("Enter");
-  assert.equal(await confirm.isDisabled(), true);
+  for (const value of ["delete", "DELETE", "Delete", "DeLeTe "]) {
+    await input.fill(value);
+    await input.press("Enter");
+    assert.equal(await confirm.isDisabled(), true);
+  }
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await dialog.waitFor({ state: "hidden" });
   assert.deepEqual(requests, []);
 
   await openDialog();
-  await input.fill("DELETE");
+  await input.fill("DeLeTe");
   await confirm.click();
   await dialog.getByRole("alert").waitFor();
   assert.match(await dialog.getByRole("alert").textContent(), /Close Unity Editor/);
@@ -164,10 +166,10 @@ try {
   assert.equal(await page.getByTestId("active").textContent(), "");
   assert.equal(await page.getByTestId("chats").textContent(), "chat-1");
   assert.deepEqual(requests, [
-    { path: target.path, confirmation: "DELETE" }, { path: target.path, confirmation: "DeLeTe" },
+    { path: target.path, confirmation: "DeLeTe" }, { path: target.path, confirmation: "DeLeTe" },
   ]);
   assert.deepEqual(chatWrites, []);
-  console.log("PASS project recycle dialog: case-insensitive confirmation, rejection, exact path, and chat/list removal");
+  console.log("PASS project recycle dialog: exact DeLeTe confirmation, rejection, exact path, and chat/list removal");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

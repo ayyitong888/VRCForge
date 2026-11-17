@@ -60,15 +60,16 @@ def test_recycle_route_requires_confirmation_and_only_removes_selected_project(t
     headers = {"Authorization": "Bearer recycle-test-token"}
     client = TestClient(server.app, client=("127.0.0.1", 50000))
     url = "/api/projects/recycle"
-    assert client.post(url, headers=headers, json={"path": path, "confirmation": "DELETE "}).status_code == 422
-    assert client.post(url, json={"path": path, "confirmation": "delete"}).status_code == 401
+    for invalid in ("delete", "DELETE", "Delete", "DeLeTe "):
+        assert client.post(url, headers=headers, json={"path": path, "confirmation": invalid}).status_code == 422
+    assert client.post(url, json={"path": path, "confirmation": "DeLeTe"}).status_code == 401
     assert project.exists()
 
     def blocked(_path: Path):
         raise OSError("Windows refused the recycle operation")
     monkeypatch.setattr(server, "recycle_project_folder", blocked)
     originals = {file: file.read_bytes() for file in (index, prefs, selection, hub)}
-    assert client.post(url, headers=headers, json={"path": path, "confirmation": "DELETE"}).status_code == 409
+    assert client.post(url, headers=headers, json={"path": path, "confirmation": "DeLeTe"}).status_code == 409
     assert project.exists() and all(file.read_bytes() == content for file, content in originals.items())
 
     recovery = tmp_path / "recycled"

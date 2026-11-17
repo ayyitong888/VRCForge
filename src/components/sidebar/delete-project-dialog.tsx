@@ -18,7 +18,7 @@ export function DeleteProjectDialog({
   const [confirmation, setConfirmation] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  const confirmationMatches = confirmation.toLowerCase() === "delete";
+  const confirmationMatches = confirmation === "DeLeTe";
 
   useEffect(() => {
     const dialog = dialogRef.current;

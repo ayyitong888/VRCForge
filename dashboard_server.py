@@ -68,7 +68,7 @@ from runtime_error_schema import runtime_error, runtime_error_from_exception
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 from mcp_resource_registry import McpResourceError
 from chat_resource_image import read_chat_scene_image_resource
 from camera_evidence_contract import validate_camera_evidence
@@ -10763,12 +10763,7 @@ async def refresh_projects() -> dict[str, Any]:
 
 class ProjectRecycleRequest(BaseModel):
     path: str
-    confirmation: Literal["delete"]
-
-    @field_validator("confirmation", mode="before")
-    @classmethod
-    def normalize_confirmation(cls, value: Any) -> Any:
-        return value.lower() if isinstance(value, str) else value
+    confirmation: Literal["DeLeTe"]
 
 
 _PROJECT_RECYCLE_LOCK = Lock()

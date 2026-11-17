@@ -1251,7 +1251,7 @@
     "hideProject": "Hide Project",
     "deleteProject": "Delete Project",
     "deleteProjectDescription": "The entire Unity folder, including assets and project chats, will move to the Windows Recycle Bin. The project will also be removed from Unity Hub, VCC, and ALCOM.",
-    "deleteProjectPrompt": "Type delete to confirm (case insensitive).",
+    "deleteProjectPrompt": "Type DeLeTe exactly to confirm deletion.",
     "deletingProject": "Deleting…",
     "removeProject": "Remove Project",
     "changes": "Project Changes · {{name}}",

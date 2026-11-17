@@ -49,7 +49,7 @@ def recycle_project_folder(project: Path) -> None:
 
     def check(hr: int) -> None:
         if hr < 0:
-            raise OSError(f"Windows could not recycle the project (0x{hr & 0xffffffff:08X}).")
+            raise OSError(f"Windows Recycle Bin operation failed (0x{hr & 0xffffffff:08X}).")
 
     ole.CoInitializeEx(None, 2)  # COINIT_APARTMENTTHREADED
     try:
@@ -66,7 +66,12 @@ def recycle_project_folder(project: Path) -> None:
         check(call(operation, 21, result, ()))  # PerformOperations
         check(call(operation, 22, result, (c.POINTER(c.c_int),), c.byref(aborted)))
         if aborted.value or project.exists():
-            raise OSError("Windows did not move the project to the Recycle Bin.")
+            raise OSError("Windows reported that recycling did not complete.")
+    except OSError as exc:
+        raise OSError(
+            "Windows could not move this project to the Recycle Bin. The project may exceed the bin's size limit "
+            f"or the bin may be unavailable on this drive. No permanent deletion was attempted. {exc}"
+        ) from exc
     finally:
         for obj in (item, operation):
             if obj:
