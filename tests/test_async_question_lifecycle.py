@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
+from contextlib import asynccontextmanager, contextmanager
 
 import pytest
+from fastapi.testclient import TestClient
 
+import dashboard_server
 from agent_gateway import AgentGateway
 from tests.test_dashboard_server import bind_test_runtime_planner
 from tests.test_native_runtime_continuations import _write_gateway, _run, _binding
@@ -19,6 +23,28 @@ def _question(gateway, tmp_path, **values):
                              "turnId": "origin-turn", "projectRoot": str(tmp_path), "objective": "Fit the wardrobe"},
         **values,
     })
+
+
+@contextmanager
+def _question_app(gateway, monkeypatch):
+    event_bus = dashboard_server.DashboardEventBus()
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        event_bus.set_loop(asyncio.get_running_loop())
+        yield
+
+    with monkeypatch.context() as fixture:
+        fixture.setattr(gateway, "_runtime_question_posted", getattr(dashboard_server.AGENT_GATEWAY, "_runtime_question_posted", None), raising=False)
+        fixture.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
+        fixture.setattr(dashboard_server, "EVENT_BUS", event_bus)
+        fixture.setattr(dashboard_server, "DASHBOARD_RUNTIME_STARTUP_TASK", None)
+        fixture.setattr(dashboard_server, "APP_AUTH_REQUIRED", True)
+        fixture.setattr(dashboard_server, "APP_SESSION_TOKEN", "question-test-app-token")
+        fixture.setattr(dashboard_server.app.router, "lifespan_context", lifespan)
+        headers = {"Authorization": "Bearer question-test-app-token", "Origin": "tauri://localhost"}
+        with TestClient(dashboard_server.app, headers=headers) as client:
+            yield client, event_bus
 
 
 def test_async_question_does_not_end_independent_runtime_work(tmp_path):
@@ -238,33 +264,51 @@ def test_real_native_answer_during_independent_read_has_one_execution_owner(tmp_
         call("independent-read", "vrcforge_fixture_read", {}),
         {"role": "assistant", "content": "Selected Example Outfit after the independent inspection."},
     ], [])
-    published = []
-    monkeypatch.setattr(gateway, "_runtime_question_posted", published.append, raising=False)
     gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", gateway.create_runtime_question)
-    def read(_params):
-        entered.set()
-        assert release.wait(5)
-        return {"ok": True, "summary": "independent inspection"}
-    gateway.register_tool("vrcforge_fixture_read", "When to use: read. When NOT to use: write.", "read/debug", read)
     monkeypatch.setattr(gateway, "_dispatch_runtime_task_after_question", lambda *_a: (_ for _ in ()).throw(AssertionError("second execution owner")))
     results = []
     origin = "turn-" + "x" * 235
     runner = threading.Thread(target=lambda: results.append(_run(gateway, tmp_path, clientTurnId=origin)))
-    runner.start()
-    try:
-        assert entered.wait(5)
-        question = gateway.questions.list(session_id="native-continuation-session")["questions"][0]
-        assert published == [question]
-        assert question["blocking"] is False and question["status"] == "pending"
-        assert "runtimeTaskSeed" not in published[0]
-        answer = gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
-        assert answer["runtimeContinuation"]["mode"] == "steer"
-        assert answer["runtimeContinuation"]["clientTurnId"] == origin
-        repeated = gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
-        assert repeated["idempotent"] is True and "runtimeContinuation" not in repeated
-    finally:
-        release.set()
-        runner.join(5)
+    with _question_app(gateway, monkeypatch) as (client, event_bus):
+        def read(_params):
+            entered.set()
+            assert release.wait(5)
+            return {"ok": True, "summary": "independent inspection"}
+
+        gateway.register_tool("vrcforge_fixture_read", "When to use: read. When NOT to use: write.", "read/debug", read)
+        with client.websocket_connect("/ws") as socket:
+            assert socket.receive_json()["type"] == "hello"
+            runner.start()
+            try:
+                assert entered.wait(5)
+                # Delimit events scheduled before the independent read even if
+                # the question itself was never posted to the socket.
+                client.portal.call(event_bus.broadcast, "fixtureReadStarted", {})
+                event = socket.receive_json()
+                assert event["type"] == "agentQuestions"
+                [question] = event["payload"]["questions"]
+                assert socket.receive_json()["type"] == "fixtureReadStarted"
+                assert question["blocking"] is False and question["status"] == "pending"
+                assert "runtimeTaskSeed" not in question
+                assert question["originClientTurnId"] == origin
+                assert runner.is_alive() and not results
+                path = f"/api/app/agent/questions/{question['questionId']}/answer"
+                reply = {"sessionId": "native-continuation-session", "answer": "Example Outfit"}
+                response = client.post(path, json=reply)
+                assert response.status_code == 200, response.text
+                answer = response.json()
+                assert answer["runtimeContinuation"]["mode"] == "steer"
+                assert answer["runtimeContinuation"]["clientTurnId"] == origin
+                event = socket.receive_json()
+                assert event["type"] == "agentQuestions"
+                assert event["payload"]["questions"][0]["status"] == "answered"
+                response = client.post(path, json=reply)
+                assert response.status_code == 200, response.text
+                repeated = response.json()
+                assert repeated["idempotent"] is True and "runtimeContinuation" not in repeated
+            finally:
+                release.set()
+                runner.join(5)
     assert not runner.is_alive() and results
     assert len(model.requests) == 3
     assert sum(m.get("role") == "user" and "Example Outfit" in m.get("content", "") for m in model.requests[-1]["messages"]) == 1
@@ -408,8 +452,8 @@ def test_blocking_question_continuation_retains_chat_followup_lane(tmp_path):
     assert saved["originClientTurnId"].endswith(":question:" + first["questionId"])
 
 
-def test_blocking_question_continuation_preserves_chat_owner_for_later_delegate(tmp_path):
-    gateway, _model = _write_gateway(tmp_path, [
+def test_blocking_question_continuation_preserves_chat_owner_for_later_delegate(tmp_path, monkeypatch):
+    gateway, model = _write_gateway(tmp_path, [
         call("ask-before-delegate", "vrcforge_ask_user", {"question": "Which outfit next?"}),
         call("delegate-after-answer", "vrcforge_delegate_subagent", {
             "role": "project_index_review", "task": "Inspect the selected outfit files.",
@@ -424,17 +468,25 @@ def test_blocking_question_continuation_preserves_chat_owner_for_later_delegate(
         "plan/preview",
         lambda params: delegated.append(dict(params)) or {"ok": True, "status": "running", "taskId": "child-after-answer"},
     )
-    _run(gateway, tmp_path, chatId="chat-owner")
+    original = _run(gateway, tmp_path, chatId="chat-owner")
+    assert original["plan"]["nextStep"] == "needs_user_action"
+    assert len(model.requests) == 1 and delegated == []
     question = gateway.questions.list(session_id="native-continuation-session")["questions"][0]
     saved = gateway.questions._project(include_answered=True)[question["questionId"]]
     assert saved["runtimeTaskSeed"]["parentChatId"] == "chat-owner"
 
     done = threading.Event()
     gateway._runtime_turn_completed = lambda _payload: done.set()
-    gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
-    assert done.wait(5)
-    assert gateway.shutdown_runtime_continuations(5)["ok"]
-    assert delegated
+    with _question_app(gateway, monkeypatch) as (client, _event_bus):
+        response = client.post(
+            f"/api/app/agent/questions/{question['questionId']}/answer",
+            json={"sessionId": "native-continuation-session", "answer": "Example Outfit"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["runtimeContinuation"]["status"] == "queued"
+        assert done.wait(5)
+        assert gateway.shutdown_runtime_continuations(5)["ok"]
+    assert len(delegated) == 1
     assert delegated[0]["_taskSeed"]["parentChatId"] == "chat-owner"
 
 
