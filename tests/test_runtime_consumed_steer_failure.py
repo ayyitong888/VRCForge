@@ -92,6 +92,8 @@ def test_live_steer_binds_attachments_to_its_own_provider_input(tmp_path, steer_
         {"name": "Selected text", "payloadKind": "text", "text": "quote fixture"},
         {"name": "steer.png", "payloadKind": "data_url", "dataUrl": steer_image},
         {"name": "notes.zip", "payloadKind": "vault_file", "payloadHash": vault_hash},
+        *({"name": f"steer-{i}.png", "payloadKind": "data_url", "dataUrl": steer_image} for i in range(8)),
+        *({"name": "Selected text", "payloadKind": "text", "text": f"quoted selection {i}"} for i in range(4)),
     ]
 
     def first_request(_request):
@@ -109,10 +111,12 @@ def test_live_steer_binds_attachments_to_its_own_provider_input(tmp_path, steer_
         assert multimodal[0][0]["text"] == shared_message
         assert multimodal[0][1]["image_url"]["url"] == initial_image
         assert multimodal[1][0]["text"].startswith(steer_message or "See attached materials.")
+        assert len(multimodal[1]) == 10
         assert multimodal[1][-1]["image_url"]["url"] == steer_image
         assert "quote fixture" in multimodal[1][0]["text"]
         assert "notes.zip" in multimodal[1][0]["text"]
         assert vault_hash in multimodal[1][0]["text"]
+        assert "quoted selection 3" in multimodal[1][0]["text"]
         return {"role": "assistant", "content": "Final response"}
 
     gateway, _, _ = setup_gateway(tmp_path, [first_request, second_request])

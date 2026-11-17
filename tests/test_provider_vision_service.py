@@ -435,10 +435,10 @@ def test_provider_vision_pure_contracts_are_bounded_and_unchanged() -> None:
 
     prompt = build_vision_analysis_prompt(
         "x" * 2500 + "\nVISION_CONTEXT_SENTINEL",
-        [{"name": f"image-{index}.png"} for index in range(10)],
+        [{"name": f"image-{index}.png"} for index in range(11)],
     )
-    assert "image-7.png" in prompt
-    assert "image-8.png" not in prompt
+    assert "image-9.png" in prompt
+    assert "image-10.png" not in prompt
     assert "x" * 2500 in prompt
     assert "VISION_CONTEXT_SENTINEL" in prompt
 
@@ -459,7 +459,8 @@ def test_provider_vision_service_has_no_migration_host_or_monkeypatch_seam() -> 
         assert forbidden not in source
 
 
-def test_provider_vision_sdk_runner_shapes_openai_request_through_typed_fake() -> None:
+@pytest.mark.parametrize("image_count", [1, 10])
+def test_provider_vision_sdk_runner_shapes_openai_request_through_typed_fake(image_count: int) -> None:
     calls: dict[str, object] = {}
 
     class FakeOpenAI:
@@ -487,7 +488,7 @@ def test_provider_vision_sdk_runner_shapes_openai_request_through_typed_fake() -
     text, usage = runner.run(
         config,
         "late prompt",
-        [{"dataUrl": "data:image/png;base64,YQ=="}],
+        [{"dataUrl": "data:image/png;base64,YQ=="}] * image_count,
     )
 
     assert text == "fake vision"
@@ -499,7 +500,7 @@ def test_provider_vision_sdk_runner_shapes_openai_request_through_typed_fake() -
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}},
+                    *([{"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}}] * image_count),
                     {"type": "text", "text": "late prompt"},
                 ],
             }

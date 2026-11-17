@@ -18,7 +18,7 @@ import type { AgentApproval, AgentQuestion } from "../../lib/api";
 import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
-import { SELECTED_TEXT_ATTACHMENT_NAME } from "../../lib/chat-types";
+import { isSelectedTextAttachment } from "../../lib/chat-types";
 import { elapsedSecondsSince, providerWaitingWindow, type AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText, includesQuestionText } from "../../lib/conversation-utils";
 import { projectVisionFailureNotice } from "../../lib/vision-failure-notice";
@@ -136,7 +136,7 @@ export function ConversationCard({
     const draftAttachments = editing ? editingAttachments || attachments : attachments;
     const imageAttachments = draftAttachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
     const otherAttachments = draftAttachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
-    const files = otherAttachments.filter((attachment) => attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME);
+    const files = otherAttachments.filter((attachment) => !isSelectedTextAttachment(attachment));
     const hasEditingState = Boolean(editing);
     const deliveryLabel = item.queueStatus === "steering" ? t("chat.steering")
       : item.queueStatus === "waiting_for_resources" ? t("chat.waitingForResources")
@@ -554,7 +554,7 @@ function renderInterleavedUserMessage(
   const attachments = resolveAttachmentPayloadReferences(message.attachments || [], attachmentPayloads);
   const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
   const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
-  const files = otherAttachments.filter((attachment) => attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME);
+  const files = otherAttachments.filter((attachment) => !isSelectedTextAttachment(attachment));
   return (
     <div key={`steering-${message.id}`} className="group flex min-w-0 justify-end" data-chat-steering-message={message.id} data-chat-nav-anchor={navigationAnchor}>
       <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
@@ -577,7 +577,7 @@ function renderInterleavedUserMessage(
 }
 
 function UserSelectedTextAttachments({ attachments }: { attachments: ChatAttachment[] }) {
-  const selected = attachments.filter((attachment) => attachment.name === SELECTED_TEXT_ATTACHMENT_NAME);
+  const selected = attachments.filter(isSelectedTextAttachment);
   return selected.length ? (
     <div className="max-w-full [&>div]:mt-0" data-user-message-selected-text>
       <AttachmentStrip attachments={selected} compact />

@@ -145,6 +145,7 @@ from checkpoint_user_policy import (
     checkpoint_skip_authority_from_policy,
 )
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
+from chat_attachment_limits import MAX_MESSAGE_ATTACHMENT_ITEMS, MAX_MESSAGE_FILE_ATTACHMENTS
 from context_compaction import normalize_compaction_recovery
 from stage1_atomic_writes import (
     user_adjustment_receipt, user_adjustment_fresh_read_request,
@@ -772,7 +773,6 @@ ADJUSTMENT_CHECKPOINT_TARGETS = {
 SKILL_PERMISSION_MODES = {"read_only", "preview", "approval_required", "advanced_power_mode", "instruction_only"}
 SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,80}$")
 SKILL_INVOCATION_RE = re.compile(r"^\s*[/$]([a-zA-Z][a-zA-Z0-9_.-]{1,80})(?:\s+(.*))?\s*$")
-RUNTIME_ATTACHMENT_MAX_ITEMS = 8
 RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS = 5_600_000
 RUNTIME_ATTACHMENT_TEXT_MAX_CHARS = 524_288
 DESKTOP_VISION_MAX_WIDTH = 1280
@@ -5254,7 +5254,7 @@ class AgentGateway:
         """
         names = [
             summarize_text(str(item.get("name") or "image"), 120)
-            for item in image_attachments[:RUNTIME_ATTACHMENT_MAX_ITEMS]
+            for item in image_attachments[:MAX_MESSAGE_FILE_ATTACHMENTS]
         ]
         base: dict[str, Any] = {
             "schema": "vrcforge.vision_analysis.v1",
@@ -11524,7 +11524,7 @@ def desktop_screenshot_attachment(path: Path, *, allowed_root: Path) -> dict[str
 
 def normalize_runtime_attachments(value: Any) -> list[dict[str, Any]]:
     attachments: list[dict[str, Any]] = []
-    for raw in ensure_list(value)[:RUNTIME_ATTACHMENT_MAX_ITEMS]:
+    for raw in ensure_list(value)[:MAX_MESSAGE_ATTACHMENT_ITEMS]:
         if not isinstance(raw, dict):
             continue
         try:

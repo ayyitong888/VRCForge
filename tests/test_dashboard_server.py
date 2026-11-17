@@ -2074,6 +2074,14 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["memory"]["count"], 0)
 
     def test_agent_runtime_message_preserves_bounded_attachments(self) -> None:
+        extra_files = [
+            {"id": f"file-{index}", "name": f"file-{index}.bin", "payloadKind": "metadata"}
+            for index in range(9)
+        ]
+        quotes = [
+            {"id": f"selection-{index}", "name": "Selected text", "payloadKind": "text", "text": f"quote {index}"}
+            for index in range(5)
+        ]
         with TestClient(dashboard_server.app) as client:
             response = client.post(
                 "/api/app/agent/message",
@@ -2087,7 +2095,9 @@ class DashboardServerTests(unittest.TestCase):
                             "size": 11,
                             "text": "hello world",
                             "payloadKind": "text",
-                        }
+                        },
+                        *extra_files,
+                        *quotes,
                     ],
                 },
             )
@@ -2097,6 +2107,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["attachments"][0]["name"], "note.txt")
         self.assertEqual(payload["attachments"][0]["payloadKind"], "text")
         self.assertEqual(payload["attachments"][0]["text"], "hello world")
+        self.assertEqual([item["id"] for item in payload["attachments"]], [
+            "att-1", *(item["id"] for item in extra_files), *(item["id"] for item in quotes),
+        ])
         self.assertTrue(payload["attachments"][0]["replayable"])
         self.assertTrue(payload["attachments"][0]["payloadHash"])
 

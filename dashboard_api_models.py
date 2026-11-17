@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import AfterValidator, BaseModel, Field, SecretStr, model_validator
 
 from agent_runtime_turn_identity import MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH
+from chat_attachment_limits import MAX_MESSAGE_ATTACHMENT_ITEMS, validate_message_attachment_counts
 from chat_attachment_vault import ARCHIVE_MAX_BYTES
 from dashboard_foundation import runtime_settings_path
 from unity_shared_input_schemas import ShaderMaterialCategory
+
+
+MessageAttachments = Annotated[
+    list[dict[str, Any]],
+    Field(max_length=MAX_MESSAGE_ATTACHMENT_ITEMS),
+    AfterValidator(validate_message_attachment_counts),
+]
 
 
 class DashboardRequest(BaseModel):
@@ -535,7 +543,7 @@ class AgentRuntimeMessageRequest(BaseModel):
     client_turn_id: str | None = Field(default=None, alias="clientTurnId", max_length=MAX_RUNTIME_CLIENT_TURN_ID_LENGTH)
     goal_delivery_id: str | None = Field(default=None, alias="goalDeliveryId")
     message: str
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    attachments: MessageAttachments = Field(default_factory=list)
     shell_command: str | None = None
     skill_tool: str | None = None
     skill_params: dict[str, Any] = Field(default_factory=dict)
@@ -589,7 +597,7 @@ class AgentRuntimeQueueRequest(BaseModel):
     client_turn_id: str = Field(alias="clientTurnId", min_length=1, max_length=180)
     target_client_turn_id: str | None = Field(default=None, alias="targetClientTurnId", min_length=1, max_length=240)
     message: str = Field(default="", max_length=4000)
-    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    attachments: MessageAttachments = Field(default_factory=list)
     provider: str | None = None
     provider_label: str | None = Field(default=None, alias="providerLabel")
     model: str | None = None
@@ -796,7 +804,7 @@ class AgentQuestionAnswerRequest(BaseModel):
         alias="settleOnly",
         description="Record a decision already delivered through another conversation turn; do not resume the old task.",
     )
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    attachments: MessageAttachments = Field(default_factory=list)
     value: str = ""
     option_id: str = Field(default="", alias="optionId")
     selected_option_id: str = Field(default="", alias="selectedOptionId")

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 import hashlib
 import json
 from context_compaction import MAX_SUMMARY_CHARS, normalize_compaction_recovery
+from chat_attachment_limits import MAX_MESSAGE_FILE_ATTACHMENTS
 from agent_task_loop import _running_state, SUB_AGENT_TASK_TOOLS
 from planner_structured_tool_evidence import project_structured_tool_evidence
 from provider_runtime_adapters import ProviderTokenLimitError
@@ -62,7 +63,6 @@ RUNTIME_CONTEXT_COMPACTION_HARD_RATIO = 0.95
 RUNTIME_CONTEXT_COMPACTION_TARGET_RATIO = 0.50
 EXPOSURE_LAYER_PLANNING = "planning"
 EXPOSURE_LAYER_EXECUTION = "execution"
-RUNTIME_ATTACHMENT_MAX_ITEMS = 8
 RUNTIME_REPLY_LANGUAGE_INSTRUCTION = (
     "Respond in the user's language as established in the conversation, "
     "unless the user explicitly requests another language. "
@@ -957,7 +957,7 @@ def _attachment_image_blocks(attachments: object) -> list[dict[str, object]]:
         if isinstance(item, Mapping)
         and isinstance(item.get("dataUrl"), str)
         and str(item.get("dataUrl")).startswith("data:image/")
-    ][:8]
+    ][:MAX_MESSAGE_FILE_ATTACHMENTS]
 
 
 def _bind_native_image_blocks(

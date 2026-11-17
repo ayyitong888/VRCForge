@@ -3,6 +3,10 @@ import type { AgentRuntimePhase } from "./chat-streaming";
 
 export const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
 
+export function isSelectedTextAttachment(attachment: Pick<ChatAttachment, "id" | "name">): boolean {
+  return attachment.name === SELECTED_TEXT_ATTACHMENT_NAME && !attachment.id?.startsWith("att-");
+}
+
 export type ProjectType = "general" | "unity";
 
 export type ChatAttachment = {

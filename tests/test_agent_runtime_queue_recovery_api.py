@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -25,6 +26,10 @@ class AgentRuntimeQueueRecoveryApiTests(unittest.TestCase):
                      "payloadKind": "data_url", "dataUrl": "data:image/png;base64,AAAA"},
                     {"id": "file", "name": "materials.zip", "type": "application/zip",
                      "payloadKind": "vault_file", "payloadHash": "a" * 64},
+                    {"id": "att-filename-collision", "name": "Selected text", "payloadKind": "metadata"},
+                    *({"id": f"file-{i}", "name": f"file-{i}.bin", "payloadKind": "metadata"} for i in range(7)),
+                    *({"id": f"selection-{i}", "name": "Selected text", "payloadKind": "text",
+                       "text": f"quote {i}"} for i in range(4)),
                 ]
                 with TestClient(dashboard_server.app) as client:
                     response = client.post("/api/app/agent/runs/queue", json={
@@ -38,9 +43,43 @@ class AgentRuntimeQueueRecoveryApiTests(unittest.TestCase):
                 self.assertEqual(steer["attachments"][0]["text"], attachments[0]["text"])
                 self.assertEqual(steer["attachments"][1]["dataUrl"], attachments[1]["dataUrl"])
                 self.assertEqual(steer["attachments"][2]["payloadHash"], attachments[2]["payloadHash"])
+                self.assertEqual([attachment["id"] for attachment in steer["attachments"]],
+                                 [attachment["id"] for attachment in attachments])
                 self.assertEqual(gateway.list_runtime_followups(session_id="chat"), [])
+                with TestClient(dashboard_server.app) as client:
+                    queued = client.post("/api/app/agent/runs/queue", json={
+                        "sessionId": "session", "laneId": "chat", "clientTurnId": "queued-input",
+                        "message": "later", "attachments": attachments,
+                    })
+                self.assertEqual(queued.status_code, 200, queued.text)
+                self.assertTrue(queued.json()["accepted"])
+                [pending] = gateway.list_runtime_followups(session_id="chat")
+                self.assertEqual([attachment["id"] for attachment in pending["attachments"]],
+                                 [attachment["id"] for attachment in attachments])
             finally:
                 dashboard_server.AGENT_GATEWAY = original_gateway
+
+    def test_message_endpoints_reject_independent_attachment_overflow(self) -> None:
+        files = [{"id": f"file-{i}", "name": f"file-{i}.txt"} for i in range(11)]
+        quotes = [{"id": f"selection-{i}", "name": "Selected text", "text": "quote"} for i in range(6)]
+        with (
+            patch.object(dashboard_server, "_execute_app_agent_runtime_message", new=AsyncMock(return_value={"ok": True})),
+            patch.object(dashboard_server, "RUNTIME_QUEUE_PORT"),
+            TestClient(dashboard_server.app) as client,
+        ):
+            for path, message in (
+                ("/api/app/agent/message", {"message": "demo"}),
+                ("/api/app/agent/runs/queue", {"clientTurnId": "demo", "laneId": "demo", "message": "demo"}),
+                ("/api/app/agent/questions/nonexistent/answer", {"answer": "demo"}),
+            ):
+                for attachments, expected in (
+                    (files + quotes[:4], "10 file attachments"),
+                    (files[:9] + quotes, "5 quoted selections"),
+                ):
+                    with self.subTest(path=path, expected=expected):
+                        response = client.post(path, json={**message, "attachments": attachments})
+                        self.assertEqual(response.status_code, 422, response.text)
+                        self.assertIn(expected, response.json()["detail"][0]["msg"])
 
     def test_queue_list_without_lane_returns_recoverable_followups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

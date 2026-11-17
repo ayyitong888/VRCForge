@@ -8,9 +8,9 @@ import type { RunningEnterAction } from "../../lib/app-preferences";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "../../lib/permission-ui";
 import { cn, formatCount } from "../../lib/utils";
 import { formatAttachmentSize } from "../../lib/chat-format";
-import { MAX_ATTACHMENTS_PER_TURN, MAX_TEXT_ATTACHMENT_BYTES } from "../../lib/conversation-utils";
+import { MAX_FILES_PER_MESSAGE, MAX_TEXT_ATTACHMENT_BYTES } from "../../lib/conversation-utils";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ComposerSlashCommand, ContextUsage } from "../../lib/chat-types";
-import { SELECTED_TEXT_ATTACHMENT_NAME } from "../../lib/chat-types";
+import { isSelectedTextAttachment } from "../../lib/chat-types";
 import type { AgentGoal, PermissionState, ExecutionMode } from "../../lib/api";
 import { Button } from "../ui/button";
 import { hasTauriInternals } from "../../lib/api/http";
@@ -171,8 +171,8 @@ export function Composer({
     : primaryAction === "stop"
       ? t("chat.stop")
       : t("chat.send");
-  const selectedTextAttachments = attachments.filter((attachment) => attachment.name === SELECTED_TEXT_ATTACHMENT_NAME);
-  const regularAttachments = attachments.filter((attachment) => attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME);
+  const selectedTextAttachments = attachments.filter(isSelectedTextAttachment);
+  const regularAttachments = attachments.filter((attachment) => !isSelectedTextAttachment(attachment));
   const availableActions: ComposerAction[] = actions.length ? actions : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
   const commandActions: ComposerSlashCommand[] = [...availableActions, ...(onPlanModeChange && !editing ? [{
     id: "plan" as const,
@@ -297,7 +297,7 @@ export function Composer({
     if (files.length) {
       event.preventDefault();
       onAttachFiles?.(files);
-    } else if (onAttachFiles && event.target === inputRef.current && attachments.length < MAX_ATTACHMENTS_PER_TURN) {
+    } else if (onAttachFiles && event.target === inputRef.current && regularAttachments.length < MAX_FILES_PER_MESSAGE) {
       const text = event.clipboardData.getData("text/plain");
       if (!isLargeTextPaste(text) || text.includes("\0")) return;
       const file = new File([text], t("attachments.pastedTextFilename"), { type: "text/plain" });
@@ -771,7 +771,7 @@ export function AttachmentStrip({
     return (
       <div className="flex min-w-0 flex-wrap gap-2">
         {attachments.map((attachment) => {
-          const isSelectedText = attachment.name === SELECTED_TEXT_ATTACHMENT_NAME;
+          const isSelectedText = isSelectedTextAttachment(attachment);
           const isImage = Boolean(attachment.dataUrl && attachment.type.startsWith("image/"));
           const isVaultFile = attachment.payloadKind === "vault_file" || Boolean(attachment.vaultPayloadHash);
           const metadataOnly = attachment.payloadKind === "metadata"
@@ -838,7 +838,7 @@ export function AttachmentStrip({
   return (
     <div className={cn("flex min-w-0 flex-wrap gap-2", compact ? "mt-2" : "")}>
       {attachments.map((attachment) => {
-        const isSelectedText = attachment.name === SELECTED_TEXT_ATTACHMENT_NAME;
+        const isSelectedText = isSelectedTextAttachment(attachment);
         const isVaultFile = attachment.payloadKind === "vault_file" || Boolean(attachment.vaultPayloadHash);
         const metadataOnly = attachment.payloadKind === "metadata"
           || (attachment.payloadKind === "data_url" && !attachment.type.toLowerCase().startsWith("image/"));

@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol, Sequence
 
+from chat_attachment_limits import MAX_MESSAGE_FILE_ATTACHMENTS
+
 
 VISION_CAPABLE_MODEL_MARKERS = (
     "gpt-4o",
@@ -48,7 +50,7 @@ VISION_CAPABLE_MODEL_MARKERS = (
     "llama-4",
 )
 VISION_CAPABLE_MODEL_RE = re.compile(r"(^|[-_/.])(o[134])([-_.]|$)|(^|[-_/.])vl([-_.]|$)")
-VISION_IMAGE_MAX_ITEMS = 8
+VISION_IMAGE_MAX_ITEMS = MAX_MESSAGE_FILE_ATTACHMENTS
 VISION_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
 
@@ -537,7 +539,7 @@ def split_image_data_url(data_url: str) -> tuple[str, str]:
 
 
 def build_vision_analysis_prompt(message: str, images: Sequence[dict[str, Any]]) -> str:
-    names = ", ".join(str(item.get("name") or "image") for item in images[:8])
+    names = ", ".join(str(item.get("name") or "image") for item in images[:VISION_IMAGE_MAX_ITEMS])
     user_context = str(message or "").strip()
     lines = [
         "You are the image-analysis assistant of VRCForge, a VRChat avatar tool.",

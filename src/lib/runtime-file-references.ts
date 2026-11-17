@@ -1,7 +1,7 @@
 import type { WorkspaceDiffSummary } from "./api";
 import { formatPayload } from "./conversation-utils";
 import type { ConversationItem } from "./chat-types";
-import { SELECTED_TEXT_ATTACHMENT_NAME } from "./chat-types";
+import { isSelectedTextAttachment } from "./chat-types";
 import { asRecord } from "./runtime-parsing";
 import type { RuntimeFileReference } from "./runtime-ui-types";
 
@@ -35,7 +35,7 @@ export function buildRuntimeFileReferences(
   for (const item of items.slice(-16)) {
     if (item.type === "user") {
       item.attachments?.forEach((attachment) => {
-        if (attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME) {
+        if (!isSelectedTextAttachment(attachment)) {
           add(attachment.name, "attachment");
         }
       });

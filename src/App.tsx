@@ -137,7 +137,9 @@ import {
   isRetryableConversationItem,
   latestAgentContextUsage,
   latestConversationItemId,
-  MAX_ATTACHMENTS_PER_TURN,
+  MAX_FILES_PER_MESSAGE,
+  MAX_QUOTES_PER_MESSAGE,
+  messageAttachmentCounts,
   normalizeProviderForContext,
   selectedTextAttachment,
 } from "./lib/conversation-utils";
@@ -3150,6 +3152,7 @@ export default function App() {
       discardMessageEdit();
       return true;
     }
+    if (!validateMessageAttachmentCounts(nextAttachments)) return true;
     messageEditSaveInFlightRef.current = true;
     setSavingMessageEdit(true);
     try {
@@ -3485,6 +3488,7 @@ export default function App() {
     if (!composerMessage && attachments.length === 0) {
       return;
     }
+    if (!validateMessageAttachmentCounts(attachments)) return;
     setError("");
     const owner = activeChatId ? await loadChat(activeChatId).catch(() => undefined) : undefined;
     if (activeChatId && !owner) {
@@ -3652,13 +3656,23 @@ export default function App() {
     return true;
   }
 
+  function validateMessageAttachmentCounts(items: readonly ChatAttachment[]) {
+    const counts = messageAttachmentCounts(items);
+    if (counts.files <= MAX_FILES_PER_MESSAGE && counts.quotes <= MAX_QUOTES_PER_MESSAGE) return true;
+    showTransientFailure("upload", t("attachments.messageLimits", {
+      files: MAX_FILES_PER_MESSAGE,
+      quotes: MAX_QUOTES_PER_MESSAGE,
+    }));
+    return false;
+  }
+
   async function addComposerFiles(files: FileList | File[] | null) {
     if (!files || files.length === 0) {
       return;
     }
-    const remaining = Math.max(0, MAX_ATTACHMENTS_PER_TURN - attachments.length);
+    const remaining = Math.max(0, MAX_FILES_PER_MESSAGE - messageAttachmentCounts(attachments).files - attachmentLoadsRef.current);
     if (remaining === 0) {
-      const message = t("attachments.limitReached", { max: MAX_ATTACHMENTS_PER_TURN });
+      const message = t("attachments.limitReached", { max: MAX_FILES_PER_MESSAGE });
       showTransientFailure("upload", message);
       return;
     }
@@ -3668,7 +3682,7 @@ export default function App() {
       : undefined;
     const chatId = replyQuestion?.sessionId || ensureActiveChat();
     const nextAttachments: ChatAttachment[] = [];
-    attachmentLoadsRef.current += 1;
+    attachmentLoadsRef.current += selected.length;
     setAttachmentsLoading(true);
     try {
       for (const file of selected) {
@@ -3680,13 +3694,16 @@ export default function App() {
           showTransientFailure("upload", message);
         }
       }
-      setAttachments((current) => [...current, ...nextAttachments].slice(0, MAX_ATTACHMENTS_PER_TURN));
+      setAttachments((current) => {
+        const available = Math.max(0, MAX_FILES_PER_MESSAGE - messageAttachmentCounts(current).files);
+        return [...current, ...nextAttachments.slice(0, available)];
+      });
     } finally {
-      attachmentLoadsRef.current -= 1;
+      attachmentLoadsRef.current -= selected.length;
       setAttachmentsLoading(attachmentLoadsRef.current > 0);
     }
     if (files.length > remaining) {
-      const message = t("attachments.limitOneTurn", { max: MAX_ATTACHMENTS_PER_TURN });
+      const message = t("attachments.limitOneTurn", { max: MAX_FILES_PER_MESSAGE });
       showTransientFailure("upload", message);
     }
   }
@@ -4065,12 +4082,14 @@ export default function App() {
   }
 
   function addSelectionToComposer(text: string) {
-    if (attachments.length >= MAX_ATTACHMENTS_PER_TURN) {
-      showTransientFailure("upload", t("attachments.limitReached", { max: MAX_ATTACHMENTS_PER_TURN }));
-      clearSelectionMenu();
-      return;
+    if (messageAttachmentCounts(attachments).quotes >= MAX_QUOTES_PER_MESSAGE) {
+      showTransientFailure("upload", t("attachments.quoteLimitReached", { max: MAX_QUOTES_PER_MESSAGE }));
+    } else {
+      const quote = selectedTextAttachment(text);
+      setAttachments((current) => messageAttachmentCounts(current).quotes < MAX_QUOTES_PER_MESSAGE
+        ? [...current, quote]
+        : current);
     }
-    setAttachments((current) => [...current, selectedTextAttachment(text)].slice(0, MAX_ATTACHMENTS_PER_TURN));
     clearSelectionMenu();
   }
 
@@ -4669,7 +4688,10 @@ export default function App() {
                 setAttachments(current => [...current, ...turn.attachments.filter(item => !current.some(existing => existing.id === item.id))]);
               }}
               onRemoveQueuedTurn={(turnId) => void removeQueuedTurn(turnId, activeChatId)}
-              onSteerQueuedTurn={(turnId) => void steerQueuedTurn(turnId, activeChatId)}
+              onSteerQueuedTurn={(turnId) => {
+                const turn = visibleQueued.find((entry) => entry.id === turnId);
+                if (turn && validateMessageAttachmentCounts(turn.attachments)) void steerQueuedTurn(turnId, activeChatId);
+              }}
               onSwitchMode={switchMode}
               onOpenChatById={openChatById}
               commands={slashCommands}

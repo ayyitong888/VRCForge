@@ -8,7 +8,7 @@ import type {
 } from "./api";
 import { formatAttachmentSize } from "./chat-format";
 import type { ChatAttachment, ChatThread, ContextUsage, ConversationItem } from "./chat-types";
-import { SELECTED_TEXT_ATTACHMENT_NAME } from "./chat-types";
+import { isSelectedTextAttachment, SELECTED_TEXT_ATTACHMENT_NAME } from "./chat-types";
 import {
   CONTEXT_AUTO_COMPACT_RATIO,
   normalizeContextProvider,
@@ -23,9 +23,15 @@ import type { CompactionRecoveryEntry } from "./api/types";
 import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry, timelineInvocationDisplayLabel, isCancellationMarkerAssistantText } from "./chat-timeline-presentation";
 
 const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
-export const MAX_ATTACHMENTS_PER_TURN = 8;
+export const MAX_FILES_PER_MESSAGE = 10;
+export const MAX_QUOTES_PER_MESSAGE = 5;
 export const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
 export const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
+
+export function messageAttachmentCounts(attachments: readonly ChatAttachment[]) {
+  const quotes = attachments.filter(isSelectedTextAttachment).length;
+  return { files: attachments.length - quotes, quotes };
+}
 
 export function formatPayload(value: unknown): string {
   if (value === null || value === undefined) {

@@ -38,11 +38,16 @@ const fixture = `
       <section data-card="compact"><AttachmentStrip attachments={[image,archive]} compact /></section></>);
   };
   window.legacySummary = () => appendAttachmentSummary("", [{id:"legacy",name:"old.pdf",type:"application/pdf",size:10,payloadKind:"data_url",dataUrl:"data:application/pdf;base64,JVBERg=="}], i18n.t.bind(i18n));
-  function PasteFixture({ full, reads }) {
+  function PasteFixture({ full, quoteCount, fileCount, reads }) {
     const [input, setInput] = React.useState("Existing draft");
-    const [attachments, setAttachments] = React.useState(Array.from({ length: full ? 8 : 0 }, (_, id) => ({
-      id: String(id), name: id + ".txt", size: 1, type: "text/plain", payloadKind: "text", text: "x",
-    })));
+    const [attachments, setAttachments] = React.useState([
+      ...Array.from({ length: full ? 10 : fileCount }, (_, id) => ({
+        id: "att-" + id, name: id === 0 ? "Selected text" : id + ".txt", size: 1, type: "text/plain", payloadKind: "text", text: "x",
+      })),
+      ...Array.from({ length: quoteCount }, (_, id) => ({
+        id: "selection-" + id, name: "Selected text", size: 1, type: "text/plain", payloadKind: "text", text: "q",
+      })),
+    ]);
     return <Composer input={input} setInput={setInput} attachments={attachments}
       sending={false} onSubmit={() => {}} onSwitchMode={() => {}}
       onAttachFiles={files => {
@@ -53,12 +58,12 @@ const fixture = `
           }));
       }} />;
   }
-  window.replayComposerPaste = async ({ text, includeFile = false, full = false }) => {
+  window.replayComposerPaste = async ({ text, includeFile = false, full = false, quoteCount = 0, fileCount = 0 }) => {
     const host = document.body.appendChild(document.createElement("div"));
     const composer = createRoot(host);
     const reads = [];
     try {
-      flushSync(() => composer.render(<PasteFixture full={full} reads={reads} />));
+      flushSync(() => composer.render(<PasteFixture full={full} quoteCount={quoteCount} fileCount={fileCount} reads={reads} />));
       const input = host.querySelector("textarea");
       const clipboard = new DataTransfer();
       clipboard.setData("text/plain", text);
@@ -192,7 +197,10 @@ try {
   assert.equal(pasted.attachments.length, 1);
   assert.equal(pasted.attachments[0].payloadKind, "text");
   assert.equal(pasted.attachments[0].text, longPaste, "serialized attachment retains line endings and complete text");
-  for (const [text, options] of [["short paste"], [pasteBoundary], [longPaste, { full: true }],
+  const lastFile = await paste(longPaste, { fileCount: 9, quoteCount: 5 });
+  assert.equal(lastFile.intercepted, true, "the tenth file slot is available even with five quotes");
+  assert.equal(lastFile.attachments.length, 1);
+  for (const [text, options] of [["short paste"], [pasteBoundary], [longPaste, { full: true, quoteCount: 5 }],
       ["x".repeat(512 * 1024 + 1)]]) {
     const ordinary = await paste(text, options);
     assert.equal(ordinary.intercepted, false, "browser insert stays available for text outside automatic conversion");
