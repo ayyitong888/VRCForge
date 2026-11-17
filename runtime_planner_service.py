@@ -99,7 +99,7 @@ RUNTIME_CONTEXT_INSTRUCTION = (
     "Use earlier summaries and memory as context; fresh observations and the current user request take precedence. "
     "For explicit remember or forget requests, use remember_memory or delete_memory in execution; list_memory is read-only. "
     "Save exact user wording in the active project or user scope, and report the returned memoryId. "
-    "Use create_goal only for an explicit durable goal. Delegate bounded read-only work with delegate_subagent only when available and useful. "
+    "Use create_goal only for an explicit durable goal. "
     "Treat attachment metadata and delegated image analysis as such. "
 )
 RUNTIME_TOOL_USAGE_INSTRUCTION = (
@@ -121,7 +121,7 @@ RUNTIME_TROUBLESHOOTING_INSTRUCTION = (
 )
 RUNTIME_SCOPE_UNITY_INSTRUCTION = (
     "A Unity project is explicitly bound to this turn. Use its exact projectPath. "
-    "Actively delegate independent parts of multi-step Unity work to available sub-agents. Give each a distinct outcome "
+    "Actively use delegate_subagent for independent parts of multi-step Unity work when available. Give each a distinct outcome "
     "and advance independent work while they run. Use their findings before dependent steps. Run all Unity writes serially. "
     "For the current scene, component bindings, or Avatar behavior, use the relevant Unity inspection tool. "
     "Use filesystem readers for file contents or locations. "
@@ -144,6 +144,7 @@ RUNTIME_UNITY_CORE_SETUP_INSTRUCTION = (
 )
 RUNTIME_SCOPE_GENERAL_INSTRUCTION = (
     "This is a general-purpose local Agent turn with no Unity project bound. "
+    "Choose a work split that fits the task. Work directly or use delegate_subagent for parallel work or a second opinion. "
     "Use bounded read-only list/read/find/search tools for filesystem evidence and Shell for commands, scripts, or processes. "
     "A directory listing locates evidence; read relevant contents to explain a mechanism. "
     "Unity operations require a bound project conversation."
