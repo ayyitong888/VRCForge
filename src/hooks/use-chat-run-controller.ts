@@ -386,7 +386,7 @@ export function useChatRunController({
           ? (unresolvedAttachment ? "paused" : "queued")
           : entry.status === "paused" ? "paused" : "delivery_unverified";
         const turn: QueuedTurn = {
-          planMode: savedItem?.planMode === true || entry.planMode === true,
+          planMode: (entry.planMode ?? savedItem?.planMode) === true,
           id: entry.clientTurnId,
           text: savedItem?.text || entry.message || "",
           attachments,
@@ -822,7 +822,7 @@ export function useChatRunController({
       const localPreparing = current?.chatId === ownerChatId && current.clientTurnId === continuedTurn?.clientTurnId;
       const target = localOwner || (!localPreparing ? continuedTurn : undefined);
       const targetClientTurnId = target
-        && (turn.planMode === true) === ((localOwner ? currentTurnRef.current?.planMode : visibleOwnerChat?.planMode) === true)
+        && (!localOwner || (turn.planMode === true) === (currentTurnRef.current?.planMode === true))
         ? target.clientTurnId : undefined;
       const queueEndpoint = localOwner?.endpoint || endpoint;
       const stoppingOwner = () => stopRequestedRef.current

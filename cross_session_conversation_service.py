@@ -266,11 +266,12 @@ class CrossSessionConversationService:
         now = self._now()
         active_client_turn_id = self._active_client_turn(chat_id, session_id, host["projectRoot"])
         delivery_mode = "trigger_turn" if trigger_turn else "queue_only"
+        plan_mode = target.get("planMode") is True
         queued_item = {
             "id": f"user-{client_turn_id}",
             "type": "user",
             "text": forwarded_text,
-            "planMode": False,
+            "planMode": plan_mode,
             "attachments": [],
             "forwardedByAgent": True,
             "forwardedFrom": origin,
@@ -296,6 +297,7 @@ class CrossSessionConversationService:
                 "targetClientTurnId": active_client_turn_id,
                 "clientTurnId": client_turn_id,
                 "message": forwarded_text,
+                "planMode": plan_mode,
                 "laneId": chat_id,
             })
             if accepted.get("accepted") is True:
@@ -323,7 +325,7 @@ class CrossSessionConversationService:
             }
 
         queued_item = {**queued_item, "queuedFrom": True, "composerQueued": True, "queueStatus": "queued",
-                       "queueEnvelope": {"planMode": False, "projectPath": host["projectRoot"],
+                       "queueEnvelope": {"planMode": plan_mode, "projectPath": host["projectRoot"],
                                          "projectType": host["projectType"], "sessionId": session_id,
                                          "laneId": chat_id, "maxAgenticTurns": host["maxAgenticTurns"]}}
         latest = self._load_chat(chat_id, host["projectRoot"])
@@ -338,7 +340,7 @@ class CrossSessionConversationService:
                                                         "updatedAt": now, "revision": latest_revision + 1}, latest_revision)
         queued = self._enqueue_triggered_turn(
             host, chat_id=chat_id, session_id=session_id,
-            client_turn_id=client_turn_id, message=forwarded_text,
+            client_turn_id=client_turn_id, message=forwarded_text, plan_mode=plan_mode,
         )
         if queued.get("accepted") is not True:
             latest = self._load_chat(chat_id, host["projectRoot"])
@@ -382,6 +384,7 @@ class CrossSessionConversationService:
         session_id: str,
         client_turn_id: str,
         message: str,
+        plan_mode: bool,
     ) -> Mapping[str, Any]:
         return self._enqueue_followup({
             "sessionId": chat_id,
@@ -394,7 +397,7 @@ class CrossSessionConversationService:
             "provider": "",
             "providerLabel": "",
             "model": "",
-            "planMode": False,
+            "planMode": plan_mode,
             "projectPath": host["projectRoot"],
             "projectRoot": host["projectRoot"],
             "projectType": host["projectType"],
@@ -438,7 +441,7 @@ class CrossSessionConversationService:
             }
         queued = self._enqueue_triggered_turn(
             host, chat_id=chat_id, session_id=session_id,
-            client_turn_id=client_turn_id, message=message,
+            client_turn_id=client_turn_id, message=message, plan_mode=item.get("planMode") is True,
         )
         if queued.get("accepted") is not True:
             return {"ok": False, "status": "not_queued", "chatId": chat_id,
@@ -714,7 +717,7 @@ class CrossSessionConversationService:
             "projectType": "unity" if project_root else "general",
             "_projectType": "unity" if project_root else "general",
             "_projectContextActive": bool(project_root),
-            "planMode": False,
+            "planMode": claim.get("planMode") is True,
             "followupQueueId": str(claim.get("queueId") or ""),
             "followupLaneId": str(claim.get("sessionId") or chat_id),
         }

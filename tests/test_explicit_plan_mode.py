@@ -1,10 +1,20 @@
+import asyncio
+import json
+import threading
+
 import pytest
 
 from agent_task_loop import AgentTaskLoop, approval_task_context
-from dashboard_api_models import AgentRuntimeMessageRequest
+from dashboard_api_models import AgentRuntimeMessageRequest, AgentRuntimeQueueRequest
 from dashboard_server import agent_runtime_request_payload
 from tests.test_native_permission_modes import MODES, _set_mode, _write_gateway_for_mode
-from tests.test_native_runtime_gateway import call, run, setup_gateway, finish, runtime_state
+from tests.test_native_runtime_gateway import call, run, setup_gateway, finish
+
+
+def runtime_state(request):
+    prefix = "Current runtime state (data): "
+    return next(json.loads(item["content"][len(prefix):]) for item in reversed(request["messages"])
+                if item.get("role") == "system" and item["content"].startswith(prefix))
 
 
 def test_plan_request_defaults_to_execution_and_accepts_explicit_plan():
@@ -34,6 +44,7 @@ def test_explicit_plan_hides_writes_and_model_cannot_enter_execution(tmp_path, m
         assert request["tools"] == model.requests[0]["tools"]
         tools = {item["function"]["name"]: item["function"] for item in request["tools"]}
         assert "fixture_write" not in tools
+        assert "fixture_write" not in runtime_state(request)["availableToolNames"]
         assert runtime_state(request)["allowedRuntimeActions"] == ["reply", "correct"]
         assert runtime_state(request)["planMode"] is True
 
@@ -54,7 +65,7 @@ def test_plan_lock_survives_continuation_context():
     {"writeNeeded": True, "writeTool": "fixture_write", "writeParams": {}},
     {"skillNeeded": True, "skillTool": "fixture_write", "skillParams": {}},
     {"shellNeeded": True, "shellCommand": "Set-Content bypass.txt bad"},
-    {"skillNeeded": True, "skillTool": "vrcforge_delegate_subagent", "skillParams": {}},
+    {"skillNeeded": True, "skillTool": "vrcforge_followup_task", "skillParams": {}},
     {"skillNeeded": True, "skillTool": "user.package", "skillParams": {}},
 ])
 def test_gateway_plan_guard_blocks_proposals_even_if_planner_ignores_mode(tmp_path, proposal):
@@ -91,7 +102,6 @@ def test_plan_can_finish_after_rejected_control_correction(tmp_path):
 
 def test_plan_question_continuation_keeps_readonly_mode(tmp_path):
     from tests.test_native_permission_modes import _question_gateway
-    import threading
 
     gateway, model = _question_gateway(tmp_path, [
         call("question", "vrcforge_ask_user", {"question": "Which option?"}),
@@ -118,7 +128,6 @@ def test_plan_queue_envelope_survives_reload(tmp_path):
 
 @pytest.mark.parametrize("saved_mode,replay_mode", [(True, None), (True, False), (False, True)])
 def test_queued_replay_uses_persisted_plan_mode(tmp_path, monkeypatch, saved_mode, replay_mode):
-    import asyncio
     from unittest.mock import Mock
     import dashboard_server as host
 
@@ -137,3 +146,73 @@ def test_queued_replay_uses_persisted_plan_mode(tmp_path, monkeypatch, saved_mod
         request["planMode"] = replay_mode
     asyncio.run(host.app_agent_runtime_message(AgentRuntimeMessageRequest(**request)))
     assert reloaded.runtime_message.call_args.args[0]["planMode"] is saved_mode
+
+
+
+def test_same_chat_execute_after_explicit_plan_exit_runs_authorized_request(tmp_path):
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [
+        {"role": "assistant", "content": "Here is the requested plan."},
+        call("write", "fixture_write", {"projectRoot": str(tmp_path / "UnityProject"), "value": "done"}),
+    ])
+    _set_mode(gateway, "approval")
+    planned = run(gateway, tmp_path, message="How would you do this?", planMode=True)
+    assert planned["planMode"] is True
+    assert not invoked
+    executed = run(
+        gateway, tmp_path, message="First research the approach, then make the change.",
+        clientTurnId="explicit-plan-exit", planMode=False,
+    )
+    assert executed["planMode"] is False
+    assert "fixture_write" in runtime_state(model.requests[-1])["availableToolNames"]
+    assert executed["write"]["status"] == "approval_pending"
+    assert not invoked
+
+
+@pytest.mark.parametrize("active_mode", [False, True])
+def test_mode_change_while_restored_turn_is_running_queues_its_own_mode(tmp_path, monkeypatch, active_mode):
+    import dashboard_server as host
+
+    entered, release = threading.Event(), threading.Event()
+    result = []
+
+    def provider(_request):
+        entered.set()
+        release.wait(5)
+        return {"role": "assistant", "content": "Current turn finished."}
+
+    gateway, _model, _invoked = setup_gateway(tmp_path, [provider])
+    monkeypatch.setattr(host, "AGENT_GATEWAY", gateway)
+    def run_restored_turn():
+        params = {
+            "message": "Continue the original instructions.",
+            "sessionId": "native-session",
+            "clientTurnId": "native-turn",
+            "projectRoot": str(tmp_path),
+            "planMode": not active_mode,
+        }
+        context = {
+            "objective": params["message"], "sessionId": "native-session", "clientTurnId": "native-turn",
+            "projectRoot": str(tmp_path), "planMode": active_mode,
+            "exposureLayer": "planning" if active_mode else "execution",
+        }
+        with gateway.runtime_planner.bind_turn(params):
+            result.append(gateway._runtime_message_impl(
+                params, task_continuation={"context": context, "completion": {"status": "completed"}},
+            ))
+
+    worker = threading.Thread(target=run_restored_turn)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        reply = asyncio.run(host.app_agent_runtime_queue(AgentRuntimeQueueRequest(
+            sessionId="native-session", targetClientTurnId="native-turn", clientTurnId="new-mode",
+            message="Work in the mode selected for this message.", planMode=not active_mode,
+        )))
+        assert reply["queueId"]
+        assert reply.get("mode") != "steer"
+        queued = gateway.list_runtime_followups(session_id="native-session")
+        assert [(entry["clientTurnId"], entry["planMode"]) for entry in queued] == [("new-mode", not active_mode)]
+    finally:
+        release.set()
+        worker.join(6)
+    assert result[0]["planMode"] is active_mode

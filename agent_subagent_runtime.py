@@ -95,7 +95,7 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
     params = {
         "message": message, "session_id": child_session_id,
         "clientTurnId": client_turn_id, "projectRoot": project_path,
-        "model": model, "planMode": True, "maxAgenticTurns": max_steps,
+        "model": model, "maxAgenticTurns": max_steps,
     }
     if provider:
         params["provider"] = provider

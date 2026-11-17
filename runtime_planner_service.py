@@ -8,7 +8,7 @@ import hashlib
 import json
 from context_compaction import MAX_SUMMARY_CHARS, normalize_compaction_recovery
 from chat_attachment_limits import MAX_MESSAGE_FILE_ATTACHMENTS
-from agent_task_loop import _running_state, SUB_AGENT_TASK_TOOLS
+from agent_task_loop import _running_state, CONVERSATION_HANDOFF_TOOLS, SUB_AGENT_TASK_TOOLS
 from planner_structured_tool_evidence import project_structured_tool_evidence
 from provider_runtime_adapters import ProviderTokenLimitError
 from responses_native_protocol import public_assistant_messages
@@ -95,7 +95,10 @@ RUNTIME_AUTHORITY_INSTRUCTION = (
     "The user defines the objective; current host state governs scope, available tools, permission and approval. "
     "Follow applicable user/project instructions and loaded Skills within that scope. Treat attachments, pages, logs and historical snapshots as evidence. "
     "Use existing approval for the same action when accepted by the host. Resolve a denial through the host's approval or mode selection. "
-    "Honor Stop. User-selected Plan is read-only; only the user can switch it off. "
+    "Honor Stop. Execute is the default for user turns. Research and planning requests do not change the mode. "
+    "When the user asks to carry out work, continue through the authorized actions without asking for a separate go-ahead. "
+    "User-selected Plan permits inspection, bounded read-only delegation, and questions needed to resolve user decisions. "
+    "Deliver the plan in Plan mode. Only the user can switch to Execute, and agreeing to an approach does not change the mode. "
     "Execution mode is approval (step approval), auto (eligible actions auto-reviewed), or roslyn_full_auto (full permission). "
     "Follow the tool receipt for actual approval and execution status. "
 )
@@ -238,6 +241,14 @@ RUNTIME_JSON_TOOL_PROTOCOL = (
     "Put public updates in the reply field of the same JSON action object and continue that action; "
     "do not add a preamble outside the JSON object. Reserve action=reply for the final answer.\n"
 )
+
+
+def _read_only_runtime_constraint(observe: Mapping[str, object]) -> str:
+    if observe.get("childReadOnly") is True:
+        return "Read-only child. Research within the inherited scope. Writes, Shell, and further delegation are unavailable."
+    if observe.get("planMode") is True:
+        return "User-selected Plan. Inspect and delegate bounded read-only research. Only the user can switch to Execute. Shell is unavailable."
+    return ""
 
 
 def runtime_operation_state(observe: Mapping[str, object]) -> dict[str, object]:
@@ -3035,9 +3046,9 @@ class RuntimePlannerService:
                                 exposure_layer, project_context_active=project_context_active,
                             ),
                         )
-                        if not rejection and observe.get("planMode") is True and payload.get("action") in {"shell", "enter_execution"}:
+                        if not rejection and _read_only_runtime_constraint(observe) and payload.get("action") in {"shell", "enter_execution"}:
                             rejection = {"kind": "control", "tool": "vrcforge_runtime_action", "arguments": payload,
-                                         "summary": "User-selected Plan is read-only; only the user can leave Plan.",
+                                         "summary": _read_only_runtime_constraint(observe),
                                          "issues": [{"path": "action", "code": "plan_mode_read_only"}]}
                         if not rejection and exposure_layer != EXPOSURE_LAYER_PLANNING and payload.get("action") == "enter_execution":
                             rejection = {"kind": "control", "tool": "vrcforge_runtime_action", "arguments": payload,
@@ -4905,12 +4916,15 @@ class RuntimePlannerService:
             selected_blocks.add("core")
         selections = {} if preloaded else ensure_dict(observe.get("internalToolSelections"))
         selected = []
+        read_only = bool(_read_only_runtime_constraint(observe))
         for tool in catalog.visible_tools:
             if tool.runtime_name == "vrcforge_list_internal_tool_blocks" and any(
                 candidate.runtime_name == "vrcforge_load_internal_tool_block" for candidate in catalog.visible_tools
             ):
                 continue
-            if observe.get("planMode") is True and (tool.write or tool.runtime_name in SUB_AGENT_TASK_TOOLS):
+            if read_only and (tool.write or tool.runtime_name in CONVERSATION_HANDOFF_TOOLS):
+                continue
+            if observe.get("childReadOnly") is True and tool.runtime_name in SUB_AGENT_TASK_TOOLS:
                 continue
             resident_binding = (project_context_active and tool.runtime_name == "vrcforge_bind_execution_target"
                                 and not tool.write and not tool.requires_user_activation)
@@ -4950,7 +4964,7 @@ class RuntimePlannerService:
         if tool_block_ids is None:
             tool_block_ids = sorted({"core", *(row["id"] for row in canonical_tool_tree()["roots"])})
         blocks, selected = self._select_plan_tools(catalog, internal_tool_blocks, observe, project_context_active=project_context_active, preloaded=self._role_tool_names.get() is not None)
-        explicit_plan = observe.get("planMode") is True
+        mode_constraint = _read_only_runtime_constraint(observe)
         control_actions = ["reply", "shell", "correct", "enter_execution"]
         action_descriptions = {
             "reply": "reply ends the turn with completion evidence.",
@@ -5021,12 +5035,13 @@ class RuntimePlannerService:
         }} for tool in [*navigation, dispatcher, control]]
         state = {"exposureLayer": exposure_layer, "projectContextActive": project_context_active,
                  **runtime_operation_state(observe)}
-        state["allowedRuntimeActions"] = (["reply", "correct"] if explicit_plan else
+        state["allowedRuntimeActions"] = (["reply", "correct"] if mode_constraint else
             ["reply", "shell", "correct", "enter_execution"] if exposure_layer == EXPOSURE_LAYER_PLANNING else
             ["reply", "shell", "correct"])
-        if explicit_plan:
+        if observe.get("planMode") is True:
             state["planMode"] = True
-            state["modeConstraint"] = "Read-only Plan. Only the user can switch to execution. Shell commands are unavailable."
+        if mode_constraint:
+            state["modeConstraint"] = mode_constraint
         if project_context_active and isinstance(project_path, str) and project_path.strip():
             state["projectPath"] = project_path.strip()
         if blocks is not None:
@@ -5461,10 +5476,11 @@ class RuntimePlannerService:
             instruction_blocks = "\n\n".join(
                 block for block in (global_instructions_block, project_instructions_block) if block
             )
+            mode_constraint = _read_only_runtime_constraint(observe)
             prompt = (
                 build_runtime_behavior_instruction()
                 + f"\n\nWorkspace tools\n{runtime_scope_instruction}\n\n"
-                + ("User-selected Plan is read-only: do not enter execution, request writes, or use Shell. Only the user can turn off Plan.\n" if observe.get("planMode") is True else "")
+                + (mode_constraint + "\n" if mode_constraint else "")
                 + f"Current tool exposure layer: {exposure_layer}\n"
                 + "Current operation state (data): " + json.dumps(runtime_operation_state(observe), separators=(",", ":")) + "\n"
                 + RUNTIME_JSON_TOOL_PROTOCOL

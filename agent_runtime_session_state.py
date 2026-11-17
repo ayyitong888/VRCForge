@@ -80,6 +80,7 @@ class AgentRuntimeSessionState:
         "_stopped_core_dispatches",
         "_admitted_core_writes",
         "_active_turns",
+        "_active_plan_turns",
         "_waiting_turns",
         "_finalizing_turns",
         "_exclusive_turns",
@@ -102,6 +103,7 @@ class AgentRuntimeSessionState:
         self._stopped_core_dispatches: set[tuple[str, str, str]] = set()
         self._admitted_core_writes: set[tuple[str, str, str]] = set()
         self._active_turns: dict[tuple[str, str], str] = {}
+        self._active_plan_turns: set[tuple[str, str]] = set()
         self._waiting_turns: dict[tuple[str, str], tuple[str, threading.Event]] = {}
         self._finalizing_turns: set[tuple[str, str]] = set()
         self._exclusive_turns: set[tuple[str, str]] = set()
@@ -166,6 +168,7 @@ class AgentRuntimeSessionState:
             self._stopped_core_dispatches.clear()
             self._admitted_core_writes.clear()
             self._active_turns.clear()
+            self._active_plan_turns.clear()
             for _turn, cancelled in self._waiting_turns.values():
                 cancelled.set()
             self._waiting_turns.clear()
@@ -261,6 +264,7 @@ class AgentRuntimeSessionState:
                 self._user_adjustments.pop(key, None)
             for key in {key for key in (*self._active_turns.keys(), *self._finalizing_turns) if key[0] == session_id}:
                 self._active_turns.pop(key, None)
+                self._active_plan_turns.discard(key)
                 self._finalizing_turns.discard(key)
                 self._exclusive_turns.discard(key)
                 self._steer_mailboxes.pop(key, None)
@@ -1329,6 +1333,7 @@ class AgentRuntimeSessionState:
         turn_id: str,
         client_turn_id: str,
         exclusive: bool = True,
+        plan_mode: bool = False,
     ) -> bool:
         if not session_id or not client_turn_id:
             return True
@@ -1343,6 +1348,8 @@ class AgentRuntimeSessionState:
                 return False
             self._waiting_turns.pop(key, None)
             self._active_turns[key] = turn_id
+            if plan_mode:
+                self._active_plan_turns.add(key)
             if exclusive:
                 self._exclusive_turns.add(key)
             self._finalizing_turns.discard(key)
@@ -1364,6 +1371,7 @@ class AgentRuntimeSessionState:
             if active_turn_id:
                 self._finalizing_turns.add(key)
             self._active_turns.pop(key, None)
+            self._active_plan_turns.discard(key)
             target = (session_id, active_turn_id or turn_id, client_turn_id)
             self._stopped_core_dispatches.discard(target)
             self._admitted_core_writes.discard(target)
@@ -1497,6 +1505,7 @@ class AgentRuntimeSessionState:
         attachments: list[dict[str, Any]] | None = None,
         followup_lane_id: str = "",
         reserve: Callable[[str], dict[str, Any]] | None = None,
+        plan_mode: bool | None = None,
     ) -> dict[str, Any]:
         session_id = str(session_id or "").strip()[:180]
         target_client_turn_id = str(target_client_turn_id or "").strip()[:240]
@@ -1515,6 +1524,8 @@ class AgentRuntimeSessionState:
             seen_ids = self._steer_seen_ids.setdefault(key, set())
             if input_id in seen_ids:
                 return {"accepted": True, "mode": "steer", "status": "accepted", "reason": "duplicate_input", "deduped": True, "queuedCount": len(mailbox)}
+            if plan_mode is not None and plan_mode != (key in self._active_plan_turns):
+                return {"accepted": False, "mode": "followup", "reason": "plan_mode_mismatch"}
             # Keep the hot same-turn mailbox bounded. Overflow is not dropped:
             # the API atomically falls back to the durable follow-up lane.
             if len(mailbox) >= self.MAX_STEER_MAILBOX:

@@ -69,6 +69,7 @@ def test_child_uses_real_runtime_loop_for_two_readonly_tools_then_final(tmp_path
     assert len(model.requests) == 3
     assert result["ok"] is True
     assert isinstance(result["finalReport"], str) and result["finalReport"]
+    assert result["rawResult"]["planMode"] is False
     assert result["stepCount"] <= 4
 
 
@@ -178,7 +179,8 @@ def test_delegated_child_uses_parent_general_read_scope_not_model_text(tmp_path,
         service.shutdown()
 
 
-def test_parent_omitting_role_runs_general_readonly_child_without_project(tmp_path, monkeypatch):
+@pytest.mark.parametrize("plan_mode", [False, True])
+def test_parent_omitting_role_runs_general_readonly_child_without_project(tmp_path, monkeypatch, plan_mode):
     from dashboard_api_models import SubAgentCreateRequest
 
     url = "https://modular-avatar.nadena.dev/docs/reference/merge-armature"
@@ -209,7 +211,10 @@ def test_parent_omitting_role_runs_general_readonly_child_without_project(tmp_pa
         "vrcforge_delegate_subagent", "Delegate a read.", "plan/preview", server.delegate_sub_agent_runtime,
     )
     try:
-        parent.runtime_message({"message": request["task"], "sessionId": "general-parent"})
+        parent_result = parent.runtime_message({
+            "message": request["task"], "sessionId": "general-parent", "planMode": plan_mode,
+        })
+        assert parent_result["planMode"] is plan_mode
         task = service.list_tasks()["tasks"][0]
         service._registry._threads[task["id"]].join(5)
         detail = service.get_task(task["id"])
@@ -269,6 +274,23 @@ def test_plan_mode_blocks_proposed_write_before_handler_dispatch(tmp_path):
     assert not invoked
     assert len(model.requests) <= 2
     assert result["ok"] is False
+
+
+def test_readonly_child_cannot_start_another_worker_even_with_full_permission(tmp_path):
+    tool = "vrcforge_delegate_subagent"
+    gateway, model, _ = _child_gateway(tmp_path, [
+        call("recursive", tool, {"task": "Start another worker."}),
+        {"role": "assistant", "content": "I cannot delegate another child."},
+    ])
+    invoked = []
+    _set_mode(gateway, "roslyn_full_auto")
+    gateway.register_tool(tool, "Delegate read-only work.", "plan/preview", lambda args: invoked.append(args))
+
+    result = _run(gateway, tmp_path, allowed_tools=(tool,))
+    assert not invoked
+    assert tool not in _native_available_tool_names(model.requests[0])
+    assert result["rawResult"]["planMode"] is False
+    assert "tool_not_visible" in json.dumps(result)
 
 
 def _register_second_read_tool(gateway, invoked):

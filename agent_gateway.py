@@ -124,6 +124,7 @@ from agent_runtime_skill_executor import (
 from internal_tool_blocks import CONVERSATION_TOOL_NAMES
 from agent_task_loop import (
     SUB_AGENT_TASK_TOOLS,
+    CONVERSATION_HANDOFF_TOOLS,
     AgentTaskLoop,
     approval_task_context,
     canonical_action_id,
@@ -6069,7 +6070,8 @@ class AgentGateway:
             return self._runtime_continuation_accepting and not (cancelled and cancelled())
 
     def _admit_runtime_turn(
-        self, *, session_id: str, turn_id: str, client_turn_id: str, is_continuation: bool = False,
+        self, *, session_id: str, turn_id: str, client_turn_id: str,
+        is_continuation: bool = False, plan_mode: bool = False,
     ) -> None:
         """Serialize native conversation owners while keeping each caller's response."""
         with self._runtime_continuation_condition:
@@ -6090,6 +6092,7 @@ class AgentGateway:
                         )
                     if self._runtime_session_state.begin_turn(
                         session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id, exclusive=True,
+                        plan_mode=plan_mode,
                     ):
                         return
                     self._runtime_continuation_condition.wait()
@@ -6174,9 +6177,14 @@ class AgentGateway:
         continuation = ensure_dict(task_continuation)
         question_reply_turn = continuation.get("source") == "question_answered" and not continuation.get("context")
         resuming_task = task_continuation is not None and not question_reply_turn
+        child_read_only = agent_name == "sub-agent"
+        continuation_context = ensure_dict(continuation.get("context"))
+        continuation_completion = ensure_dict(continuation.get("completion"))
+        selected_mode = (continuation_context if continuation_context and continuation_completion else params).get("planMode")
+        plan_mode = not child_read_only and selected_mode is True
         self._admit_runtime_turn(
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
-            is_continuation=resuming_task,
+            is_continuation=resuming_task, plan_mode=plan_mode,
         )
         params["_runtimeAdmitted"] = True
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
@@ -6236,8 +6244,6 @@ class AgentGateway:
         scoped_general_roots = tuple(general_allowed_roots)
         if full_permission and agent_name != "sub-agent":
             general_allowed_roots = host_scope_roots()
-        continuation_context = ensure_dict(ensure_dict(task_continuation).get("context"))
-        continuation_completion = ensure_dict(ensure_dict(task_continuation).get("completion"))
         restored_absent_paths = checkpoint_restore_absence_paths(ensure_dict(task_continuation))
         if continuation_context and continuation_completion:
             task_loop = AgentTaskLoop.from_approval_context(
@@ -6248,8 +6254,8 @@ class AgentGateway:
         else:
             task_loop = AgentTaskLoop(
                 message,
-                exposure_layer=EXPOSURE_LAYER_PLANNING if params.get("planMode") is True else EXPOSURE_LAYER_EXECUTION,
-                plan_mode=params.get("planMode") is True,
+                exposure_layer=EXPOSURE_LAYER_PLANNING if child_read_only or plan_mode else EXPOSURE_LAYER_EXECUTION,
+                plan_mode=plan_mode,
                 session_id=session_id,
                 turn_id=turn_id,
                 client_turn_id=client_turn_id,
@@ -7144,7 +7150,8 @@ class AgentGateway:
                     if required_memory_tool:
                         task_loop.require_action(kind="write", tool=required_memory_tool)
         tool_calls_used = task_loop.tool_calls_used if continuation_context else 0
-        runtime_exposure_layer = EXPOSURE_LAYER_PLANNING if task_loop.plan_mode else task_loop.exposure_layer
+        read_only = child_read_only or task_loop.plan_mode
+        runtime_exposure_layer = EXPOSURE_LAYER_PLANNING if read_only else task_loop.exposure_layer
         params["planMode"] = task_loop.plan_mode
         remaining_action: dict[str, Any] | None = None
         runtime_compaction: dict[str, Any] | None = None
@@ -7180,7 +7187,7 @@ class AgentGateway:
 
         def enter_runtime_execution() -> bool:
             nonlocal runtime_exposure_layer
-            if task_loop.plan_mode:
+            if read_only:
                 return False
             if runtime_exposure_layer != EXPOSURE_LAYER_PLANNING:
                 return False
@@ -7289,7 +7296,7 @@ class AgentGateway:
             })
             return planner_argument_failures >= RUNTIME_PLANNER_ARGUMENT_MAX_ATTEMPTS
 
-        if not task_loop.plan_mode and not handoff_terminal and bool(params.get("_computerUseRequested")) and not self._runtime_session_state.desktop_bootstrap_completed(
+        if not read_only and not handoff_terminal and bool(params.get("_computerUseRequested")) and not self._runtime_session_state.desktop_bootstrap_completed(
             session_id
         ):
             bootstrap_tool = "vrcforge_agent_desktop_action"
@@ -7521,6 +7528,8 @@ class AgentGateway:
             # and capabilities without host-owned budget counters.
             planner_observe = dict(observe) if isinstance(observe, dict) else {}
             planner_observe["planMode"] = task_loop.plan_mode
+            if child_read_only:
+                planner_observe["childReadOnly"] = True
             saved_checkpoint_setting = self._runtime_session_state.checkpoint_choice(session_id)
             planner_observe["checkpointChoice"] = {
                 "mode": saved_checkpoint_setting.get("mode", "require")
@@ -7668,23 +7677,28 @@ class AgentGateway:
                         if validated_choice["mode"] == "require":
                             checkpoint_skip_authority = None
 
-            # Explicit Plan is a user-owned read-only boundary, independent of
-            # global permission settings and model-proposed phase transitions.
+            # User-selected Plan and child isolation are read-only even under
+            # full permission. Only a parent can start a bounded worker.
             plan_tool_name = str(plan.get("writeTool") or plan.get("skillTool") or "").strip()
             plan_tool = self._tools.get(plan_tool_name)
-            if task_loop.plan_mode and (
+            if read_only and (
                 plan.get("enterExecution")
                 or plan.get("writeNeeded")
                 or plan.get("shellNeeded")
                 or plan.get("shellCommand")
                 or plan_tool_name in self._write_handlers
                 or (plan_tool is not None and plan_tool.write)
-                or plan_tool_name in SUB_AGENT_TASK_TOOLS
+                or plan_tool_name in CONVERSATION_HANDOFF_TOOLS
+                or (child_read_only and plan_tool_name in SUB_AGENT_TASK_TOOLS)
                 or (plan.get("skillNeeded") and plan_tool is None)
             ):
                 last_plan = {
-                    "summary": "Plan mode permits read-only inspection only.",
-                    "reply": "Plan mode cannot execute changes or Shell commands. Turn off Plan to execute.",
+                    "summary": "This turn permits read-only work only.",
+                    "reply": (
+                        "This child can only research within its inherited scope."
+                        if child_read_only else
+                        "Plan allows inspection and bounded read-only delegation. Switch to Execute to make changes."
+                    ),
                     "planner": "runtime",
                     "shellNeeded": False,
                     "nextStep": "plan_mode_blocked",
@@ -9726,6 +9740,7 @@ class AgentGateway:
                 target_client_turn_id=target_client_turn_id,
                 input_id=input_id,
                 message=message,
+                plan_mode=params.get("planMode") is True,
                 followup_lane_id=followup_lane_id,
                 attachments=normalize_runtime_attachments(params.get("attachments")),
                 reserve=lambda turn_id: self._runtime_followup_queue.enqueue(

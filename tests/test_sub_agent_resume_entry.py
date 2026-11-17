@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import inspect
+
+import pytest
 import time
 from contextlib import nullcontext
 
@@ -148,7 +150,8 @@ class NativeResumeToolModel:
         )
 
 
-def test_native_resume_tool_uses_trusted_parent_seed_and_delivers_continuation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("plan_mode", [False, True])
+def test_native_resume_tool_uses_trusted_parent_seed_and_delivers_continuation(tmp_path, monkeypatch, plan_mode):
     gateway, _initial_model, _invoked = setup_gateway(tmp_path, [
         {"role": "assistant", "content": "Initial child report."},
     ])
@@ -195,6 +198,7 @@ def test_native_resume_tool_uses_trusted_parent_seed_and_delivers_continuation(t
             "projectRoot": str(tmp_path),
             "model": "fixture-parent-model",
             "maxAgenticTurns": 4,
+            "planMode": plan_mode,
         })
         assert parent_result["ok"] is True
         deadline = time.monotonic() + 6
@@ -218,6 +222,7 @@ def test_native_resume_tool_uses_trusted_parent_seed_and_delivers_continuation(t
         assert seed["requestedArguments"]["taskId"] == source["id"]
         assert continuation_results and continuation_results[0]
         assert continuation_results[0]["sessionId"] == "parent-session"
+        assert continuation_results[0]["planMode"] is plan_mode
         assert continuation_results[0]["plan"]["nextStep"] == "done"
         durable = service.get_task(resumed_task["id"])["task"]
         assert durable["parentContinuationStatus"] == "delivered"

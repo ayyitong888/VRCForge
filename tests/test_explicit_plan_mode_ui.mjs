@@ -22,6 +22,7 @@ const requireStub = (name) => {
   if (name === "react-i18next") return { useTranslation: () => ({ t }) };
   if (name.endsWith("/i18n")) return { t };
   if (name.endsWith("/permission-ui")) return { permissionVisualState: () => ({}), executionModeLabel: (mode) => mode, EXECUTION_MODES: [] };
+  if (name.endsWith("/chat-types")) return { isSelectedTextAttachment: () => false };
   if (name.endsWith("/utils")) return { cn: (...values) => values.filter(Boolean).join(" ") };
   return new Proxy({}, { get: (_target, property) => property });
 };
@@ -79,22 +80,22 @@ assert.equal(requests.at(-1).planMode, true);
 
 // Execute App's real retry function against an unrelated active composer mode.
 const app = readFileSync("src/App.tsx", "utf8");
-const retrySource = app.slice(app.indexOf("  function retryConversationItem("), app.indexOf("  async function runExplicitWorkspaceAction("));
+const retrySource = app.slice(app.indexOf("  async function retryConversationItem("), app.indexOf("  async function runExplicitWorkspaceAction("));
 const retryJs = ts.transpileModule(retrySource, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 for (const originalMode of [true, false, undefined]) {
   const chat = { id: "a", planMode: !originalMode, items: [{ id: "u", type: "user", text: "original", planMode: originalMode }] };
   let sent;
-  const retry = new Function("isChatRunActive", "compacting", "getChatById", "activeChatId", "latestConversationItemId", "isRetryableConversationItem", "resolveContextLimit", "providerSnapshot", "currentModelInfo", "apiConfig", "cloneChatAttachments", "runTurnNow", `${retryJs}; return retryConversationItem;`)(
-    () => false, false, () => chat, "a", () => "u", () => true, () => ({ known: false }), {}, null, null, (items) => items,
+  const retry = new Function("isChatRunActive", "compacting", "loadChat", "activeChatId", "latestConversationItemId", "isRetryableConversationItem", "resolveContextLimit", "providerSnapshot", "currentModelInfo", "apiConfig", "cloneChatAttachments", "runTurnNow", `${retryJs}; return retryConversationItem;`)(
+    () => false, false, async () => chat, "a", () => "u", () => true, () => ({ known: false }), {}, null, null, (items) => items,
     (_id, turn) => { sent = turn; },
   );
-  retry("u");
+  await retry("u");
   assert.equal(sent.planMode, originalMode === true, "retry keeps original mode, including legacy execute default");
 }
 const sessions = readFileSync("src/hooks/use-chat-sessions.ts", "utf8");
 assert.match(sessions, /planMode: chat\.planMode === true/);
-assert.match(app, /planMode=\{activeChat\?\.planMode === true\}/, "indicator is scoped to active chat");
-assert.match(app, /updateChat\(chatId, \(chat\) => \(\{ \.\.\.chat, planMode \}\)\)/);
+assert.match(app, /planMode=\{displayChat\?\.planMode === true\}/, "indicator is scoped to active chat");
+assert.match(app, /updateChat\(chat\.id, \(current\) => \(\{ \.\.\.current, planMode \}\)\)/);
 const controller = readFileSync("src/hooks/use-chat-run-controller.ts", "utf8");
 assert.match(controller, /\(turn\.planMode === true\) === \(currentTurnRef\.current\?\.planMode === true\)/, "different mode must enqueue instead of steering current turn");
 for (const locale of ["en-US", "zh-CN", "zh-TW", "ja-JP"]) {

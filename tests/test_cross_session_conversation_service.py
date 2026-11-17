@@ -90,6 +90,7 @@ class Harness:
                 "clientTurnId": params["clientTurnId"],
                 "message": params["message"],
                 "deliveryMode": params["deliveryMode"],
+                "planMode": params["planMode"],
                 "projectRoot": params["projectRoot"],
                 "status": "pending",
             }
@@ -282,6 +283,20 @@ class CrossSessionConversationServiceTests(unittest.TestCase):
         self.assertTrue(persisted[-2]["forwardedByAgent"])
         self.assertEqual(persisted[-2]["queuedFrom"], False)
         self.assertEqual(persisted[-1]["id"], f"runtime-reply-{response['clientTurnId']}")
+
+    def test_offscreen_followup_retains_target_user_plan_selection_across_queue_restore(self):
+        harness = Harness()
+        harness.chats["offscreen"]["planMode"] = True
+        service = harness.service()
+        context = {**trusted_context(), "chatId": "offscreen", "message": "Research the scene."}
+        self.assertEqual(service.followup_task(context)["status"], "queued")
+        # The queue persisted the target's selection when it received the turn.
+        harness.queue.clear()
+        harness.chats["offscreen"]["planMode"] = False
+        self.assertEqual(service.followup_task(context)["status"], "queued")
+        self.assertTrue(harness.queue[0]["planMode"])
+        self.assertEqual(service.process_pending(), 1)
+        self.assertTrue(harness.dispatched[0]["planMode"])
 
     def test_followup_task_is_delivered_to_busy_active_turn(self):
         harness = Harness()

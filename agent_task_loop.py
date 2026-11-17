@@ -35,6 +35,7 @@ from request_usage_reconciliation import usage_snapshot_sha256
 
 TASK_LOOP_SCHEMA = "vrcforge.agent_task_loop.v2"
 SUB_AGENT_TASK_TOOLS = frozenset({"vrcforge_delegate_subagent", "vrcforge_resume_subagent"})
+CONVERSATION_HANDOFF_TOOLS = frozenset({"vrcforge_send_message", "vrcforge_followup_task"})
 TASK_APPROVAL_CONTEXT_SCHEMA = "vrcforge.agent_task_approval.v1"
 WRITE_TRANSACTION_SCHEMA = "vrcforge.approved_write_transaction.v1"
 _RUNNING_STATUSES = frozenset(
