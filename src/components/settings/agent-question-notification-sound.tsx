@@ -39,10 +39,11 @@ export function AgentQuestionNotificationSoundSettings() {
 
   const row = (kind: AgentQuestionNotificationSoundKind, label: string) => {
     const sound = sounds[kind];
+    const defaultLabel = t(kind === "ordinary" ? "settings.notificationSoundOrdinaryDefault" : "settings.notificationSoundBlockingDefault");
     return (
       <div className="rounded-lg border border-border bg-background p-3" data-notification-sound-kind={kind}>
         <div className="text-sm font-medium">{label}</div>
-        <div className="mt-1 text-xs text-muted-foreground">{sound.enabled ? sound.name || t("settings.notificationSoundBlockingDefault") : t("settings.notificationSoundWindowsDefault")}</div>
+        <div className="mt-1 text-xs text-muted-foreground">{sound.enabled ? sound.name || defaultLabel : t("settings.notificationSoundWindowsDefault")}</div>
         <div className="mt-3 flex flex-wrap gap-2">
           <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent">
             <Upload className="h-4 w-4" />{t("settings.notificationSoundChoose")}

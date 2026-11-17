@@ -17,6 +17,10 @@ This software is provided without warranty. Users should back up their Unity / V
 
 Bundled third-party components and notices:
 
+* Drop 003 notification sound by Kenney
+  * Upstream: https://kenney.nl/assets/interface-sounds
+  * License: CC0-1.0 (https://creativecommons.org/publicdomain/zero/1.0/)
+
 * dnd kit frontend sorting components
   * Upstream: https://github.com/clauderic/dnd-kit
   * License: MIT

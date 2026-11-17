@@ -8,17 +8,21 @@ export type AgentQuestionNotificationSound = { enabled: boolean; dataUrl: string
 export type AgentQuestionNotificationSounds = Record<AgentQuestionNotificationSoundKind, AgentQuestionNotificationSound>;
 
 const DEFAULT_SOUND: AgentQuestionNotificationSound = { enabled: false, dataUrl: "", name: "" };
+const DEFAULT_ORDINARY_NOTIFICATION_SOUND_URL = new URL("../assets/drop-003.ogg", import.meta.url).href;
 export const DEFAULT_BLOCKING_NOTIFICATION_SOUND_URL = new URL("../assets/critical-notification.mp3", import.meta.url).href;
-const defaultSound = (kind: AgentQuestionNotificationSoundKind): AgentQuestionNotificationSound => kind === "blocking"
-  ? { enabled: true, dataUrl: DEFAULT_BLOCKING_NOTIFICATION_SOUND_URL, name: "" }
-  : { ...DEFAULT_SOUND };
+const defaultSound = (kind: AgentQuestionNotificationSoundKind): AgentQuestionNotificationSound => ({
+  enabled: true,
+  dataUrl: kind === "blocking" ? DEFAULT_BLOCKING_NOTIFICATION_SOUND_URL : DEFAULT_ORDINARY_NOTIFICATION_SOUND_URL,
+  name: "",
+});
 const DEFAULT_SOUNDS = (): AgentQuestionNotificationSounds => ({ ordinary: defaultSound("ordinary"), blocking: defaultSound("blocking") });
 let activePreview: HTMLAudioElement | null = null;
 
 function parseSound(value: unknown, kind: AgentQuestionNotificationSoundKind): AgentQuestionNotificationSound {
   if (!value || typeof value !== "object") return defaultSound(kind);
   const item = value as Partial<AgentQuestionNotificationSound>;
-  if (item.enabled === false) return { ...DEFAULT_SOUND };
+  // Older settings stored the Windows default as a disabled ordinary sound.
+  if (item.enabled === false && kind === "blocking") return { ...DEFAULT_SOUND };
   if (item.enabled !== true || typeof item.dataUrl !== "string" || !item.dataUrl.startsWith("data:audio/")) return defaultSound(kind);
   return { enabled: true, dataUrl: item.dataUrl, name: typeof item.name === "string" ? item.name : "" };
 }

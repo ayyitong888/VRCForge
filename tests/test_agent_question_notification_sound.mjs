@@ -14,10 +14,12 @@ function makeStorage() {
   };
 }
 
-test("ordinary defaults to Windows and blocking resets to the bundled sound without losing the other choice", async () => {
+test("ordinary defaults to Drop 003 and each custom sound can be reset independently", async () => {
   globalThis.window = { localStorage: makeStorage() };
   const module = await import(pathToFileURL(path.join(root, "src/lib/agent-question-notification-sound.ts")).href);
-  assert.equal(module.loadAgentQuestionNotificationSound("ordinary").enabled, false);
+  const ordinaryDefault = module.loadAgentQuestionNotificationSound("ordinary");
+  assert.equal(ordinaryDefault.enabled, true);
+  assert.match(ordinaryDefault.dataUrl, /\/drop-003\.ogg$/);
   assert.equal(module.loadAgentQuestionNotificationSound().dataUrl, module.DEFAULT_BLOCKING_NOTIFICATION_SOUND_URL);
   const sound = { enabled: true, dataUrl: "data:audio/wav;base64,AAAA", name: "local.wav" };
   module.saveAgentQuestionNotificationSound(sound, "ordinary");
@@ -26,10 +28,20 @@ test("ordinary defaults to Windows and blocking resets to the bundled sound with
   module.clearAgentQuestionNotificationSound("blocking");
   assert.deepEqual(module.loadAgentQuestionNotificationSound("ordinary"), sound);
   assert.equal(module.loadAgentQuestionNotificationSound("blocking").dataUrl, module.DEFAULT_BLOCKING_NOTIFICATION_SOUND_URL);
+  module.saveAgentQuestionNotificationSound(sound, "blocking");
+  module.clearAgentQuestionNotificationSound("ordinary");
+  assert.deepEqual(module.loadAgentQuestionNotificationSound("ordinary"), ordinaryDefault);
+  assert.deepEqual(module.loadAgentQuestionNotificationSound("blocking"), sound);
   module.clearAgentQuestionNotificationSound();
   assert.equal(module.loadAgentQuestionNotificationSound().enabled, true);
-  assert.equal(module.loadAgentQuestionNotificationSound("ordinary").enabled, false);
+  assert.deepEqual(module.loadAgentQuestionNotificationSound("ordinary"), ordinaryDefault);
   assert.match(module.AGENT_QUESTION_NOTIFICATION_SOUND_STORAGE_KEY, /notification-sound/);
+  window.localStorage.setItem(module.AGENT_QUESTION_NOTIFICATION_SOUND_STORAGE_KEY, JSON.stringify({
+    ordinary: { enabled: false, dataUrl: "", name: "" },
+    blocking: sound,
+  }));
+  assert.deepEqual(module.loadAgentQuestionNotificationSound("ordinary"), ordinaryDefault);
+  assert.deepEqual(module.loadAgentQuestionNotificationSound("blocking"), sound);
 });
 
 test("background playback stops the previous custom preview and tolerates autoplay rejection", async () => {
