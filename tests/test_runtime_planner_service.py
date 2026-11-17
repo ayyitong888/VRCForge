@@ -1779,7 +1779,7 @@ def test_model_prompt_includes_bounded_input_contract_for_high_confusion_tool() 
     ("tool_name", "required", "optional"),
     [
         ("vrcforge_list_conversations", set(), {"offset", "limit"}),
-        ("vrcforge_read_conversation", {"chatId"}, {"offset", "limit"}),
+        ("vrcforge_read_conversation", {"chatId"}, {"offset", "limit", "textOffset"}),
         ("vrcforge_create_conversation", set(), {"title"}),
         ("vrcforge_send_message", {"chatId", "message"}, set()),
         ("vrcforge_followup_task", {"chatId", "message"}, set()),

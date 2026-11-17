@@ -28455,7 +28455,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_read_conversation",
-        "When to use: read public messages in this same project scope; pass an exact chat ID or vrcforge://chat/ link as chatId, and use nextOffset to read further pages. When NOT to use: transfer attachments, approvals, or write authority. Negative example: do not claim that a link or unread page gave you its contents.",
+        "When to use: read public messages in this same project scope; pass an exact chat ID or vrcforge://chat/ link as chatId. Use nextOffset for further messages and each message's nextTextRequest as arguments to read its remaining text. When NOT to use: transfer attachments, approvals, or write authority. Negative example: do not claim that a link or unread page gave you its contents.",
         "read/debug",
         lambda params: _invoke_cross_session_conversation("read_conversation", params or {}),
     )

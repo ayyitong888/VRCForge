@@ -792,6 +792,34 @@ class DashboardServerTests(unittest.TestCase):
 
         runtime_snapshot.assert_called_once_with("chat-1", "session-1", "ProjectA")
 
+    def test_conversation_read_can_recover_long_message_tail(self) -> None:
+        with patch.object(dashboard_server, "_CROSS_SESSION_CONVERSATION_SERVICE", None):
+            full_reply = "a" * 8500 + "Final detail: use the spare palette."
+            dashboard_server.write_chat_transcripts_storage(dashboard_server.ChatTranscriptsRequest(chats=[
+                {"id": "long-peer", "sessionId": "peer-session", "items": [
+                    {"id": "question", "type": "user", "text": "What did you find?"},
+                    {"id": "reply", "type": "agent", "response": {"plan": {
+                        "reply": full_reply, "summary": "Peer answer", "planner": "runtime", "shellNeeded": False,
+                    }}},
+                    {"id": "later", "type": "user", "text": "Another question."},
+                ]},
+            ]))
+            read = dashboard_server.AGENT_GATEWAY._tools["vrcforge_read_conversation"].handler
+            params = {"chatId": "vrcforge://chat/long-peer", "_trustedConversationContext": {
+                "chatId": "source", "sessionId": "source-session", "clientTurnId": "turn", "actionId": "read",
+            }}
+            first = read({**params, "limit": 2})
+            partial = first["messages"][1]
+            self.assertTrue(partial["truncated"])
+            tail = read({**params, **partial["nextTextRequest"]})
+            self.assertEqual(partial["text"] + tail["messages"][0]["text"], full_reply)
+            self.assertFalse(tail["messages"][0]["truncated"])
+            self.assertEqual(tail["nextOffset"], 2)
+            self.assertEqual(read({**params, "offset": tail["nextOffset"]})["messages"][0]["text"], "Another question.")
+            self.assertIn("use the spare palette", dashboard_server.RUNTIME_PLANNER.native_result_observation({
+                "tool": "vrcforge_read_conversation", "kind": "skill", "status": "completed", "result": tail,
+            })["observation"])
+
     def test_chat_storage_write_echoes_precise_origin(self) -> None:
         origin_id = "00000000-0000-4000-8000-000000000001"
         vault = SimpleNamespace(retain=lambda _references: {})

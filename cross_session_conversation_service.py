@@ -165,7 +165,6 @@ class CrossSessionConversationService:
         host = self._host(params)
         chat_id, target = self._target_chat(params, host)
         items = target.get("items") if isinstance(target.get("items"), list) else []
-        transcript = [message for item in items if (message := self._public_message(item)) is not None]
         try:
             offset = max(0, int(params.get("offset", 0)))
         except (TypeError, ValueError):
@@ -174,8 +173,30 @@ class CrossSessionConversationService:
             limit = min(self.MAX_READ_LIMIT, max(1, int(params.get("limit", 6))))
         except (TypeError, ValueError):
             limit = 6
-        page = transcript[offset:offset + limit]
-        next_offset = offset + len(page) if offset + len(page) < len(transcript) else None
+        text_offset = params.get("textOffset")
+        if text_offset is not None:
+            if type(text_offset) is not int or text_offset < 0:
+                raise CrossSessionConversationError("textOffset must be a nonnegative integer.")
+            limit = 1
+        page = []
+        total = 0
+        for item in items:
+            start = (text_offset or 0) if total == offset else 0
+            message = self._public_message(item, text_offset=start)
+            if message is None:
+                continue
+            if offset <= total < offset + limit:
+                if message["truncated"]:
+                    message["nextTextRequest"] = {
+                        "chatId": chat_id,
+                        "offset": total,
+                        "textOffset": start + len(message["text"]),
+                    }
+                page.append(message)
+            total += 1
+        if text_offset is not None and not page:
+            raise CrossSessionConversationError("The requested message offset is outside this conversation.")
+        next_offset = offset + len(page) if offset + len(page) < total else None
         return {
             "ok": True,
             "chatId": chat_id,
@@ -184,7 +205,7 @@ class CrossSessionConversationService:
             "messages": page,
             "offset": offset,
             "nextOffset": next_offset,
-            "total": len(transcript),
+            "total": total,
         }
 
     def create_conversation(self, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -491,7 +512,7 @@ class CrossSessionConversationService:
             return MAX_CROSS_SESSION_AGENTIC_TURNS
 
     @classmethod
-    def _public_message(cls, item: Any) -> dict[str, Any] | None:
+    def _public_message(cls, item: Any, *, text_offset: int = 0) -> dict[str, Any] | None:
         if not isinstance(item, Mapping):
             return None
         item_type = str(item.get("type") or "")
@@ -507,11 +528,13 @@ class CrossSessionConversationService:
             return None
         if not isinstance(text, str) or not text.strip():
             return None
-        truncated = len(text) > cls.MAX_READ_MESSAGE_CHARS
+        if text_offset >= len(text):
+            raise CrossSessionConversationError("textOffset is outside the requested message.")
+        end = text_offset + cls.MAX_READ_MESSAGE_CHARS
         message = {
             "role": role,
-            "text": text[:cls.MAX_READ_MESSAGE_CHARS],
-            "truncated": truncated,
+            "text": text[text_offset:end],
+            "truncated": len(text) > end,
             "createdAt": cls._text(item.get("createdAt") or item.get("completedAt"), max_chars=48),
         }
         if role == "agent_relay" and isinstance(item.get("forwardedFrom"), Mapping):
