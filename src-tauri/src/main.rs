@@ -391,6 +391,7 @@ fn main() {
             update_vision_config,
             update_skill,
             save_project_prefs,
+            recycle_project,
             scan_project_index,
             start_backend,
             write_path_to_skill,

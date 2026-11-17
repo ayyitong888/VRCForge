@@ -415,6 +415,13 @@ pub(crate) struct DesktopProjectPrefsRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopRecycleProjectRequest {
+    path: String,
+    confirmation: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProjectIndexScanRequest {
     project_path: String,
     max_files: Option<u64>,
@@ -1782,6 +1789,22 @@ pub async fn save_project_prefs(
                 "hiddenPaths": request.hidden_paths.unwrap_or_default(),
             })),
             request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn recycle_project(
+    request: DesktopRecycleProjectRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/projects/recycle".to_string(),
+            Some(serde_json::json!({ "path": request.path, "confirmation": request.confirmation })),
+            Some(120_000),
         )
         .map(sanitize_webview_response)
     })

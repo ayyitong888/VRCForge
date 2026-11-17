@@ -148,7 +148,7 @@ export function useChatSessions({
 }: UseChatSessionsParams) {
   const { i18n, t } = useTranslation();
   const [chats, setChats] = useState<ChatThread[]>(() => initialChatState.chats);
-  const [sidebarCacheEntries] = useState<ChatSidebarCacheEntry[]>(() => loadChatSidebarCache());
+  const [sidebarCacheEntries, setSidebarCacheEntries] = useState<ChatSidebarCacheEntry[]>(() => loadChatSidebarCache());
   const [catalog, setCatalog] = useState<ChatCatalogEntry[] | null>(null);
   const [chatStorageLoadSucceeded, setChatStorageLoadSucceeded] = useState(false);
   const [chatStorageReady, setChatStorageReady] = useState(false);
@@ -365,6 +365,7 @@ export function useChatSessions({
       const normalized = normalizeStoredChatSnapshot(result.chats);
       const chat = normalized.chats.find((record) => record.id === chatId);
       if (!chat || !chatRestoreMountedRef.current || endpointRef.current !== endpoint) return undefined;
+      if (!catalogRef.current.some((row) => row.id === chatId)) return undefined;
       const digests = chatDigestsFromPayload(result.chatDigests, [chat]);
       const shapes = chatMetadataShapesFromPayload(result.chatMetadataShapes, [chat]);
       if (result.sourceRevision) mergeSourceRevisions([result.sourceRevision]);
@@ -1247,6 +1248,52 @@ export function useChatSessions({
     }
   }
 
+  async function recycleProjectWithChats(path: string, recycle: () => Promise<string>) {
+    await enqueueChatStorageOperation(async () => {
+      // Drain chat writes before removing their project directory, then discard
+      // its loaded state before autosaves can resume.
+      if (chatsDirtyRef.current) {
+        await saveWithOneReconcileRetryWithinStorageOperation(
+          filterPersistableChats(chatsRef.current), chatsSaveVersionRef.current, true,
+        );
+      } else {
+        await settlePendingChatSave();
+      }
+      const recycledPath = await recycle();
+      const keys = new Set([path, recycledPath].map(normalizeProjectPathKey));
+      const removed = (entry: { projectPath?: string; sourceProjectPath?: string }) =>
+        keys.has(normalizeProjectPathKey(entry.projectPath))
+        || keys.has(normalizeProjectPathKey(entry.sourceProjectPath));
+      const ids = new Set([
+        ...chatsRef.current.filter(removed).map((chat) => chat.id),
+        ...catalogRef.current.filter(removed).map((chat) => chat.id),
+        ...sidebarCacheEntries.filter(removed).map((chat) => chat.id),
+      ]);
+      for (const [id, baseline] of Object.entries(chatBaselineFingerprintsRef.current)) {
+        if (baseline && removed(baseline)) ids.add(id);
+      }
+      for (const id of ids) {
+        delete chatBaselineFingerprintsRef.current[id];
+        if (chatServerDigestsRef.current) delete chatServerDigestsRef.current[id];
+        if (chatServerMetadataShapesRef.current) delete chatServerMetadataShapesRef.current[id];
+        chatDeletedIdsRef.current.delete(id);
+      }
+      const keep = (entry: { id: string }) => !ids.has(entry.id);
+      chatsRef.current = chatsRef.current.filter(keep);
+      catalogRef.current = catalogRef.current.filter(keep);
+      pendingChatIdsRef.current = pendingChatIdsRef.current.filter((id) => !ids.has(id));
+      chatSourceRevisionsRef.current = chatSourceRevisionsRef.current.filter(
+        (source) => !keys.has(normalizeProjectPathKey(source.projectPath)),
+      );
+      setChats(chatsRef.current);
+      setCatalog((current) => current?.filter(keep) ?? null);
+      setSidebarCacheEntries((current) => current.filter(keep));
+      if (keys.has(normalizeProjectPathKey(activeProjectPath)) || ids.has(activeChatId)) {
+        newConversation("", "general");
+      }
+    }, "recycle-project");
+  }
+
   function openChat(chat: ChatThread) {
     setActiveView("chat");
     setActiveChatId(chat.id);
@@ -1312,6 +1359,7 @@ export function useChatSessions({
     bindProject,
     newTemporaryChat,
     archiveProjectChats,
+    recycleProjectWithChats,
     openChat,
     selectProject,
   };

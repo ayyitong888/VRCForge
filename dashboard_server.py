@@ -610,6 +610,7 @@ from path_to_skill_controller import (
     PathToSkillWriteService,
 )
 from project_catalog_discovery import ProjectCatalogDiscovery, ProjectCatalogDiscoveryPorts
+from project_recycle import recycle_project_folder, validate_project as validate_project_for_recycle
 from project_catalog_registration_service import (
     ProjectCatalogRegistrationError,
     ProjectCatalogRegistrationService,
@@ -7027,6 +7028,10 @@ def project_catalog_registration_paths() -> dict[str, tuple[Path, ...]]:
             app_data / "Alcom" / "settings.json",
             local_app_data / "vrc-get" / "settings.json",
             app_data / "vrc-get" / "settings.json",
+            local_app_data / "VRChatCreatorCompanion" / "vrc-get-settings.json",
+            app_data / "VRChatCreatorCompanion" / "vrc-get-settings.json",
+            local_app_data / "VRChatCreatorCompanion" / "vrc-get" / "settings.json",
+            app_data / "VRChatCreatorCompanion" / "vrc-get" / "settings.json",
         ),
         "unityHub": (
             app_data / "UnityHub" / "projects-v1.json",
@@ -7038,6 +7043,8 @@ def project_catalog_registration_paths() -> dict[str, tuple[Path, ...]]:
 PROJECT_CATALOG_REGISTRATIONS = ProjectCatalogRegistrationService(
     receipts_dir=DASHBOARD_ARTIFACTS_DIR / "project-catalog-registration-receipts",
     catalog_paths=project_catalog_registration_paths(),
+    alcom_database_paths=PROJECT_CATALOG_DISCOVERY.discover_alcom_database_paths(),
+    alcom_helper_path=TOOLS_DIR / "alcom_litedb_reader" / "vrcforge_alcom_litedb_reader.exe",
 )
 
 
@@ -10752,6 +10759,112 @@ async def refresh_projects() -> dict[str, Any]:
     await EVENT_BUS.broadcast("projects", payload)
     await emit_log_async("info", "project", "Project list refreshed.", {"count": len(payload["projects"])})
     return payload
+
+
+class ProjectRecycleRequest(BaseModel):
+    path: str
+    confirmation: Literal["delete"]
+
+
+_PROJECT_RECYCLE_LOCK = Lock()
+
+
+def recycle_unity_project_sync(path: str) -> dict[str, Any]:
+    if os.name != "nt":
+        raise ValueError("Project deletion is available on Windows only.")
+    protected = (runtime_paths.ROOT_DIR, runtime_paths.USER_DATA_DIR, Path.home())
+    project = validate_project_for_recycle(path, protected)
+    identity = project.stat()
+    display = normalize_path_string(str(project))
+    key = display.casefold()
+    chat_key = normalize_chat_project_key(display)
+
+    def matches(value: Any) -> bool:
+        return isinstance(value, str) and normalize_path_string(value).casefold() == key
+
+    def require_closed_managers() -> None:
+        manager_names = {"unity hub.exe", "creatorcompanion.exe", "vrchat creator companion.exe", "alcom.exe", "vrc-get.exe"}
+        running = {row["name"].casefold() for row in _enumerate_windows_process_names(require_discovery_evidence=True)}
+        if running & manager_names:
+            raise ValueError("Exit Unity Hub, VCC and ALCOM completely before deleting a project. They may still be running in the tray.")
+
+    with _PROJECT_RECYCLE_LOCK, CHAT_TRANSCRIPTS_LOCK:
+        snapshot = PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False)
+        known_projects = [*snapshot.get("projects", []), *load_project_prefs().get("customProjects", [])]
+        if not any(matches(row.get("path")) and row.get("projectType", "unity") == "unity"
+                   for row in known_projects):
+            raise ValueError("Select a Unity project from the current project list.")
+        live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
+        if live_connection is not None and live_connection.is_frozen():
+            raise ValueError("Stop the active validation run before deleting projects.")
+        require_closed_managers()
+        for process in list_running_unity_processes(require_discovery_evidence=True):
+            opened = extract_unity_project_path_from_command_line(process["commandLine"])
+            if not opened or Path(opened).resolve().is_relative_to(project):
+                raise ValueError("Close the Unity Editor for this project before deleting it.")
+        runs = AGENT_GATEWAY.runtime_runs.list_runs(limit=50, project_root=display, notification_only=True)["runs"]
+        if any(row.get("status") in {"queued", "running", "stopping", "waiting_approval", "waiting_for_approval", "waiting_for_input"}
+               for row in runs):
+            raise ValueError("Stop the active Agent run for this project before deleting it.")
+
+        def commit() -> None:
+            require_closed_managers()
+            index = chat_project_index_path()
+            prefs = project_prefs_path()
+            selection = PROJECT_SNAPSHOT_SELECTION.selection_path
+            changes: dict[Path, tuple[bytes, dict[str, Any]]] = {}
+            for target, fields in ((index, ("projectPaths",)), (prefs, ("customPaths", "customProjects", "hiddenPaths")),
+                                   (selection, ())):
+                if path_has_link_like_segment(target, target.parent):
+                    raise ValueError("A project index or preference file is linked. Deletion was stopped.")
+                if not target.is_file():
+                    continue
+                original = target.read_bytes()
+                document = load_strict_json(original.decode("utf-8-sig"))
+                updated = dict(document)
+                for field in fields:
+                    if isinstance(document.get(field), list):
+                        updated[field] = [entry for entry in document[field]
+                                          if not matches(entry.get("path") if isinstance(entry, dict) else entry)]
+                if target == selection and matches(document.get("selectedProjectPath")):
+                    updated["selectedProjectPath"] = ""
+                if updated != document:
+                    changes[target] = (original, updated)
+            written: dict[Path, bytes] = {}
+            try:
+                for target, (original, updated) in changes.items():
+                    if target.read_bytes() != original:
+                        raise OSError("VRCForge project data changed during deletion. Try again.")
+                    atomic_write_json(target, updated)
+                    written[target] = original
+                if validate_project_for_recycle(path, protected) != project or not os.path.samestat(project.stat(), identity):
+                    raise OSError("The project path changed during deletion.")
+                recycle_project_folder(project)
+            except Exception:
+                if not restore_chat_storage_files(written, {}):
+                    raise OSError("Project deletion failed and VRCForge project metadata could not be fully restored.")
+                raise
+
+        catalogs = PROJECT_CATALOG_REGISTRATIONS.remove_project_from_catalogs(project, commit)
+        CHAT_REQUESTED_PROJECT_PATHS.pop(chat_key, None)
+        if matches(DASHBOARD_STATE.selected_project_path):
+            DASHBOARD_STATE.selected_project_path = ""
+            DASHBOARD_STATE.unity_instance = ""
+    PROJECT_SNAPSHOT_SELECTION.schedule_project_snapshot_refresh(force=True)
+    return {"ok": True, "path": display, "catalogs": catalogs}
+
+
+@app.post("/api/projects/recycle")
+async def recycle_unity_project(request: Request, body: ProjectRecycleRequest) -> dict[str, Any]:
+    supplied = extract_bearer_token(request)
+    if not APP_SESSION_TOKEN or not hmac.compare_digest(supplied, APP_SESSION_TOKEN):
+        raise HTTPException(status_code=401, detail="Project deletion requires a VRCForge app session.")
+    try:
+        result = await asyncio.to_thread(recycle_unity_project_sync, body.path)
+    except (ValueError, OSError, ProjectCatalogRegistrationError, UnityProcessDiscoveryUnavailable) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await emit_log_async("info", "project", "Unity project moved to the Windows Recycle Bin.", {"projectPath": result["path"]})
+    return result
 
 
 @app.post("/api/state")

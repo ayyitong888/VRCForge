@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import {
   fetchProjectPrefs,
   planOutfitImport,
+  recycleUnityProject,
   requestOutfitImport,
   saveProjectPrefs,
 } from "../lib/api";
@@ -59,6 +60,7 @@ export function useProjectManagement({
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [projectListError, setProjectListError] = useState("");
   const [projectMenu, setProjectMenu] = useState<{ projectPath: string; x: number; y: number } | null>(null);
+  const [recycledProjectKeys, setRecycledProjectKeys] = useState<Set<string>>(() => new Set());
   const [projectUiPrefs, setProjectUiPrefs] = useState<ProjectUiPrefs>(() => loadProjectUiPrefs());
   const [renamingProjectPath, setRenamingProjectPath] = useState("");
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
@@ -110,8 +112,10 @@ export function useProjectManagement({
         sources: ["custom"],
       });
     }
-    return [...byPath.values()];
-  }, [projectPrefs.customProjects, projects]);
+    return [...byPath.entries()]
+      .filter(([key]) => !recycledProjectKeys.has(key))
+      .map(([, project]) => project);
+  }, [projectPrefs.customProjects, projects, recycledProjectKeys]);
   const projectItems = useMemo(
     () =>
       allProjectItems
@@ -244,6 +248,11 @@ export function useProjectManagement({
       setProjectModalError(t(newProjectType === "general" ? "project.invalidGeneralProjectRoot" : "project.invalidProjectRoot"));
       return;
     }
+    setRecycledProjectKeys((current) => {
+      const next = new Set(current);
+      next.delete(normalizeProjectPathKey(path));
+      return next;
+    });
     setNewProjectPath("");
     setShowProjectModal(false);
     if (newProjectType === "unity") {
@@ -282,6 +291,32 @@ export function useProjectManagement({
       ...projectPrefs,
       hiddenPaths: projectPrefs.hiddenPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)),
     });
+  }
+
+  function canRecycleProject(path: string) {
+    const key = normalizeProjectPathKey(path);
+    return projectItems.some((project) =>
+      project.projectType !== "general" && Boolean(project.path) &&
+      normalizeProjectPathKey(project.path) === key && isAbsoluteLocalPath(project.path || ""),
+    );
+  }
+
+  async function recycleProject(path: string, confirmation: string): Promise<string> {
+    if (!canRecycleProject(path)) throw new Error(t("project.invalidProjectRoot"));
+    const target = runtimeConnected ? endpoint : await startRuntime();
+    if (!target) throw new Error(t("project.runtimeRequired"));
+    const recycledPath = await recycleUnityProject(target, path, confirmation);
+    const keys = new Set([path, recycledPath].map(normalizeProjectPathKey));
+    const keepPath = (value: string) => !keys.has(normalizeProjectPathKey(value));
+    const withoutRecycledProject = (prefs: ProjectPrefs): ProjectPrefs => ({
+      customPaths: prefs.customPaths.filter(keepPath),
+      customProjects: prefs.customProjects.filter((entry) => keepPath(entry.path)),
+      hiddenPaths: prefs.hiddenPaths.filter(keepPath),
+    });
+    setRecycledProjectKeys((current) => new Set([...current, ...keys]));
+    setProjectPrefs(withoutRecycledProject);
+    saveProjectPrefsCache(withoutRecycledProject(projectPrefs));
+    return recycledPath;
   }
 
   function projectDisplayName(project?: { path?: string; name?: string }): string {
@@ -530,6 +565,8 @@ export function useProjectManagement({
     removeCustomProject,
     hideProject,
     unhideProject,
+    canRecycleProject,
+    recycleProject,
     projectDisplayName,
     projectDisplayLabel,
     projectDisplayDetail,

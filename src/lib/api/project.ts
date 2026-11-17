@@ -6,6 +6,22 @@ export type ProjectPrefs = {
   hiddenPaths: string[];
 };
 
+export async function recycleUnityProject(endpoint: string, path: string, confirmation: string): Promise<string> {
+  const request = { path, confirmation };
+  const payload = hasTauriInternals()
+    ? await invokeTauriWithAbort<{ ok: boolean; path: string }>("recycle_project", {
+        request,
+      })
+    : await requestJson<{ ok: boolean; path: string }>(`${endpoint}/api/projects/recycle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+        timeoutMs: 120000,
+      });
+  if (payload.ok !== true || !payload.path) throw new Error("VRCForge did not confirm the project removal.");
+  return payload.path;
+}
+
 export type ProjectIndexPathEntry = {
   path: string;
   category?: string;

@@ -12,13 +12,14 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, type ReactNode, type Ref } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { ChatThread } from "../../lib/chat-types";
 import { normalizeProjectPathKey } from "../../lib/project-path";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
+import { DeleteProjectDialog } from "./delete-project-dialog";
 
 export type ProjectMenuState = { projectPath: string; x: number; y: number };
 export type ChatMenuState = { chatId: string; x: number; y: number };
@@ -43,6 +44,8 @@ type SidebarMenusProps = {
   onArchiveProjectChats: (projectPath: string, archive: boolean) => void;
   onHideProject: (projectPath: string) => void;
   onRemoveCustomProject: (projectPath: string) => void;
+  canRecycleProject: (projectPath: string) => boolean;
+  onRecycleProject: (projectPath: string, confirmation: string) => Promise<void>;
   onAskInNewSession: (text: string) => void;
   onAddSelectionToComposer: (text: string) => void;
   onCloseChatMenu: () => void;
@@ -73,6 +76,8 @@ export function SidebarMenus({
   onArchiveProjectChats,
   onHideProject,
   onRemoveCustomProject,
+  canRecycleProject,
+  onRecycleProject,
   onAskInNewSession,
   onAddSelectionToComposer,
   onCloseChatMenu,
@@ -86,6 +91,7 @@ export function SidebarMenus({
   const { t } = useTranslation();
   const menuChat = chatMenu ? chats.find((chat) => chat.id === chatMenu.chatId) : null;
   const deleteTarget = deleteTargetId ? chats.find((chat) => chat.id === deleteTargetId) : null;
+  const [projectDeletePath, setProjectDeletePath] = useState("");
 
   return (
     <>
@@ -105,6 +111,7 @@ export function SidebarMenus({
           onArchiveProjectChats={onArchiveProjectChats}
           onHideProject={onHideProject}
           onRemoveCustomProject={onRemoveCustomProject}
+          onDeleteProject={canRecycleProject(projectMenu.projectPath) ? setProjectDeletePath : undefined}
         />,
         document.body,
       ) : null}
@@ -155,6 +162,16 @@ export function SidebarMenus({
           onConfirm={onConfirmDeleteChat}
         />
       ) : null}
+      {projectDeletePath ? (
+        <DeleteProjectDialog
+          path={projectDeletePath}
+          onCancel={() => setProjectDeletePath("")}
+          onConfirm={async (confirmation) => {
+            await onRecycleProject(projectDeletePath, confirmation);
+            setProjectDeletePath("");
+          }}
+        />
+      ) : null}
     </>
   );
 }
@@ -174,6 +191,7 @@ function ProjectContextMenu({
   onArchiveProjectChats,
   onHideProject,
   onRemoveCustomProject,
+  onDeleteProject,
 }: {
   menu: ProjectMenuState;
   chats: ChatThread[];
@@ -189,6 +207,7 @@ function ProjectContextMenu({
   onArchiveProjectChats: (projectPath: string, archive: boolean) => void;
   onHideProject: (projectPath: string) => void;
   onRemoveCustomProject: (projectPath: string) => void;
+  onDeleteProject?: (projectPath: string) => void;
 }) {
   const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
@@ -199,6 +218,11 @@ function ProjectContextMenu({
   const pinned = pinnedProjectSet.has(menuKey);
   const projectChatCount = chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === menuKey && !chat.archived).length;
   const archivedChatCount = chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === menuKey && chat.archived).length;
+
+  useLayoutEffect(() => {
+    const element = menuRef.current;
+    if (element) element.style.top = `${Math.max(8, Math.min(menu.y, window.innerHeight - element.offsetHeight - 8))}px`;
+  }, [menu.y]);
 
   useEffect(() => {
     menuRef.current?.querySelector<HTMLButtonElement>('button[role="menuitem"]')?.focus();
@@ -217,10 +241,9 @@ function ProjectContextMenu({
             onClose();
           }
         }}
-        className="fixed z-50 w-56 rounded-lg border border-border bg-card p-1.5 shadow-panel"
+        className="fixed z-50 max-h-[calc(100vh-1rem)] w-56 overflow-y-auto rounded-lg border border-border bg-card p-1.5 shadow-panel"
         style={{
-          left: Math.min(menu.x, window.innerWidth - 240),
-          top: Math.min(menu.y, window.innerHeight - 260),
+          left: Math.max(8, Math.min(menu.x, window.innerWidth - 240)),
         }}
       >
         <MenuButton
@@ -288,6 +311,17 @@ function ProjectContextMenu({
             label={t("project.removeProject")}
             onClick={() => {
               onRemoveCustomProject(menuPath);
+              onClose();
+            }}
+          />
+        ) : null}
+        {onDeleteProject ? (
+          <MenuButton
+            destructive
+            icon={<Trash2 className="h-4 w-4 shrink-0" />}
+            label={t("project.deleteProject")}
+            onClick={() => {
+              onDeleteProject(menuPath);
               onClose();
             }}
           />

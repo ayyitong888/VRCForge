@@ -744,6 +744,8 @@ export default function App() {
     removeCustomProject,
     hideProject,
     unhideProject,
+    canRecycleProject,
+    recycleProject,
     projectDisplayName,
     projectDisplayLabel,
     projectDisplayDetail,
@@ -826,6 +828,7 @@ export default function App() {
     bindProject,
     newTemporaryChat,
     archiveProjectChats,
+    recycleProjectWithChats,
     openChat,
     selectProject,
   } = useChatSessions({
@@ -4987,6 +4990,11 @@ export default function App() {
         onArchiveProjectChats={archiveProjectChats}
         onHideProject={hideProject}
         onRemoveCustomProject={removeCustomProject}
+        canRecycleProject={canRecycleProject}
+        onRecycleProject={async (path, confirmation) => {
+          await recycleProjectWithChats(path, () => recycleProject(path, confirmation));
+          void refreshManagedProjectList();
+        }}
         onAskInNewSession={askInNewSession}
         onAddSelectionToComposer={addSelectionToComposer}
         onCloseChatMenu={() => setChatMenu(null)}

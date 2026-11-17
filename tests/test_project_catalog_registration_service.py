@@ -140,3 +140,77 @@ def test_unknown_or_incompatible_catalogue_is_read_only_failure(tmp_path: Path) 
         service.register({"catalog": "vcc", "projectPath": str(project)})
 
     assert paths["vcc"].read_bytes() == before
+
+
+def test_remove_project_from_every_catalogue_before_commit_and_keep_other_projects(tmp_path: Path) -> None:
+    service, paths = _service(tmp_path)
+    project = _project(tmp_path / "Avalon")
+    unrelated = _project(tmp_path / "Avalon Backup")
+    duplicate = paths["vcc"].with_name("settings_v2.json")
+    service.catalog_paths["vcc"] += (duplicate,)
+    paths["vcc"].write_text(json.dumps({"userProjects": [project.as_posix() + "/", str(unrelated)], "lastSelectedProject": str(project)}), encoding="utf-8")
+    duplicate.write_text(json.dumps({"userProjects": [str(project)], "other": 10}), encoding="utf-8")
+    paths["alcom"].write_text(json.dumps({"projects": [{"path": str(project), "name": "a"}, str(unrelated)], "keep": True}), encoding="utf-8")
+    paths["unityHub"].write_text(json.dumps({"schema_version": "v1", "data": {
+        project.as_posix(): {"path": project.as_posix(), "title": "Avalon"},
+        str(unrelated): {"title": "Avalon Backup"},
+    }}), encoding="utf-8")
+    expected = {
+        paths["vcc"]: {"userProjects": [str(unrelated)], "lastSelectedProject": ""},
+        duplicate: {"userProjects": [], "other": 10},
+        paths["alcom"]: {"projects": [str(unrelated)], "keep": True},
+        paths["unityHub"]: {"schema_version": "v1", "data": {str(unrelated): {"title": "Avalon Backup"}}},
+    }
+
+    def commit() -> None:
+        assert {p: json.loads(p.read_bytes()) for p in expected} == expected
+        project.rename(tmp_path / "recycled-project")
+
+    assert service.remove_project_from_catalogs(project, commit) == ["vcc", "alcom", "unityHub"]
+    assert not project.exists()
+    assert (unrelated / "Assets").is_dir()
+
+
+def test_removal_restores_exact_json_and_litedb_bytes_if_commit_fails(tmp_path: Path, monkeypatch) -> None:
+    service, paths = _service(tmp_path)
+    project = _project(tmp_path / "Avatar Project")
+    db = tmp_path / "vcc.liteDb"
+    db.write_bytes(b"before-db")
+    service.alcom_database_paths = (db,)
+    paths["vcc"].write_text(json.dumps({"userProjects": [str(project)]}), encoding="utf-8-sig")
+    before = {p: p.read_bytes() for p in (*paths.values(), db)}
+    monkeypatch.setattr(service, "_prepare_litedb_removal", lambda data, selected: b"after-db")
+
+    def fail() -> None:
+        assert json.loads(paths["vcc"].read_bytes())["userProjects"] == []
+        assert db.read_bytes() == b"after-db"
+        raise OSError("recycle unavailable")
+
+    with pytest.raises(OSError, match="recycle unavailable"):
+        service.remove_project_from_catalogs(project, fail)
+    assert {p: p.read_bytes() for p in before} == before
+    assert project.is_dir()
+
+
+def test_unreadable_or_unsupported_catalogue_prevents_filesystem_commit(tmp_path: Path) -> None:
+    service, paths = _service(tmp_path)
+    project = _project(tmp_path / "Avatar Project")
+    paths["vcc"].write_text(json.dumps({"userProjects": [str(project)]}), encoding="utf-8")
+    paths["unityHub"].write_text(json.dumps({"schema_version": "v2", "data": {}}), encoding="utf-8")
+    before = paths["vcc"].read_bytes()
+
+    with pytest.raises(ProjectCatalogRegistrationError, match="Unsupported Unity Hub"):
+        service.remove_project_from_catalogs(project, lambda: pytest.fail("Must not remove project"))
+    assert paths["vcc"].read_bytes() == before
+
+
+def test_pending_litedb_journal_prevents_filesystem_commit(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    project = _project(tmp_path / "Avatar Project")
+    db = tmp_path / "vcc.liteDb"
+    db.touch()
+    (tmp_path / "vcc-log.liteDb").touch()
+    service.alcom_database_paths = (db,)
+
+    with pytest.raises(ProjectCatalogRegistrationError, match="finish pending writes"):
+        service.remove_project_from_catalogs(project, lambda: pytest.fail("Must not remove project"))
