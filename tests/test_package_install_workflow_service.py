@@ -528,3 +528,41 @@ def test_legacy_upgrade_opt_in_preserves_differences(monkeypatch, tmp_path):
     assert result['canPrepareUpgradeRequest']
     assert result['legacyPreservationRequired']
     assert result['legacyBaselineVerification']['unknown']==['keep.txt']
+
+
+def test_package_manager_status_routes_available_cli_to_current_supervised_request(tmp_path: Path) -> None:
+    # Replay the relevant live receipt shape: managed vrc-get and VCC both exist,
+    # the dependency is absent, and the user requested installation inside the App.
+    calls: list[tuple[Any, ...]] = []
+    service = _service(calls, {"projectPath": str(tmp_path), "canExecuteCommandInstall": True})
+    cli = dict(service._ports.locate_managers()[0], source="vrcforge-managed")
+    from dataclasses import replace
+    service = PackageInstallWorkflowService(replace(service._ports, locate_managers=lambda: [
+        {"name": "vcc", "supportsUiHandoff": True, "supportsCommandInstall": False}, cli,
+    ]))
+    receipt = service.package_manager_status({"projectPath": str(tmp_path)})
+    assert receipt["canInstall"] and receipt["canRequestInstall"]
+    assert receipt["preferredCommandInstaller"]["name"] == "vrc-get"
+    assert receipt["preferredUiHandoff"]["name"] == "vcc"
+    assert "vrc-get" in receipt["installPolicy"]["managerPriority"][0]
+    assert "vrcforge_package_install_plan" in receipt["hint"]
+    assert "vrcforge_package_install_request" in receipt["hint"]
+    assert "external MCP Gateway enablement is not required" in receipt["hint"]
+    assert not any(call[0] == "approval" for call in calls)
+
+
+def test_package_plan_honors_explicit_cli_preference_over_detected_vcc(tmp_path: Path) -> None:
+    from dataclasses import replace
+    calls: list[tuple[Any, ...]] = []
+    service = _service(calls, {"projectPath": str(tmp_path), "canExecuteCommandInstall": True})
+    cli = dict(service._ports.locate_managers()[0], source="vrcforge-managed")
+    service = PackageInstallWorkflowService(replace(service._ports, locate_managers=lambda: [
+        {"name": "vcc", "supportsUiHandoff": True, "supportsCommandInstall": False}, cli,
+    ]))
+    for preference_key in ("preferredManager", "preferred_manager"):
+        plan = service.plan_install({"projectPath": str(tmp_path), "packageId": "com.vrcfury.vrcfury", preference_key: "vrc-get"})
+        assert plan["strategy"] == plan["executionStrategy"] == "command"
+        assert plan["preferredManager"]["name"] == "vrc-get"
+        assert plan["canExecuteCommandInstall"] and plan["canCreateInstallRequest"]
+        assert "handoff first" not in plan["message"]
+    assert not any(call[0] == "approval" for call in calls)

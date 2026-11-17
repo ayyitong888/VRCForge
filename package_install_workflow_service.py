@@ -517,7 +517,8 @@ class PackageInstallWorkflowService:
             if allow_agent and not selected_handoff
             else "manual_handoff"
         )
-        strategy = "ui_handoff" if selected_handoff else execution_strategy
+        prefer_command = selected_cli is not None and preferred == selected_cli.get("name")
+        strategy = "command" if prefer_command else "ui_handoff" if selected_handoff else execution_strategy
         return {
             "schema": "vrcforge.package_install_plan.v1",
             "packageId": package_id,
@@ -535,7 +536,7 @@ class PackageInstallWorkflowService:
             ),
             "strategy": strategy,
             "executionStrategy": execution_strategy,
-            "preferredManager": selected_handoff or selected_cli,
+            "preferredManager": selected_cli if prefer_command else selected_handoff or selected_cli,
             "commandInstaller": selected_cli,
             "uiHandoff": selected_handoff,
             "managers": managers,
@@ -544,7 +545,9 @@ class PackageInstallWorkflowService:
             "requiresApproval": True,
             "requiresCheckpoint": True,
             "message": (
-                "Use the selected ALCOM/VCC handoff first; supervised command install is also available after approval."
+                "Use the requested vrc-get CLI through the current permission policy and checkpoint flow."
+                if prefer_command
+                else "Use the selected ALCOM/VCC handoff first; supervised command install is also available after approval."
                 if selected_handoff and selected_cli
                 else "Use the selected ALCOM/VCC handoff first."
                 if selected_handoff
@@ -611,17 +614,23 @@ class PackageInstallWorkflowService:
             "knownOptimizationPackages": self._optimizer_package_catalog(),
             "installPolicy": {
                 "managerPriority": [
-                    "ALCOM/VCC UI handoff when a human wants to manage repositories visually",
-                    "vrc-get CLI for non-interactive supervised installs",
+                    "vrc-get CLI for user-requested installs under the current App permission policy",
+                    "ALCOM/VCC UI handoff only when the user requests it or the package plan requires it",
                     "agent-managed download/install plan when no package manager is available",
                 ],
                 "directManifestEditing": False,
                 "requiresApprovalCheckpoint": True,
             },
             "hint": (
-                "VRCForge detects ALCOM/VCC for user handoff without requiring either one. "
-                "Non-interactive installs currently use the sealed vrc-get adapter; otherwise "
-                "VRCForge returns a backend-neutral plan instead of claiming unsupported execution."
+                "For a user-requested package installation, read vrcforge_package_install_plan for the exact "
+                "project/package with preferredManager set to preferredCommandInstaller.name when a command "
+                "installer is available, then use vrcforge_package_install_request with the same preference "
+                "when its command-install path is ready. "
+                "The request applies the current App permission policy and checkpoint flow; external MCP Gateway "
+                "enablement is not required for the built-in Agent. A previously rejected request is historical "
+                "evidence: use the current plan/receipt to decide whether installation is blocked. "
+                "Use ALCOM/VCC handoff only if the user asks for manual installation or the current plan requires UI. "
+                "Manager detection alone is neither installation permission nor proof that a package was installed."
             ),
         }
 
