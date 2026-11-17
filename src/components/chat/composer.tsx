@@ -527,9 +527,9 @@ export function Composer({
                         <Check className={cn("mt-0.5 h-4 w-4 shrink-0", currentMode === mode.value ? modeVisual.textClass : "opacity-0")} />
                         <span className="min-w-0">
                           <span className={cn("block font-medium", modeVisual.textClass)}>
-                            {mode.label}
+                            {t(mode.labelKey)}
                           </span>
-                          <span className="block text-xs text-muted-foreground">{mode.description}</span>
+                          <span className="block text-xs text-muted-foreground">{t(mode.descriptionKey)}</span>
                         </span>
                       </button>
                     );

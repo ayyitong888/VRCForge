@@ -819,11 +819,11 @@
   },
   "executionMode": {
     "approval": "受限模式",
-    "approvalDesc": "沙箱模式：高风险命令与写操作逐项审批，最安全。",
+    "approvalDesc": "写入和高风险操作需逐项确认。",
     "auto": "自动审批",
-    "autoDesc": "内置助手自动审核普通操作；删除和项目外路径仍需确认。外部 MCP 按手动批准执行。",
+    "autoDesc": "普通操作自动审核，高风险或信息不足时手动确认。",
     "roslynFullAuto": "完全权限",
-    "roslynFullAutoDesc": "所有请求自动通过并留痕；风险最高，不再需要启动额外确认。"
+    "roslynFullAutoDesc": "按授权直接执行。外部连接需手动开启。"
   },
   "chat": {
     "captureBatch": "第 {{index}} 次截图",

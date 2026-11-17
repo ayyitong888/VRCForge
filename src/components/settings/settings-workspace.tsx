@@ -455,7 +455,7 @@ export function SettingsWorkspace({
                   )}
                 >
                   <div className="flex min-w-0 items-center gap-2">
-                    <span className={cn("truncate text-sm font-medium", modeVisual.textClass)}>{mode.label}</span>
+                    <span className={cn("truncate text-sm font-medium", modeVisual.textClass)}>{t(mode.labelKey)}</span>
                     {mode.value === "roslyn_full_auto" ? (
                       <Badge tone={modeVisual.badgeTone} className="shrink-0">
                         {t("settings.highRisk")}
@@ -468,7 +468,7 @@ export function SettingsWorkspace({
                     ) : null}
                     {selected ? <Check className={cn("ml-auto h-4 w-4 shrink-0", modeVisual.textClass)} /> : null}
                   </div>
-                  <div className="text-xs text-muted-foreground">{mode.description}</div>
+                  <div className="text-xs text-muted-foreground">{t(mode.descriptionKey)}</div>
                 </button>
               );
             })}

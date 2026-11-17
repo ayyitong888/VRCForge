@@ -1,14 +1,14 @@
 import i18n from "../i18n";
 import type { ExecutionMode, PermissionState } from "./api";
 
-export const EXECUTION_MODES: Array<{ value: ExecutionMode; label: string; description: string }> = [
-  { value: "approval", label: i18n.t("executionMode.approval"), description: i18n.t("executionMode.approvalDesc") },
-  { value: "auto", label: i18n.t("header.autoApproval"), description: i18n.t("executionMode.autoDesc") },
-  { value: "roslyn_full_auto", label: i18n.t("header.fullPermission"), description: i18n.t("header.fullPermission") },
+export const EXECUTION_MODES: Array<{ value: ExecutionMode; labelKey: string; descriptionKey: string }> = [
+  { value: "approval", labelKey: "executionMode.approval", descriptionKey: "executionMode.approvalDesc" },
+  { value: "auto", labelKey: "header.autoApproval", descriptionKey: "executionMode.autoDesc" },
+  { value: "roslyn_full_auto", labelKey: "header.fullPermission", descriptionKey: "executionMode.roslynFullAutoDesc" },
 ];
 
 export function executionModeLabel(mode?: string): string {
-  return EXECUTION_MODES.find((item) => item.value === mode)?.label || i18n.t("executionMode.approval");
+  return i18n.t(EXECUTION_MODES.find((item) => item.value === mode)?.labelKey ?? "executionMode.approval");
 }
 
 export type PermissionVisualState = {

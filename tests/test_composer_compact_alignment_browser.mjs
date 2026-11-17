@@ -15,7 +15,8 @@ const bundle = await build({
     import React, { useState } from "react";
     import { createRoot } from "react-dom/client";
     import { Composer } from "./src/components/chat/composer";
-    import { initializeI18n } from "./src/i18n";
+    import { initializeI18n, setLocale } from "./src/i18n";
+    window.setPermissionFixtureLocale = setLocale;
     window.submissions = 0;
     function Fixture() {
       const [input, setInput] = useState("");
@@ -32,7 +33,7 @@ const bundle = await build({
 const { chromium } = createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
 const browser = await chromium.launch({ headless: true, channel: "msedge" });
 try {
-  const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+  const page = await browser.newPage({ locale: "en-US", viewport: { width: 800, height: 600 } });
   await page.setContent('<main id="root"></main>');
   await page.addStyleTag({ content: css });
   await page.addScriptTag({ content: bundle.outputFiles[0].text });
@@ -120,6 +121,14 @@ try {
     assert.ok(menuRect.y >= 0 && menuRect.y + menuRect.height <= page.viewportSize().height,
       "permission menu must remain visible vertically");
     assert.equal(await menu.locator("button").count(), 3);
+    const fullDescription = "Run authorized actions directly. Enable external access manually.";
+    assert.equal(await menu.getByText("Full Permission", { exact: true }).count(), 1);
+    assert.equal(await menu.getByText(fullDescription, { exact: true }).isVisible(), true);
+
+    await page.evaluate(() => window.setPermissionFixtureLocale("zh-CN"));
+    await menu.getByText("按授权直接执行。外部连接需手动开启。", { exact: true }).waitFor();
+    assert.equal(await menu.getByText("完全权限", { exact: true }).count(), 1);
+    assert.equal(await menu.getByText("普通操作自动审核，高风险或信息不足时手动确认。", { exact: true }).isVisible(), true);
   });
 } finally {
   await browser.close();

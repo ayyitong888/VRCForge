@@ -44,7 +44,7 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...group("general", "diagnostics", [["settings.diagnostics", "settings.loggingDesc"], ["settings.logLevel"], ["settings.openLogsFolder"], ["settings.exportBundle"]]),
   ...group("general", "about", [["settings.aboutTitle", "settings.aboutSafety"]]),
   ...group("general", "developer-toggle", [["settings.developerOptions", "settings.developerOptionsDesc"]]),
-  ...group("permissions", "permissions", [["settings.permissionMode", "settings.permissionModeDescription"], ["executionMode.approval", "executionMode.approvalDesc"], ["header.autoApproval", "executionMode.autoDesc"], ["header.fullPermission"]]),
+  ...group("permissions", "permissions", [["settings.permissionMode", "settings.permissionModeDescription"], ["executionMode.approval", "executionMode.approvalDesc"], ["header.autoApproval", "executionMode.autoDesc"], ["header.fullPermission", "executionMode.roslynFullAutoDesc"]]),
   ...group("models", "account", [["chatgptOAuth.title"], ["chatgptOAuth.model"], ["chatgptOAuth.reasoningSelect"], ["chatgptOAuth.testConnection"]]),
   ...group("models", "api", [
     ["provider.apiProvider", "settings.providerDesc"], ["provider.apiKey", "provider.savedKeyHint"], ["provider.baseUrl"],
