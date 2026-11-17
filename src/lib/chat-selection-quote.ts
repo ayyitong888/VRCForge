@@ -4,6 +4,15 @@ export type ConversationQuoteSelection = {
   y: number;
 };
 
+export function dismissConversationQuoteOnOutsidePointerDown(menu: HTMLElement, dismiss: () => void): () => void {
+  const handlePointerDown = (event: PointerEvent) => {
+    if (event.target instanceof Node && !menu.contains(event.target)) dismiss();
+  };
+  const ownerDocument = menu.ownerDocument;
+  ownerDocument.addEventListener("pointerdown", handlePointerDown, true);
+  return () => ownerDocument.removeEventListener("pointerdown", handlePointerDown, true);
+}
+
 function quoteContentRoot(node: Node | null): Element | null {
   const element = node instanceof Element ? node : node?.parentElement;
   if (!element) return null;

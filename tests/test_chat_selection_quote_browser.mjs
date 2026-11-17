@@ -43,6 +43,7 @@ try {
         <pre id="code-body">const answer = 42;</pre>
       </article>
       <textarea id="draft">Editable draft</textarea>
+      <div id="quote-menu"><button id="quote-action">Add to chat</button></div>
     </main>`);
   await page.addStyleTag({ content: await fs.readFile(process.env.VRCFORGE_QUOTE_STYLE_SOURCE || path.join(root, "src/styles.css"), "utf8") });
   await page.addScriptTag({ path: bundle });
@@ -103,7 +104,40 @@ try {
     return window.VRCForgeQuote.conversationQuoteFromSelection(selection);
   });
   assert.equal(crossBoundary, null, "selection spanning multiple messages is not treated as a quote");
-  console.log(JSON.stringify({ statusIgnored: true, toolIgnored: true, controlsIgnored: true, bodyQuotesPreserved: true, assistantCommentaryAllowed: true, nestedStatusIgnored: true, crossMessageRejected: true }));
+
+  await getQuote("#user-message", 0, 4);
+  await page.evaluate(() => {
+    const menu = document.querySelector("#quote-menu");
+    window.VRCForgeQuote.dismissConversationQuoteOnOutsidePointerDown?.(menu, () => {
+      window.getSelection().removeAllRanges();
+      menu.hidden = true;
+    });
+    document.querySelector("#action").addEventListener("pointerdown", () => {
+      document.body.dataset.selectionOnPointerDown = window.getSelection().toString();
+    });
+    document.querySelector("#quote-action").addEventListener("click", () => {
+      menu.dataset.actionInvoked = "true";
+    });
+  });
+  await page.locator("#quote-action").click();
+  assert.equal(await page.locator("#quote-menu").getAttribute("data-action-invoked"), "true");
+  await getQuote("#user-message", 0, 4);
+  await page.locator("#action").click();
+  assert.equal(await page.locator("body").getAttribute("data-selection-on-pointer-down"), "",
+    "the first press outside clears the quote before the clicked control runs");
+  assert.equal(await page.locator("#quote-menu").isVisible(), false);
+
+  for (const [primary, expected] of [["22 100% 50%", "rgb(255, 94, 0)"], ["120 100% 25%", "rgb(0, 128, 0)"]]) {
+    const colors = await page.evaluate((accent) => {
+      document.documentElement.style.setProperty("--primary", accent);
+      document.documentElement.style.setProperty("--primary-foreground", "0 0% 100%");
+      const message = getComputedStyle(document.querySelector("#user-message"), "::selection");
+      const code = getComputedStyle(document.querySelector("#code-body"), "::selection");
+      return [message.backgroundColor, message.color, code.backgroundColor];
+    }, primary);
+    assert.deepEqual(colors, [expected, "rgb(255, 255, 255)", expected]);
+  }
+  console.log("PASS quote selection, first outside press, toolbar action, and theme-following highlights");
 } finally {
   await browser.close();
   await fs.rm(temp, { recursive: true, force: true });

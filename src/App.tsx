@@ -1,6 +1,6 @@
 import { projectDiscoveryState } from "./lib/project-discovery-state";
 import { useChatDeepLinks } from "./hooks/use-chat-deep-links";
-import { conversationQuoteFromSelection } from "./lib/chat-selection-quote";
+import { conversationQuoteFromSelection, dismissConversationQuoteOnOutsidePointerDown } from "./lib/chat-selection-quote";
 import { hasRecentConnectorSelfTest } from "./lib/connector-verification";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -2169,7 +2169,11 @@ export default function App() {
 
     positionMenu();
     window.addEventListener("resize", positionMenu);
-    return () => window.removeEventListener("resize", positionMenu);
+    const removeQuoteDismissal = dismissConversationQuoteOnOutsidePointerDown(menu, clearSelectionMenu);
+    return () => {
+      window.removeEventListener("resize", positionMenu);
+      removeQuoteDismissal();
+    };
   }, [selectionMenu]);
 
   useEffect(() => {
@@ -4738,7 +4742,7 @@ export default function App() {
               onConversationScroll={(scrollElement, requestOlder) => {
                 conversationScroll.onScroll(scrollElement, requestOlder && hasOlderChatMessages);
                 if (selectionMenu) {
-                  setSelectionMenu(null);
+                  clearSelectionMenu();
                 }
               }}
               showScrollToBottom={!conversationScroll.pinned}
