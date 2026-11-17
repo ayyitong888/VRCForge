@@ -1653,6 +1653,7 @@ AGENT_GATEWAY = AgentGateway(
     runtime_status_changed=broadcast_runtime_status,
     runtime_timeline_changed=broadcast_runtime_status,
     runtime_progress_changed=lambda payload: EVENT_BUS.broadcast_from_sync("agentProgress", payload),
+    runtime_question_posted=lambda question: EVENT_BUS.broadcast_from_sync("agentQuestions", {"questions": [question]}),
     vision_profile_enabled=lambda: bool(PROVIDER_CONFIGURATION.current_vision_config().enabled),
     load_mcp_resources=not AGENT_MCP_STDIO_MODE,
 )

@@ -238,6 +238,8 @@ def test_real_native_answer_during_independent_read_has_one_execution_owner(tmp_
         call("independent-read", "vrcforge_fixture_read", {}),
         {"role": "assistant", "content": "Selected Example Outfit after the independent inspection."},
     ], [])
+    published = []
+    monkeypatch.setattr(gateway, "_runtime_question_posted", published.append, raising=False)
     gateway.register_tool("vrcforge_ask_user", "When to use: ask. When NOT to use: otherwise.", "plan/preview", gateway.create_runtime_question)
     def read(_params):
         entered.set()
@@ -249,16 +251,23 @@ def test_real_native_answer_during_independent_read_has_one_execution_owner(tmp_
     origin = "turn-" + "x" * 235
     runner = threading.Thread(target=lambda: results.append(_run(gateway, tmp_path, clientTurnId=origin)))
     runner.start()
-    assert entered.wait(5)
-    question = gateway.questions.list(session_id="native-continuation-session")["questions"][0]
-    answer = gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
-    assert answer["runtimeContinuation"]["mode"] == "steer"
-    assert answer["runtimeContinuation"]["clientTurnId"] == origin
-    release.set()
-    runner.join(5)
+    try:
+        assert entered.wait(5)
+        question = gateway.questions.list(session_id="native-continuation-session")["questions"][0]
+        assert published == [question]
+        assert question["blocking"] is False and question["status"] == "pending"
+        assert "runtimeTaskSeed" not in published[0]
+        answer = gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
+        assert answer["runtimeContinuation"]["mode"] == "steer"
+        assert answer["runtimeContinuation"]["clientTurnId"] == origin
+        repeated = gateway.questions.answer(question["questionId"], {"sessionId": "native-continuation-session", "answer": "Example Outfit"})
+        assert repeated["idempotent"] is True and "runtimeContinuation" not in repeated
+    finally:
+        release.set()
+        runner.join(5)
     assert not runner.is_alive() and results
     assert len(model.requests) == 3
-    assert any(m.get("role") == "user" and "Example Outfit" in m.get("content", "") for m in model.requests[-1]["messages"])
+    assert sum(m.get("role") == "user" and "Example Outfit" in m.get("content", "") for m in model.requests[-1]["messages"]) == 1
     saved = gateway.questions.list(session_id="native-continuation-session", include_answered=True)["questions"][0]
     assert saved["runtimeContinuationStatus"] == "delivered"
     assert results[0]["plan"]["nextStep"] != "needs_user_action", "answered questions must not be replayed as a stale completion blocker"

@@ -31,7 +31,9 @@ ASK_USER_USAGE_INSTRUCTION = (
     "If the user gives you a criterion, apply it yourself. For example, capture and inspect current screenshots to identify clipping "
     "before asking which outfit needs adjustment. Continue once the evidence resolves the choice. "
     "Ask only about what remains unresolved and requires the user's input, and keep doing independent work when possible. "
-    "Example: ask which color they prefer before applying a texture. "
+    "If some work is independent, set blocking=false and take the next independent action as soon as the question is posted. "
+    "Wait for the answer before doing anything that depends on it. Use blocking=true when the answer is required for further progress. "
+    "Example: ask which color they prefer while checking the existing material setup. Apply the chosen texture after they reply. "
 )
 CALL_USER_USAGE_INSTRUCTION = (
     "Use call_user as an exceptional human handoff for a specific action or judgment the user must perform. "
@@ -45,7 +47,8 @@ CALL_USER_USAGE_INSTRUCTION = (
     "For any requested appearance or motion edit, show the user the actual result in Unity or a current screenshot and use a visual_checkpoint before accepting it. "
     "Continue dependent work when the user accepts. If a position needs adjustment, use vrcforge_select_scene_object to select the exact movable object in Unity, then hand it to the user. "
     "Pause edits to that target while the user adjusts it. On handback, read the current transform and bindings, preserve the user adjustment, and finish the remaining approved work and review. "
-    "Continue independent work without assuming an answer; existing approval and checkpoint requirements remain authoritative. "
+    "For a decision that permits independent work, set blocking=false and continue that work while the user responds. "
+    "Existing approval and checkpoint requirements remain authoritative. "
 )
 QUESTION_CONFIRMATION_INSTRUCTION = (
     "If a tool already created a pending confirmation, reuse the existing confirmation card. "
@@ -65,7 +68,7 @@ QUESTION_LANGUAGE_INSTRUCTION = (
 QUESTION_INPUT_SCHEMA = {
     "type": "object", "required": ["question"], "additionalProperties": True,
     "properties": {
-        "blocking": {"type": "boolean", "default": True, "description": "Use false for a decision you can ask while continuing independent work. Visual acceptance and Goal gates always block. Never continue actions that depend on an unanswered decision."},
+        "blocking": {"type": "boolean", "default": True, "description": "Set false when there is independent work you can do while awaiting the answer. Continue with that work after posting the question and wait before dependent steps. Set true when progress needs the answer. Visual acceptance and Goal gates always block."},
         "header": {"type": "string", "maxLength": 120, "description": "A short heading in the user's language describing the help needed, without technical jargon."},
         "kind": {"type": "string", "enum": ["decision", "visual_checkpoint"]},
         "question": {

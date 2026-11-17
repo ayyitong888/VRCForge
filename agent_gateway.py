@@ -799,6 +799,7 @@ class AgentGateway:
         runtime_status_changed: Callable[[dict[str, Any]], None] | None = None,
         runtime_timeline_changed: Callable[[dict[str, Any]], None] | None = None,
         runtime_progress_changed: Callable[[dict[str, Any]], None] | None = None,
+        runtime_question_posted: Callable[[Mapping[str, Any]], None] | None = None,
         vision_profile_enabled: Callable[[], bool] | None = None,
         runtime_subagent_active_parent_task_ids: Callable[..., list[str]] | None = None,
         runtime_subagent_cancel_task: Callable[[str], Any] | None = None,
@@ -810,6 +811,7 @@ class AgentGateway:
         self.public_base_url = public_base_url.rstrip("/")
         self._project_selection_request = project_selection_request
         self._runtime_progress_changed = runtime_progress_changed or (lambda _payload: None)
+        self._runtime_question_posted = runtime_question_posted or (lambda _question: None)
         self._tools: dict[str, AgentTool] = {}
         self._write_handlers: dict[str, AgentWriteHandler] = {}
         # Explicit per-instance additions are used only when a host registers a
@@ -1767,7 +1769,15 @@ class AgentGateway:
             values["_runtimeTaskSeed"] = dict(seed)
             values["_runtimeSessionId"] = runtime_session_id
             values["_runtimeClientTurnId"] = str(seed.get("clientTurnId") or "")
-        return self.questions.create(values)
+        result = self.questions.create(values)
+        question = ensure_dict(result.get("question"))
+        if seed and question.get("blocking") is False and not result.get("deduplicated"):
+            try:
+                self._runtime_question_posted(question)
+            except Exception:
+                # The durable question can still be loaded if notification fails.
+                pass
+        return result
 
     def run_browser_tool(self, params: dict[str, Any]) -> dict[str, Any]:
         params = dict(params)
