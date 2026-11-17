@@ -35,8 +35,8 @@ def test_core_only_prompt_does_not_direct_hidden_diagnostics_or_shell_log_readin
     value = prompt("VRCForge runtime startup timed out. Please inspect retained startup logs.")
     assert "choose know_yourself before filesystem" not in value
     assert "系统级问题，如看日志/查工程外文件/git" not in value
-    assert "先发现并加载相应的只读诊断工具块" in value
-    assert "不可调用未列出的工具" in value
+    assert "discover and load the relevant read-only diagnostic tools" in value
+    assert "Use visible diagnostics instead of host Shell for those logs" in value
 
 
 def test_diagnostics_guidance_keeps_actual_core_catalogue_and_explicit_shell_action():
@@ -45,6 +45,6 @@ def test_diagnostics_guidance_keeps_actual_core_catalogue_and_explicit_shell_act
     names = tuple(line[2:].split(" runtimeAlias=", 1)[0].split(" schema=", 1)[0].split(":", 1)[0].strip()
                   for line in section.splitlines() if line.startswith("- "))
     assert names == CORE_NAMES
-    assert '"action": "shell"' in value
-    assert '"shell_params": {"cwd": "<可选目录>"}' in value
+    assert '"action":"shell"' in value
+    assert '"shell_params":{"cwd":"<directory>"}' in value
     assert "shell_command" in value

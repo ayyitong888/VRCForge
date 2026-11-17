@@ -38,7 +38,7 @@ def test_native_control_schema_is_fixed_and_runtime_state_describes_allowed_acti
     assert 'ordinary tool operations; use call_tool instead' in control['description']
     assert 'never grants permissions' in control['description']
     assert 'enter execution through vrcforge_runtime_action' not in request['instructions']
-    assert 'The host enforces permissions and approvals.' in request['instructions']
+    assert 'current host state governs scope, available tools, permission and approval.' in request['instructions']
     assert 'performs no write' in action['description']
     assert 'does not bypass approval' in action['description']
     if plan_mode:

@@ -167,12 +167,12 @@ def test_completion_prompt_separates_success_claim_from_honest_failure_reply() -
             }
         ],
     )
-    assert "失败收尾不得使用 satisfied=true" in prompt
-    assert "不同工具的成功结果不能清除原失败步骤" in prompt
+    assert 'For unresolved work include "completion_claim":{"satisfied":false}' in prompt
+    assert "Unrelated successes do not clear failures" in prompt
     tail = prompt[prompt.index("Completion contract:"):]
-    assert "Never claim success while an action is running, pending approval, failed, or unverified." in tail
-    assert "Only a successful terminal reply may use" in tail
-    assert "An honest failure reply must not claim success" in tail
+    assert "only for verified requested outcomes" in tail
+    assert "after tools, use action=reply with completion_claim.satisfied=true" in tail
+    assert "The host verifies the full task and outstanding requirements" in tail
     assert '"completion_claim":{"satisfied":false}' in prompt
 
 
@@ -1882,9 +1882,9 @@ def test_model_prompt_keeps_unreferenced_matching_definition_local() -> None:
 def test_model_prompt_requires_evidence_grounded_final_reply_without_hiding_safe_updates() -> None:
     prompt = service()._build_llm_plan_prompt("inspect the project", [])
 
-    assert "推断须明确标注" in prompt
-    assert "包名或 private 标记不能证明产品用途" in prompt
-    assert "reply 字段是直接展示给用户的对话内容" in prompt
+    assert "Treat inferences as inferences" in prompt
+    assert "package names and private markers do not establish purpose" in prompt
+    assert "Put public updates in the reply field" in prompt
 
 
 def test_bound_general_project_agents_file_is_injected_before_current_user_message(tmp_path) -> None:
@@ -2186,11 +2186,11 @@ def test_internal_planner_prompt_only_expands_loaded_tool_blocks() -> None:
     assert "list_internal_tool_blocks" in prompt
     assert "read_text_file" in prompt
     assert "unity_scan_vrcfury" not in prompt
-    assert "loaded internal tool blocks: core, files" in prompt
-    assert "call it with action=skill" in prompt
-    assert "never in action" in prompt
-    assert "action 只能是 skill、shell、reply、enter_execution 或 write" in prompt
-    assert 'planning 层禁止 write，execution 层才允许 write' in prompt
+    assert 'Current loaded tool blocks: ["core","files"]' in prompt
+    assert "Load/unload tools through skill actions" in prompt
+    assert "use exact visible tool names in skill_tool/write_tool" in prompt
+    assert "action is skill, write, shell, enter_execution or reply" in prompt
+    assert 'In planning use read tools; enter_execution is required before writes' in prompt
 
 
 
@@ -2220,8 +2220,8 @@ def test_llm_execution_layer_has_a_first_class_supervised_write_action() -> None
     execution_prompt = service(catalog=catalog)._build_llm_plan_prompt(
         "create Probe", [], exposure_layer=EXPOSURE_LAYER_EXECUTION,
     )
-    assert "action 只能是 skill、shell、reply、enter_execution 或 write" in execution_prompt
-    assert "planning 层禁止 write，execution 层才允许 write" in execution_prompt
+    assert "action is skill, write, shell, enter_execution or reply" in execution_prompt
+    assert "In planning use read tools; enter_execution is required before writes" in execution_prompt
 
     plan = service(catalog=catalog, model=model)._llm_plan_agent_turn(
         "create Probe",
@@ -3604,7 +3604,7 @@ def test_legacy_prompt_uses_shared_public_behavior_with_json_action_format(layer
     assert 'phase="commentary"' not in prompt
     assert "Non-final action commentary is optional" not in prompt
     assert "Give a brief update only" not in prompt
-    assert "只返回一个 JSON 对象" in prompt
+    assert "Return one JSON object without Markdown or extra prose" in prompt
 
 
 def test_shared_public_behavior_covers_opening_milestones_cadence_and_final():
