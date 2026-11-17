@@ -23,8 +23,9 @@ import type { CompactionRecoveryEntry } from "./api/types";
 import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry, timelineInvocationDisplayLabel, isCancellationMarkerAssistantText } from "./chat-timeline-presentation";
 
 const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
+export const MAX_ATTACHMENTS_PER_TURN = 8;
 export const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
-const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
+export const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 
 export function formatPayload(value: unknown): string {
   if (value === null || value === undefined) {

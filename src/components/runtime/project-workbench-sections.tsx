@@ -8,7 +8,7 @@ import type { AgentDesktopAction, AgentProgress, WorkspaceDiffSummary } from "..
 import type { ChatAttachment, ProjectType } from "../../lib/chat-types";
 import { runtimeAuthorizationLabelKey, runtimeAuthorizationMessageKey, type RuntimeAuthorizationStatus } from "../../lib/runtime-authorization-status";
 import { AgentTodoPanelEmbedded } from "./agent-todo-panel";
-import { RuntimeDiffFileRow, RuntimeInfoRow, RuntimeReviewButton, RuntimeSection, StatusDot } from "./runtime-sidebar-ui";
+import { RuntimeAttentionRows, RuntimeDiffFileRow, RuntimeInfoRow, RuntimeSection, StatusDot, type RuntimeAttentionRowsProps } from "./runtime-sidebar-ui";
 import {
   Box,
   Bot,
@@ -137,8 +137,8 @@ export function ProjectWorkbenchSections({
   onOpenUserAttachmentSource,
   pendingApprovals,
   hasExternalPendingApprovals = false,
-  runtimeReviewCount = 0,
-  onOpenRuntimeReview,
+  pendingQuestions,
+  runtimeReview,
   workspaceSummary,
   activeDesktopActions,
   onTestAgentConnection,
@@ -167,14 +167,12 @@ export function ProjectWorkbenchSections({
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
   pendingApprovals: number;
   hasExternalPendingApprovals?: boolean;
-  runtimeReviewCount?: number;
-  onOpenRuntimeReview?: () => void;
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
   onTestAgentConnection?: () => void | Promise<void>;
   providerTestAttempted: boolean;
   onOpenPendingApprovals: () => void;
-}) {
+} & RuntimeAttentionRowsProps) {
   const { t } = useTranslation();
   const isUnityProject = projectType === "unity";
   const initialSections = isUnityProject ? INITIAL_PROJECT_SECTIONS_UNITY : INITIAL_PROJECT_SECTIONS_GENERAL;
@@ -270,7 +268,7 @@ export function ProjectWorkbenchSections({
           />
         </button>
       ) : null}
-      <RuntimeReviewButton count={runtimeReviewCount} onOpen={onOpenRuntimeReview} />
+      <RuntimeAttentionRows pendingQuestions={pendingQuestions} runtimeReview={runtimeReview} />
       <RuntimeSection
         title={isUnityProject ? t("workspace.todo") : t("workspace.progress")}
         collapsed={Boolean(collapsedSections.todo)}

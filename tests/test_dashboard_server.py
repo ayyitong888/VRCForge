@@ -8191,7 +8191,7 @@ class DashboardServerTests(unittest.TestCase):
             finally:
                 dashboard_server.AGENT_GATEWAY = original_gateway
 
-    def test_attachment_input_skips_hot_steer_and_keeps_durable_safe_reference(self) -> None:
+    def test_attachment_input_for_finished_turn_keeps_durable_safe_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             gateway = AgentGateway(Path(tmp) / "config.json", Path(tmp) / "audit")
             gateway._runtime_session_state.begin_turn(
@@ -8209,7 +8209,7 @@ class DashboardServerTests(unittest.TestCase):
                             "sessionId": "runtime-session-attachment",
                             "laneId": "chat-lane-attachment",
                             "clientTurnId": "attachment-followup",
-                            "targetClientTurnId": "runtime-client-attachment",
+                            "targetClientTurnId": "finished-client-attachment",
                             "message": "inspect this image next",
                             "attachments": [{
                                 "id": "image-a",

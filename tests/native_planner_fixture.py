@@ -6,9 +6,11 @@ from agent_output_truncation import OutputTruncation
 
 
 class NativePlannerFixture:
-    def __init__(self, messages, sink=None):
+    def __init__(self, messages, sink=None, *, active_turn_start=0):
         self._messages = deepcopy(messages)
         self._sink = sink
+        self._active_turn_start = active_turn_start
+        self.steer_attachments = {}
         self.compaction = None
         self.compaction_attempted_snapshot = None
         self.output_truncation = OutputTruncation()
@@ -40,7 +42,7 @@ class NativePlannerFixture:
         return deepcopy(self._messages)
 
     def request_history(self):
-        return self.messages(), 0
+        return self.messages(), self._active_turn_start
 
     def persist_request_context(self, messages):
         assert messages[:len(self._messages)] == self._messages

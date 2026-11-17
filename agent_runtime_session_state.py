@@ -781,7 +781,7 @@ class AgentRuntimeSessionState:
             self._save_native(session_id, normalized)
             return copy.deepcopy(normalized)
 
-    def append_native_user(self, session_id: str, *, binding: str, message: str, human: bool = True, hidden: bool = False) -> None:
+    def append_native_user(self, session_id: str, *, binding: str, message: str, human: bool = True, hidden: bool = False) -> int:
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
         message = self._native_required(message, "message")
@@ -795,9 +795,11 @@ class AgentRuntimeSessionState:
             candidate["humanUserMessageIndices"] = human_indices(snapshot)
             if human and not hidden:
                 candidate["humanUserMessageIndices"].append(len(candidate["messages"]))
+            index = len(candidate["messages"])
             candidate["messages"].append({"role": "user", "content": message, **({"hidden": True} if hidden else {})})
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
+            return index
 
     @staticmethod
     def _is_native_runtime_state_message(message: dict[str, Any]) -> bool:
@@ -1445,13 +1447,14 @@ class AgentRuntimeSessionState:
         target_client_turn_id: str,
         input_id: str,
         message: str,
+        attachments: list[dict[str, Any]] | None = None,
         followup_lane_id: str = "",
     ) -> dict[str, Any]:
         session_id = str(session_id or "").strip()[:180]
         target_client_turn_id = str(target_client_turn_id or "").strip()[:240]
         input_id = str(input_id or "").strip()[:180]
         message = str(message or "").strip()[:4000]
-        if not session_id or not target_client_turn_id or not input_id or not message:
+        if not session_id or not target_client_turn_id or not input_id or not (message or attachments):
             return {"accepted": False, "mode": "followup", "reason": "invalid_request"}
         with self._ports.shared_state_lock:
             key = (session_id, target_client_turn_id)
@@ -1465,10 +1468,12 @@ class AgentRuntimeSessionState:
             # the API atomically falls back to the durable follow-up lane.
             if len(mailbox) >= self.MAX_STEER_MAILBOX:
                 return {"accepted": False, "mode": "followup", "reason": "mailbox_full"}
-            mailbox_item = {
+            mailbox_item: dict[str, Any] = {
                 "inputId": input_id,
                 "message": message,
             }
+            if attachments:
+                mailbox_item["attachments"] = copy.deepcopy(attachments)
             normalized_lane_id = str(followup_lane_id or "").strip()[:180]
             if normalized_lane_id:
                 mailbox_item["followupLaneId"] = normalized_lane_id

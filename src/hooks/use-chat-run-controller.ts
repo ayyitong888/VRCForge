@@ -1257,6 +1257,7 @@ export function useChatRunController({
     return submitTurn({
       ...current,
       id: createClientTurnId(current.id),
+      attachments: resolveAttachmentPayloadReferences(current.attachments, getChatById(chatId || "")?.attachmentPayloads),
       queueId: undefined,
       queueSequence: undefined,
       queueStatus: undefined,

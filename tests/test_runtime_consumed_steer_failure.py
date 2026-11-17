@@ -80,6 +80,55 @@ def test_live_delta_receipt_is_published_before_the_next_model_request(tmp_path)
     assert result["consumedSteerInputIds"] == ["live-confirmed"]
 
 
+@pytest.mark.parametrize("steer_message", ["inspect these", ""])
+def test_live_steer_binds_attachments_to_its_own_provider_input(tmp_path, steer_message):
+    from tests.test_native_runtime_gateway import run, setup_gateway
+
+    initial_image = "data:image/png;base64,aW5pdGlhbA=="
+    steer_image = "data:image/png;base64,c3RlZXI="
+    vault_hash = "a" * 64
+    shared_message = "inspect these"
+    attachments = [
+        {"name": "Selected text", "payloadKind": "text", "text": "quote fixture"},
+        {"name": "steer.png", "payloadKind": "data_url", "dataUrl": steer_image},
+        {"name": "notes.zip", "payloadKind": "vault_file", "payloadHash": vault_hash},
+    ]
+
+    def first_request(_request):
+        receipt = gateway.runtime_sessions.submit_steer(
+            session_id="native-session", target_client_turn_id="native-turn",
+            input_id="steer-with-attachments", message=steer_message, attachments=attachments,
+        )
+        assert receipt["accepted"]
+        attachments[0]["text"] = "caller mutation"
+        return {"role": "assistant", "content": "Earlier response"}
+
+    def second_request(request):
+        multimodal = [item["content"] for item in request["messages"] if isinstance(item.get("content"), list)]
+        assert len(multimodal) == 2
+        assert multimodal[0][0]["text"] == shared_message
+        assert multimodal[0][1]["image_url"]["url"] == initial_image
+        assert multimodal[1][0]["text"].startswith(steer_message or "See attached materials.")
+        assert multimodal[1][-1]["image_url"]["url"] == steer_image
+        assert "quote fixture" in multimodal[1][0]["text"]
+        assert "notes.zip" in multimodal[1][0]["text"]
+        assert vault_hash in multimodal[1][0]["text"]
+        return {"role": "assistant", "content": "Final response"}
+
+    gateway, _, _ = setup_gateway(tmp_path, [first_request, second_request])
+    gateway._vision_profile_enabled = lambda: False
+    result = run(gateway, tmp_path, message=shared_message, attachments=[{
+        "id": "initial", "name": "initial.png", "type": "image/png", "size": 7,
+        "payloadKind": "data_url", "dataUrl": initial_image,
+    }])
+    assert result["consumedSteerInputIds"] == ["steer-with-attachments"]
+    with gateway.runtime_planner.bind_turn({}):
+        binding = gateway.runtime_planner.native_conversation_binding(str(tmp_path))
+    snapshot = gateway.runtime_sessions.native_conversation("native-session", binding=binding)
+    assert all(isinstance(item.get("content"), (str, type(None))) for item in snapshot["messages"])
+    assert "data:image/" not in json.dumps(snapshot)
+
+
 def test_presentation_callback_failure_does_not_retract_consumption(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     def failed_callback(_ids):

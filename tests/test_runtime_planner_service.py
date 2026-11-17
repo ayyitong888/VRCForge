@@ -457,7 +457,7 @@ def test_native_direct_image_projection_preserves_existing_multimodal_history() 
         {"turn": {"directImageInput": True, "attachments": [
             {"type": "image/png", "dataUrl": "data:image/png;base64,CURRENT"},
         ]}},
-        native_turn=NativePlannerFixture(history),
+        native_turn=NativePlannerFixture(history, active_turn_start=1),
     )
     assert plan["nextStep"] == "done"
     request = model.requests[0]

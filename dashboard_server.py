@@ -3703,10 +3703,7 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
     if not (queue_request.lane_id or queue_request.session_id):
         raise HTTPException(status_code=422, detail={"code": "queue_lane_required"})
     steer_result: dict[str, Any] | None = None
-    # Attachments require their own full turn so vision/payload resolution is
-    # deterministic. Same-turn steer is text-only and never drops attachments;
-    # the request falls through to the durable follow-up lane instead.
-    if queue_request.target_client_turn_id and not queue_request.attachments:
+    if queue_request.target_client_turn_id:
         steer_result = await asyncio.to_thread(
             RUNTIME_QUEUE_PORT.submit_runtime_steer,
             {

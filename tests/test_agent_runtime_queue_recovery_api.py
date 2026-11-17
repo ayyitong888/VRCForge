@@ -9,6 +9,39 @@ from agent_gateway import AgentGateway
 
 
 class AgentRuntimeQueueRecoveryApiTests(unittest.TestCase):
+    def test_steer_delivers_quote_image_and_file_to_exact_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = AgentGateway(Path(tmp) / "config.json", Path(tmp) / "audit")
+            gateway.runtime_sessions.begin_turn(
+                session_id="session", turn_id="running-turn", client_turn_id="active-input",
+            )
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            dashboard_server.AGENT_GATEWAY = gateway
+            try:
+                attachments = [
+                    {"id": "selection", "name": "Selected text", "type": "text/plain",
+                     "payloadKind": "text", "text": "执行前会创建检查点。"},
+                    {"id": "image", "name": "layout.png", "type": "image/png",
+                     "payloadKind": "data_url", "dataUrl": "data:image/png;base64,AAAA"},
+                    {"id": "file", "name": "materials.zip", "type": "application/zip",
+                     "payloadKind": "vault_file", "payloadHash": "a" * 64},
+                ]
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post("/api/app/agent/runs/queue", json={
+                        "sessionId": "session", "laneId": "chat", "clientTurnId": "steer-input",
+                        "targetClientTurnId": "active-input", "message": "不用创建", "attachments": attachments,
+                    })
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["mode"], "steer")
+                [steer] = gateway.runtime_sessions.drain_steer(session_id="session", client_turn_id="active-input")
+                self.assertEqual(steer["message"], "不用创建")
+                self.assertEqual(steer["attachments"][0]["text"], attachments[0]["text"])
+                self.assertEqual(steer["attachments"][1]["dataUrl"], attachments[1]["dataUrl"])
+                self.assertEqual(steer["attachments"][2]["payloadHash"], attachments[2]["payloadHash"])
+                self.assertEqual(gateway.list_runtime_followups(session_id="chat"), [])
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+
     def test_queue_list_without_lane_returns_recoverable_followups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             gateway = AgentGateway(Path(tmp) / "config.json", Path(tmp) / "audit")

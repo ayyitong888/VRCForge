@@ -8,7 +8,7 @@ import { runtimeAuthorizationLabelKey, runtimeAuthorizationMessageKey, type Runt
 import { cn } from "../../lib/utils";
 import { AgentTodoPanel } from "./agent-todo-panel";
 import { CoreVersionNotice } from "./core-version-notice";
-import { RuntimeInfoRow, RuntimeReviewButton, StatusDot } from "./runtime-sidebar-ui";
+import { RuntimeAttentionRows, RuntimeInfoRow, StatusDot, type RuntimeAttentionRowsProps } from "./runtime-sidebar-ui";
 import { ProjectWorkbenchSections, type UserAttachmentSource } from "./project-workbench-sections";
 
 type ComponentStatus = { status: string; message?: string; detail?: unknown } | null | undefined;
@@ -48,8 +48,8 @@ export function RightRuntimeSidebar({
   pendingApprovals,
   hasExternalPendingApprovals,
   approvalPanel,
-  runtimeReviewCount = 0,
-  onOpenRuntimeReview,
+  pendingQuestions,
+  runtimeReview,
   dismissedQuestion,
   workspaceSummary,
   activeDesktopActions,
@@ -86,8 +86,6 @@ export function RightRuntimeSidebar({
   pendingApprovals: number;
   hasExternalPendingApprovals?: boolean;
   approvalPanel?: ReactNode;
-  runtimeReviewCount?: number;
-  onOpenRuntimeReview?: () => void;
   dismissedQuestion?: { label: string; onReopen: () => void };
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
@@ -97,7 +95,7 @@ export function RightRuntimeSidebar({
   onHideSidebar: () => void;
   onOpenPendingApprovals: () => void;
   localizeHealthMessage: (message?: string) => string;
-}) {
+} & RuntimeAttentionRowsProps) {
   const { t } = useTranslation();
   const backendStatus = backendComponent?.status || "unknown";
   const backendValue = componentValueFromMessage(
@@ -190,8 +188,8 @@ export function RightRuntimeSidebar({
             onOpenUserAttachmentSource={onOpenUserAttachmentSource}
             pendingApprovals={pendingApprovals}
             hasExternalPendingApprovals={hasExternalPendingApprovals}
-            runtimeReviewCount={runtimeReviewCount}
-            onOpenRuntimeReview={onOpenRuntimeReview}
+            pendingQuestions={pendingQuestions}
+            runtimeReview={runtimeReview}
             workspaceSummary={workspaceSummary}
             activeDesktopActions={activeDesktopActions}
             onTestAgentConnection={onTestAgentConnection}
@@ -274,7 +272,7 @@ export function RightRuntimeSidebar({
                   </div>
                 </>
               ) : null}
-              <RuntimeReviewButton count={runtimeReviewCount} onOpen={onOpenRuntimeReview} />
+              <RuntimeAttentionRows pendingQuestions={pendingQuestions} runtimeReview={runtimeReview} />
               <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
                 <RuntimeInfoRow
                   icon={<ListChecks className="h-4 w-4" />}

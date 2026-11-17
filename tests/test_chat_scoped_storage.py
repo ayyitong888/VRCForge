@@ -203,6 +203,27 @@ def test_history_cursor_survives_other_chat_write_and_rejects_removed_anchor(cha
     assert response.json()["detail"]["code"] == "chat_store_snapshot_changed"
 
 
+def test_cancelled_send_now_retries_do_not_push_conversation_out_of_history(chat_store):
+    client, _, _, project, project_path, _ = chat_store
+    prior = [user("older-page"), user("original-question"), agent("original-reply")]
+    cancelled = [
+        {**user(f"send-now-retry-{index}"), "queuedFrom": True, "composerQueued": True, "queueStatus": "cancelled"}
+        for index in range(12)
+    ]
+    recent = [user(f"recent-{index}") for index in range(10)]
+    items = prior + cancelled + recent
+    write_store(project_path, [{"id": "selected", "title": "Selected", "items": items}])
+    scope = {"chatId": "selected", "chatProjectPath": str(project)}
+
+    latest = client.get("/api/app/chats", params=scope).json()
+    assert latest["chats"][0]["items"] == prior[1:] + recent
+    older = client.get("/api/app/chats", params={**scope, "before": latest["nextBefore"]}).json()
+    assert older["chats"][0]["items"] == prior[:1]
+    assert older["nextBefore"] is None
+    full = client.get("/api/app/chats", params={**scope, "full": "1"}).json()
+    assert full["chats"][0]["items"] == items
+
+
 def test_create_registers_new_project_and_rejects_cross_scope_duplicate(chat_store):
     client, app_path, index_path, project, project_path, archive_reads = chat_store
     body = {"chatId": "new", "projectPath": str(project), "chat": {

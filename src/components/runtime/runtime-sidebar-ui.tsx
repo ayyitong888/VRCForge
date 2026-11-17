@@ -1,4 +1,4 @@
-import { Archive, ChevronDown, ChevronRight, FilePlus2, FileText, History, ListChecks } from "lucide-react";
+import { Archive, ChevronDown, ChevronRight, FilePlus2, FileText, HelpCircle, History, ListChecks } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
@@ -10,6 +10,7 @@ import {
 import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
 import { cn, formatCount } from "../../lib/utils";
 import { isActiveRuntimeRunStatus } from "../../lib/runtime-run-status";
+import type { runtimeReviewKind } from "../../lib/runtime-scope";
 
 export function RuntimeToolButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
   return (
@@ -44,19 +45,45 @@ export function StatusDot({ status }: { status: "ok" | "warning" | "error" | "un
   );
 }
 
-export function RuntimeReviewButton({ count, onOpen }: { count: number; onOpen?: () => void }) {
+export type RuntimeAttentionRowsProps = {
+  pendingQuestions?: { count: number; onOpen: () => void };
+  runtimeReview?: { kind: ReturnType<typeof runtimeReviewKind>; onOpen: () => void };
+};
+
+const REVIEW_COPY = {
+  review: ["workspace.runtimeReviewTitle", "workspace.runtimeReviewBody"],
+  projectSelection: ["workspace.runtimeProjectSelectionTitle", "workspace.runtimeProjectSelectionBody"],
+  verificationRequired: ["workspace.runtimeVerificationRequiredTitle", "workspace.runtimeVerificationRequiredBody"],
+  verificationFailed: ["workspace.runtimeVerificationFailedTitle", "workspace.runtimeVerificationFailedBody"],
+} as const;
+
+export function RuntimeAttentionRows({ pendingQuestions, runtimeReview }: RuntimeAttentionRowsProps) {
   const { t } = useTranslation();
-  if (!count || !onOpen) return null;
+  const reviewCopy = runtimeReview ? REVIEW_COPY[runtimeReview.kind] : undefined;
+  const buttonClass = "w-full rounded-md px-1 text-left hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
   return (
-    <button type="button" data-vrcforge-status="runtime-attention" onClick={onOpen}
-      className="w-full rounded-md px-1 text-left hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-      <RuntimeInfoRow
-        icon={<ListChecks className="h-4 w-4" />}
-        label={t("workspace.runtimeReviewTitle")}
-        value={t("workspace.runtimeReviewCount", { count })}
-        suffix={<StatusDot status="warning" />}
-      />
-    </button>
+    <>
+      {pendingQuestions?.count ? (
+        <button type="button" data-vrcforge-status="runtime-question" onClick={pendingQuestions.onOpen} className={buttonClass}>
+          <RuntimeInfoRow
+            icon={<HelpCircle className="h-4 w-4" />}
+            label={t("workspace.runtimeQuestionTitle")}
+            value={t("workspace.runtimeQuestionCount", { count: pendingQuestions.count })}
+            suffix={<StatusDot status="warning" />}
+          />
+        </button>
+      ) : null}
+      {runtimeReview && reviewCopy ? (
+        <button type="button" data-vrcforge-status="runtime-attention" onClick={runtimeReview.onOpen} className={buttonClass}>
+          <RuntimeInfoRow
+            icon={<ListChecks className="h-4 w-4" />}
+            label={t(reviewCopy[0])}
+            value={t(reviewCopy[1])}
+            suffix={<StatusDot status="warning" />}
+          />
+        </button>
+      ) : null}
+    </>
   );
 }
 

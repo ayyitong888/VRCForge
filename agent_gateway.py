@@ -5959,6 +5959,7 @@ class AgentGateway:
                         client_turn_id=input_id,
                         target_client_turn_id=resolved_client_turn_id,
                         message=str(item.get("message") or ""),
+                        attachments=ensure_list(item.get("attachments")),
                     )
                 except Exception:  # noqa: BLE001 - persistence failure becomes an authoritative bounded outcome.
                     queued = {
@@ -7090,6 +7091,30 @@ class AgentGateway:
 
         def record_consumed_steers(items: list[dict[str, Any]]) -> None:
             nonlocal loop_reminder_pending
+            for item in items:
+                steer_attachments = ensure_list(item.get("attachments"))
+                if not steer_attachments:
+                    continue
+                images = runtime_image_attachments(steer_attachments)
+                if images and self._vision_profile_enabled():
+                    analysis = self._run_vision_analysis(str(item.get("message") or ""), images)
+                    model_label = " · ".join(filter(None, (
+                        str(analysis.get("providerLabel") or analysis.get("provider") or ""),
+                        str(analysis.get("model") or ""),
+                    )))
+                    text = str(analysis.get("text") or analysis.get("notice") or "Image analysis did not complete.")
+                    steer_attachments, _ = discard_runtime_image_payloads(steer_attachments)
+                    item["attachments"] = steer_attachments = [
+                        *steer_attachments,
+                        {"name": f"Delegated image analysis ({model_label or 'vision model'})",
+                         "payloadKind": "text", "text": text},
+                    ]
+                if not native_binding:
+                    turn_context = ensure_dict(observe.get("turn"))
+                    turn_context["attachments"] = [*ensure_list(turn_context.get("attachments")), *steer_attachments]
+                    if runtime_image_attachments(steer_attachments):
+                        turn_context["directImageInput"] = True
+                    observe["turn"] = turn_context
             native_turn.queue_steers(items)
             if items:
                 tool_loop_progress.reset()
@@ -9679,6 +9704,7 @@ class AgentGateway:
             input_id=input_id,
             message=message,
             followup_lane_id=followup_lane_id,
+            attachments=normalize_runtime_attachments(params.get("attachments")),
         )
         return {
             "ok": result.get("accepted") is True,

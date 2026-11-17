@@ -1,7 +1,7 @@
 """Small adapter for one native provider turn.
 
 The adapter owns only per-turn bookkeeping (receipt ids, observation cursor,
-and queued steer text). Conversation storage and validation remain owned by
+and queued steer input). Conversation storage and validation remain owned by
 AgentRuntimeSessionState.
 """
 
@@ -11,6 +11,7 @@ import copy
 import json
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable
+from agent_user_path_context import human_indices, human_user_projection
 from responses_native_protocol import public_assistant_messages
 from agent_scan_result_policy import (
     SCAN_RESULT_CONTINUATION_POLICY_V2,
@@ -160,7 +161,9 @@ class NativeRuntimeTurn:
         self.output_truncation = OutputTruncation(**dict((continuation_context or {}).get("_outputTruncation") or {}))
         self._loop_state = loop_state
         self._native_decision: dict[str, Any] | None = None
-        self._native_steers: list[dict[str, str]] = []
+        self._native_steers: list[dict[str, Any]] = []
+        # Keep media bound to its human history slot for this turn only.
+        self.steer_attachments: dict[int, list[dict[str, Any]]] = {}
         self._consumed_steer_input_ids: list[str] = []
         self._on_steer_consumed = on_steer_consumed
         self._queued_calls: list[dict[str, Any]] = []
@@ -369,6 +372,16 @@ class NativeRuntimeTurn:
                 self._session_id, binding=self._binding,
                 expected_snapshot=expected_snapshot, summary=summary, recovery=recovery,
             )
+            if self.steer_attachments:
+                retained_indices = (
+                    index for index in human_indices(expected_snapshot)
+                    if human_user_projection(expected_snapshot["messages"][index]) is not None
+                )
+                self.steer_attachments = {
+                    new_index: self.steer_attachments[old_index]
+                    for new_index, old_index in enumerate(retained_indices, start=1)
+                    if old_index in self.steer_attachments
+                }
 
     def admit(self, receipt: dict[str, Any], *, tool_names: Iterable[str] = ()) -> None:
         """Record one provider receipt; execution remains serial in the existing dispatcher."""
@@ -561,11 +574,13 @@ class NativeRuntimeTurn:
         self.output_truncation.flush_feedback(self)
         while self._native_steers:
             steer = self._native_steers[0]
-            self._state.append_native_user(
+            history_index = self._state.append_native_user(
                 self._session_id,
                 binding=self._binding,
-                message=steer["message"],
+                message=steer["message"] or "See attached materials.",
             )
+            if steer["attachments"]:
+                self.steer_attachments[history_index] = steer["attachments"]
             self._native_steers.pop(0)
             input_id = steer["inputId"]
             # Terminal cleanup can retain pending user text for history, but
@@ -626,14 +641,15 @@ class NativeRuntimeTurn:
         """Queue accepted steer messages for the next native provider request."""
         if not self._binding:
             return
-        accepted = list(items)
-        if any(str(item.get("message") or "") for item in accepted):
+        accepted = [
+            {"inputId": str(item.get("inputId") or ""), "message": str(item.get("message") or ""),
+             "attachments": item.get("attachments") or []}
+            for item in items
+            if item.get("message") or item.get("attachments")
+        ]
+        if accepted:
             self._settle_unexecuted("user_steer")
-        self._native_steers.extend(
-            {"inputId": str(item.get("inputId") or ""), "message": str(item.get("message") or "")}
-            for item in accepted
-            if str(item.get("message") or "")
-        )
+            self._native_steers.extend(accepted)
 
     def approval_seed(self, seed: dict[str, Any]) -> dict[str, Any]:
         """Attach the current validated native snapshot to an approval seed."""

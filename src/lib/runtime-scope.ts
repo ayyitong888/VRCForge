@@ -1,5 +1,5 @@
 import type { AgentApproval, AgentQuestion, AgentRuntimeRun } from "./api";
-import type { ChatThread } from "./chat-types";
+import type { ChatThread, ConversationItem } from "./chat-types";
 import { normalizeProjectPathKey } from "./project-path";
 import { approvalIdFromResponse } from "./runtime-parsing";
 import { isBlockingAgentQuestion } from "./agent-question-notifications";
@@ -109,7 +109,7 @@ export function runtimeReviewItemForChat(
   runtimeAttention: AgentRuntimeRun[],
   questions: AgentQuestion[] = [],
 ) {
-  return chat?.items.find((item) => {
+  return chat?.items.find((item): item is Extract<ConversationItem, { type: "agent" }> => {
     if (item.type !== "agent" || !runtimeAttention.some((run) =>
       (run.clientTurnId && item.response.clientTurnId === run.clientTurnId)
       || (run.turnId && (item.response.turnId || item.response.turn_id) === run.turnId))) return false;
@@ -131,6 +131,15 @@ export function runtimeReviewItemForChat(
     return item.response.steps?.some((step) => step.tool === "vrcforge_request_project_selection"
       && !("historical" in step && step.historical === true)
       && step.result !== null && typeof step.result === "object"
-      && "projectSelectionRequested" in step.result && step.result.projectSelectionRequested === true);
+      && "projectSelectionRequested" in step.result && step.result.projectSelectionRequested === true) ?? false;
   });
+}
+
+export function runtimeReviewKind(item: Extract<ConversationItem, { type: "agent" }>) {
+  switch (item.response.plan?.completionGate?.reason) {
+    case "question_pending": return "projectSelection";
+    case "verification_required": return "verificationRequired";
+    case "verification_failed": return "verificationFailed";
+    default: return "review";
+  }
 }

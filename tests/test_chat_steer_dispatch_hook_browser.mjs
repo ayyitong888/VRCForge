@@ -322,11 +322,22 @@ try {
   assert.deepEqual(await followupPresentation(edited.id), { queuedRows: 0, messages: 1 }, "terminal settlement must not duplicate the admitted user message");
   await page.evaluate(() => window.__startFixture());
   await page.waitForFunction(() => window.__providerRequests.length === 4);
-  assert.equal(await page.evaluate(() => window.__queueFixture("console-guide-fixture", "guide fixture text")), "queued");
+  assert.equal(await page.evaluate(() => window.__queueFixture("console-guide-fixture", "不用创建", [
+    { id: "quote", name: "Selected text", type: "text/plain", size: 12, payloadKind: "text", text: "执行前会创建检查点。" },
+    { id: "image", name: "layout.png", type: "image/png", size: 16, payloadKind: "data_url", dataUrl: "data:image/png;base64,AAAA" },
+    { id: "file", name: "materials.zip", type: "application/zip", size: 1024, payloadKind: "vault_file", payloadHash: "a".repeat(64) },
+  ])), "queued");
   const guideId = await page.evaluate(() => window.__queuedTurns().find((turn) => turn.id === "console-guide-fixture")?.id);
+  await page.evaluate((id) => {
+    const stored = window.__chat.items.find((item) => item.clientTurnId === id);
+    window.__queuedTurns().find((turn) => turn.id === id).attachments = stored.attachments;
+  }, guideId);
   assert.equal(await page.evaluate((id) => window.__steerFixtureQueued(id), guideId), "steered", "Guide cancels the durable queue entry and dispatches one immediate steer");
   const guideDispatch = await page.evaluate(() => window.__queueRequests.at(-1));
   assert.equal(guideDispatch.targetClientTurnId, "active-turn-fixture");
+  assert.equal(guideDispatch.attachments[0].text, "执行前会创建检查点。");
+  assert.equal(guideDispatch.attachments[1].dataUrl, "data:image/png;base64,AAAA");
+  assert.equal(guideDispatch.attachments[2].payloadHash, "a".repeat(64));
   const guidedTurnId = guideDispatch.clientTurnId;
   await page.evaluate((clientTurnId) => window.__resolveProvider({
     ok: true, status: "completed", sessionId: "session-fixture", turnId: "guided-active-turn",

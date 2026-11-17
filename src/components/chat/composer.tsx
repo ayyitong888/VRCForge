@@ -8,6 +8,7 @@ import type { RunningEnterAction } from "../../lib/app-preferences";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "../../lib/permission-ui";
 import { cn, formatCount } from "../../lib/utils";
 import { formatAttachmentSize } from "../../lib/chat-format";
+import { MAX_ATTACHMENTS_PER_TURN, MAX_TEXT_ATTACHMENT_BYTES } from "../../lib/conversation-utils";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ComposerSlashCommand, ContextUsage } from "../../lib/chat-types";
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "../../lib/chat-types";
 import type { AgentGoal, PermissionState, ExecutionMode } from "../../lib/api";
@@ -37,6 +38,17 @@ function composerActionIcon(action: ComposerActionId): ReactNode {
 
 
 type ComposerFileInput = FileList | File[] | null;
+const LARGE_PASTE_CHAR_THRESHOLD = 1_000;
+
+function isLargeTextPaste(text: string): boolean {
+  if (text.length <= LARGE_PASTE_CHAR_THRESHOLD) return false;
+  let count = 0;
+  for (const character of text) {
+    count += 1;
+    if (count > LARGE_PASTE_CHAR_THRESHOLD) return true;
+  }
+  return false;
+}
 
 export function Composer({
   input,
@@ -282,11 +294,17 @@ export function Composer({
       seen.add(key);
       return true;
     });
-    if (!files.length) {
-      return;
+    if (files.length) {
+      event.preventDefault();
+      onAttachFiles?.(files);
+    } else if (onAttachFiles && event.target === inputRef.current && attachments.length < MAX_ATTACHMENTS_PER_TURN) {
+      const text = event.clipboardData.getData("text/plain");
+      if (!isLargeTextPaste(text) || text.includes("\0")) return;
+      const file = new File([text], t("attachments.pastedTextFilename"), { type: "text/plain" });
+      if (file.size > MAX_TEXT_ATTACHMENT_BYTES) return;
+      event.preventDefault();
+      onAttachFiles([file]);
     }
-    event.preventDefault();
-    onAttachFiles?.(files);
   };
   return (
     <form

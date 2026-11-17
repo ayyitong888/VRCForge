@@ -10,10 +10,11 @@ const bundle = await build({
     import { createRoot } from "react-dom/client";
     import { RightRuntimeSidebar } from "./src/components/runtime/runtime-sidebar";
     import { AgentQuestionCard } from "./src/components/chat/agent-question-card";
-    import { pendingQuestionReviewTargets, filterQuestionsForRuntimeScope, runtimeReviewItemForChat } from "./src/lib/runtime-scope";
-    import { initializeI18n } from "./src/i18n";
+    import { pendingQuestionReviewTargets, filterQuestionsForRuntimeScope, runtimeReviewItemForChat, runtimeReviewKind } from "./src/lib/runtime-scope";
+    import { initializeI18n, setLocale } from "./src/i18n";
     const root = createRoot(document.getElementById("root"));
     const ready = initializeI18n();
+    window.setStatusLocale = setLocale;
     window.showSidebar = async (state, pendingApprovals = 0, projectType = "unity", hasExternalPendingApprovals = false, reviewFixture) => {
       await ready;
       window.approvalsOpened = false;
@@ -41,15 +42,12 @@ const bundle = await build({
         subAgentTaskCount={0} subAgentRunningTaskCount={0} subAgentCompletedTaskCount={0}
         userAttachmentSources={[]} approvalsLoaded pendingApprovals={pendingApprovals} workspaceSummary={null}
         hasExternalPendingApprovals={hasExternalPendingApprovals}
-        runtimeReviewCount={review.count || (runtimeReview ? 1 : 0)}
-        onOpenRuntimeReview={() => {
-          if (review.target) {
-            setActive(review.target.chat.id);
-            setReveal({ questionId: review.target.question.questionId });
-          } else {
-            window.reviewItemOpened = runtimeReview?.id;
-          }
-        }}
+        pendingQuestions={review.target && { count: review.count, onOpen: () => {
+          setActive(review.target.chat.id);
+          setReveal({ questionId: review.target.question.questionId });
+        } }}
+        runtimeReview={runtimeReview && { kind: runtimeReviewKind(runtimeReview),
+          onOpen: () => { window.reviewItemOpened = runtimeReview.id; } }}
         activeDesktopActions={[]} refreshUnityStatus={() => {}} providerTestAttempted={false}
         onHideSidebar={() => {}} onOpenPendingApprovals={() => window.approvalsOpened = true}
         localizeHealthMessage={() => ""} />
@@ -87,6 +85,7 @@ try {
   assert.equal(await details.getAttribute("aria-expanded"), "false");
   assert.equal(await page.locator("[data-vrcforge-project-environment]").count(), 0);
   const approval = page.locator('[data-vrcforge-status="approval"]');
+  assert.match(await approval.innerText(), /Pending approvals.*1 operation awaiting approval/s);
   await approval.click();
   assert.equal(await page.evaluate(() => window.approvalsOpened), true);
   assert.equal(await details.getAttribute("aria-expanded"), "false");
@@ -123,9 +122,18 @@ try {
   const pending = fixture.questions.at(-1);
   const owner = fixture.chats.find((chat) => chat.sessionId === pending.sessionId);
   await show("ready", 0, "unity", false, fixture);
+  const questionRow = page.getByRole("button", { name: /Question awaiting your answer/ });
   const review = page.getByRole("button", { name: /Task needs review/ });
-  assert.match(await review.innerText(), /1 task check/);
-  await review.click();
+  await questionRow.waitFor({ timeout: 3000 });
+  assert.match(await questionRow.innerText(), /1 question to answer/);
+  assert.equal(await review.count(), 0);
+  assert.equal(await approval.count(), 0);
+  await page.evaluate(() => window.setStatusLocale("zh-CN"));
+  const localizedQuestion = page.getByRole("button", { name: /有问题待回答/ });
+  await localizedQuestion.waitFor();
+  assert.match(await localizedQuestion.innerText(), /1 个问题等待你回答/);
+  await page.evaluate(() => window.setStatusLocale("en-US"));
+  await questionRow.click();
   const card = page.locator("[data-chat-question-dock]");
   await card.waitFor();
   assert.equal(await page.locator("[data-review-owner]").textContent(), owner.id);
@@ -142,7 +150,7 @@ try {
       questions: [{ ...pending, originClientTurnId: "question-origin" }],
     });
     await page.locator("[data-review-owner]").getByText("alias").waitFor();
-    await review.click();
+    await questionRow.click();
     assert.equal(await page.locator("[data-review-owner]").textContent(), owner.id);
   }
 
@@ -161,6 +169,7 @@ try {
   };
   await show("ready", 0, "unity", false, stale);
   await page.locator('[data-review-owner]').getByText("review-chat").waitFor();
+  assert.equal(await questionRow.count(), 0, "answered questions clear the question row");
   assert.equal(await review.count(), 0, "a blocked origin must not show a review badge after its question is answered");
 
   delete blockedReply.response.plan.completionGate;
@@ -174,13 +183,21 @@ try {
 
   blockedReply.response.plan.completionGate = { reason: "verification_required" };
   await show("ready", 0, "unity", false, stale);
-  await review.click();
+  await page.getByRole("button", { name: /Task check needs action/ }).click();
+  assert.equal(await page.evaluate(() => window.reviewItemOpened), blockedReply.id);
+
+  blockedReply.response.plan.completionGate.reason = "verification_failed";
+  const combined = { ...stale, chats: [...stale.chats, owner], questions: [...stale.questions, pending] };
+  await show("ready", 1, "unity", false, combined);
+  await questionRow.waitFor();
+  await approval.waitFor();
+  await page.getByRole("button", { name: /Task check did not pass/ }).click();
   assert.equal(await page.evaluate(() => window.reviewItemOpened), blockedReply.id);
 
   blockedReply.response.plan.completionGate.reason = "question_pending";
   blockedReply.response.steps = [{ tool: "vrcforge_request_project_selection", result: { projectSelectionRequested: true } }];
   await show("ready", 0, "unity", false, stale);
-  await review.click();
+  await page.getByRole("button", { name: /Project selection required/ }).click();
   assert.equal(await page.evaluate(() => window.reviewItemOpened), blockedReply.id);
 
   delete blockedReply.response.clientTurnId;

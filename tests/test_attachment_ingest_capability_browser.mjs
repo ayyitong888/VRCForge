@@ -38,6 +38,41 @@ const fixture = `
       <section data-card="compact"><AttachmentStrip attachments={[image,archive]} compact /></section></>);
   };
   window.legacySummary = () => appendAttachmentSummary("", [{id:"legacy",name:"old.pdf",type:"application/pdf",size:10,payloadKind:"data_url",dataUrl:"data:application/pdf;base64,JVBERg=="}], i18n.t.bind(i18n));
+  function PasteFixture({ full, reads }) {
+    const [input, setInput] = React.useState("Existing draft");
+    const [attachments, setAttachments] = React.useState(Array.from({ length: full ? 8 : 0 }, (_, id) => ({
+      id: String(id), name: id + ".txt", size: 1, type: "text/plain", payloadKind: "text", text: "x",
+    })));
+    return <Composer input={input} setInput={setInput} attachments={attachments}
+      sending={false} onSubmit={() => {}} onSwitchMode={() => {}}
+      onAttachFiles={files => {
+        reads.push(Promise.all(Array.from(files, file => readChatAttachment(file, i18n.t.bind(i18n))))
+          .then(next => {
+            flushSync(() => setAttachments(current => [...current, ...next]));
+            return serializeChatAttachments(next);
+          }));
+      }} />;
+  }
+  window.replayComposerPaste = async ({ text, includeFile = false, full = false }) => {
+    const host = document.body.appendChild(document.createElement("div"));
+    const composer = createRoot(host);
+    const reads = [];
+    try {
+      flushSync(() => composer.render(<PasteFixture full={full} reads={reads} />));
+      const input = host.querySelector("textarea");
+      const clipboard = new DataTransfer();
+      clipboard.setData("text/plain", text);
+      if (includeFile) clipboard.items.add(new File(["existing file"], "notes.txt", { type: "text/plain" }));
+      const event = new ClipboardEvent("paste", { clipboardData: clipboard, bubbles: true, cancelable: true });
+      input.dispatchEvent(event);
+      const attachments = (await Promise.all(reads)).flat();
+      return { intercepted: event.defaultPrevented, draft: input.value, attachments,
+        displayed: host.textContent.includes("Pasted text.txt") };
+    } finally {
+      flushSync(() => composer.unmount());
+      host.remove();
+    }
+  };
   window.replayNativeDrop = async () => {
     const host = document.body.appendChild(document.createElement("div"));
     const composer = createRoot(host);
@@ -145,6 +180,29 @@ try {
   assert.deepEqual(await page.evaluate(() => window.replayNativeDrop()), {
     dropListeners: 1, accepted: [[7, "Reference.png"]], listenersAfterUnmount: 0,
   });
+  const paste = (text, options = {}) => page.evaluate(
+    (args) => window.replayComposerPaste(args), { text, ...options },
+  );
+  const pasteBoundary = "😀".repeat(1000);
+  const longPaste = "first line\r\n" + pasteBoundary + "\nlast line  ";
+  const pasted = await paste(longPaste);
+  assert.equal(pasted.intercepted, true, "long text becomes a file instead of filling the input");
+  assert.equal(pasted.draft, "Existing draft");
+  assert.equal(pasted.displayed, true);
+  assert.equal(pasted.attachments.length, 1);
+  assert.equal(pasted.attachments[0].payloadKind, "text");
+  assert.equal(pasted.attachments[0].text, longPaste, "serialized attachment retains line endings and complete text");
+  for (const [text, options] of [["short paste"], [pasteBoundary], [longPaste, { full: true }],
+      ["x".repeat(512 * 1024 + 1)]]) {
+    const ordinary = await paste(text, options);
+    assert.equal(ordinary.intercepted, false, "browser insert stays available for text outside automatic conversion");
+    assert.deepEqual(ordinary.attachments, []);
+  }
+  const mixed = await paste(longPaste, { includeFile: true });
+  assert.equal(mixed.intercepted, true);
+  assert.deepEqual(mixed.attachments.map(({ name, text }) => ({ name, text })), [{
+    name: "notes.txt", text: "existing file",
+  }]);
   for (const [name, type, bytes, expected] of cases) {
     const result = await page.evaluate(args => window.replay(args), {name, type, bytes: [...bytes]});
     const { attachment, summary, serialized, normal, compact } = result;

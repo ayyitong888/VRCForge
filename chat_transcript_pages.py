@@ -45,15 +45,27 @@ def read_chat_page(chat: dict[str, Any], path: Path, end: int) -> tuple[dict[str
     items = chat["items"]
     start = end
     remaining_bytes = PAGE_BYTES
-    while start > 0 and end - start < PAGE_ITEMS:
-        size = _item_bytes(items[start - 1])
+    tail = []
+    while start > 0:
+        item = items[start - 1]
+        # The conversation UI hides retired queue entries. Keep their receipts
+        # in the complete record without spending a history slot on them.
+        if item["type"] == "user" and item.get("queueStatus") == "cancelled" and (
+            item.get("composerQueued") or item.get("queuedFrom")
+        ):
+            start -= 1
+            continue
+        if len(tail) >= PAGE_ITEMS:
+            break
+        size = _item_bytes(item)
         # A single large item stays whole; the existing IPC transport pages it.
-        if start < end and size > remaining_bytes:
+        if tail and size > remaining_bytes:
             break
         start -= 1
         remaining_bytes -= size
+        tail.append(item)
 
-    tail = items[start:end]
+    tail.reverse()
     page = {key: value for key, value in chat.items() if key not in {"items", "attachmentPayloads", "compactedAttachmentRefs"}}
     page["items"] = tail
     payload_hashes = {

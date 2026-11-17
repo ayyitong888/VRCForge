@@ -91,7 +91,7 @@ import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice"
 import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
-import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, pendingQuestionReviewTargets, questionBelongsToRuntimeScope, questionContinuationOwner, runtimeReviewItemForChat } from "./lib/runtime-scope";
+import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, pendingQuestionReviewTargets, questionBelongsToRuntimeScope, questionContinuationOwner, runtimeReviewItemForChat, runtimeReviewKind } from "./lib/runtime-scope";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import { flushChatsBeforeQuit } from "./lib/app-quit";
 import {
@@ -137,6 +137,7 @@ import {
   isRetryableConversationItem,
   latestAgentContextUsage,
   latestConversationItemId,
+  MAX_ATTACHMENTS_PER_TURN,
   normalizeProviderForContext,
   selectedTextAttachment,
 } from "./lib/conversation-utils";
@@ -251,7 +252,6 @@ type EditingMessageDraft = {
   draftAttachments: ChatAttachment[];
 };
 
-const MAX_ATTACHMENTS_PER_TURN = 8;
 const STARTUP_BACKGROUND_REFRESH_DELAY_MS = 1200;
 const PROJECT_SNAPSHOT_CACHE_KEY = "vrcforge_project_snapshot_cache";
 
@@ -1154,6 +1154,7 @@ export default function App() {
     () => pendingQuestionReviewTargets(chats, runtimeConnected ? agentQuestions : [], activeChatId),
     [chats, runtimeConnected, agentQuestions, activeChatId],
   );
+  const reviewQuestionTarget = questionReview.target;
   const runtimeReviewItem = runtimeReviewItemForChat(activeChat || undefined, runtimeAttention, scopedAgentQuestions);
   const selectedForegroundTurn = currentTurn?.chatId === activeChatId ? currentTurn : null;
   const selectedCompaction = compacting && activeChat?.compaction?.status === "compacting";
@@ -4841,18 +4842,19 @@ export default function App() {
                   onClose={() => setPendingApprovalPanelOpen(false)}
                 />
               ) : undefined}
-              runtimeReviewCount={questionReview.count || (runtimeReviewItem ? 1 : 0)}
-              onOpenRuntimeReview={() => {
-                const target = questionReview.target;
-                if (target) {
-                  openChat(target.chat);
-                  reopenAgentQuestion(target.question.questionId);
-                  setReviewQuestionReveal({ chatId: target.chat.id, questionId: target.question.questionId });
-                } else if (runtimeReviewItem) {
-                  document.querySelector(`[data-conversation-item-id="${CSS.escape(runtimeReviewItem.id)}"]`)
-                    ?.scrollIntoView({ block: "center" });
-                }
-              }}
+              pendingQuestions={reviewQuestionTarget ? {
+                count: questionReview.count,
+                onOpen: () => {
+                  openChat(reviewQuestionTarget.chat);
+                  reopenAgentQuestion(reviewQuestionTarget.question.questionId);
+                  setReviewQuestionReveal({ chatId: reviewQuestionTarget.chat.id, questionId: reviewQuestionTarget.question.questionId });
+                },
+              } : undefined}
+              runtimeReview={runtimeReviewItem ? {
+                kind: runtimeReviewKind(runtimeReviewItem),
+                onOpen: () => document.querySelector(`[data-conversation-item-id="${CSS.escape(runtimeReviewItem.id)}"]`)
+                  ?.scrollIntoView({ block: "center" }),
+              } : undefined}
               dismissedQuestion={dismissedAgentQuestion ? {
                 label: dismissedAgentQuestion.header || dismissedAgentQuestion.question || dismissedAgentQuestion.questionId,
                 onReopen: () => reopenAgentQuestion(dismissedAgentQuestion.questionId),
