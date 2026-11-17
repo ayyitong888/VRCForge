@@ -135,6 +135,7 @@ class SubAgentTaskRegistry:
         self._tasks: dict[str, SubAgentTask] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._executing: set[str] = set()
         self._active_child_sessions: dict[str, str] = {}
         self._parent_continuations_inflight: set[str] = set()
         self._recent_event_log_state: tuple[int, int, int, int] | None = None
@@ -471,7 +472,7 @@ class SubAgentTaskRegistry:
             if not lane_acquired:
                 raise RuntimeError("Shared runtime concurrency limit reached.")
         with self._lock:
-            if self._shutdown:
+            if self._shutdown or not self._accepting:
                 if lane_acquired and self._lane_budget is not None:
                     self._lane_budget.release(task_id)
                 self._ensure_accepting_locked()
@@ -525,6 +526,7 @@ class SubAgentTaskRegistry:
                 # failure therefore cannot leave a durable task stuck queued.
                 worker.start()
                 worker_started = True
+                self._executing.add(task_id)
                 sub_task = self._commit_task_event_locked(
                     None,
                     sub_task,
@@ -534,7 +536,8 @@ class SubAgentTaskRegistry:
                 )
             except Exception:
                 self._cancel_events.pop(task_id, None)
-                self._threads.pop(task_id, None)
+                if not worker_started:
+                    self._threads.pop(task_id, None)
                 if child_session_id:
                     self._active_child_sessions.pop(child_session_id, None)
                 if lane_acquired and not worker_started and self._lane_budget is not None:
@@ -763,31 +766,39 @@ class SubAgentTaskRegistry:
         handler_done.set()
         lifecycle_done = threading.Event()
 
-        def release_child_session() -> None:
-            if not child_session_id or not (lifecycle_done.is_set() and handler_done.is_set()):
+        def release_execution() -> None:
+            if not (lifecycle_done.is_set() and handler_done.is_set()):
                 return
             with self._lock:
                 if self._active_child_sessions.get(child_session_id) == task_id:
                     self._active_child_sessions.pop(child_session_id)
+                if task_id in self._executing:
+                    if self._lane_budget is not None:
+                        self._lane_budget.release(task_id)
+                    self._executing.remove(task_id)
 
         def finish_lifecycle() -> None:
             lifecycle_done.set()
-            release_child_session()
+            release_execution()
 
         try:
-            self._run_task_body(task_id, handler_done, release_child_session, finish_lifecycle)
+            try:
+                self._run_task_body(task_id, handler_done, release_execution, finish_lifecycle)
+            finally:
+                finish_lifecycle()
+            try:
+                if self._worker_terminal is not None:
+                    self._worker_terminal()
+            finally:
+                self._notify_task_finished(task_id)
         finally:
-            finish_lifecycle()
-            if self._lane_budget is not None:
-                self._lane_budget.release(task_id)
-        try:
-            if self._worker_terminal is not None:
-                self._worker_terminal()
-        finally:
-            self._notify_task_finished(task_id)
+            # A terminal watchdog report can precede handler exit. Keep the
+            # coordinator joinable so shutdown still accounts for that handler.
+            handler_done.wait()
+            release_execution()
 
     def _notify_task_finished(self, task_id: str) -> None:
-        """Notify the app after terminal state is durable and its lane is free."""
+        """Notify the app as soon as terminal state is durable."""
 
         with self._lock:
             task = self._tasks.get(task_id)
@@ -890,7 +901,7 @@ class SubAgentTaskRegistry:
 
     def _run_task_body(
         self, task_id: str, handler_done: threading.Event,
-        release_child_session: Callable[[], None], finish_lifecycle: Callable[[], None],
+        release_execution: Callable[[], None], finish_lifecycle: Callable[[], None],
     ) -> None:
         with self._lock:
             task = self._tasks.get(task_id)
@@ -925,7 +936,7 @@ class SubAgentTaskRegistry:
                     handler_error.append(exc)
                 finally:
                     handler_done.set()
-                    release_child_session()
+                    release_execution()
 
             worker = threading.Thread(target=_run_handler, daemon=True, name=f"subagent-{task_id[:12]}")
             handler_done.clear()
@@ -1286,7 +1297,7 @@ class SubAgentTaskRegistry:
         )
 
     def _running_count_locked(self) -> int:
-        return sum(1 for task in self._tasks.values() if task.status in _RUNNING_STATUSES)
+        return len(self._executing)
 
     def _ensure_accepting_locked(self) -> None:
         if self._shutdown:

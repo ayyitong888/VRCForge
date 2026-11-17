@@ -313,6 +313,66 @@ def test_hung_handler_times_out_and_produces_terminal_event(tmp_path):
     assert "watchdog" in failed.get("error", "").lower() or "exceeded" in failed.get("error", "").lower()
 
 
+def test_watchdog_keeps_execution_capacity_until_handlers_exit(tmp_path):
+    max_concurrent = SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT
+    lane_budget = RuntimeLaneBudget(total_limit=max_concurrent, background_limit=1)
+    release = [threading.Event() for _ in range(max_concurrent)]
+    finished = threading.Condition()
+    reports = set()
+
+    def handler(payload, _cancel):
+        task = payload["task"]
+        if task != "replacement":
+            release[int(task)].wait()
+        return {"ok": True, "summaryText": "finished"}
+
+    def report(event):
+        with finished:
+            reports.add(event["subAgentTaskId"])
+            finished.notify_all()
+        return {"status": "enqueued"}
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("worker", "Worker", "Read-only worker.")],
+        handlers={"worker": handler},
+        max_concurrent=max_concurrent,
+        lane_budget=lane_budget,
+        task_finished=report,
+    )
+
+    def start(task):
+        return registry.create_task(
+            role="worker", task=str(task), display_name="Worker",
+            parent_session_id=f"parent-{task}",
+            params={"timeoutSeconds": 1, "_taskSeed": {"task": str(task)}},
+        )["task"]["id"]
+
+    task_ids = []
+    try:
+        task_ids = [start(i) for i in range(max_concurrent)]
+        for task_id in task_ids:
+            assert _wait_for_status(registry, task_id, {"failed"})["task"]["errorCode"] == "sub_agent_task_timeout"
+        with finished:
+            assert finished.wait_for(lambda: reports == set(task_ids), timeout=2)
+        with pytest.raises(RuntimeError, match="Sub-agent concurrency limit reached"):
+            start("replacement")
+        assert registry.list_tasks()["runningCount"] == max_concurrent
+        assert not lane_budget.acquire("background", "background")
+
+        release[0].set()
+        registry._threads[task_ids[0]].join(2)
+        assert registry.list_tasks()["runningCount"] == max_concurrent - 1
+        replacement = start("replacement")
+        _wait_for_status(registry, replacement, {"completed"})
+        assert registry.shutdown(timeout_seconds=0)["timedOutTaskIds"] == sorted(task_ids[1:])
+    finally:
+        for gate in release:
+            gate.set()
+        assert registry.shutdown(timeout_seconds=3)["ok"]
+        assert lane_budget.snapshot()["total"] == 0
+
+
 def test_task_crash_failure_never_leaks_raw_exception_text(tmp_path):
     """A crashing handler must surface a controlled message plus an error code,
     never the raw exception string (the sub-agent panel renders task.error)."""
