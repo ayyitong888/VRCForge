@@ -1,3 +1,5 @@
+import type { ChatAttachment } from "./chat-types";
+
 /**
  * /delegate 斜杠指令解析（子代理技能委派域）。
  *
@@ -20,6 +22,20 @@ export type DelegateCommand = {
   targetKind?: "tool" | "skill";
   task: string;
 };
+
+export function delegateMaterials(attachments: ChatAttachment[], command: DelegateCommand) {
+  const materials: Array<{ name: string; content: { text: string } }> = [];
+  const unsupported: string[] = [];
+  for (const attachment of attachments) {
+    if (command.toolName || typeof attachment.text !== "string" || !attachment.text.trim()
+      || attachment.error || attachment.truncated) {
+      unsupported.push(attachment.name);
+    } else {
+      materials.push({ name: attachment.name, content: { text: attachment.text } });
+    }
+  }
+  return { materials, unsupported };
+}
 
 export function parseDelegateCommand(raw: string, knownSkillNames: Iterable<string> = []): DelegateCommand {
   const text = raw.replace(/^\/delegate\s*/i, "").trim();

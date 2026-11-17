@@ -29,6 +29,7 @@ export function useComposerDraft(chatId: string, projectPath: string, chatStarte
   const scope = chatId && chatStarted ? chatScope(chatId) : `new:${normalizeProjectPathKey(projectPath)}`;
   const drafts = useRef(new Map<string, ComposerDraft>());
   const submissions = useRef(new Map<string, symbol>());
+  const retainedSubmissions = useRef(new WeakSet<ComposerDraft>());
   const lastScope = useRef({ chatId, scope });
   const [, render] = useReducer((revision: number) => revision + 1, 0);
 
@@ -103,5 +104,27 @@ export function useComposerDraft(chatId: string, projectPath: string, chatStarte
     };
   }
 
-  return { ...read(scope), setInput, setAttachments, beginSubmission };
+  const draft = read(scope);
+
+  function beginRetainedSubmission(ownerChatId: string) {
+    if (read(scope) !== draft || retainedSubmissions.current.has(draft)) return;
+    retainedSubmissions.current.add(draft);
+    const ownerScope = chatScope(ownerChatId);
+    const ownerDraft = read(ownerScope);
+    const canMove = scope !== ownerScope && !ownerDraft.input && !ownerDraft.attachments.length;
+    const submittedScope = canMove ? ownerScope : scope;
+    if (canMove) {
+      if (writeDraftText(ownerScope, draft.input) && readDraftText(scope) === draft.input) writeDraftText(scope, "");
+      drafts.current.set(scope, { input: "", attachments: [] });
+      update(ownerScope, draft);
+    }
+    return (accepted: boolean) => {
+      retainedSubmissions.current.delete(draft);
+      if (!accepted || read(submittedScope) !== draft) return;
+      writeDraftText(submittedScope, "");
+      update(submittedScope, { input: "", attachments: [] });
+    };
+  }
+
+  return { ...draft, setInput, setAttachments, beginSubmission, beginRetainedSubmission };
 }

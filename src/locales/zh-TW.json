@@ -1406,6 +1406,8 @@
     "summary": "pkg {{pkg}} 路 prefab {{prefab}}"
   },
   "subagent": {
+    "delegateUnsupportedAttachments": "描述型委派只接受可讀取的文字附件。請先移除這些附件：{{names}}。",
+    "delegateFailed": "子 Agent 未接受這次委派。",
     "title": "背景任務",
     "statusNeedsAction": "需處理",
     "statusRunning": "{{count}} 執行中",

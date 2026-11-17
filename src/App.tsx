@@ -173,7 +173,7 @@ import {
   createSubAgentContextSmokeTask,
   isMarkdownSmokeMode,
 } from "./lib/markdown-smoke";
-import { parseDelegateCommand } from "./lib/subagent-delegate";
+import { delegateMaterials, parseDelegateCommand } from "./lib/subagent-delegate";
 import { isAwaitingMergeReview, isMergedAdopted, isParentDeliveryPending, subAgentAdoptedHistoryItem, subAgentProposedNextAction } from "./lib/subagent-merge";
 import {
   AGENT_QUESTION_NOTIFICATION_ACTION_EVENT,
@@ -400,6 +400,7 @@ export default function App() {
   );
   const [loadingSubAgents, setLoadingSubAgents] = useState(false);
   const [subAgentError, setSubAgentError] = useState("");
+  const [subAgentListError, setSubAgentListError] = useState("");
   const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(() => initialSubAgentTask);
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
   const [subAgentSidebarOpen, setSubAgentSidebarOpen] = useState(() => Boolean(initialSubAgentTask));
@@ -860,7 +861,7 @@ export default function App() {
     expandProjectGroup,
     initialChatState,
   });
-  const { input, setInput, attachments, setAttachments, beginSubmission } = useComposerDraft(
+  const { input, setInput, attachments, setAttachments, beginSubmission, beginRetainedSubmission } = useComposerDraft(
     activeChatId,
     activeProjectPath,
     !activeChat || !isUnstartedChat(activeChat),
@@ -2578,6 +2579,10 @@ export default function App() {
   }, [activeChatId, chats, checkForAppUpdateNow]);
 
   useEffect(() => {
+    setSubAgentError("");
+  }, [subAgentParentChatId]);
+
+  useEffect(() => {
     if (!runtimeConnected) {
       setSubAgentList(null);
       setLoadingSubAgents(false);
@@ -3557,13 +3562,27 @@ export default function App() {
         message,
         skills.map((skill) => skill.name),
       );
-      void startSubAgentTask(
-        command.toolName ? "skill_delegate" : undefined,
-        command.task || undefined,
-        command.toolName,
-        command.targetKind === "skill" ? command.task : undefined,
-      );
-      setInput("");
+      const { materials, unsupported } = delegateMaterials(attachments, command);
+      if (unsupported.length) {
+        setError(t("subagent.delegateUnsupportedAttachments", { names: unsupported.join(", ") }));
+        return;
+      }
+      const parentChatId = ensureActiveChat();
+      const finish = beginRetainedSubmission(parentChatId);
+      if (!finish) return;
+      let accepted = false;
+      try {
+        accepted = await startSubAgentTask(
+          command.toolName ? "skill_delegate" : undefined,
+          command.task || undefined,
+          command.toolName,
+          command.targetKind === "skill" ? command.task : undefined,
+          materials,
+          parentChatId,
+        );
+      } finally {
+        finish(accepted);
+      }
       return;
     }
     if (message === "/handoff" || message.startsWith("/handoff ")) {
@@ -3685,7 +3704,7 @@ export default function App() {
     const replyQuestion = pendingReplyQuestionId
       ? agentQuestions.find((question) => question.questionId === pendingReplyQuestionId)
       : undefined;
-    const chatId = replyQuestion?.sessionId || ensureActiveChat();
+    const chatId = replyQuestion?.sessionId || activeChatId || ensureActiveChat();
     const nextAttachments: ChatAttachment[] = [];
     attachmentLoadsRef.current += selected.length;
     setAttachmentsLoading(true);
@@ -3844,10 +3863,10 @@ export default function App() {
       appliedSubAgentListRequestRef.current = requestId;
       setSubAgentList((current) => reconcileSubAgentList(current, payload));
       setSelectedSubAgent((current) => reconcileSelectedSubAgent(current, payload.tasks));
-      setSubAgentError("");
+      setSubAgentListError("");
     } catch (cause) {
       if (requestId !== subAgentListRequestRef.current || parentChatId !== subAgentParentChatRef.current) return;
-      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      setSubAgentListError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (requestId === subAgentListRequestRef.current) setLoadingSubAgents(false);
     }
@@ -3858,6 +3877,8 @@ export default function App() {
     taskOverride?: string,
     toolName?: string,
     skillArguments?: string,
+    selectedMaterials: Array<Record<string, unknown>> = [],
+    parentChatId = ensureActiveChat(),
   ) {
     const agentName = pickSubAgentName();
     const projectPath = activeChat?.projectPath || activeProjectPath;
@@ -3878,17 +3899,13 @@ export default function App() {
     setError("");
     setSubAgentError("");
     try {
+      updateChat(parentChatId, (chat) => touchChat({ ...chat, title: chat.title || task }));
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          setSubAgentError("Runtime is not connected.");
-          return;
-        }
+        if (!readyEndpoint) throw new Error("Runtime is not connected.");
         targetEndpoint = readyEndpoint;
       }
-      const parentChatId = ensureActiveChat();
-      updateChat(parentChatId, (chat) => touchChat({ ...chat, title: chat.title || task }));
       await persistChatsNow();
       const parentChat = getChatById(parentChatId);
       const payload = await createSubAgent(targetEndpoint, {
@@ -3898,6 +3915,7 @@ export default function App() {
         parentChatId,
         parentSessionId: parentChat?.sessionId || "",
         projectPath: parentChat?.projectPath || projectPath,
+        ...(selectedMaterials.length ? { selectedMaterials } : {}),
         params: {
           projectPath,
           packagePath: outfitPackagePath.trim(),
@@ -3905,13 +3923,21 @@ export default function App() {
           ...(skillArguments?.trim() ? { skillArguments: skillArguments.trim() } : {}),
         },
       });
-      setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
-      setSelectedSubAgentPanelOpen(true);
+      if (!payload.ok || !payload.task) throw new Error(t("subagent.delegateFailed"));
+      if (subAgentParentChatRef.current === parentChatId) {
+        setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
+        setSelectedSubAgentPanelOpen(true);
+      }
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
-      await reconcileSubAgentHandoffs([payload.task]);
       void loadSubAgents(false);
+      return true;
     } catch (cause) {
-      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      if (parentChatId === subAgentParentChatRef.current) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setError(message);
+        setSubAgentError(message);
+      }
+      return false;
     }
   }
 
@@ -3919,6 +3945,7 @@ export default function App() {
     if (subAgentActionBusyRef.current.has(taskId)) {
       return false;
     }
+    setSubAgentError("");
     subAgentActionBusyRef.current.add(taskId);
     setSubAgentActionBusyTaskIds(new Set(subAgentActionBusyRef.current));
     return true;
@@ -3939,7 +3966,7 @@ export default function App() {
       setSelectedSubAgent((current) => (current?.id === payload.task.id ? latestSubAgentTask(current, payload.task) : current));
       await refreshSelectedSubAgentTask(taskId, "if-current");
     } catch (cause) {
-      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      reportSubAgentActionError(cause, subAgentParentChatId);
     } finally {
       endSubAgentAction(taskId);
     }
@@ -3963,7 +3990,7 @@ export default function App() {
       subAgentSelectionIntentRef.current = payload.task.id;
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
     } catch (cause) {
-      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      reportSubAgentActionError(cause, subAgentParentChatId);
     } finally {
       endSubAgentAction(taskId);
     }
@@ -3988,7 +4015,7 @@ export default function App() {
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
       return true;
     } catch (cause) {
-      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      reportSubAgentActionError(cause, subAgentParentChatId);
       return false;
     } finally {
       endSubAgentAction(taskId);
@@ -4018,7 +4045,7 @@ export default function App() {
     try {
       await refreshSelectedSubAgentTask(taskId);
     } catch (cause) {
-      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      reportSubAgentActionError(cause, subAgentParentChatId);
     }
   }
 
@@ -4026,6 +4053,12 @@ export default function App() {
     setSubAgentSidebarOpen(true);
     setSelectedSubAgentPanelOpen(false);
     setRightSidebarCollapsed(false);
+  }
+
+  function reportSubAgentActionError(cause: unknown, parentChatId: string) {
+    if (parentChatId === subAgentParentChatRef.current) {
+      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   async function mergeSubAgentTask(task: SubAgentTask, decision: "adopted" | "dismissed") {
@@ -4049,7 +4082,7 @@ export default function App() {
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
       setActiveView("chat");
     } catch (cause) {
-      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      reportSubAgentActionError(cause, subAgentParentChatId);
       void loadSubAgents(false);
     } finally {
       endSubAgentAction(task.id);
@@ -4289,7 +4322,7 @@ export default function App() {
     <SubAgentPanel
       tasks={activeSubAgentTasks}
       loading={loadingSubAgents}
-      error={subAgentError}
+      error={subAgentError || subAgentListError}
       roles={subAgentList?.roles || []}
       onOpen={(taskId) => void (taskId ? inspectSubAgentTask(taskId) : openSubAgentWorkspace())}
     />
@@ -4301,7 +4334,7 @@ export default function App() {
           tasks={activeSubAgentTasks}
           openThread={selectedSubAgentPanelOpen}
           loading={loadingSubAgents}
-          error={subAgentError}
+          error={subAgentError || subAgentListError}
           onBack={() => { setSubAgentSidebarOpen(true); setSelectedSubAgentPanelOpen(false); }}
           endpoint={endpoint}
           developerOptionsEnabled={developerOptionsEnabled}

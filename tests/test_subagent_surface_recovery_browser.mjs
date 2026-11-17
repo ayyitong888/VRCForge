@@ -268,6 +268,65 @@ try {
     catalogOnly = false;
   }
 
+  if (issue === "all" || issue === "manual" || issue === "manual-materials") {
+    tasks = [done];
+    detail = done;
+    const page = await open();
+    const composer = page.locator("[data-chat-composer-dock] textarea").first();
+    const files = page.locator('[data-chat-composer-dock] input[type="file"]').first();
+    await files.setInputFiles({ name: "manual-note.txt", mimeType: "text/plain", buffer: Buffer.from("manual material sentinel") });
+    await page.getByText("manual-note.txt", { exact: true }).waitFor();
+    const message = "/delegate Read what I attached.";
+    await composer.fill(message);
+    await composer.press("Enter");
+    await waitFor(() => posts.length === 1, "a failed manual request must reach HTTP");
+    if (issue === "manual-materials") {
+      assert.deepEqual(posts[0].selectedMaterials, [{ name: "manual-note.txt", content: { text: "manual material sentinel" } }]);
+    } else {
+      assert.equal(await composer.inputValue(), message, "draft must stay after sending");
+      await page.getByText("Fixture rejected delegation", { exact: true }).first().waitFor();
+      assert.equal(await composer.inputValue(), message, "draft must stay after HTTP 400");
+      await page.getByText("manual-note.txt", { exact: true }).waitFor();
+      assert.deepEqual(posts[0].selectedMaterials, [{ name: "manual-note.txt", content: { text: "manual material sentinel" } }]);
+
+      holdPost = true;
+      postFailure = false;
+      await composer.press("Enter");
+      await waitFor(() => posts.length === 2 && pending.length === 1, "second POST must be in flight");
+      assert.equal(await composer.inputValue(), message, "success must wait for acceptance");
+      await page.getByText("Surface B", { exact: true }).first().click();
+      await composer.fill("B's separate draft");
+      pending.shift()();
+      await waitFor(() => pending.length === 0, "fixture accepted POST");
+      await page.getByText("Surface A", { exact: true }).first().click();
+      await page.waitForFunction(() => document.querySelector("[data-chat-composer-dock] textarea")?.value === "");
+      await page.getByText("Surface B", { exact: true }).first().click();
+      assert.equal(await composer.inputValue(), "B's separate draft");
+      await page.getByText("Surface A", { exact: true }).first().click();
+
+      await files.setInputFiles({ name: "unknown.dat", mimeType: "application/octet-stream", buffer: Buffer.from("unsupported") });
+      await page.getByText("unknown.dat", { exact: true }).waitFor();
+      await composer.fill("/delegate Check this binary.");
+      await composer.press("Enter");
+      await page.getByText(/Manual delegation accepts readable text attachments/).first().waitFor();
+      assert.equal(posts.length, 2);
+      assert.equal(await composer.inputValue(), "/delegate Check this binary.");
+
+    }
+    await page.close();
+  }
+  if (issue === "all" || issue === "manual" || issue === "manual-error") {
+    tasks = [done];
+    detail = done;
+    const page = await open();
+    const panel = await openThread(page);
+    await panel.getByRole("button", { name: "Merge into chat" }).click();
+    await waitFor(() => merges.length === 1, "merge must reach HTTP");
+    const sidebar = page.locator("[data-vrcforge-subagent-sidebar]");
+    await sidebar.getByRole("alert").getByText("Fixture revision conflict", { exact: true }).waitFor();
+    await panel.getByText("Completed", { exact: true }).waitFor();
+    await page.close();
+  }
   console.log(`PASS App browser and fixture HTTP: ${issue}`);
 } catch (error) {
   console.error(error.message);

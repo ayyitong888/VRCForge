@@ -1406,6 +1406,8 @@
     "summary": "pkg {{pkg}} / prefab {{prefab}}"
   },
   "subagent": {
+    "delegateUnsupportedAttachments": "タスク内容を委任するときは、読み取り可能なテキスト添付ファイルを使えます。送信する前に次の添付ファイルを取り除いてください：{{names}}。",
+    "delegateFailed": "サブ agent がこの委任を受け付けませんでした。",
     "title": "バックグラウンドタスク",
     "statusNeedsAction": "要対応",
     "statusRunning": "{{count}} 実行中",

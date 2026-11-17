@@ -29,7 +29,7 @@ def test_http_entry_runs_durable_child_with_selected_model_and_materials(tmp_pat
                 "parentChatId": "parent-chat", "parentSessionId": "parent-session",
                 "projectPath": str(tmp_path), "model": "fixture-child-model",
                 "systemPrompt": "Summarize the selected evidence.", "maxSteps": 3,
-                "selectedMaterials": [{"content": {"text": "selected note sentinel"}}],
+                "selectedMaterials": [{"name": "note.txt", "content": {"text": "selected note sentinel"}}],
                 "params": {
                     "childSessionId": "parent-session",
                     "_generalReadRoots": ["forged-root"],
@@ -52,6 +52,7 @@ def test_http_entry_runs_durable_child_with_selected_model_and_materials(tmp_pat
             assert "PARENT ENTRY PRIVATE SENTINEL" not in str(model.requests)
             assert "Summarize the selected evidence." in model.requests[0]["instructions"]
             assert "selected note sentinel" in str(model.requests[0]["messages"])
+            assert "note.txt" in str(model.requests[0]["messages"])
             assert (tmp_path / "children" / "results" / (task_id + ".json")).exists()
     finally:
         service.shutdown()

@@ -1414,6 +1414,8 @@
     "summary": "pkg {{pkg}} / prefab {{prefab}}"
   },
   "subagent": {
+    "delegateUnsupportedAttachments": "Manual delegation accepts readable text attachments for task descriptions. Remove these attachments before sending: {{names}}.",
+    "delegateFailed": "The sub-agent did not accept this delegation.",
     "title": "Background Tasks",
     "statusNeedsAction": "Needs Action",
     "statusRunning": "{{count}} Running",

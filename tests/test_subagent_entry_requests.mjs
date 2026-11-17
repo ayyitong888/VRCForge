@@ -17,8 +17,9 @@ const environment={
   activeChat:parent,activeProjectPath:parent.projectPath,outfitPackagePath:"",endpoint:"http://127.0.0.1:8098",runtimeConnected:true,
   pickSubAgentName:()=>"Reviewer",setActiveView:noop,setError:noop,setSubAgentError:value=>{error=value},
   clearSelectionMenu:noop,setSelectedSubAgentPanelOpen:noop,ensureActiveChat:()=>parent.id,
+  subAgentParentChatRef:{current:parent.id},
   updateChat:(_,update)=>update(parent),touchChat:chat=>chat,persistChatsNow:async()=>{},getChatById:()=>parent,
-  createSubAgent:async(_,body)=>{request=body;return {task:{id:"task",childSessionId:"child",parentChatId:parent.id}}},
+  createSubAgent:async(_,body)=>{request=body;return {ok:true,task:{id:"task",childSessionId:"child",parentChatId:parent.id}}},
   setSelectedSubAgent:noop,setSubAgentList:noop,reconcileSubAgentHandoffs:async()=>{},loadSubAgents:async()=>{},
 };
 function entry(name){

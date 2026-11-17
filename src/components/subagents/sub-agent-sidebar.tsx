@@ -170,6 +170,10 @@ export function SubAgentSidebar({
         </Button>
       </header>
 
+      {error ? <div className="flex shrink-0 items-start gap-1.5 px-3 py-2 text-xs text-destructive" role="alert">
+        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span className="min-w-0 break-words">{error}</span>
+      </div> : null}
       {openThread ? (
         <div className="min-h-0 flex-1 overflow-hidden" data-vrcforge-subagent-sidebar-thread>
           <SubAgentWorkspaceSurface {...surfaceProps} tasks={tasks} roles={roles} selected={surfaceProps.selected}
@@ -177,10 +181,6 @@ export function SubAgentSidebar({
         </div>
       ) : null}
         <div style={{ display: openThread ? "none" : undefined }} className="app-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto p-3" data-vrcforge-subagent-sidebar-list>
-          {error ? <div className="flex shrink-0 items-start gap-1.5 text-xs text-destructive" role="alert">
-            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            <span>{error}</span>
-          </div> : null}
           {loading ? <div className="flex shrink-0 items-center gap-2 px-1 text-xs text-muted-foreground">
             <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
             <span>{t("common.loading")}</span>
