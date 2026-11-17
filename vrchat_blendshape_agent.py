@@ -462,7 +462,7 @@ def _native_tools_to_gemini(tools: Sequence[Mapping[str, Any]]) -> list[dict[str
     return [{"function_declarations": declarations}] if declarations else []
 
 
-def _native_gemini_response(settings: Settings, response: Any) -> LlmPlanResponse:
+def _native_gemini_response(settings: Settings, response: Any, *, source: str = "gemini") -> LlmPlanResponse:
     candidates = as_list(get_value(response, "candidates"))
     candidate = candidates[0] if candidates else {}
     content = get_value(candidate, "content") or {}
@@ -480,7 +480,7 @@ def _native_gemini_response(settings: Settings, response: Any) -> LlmPlanRespons
                 calls.append({"id": uuid.uuid4().hex, "type": "function", "function": {
                     "name": name, "arguments": json.dumps(dict(args), ensure_ascii=False, separators=(",", ":")),
                 }})
-                replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump())
+                replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump(mode="json", exclude_none=True))
             else:
                 discarded_calls.append({"id": "", "name": name, "arguments": str(args),
                                         "reason": "tool_call_truncated",
@@ -489,9 +489,9 @@ def _native_gemini_response(settings: Settings, response: Any) -> LlmPlanRespons
         text = str(get_value(part, "text") or "")
         if text and get_value(part, "thought") is not True:
             visible_text.append(text)
-            replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump())
+            replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump(mode="json", exclude_none=True))
         elif get_value(part, "thought_signature") or get_value(part, "thoughtSignature"):
-            replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump())
+            replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump(mode="json", exclude_none=True))
     finish_raw = get_value(candidate, "finish_reason") or get_value(candidate, "finishReason")
     finish = _provider_finish_reason(finish_raw)
     receipt: dict[str, Any] = {"role": "assistant", "content": "".join(visible_text) or None,
@@ -501,8 +501,8 @@ def _native_gemini_response(settings: Settings, response: Any) -> LlmPlanRespons
     is_truncated = finish == "max_tokens" or finish == "length"
     return LlmPlanResponse(
         text="".join(visible_text),
-        reasoning=extract_llm_reasoning_trace(response, settings, source="gemini"),
-        usage=extract_llm_token_usage(response, settings, source="gemini"),
+        reasoning=extract_llm_reasoning_trace(response, settings, source=source),
+        usage=extract_llm_token_usage(response, settings, source=source),
         assistant_message=receipt,
         finish_reason="length" if is_truncated else ("tool_calls" if calls else finish),
         model=actual_response_model(response),
@@ -2030,6 +2030,7 @@ def _request_llm_protocol_with_metadata(
             return request_vertex_ai_plan_with_metadata(
                 settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
                 cancel_event=cancel_event, stream_activity_callback=stream_activity_callback,
+                native_messages=native_messages, native_tools=native_tools,
             )
         return request_gemini_plan_with_metadata(
             settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
@@ -2248,6 +2249,84 @@ def request_gemini_plan(
     ).text
 
 
+def _google_native_config(
+    settings: Settings,
+    genai_types: Any,
+    generate_config: Any,
+    native_system: str,
+    native_tools: Sequence[Mapping[str, Any]],
+) -> Any:
+    config_fields: dict[str, Any] = {}
+    if generate_config is not None:
+        config_fields = dict(getattr(generate_config, "model_dump", lambda: {})() or {})
+    system_instruction = "\n\n".join(part for part in (str(settings.llm_system_instruction or "").strip(), native_system) if part)
+    if system_instruction:
+        config_fields["system_instruction"] = system_instruction
+    if llm_max_output_tokens(settings) is not None:
+        config_fields["max_output_tokens"] = llm_max_output_tokens(settings)
+    declarations = _native_tools_to_gemini(native_tools)
+    if declarations:
+        config_fields["tools"] = declarations
+    return genai_types.GenerateContentConfig(**config_fields)
+
+
+def _request_google_native_plan(
+    settings: Settings,
+    client: Any,
+    contents: Any,
+    generate_config: Any,
+    stream_callback: Callable[[str], None] | None,
+    cancel_event: Any | None,
+    *,
+    source: str,
+) -> LlmPlanResponse:
+    if stream_callback is None:
+        response = client.models.generate_content(
+            model=settings.llm_model, contents=contents, config=generate_config,
+        )
+    else:
+        text_parts: list[str] = []
+        structured_parts: dict[int, Any] = {}
+        last_chunk: Any = None
+        for chunk in client.models.generate_content_stream(
+            model=settings.llm_model, contents=contents, config=generate_config,
+        ):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Gemini stream cancelled.")
+            last_chunk = chunk
+            candidates = as_list(get_value(chunk, "candidates"))
+            candidate = candidates[0] if candidates else {}
+            parts = as_list(get_value(get_value(candidate, "content") or {}, "parts"))
+            for index, part in enumerate(parts):
+                function_call = get_value(part, "function_call") or get_value(part, "functionCall")
+                text_delta = str(get_value(part, "text") or "")
+                if function_call is not None or get_value(part, "thought_signature") or get_value(part, "thoughtSignature"):
+                    # Gemini stream completion is the protocol boundary. Keep the latest
+                    # typed part at its position; never infer call completeness from JSON.
+                    structured_parts[index] = part
+                elif text_delta:
+                    if get_value(part, "thought") is not True:
+                        text_parts.append(text_delta)
+                        stream_callback(text_delta)
+        if last_chunk is None:
+            raise RuntimeError("Gemini stream ended without a response chunk.")
+        candidates = as_list(get_value(last_chunk, "candidates"))
+        last_candidate = candidates[0] if candidates else {}
+        final_parts: list[Any] = []
+        if text_parts:
+            final_parts.append({"text": "".join(text_parts), "thought": False})
+        final_parts.extend(structured_parts[index] for index in sorted(structured_parts))
+        response = SimpleNamespace(
+            candidates=[SimpleNamespace(
+                finish_reason=get_value(last_candidate, "finish_reason") or get_value(last_candidate, "finishReason"),
+                content=SimpleNamespace(role="model", parts=final_parts),
+            )],
+            usage_metadata=get_value(last_chunk, "usage_metadata") or get_value(last_chunk, "usageMetadata") or {},
+            model_version=actual_response_model(last_chunk),
+        )
+    return _native_gemini_response(settings, response, source=source)
+
+
 def request_gemini_plan_with_metadata(
     settings: Settings,
     prompt: str,
@@ -2274,7 +2353,8 @@ def request_gemini_plan_with_metadata(
         or normalize_reasoning_effort(settings.gemini_thinking_level)
         or llm_max_output_tokens(settings) is not None
         or bool(str(settings.llm_system_instruction or "").strip())
-        or bool(native_tools)
+        or native_messages is not None
+        or native_tools is not None
         or normalize_provider_name(settings.llm_provider) == "custom"
     ):
         try:
@@ -2294,18 +2374,7 @@ def request_gemini_plan_with_metadata(
 
     generate_config = build_gemini_generate_config(settings, genai_types) if genai_types is not None else None
     if native_mode:
-        config_fields: dict[str, Any] = {}
-        if generate_config is not None:
-            config_fields = dict(getattr(generate_config, "model_dump", lambda: {})() or {})
-        system_instruction = "\n\n".join(part for part in (str(settings.llm_system_instruction or "").strip(), native_system) if part)
-        if system_instruction:
-            config_fields["system_instruction"] = system_instruction
-        if llm_max_output_tokens(settings) is not None:
-            config_fields["max_output_tokens"] = llm_max_output_tokens(settings)
-        declarations = _native_tools_to_gemini(native_tools or ())
-        if declarations:
-            config_fields["tools"] = declarations
-        generate_config = genai_types.GenerateContentConfig(**config_fields) if genai_types is not None else config_fields
+        generate_config = _google_native_config(settings, genai_types, generate_config, native_system, native_tools or ())
     client_kwargs: dict[str, Any] = {"api_key": settings.llm_api_key}
     if normalize_provider_name(settings.llm_provider) == "custom":
         if genai_types is None:
@@ -2322,51 +2391,9 @@ def request_gemini_plan_with_metadata(
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Gemini request cancelled.")
         if native_mode:
-            if stream_callback is None:
-                response = client.models.generate_content(
-                    model=settings.llm_model, contents=contents, config=generate_config,
-                )
-            else:
-                text_parts: list[str] = []
-                structured_parts: dict[int, Any] = {}
-                last_chunk: Any = None
-                for chunk in client.models.generate_content_stream(
-                    model=settings.llm_model, contents=contents, config=generate_config,
-                ):
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise RuntimeError("Gemini stream cancelled.")
-                    last_chunk = chunk
-                    candidates = as_list(get_value(chunk, "candidates"))
-                    candidate = candidates[0] if candidates else {}
-                    parts = as_list(get_value(get_value(candidate, "content") or {}, "parts"))
-                    for index, part in enumerate(parts):
-                        function_call = get_value(part, "function_call") or get_value(part, "functionCall")
-                        text_delta = str(get_value(part, "text") or "")
-                        if function_call is not None or get_value(part, "thought_signature") or get_value(part, "thoughtSignature"):
-                            # Gemini stream completion is the protocol boundary. Keep the latest
-                            # typed part at its position; never infer call completeness from JSON.
-                            structured_parts[index] = part
-                        elif text_delta:
-                            if get_value(part, "thought") is not True:
-                                text_parts.append(text_delta)
-                                stream_callback(text_delta)
-                if last_chunk is None:
-                    raise RuntimeError("Gemini stream ended without a response chunk.")
-                candidates = as_list(get_value(last_chunk, "candidates"))
-                last_candidate = candidates[0] if candidates else {}
-                final_parts: list[Any] = []
-                if text_parts:
-                    final_parts.append({"text": "".join(text_parts), "thought": False})
-                final_parts.extend(structured_parts[index] for index in sorted(structured_parts))
-                response = SimpleNamespace(
-                    candidates=[SimpleNamespace(
-                        finish_reason=get_value(last_candidate, "finish_reason") or get_value(last_candidate, "finishReason"),
-                        content=SimpleNamespace(role="model", parts=final_parts),
-                    )],
-                    usage_metadata=get_value(last_chunk, "usage_metadata") or get_value(last_chunk, "usageMetadata") or {},
-                    model_version=actual_response_model(last_chunk),
-                )
-            return _native_gemini_response(settings, response)
+            return _request_google_native_plan(
+                settings, client, contents, generate_config, stream_callback, cancel_event, source="gemini",
+            )
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
             final_chunk: Any = None
@@ -2437,6 +2464,8 @@ def request_vertex_ai_plan_with_metadata(
     stream_callback: Callable[[str], None] | None = None,
     cancel_event: Any | None = None,
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+    native_messages: Sequence[Mapping[str, Any]] | None = None,
+    native_tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> LlmPlanResponse:
     try:
         from google import genai
@@ -2447,9 +2476,11 @@ def request_vertex_ai_plan_with_metadata(
 
     project, location = resolve_vertex_ai_project_location(settings.llm_base_url)
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
+    native_mode = native_messages is not None or native_tools is not None
     genai_types: Any = None
     if (
         image_paths
+        or native_mode
         or normalize_reasoning_effort(settings.gemini_thinking_level)
         or llm_max_output_tokens(settings) is not None
         or bool(str(settings.llm_system_instruction or "").strip())
@@ -2459,17 +2490,28 @@ def request_vertex_ai_plan_with_metadata(
         except ImportError as exc:
             raise RuntimeError("The installed google-genai package does not expose the required content/config types.") from exc
     contents: Any = prompt
+    native_system = ""
+    if native_mode:
+        contents, native_system = _native_messages_to_gemini(native_messages or ())
+        if not contents:
+            contents = [{"role": "user", "parts": [{"text": prompt}]}]
     if image_paths:
         image_parts = [build_google_genai_image_part(genai_types, path) for path in image_paths]
         contents = [prompt, *image_parts]
 
     generate_config = build_gemini_generate_config(settings, genai_types) if genai_types is not None else None
+    if native_mode:
+        generate_config = _google_native_config(settings, genai_types, generate_config, native_system, native_tools or ())
     try:
         client = genai.Client(vertexai=True, project=project, location=location)
         watcher_stop, watcher = _start_provider_cancel_watcher(client, cancel_event, name="vrcforge-vertex-cancel")
         try:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Vertex AI request cancelled.")
+            if native_mode:
+                return _request_google_native_plan(
+                    settings, client, contents, generate_config, stream_callback, cancel_event, source="vertexai",
+                )
             if stream_callback is not None and not image_paths:
                 chunks: list[str] = []
                 final_chunk: Any = None
