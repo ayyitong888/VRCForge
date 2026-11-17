@@ -28,16 +28,11 @@ class SkillPackageControllerStorePort(Protocol):
         dev_mode: bool = False,
     ) -> AbstractContextManager[InstallResult]: ...
 
-    def state_transaction(
-        self,
-        skill_ids: list[str],
-    ) -> AbstractContextManager[None]: ...
-
-    def set_enabled(
+    def set_enabled_transaction(
         self,
         skill_id: str,
         enabled: bool,
-    ) -> PackageStateResult: ...
+    ) -> AbstractContextManager[PackageStateResult]: ...
 
     def uninstall_transaction(
         self,
@@ -141,8 +136,7 @@ class SkillPackageController:
         enabled = bool(params.get("enabled"))
         service = self._ports.make_service()
         with self._ports.write_lock:
-            with service.state_transaction([skill_id]):
-                result = service.set_enabled(skill_id, enabled)
+            with service.set_enabled_transaction(skill_id, enabled) as result:
                 projected = None
                 if (
                     params.get(
@@ -157,6 +151,10 @@ class SkillPackageController:
                     )
         return {
             "ok": True,
+            "readbackVerified": True,
+            "committed": True,
+            "commitState": "complete",
+            "persistenceState": "persisted",
             "state": result.as_dict(),
             "projectedSkill": projected,
         }
@@ -187,6 +185,10 @@ class SkillPackageController:
                         projected = projected_result
         return {
             "ok": True,
+            "readbackVerified": True,
+            "committed": True,
+            "commitState": "complete",
+            "persistenceState": "persisted",
             "uninstalled": result.as_dict(),
             "projectedSkill": projected,
         }

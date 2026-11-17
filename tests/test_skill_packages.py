@@ -328,6 +328,40 @@ def test_set_enabled_and_uninstall_package_keep_registry_and_metadata_in_sync(tm
         service.set_enabled("com.example.avatar-helper", True)
 
 
+@pytest.mark.parametrize(("operation", "drop_registry_write"), [("disable", True), ("disable", False), ("uninstall", True)])
+def test_package_mutation_readback_rolls_back_a_dropped_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    drop_registry_write: bool,
+) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
+    package = service.export_dev(make_skill_source(tmp_path), tmp_path / "helper.vsk").package_path
+    service.install(package)
+    skill_id = "com.example.avatar-helper"
+    service.set_enabled(skill_id, True)
+    metadata = service.skill_store / skill_id / "installed.json"
+    old_registry = service.registry_path.read_bytes()
+    old_metadata = metadata.read_bytes()
+    dropped_path = service.registry_path if drop_registry_write else metadata
+    write_json = service._atomic_write_json
+
+    def drop_one_write(path: Path, value: object) -> None:
+        if path != dropped_path:
+            write_json(path, value)
+
+    monkeypatch.setattr(service, "_atomic_write_json", drop_one_write)
+    with pytest.raises(PackageIntegrityError, match="readback failed"):
+        if operation == "disable":
+            service.set_enabled(skill_id, False)
+        else:
+            service.uninstall(skill_id)
+
+    assert service.registry_path.read_bytes() == old_registry
+    assert metadata.read_bytes() == old_metadata
+    assert service.list_installed()[0]["enabled"] is True
+
+
 def test_unsigned_dev_roundtrip_has_lock_but_no_signature(tmp_path: Path) -> None:
     service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
     source = make_skill_source(tmp_path)

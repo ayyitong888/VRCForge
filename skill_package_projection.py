@@ -838,12 +838,26 @@ class SkillPackageProjectionService:
             target_dir,
             manifest,
         )
-        self._write_state(
+        state_path = self._write_state(
             target_dir,
             enabled,
             package_id,
             projection_digest,
         )
+        if self._path_is_link_like(state_path):
+            raise RuntimeError(f"Projected skill state changed during readback: {target_name}")
+        with state_path.open("rb") as stream:
+            raw_state = stream.read(self._ports.state_max_bytes + 1)
+        if len(raw_state) > self._ports.state_max_bytes:
+            raise RuntimeError(f"Projected skill enablement readback failed: {target_name}")
+        observed = json.loads(raw_state)
+        if observed != {
+            "enabled": bool(enabled),
+            "packageId": package_id,
+            "projectionDigest": projection_digest,
+            "schema": self._ports.state_schema,
+        } or observed["enabled"] is not bool(enabled):
+            raise RuntimeError(f"Projected skill enablement readback failed: {target_name}")
         return {
             "ok": True,
             "name": target_name,
@@ -895,6 +909,8 @@ class SkillPackageProjectionService:
         )
         os.replace(target_dir, isolated_dir)
         try:
+            if os.path.lexists(target_dir):
+                raise RuntimeError(f"Projected skill removal readback failed: {target_name}")
             yield {"ok": True, "name": target_name, "deleted": target_name}
         except Exception:
             try:

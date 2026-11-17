@@ -1085,6 +1085,12 @@ class SkillPackageService:
         return self.install(*args, **kwargs)
 
     def set_enabled(self, skill_id: str, enabled: bool) -> PackageStateResult:
+        with self.set_enabled_transaction(skill_id, enabled) as result:
+            return result
+
+    @contextmanager
+    def set_enabled_transaction(self, skill_id: str, enabled: bool) -> Iterator[PackageStateResult]:
+        """Keep the verified package state recoverable until its projection is updated."""
         normalized_id = self._normalize_installed_skill_id(skill_id)
         registry = self.load_registry()
         entry = self._find_installed_entry(normalized_id, registry)
@@ -1106,18 +1112,19 @@ class SkillPackageService:
         registry_entry.pop("versions", None)
         changed = bool(registry_entry.get("enabled", True)) != bool(enabled)
         registry_entry["enabled"] = bool(enabled)
-        self._write_installed_registry_entry(
-            normalized_id,
-            registry_entry,
-            registry,
-            audit_event={
-                "event": "skill_package_enabled" if bool(enabled) else "skill_package_disabled",
-                "skill_id": normalized_id,
-                "changed": changed,
-            },
-        )
-        manifest = self._read_current_manifest(normalized_id, str(registry_entry.get("version") or ""))
-        return PackageStateResult(normalized_id, registry_entry, manifest, changed)
+        with self.state_transaction([normalized_id]):
+            observed = self._write_installed_registry_entry(
+                normalized_id,
+                registry_entry,
+                registry,
+                audit_event={
+                    "event": "skill_package_enabled" if bool(enabled) else "skill_package_disabled",
+                    "skill_id": normalized_id,
+                    "changed": changed,
+                },
+            )
+            manifest = self._read_current_manifest(normalized_id, str(observed["version"]))
+            yield PackageStateResult(normalized_id, observed, manifest, changed)
 
     @contextmanager
     def state_transaction(self, skill_ids: Sequence[str] | None = None) -> Iterator[None]:
@@ -1136,9 +1143,8 @@ class SkillPackageService:
             raise
 
     def _capture_state_transaction(self, skill_ids: Sequence[str] | None) -> dict[str, Any]:
-        registry = self.load_registry()
         if skill_ids is None:
-            normalized_ids = sorted(registry["skills"])
+            normalized_ids = sorted(self.load_registry()["skills"])
         else:
             normalized_ids = sorted({self._normalize_installed_skill_id(skill_id) for skill_id in skill_ids})
         registry_existed = self.registry_path.is_file()
@@ -1216,6 +1222,8 @@ class SkillPackageService:
                 os.replace(skill_root, isolated_root)
                 moved = True
             self._atomic_write_json(self.registry_path, next_registry)
+            if os.path.lexists(skill_root) or normalized_id in self._read_registry_document()["skills"]:
+                raise PackageIntegrityError(f"Skill package uninstall readback failed: {normalized_id}.")
             result = UninstallResult(
                 normalized_id,
                 registry_entry,
@@ -1250,19 +1258,22 @@ class SkillPackageService:
                 except OSError:
                     pass
 
-    def load_registry(self) -> dict[str, Any]:
-        if not self.registry_path.exists():
-            return self._registry_document({"skills": {}})
+    def _read_registry_document(self) -> dict[str, Any]:
         if self.registry_path.is_symlink() or not self.registry_path.is_file():
             raise PackageSecurityError("registry.json must be a regular file.")
         value = _load_json_bytes(self.registry_path.read_bytes(), "registry.json")
         if not isinstance(value, dict) or value.get("schema") != REGISTRY_SCHEMA:
             raise PackageIntegrityError("registry.json has an unsupported schema.")
-        skills = value.get("skills")
-        if not isinstance(skills, dict):
+        if not isinstance(value.get("skills"), dict):
             raise PackageIntegrityError("registry.json skills must be an object.")
+        return value
+
+    def load_registry(self) -> dict[str, Any]:
+        if not self.registry_path.exists():
+            return self._registry_document({"skills": {}})
+        value = self._read_registry_document()
         normalized_skills: dict[str, dict[str, Any]] = {}
-        for skill_id, entry in skills.items():
+        for skill_id, entry in value["skills"].items():
             normalized_skills[skill_id] = self._validate_registry_entry(
                 skill_id,
                 entry,
@@ -2951,7 +2962,7 @@ class SkillPackageService:
         registry: dict[str, Any],
         *,
         audit_event: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         self.skill_store.mkdir(parents=True, exist_ok=True)
         skill_root = self.skill_store / skill_id
         if skill_root.is_symlink():
@@ -2959,7 +2970,8 @@ class SkillPackageService:
         if skill_root.exists() and not skill_root.is_dir():
             raise PackageSecurityError(f"Installed skill path is not a directory: {skill_id}.")
         installed_path = skill_root / "installed.json"
-        if skill_root.exists():
+        has_installed_tree = skill_root.exists()
+        if has_installed_tree:
             installed_entry = dict(registry_entry)
             installed_entry["versions"] = self._installed_versions(skill_id)
             self._atomic_write_json(installed_path, installed_entry)
@@ -2970,6 +2982,17 @@ class SkillPackageService:
         )
         next_registry["skills"][skill_id] = dict(registry_entry)
         self._atomic_write_json(self.registry_path, next_registry)
+        expected_enabled = registry_entry["enabled"]
+        observed = self._read_registry_document()["skills"].get(skill_id)
+        if observed != registry_entry or observed["enabled"] is not expected_enabled:
+            raise PackageIntegrityError(f"Skill package registry enablement readback failed: {skill_id}.")
+        if has_installed_tree:
+            if _is_symlink_like(installed_path):
+                raise PackageIntegrityError(f"Installed skill metadata changed during readback: {skill_id}.")
+            metadata = _load_json_bytes(installed_path.read_bytes(), f"{skill_id}/installed.json")
+            if metadata != installed_entry or metadata["enabled"] is not expected_enabled:
+                raise PackageIntegrityError(f"Installed skill metadata enablement readback failed: {skill_id}.")
+        return observed
 
     def _check_update_policy(
         self,

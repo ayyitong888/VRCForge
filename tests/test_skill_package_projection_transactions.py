@@ -440,9 +440,11 @@ def test_package_enable_toggle_preserves_signed_projection_and_audit_identity(
     assert projected_skill.read_bytes() == original_bytes
 
 
+@pytest.mark.parametrize("silent", [False, True])
 def test_package_enable_projection_failure_restores_registry_and_projection_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    silent: bool,
 ) -> None:
     source = _write_package_source(
         tmp_path,
@@ -473,6 +475,8 @@ def test_package_enable_projection_failure_restores_registry_and_projection_stat
         _package_id: str,
         _projection_digest: str,
     ) -> Path:
+        if silent:
+            return state_path
         raise OSError("injected projected state failure")
 
     monkeypatch.setattr(
@@ -480,7 +484,9 @@ def test_package_enable_projection_failure_restores_registry_and_projection_stat
         "_write_state",
         fail_state_write,
     )
-    with pytest.raises(OSError, match="injected projected state failure"):
+    error = RuntimeError if silent else OSError
+    message = "enablement readback failed" if silent else "injected projected state failure"
+    with pytest.raises(error, match=message):
         controller.set_enabled(
             {"skillPackageId": "community.tests.projection-toggle-rollback", "enabled": False}
         )

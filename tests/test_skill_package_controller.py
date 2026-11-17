@@ -98,8 +98,7 @@ def test_controller_has_typed_ports_direct_routes_and_registry_handlers() -> Non
     } == {
         "preflight_import",
         "install_transaction",
-        "state_transaction",
-        "set_enabled",
+        "set_enabled_transaction",
         "uninstall_transaction",
     }
     for forbidden in (
@@ -288,13 +287,9 @@ def test_toggle_rejects_missing_id_before_factory_and_preserves_transaction() ->
     )
 
     class Service:
-        def state_transaction(self, ids: list[str]) -> object:
-            calls.append(("state-transaction", ids))
-            return _TrackingContext(calls, "state-tx")
-
-        def set_enabled(self, skill_id: str, enabled: bool) -> object:
-            calls.append(("set-enabled", skill_id, enabled))
-            return state
+        def set_enabled_transaction(self, skill_id: str, enabled: bool) -> object:
+            calls.append(("set-enabled-transaction", skill_id, enabled))
+            return _TrackingContext(calls, "state-tx", state)
 
     output = SkillPackageController(_ports(Service(), calls)).set_enabled(
         {
@@ -306,15 +301,18 @@ def test_toggle_rejects_missing_id_before_factory_and_preserves_transaction() ->
     )
     assert output == {
         "ok": True,
+        "readbackVerified": True,
+        "committed": True,
+        "commitState": "complete",
+        "persistenceState": "persisted",
         "state": {"id": "skill", "enabled": True},
         "projectedSkill": {"enabled": True},
     }
     assert calls == [
         "factory",
         "lock:enter",
-        ("state-transaction", ["skill"]),
+        ("set-enabled-transaction", "skill", True),
         "state-tx:enter",
-        ("set-enabled", "skill", True),
         ("set-projection", {"id": "skill"}, True),
         "state-tx:exit",
         "lock:exit",
@@ -357,6 +355,7 @@ def test_uninstall_keeps_nested_projection_transaction_and_optional_skip() -> No
             {"id": "skill", **remove_params}
         )
         assert output["uninstalled"] == {"id": "skill"}
+        assert output["readbackVerified"] is True
         assert (output["projectedSkill"] is not None) is expect_delete
         assert calls[:3] == ["factory", "lock:enter", ("uninstall", "skill")]
         assert calls[-2:] == ["uninstall-tx:exit", "lock:exit"]
