@@ -14,7 +14,7 @@ import json
 import re
 from typing import Any, Callable, Iterator, Mapping
 
-from planner_structured_tool_evidence import _identity_key, _private_or_opaque, project_structured_tool_evidence
+from planner_structured_tool_evidence import _identity_key, _key, _private_or_opaque, project_structured_tool_evidence
 
 TOOL_NAME = "vrcforge_read_tool_result"
 PAGE_SCHEMA = "vrcforge.tool_result_page.v1"
@@ -45,11 +45,13 @@ INPUT_SCHEMA = {
                         "pattern": r"^(?:/(?:[^~/]|~[01])*){0,32}$",
                         "description": "RFC6901 pointer: empty string selects root; otherwise keep the leading slash, e.g. /parameters or /layers/0/states. Escape a key's slash as ~1 and tilde as ~0. Copy exact pointers from returned rows."},
         "offset": {"type": "integer", "minimum": 0, "default": 0,
-                   "description": "Zero-based item or field offset within the selected collection; at most its returned count. Use nextRequest to continue."},
+                   "description": "Zero-based item or field offset, or match offset when matchNameOrPath is set. Use nextRequest to continue."},
         "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": DEFAULT_PAGE_ITEMS,
                   "description": "Maximum items in this page (1 through 20). The character budget may return fewer; follow nextRequest when hasMore is true."},
         "textOffset": {"type": "integer", "minimum": 0,
                        "description": "Only for an exact text field with offset=0: character offset in its sanitized text, independent of item offset/limit. Copy nextRequest to retrieve remaining text."},
+        "matchNameOrPath": {"type": "string", "minLength": 1, "maxLength": 1024,
+                            "description": "Find an exact known name or path among direct members of the selected retained array or object. Matches public name/path fields, object keys or string entries. Returns original JSON pointers and pages only the matches. Omit to browse all members. Does not search outside the retained collection."},
         "source": {"type": "string", "enum": ["result", "owner_model"], "default": "result",
                    "description": "Use owner_model only with the owner-validated model payload attached to this exact result reference."},
     },
@@ -121,7 +123,8 @@ def scan_result_continuation(step: Mapping[str, Any]) -> dict[str, Any]:
             "before rescanning, including after Play "
             "or domain reload. The host verifies Core scope or the complete observable business result. "
             "Page replacementRef if supplied; the host already rescanned. Otherwise rescan the expired scope "
-            "as needed. Failure to verify is not validity. Use the loaded reader name via call_tool."))
+            "as needed. Use matchNameOrPath with a collection pointer for an exact known retained member. "
+            "Failure to verify is not validity. Use the loaded reader name via call_tool."))
     return descriptor if isinstance(descriptor, dict) else {}
 
 
@@ -297,7 +300,15 @@ def page_next_request_arguments(page: Mapping[str, Any]) -> dict[str, Any] | Non
         return None
     args = request.get("arguments")
     required = {"resultRef", "jsonPointer", "offset", "limit"}
-    if not isinstance(args, dict) or not required <= set(args) or set(args) - required - {"textOffset", "source"}:
+    if not isinstance(args, dict) or not required <= set(args) or set(args) - required - {"textOffset", "source", "matchNameOrPath"}:
+        return None
+    if "matchNameOrPath" in args:
+        lookup = page.get("lookup")
+        target = args["matchNameOrPath"]
+        if ("textOffset" in args or not isinstance(target, str) or not 1 <= len(target) <= 1024
+                or not isinstance(lookup, Mapping) or lookup.get("matchNameOrPath") != target):
+            return None
+    elif "lookup" in page:
         return None
     source = args.get("source", "result")
     if source not in ("result", "owner_model") or source != page.get("source", "result"):
@@ -390,7 +401,7 @@ def result_continuation(session_id: str, turn_id: str, project_root: str, step: 
     return {"resultRef": ref, "scope": "current_turn", "sourceStep": step["index"],
             "collections": collection_manifest(step["result"], sanitize),
             "nextRequest": {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "jsonPointer": "", "offset": 0}},
-            "instructions": "Use nextRequest for the suggested data page, or copy the needed collection's jsonPointer with offset 0. Use root only for other fields. Do not rerun the tool. References expire when this turn ends."}
+            "instructions": "Use matchNameOrPath with a collection pointer to find an exact known retained member. Otherwise use nextRequest or copy the needed collection's jsonPointer with offset 0. Use root only for other fields. Do not rerun the tool. References expire when this turn ends."}
 
 
 def model_payload_continuation(session_id: str, turn_id: str, project_root: str,
@@ -513,6 +524,22 @@ def _select(root: object, pointer: str, sanitize: Callable[[object, int], str]) 
     return value
 
 
+def _matches_name_or_path(key: object, child: object, target: str,
+                          sanitize: Callable[[object, int], str]) -> bool:
+    if isinstance(key, str):
+        if not _safe_key(key, child, sanitize):
+            return False
+        if key == target:
+            return True
+    if isinstance(child, str):
+        return child == target
+    return isinstance(child, dict) and any(
+        isinstance(value, str) and value == target and _key(field).endswith(("name", "path"))
+        and _safe_key(field, value, sanitize)
+        for field, value in child.items()
+    )
+
+
 def _source_constraints(root: object, pointer: str, sanitize: Callable[[object, int], str]) -> tuple[list[dict[str, Any]], bool]:
     """Carry source uncertainty into narrow reads without traversing sibling data."""
     keys = ("classification", "resolutionStatus", "candidateCount", "analysisRequired",
@@ -589,7 +616,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     if context is None or not context.session_id or not context.turn_id:
         raise PermissionError("Result reads require the owning active runtime turn")
     if set(params) - set(INPUT_SCHEMA["properties"]):
-        raise ValueError("Result reader accepts only resultRef, source, jsonPointer, offset, limit and textOffset")
+        raise ValueError("Result reader accepts only resultRef, source, jsonPointer, offset, limit, textOffset and matchNameOrPath")
     source = params.get("source", "result")
     if source not in ("result", "owner_model"):
         raise ValueError("source must be result or owner_model")
@@ -649,6 +676,28 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError("offset must be nonnegative and limit must be between 1 and 20")
     members = list(value.items()) if isinstance(value, dict) else list(enumerate(value)) if isinstance(value, list) else [(None, value)]
+    lookup = {}
+    continuation_filters = {}
+    if "matchNameOrPath" in params:
+        target = params["matchNameOrPath"]
+        if not isinstance(target, str) or not 1 <= len(target) <= 1024:
+            raise ValueError("matchNameOrPath must be a string of 1 to 1024 characters")
+        if not isinstance(value, (dict, list)) or "textOffset" in params:
+            raise ValueError("matchNameOrPath requires a retained collection")
+        # A redacted selector must never reveal whether the underlying value
+        # is retained. Use the same exact-string redactor as the page projector.
+        public = sanitize(target, None) == target
+        retained_count = len(members)
+        members = [
+            (key, child) for key, child in members
+            if public and _matches_name_or_path(key, child, target, sanitize)
+            and len(_pointer(pointer, key)) <= 1024 and pointer.count("/") < 32
+        ]
+        lookup = {"scope": "retained_direct_members", "retainedItems": retained_count,
+                  "interpretation": "Matches cover addressable public direct members retained here. They do not establish source coverage or a confirmed mapping."}
+        if members:
+            lookup["matchNameOrPath"] = target
+            continuation_filters["matchNameOrPath"] = target
     if offset > len(members):
         raise ValueError("offset is outside the retained result")
     field_name = pointer.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
@@ -663,6 +712,8 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                            "resultRef": ref, "source": source, "sourceStep": step["index"], "sourceTool": step["tool"],
                            "jsonPointer": pointer, "offset": offset, "totalItems": len(members),
                            "items": [], "redactedFields": 0, "hasMore": False, "previewTruncated": False}
+    if lookup:
+        page["lookup"] = lookup
     if source == "result" and host_verification is not None:
         page.update(freshness="captured_this_turn" if host_verification == "current_turn" else "verified_on_read",
                     verification=host_verification, verificationAuthority="host_scan_result_store", expired=False)
@@ -742,7 +793,8 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
             row["type"] = "object" if isinstance(child, dict) else "array"
             row["count"] = len(child)
         next_collection = {"tool": TOOL_NAME, "arguments": {
-            "resultRef": ref, "source": source, "jsonPointer": pointer, "offset": cursor + 1, "limit": limit}}
+            "resultRef": ref, "source": source, "jsonPointer": pointer, "offset": cursor + 1, "limit": limit,
+            **continuation_filters}}
         single = {**page, "items": [row], "returnedItems": 1, "nextRequest": next_collection}
         if _size(single) > MAX_PAGE_CHARS and "value" in row:
             # No cut preview: retain the complete value in the same owning
@@ -774,7 +826,8 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
         cursor += 1
     page["hasMore"] = cursor < len(members)
     if page["hasMore"]:
-        page["nextRequest"] = {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "source": source, "jsonPointer": pointer, "offset": cursor, "limit": limit}}
+        page["nextRequest"] = {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "source": source, "jsonPointer": pointer,
+                                                                "offset": cursor, "limit": limit, **continuation_filters}}
     page["returnedItems"] = len(page["items"])
     # hasMore covers siblings; expandable rows carry their own exact requests.
     page["previewTruncated"] = any(row["truncated"] for row in page["items"])

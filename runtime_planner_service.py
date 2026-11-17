@@ -296,7 +296,7 @@ _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_exit_skill": ("name:string", "reason:string"),
     "vrcforge_list_directory": ("path:string", "projectPath?:string", "maxDepth?:integer", "maxCount?:integer"),
     "vrcforge_read_text_file": ("path:string", "projectPath?:string", "maxBytes?:integer", "maxOutputChars?:integer", "startLine?:integer", "endLine?:integer"),
-    "vrcforge_read_tool_result": ("resultRef:string", "jsonPointer?:string", "offset?:integer", "limit?:integer"),
+    "vrcforge_read_tool_result": ("resultRef:string", "jsonPointer?:string", "matchNameOrPath?:string", "offset?:integer", "limit?:integer"),
     "vrcforge_find_files": ("path:string", "projectPath?:string", "pattern?:string", "maxDepth?:integer", "maxCount?:integer"),
     "vrcforge_search_text": ("path:string", "projectPath?:string", "query:string", "pattern?:string", "maxDepth?:integer", "maxCount?:integer", "maxFileBytes?:integer", "caseSensitive?:boolean"),
     "vrcforge_edit_file": ("path:string", "content:string"),
@@ -4140,6 +4140,8 @@ class RuntimePlannerService:
         result = step.get("result")
         if not isinstance(result, Mapping):
             return []
+        if step.get("tool") == "vrcforge_read_tool_result" and "lookup" in result:
+            return []  # Match pagination does not describe source completeness.
         scopes = [("", result)] + [
             ("/" + name, result[name])
             for name in ("summary", "recognitionCoverage", "coverage", "paging")

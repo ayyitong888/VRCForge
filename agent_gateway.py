@@ -1536,7 +1536,7 @@ class AgentGateway:
 
         self.register_tool(
             RESULT_READER_TOOL,
-            "When to use: read retained structured data using its exact resultRef, jsonPointer and zero-based offset; honor returned scope and freshness. Owned expired references return needs_rescan with reason and scope. When NOT to use: do not read another session/project, files, opaque capture output, credentials, or rerun a mutation. Negative example: guessing an old resultRef cannot grant access. Legacy Unity references remain current_turn only.",
+            "When to use: page retained structured data by its exact resultRef and jsonPointer, or set matchNameOrPath to find an exact known member in that collection. Honor returned scope and freshness. Owned expired references return needs_rescan with reason and scope. When NOT to use: do not read another session/project, files, opaque capture output, credentials, or rerun a mutation. Negative example: guessing an old resultRef cannot grant access. Legacy Unity references remain current_turn only.",
             "read/debug",
             lambda params: read_tool_result(params, sanitize=planner_policy.sanitize_planner_observation_text),
         )

@@ -7,7 +7,7 @@ from runtime_planner_service import RuntimePlannerService
 from runtime_planner_service import sanitize_planner_observation_text as sanitize
 from agent_tool_result_reader import (
     MAX_PAGE_CHARS, TOOL_NAME, bind_tool_result_context, observation_result_continuation,
-    read_tool_result, result_continuation, result_reference,
+    page_next_request_arguments, read_tool_result, result_continuation, result_reference,
 )
 
 
@@ -25,6 +25,35 @@ def scan_result():
     return {"parameters": [{"name": f"Parameter{i}", "type": "Bool"} for i in range(27)] + [
         {"name": "衣柜", "type": "Int", "default_int": 0, "used_by_condition": True}],
         "layers": [{"name": "Wardrobe", "states": [{"name": "Rest"}]}]}
+
+
+def test_lookup_pages_exact_public_members_and_preserves_source_coordinates():
+    rows = [{"name": f"Variant {index}"} for index in range(86)]
+    rows[15] = {"privatePath": "Assets/Target.prefab"}
+    rows[40] = {"name": "Target", "assetPath": "Assets/Target.prefab"}
+    rows[85] = {"name": "Target", "path": "Assets/Alt/Target.prefab"}
+    step = retained({"prefabCandidates": rows, "otherCandidates": [rows[40]],
+                     "keyed": {"name/with~escapes": {"id": "probe"}}})
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        page = read(step, jsonPointer="/prefabCandidates", matchNameOrPath="Target", limit=1)
+        assert page["lookup"]["retainedItems"] == 86
+        assert page["totalItems"] == 2 and page["hasMore"] is True
+        assert RuntimePlannerService.model_source_completeness({"tool": TOOL_NAME, "result": page}) == []
+        assert page["items"][0]["jsonPointer"] == "/prefabCandidates/40"
+        request = page_next_request_arguments(page)
+        assert request and request["matchNameOrPath"] == "Target"
+        following = read_tool_result(request, sanitize=sanitize)
+        assert following["items"][0]["jsonPointer"] == "/prefabCandidates/85"
+        assert following["hasMore"] is False
+        exact = read(step, jsonPointer="/prefabCandidates", matchNameOrPath="Assets/Target.prefab")
+        assert [item["value"] for item in exact["items"]] == [rows[40]]
+        keyed = read(step, jsonPointer="/keyed", matchNameOrPath="name/with~escapes")
+        assert keyed["items"][0]["jsonPointer"] == "/keyed/name~1with~0escapes"
+        assert [item["value"] for item in read(step, jsonPointer=keyed["items"][0]["jsonPointer"])["items"]] == ["probe"]
+        assert read(step, jsonPointer="/prefabCandidates", matchNameOrPath="Targ")["items"] == []
+    with bind_tool_result_context("other", "turn", "project", [step]):
+        with pytest.raises(PermissionError):
+            read(step, jsonPointer="/prefabCandidates", matchNameOrPath="Target")
 
 
 @pytest.mark.parametrize(("tool", "field"), [
@@ -53,7 +82,8 @@ def test_observation_keeps_explicit_cursor_and_does_not_guess_between_large_coll
     assert observation["nextRequest"]["arguments"]["offset"] == 3
 
 
-def test_real_gateway_issues_current_turn_ref_and_reader_recovers_tail_parameter():
+@pytest.mark.parametrize("lookup", [False, True])
+def test_real_gateway_issues_current_turn_ref_and_reader_recovers_tail_parameter(lookup):
     import test_agent_loop_p0 as loop_tests
     fixture = loop_tests.AgentLoopP0Tests("test_loaded_skill_policy_blocks_disallowed_tool_then_allows_real_evidence")
     fixture.setUp()
@@ -72,10 +102,11 @@ def test_real_gateway_issues_current_turn_ref_and_reader_recovers_tail_parameter
             assert "resultContinuation=" in observation
             continuation = state[-1]["resultRead"]
             assert any(row["jsonPointer"] == "/parameters" and row["count"] == 28 for row in continuation["collections"])
+            target = {"matchNameOrPath": "衣柜"} if lookup else {"offset": 26, "limit": 1}
             return {"planner": "llm", "skillNeeded": True, "skillTool": "vrcforge_read_tool_result",
-                    "skillParams": {"resultRef": continuation["resultRef"], "jsonPointer": "/parameters", "offset": 26, "limit": 1},
+                    "skillParams": {"resultRef": continuation["resultRef"], "jsonPointer": "/parameters", **target},
                     "continueLoop": True, "nextStep": "call_skill"}
-        if len(state) == 2:
+        if len(state) == 2 and not lookup:
             request = state[-1]["result"]["nextRequest"]
             assert request["arguments"]["jsonPointer"] == "/parameters"
             assert request["arguments"]["offset"] == 27
@@ -91,8 +122,9 @@ def test_real_gateway_issues_current_turn_ref_and_reader_recovers_tail_parameter
         with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=planner):
             response = gateway.runtime_message({"message": "Inspect the supplied parameter result", "session_id": "reader-test"})
         assert response["plan"]["nextStep"] == "done"
-        assert [step["tool"] for step in response["steps"]] == [name, TOOL_NAME, TOOL_NAME]
-        assert len(seen) == 3
+        expected_readers = 1 if lookup else 2
+        assert [step["tool"] for step in response["steps"]] == [name] + [TOOL_NAME] * expected_readers
+        assert len(seen) == expected_readers + 1
     finally:
         gateway._tools.pop(name, None)
         fixture.tearDown()
@@ -105,7 +137,7 @@ def test_reader_is_fresh_core_read_in_both_contexts_and_layers():
             catalog = dashboard_server._RuntimePlannerCatalog().read(layer, project_context_active=project)
             tool = next(item for item in catalog.visible_tools if item.runtime_name == TOOL_NAME)
             assert tool.block == "core" and not tool.write
-            assert set(tool.input_schema["properties"]) - {"promptSkillProvenance"} == {"resultRef", "source", "jsonPointer", "offset", "limit", "textOffset"}
+            assert set(tool.input_schema["properties"]) - {"promptSkillProvenance"} == {"resultRef", "source", "jsonPointer", "offset", "limit", "textOffset", "matchNameOrPath"}
             prompt = dashboard_server.AGENT_GATEWAY.runtime_planner._build_llm_plan_prompt(
                 "Read omitted data", [], exposure_layer=layer, project_context_active=project, internal_tool_blocks=["core"])
             assert "- read_tool_result" in prompt

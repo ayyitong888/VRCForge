@@ -45,6 +45,15 @@ def test_other_page_or_invalid_pointer_cannot_erase_failure(change):
     assert finish(loop)["nextStep"] == "tool_failed"
 
 
+def test_lookup_correction_matches_only_the_same_selector():
+    loop = AgentTaskLoop("Read named parameters")
+    failed = record(loop, {**TARGET, "matchNameOrPath": "Wanted", "limit": 22}, ok=False)
+    other = record(loop, {**TARGET, "matchNameOrPath": "Other", "limit": 20}, ok=True)
+    assert not other.get("correctedActionIds")
+    recovered = record(loop, {**TARGET, "matchNameOrPath": "Wanted", "limit": 20}, ok=True)
+    assert recovered["correctedActionIds"] == [failed["actionId"]]
+
+
 @pytest.mark.parametrize("kind,tool", [("write", TOOL), ("skill", "vrcforge_scan_fx_animator")])
 def test_matching_arguments_do_not_relax_other_tools_or_writes(kind, tool):
     loop = AgentTaskLoop("Read parameter")

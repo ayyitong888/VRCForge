@@ -1496,7 +1496,7 @@ class AgentTaskLoop:
     _managed_visual_capture_action_ids: list[str] = field(default_factory=list)
     # Result references are scoped to this turn; retain exact call identities
     # only here, never reconstruct them from redacted summaries or persisted tasks.
-    _result_reader_targets: dict[str, tuple[str, str, int]] = field(default_factory=dict)
+    _result_reader_targets: dict[str, tuple[str, str, int, str | None]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.objective = _bounded_text(self.objective, None)
@@ -1755,16 +1755,18 @@ class AgentTaskLoop:
             ref = arguments.get("resultRef")
             pointer = arguments.get("jsonPointer", "")
             offset = arguments.get("offset", 0)
+            match = arguments.get("matchNameOrPath")
             if (
                 isinstance(ref, str) and ref
                 and isinstance(pointer, str) and len(pointer) <= 1024
                 and (not pointer or pointer.startswith("/"))
                 and "~" not in pointer.replace("~0", "").replace("~1", "")
                 and type(offset) is int and offset >= 0
+                and ("matchNameOrPath" not in arguments or isinstance(match, str) and 1 <= len(match) <= 1024)
             ):
                 # Page size is intentionally excluded: correcting an invalid
                 # limit must still identify the same requested page start.
-                reader_target = (ref, pointer, offset)
+                reader_target = (ref, pointer, offset, match)
                 self._result_reader_targets[action_id] = reader_target
         correction_id = _bounded_text(correction_for_action_id, 80)
         accepted_correction_id = ""
