@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from agent_gateway import AgentGateway
+from agent_gateway import AgentGateway, AgentGatewayError
 from desktop_apps import WindowsAppCatalog
 from desktop_executor import DesktopActionCancelled, DesktopExecutorError, WindowsDesktopController
 from desktop_operations import canonical_desktop_params
@@ -291,6 +291,48 @@ class DesktopExecutorTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)
         self.assertIn("operation=screenshot", observation)
         self.assertIn("A settings window is visible", observation)
+
+    def test_app_owned_screenshot_works_with_external_gateway_disabled(self) -> None:
+        import dashboard_server
+        from fastapi.testclient import TestClient
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            config = gateway.ensure_config()
+            config.enabled = False
+            gateway.save_config(config)
+            captured = []
+
+            def capture(params: dict[str, Any]) -> dict[str, Any]:
+                captured.append(params["mode"])
+                return {"ok": True, "width": 2, "height": 2}
+
+            gateway.register_tool(
+                "vrcforge_capture_screenshot", "Capture a fixture screenshot.", "read/debug", capture,
+            )
+            path = "/api/app/agent/desktop-actions"
+            request = {"action": "screenshot", "params": {"mode": "window"}}
+            token = "fixture-app-session-token"
+            with (
+                patch.object(dashboard_server, "AGENT_GATEWAY", gateway),
+                patch.object(dashboard_server, "APP_AUTH_REQUIRED", True),
+                patch.object(dashboard_server, "APP_SESSION_TOKEN", token),
+            ):
+                client = TestClient(dashboard_server.app)
+                try:
+                    self.assertEqual(client.post(path, json=request).status_code, 401)
+                    response = client.post(path, json=request, headers={"Authorization": f"Bearer {token}"})
+                finally:
+                    client.close()
+
+            self.assertEqual(response.status_code, 200)
+            result = response.json()
+            self.assertEqual(result["status"], "executed", result["error"])
+            self.assertEqual(result["result"]["result"]["width"], 2)
+            with self.assertRaisesRegex(AgentGatewayError, "Gateway is disabled"):
+                gateway.call_tool("vrcforge_capture_screenshot", {"mode": "window"})
+            self.assertEqual(captured, ["window"])
 
     def test_embedded_worker_executes_and_returns_full_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,19 +1,106 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from agent_gateway import AgentGateway
+import dashboard_server
+from agent_gateway import AgentGateway, AgentGatewayError
 from agent_question_service import AgentQuestionServiceError
+from package_install_workflow_service import PackageInstallWorkflowService
 from runtime_planner_service import RuntimePlannerService
 from tests.test_native_runtime_continuations import _run, _write_gateway
-from tests.test_native_runtime_gateway import NativeModel, NativeTurn, call, finish
+from tests.test_native_runtime_gateway import NativeModel, NativeTurn, call, finish, run, runtime_state
 from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntimePlannerDesktop
 
 
 MODES = ("approval", "auto", "roslyn_full_auto")
+
+
+@pytest.mark.parametrize("mode, allow_writes", [
+    ("approval", True), ("auto", True), ("roslyn_full_auto", True), ("roslyn_full_auto", False),
+])
+def test_native_vpm_install_uses_local_permission_with_external_gateway_disabled(
+    tmp_path: Path, monkeypatch, mode: str, allow_writes: bool,
+) -> None:
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True)
+    tool_name = "vrcforge_package_install_request"
+    model_tool_name = "unity_package_install_request"
+    package_id = "com.vrcfury.vrcfury"
+    arguments = {"projectPath": str(project), "packageId": package_id, "preferredManager": "vrc-get"}
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    model = NativeModel([
+        call("load-package-tool", "load_internal_tool_block", {
+            "block": "project_environment/assets_packages", "tools": [model_tool_name],
+        }),
+        call("request-install", model_tool_name, arguments), finish,
+    ])
+    original = dashboard_server.AGENT_GATEWAY._tools[tool_name]
+    loader = dashboard_server.AGENT_GATEWAY._tools["vrcforge_load_internal_tool_block"]
+    monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
+    gateway.bind_runtime_planner(RuntimePlannerService(
+        catalog=dashboard_server._RuntimePlannerCatalog(),
+        desktop=_TestRuntimePlannerDesktop(gateway),
+        model=model,
+        turn=NativeTurn(),
+    ))
+    config = gateway.ensure_config()
+    config.enabled = False
+    config.allow_write_requests = allow_writes
+    config.execution_mode = mode
+    config.roslyn_risk_acknowledged = mode == "roslyn_full_auto"
+    gateway.save_config(config)
+    workflow = PackageInstallWorkflowService(replace(
+        dashboard_server.PACKAGE_INSTALL_WORKFLOWS._ports,
+        create_apply_request=gateway.approval_transactions.create_apply_request,
+    ))
+    monkeypatch.setattr(workflow, "plan_install", lambda _params: {
+        "ok": True, "projectPath": str(project), "packageId": package_id,
+        "packageState": {"installed": False}, "canExecuteCommandInstall": True,
+    })
+    installed = []
+    gateway.register_tool(
+        tool_name, original.description, original.category,
+        workflow.request_install, write=True,
+    )
+    gateway.register_tool(loader.name, loader.description, loader.category, loader.handler)
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_install_vpm_package", "Install the fixture package.", "medium",
+        lambda args: installed.append((args["packageId"], args["preferredManager"])) or {"ok": True},
+        pre_write_checkpoint_required=False,
+    )
+    reviewed = []
+    if mode == "auto":
+        def allow_review(approval):
+            assert not installed
+            reviewed.append(approval["targetTool"])
+            return "allow_auto"
+        gateway.approval_transactions.auto_approval_reviewer = allow_review
+
+    with pytest.raises(AgentGatewayError, match="Agent Gateway is disabled"):
+        gateway.call_external_mcp_tool(tool_name, arguments, agent_name="internal-runtime")
+    assert not installed
+    response = run(gateway, tmp_path, projectRoot=str(project), message=f"Install {package_id}.")
+    if not allow_writes:
+        assert model_tool_name not in runtime_state(model.requests[1])["availableToolNames"]
+        assert not gateway.approval_transactions.list_approvals()
+        assert not installed
+        return
+    attempts = [step for step in response["steps"] if step["tool"] == tool_name]
+    assert len(attempts) == 1, (response["plan"], response["steps"])
+    step, = attempts
+    if mode == "approval":
+        assert step["status"] == "approval_pending", step
+        assert not installed
+        assert gateway.approval_transactions.list_approvals()
+    else:
+        assert installed == [(package_id, "vrc-get")], step
+    if mode == "auto":
+        assert reviewed == ["vrcforge_install_vpm_package"]
 
 
 def _set_mode(gateway: AgentGateway, mode: str) -> None:

@@ -1140,7 +1140,7 @@ class AgentGateway:
                 write_handler_visible=self._write_handler_visible,
                 append_audit=self.append_audit,
                 authenticate=self.authenticate,
-                call_tool=self.call_tool,
+                call_tool=self._call_registered_tool,
                 ensure_config=self.ensure_config,
                 read_user_constraints=self.read_user_constraints,
                 roslyn_available=self.roslyn_available,
@@ -1402,11 +1402,7 @@ class AgentGateway:
                 runtime_cancel_requested=self._runtime_session_state.cancel_requested,
                 signal_background_activity=self._signal_background_activity,
                 has_tool=lambda name: name in self._tools,
-                call_tool=lambda name, params, agent_name: self.call_tool(
-                    name,
-                    params,
-                    agent_name=agent_name,
-                ),
+                call_tool=self._call_registered_tool,
                 run_vision_analysis=self._run_vision_analysis,
                 build_screenshot_attachment=lambda path, root: desktop_screenshot_attachment(
                     path,
@@ -5073,8 +5069,19 @@ class AgentGateway:
         params: dict[str, Any] | None = None,
         agent_name: str = "external-agent",
     ) -> dict[str, Any]:
+        return self._call_registered_tool(name, params, agent_name, require_external_gateway=True)
+
+    def _call_registered_tool(
+        self,
+        name: str,
+        params: dict[str, Any] | None,
+        agent_name: str,
+        *,
+        require_external_gateway: bool = False,
+    ) -> dict[str, Any]:
+        """Dispatch a registered tool from the external entry or a trusted local service."""
         config = self.ensure_config()
-        if not config.enabled:
+        if require_external_gateway and not config.enabled:
             raise AgentGatewayError("Agent Gateway is disabled in config/agent_gateway.json.", status_code=403)
 
         tool = self._tools.get(name)
