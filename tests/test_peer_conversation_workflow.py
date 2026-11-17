@@ -5,11 +5,15 @@ import json
 import threading
 from unittest.mock import Mock
 
+import pytest
+
 import dashboard_server as host
 from tests.test_native_runtime_gateway import call, setup_gateway
 
 
-def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_path, monkeypatch):
+@pytest.mark.parametrize("target_plan", [False, True], ids=["app-chat", "general-workspace-plan"])
+def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_path, monkeypatch, target_plan):
+    workspace = str(tmp_path) if target_plan else ""
     source_id, target_id = "relay-source", "relay-target"
     source_session, target_session = "relay-source-session", "relay-target-session"
     evidence = "The target's glossary uses the term blend shape."
@@ -39,6 +43,8 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
         assert f"delegated from conversation {source_id}" in wire
         assert "Please verify the glossary terminology." in wire
         assert release_target.wait(4)
+        if target_plan:
+            return {"role": "assistant", "content": evidence}
         return call("target-note", "send_message", {
             "chatId": source_id, "message": "I checked the glossary and am returning the result.",
         })
@@ -54,6 +60,9 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
         index = state.get(lane, 0)
         state[lane] = index + 1
         if as_target:
+            if target_plan:
+                assert index == 0
+                return target_starts(request)
             if index == 0:
                 return call("target-tools", "load_internal_tool_block", {
                     "block": "project_environment/conversations", "tools": ["send_message"],
@@ -75,7 +84,10 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
         assert index == 3
         return source_finishes(request)
 
-    gateway, model, _ = setup_gateway(tmp_path, [model_step] * 7)
+    request_count = 5 if target_plan else 7
+    gateway, model, _ = setup_gateway(tmp_path, [model_step] * request_count)
+    runtime = Mock(wraps=gateway.runtime_message)
+    monkeypatch.setattr(gateway, "runtime_message", runtime)
     monkeypatch.setattr(host, "AGENT_GATEWAY", gateway)
     monkeypatch.setattr(host, "RUNTIME_QUEUE_PORT", gateway)
     monkeypatch.setattr(host, "EVENT_BUS", host.DashboardEventBus())
@@ -87,16 +99,16 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
 
     source = {
         "id": source_id, "sessionId": source_session, "revision": 1, "title": "Requester",
-        "projectPath": "", "projectType": "general", "items": [],
+        "projectPath": workspace, "projectType": "general", "items": [],
     }
     target = {
         "id": target_id, "sessionId": target_session, "revision": 1, "title": "Glossary owner",
-        "projectPath": "", "projectType": "general", "items": [
+        "projectPath": workspace, "projectType": "general", "planMode": target_plan, "items": [
             {"id": "target-seed", "type": "user", "text": "I maintain the glossary."},
         ],
     }
-    assert host._create_handoff_chat(source, "")["id"] == source_id
-    assert host._create_handoff_chat(target, "")["id"] == target_id
+    assert host._create_handoff_chat(source, workspace)["id"] == source_id
+    assert host._create_handoff_chat(target, workspace)["id"] == target_id
 
     service = host.cross_session_conversation_runtime()
 
@@ -126,7 +138,7 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
             return await host.app_agent_runtime_message(host.AgentRuntimeMessageRequest(
                 message="Ask the existing glossary chat to verify its wording and summarize its answer.",
                 session_id=source_session, chatId=source_id, clientTurnId="request-glossary",
-                projectType="general", maxAgenticTurns=6,
+                projectPath=workspace, projectType="general", maxAgenticTurns=6,
             ))
         finally:
             release_target.set()
@@ -134,13 +146,21 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
 
     result = asyncio.run(exercise())
     assert result["plan"]["reply"] == f"Glossary verification: {evidence}", (result["plan"], calls)
-    assert sorted(name for name, _ in calls) == ["followup_task", "read_conversation", "send_message"]
+    expected_tools = ["followup_task", "read_conversation"]
+    if not target_plan:
+        expected_tools.append("send_message")
+    assert sorted(name for name, _ in calls) == expected_tools
     assert next(receipt for name, receipt in calls if name == "read_conversation")["status"] == "completed"
-    assert len(model.requests) == 7
-    saved = host._load_handoff_chat(target_id, "")
+    assert len(model.requests) == request_count
+    saved = host._load_handoff_chat(target_id, workspace)
     assert next(item for item in saved["items"] if item.get("id", "").startswith("runtime-reply-"))["response"]["plan"]["reply"] == evidence
-    note = host._load_handoff_chat(source_id, "")["items"][-1]
-    assert note["forwardedFrom"]["sourceChatId"] == target_id
-    assert note["forwardedByAgent"] is True
-    assert "I checked the glossary" in note["text"]
+    target_runtime = next(call.args[0] for call in runtime.call_args_list if call.args[0]["chatId"] == target_id)
+    assert target_runtime["_projectType"] == "general"
+    assert target_runtime["_projectContextActive"] is False
+    assert target_runtime["planMode"] is target_plan
+    if not target_plan:
+        note = host._load_handoff_chat(source_id, workspace)["items"][-1]
+        assert note["forwardedFrom"]["sourceChatId"] == target_id
+        assert note["forwardedByAgent"] is True
+        assert "I checked the glossary" in note["text"]
     assert len(gateway.list_runtime_followups(session_id=target_id)) == 1

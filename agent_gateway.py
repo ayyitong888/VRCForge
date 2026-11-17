@@ -8577,6 +8577,7 @@ class AgentGateway:
                         "clientTurnId": client_turn_id,
                         "actionId": planned_action_id,
                         "projectRoot": project_root,
+                        "projectType": "unity" if project_context_active and project_root else "general",
                         "maxAgenticTurns": task_loop.budget_policy.max_model_turns,
                     }
                 if step_tool in {

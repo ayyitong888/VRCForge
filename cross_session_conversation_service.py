@@ -115,6 +115,12 @@ class CrossSessionConversationService:
             return ""
         return value.strip()[:max_chars]
 
+    @staticmethod
+    def _project_type(configured: Any, project_root: str) -> str:
+        if configured == "general":
+            return "general"
+        return "unity" if project_root else "general"
+
     def _host(self, params: Mapping[str, Any]) -> dict[str, Any]:
         context = params.get("_trustedConversationContext")
         if not isinstance(context, Mapping):
@@ -133,7 +139,7 @@ class CrossSessionConversationService:
             "clientTurnId": source_turn_id,
             "actionId": source_action_id,
             "projectRoot": scope,
-            "projectType": "unity" if scope else "general",
+            "projectType": self._project_type(context.get("projectType"), scope),
             "maxAgenticTurns": max_agentic_turns,
         }
 
@@ -354,6 +360,7 @@ class CrossSessionConversationService:
         chat_id, target = self._target_chat(params, host)
         if trigger_turn and chat_id == host["chatId"]:
             raise CrossSessionConversationError("A follow-up target must be a different conversation.")
+        host["projectType"] = self._project_type(target.get("projectType"), host["projectRoot"])
         session_id = str(target.get("sessionId") or "").strip()
         if not session_id:
             raise CrossSessionConversationError("Target conversation has no session binding.")
@@ -866,6 +873,7 @@ class CrossSessionConversationService:
         session_id = str(target.get("sessionId") or "")
         client_turn_id = str(claim.get("clientTurnId") or "")
         message = self._text(claim.get("message"), max_chars=self.MAX_MESSAGE_CHARS + 512)
+        project_type = self._project_type(target.get("projectType"), project_root)
         if not message:
             raise CrossSessionConversationError("Queued forwarded message is empty.")
         params: dict[str, Any] = {
@@ -876,9 +884,9 @@ class CrossSessionConversationService:
             "history": self._history_before(target, client_turn_id),
             "projectPath": project_root,
             "projectRoot": project_root,
-            "projectType": "unity" if project_root else "general",
-            "_projectType": "unity" if project_root else "general",
-            "_projectContextActive": bool(project_root),
+            "projectType": project_type,
+            "_projectType": project_type,
+            "_projectContextActive": project_type == "unity",
             "planMode": claim.get("planMode") is True,
             "followupQueueId": str(claim.get("queueId") or ""),
             "followupLaneId": str(claim.get("sessionId") or chat_id),
