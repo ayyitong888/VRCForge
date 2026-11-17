@@ -51,6 +51,7 @@ def test_terminal_cleanup_never_confirms_queued_but_unconsumed_inputs(tmp_path, 
     native.settle({"nextStep": terminal})
     assert native.consumed_steer_input_ids == []
     assert events == []
+    assert all(message.get("content") != "pending input" for message in native.messages())
 
 
 def test_live_delta_receipt_is_published_before_the_next_model_request(tmp_path):

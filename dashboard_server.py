@@ -3714,12 +3714,22 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
                 "message": queue_request.message,
                 "attachments": queue_request.attachments,
                 "laneId": queue_request.lane_id,
+                "provider": queue_request.provider,
+                "providerLabel": queue_request.provider_label,
+                "model": queue_request.model,
+                "projectPath": queue_request.project_path,
+                "projectRoot": queue_request.project_root,
+                "planMode": queue_request.plan_mode,
                 "projectType": queue_request.project_type
                 or ("unity" if (queue_request.project_path or queue_request.project_root) else "general"),
             }
         )
         if steer_result.get("accepted") is True:
             await EVENT_BUS.broadcast("agentRuntimeQueue", steer_result)
+            return steer_result
+        if steer_result.get("status") == "backpressure" or steer_result.get("reason") in {
+            "reserved_input_id", "input_already_recorded",
+        }:
             return steer_result
     followup_lane_id = queue_request.lane_id or queue_request.session_id
     if steer_result is None or steer_result.get("accepted") is not True:

@@ -881,7 +881,7 @@ export function useChatRunController({
           }
         });
       queueDispatchTailRef.current = dispatch.then(() => undefined, () => undefined);
-       let queueResult = await dispatch;
+       const queueResult = await dispatch;
        if (cancellationGeneration !== queueCancellationGenerationRef.current) {
          const cancellation = queueResult?.queueId && queuedTurn.queueLaneId
            ? await cancelAgentRunFollowup(queueEndpoint, queueResult.queueId, { sessionId: queuedTurn.queueLaneId }).catch(() => null)
@@ -907,25 +907,6 @@ export function useChatRunController({
          steerIntentRef.current.delete(turn.id);
          await reservation.decision;
          return "failed";
-       }
-       // A steer accepted concurrently with Stop would otherwise disappear
-       // with the cancelled active turn. Re-submit the same immutable input to
-       // the durable follow-up lane before releasing the reservation.
-       if (stoppingOwner() && queueResult?.accepted === true && queueResult.mode === "steer") {
-         queueResult = await recordAgentRunQueued(queueEndpoint, {
-           sessionId: queuedTurn.sessionId,
-           laneId: queuedTurn.queueLaneId,
-           clientTurnId: turn.id,
-           planMode: turn.planMode === true,
-           message: turn.text,
-           attachments: serializeChatAttachments(turn.attachments),
-           provider: turn.provider,
-           providerLabel: turn.providerLabel,
-           model: turn.model,
-           projectPath: queuedTurn.projectPath,
-           projectRoot: queuedTurn.projectPath,
-           projectType: queuedTurn.projectType,
-         }).catch(() => null);
        }
        const backpressured = queueResult?.accepted !== true;
        queueArbitratorRef.current.settle(turn.id, {
@@ -954,7 +935,8 @@ export function useChatRunController({
          ...queuedTurn,
          queueId: queueResult?.queueId,
          queueSequence: queueResult?.sequence,
-         queueStatus: stoppingOwner() ? "paused" : backpressured ? "waiting_for_resources" : "queued",
+         queueStatus: stoppingOwner() || queueResult?.status === "paused"
+           ? "paused" : backpressured ? "waiting_for_resources" : "queued",
         };
        steerIntentRef.current.delete(turn.id);
        queueRef.current.push(durableTurn);
@@ -1592,17 +1574,17 @@ export function useChatRunController({
           ...intent,
           queueId: deferred.queueId,
           queueSequence: deferred.sequence,
-          queueStatus: "queued",
+          queueStatus: deferred.status === "paused" ? "paused" : "queued",
         });
         steerIntentRef.current.delete(inputId);
         deferredQueueChanged = true;
       }
-      for (const [inputId] of deferredSteerBackpressure) {
+      for (const [inputId, outcome] of deferredSteerBackpressure) {
         const intent = steerIntentRef.current.get(inputId);
         if (!intent || queueRef.current.some((queuedTurn) => queuedTurn.id === inputId)) continue;
         queueRef.current.push({
           ...intent,
-          queueStatus: "waiting_for_resources",
+          queueStatus: outcome.status === "delivery_unverified" ? "delivery_unverified" : "waiting_for_resources",
         });
         steerIntentRef.current.delete(inputId);
         deferredQueueChanged = true;
@@ -1729,7 +1711,7 @@ export function useChatRunController({
               ...item,
               queuedFrom: true,
               composerQueued: true,
-              queueStatus: "queued" as const,
+              queueStatus: deferred.status === "paused" ? "paused" as const : "queued" as const,
               queueEnvelope: {
                 ...item.queueEnvelope,
                 queueId: deferred.queueId,
@@ -1737,12 +1719,14 @@ export function useChatRunController({
               },
             };
           }
-          if (deferredSteerBackpressure.has(item.clientTurnId || "")) {
+          const unconfirmed = deferredSteerBackpressure.get(item.clientTurnId || "");
+          if (unconfirmed) {
             return {
               ...item,
               queuedFrom: true,
               composerQueued: true,
-              queueStatus: "waiting_for_resources" as const,
+              queueStatus: unconfirmed.status === "delivery_unverified"
+                ? "delivery_unverified" as const : "waiting_for_resources" as const,
             };
           }
           if (terminalUnverifiedSteerInputIds.has(item.clientTurnId || "")) {

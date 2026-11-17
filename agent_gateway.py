@@ -2109,10 +2109,10 @@ class AgentGateway:
                 session_id=session_id, client_turn_id=origin, turn_id=str(seed.get("turnId") or ""),
             ):
                 return None
-            result = {} if attachments else self.submit_runtime_steer({
-                "sessionId": session_id, "targetClientTurnId": origin,
-                "clientTurnId": input_id, "message": prompt, "laneId": lane,
-            })
+            result = {} if attachments else self._runtime_session_state.submit_steer(
+                session_id=session_id, target_client_turn_id=origin,
+                input_id=input_id, message=prompt, followup_lane_id=lane,
+            )
             if result.get("accepted") is True:
                 if seed.get("_questionKind") == "visual_checkpoint":
                     NativeRuntimeTurn.cancel_question(
@@ -5928,59 +5928,60 @@ class AgentGateway:
                 turn_raised or not find_current_pending_question(ensure_dict(response_payload).get("steps"))
             ):
                 self._desktop.release_browser_turn()
+            resolved_turn_id = str(owned_params.get("_resolvedRuntimeTurnId") or "")
+            persisted_steers: list[dict[str, Any]] = []
+
+            def finalize_steers() -> None:
+                nonlocal persisted_steers
+                stopped = self._runtime_session_state.cancel_requested(
+                    session_id=resolved_session_id, turn_id=resolved_turn_id, client_turn_id=resolved_client_turn_id,
+                ) or ensure_dict(ensure_dict(response_payload).get("plan")).get("nextStep") == "cancelled"
+                try:
+                    persisted_steers = self._runtime_followup_queue.transition_steers(
+                        session_id=resolved_session_id, turn_id=resolved_turn_id,
+                        client_turn_id=resolved_client_turn_id, stopped=stopped,
+                        consumed=set(ensure_list(ensure_dict(response_payload).get("consumedSteerInputIds"))),
+                    )
+                except OSError:
+                    # The acceptance record still survives a restart. Keep the
+                    # terminal response available and report this unconfirmed handoff.
+                    persisted_steers = [
+                        {**entry, "status": "delivery_unverified"} for entry in self._runtime_followup_queue.list()
+                        if entry.get("runtimeSessionId") == resolved_session_id
+                        and entry.get("steerTurnId") == resolved_turn_id
+                        and entry.get("targetClientTurnId") == resolved_client_turn_id
+                    ]
             late_steers = self._runtime_session_state.finish_turn(
-                session_id=resolved_session_id,
-                turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
-                client_turn_id=resolved_client_turn_id,
+                session_id=resolved_session_id, turn_id=resolved_turn_id,
+                client_turn_id=resolved_client_turn_id, before_release=finalize_steers,
             )
             # An answer the old turn never consumed is still queued in the
             # question ledger. Start it in a new turn through the same worker.
-            deferred: list[dict[str, Any]] = []
-            followup_outcomes: list[dict[str, Any]] = []
             for item in late_steers:
                 input_id = str(item.get("inputId") or "")[:180]
-                followup_lane_id = str(item.get("followupLaneId") or resolved_session_id)[:180]
                 question = self._async_question_input_owner(
                     input_id, session_id=resolved_session_id, client_turn_id=resolved_client_turn_id,
                     turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
                 )
                 if question:
                     self.questions.reconcile_runtime_continuation(str(question["questionId"]))
-                    continue
-                if input_id.startswith("question-answer:"):
-                    continue
-                try:
-                    queued = self._runtime_followup_queue.enqueue(
-                        session_id=followup_lane_id,
-                        client_turn_id=input_id,
-                        target_client_turn_id=resolved_client_turn_id,
-                        message=str(item.get("message") or ""),
-                        attachments=ensure_list(item.get("attachments")),
-                    )
-                except Exception:  # noqa: BLE001 - persistence failure becomes an authoritative bounded outcome.
-                    queued = {
-                        "accepted": False,
-                        "status": "backpressure",
-                        "reason": "durable_store_unavailable",
-                    }
-                if queued.get("accepted") is True:
-                    deferred.append({
-                        "inputId": input_id,
-                        "queueId": queued.get("queueId"),
-                        "sequence": queued.get("sequence"),
-                        "status": queued.get("status") or "pending",
-                    })
-                followup_outcomes.append({
-                    "inputId": input_id,
-                    "targetClientTurnId": resolved_client_turn_id[:180],
-                    "followupLaneId": followup_lane_id,
-                    "status": str(queued.get("status") or ("queued" if queued.get("accepted") is True else "rejected"))[:40],
-                    "reason": str(queued.get("reason") or ("queued_followup" if queued.get("accepted") is True else "followup_rejected"))[:80],
-                })
-            if response_payload is not None and followup_outcomes:
-                response_payload["deferredSteerFollowupOutcomes"] = followup_outcomes
+            if response_payload is not None and persisted_steers:
+                outstanding = [entry for entry in persisted_steers if entry["status"] != "acked"]
+                deferred = [
+                    {"inputId": entry["clientTurnId"], "queueId": entry["queueId"],
+                     "sequence": entry["sequence"], "status": entry["status"]}
+                    for entry in outstanding if entry["status"] in {"pending", "paused"}
+                ]
                 if deferred:
                     response_payload["deferredSteerFollowups"] = deferred
+                if outstanding:
+                    response_payload["deferredSteerFollowupOutcomes"] = [
+                        {"inputId": entry["clientTurnId"], "targetClientTurnId": resolved_client_turn_id,
+                         "followupLaneId": entry["sessionId"], "status": entry["status"],
+                         "reason": {"pending": "queued_followup", "paused": "delivery_paused",
+                                    "delivery_unverified": "durable_store_unavailable"}[entry["status"]]}
+                        for entry in outstanding
+                    ]
             if response_payload is not None and resolved_session_id and resolved_client_turn_id:
                 response_status = "failed" if turn_raised else "completed"
                 try:
@@ -7091,6 +7092,7 @@ class AgentGateway:
         iterations = 0
         cap_reached = False
         consumed_steer_input_ids: list[str] = []
+        pending_legacy_steer_ids: list[str] = []
         consumed_steer_seen: set[str] = set()
         params["_runtimeFailureProgress"]["consumedSteerInputIds"] = consumed_steer_input_ids
         memory_request_text = message
@@ -7132,19 +7134,15 @@ class AgentGateway:
             nonlocal memory_request_text
             for item in items:
                 input_id = str(item.get("inputId") or "").strip()
-                if input_id and input_id not in consumed_steer_seen and len(consumed_steer_input_ids) < 256:
+                if input_id and input_id not in consumed_steer_seen and len(consumed_steer_seen) < 256:
                     consumed_steer_seen.add(input_id)
-                    consumed_steer_input_ids.append(input_id)
+                    if not native_binding:
+                        pending_legacy_steer_ids.append(input_id)
                     memory_request_text = str(item.get("message") or "")
                     memory_user_texts.append(memory_request_text)
                     required_memory_tool = requested_memory_tool(memory_request_text)
                     if required_memory_tool:
                         task_loop.require_action(kind="write", tool=required_memory_tool)
-            if not native_binding:
-                self._settle_async_question_steers(
-                    [str(item.get("inputId") or "") for item in items],
-                    session_id=session_id, client_turn_id=client_turn_id, turn_id=turn_id,
-                )
         tool_calls_used = task_loop.tool_calls_used if continuation_context else 0
         runtime_exposure_layer = EXPOSURE_LAYER_PLANNING if task_loop.plan_mode else task_loop.exposure_layer
         params["planMode"] = task_loop.plan_mode
@@ -7398,7 +7396,7 @@ class AgentGateway:
                 break
             iteration_started = time.perf_counter()
             settle_started = time.perf_counter()
-            native_turn.settle()
+            native_turn.settle(flush_steers=False)
             if loop_reminder_pending and not native_turn.has_queued_calls:
                 if native_binding:
                     native_turn.append_hidden(LOOP_REMINDER)
@@ -7494,10 +7492,7 @@ class AgentGateway:
                 # drain below remains necessary for input that races with an
                 # in-flight provider call; this pre-boundary drain prevents a
                 # stale provider request after a completed tool batch.
-                steer_inputs = self._runtime_session_state.drain_steer(
-                    session_id=session_id,
-                    client_turn_id=client_turn_id,
-                )
+                steer_inputs = self._drain_runtime_steers(session_id, turn_id, client_turn_id)
                 if steer_inputs:
                     record_consumed_steers(steer_inputs)
                     history.extend(
@@ -7542,7 +7537,7 @@ class AgentGateway:
             # Budget enforcement and the terminal user notice belong to the host,
             # not to model context. Also discard any caller-supplied counter.
             planner_observe.pop("modelTurnBudget", None)
-            native_turn.settle()
+            native_turn.settle(flush_steers=not budget_decision.get("paused"))
             queued_native_action = bool(native_binding and native_turn.has_queued_calls)
             # Steer may discard the queue after the first budget check. A fresh
             # provider request must still obey the original model-turn cap.
@@ -7557,6 +7552,12 @@ class AgentGateway:
                 planner_observe["skippedNativeQuestions"] = self.questions.skipped_native_questions(
                     session_id=session_id, project_root=project_root, binding=native_binding,
                 )
+            if pending_legacy_steer_ids:
+                consumed_steer_input_ids.extend(pending_legacy_steer_ids)
+                self._settle_async_question_steers(
+                    pending_legacy_steer_ids, session_id=session_id, client_turn_id=client_turn_id, turn_id=turn_id,
+                )
+                pending_legacy_steer_ids.clear()
             planner_started = time.perf_counter()
             plan = self.runtime_planner.plan_agent_turn(
                 message,
@@ -7694,10 +7695,7 @@ class AgentGateway:
             # A user steer is accepted only for this exact active turn. Drain
             # after the current model boundary and before any newly planned
             # action executes, then re-plan from the synthetic user messages.
-            steer_inputs = self._runtime_session_state.drain_steer(
-                session_id=session_id,
-                client_turn_id=client_turn_id,
-            )
+            steer_inputs = self._drain_runtime_steers(session_id, turn_id, client_turn_id)
             if steer_inputs:
                 record_consumed_steers(steer_inputs)
                 history.extend(
@@ -9720,14 +9718,26 @@ class AgentGateway:
         input_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
         message = str(params.get("message") or "").strip()
         followup_lane_id = str(params.get("lane_id") or params.get("laneId") or params.get("followupLaneId") or "").strip()
-        result = self._runtime_session_state.submit_steer(
-            session_id=session_id,
-            target_client_turn_id=target_client_turn_id,
-            input_id=input_id,
-            message=message,
-            followup_lane_id=followup_lane_id,
-            attachments=normalize_runtime_attachments(params.get("attachments")),
-        )
+        if input_id.startswith("question-answer:"):
+            result = {"accepted": False, "mode": "followup", "reason": "reserved_input_id"}
+        else:
+            result = self._runtime_session_state.submit_steer(
+                session_id=session_id,
+                target_client_turn_id=target_client_turn_id,
+                input_id=input_id,
+                message=message,
+                followup_lane_id=followup_lane_id,
+                attachments=normalize_runtime_attachments(params.get("attachments")),
+                reserve=lambda turn_id: self._runtime_followup_queue.enqueue(
+                    session_id=followup_lane_id or session_id,
+                    client_turn_id=input_id,
+                    target_client_turn_id=target_client_turn_id,
+                    message=message,
+                    attachments=ensure_list(params.get("attachments")),
+                    envelope=self._runtime_followup_envelope({**params, "runtimeSessionId": session_id}),
+                    steer_turn_id=turn_id,
+                ),
+            )
         return {
             "ok": result.get("accepted") is True,
             **result,
@@ -9736,11 +9746,32 @@ class AgentGateway:
             "clientTurnId": input_id,
         }
 
+    def _drain_runtime_steers(self, session_id: str, turn_id: str, client_turn_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            if self._runtime_session_state.cancel_requested(
+                session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+            ):
+                return []
+            items = self._runtime_session_state.drain_steer(session_id=session_id, client_turn_id=client_turn_id)
+            if items:
+                self._runtime_followup_queue.transition_steers(
+                    session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+                    draining={item["inputId"] for item in items},
+                )
+            return items
+
     def list_runtime_followups(self, *, session_id: str = "", include_terminal: bool = True) -> list[dict[str, Any]]:
         return [
             item for item in self._runtime_followup_queue.list(session_id=session_id, include_terminal=include_terminal)
-            if not self._is_question_followup(item) or item["status"] in {"acked", "cancelled"}
+            if item["status"] not in AgentRuntimeFollowupQueue.LIVE_STEER_STATES
+            and (not self._is_question_followup(item) or item["status"] in {"acked", "cancelled"})
         ]
+
+    @staticmethod
+    def _runtime_followup_envelope(params: Mapping[str, Any]) -> dict[str, Any]:
+        return {**{key: params.get(key) for key in (
+            "runtimeSessionId", "provider", "model", "projectPath", "projectRoot", "projectType", "providerLabel",
+        )}, "planMode": params.get("planMode") is True}
 
     def enqueue_runtime_followup(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._runtime_followup_queue.enqueue(
@@ -9749,7 +9780,7 @@ class AgentGateway:
             target_client_turn_id=str(params.get("targetClientTurnId") or params.get("target_client_turn_id") or ""),
             message=str(params.get("message") or ""),
             attachments=params.get("attachments") if isinstance(params.get("attachments"), list) else [],
-            envelope={"runtimeSessionId": params.get("runtimeSessionId"), "provider": params.get("provider"), "model": params.get("model"), "projectPath": params.get("projectPath"), "projectRoot": params.get("projectRoot"), "projectType": params.get("projectType"), "providerLabel": params.get("providerLabel"), "planMode": params.get("planMode") is True},
+            envelope=self._runtime_followup_envelope(params),
         )
 
     def claim_runtime_followups(self, *, session_id: str = "", owner_id: str = "", limit: int = 8, queue_id: str = "") -> list[dict[str, Any]]:
@@ -10005,6 +10036,15 @@ class AgentGateway:
             exact_turn = bool(target and all(target) and self._runtime_session_state.dispatch_stopped(
                 session_id=target[0], turn_id=target[1], client_turn_id=target[2],
             ))
+            if exact_turn:
+                try:
+                    self._runtime_followup_queue.transition_steers(
+                        session_id=target[0], turn_id=target[1], client_turn_id=target[2], stopping=True,
+                    )
+                except OSError:
+                    # Stop remains authoritative in the current process. The
+                    # terminal handoff retries the durable queue transition.
+                    pass
             unity_write_may_have_executed = bool(exact_turn and self._runtime_session_state.core_write_admitted(
                 session_id=target[0], turn_id=target[1], client_turn_id=target[2],
             ))

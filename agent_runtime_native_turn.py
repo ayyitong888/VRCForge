@@ -443,7 +443,7 @@ class NativeRuntimeTurn:
                 content=json.dumps({"status": "not_executed", "reason": reason, "observations": []}))
         self._queued_calls.clear()
 
-    def settle(self, terminal: Mapping[str, Any] | None = None) -> None:
+    def settle(self, terminal: Mapping[str, Any] | None = None, *, flush_steers: bool = True) -> None:
         """Settle native calls only after all canonical observations are final."""
         if not self._binding:
             return
@@ -572,8 +572,14 @@ class NativeRuntimeTurn:
         if self._queued_calls:
             return
         self.output_truncation.flush_feedback(self)
-        while self._native_steers:
+        while flush_steers and self._native_steers:
             steer = self._native_steers[0]
+            input_id = steer["inputId"]
+            if terminal is not None and not input_id.startswith("question-answer:"):
+                # The queue owns unsent inputs. Appending them here would expose
+                # a paused steer to the next model request without its replay.
+                self._native_steers.pop(0)
+                continue
             history_index = self._state.append_native_user(
                 self._session_id,
                 binding=self._binding,
@@ -582,9 +588,7 @@ class NativeRuntimeTurn:
             if steer["attachments"]:
                 self.steer_attachments[history_index] = steer["attachments"]
             self._native_steers.pop(0)
-            input_id = steer["inputId"]
-            # Terminal cleanup can retain pending user text for history, but
-            # it cannot claim that an unsent input entered a model boundary.
+            # A saved Question answer has its own durable handoff.
             if terminal is None and input_id and input_id not in self._consumed_steer_input_ids:
                 if len(self._consumed_steer_input_ids) < 256:
                     self._consumed_steer_input_ids.append(input_id)

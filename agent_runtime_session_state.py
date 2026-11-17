@@ -1308,7 +1308,8 @@ class AgentRuntimeSessionState:
             self._steer_mailboxes.setdefault(key, [])
             return True
 
-    def finish_turn(self, *, session_id: str, turn_id: str = "", client_turn_id: str) -> list[dict[str, Any]]:
+    def finish_turn(self, *, session_id: str, turn_id: str = "", client_turn_id: str,
+                    before_release: Callable[[], None] | None = None) -> list[dict[str, Any]]:
         if not session_id or not client_turn_id:
             return []
         with self._ports.shared_state_lock:
@@ -1316,6 +1317,8 @@ class AgentRuntimeSessionState:
             active_turn_id = self._active_turns.get(key)
             if turn_id and active_turn_id is not None and active_turn_id != turn_id:
                 return []
+            if active_turn_id and before_release is not None:
+                before_release()
             undrained = copy.deepcopy(self._steer_mailboxes.get(key, []))
             if active_turn_id:
                 self._finalizing_turns.add(key)
@@ -1452,6 +1455,7 @@ class AgentRuntimeSessionState:
         message: str,
         attachments: list[dict[str, Any]] | None = None,
         followup_lane_id: str = "",
+        reserve: Callable[[str], dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         session_id = str(session_id or "").strip()[:180]
         target_client_turn_id = str(target_client_turn_id or "").strip()[:240]
@@ -1461,7 +1465,10 @@ class AgentRuntimeSessionState:
             return {"accepted": False, "mode": "followup", "reason": "invalid_request"}
         with self._ports.shared_state_lock:
             key = (session_id, target_client_turn_id)
-            if key not in self._active_turns:
+            turn_id = self._active_turns.get(key)
+            if not turn_id or self.cancel_requested(
+                session_id=session_id, turn_id=turn_id, client_turn_id=target_client_turn_id,
+            ):
                 return {"accepted": False, "mode": "followup", "reason": "turn_not_active"}
             mailbox = self._steer_mailboxes.setdefault(key, [])
             seen_ids = self._steer_seen_ids.setdefault(key, set())
@@ -1471,6 +1478,12 @@ class AgentRuntimeSessionState:
             # the API atomically falls back to the durable follow-up lane.
             if len(mailbox) >= self.MAX_STEER_MAILBOX:
                 return {"accepted": False, "mode": "followup", "reason": "mailbox_full"}
+            receipt = {}
+            if reserve is not None:
+                reserved = reserve(turn_id)
+                if not reserved.get("accepted"):
+                    return reserved
+                receipt = {key: reserved[key] for key in ("queueId", "sequence") if key in reserved}
             mailbox_item: dict[str, Any] = {
                 "inputId": input_id,
                 "message": message,
@@ -1487,6 +1500,7 @@ class AgentRuntimeSessionState:
                 "mode": "steer",
                 "reason": "accepted",
                 "queuedCount": len(mailbox),
+                **receipt,
             }
 
     def steer_pending(self, *, session_id: str, client_turn_id: str) -> bool:

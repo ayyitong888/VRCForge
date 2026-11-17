@@ -7990,7 +7990,7 @@ class DashboardServerTests(unittest.TestCase):
         queued = gateway.list_runtime_followups(session_id="chat-lane-late", include_terminal=False)
         self.assertEqual([item["clientTurnId"] for item in queued], ["late-user-input"])
 
-    def test_late_steer_persistence_backpressure_returns_bounded_outcome(self) -> None:
+    def test_steer_persistence_backpressure_refuses_volatile_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config.json", root / "audit")
@@ -8011,7 +8011,10 @@ class DashboardServerTests(unittest.TestCase):
                     "message": "private message must not be echoed in the outcome",
                     "laneId": "chat-lane-backpressure",
                 })
-                self.assertTrue(accepted["accepted"])
+                self.assertFalse(accepted["accepted"])
+                self.assertEqual(accepted["status"], "backpressure")
+                self.assertEqual(accepted["reason"], "durable_store_capacity")
+                self.assertNotIn("private message", str(accepted))
                 return {"ok": True, "plan": {"nextStep": "done"}}
 
             with patch.object(
@@ -8023,15 +8026,7 @@ class DashboardServerTests(unittest.TestCase):
                     payload = gateway._runtime_message_impl({})
 
         self.assertNotIn("deferredSteerFollowups", payload)
-        outcomes = payload["deferredSteerFollowupOutcomes"]
-        self.assertEqual(outcomes, [{
-            "inputId": "late-backpressure-input",
-            "targetClientTurnId": "runtime-client-backpressure",
-            "followupLaneId": "chat-lane-backpressure",
-            "status": "backpressure",
-            "reason": "durable_store_capacity",
-        }])
-        self.assertNotIn("private message", str(outcomes))
+        self.assertNotIn("deferredSteerFollowupOutcomes", payload)
 
     def test_desktop_bootstrap_does_not_consume_the_turn_action_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
