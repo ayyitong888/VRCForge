@@ -699,14 +699,15 @@ def _bounded_skill_policy(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     name = _bounded_text(value.get("name"), 160)
+    # Keep every rule: the same policy enforces tool admission after resume.
     allowed = [
         bounded
-        for item in list(value.get("allowedTools") or [])[:32]
+        for item in value.get("allowedTools") or []
         if (bounded := _bounded_text(item, 160))
     ]
     disallowed = [
         bounded
-        for item in list(value.get("disallowedTools") or [])[:32]
+        for item in value.get("disallowedTools") or []
         if (bounded := _bounded_text(item, 160))
     ]
     if not (name or allowed or disallowed):

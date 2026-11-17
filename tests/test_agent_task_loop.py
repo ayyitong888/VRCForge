@@ -1215,7 +1215,7 @@ def test_capture_approval_continuation_returns_only_bounded_receipt_to_planner()
     assert "privatePath" not in str(observation)
 
 
-def test_skill_context_is_bounded_in_task_and_approval_continuations() -> None:
+def test_skill_text_is_bounded_and_all_tool_rules_survive_approval() -> None:
     loop = AgentTaskLoop("follow the loaded skill", session_id="session-1")
     loop.activate_skill_policy(
         name="n" * 200,
@@ -1239,8 +1239,8 @@ def test_skill_context_is_bounded_in_task_and_approval_continuations() -> None:
     skill_context = context["skillContext"]
     assert len(skill_context["name"]) == 160
     assert len(skill_context["instructions"]) == 6_000
-    assert 1 <= len(skill_context["allowedTools"]) <= 32
-    assert 1 <= len(skill_context["disallowedTools"]) <= 32
+    assert len(skill_context["allowedTools"]) == 41
+    assert len(skill_context["disallowedTools"]) == 41
     assert len(skill_context["allowedTools"]) == len(set(skill_context["allowedTools"]))
     assert len(skill_context["disallowedTools"]) == len(set(skill_context["disallowedTools"]))
 
@@ -1258,6 +1258,8 @@ def test_skill_context_is_bounded_in_task_and_approval_continuations() -> None:
     assert "result" not in synthetic
     assert resumed.skill_policy_block_reason("allowed") == ""
     assert resumed.skill_policy_block_reason("denied") == "skill_tool_disallowed"
+    assert resumed.skill_policy_block_reason("allow-39") == ""
+    assert resumed.skill_policy_block_reason("deny-39") == "skill_tool_disallowed"
 
 
 def test_rejected_approval_is_a_terminal_needs_user_action_outcome() -> None:
