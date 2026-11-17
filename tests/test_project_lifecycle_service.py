@@ -55,6 +55,7 @@ def test_create_project_is_staged_registered_and_rollback_is_recoverable(tmp_pat
     assert created["ok"] is True
     assert created["commitState"] == "complete"
     assert created["registeredInVRCForge"] is True
+    assert created["readbackVerified"] is True
     assert (target / "Assets" / "Template.txt").read_text(encoding="utf-8") == "template"
     assert not list(target.parent.glob(".*.vrcforge-create-*"))
     prefs = json.loads((tmp_path / "state" / "custom-projects.json").read_text(encoding="utf-8"))
@@ -64,6 +65,7 @@ def test_create_project_is_staged_registered_and_rollback_is_recoverable(tmp_pat
 
     assert rolled_back["ok"] is True
     assert rolled_back["commitState"] == "complete"
+    assert rolled_back["readbackVerified"] is True
     assert not target.exists()
     recovery_path = Path(rolled_back["recoveryPath"])
     assert recovery_path.is_dir()

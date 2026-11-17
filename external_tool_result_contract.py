@@ -392,6 +392,8 @@ def canonical_result_facts(
             if readback_state not in {"verified", "not_started", "pending", "unknown"}:
                 readback_state = "handler_reported"
         facts["readbackState"] = readback_state
+    elif success is True and sources and sources[0].get("readbackVerified") is True:
+        facts["readbackState"] = "verified"
 
     precise_present = cause_relevant and any(
         _result_source_priority(source) <= 1 for source in expanded_sources

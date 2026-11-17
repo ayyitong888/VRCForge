@@ -201,9 +201,11 @@ class CrossSessionConversationService:
             "revision": 0,
             "items": [],
         }
-        self._create_chat(record, host["projectRoot"])
+        saved = self._create_chat(record, host["projectRoot"])
+        if not isinstance(saved, Mapping) or saved.get("id") != chat_id or saved.get("sessionId") != session_id:
+            raise CrossSessionConversationError("The stored conversation did not match the requested identity.")
         self._notify_chat_changed()
-        return {"ok": True, "chatId": chat_id, "title": title, "created": True}
+        return {"ok": True, "chatId": chat_id, "title": title, "created": True, "readbackVerified": True}
 
     def send_message(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Queue a message for the target; do not start an idle target turn."""

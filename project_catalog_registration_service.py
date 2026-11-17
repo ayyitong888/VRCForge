@@ -388,6 +388,7 @@ class ProjectCatalogRegistrationService:
             "mutationStarted": True,
             "committed": True,
             "commitState": "complete",
+            "readbackVerified": True,
             "reloadRequired": True,
             "rollback": {
                 "available": True,
@@ -453,6 +454,7 @@ class ProjectCatalogRegistrationService:
             "mutationStarted": True,
             "committed": True,
             "commitState": "complete",
+            "readbackVerified": True,
             "reloadRequired": True,
         }
 

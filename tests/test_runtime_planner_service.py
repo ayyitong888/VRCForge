@@ -191,6 +191,22 @@ def test_completion_prompt_stops_when_a_complete_canonical_read_answers_the_ques
         assert "completion_claim" in instructions
 
 
+def test_model_receipts_expose_verified_write_readback_without_requesting_result_pages():
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    raw = {
+        "ok": True, "status": "completed", "commitState": "complete",
+        "committed": True, "verified": True,
+        "readback": {"verified": True, "scope": "package_manager_files"},
+    }
+    planner = service()
+    for receipt, expected in ((raw, "verified"), ({**raw, "readback": None}, "handler_reported")):
+        outcome = normalize_agent_tool_result(receipt, fallback_summary="VPM install", write=True)
+        step = {"tool": "vrcforge_install_vpm_package", "status": "executed", "outcome": outcome}
+        assert planner.native_result_observation(step)["outcome"]["readbackState"] == expected
+        assert f"readbackState={expected}" in planner._llm_loop_step_observation(step)
+
+
 def test_prompt_does_not_surface_host_owned_remaining_model_turns() -> None:
     prompt = service()._build_llm_plan_prompt(
         "继续诊断",

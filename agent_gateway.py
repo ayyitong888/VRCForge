@@ -10309,7 +10309,18 @@ class AgentGateway:
             "items": normalized_items,
         }
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
-        return self.list_agent_progress(limit=50, project_root=project_root, session_id=session_id)
+        snapshot = self.list_agent_progress(limit=50, project_root=project_root, session_id=session_id)
+        expected = {row["progressId"]: redact_sensitive(row) for row in normalized_items}
+        observed = {
+            row["progressId"]: row for row in snapshot["items"]
+            if row.get("sessionId") == session_id and (project_root or not row.get("projectRoot"))
+        }
+        if (len(snapshot["items"]) < 50 and len(expected) == len(normalized_items)
+                and observed.keys() == expected.keys()
+                and all(all(observed[item_id].get(key) == value for key, value in row.items())
+                        for item_id, row in expected.items())):
+            snapshot["readbackVerified"] = True
+        return snapshot
 
     def create_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -10330,7 +10341,8 @@ class AgentGateway:
         }
         self._bind_todo_completion(event, params, {})
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
-        return {"ok": True, "progress": self._find_agent_progress(progress_id, event)}
+        progress = self._find_agent_progress(progress_id, event)
+        return {"ok": True, "progress": progress, "readbackVerified": True}
 
     @staticmethod
     def _require_agent_item_scope(existing: dict[str, Any], params: dict[str, Any], *, label: str) -> None:
@@ -10372,7 +10384,9 @@ class AgentGateway:
         }
         self._bind_todo_completion(event, params, existing)
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
-        return {"ok": True, "progress": self._find_agent_progress(progress_id, event)}
+        progress = self._find_agent_progress(progress_id, event)
+        return {"ok": True, "progress": progress,
+                "readbackVerified": all(progress.get(key) == value for key, value in event.items())}
 
     @staticmethod
     def _bind_todo_completion(entry: dict[str, Any], values: dict[str, Any], previous: dict[str, Any]) -> None:

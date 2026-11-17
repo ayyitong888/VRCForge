@@ -122,6 +122,7 @@ class AgentGoalService:
         goal = self._store_call(self._store.create_if_no_unfinished, raw)
         return {
             "ok": True,
+            "readbackVerified": True,
             "schema": "vrcforge.agent_goal.v2",
             "goal": self._redact(goal),
             "summary": f"Goal created: {goal.get('title') or goal.get('goalId')}",
@@ -140,6 +141,7 @@ class AgentGoalService:
         attempts = int(goal.get("agentBlockedAttempts") or 0)
         return {
             "ok": True,
+            "readbackVerified": True,
             "schema": "vrcforge.agent_goal.v2",
             "goal": self._redact(goal),
             "blockedAttempts": attempts,

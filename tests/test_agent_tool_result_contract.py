@@ -78,6 +78,44 @@ def test_unknown_commit_keeps_its_state_and_preserves_explicit_persistence() -> 
     assert outcome["readbackState"] == "unknown"
 
 
+def test_gateway_retry_projection_keeps_an_already_verified_install_complete() -> None:
+    raw = {
+        "ok": True,
+        "status": "ok",
+        "readback": {"packageId": "vrchat.blackstartx.gesture-manager", "version": "3.9.9"},
+        "readbackVerified": True,
+    }
+    gateway_result = {
+        "ok": True,
+        "status": "ok",
+        "requestId": "call_fixture",
+        "tool": "vrcforge_package_install_request",
+        "result": raw,
+        "outcome": {
+            "schema": "vrcforge.tool_result.v1",
+            "status": "ok",
+            "committed": True,
+            "commitState": "complete",
+            "commitStateKnown": True,
+            "readbackState": "verified",
+            "persistenceState": "persisted",
+        },
+    }
+    approved_result = {
+        "ok": True,
+        "status": "executed",
+        "approvalId": "approval_fixture",
+        "result": raw,
+        "outcome": gateway_result["outcome"],
+    }
+    for wrapped_result in (gateway_result, approved_result):
+        outcome = normalize_agent_tool_result(wrapped_result, fallback_summary="Install package", write=True)
+        assert outcome["commitState"] == "complete"
+        assert outcome["commitStateKnown"] is True
+        assert outcome["readbackState"] == "verified"
+        assert "nextAction" not in outcome
+
+
 def test_verified_readback_requires_independent_readback_evidence() -> None:
     raw = {
         "ok": True,
@@ -97,6 +135,16 @@ def test_verified_readback_requires_independent_readback_evidence() -> None:
         write=True,
     )
     assert verified["readbackState"] == "verified"
+
+
+def test_non_write_operation_requires_a_top_level_readback_receipt() -> None:
+    for raw, expected in (
+        ({"ok": True, "readbackVerified": True}, "verified"),
+        ({"ok": True, "data": {"readbackVerified": True}}, None),
+        ({"ok": False, "readbackVerified": True}, None),
+    ):
+        result = normalize_agent_tool_result(raw, fallback_summary="Conversation creation", write=False)
+        assert result.get("readbackState") == expected
 
 
 def test_shared_completion_facts_normalize_no_change_without_claiming_readback() -> None:

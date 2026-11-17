@@ -70,6 +70,7 @@ class Harness:
             if record["id"] in self.chats:
                 raise CrossSessionConversationError("duplicate chat")
             self.chats[record["id"]] = copy.deepcopy(dict(record))
+            return copy.deepcopy(self.chats[record["id"]])
 
     def save(self, chat_id: str, _scope: str, updated, expected_revision: int):
         with self.lock:
@@ -233,6 +234,7 @@ class CrossSessionConversationServiceTests(unittest.TestCase):
     def test_create_uses_fresh_session_and_does_not_copy_history(self):
         harness = Harness()
         result = harness.service().create_conversation({**trusted_context(), "title": "New work"})
+        self.assertTrue(result["readbackVerified"])
         created = harness.chats[result["chatId"]]
         self.assertNotEqual(created["sessionId"], "source-session")
         self.assertEqual(created["projectPath"], "C:/Unity/Project")

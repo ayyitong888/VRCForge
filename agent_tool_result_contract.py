@@ -636,6 +636,19 @@ def normalize_agent_tool_result(
         "verification": verification,
     }
     execution_pending = bool(pending_execution and status == "pending")
+    # Preserve an existing normalized receipt from the gateway or approval wrapper.
+    gateway_outcome = views[0].get("outcome") if views else None
+    if (
+        isinstance(gateway_outcome, Mapping)
+        and gateway_outcome.get("schema") == TOOL_RESULT_SCHEMA
+        and gateway_outcome.get("status") == status
+        and isinstance(views[0].get("result"), Mapping)
+        and (
+            isinstance(views[0].get("approvalId"), str)
+            or (isinstance(views[0].get("requestId"), str) and isinstance(views[0].get("tool"), str))
+        )
+    ):
+        causal_views = [gateway_outcome, *causal_views]
     canonical_facts = canonical_result_facts(
         causal_views,
         success=None if execution_pending else status == "ok",

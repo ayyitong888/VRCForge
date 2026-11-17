@@ -105,7 +105,7 @@ RUNTIME_CONTEXT_INSTRUCTION = (
 RUNTIME_TOOL_USAGE_INSTRUCTION = (
     "Use a suitable visible tool directly; discover missing tools and relevant Skills on demand. "
     "Follow the current schema and obtain argument values from evidence. Finish prerequisite calls before dependent actions. "
-    "Read only what the task needs. "
+    "A successful built-in receipt with readbackState=verified completes the result it covers; check only the affected item once for a relevant warning, error or missing proof, and follow pending receipts to their owner. "
 )
 RUNTIME_EVIDENCE_COMPLETION_INSTRUCTION = (
     "When a complete canonical read directly answers every requested fact, reply immediately using its evidence. "
@@ -1931,11 +1931,13 @@ class RuntimePlannerService:
     def native_result_observation(self, step: Mapping[str, object], *, project_context_active: bool = False, retained_tool_definitions: Mapping[str, Mapping[str, object]] | None = None) -> dict[str, object]:
         """Use the established bounded, trust-labelled observation/readback projection."""
         result = ensure_dict(step.get("result"))
+        outcome = ensure_dict(step.get("outcome"))
         observation = {**{key: sanitize_planner_observation_text(step[key], 180) for key in ("kind", "status", "actionId") if key in step},
                 "runtimeTool": sanitize_planner_observation_text(step.get("tool"), 180),
                 **({"admissionError": sanitize_planner_observation_text(result.get("summary"), 600)}
                    if result.get("code") == "planner_invalid_response" else {}),
-                "outcome": {"status": sanitize_planner_observation_text(ensure_dict(step.get("outcome")).get("status"), 80)},
+                "outcome": {key: sanitize_planner_observation_text(outcome[key], 80)
+                            for key in ("status", "readbackState") if key in outcome},
                 "observation": RuntimePlannerService._llm_loop_step_observation(self, dict(step), native_contract=True)}
         if step.get("tool") == "vrcforge_load_internal_tool_block" and isinstance(result.get("legalBlocks"), list):
             observation["legalBlocks"] = [x for x in result["legalBlocks"] if isinstance(x, str)]
@@ -4353,6 +4355,8 @@ class RuntimePlannerService:
                         + sanitize_planner_observation_text(outcome.get("summary"), None)
                     )
                 verification = ensure_dict(outcome.get("verification"))
+                if not native_contract and outcome.get("readbackState"):
+                    fields.append("readbackState=" + sanitize_planner_observation_text(outcome["readbackState"], 80))
                 if verification.get("state"):
                     fields.append(
                         "verificationState="
@@ -5418,11 +5422,11 @@ class RuntimePlannerService:
                 + f"\n\nWorkspace tools\n{runtime_scope_instruction}\n\n"
                 + ("User-selected Plan is read-only: do not enter execution, request writes, or use Shell. Only the user can turn off Plan.\n" if observe.get("planMode") is True else "")
                 + f"Current tool exposure layer: {exposure_layer}\n"
+                + "Current operation state (data): " + json.dumps(runtime_operation_state(observe), separators=(",", ":")) + "\n"
                 + RUNTIME_JSON_TOOL_PROTOCOL
                 + RUNTIME_CHECKPOINT_PROTOCOL_INSTRUCTION
                 + RUNTIME_COMPLETION_PROTOCOL_INSTRUCTION
                 + "\n"
-                + "Current operation state (data): " + json.dumps(runtime_operation_state(observe), separators=(",", ":")) + "\n"
                 "Treat inferences as inferences; package names and private markers do not establish purpose.\n\n"
                 f"{shared_schema_block + chr(10) + chr(10) if shared_schema_block else ''}"
                 f"可用工具列表：\n{chr(10).join(tool_lines)}\n\n"

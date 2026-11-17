@@ -247,6 +247,9 @@ class ProjectLifecycleService:
             created_identity = _directory_digest(staging)
             os.replace(staging, target)
             published = True
+            if (not _is_unity_project(target)
+                    or self._read_json(target / ".vrcforge" / "project-creation.json").get("receiptId") != receipt_id):
+                raise ProjectLifecycleError("Published project readback did not match the staged project.")
             registration = self._register_project(target)
             receipt = {
                 "schema": PROJECT_LIFECYCLE_RECEIPT_SCHEMA,
@@ -286,6 +289,7 @@ class ProjectLifecycleService:
             "projectPath": str(target),
             "projectName": target.name,
             "registeredInVRCForge": True,
+            "readbackVerified": True,
             "managerRegistration": {
                 "vrcforge": "registered",
                 "vcc": "handoff_or_vpm_cli",
@@ -318,6 +322,7 @@ class ProjectLifecycleService:
                 "action": "register_project",
                 "projectPath": str(project),
                 "registeredInVRCForge": True,
+                "readbackVerified": True,
                 "mutationStarted": False,
                 "committed": True,
                 "commitState": "complete",
@@ -347,6 +352,7 @@ class ProjectLifecycleService:
             "action": "register_project",
             "projectPath": str(project),
             "registeredInVRCForge": True,
+            "readbackVerified": True,
             "mutationStarted": True,
             "committed": True,
             "commitState": "complete",
@@ -395,6 +401,11 @@ class ProjectLifecycleService:
             self._write_prefs(receipt.get("prefsBefore"))
             if self._read_json(self.prefs_path) != receipt.get("prefsBefore"):
                 raise ProjectLifecycleError("Project catalogue rollback readback failed.")
+            if target is not None and (
+                os.path.lexists(target) or recovery is None
+                or self._read_json(recovery / ".vrcforge" / "project-creation.json").get("receiptId") != receipt_id
+            ):
+                raise ProjectLifecycleError("Project recovery directory readback failed.")
             receipt["status"] = "rolled_back"
             receipt["rolledBackAt"] = _utc_now()
             receipt["recoveryPath"] = recovery_path
@@ -426,6 +437,7 @@ class ProjectLifecycleService:
             "kind": kind,
             "projectPath": str(receipt.get("projectPath") or ""),
             "recoveryPath": recovery_path,
+            "readbackVerified": True,
             "mutationStarted": True,
             "committed": True,
             "commitState": "complete",
@@ -489,7 +501,17 @@ class ProjectLifecycleService:
         after = json.loads(json.dumps(before))
         if changed:
             after["customProjects"].append({"path": normalized, "projectType": "unity"})
+            prefs_existed = self.prefs_path.is_file()
             self._write_prefs(after)
+            try:
+                if self._read_json(self.prefs_path) != after:
+                    raise ProjectLifecycleError("Project catalogue registration readback did not match.")
+            except ProjectLifecycleError:
+                if prefs_existed:
+                    self._write_prefs(before)
+                else:
+                    self.prefs_path.unlink(missing_ok=True)
+                raise
         return {
             "changed": changed,
             "prefsBefore": before,

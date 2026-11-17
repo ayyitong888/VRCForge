@@ -100,7 +100,7 @@ def _authorize(
     return path
 
 
-def _atomic_write(path: Path, data: bytes, *, overwrite: bool) -> None:
+def _atomic_write(path: Path, data: bytes, *, overwrite: bool) -> bool:
     if path.exists() and not overwrite:
         raise FileExistsError(str(path))
     if not path.parent.is_dir():
@@ -111,9 +111,17 @@ def _atomic_write(path: Path, data: bytes, *, overwrite: bool) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+            written = os.fstat(handle.fileno())
         if path.exists() and not overwrite:
             raise FileExistsError(str(path))
         os.replace(temporary, path)
+        try:
+            if not os.path.samestat(written, path.lstat()):
+                return False
+            with path.open("rb") as handle:
+                return os.path.samestat(written, os.fstat(handle.fileno())) and handle.read(len(data) + 1) == data
+        except OSError:
+            return False
     finally:
         try:
             os.unlink(temporary)
@@ -134,8 +142,9 @@ def write_file(
     """Create a file atomically; refuses to overwrite unless requested."""
     target = _authorize(path, operation=TOOL_WRITE_FILE, path_guard=path_guard, capability=capability, current_project=current_project)
     data = content if isinstance(content, bytes) else content.encode(encoding)
-    _atomic_write(target, data, overwrite=overwrite)
-    return {"path": str(target), "operation": TOOL_WRITE_FILE, "bytes": len(data), "overwritten": overwrite}
+    verified = _atomic_write(target, data, overwrite=overwrite)
+    return {"path": str(target), "operation": TOOL_WRITE_FILE, "bytes": len(data), "overwritten": overwrite,
+            "readbackVerified": verified}
 
 
 def edit_file(
@@ -152,8 +161,8 @@ def edit_file(
     if not target.is_file():
         raise FileNotFoundError(str(target))
     data = content if isinstance(content, bytes) else content.encode(encoding)
-    _atomic_write(target, data, overwrite=True)
-    return {"path": str(target), "operation": TOOL_EDIT_FILE, "bytes": len(data)}
+    verified = _atomic_write(target, data, overwrite=True)
+    return {"path": str(target), "operation": TOOL_EDIT_FILE, "bytes": len(data), "readbackVerified": verified}
 
 
 def delete_path(
@@ -173,7 +182,17 @@ def delete_path(
         kind = "file"
     else:
         raise FileNotFoundError(str(target))
-    return {"path": str(target), "operation": TOOL_DELETE_PATH, "kind": kind}
+    return {"path": str(target), "operation": TOOL_DELETE_PATH, "kind": kind, "readbackVerified": _absent(target)}
+
+
+def _absent(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass
+    return False
 
 
 def move_path(
@@ -194,14 +213,19 @@ def move_path(
         raise FileExistsError(str(dst))
     if not dst.parent.is_dir():
         raise FileNotFoundError(str(dst.parent))
-    if overwrite and dst.exists():
-        if dst.is_dir() and src.is_dir():
+    moved = src.lstat()
+    if overwrite and dst.is_dir():
+        if src.is_dir():
             raise FileExistsError(str(dst))
-        if dst.is_dir():
-            raise IsADirectoryError(str(dst))
-        dst.unlink()
+        raise IsADirectoryError(str(dst))
     os.replace(src, dst) if overwrite else os.rename(src, dst)
-    return {"source": str(src), "destination": str(dst), "operation": TOOL_MOVE_PATH, "overwritten": overwrite}
+    try:
+        source_moved = dst.resolve(strict=True).name == dst.name if src == dst else _absent(src)
+        verified = os.path.samestat(moved, dst.lstat()) and source_moved
+    except OSError:
+        verified = False
+    return {"source": str(src), "destination": str(dst), "operation": TOOL_MOVE_PATH,
+            "overwritten": overwrite, "readbackVerified": verified}
 
 
 def _apply_unified_patch(original: str, patch: str) -> str:
@@ -271,8 +295,9 @@ def apply_patch(
         raise ValueError("apply_patch requires an existing file and string patch")
     original = target.read_text(encoding=encoding)
     updated = _apply_unified_patch(original, patch)
-    _atomic_write(target, updated.encode(encoding), overwrite=True)
-    return {"path": str(target), "operation": TOOL_APPLY_PATCH, "bytes": len(updated.encode(encoding))}
+    data = updated.encode(encoding)
+    verified = _atomic_write(target, data, overwrite=True)
+    return {"path": str(target), "operation": TOOL_APPLY_PATCH, "bytes": len(data), "readbackVerified": verified}
 
 
 __all__ = [

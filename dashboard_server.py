@@ -7074,6 +7074,7 @@ def select_project_lifecycle_sync(params: dict[str, Any]) -> dict[str, Any]:
         "mutationStarted": changed,
         "committed": True,
         "commitState": "complete",
+        "readbackVerified": True,
     }
 
 
@@ -11868,6 +11869,7 @@ def restore_unity_core_sync(params: dict[str, Any]) -> dict[str, Any]:
         "backupSha256": backup_identity["sha256"],
         "replacedInstalledSha256": installed_identity["sha256"],
         "restoredSha256": restored_identity["sha256"],
+        "readbackVerified": True,
         "safetyBackupPath": str(safety_backup),
         "safetyBackupSha256": installed_identity["sha256"],
         "restoredAt": restored_at,

@@ -137,6 +137,7 @@ def test_shared_general_handlers_read_project_but_reject_project_write(monkeypat
         {"path": str(outside / "allowed.txt"), "content": "yes"}
     )
     assert written["operation"] == "write_file"
+    assert written["readbackVerified"] is True
     assert (outside / "allowed.txt").read_text(encoding="utf-8") == "yes"
 
 
