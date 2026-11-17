@@ -571,3 +571,76 @@ def test_installer_sources_uninstall_kept_message_names_the_preserved_root():
         for lang in FOUR_LANGS:
             assert f"LangString UninstallKeptUserData {lang}" in source
         assert "Your personal data remains in $DataDir" in source
+
+
+def test_native_setup_rejects_non_hosted_machine_before_launch(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    monkeypatch.delenv("RUNNER_ENVIRONMENT", raising=False)
+    monkeypatch.setattr(smoke, "run_native_setup", lambda *args: (_ for _ in ()).throw(AssertionError("must not launch")))
+    report = smoke.run_smoke(make_args(tmp_path, tmp_path / "setup.exe", installer_kind="native", scope="production-clean"))
+    assert report["ok"] is False
+    assert "GitHub-hosted" in report["steps"][-1]["error"]
+
+
+def test_native_upgrade_routes_ui_phases_and_preserves_data(tmp_path, monkeypatch):
+    import shutil
+    from types import SimpleNamespace
+    smoke = load_installer_smoke()
+    installer, previous = tmp_path / "new.exe", tmp_path / "old.exe"
+    installer.write_bytes(b"new")
+    previous.write_bytes(b"old")
+    install, data = tmp_path / "installed", tmp_path / "data"
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
+    monkeypatch.setattr(smoke, "production_clean_scope_step", lambda *a: {"name": "scope", "ok": True})
+    monkeypatch.setattr(smoke, "is_admin", lambda: True)
+    monkeypatch.setattr(smoke, "port_is_open", lambda port: False)
+    monkeypatch.setattr(smoke, "start_installed_backend", lambda *a: SimpleNamespace(pid=1234, poll=lambda: None, terminate=lambda: None, wait=lambda **kw: 0))
+    monkeypatch.setattr(smoke, "wait_for_health", lambda *a, **kw: {"version": "2.0.0", "portableMode": True})
+    calls = []
+    def setup(executable, mode, timeout):
+        calls.append(mode)
+        if mode == "install":
+            assert not data.exists()
+            for name in ["VRCForge.exe", "VERSION", "backend/vrcforge_backend.exe", "dashboard/index.html", "Uninstall.exe"]:
+                f = install / name
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("1.0.0" if name == "VERSION" else "fixture")
+        elif mode == "upgrade":
+            assert (data / smoke.SENTINEL_NAME).is_file()
+            (install / "VERSION").write_text("2.0.0")
+        else:
+            shutil.rmtree(install)
+        return CompletedProcess([str(executable), mode], 0, "", "")
+    def shortcuts(root, **kw):
+        assert kw["expected_icon"] == install / "VRCForge.exe"
+        return {"name": "shortcuts.after_upgrade", "ok": True}
+    monkeypatch.setattr(smoke, "run_native_setup", setup)
+    monkeypatch.setattr(smoke, "inspect_installed_shortcuts", shortcuts)
+    report = smoke.run_smoke(make_args(tmp_path, installer, installer_kind="native", scope="production-clean",
+        install_dir=str(install), user_data_root=str(data), upgrade_installer=str(previous), upgrade_version="1.0.0"))
+    assert report["ok"] is True, report["steps"]
+    assert calls == ["install", "upgrade", "uninstall"]
+    assert report["summary"]["phases"] == dict(install="passed", upgrade="passed", uninstall="passed", preservation="passed")
+    assert (data / smoke.SENTINEL_NAME).is_file()
+
+
+def test_native_cleanup_timeout_still_returns_failure_evidence(tmp_path, monkeypatch):
+    from subprocess import TimeoutExpired
+    smoke = load_installer_smoke()
+    installer, install = tmp_path / "setup.exe", tmp_path / "installed"
+    installer.write_bytes(b"fixture")
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
+    monkeypatch.setattr(smoke, "production_clean_scope_step", lambda *a: {"name": "scope", "ok": True})
+    monkeypatch.setattr(smoke, "is_admin", lambda: True)
+    def setup(executable, mode, timeout):
+        if mode == "install":
+            install.mkdir()
+            (install / "Uninstall.exe").write_bytes(b"fixture")
+            return CompletedProcess([str(executable)], 1, "", "install failed")
+        raise TimeoutExpired([str(executable)], timeout)
+    monkeypatch.setattr(smoke, "run_native_setup", setup)
+    report = smoke.run_smoke(make_args(tmp_path, installer, installer_kind="native", scope="production-clean", install_dir=str(install)))
+    assert report["ok"] is False
+    assert report["summary"]["phases"]["uninstall"] == "failed"
+    assert any(step["name"] == "failure_cleanup.error" for step in report["steps"])
+    assert any("non-zero exit" in step.get("error", "") for step in report["steps"])
