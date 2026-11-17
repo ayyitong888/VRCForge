@@ -82,6 +82,7 @@ class AgentRuntimeSessionState:
         "_active_turns",
         "_active_plan_turns",
         "_waiting_turns",
+        "_subagent_parent_turns",
         "_finalizing_turns",
         "_exclusive_turns",
         "_final_responses",
@@ -105,6 +106,7 @@ class AgentRuntimeSessionState:
         self._active_turns: dict[tuple[str, str], str] = {}
         self._active_plan_turns: set[tuple[str, str]] = set()
         self._waiting_turns: dict[tuple[str, str], tuple[str, threading.Event]] = {}
+        self._subagent_parent_turns: dict[tuple[str, str], tuple[str, str, str]] = {}
         self._finalizing_turns: set[tuple[str, str]] = set()
         self._exclusive_turns: set[tuple[str, str]] = set()
         self._final_responses: dict[str, list[dict[str, Any]]] = {}
@@ -172,6 +174,7 @@ class AgentRuntimeSessionState:
             for _turn, cancelled in self._waiting_turns.values():
                 cancelled.set()
             self._waiting_turns.clear()
+            self._subagent_parent_turns.clear()
             self._finalizing_turns.clear()
             self._exclusive_turns.clear()
             self._final_responses.clear()
@@ -269,6 +272,9 @@ class AgentRuntimeSessionState:
                 self._exclusive_turns.discard(key)
                 self._steer_mailboxes.pop(key, None)
                 self._steer_seen_ids.pop(key, None)
+            self._subagent_parent_turns = {
+                key: parent for key, parent in self._subagent_parent_turns.items() if key[0] != session_id
+            }
             self._cancelled_targets = {
                 target: reason for target, reason in self._cancelled_targets.items() if target[0] != session_id
             }
@@ -1262,6 +1268,21 @@ class AgentRuntimeSessionState:
                 and (not turn_id or target[1] == turn_id)
                 and (not client_turn_id or target[2] == client_turn_id)
             ]
+            if not matching:
+                matching_parents = [
+                    (key, parent) for key, parent in self._subagent_parent_turns.items()
+                    if (not session_id or parent[0] == session_id)
+                    and (not turn_id or parent[1] == turn_id)
+                    and (not client_turn_id or parent[2] == client_turn_id)
+                ]
+                if len(matching_parents) == 1:
+                    key, parent = matching_parents[0]
+                    active_turn = self._active_turns.get(key)
+                    if active_turn is None:
+                        # The queued continuation still needs to settle the tool receipt.
+                        self._cancelled_targets.setdefault(parent, reason)
+                        return parent
+                    matching = [(key[0], active_turn, key[1])]
             colliding = [
                 target for target in active_targets
                 if (session_id and target[0] == session_id)
@@ -1307,7 +1328,10 @@ class AgentRuntimeSessionState:
         with self._ports.shared_state_lock:
             return (session_id, turn_id, client_turn_id) in self._stopped_core_dispatches
 
-    def queue_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> threading.Event | None:
+    def queue_turn(
+        self, *, session_id: str, turn_id: str, client_turn_id: str,
+        subagent_parent_turn: tuple[str, str, str] | None = None,
+    ) -> threading.Event | None:
         """Track an admitted request waiting for this session's current owner."""
         with self._ports.shared_state_lock:
             key = (session_id, client_turn_id)
@@ -1317,6 +1341,8 @@ class AgentRuntimeSessionState:
             if self.consume_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
                 cancelled.set()
             self._waiting_turns[key] = (turn_id, cancelled)
+            if subagent_parent_turn is not None:
+                self._subagent_parent_turns[key] = subagent_parent_turn
             return cancelled
 
     def discard_waiting_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> None:
@@ -1325,6 +1351,7 @@ class AgentRuntimeSessionState:
             waiting = self._waiting_turns.get(key)
             if waiting and waiting[0] == turn_id:
                 self._waiting_turns.pop(key)
+                self._subagent_parent_turns.pop(key, None)
 
     def begin_turn(
         self,
@@ -1350,6 +1377,13 @@ class AgentRuntimeSessionState:
             self._active_turns[key] = turn_id
             if plan_mode:
                 self._active_plan_turns.add(key)
+            parent = self._subagent_parent_turns.get(key)
+            if parent is not None:
+                reason = self.consume_cancel_reason(session_id=parent[0], turn_id=parent[1], client_turn_id=parent[2])
+                if reason is not None:
+                    target = (session_id, turn_id, client_turn_id)
+                    self._cancelled_targets.setdefault(target, reason)
+                    self._stopped_core_dispatches.add(target)
             if exclusive:
                 self._exclusive_turns.add(key)
             self._finalizing_turns.discard(key)
@@ -1372,6 +1406,7 @@ class AgentRuntimeSessionState:
                 self._finalizing_turns.add(key)
             self._active_turns.pop(key, None)
             self._active_plan_turns.discard(key)
+            self._subagent_parent_turns.pop(key, None)
             target = (session_id, active_turn_id or turn_id, client_turn_id)
             self._stopped_core_dispatches.discard(target)
             self._admitted_core_writes.discard(target)

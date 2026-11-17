@@ -6072,11 +6072,13 @@ class AgentGateway:
     def _admit_runtime_turn(
         self, *, session_id: str, turn_id: str, client_turn_id: str,
         is_continuation: bool = False, plan_mode: bool = False,
+        subagent_parent_turn: tuple[str, str, str] | None = None,
     ) -> None:
         """Serialize native conversation owners while keeping each caller's response."""
         with self._runtime_continuation_condition:
             waiting_cancelled = self._runtime_session_state.queue_turn(
                 session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+                subagent_parent_turn=subagent_parent_turn,
             )
             if waiting_cancelled is None:
                 raise AgentGatewayError("A runtime turn with this sessionId and clientTurnId is already active.", status_code=409)
@@ -6182,9 +6184,16 @@ class AgentGateway:
         continuation_completion = ensure_dict(continuation.get("completion"))
         selected_mode = (continuation_context if continuation_context and continuation_completion else params).get("planMode")
         plan_mode = not child_read_only and selected_mode is True
+        subagent_parent_turn = None
+        if continuation.get("source") == "sub_agent_finished":
+            seed = continuation_context
+            parent_turn_id = str(seed.get("turnId") or "")
+            parent_client_id = str(seed.get("clientTurnId") or "")
+            if seed.get("sessionId") == session_id and parent_turn_id and parent_client_id:
+                subagent_parent_turn = (session_id, parent_turn_id, parent_client_id)
         self._admit_runtime_turn(
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
-            is_continuation=resuming_task, plan_mode=plan_mode,
+            is_continuation=resuming_task, plan_mode=plan_mode, subagent_parent_turn=subagent_parent_turn,
         )
         params["_runtimeAdmitted"] = True
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()

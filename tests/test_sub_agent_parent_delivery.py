@@ -225,3 +225,123 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
     finally:
         parent_returned.set()
         service.shutdown(timeout_seconds=8)
+
+@pytest.mark.parametrize("stop_position", ["before_entry", "waiting", "after_admission"])
+def test_fastapi_stop_during_dispatching_suppresses_parent_resume(tmp_path, monkeypatch, stop_position):
+    from fastapi.testclient import TestClient
+    from unittest.mock import AsyncMock, Mock
+
+    gateway, model, _ = setup_gateway(tmp_path, [
+        call("delegated-read", "vrcforge_delegate_subagent", {
+            "role": "llm_readonly", "task": "Inspect the fixture.",
+        }),
+        {"role": "assistant", "content": "A distinct parent turn finished."},
+    ])
+    worker_release = threading.Event()
+    dispatching = threading.Event()
+    resume = threading.Event()
+    results = []
+    admission_reached = threading.Event()
+    admission_release = threading.Event()
+    blocked_identity = {"session_id": "parent", "turn_id": "competing", "client_turn_id": "competing"}
+    state = gateway._runtime_session_state
+
+    if stop_position == "waiting":
+        queue_turn = type(state).queue_turn
+
+        def observed_queue_turn(self, **kwargs):
+            result = queue_turn(self, **kwargs)
+            if str(kwargs["client_turn_id"]).startswith("original:subagent:"):
+                admission_reached.set()
+            return result
+
+        monkeypatch.setattr(type(state), "queue_turn", observed_queue_turn)
+    elif stop_position == "after_admission":
+        admit_turn = gateway._admit_runtime_turn
+
+        def hold_admitted_turn(**kwargs):
+            admit_turn(**kwargs)
+            if kwargs["is_continuation"]:
+                admission_reached.set()
+                assert admission_release.wait(5)
+
+        monkeypatch.setattr(gateway, "_admit_runtime_turn", hold_admitted_turn)
+
+    def worker(_params, _cancel):
+        assert worker_release.wait(5)
+        return {"ok": True, "summaryText": "Durable child finding."}
+
+    def deliver(event):
+        dispatching.set()
+        assert resume.wait(5)
+        results.append(gateway.resume_runtime_task_after_sub_agent(event))
+
+    roles = build_sub_agent_roles()
+    service = SubAgentCollaborationService(SubAgentCollaborationPorts(
+        artifact_dir=tmp_path / "sub-agents",
+        gateway=SubAgentExecutionPorts(
+            execute=gateway.runtime_skills.execute,
+            run_sub_agent_llm=gateway.run_sub_agent_llm,
+            wait_runtime_session_idle=gateway.wait_runtime_session_idle,
+        ),
+        lane_budget=RuntimeLaneBudget(),
+        build_roles=lambda: roles,
+        build_handlers=lambda _ports: {"llm_readonly": worker},
+        task_finished=deliver,
+    ))
+    monkeypatch.setattr(server, "AGENT_GATEWAY", gateway)
+    monkeypatch.setattr(server, "SUB_AGENT_COLLABORATION", service)
+    monkeypatch.setattr(server, "EVENT_BUS", Mock(broadcast=AsyncMock()))
+    registry = service._registry
+    gateway.bind_runtime_subagent_control(
+        active_parent_task_ids=registry.active_parent_task_ids, cancel_task=registry.cancel_task,
+        parent_delivery_pending=registry.parent_delivery_pending,
+    )
+    gateway.register_tool(
+        "vrcforge_delegate_subagent",
+        "When to use: delegate a read. When NOT to use: write.",
+        "plan/preview", server.delegate_sub_agent_runtime,
+    )
+    try:
+        parent = gateway.runtime_message({
+            "sessionId": "parent", "clientTurnId": "original", "message": "Delegate a read.",
+        })
+        assert parent["plan"]["reason"] == "sub_agent_pending"
+        worker_release.set()
+        assert dispatching.wait(5)
+        task_id = registry.list_tasks()["tasks"][0]["id"]
+        task = registry.get_task(task_id)["task"]
+        assert task["status"] == "completed" and task["parentContinuationStatus"] == "dispatching"
+        worker_thread = registry._threads[task_id]
+        if stop_position == "waiting":
+            assert state.begin_turn(**blocked_identity)
+        if stop_position != "before_entry":
+            resume.set()
+            assert admission_reached.wait(5)
+        response = TestClient(server.app).post("/api/app/agent/runs/cancel", json={
+            "sessionId": parent["sessionId"], "turnId": parent["turnId"],
+            "clientTurnId": parent["clientTurnId"],
+        })
+        assert response.status_code == 200, response.text
+        assert response.json()["ok"] is True
+
+        if stop_position == "waiting":
+            with gateway._runtime_continuation_condition:
+                state.finish_turn(**blocked_identity)
+                state.clear_finalizing_turn(session_id="parent", client_turn_id="competing")
+                gateway._runtime_continuation_condition.notify_all()
+        resume.set()
+        admission_release.set()
+        worker_thread.join(5)
+        assert len(model.requests) == 1
+        assert results[0]["plan"]["nextStep"] == "cancelled"
+        assert "Durable child finding." in json.dumps(registry.get_task(task_id))
+        other = gateway.runtime_message({
+            "sessionId": "parent", "clientTurnId": "other", "message": "New turn.",
+        })
+        assert other["plan"]["reply"] == "A distinct parent turn finished."
+    finally:
+        worker_release.set()
+        resume.set()
+        admission_release.set()
+        service.shutdown(timeout_seconds=5)
