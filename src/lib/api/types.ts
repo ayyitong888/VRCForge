@@ -779,6 +779,7 @@ export type AgentRuntimeRun = {
   clientTurnId?: string;
   agent?: string;
   messageSummary?: string;
+  notificationPreview?: string;
   provider?: string;
   providerLabel?: string;
   model?: string;

@@ -23,7 +23,7 @@ test("question notification is display-only and carries exact chat/question iden
   const workspace = await readFile(path.join(root, "src/hooks/use-runtime-workspace.ts"), "utf8");
   assert.match(workspace, /isCallUserQuestion\(question\)/);
   assert.match(workspace, /question\.status === "pending"/);
-  assert.match(workspace, /chatIdForSessionId/);
+  assert.match(workspace, /chatForSessionId\?\.\(String\(question\.sessionId/);
   assert.match(workspace, /normalizeAgentQuestionNotificationBody/);
   assert.match(workspace, /const notificationChatId = chatId \|\| `question-/);
   assert.match(workspace, /agentQuestionNotificationInflightRef/);
@@ -32,13 +32,14 @@ test("question notification is display-only and carries exact chat/question iden
   assert.doesNotMatch(workspace, /isCallUserQuestion\(question\).*ask_user/s);
   const app = await readFile(path.join(root, "src/App.tsx"), "utf8");
   assert.match(app, /AGENT_QUESTION_NOTIFICATION_ACTION_EVENT/);
-  assert.match(app, /setActiveChatId\(chat\.id\)/);
+  assert.match(app, /questionSessionId !== chatSessionId/);
+  assert.match(app, /openChat\(chat\);\s*reopenAgentQuestion\(question\.questionId\)/);
   assert.match(app, /setActiveView\("chat"\)/);
   assert.match(app, /item\.questionId === action\.questionId/);
   assert.match(app, /fetchAgentQuestions\(endpoint/);
   assert.match(app, /initialGlobalQuestionFetchRef/);
-  assert.match(app, /sessionId: answeredQuestion\?\.sessionId \|\| sessionId/);
-  assert.match(app, /projectRoot: answeredQuestion\?\.projectRoot/);
+  assert.match(app, /sessionId: answeredQuestion\.sessionId \|\| answerChat\?\.sessionId/);
+  assert.match(app, /projectRoot: answeredQuestion\.projectRoot \|\| answerChat\?\.projectPath/);
   assert.doesNotMatch(app, /chat\.items\.some\(\(item\) => item\.type === "agent"\)/);
 });
 

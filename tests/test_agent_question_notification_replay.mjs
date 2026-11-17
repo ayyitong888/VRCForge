@@ -16,7 +16,7 @@ const bundle = await build({
     function Fixture() {
       const [runtimeConnected, setRuntimeConnected] = useState(false);
       const [sessionId, setSessionId] = useState("session-replay");
-      const workspace = useRuntimeWorkspace({ endpoint: location.origin, runtimeConnected, sessionId, activeRuntimeProjectPath: "", activeProjectPath: "", sending: false, pendingApprovals: 0, setBootstrap: () => {}, setAgentApprovals: () => {}, setError: () => {}, chatIdForSessionId: () => "chat-replay" });
+      const workspace = useRuntimeWorkspace({ endpoint: location.origin, runtimeConnected, sessionId, activeRuntimeProjectPath: "", activeProjectPath: "", sending: false, pendingApprovals: 0, setBootstrap: () => {}, setAgentApprovals: () => {}, setError: () => {}, chatForSessionId: () => ({id: "chat-replay", title: "Dependency check"}) });
       useEffect(() => { window.testApi = workspace; }, [workspace]);
       window.connectRuntime = () => setRuntimeConnected(true);
       window.switchSession = setSessionId;

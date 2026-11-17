@@ -33,7 +33,7 @@ import { playNotificationSoundOnce } from "../lib/notification-sound-delivery";
 import { isProjectWorkbenchSmokeMode, markdownSmokeGoals, markdownSmokeMemories, markdownSmokeProgress, markdownSmokeRuns } from "../lib/markdown-smoke";
 import { normalizeProjectPathKey } from "../lib/project-path";
 import { fetchAgentRuns } from "../lib/api/agent-runtime";
-import { createRuntimeAttentionDelivery, latestRuntimeAttentionCandidates, runtimeAttentionCandidates, runtimeAttentionFromRun, type RuntimeAttention } from "../lib/runtime-attention";
+import { createRuntimeAttentionDelivery, latestRuntimeAttentionCandidates, normalizeRuntimeNotificationText, runtimeAttentionCandidates, runtimeAttentionFromRun, type RuntimeAttention } from "../lib/runtime-attention";
 
 type UseRuntimeWorkspaceParams = {
   endpoint: string;
@@ -46,7 +46,7 @@ type UseRuntimeWorkspaceParams = {
   setBootstrap: Dispatch<SetStateAction<AppBootstrap | null>>;
   setAgentApprovals: Dispatch<SetStateAction<AgentApproval[] | null>>;
   setError: Dispatch<SetStateAction<string>>;
-  chatIdForSessionId?: (sessionId: string) => string;
+  chatForSessionId?: (sessionId: string) => { id: string; title: string } | undefined;
 };
 
 const ACTIVE_QUESTION_CONTINUATION_STATUSES = new Set(["queued", "claimed", "running", "cancelling"]);
@@ -73,7 +73,7 @@ export function useRuntimeWorkspace({
   setBootstrap,
   setAgentApprovals,
   setError,
-  chatIdForSessionId,
+  chatForSessionId,
 }: UseRuntimeWorkspaceParams) {
   const { t } = useTranslation();
   const [workspaceDiff, setWorkspaceDiff] = useState<WorkspaceDiffSummary | null>(null);
@@ -114,6 +114,8 @@ export function useRuntimeWorkspace({
   const agentQuestionNotificationInflightRef = useRef<Set<string>>(new Set());
   const agentQuestionNotificationStatusRef = useRef(new Map<string, string>());
   const [verifiedAttention, setVerifiedAttention] = useState<RuntimeAttention[]>([]);
+  const chatLookupRef = useRef(chatForSessionId);
+  chatLookupRef.current = chatForSessionId;
   const deliverAttention = useRef(createRuntimeAttentionDelivery());
   const [notificationRuns, setNotificationRuns] = useState<AgentRuntimeRun[]>([]);
   // Notification observation belongs to the application, not the selected chat.
@@ -159,20 +161,26 @@ export function useRuntimeWorkspace({
   useEffect(() => {
     let current = true;
     if (!runtimeConnected) return;
-    const results = attentionCandidates.map(runtimeAttentionFromRun);
-    {
-      if (!current) return;
-      const attention = results.filter((item): item is RuntimeAttention => item !== null);
-      setVerifiedAttention(attention);
-      if (!isTauriRuntime()) return;
-      for (const item of attention) {
-        const kind = item.status === "blocked" ? "Blocked" : item.status === "completed" ? "Completed" : item.status === "failed" ? "Failed" : "Stopped";
-        void deliverAttention.current(endpoint, item, t(`workspace.notification${kind}Title`), t(`workspace.notification${kind}Body`), () => current).catch((cause) => {
-          // Failed native submissions remain retryable and visible.
-          if (current) setRuntimeNotice(t("workspace.notificationSendFailed") + String(cause instanceof Error ? cause.message : cause));
-        });
-      }
+    const native = isTauriRuntime();
+    const attention: RuntimeAttention[] = [];
+    for (const run of attentionCandidates) {
+      const item = runtimeAttentionFromRun(run);
+      if (!item) continue;
+      attention.push(item);
+      if (!native) continue;
+      const kind = item.status === "blocked" ? "Blocked" : item.status === "completed" ? "Completed" : item.status === "failed" ? "Failed" : "Stopped";
+      const statusTitle = t(`workspace.notification${kind}Title`);
+      const title = normalizeRuntimeNotificationText(chatLookupRef.current?.(item.sessionId)?.title, 120)
+        || normalizeRuntimeNotificationText(run.messageSummary, 120) || statusTitle;
+      const preview = normalizeRuntimeNotificationText(run.notificationPreview, 420);
+      const body = !preview ? t(`workspace.notification${kind}Body`)
+        : kind === "Completed" || title === statusTitle ? preview : `${statusTitle} · ${preview}`;
+      void deliverAttention.current(endpoint, item, title, body, () => current).catch((cause) => {
+        // Failed native submissions remain retryable and visible.
+        if (current) setRuntimeNotice(t("workspace.notificationSendFailed") + String(cause instanceof Error ? cause.message : cause));
+      });
     }
+    setVerifiedAttention(attention);
 
     return () => { current = false; };
   }, [endpoint, runtimeConnected, attentionCandidates, t]);
@@ -199,7 +207,8 @@ export function useRuntimeWorkspace({
           agentQuestionNotificationInflightRef.current,
         )
       ) continue;
-      const chatId = chatIdForSessionId?.(String(question.sessionId || "").trim()) || "";
+      const chat = chatForSessionId?.(String(question.sessionId || "").trim());
+      const chatId = chat?.id || "";
       const notificationChatId = chatId || `question-${questionId.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 96)}`;
       agentQuestionNotificationInflightRef.current.add(questionId);
       const blocking = isBlockingAgentQuestion(question);
@@ -207,7 +216,7 @@ export function useRuntimeWorkspace({
         return showAgentQuestionNotification({
           questionId,
           chatId: notificationChatId,
-          title: t("questionCard.label"),
+          title: normalizeRuntimeNotificationText(chat?.title, 120) || t("questionCard.label"),
           body: normalizeAgentQuestionNotificationBody(question.question || question.header || questionId),
           silent: soundPlayed,
         });

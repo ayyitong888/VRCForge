@@ -237,8 +237,8 @@ pub(crate) fn show_background_goal_notification(
         })?;
         let callback_app = app.clone();
         tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
-            .title(&request.title)
-            .text1(&request.body)
+            .title(&crate::sanitize::sanitize_text_for_webview(&request.title))
+            .text1(&crate::sanitize::sanitize_text_for_webview(&request.body))
             .sound(if request.silent { None } else { Some(tauri_winrt_notification::Sound::Default) })
             .icon(&icon_path, tauri_winrt_notification::IconCrop::Square, APPROVAL_NOTIFICATION_ICON_ALT_TEXT)
             .on_activated(move |_| { focus_main_window(&callback_app); Ok(()) })
@@ -300,8 +300,8 @@ pub(crate) fn show_agent_question_notification(
         };
         let callback_app = app.clone();
         tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
-            .title(&request.title)
-            .text1(&request.body)
+            .title(&crate::sanitize::sanitize_text_for_webview(&request.title))
+            .text1(&crate::sanitize::sanitize_text_for_webview(&request.body))
             .sound(if request.silent { None } else { Some(tauri_winrt_notification::Sound::Default) })
             .icon(
                 &icon_path,

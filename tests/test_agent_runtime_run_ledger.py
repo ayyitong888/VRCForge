@@ -573,6 +573,9 @@ def test_notification_runs_preserve_lifecycle_without_history_payload(tmp_path: 
         "agent": "sub-agent",
         "nextStep": "paused",
         "reason": "interrupted",
+        "messageSummary": "Inspect the wardrobe",
+        "planSummary": "Generic plan headline",
+        "continuationEvent": {"plan": {"reply": "The package check stopped.\nNo files were changed. " + "Long detail. " * 80}},
         "steps": [{"result": "large history payload" * 1000}],
     })
     ledger.append({
@@ -596,11 +599,16 @@ def test_notification_runs_preserve_lifecycle_without_history_payload(tmp_path: 
             "nextStep": "paused",
             "reason": "interrupted",
             "cancellationReason": "user_stop",
+            "messageSummary": "Inspect the wardrobe",
+            "notificationPreview": notifications["runs"][0]["notificationPreview"],
             "startedAt": start,
             "createdAt": full["runs"][0]["createdAt"],
             "updatedAt": full["runs"][0]["updatedAt"],
         }],
     }
+    preview = notifications["runs"][0]["notificationPreview"]
+    assert preview.startswith("The package check stopped. No files were changed.")
+    assert len(preview) <= 420 and "large history payload" not in preview
     assert full["runs"][0]["steps"] and len(full["events"]) == 3
 
 

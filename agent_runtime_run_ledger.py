@@ -19,7 +19,7 @@ from agent_runtime_event_projection import project_runtime_turn_event, capture_t
 _COMPLETED_RUN_STATUSES = frozenset({"completed", "failed", "denied", "cancelled"})
 _RUN_NOTIFICATION_FIELDS = (
     "sessionId", "clientTurnId", "turnId", "status", "startedAt", "createdAt", "updatedAt",
-    "agent", "nextStep", "reason", "cancellationReason",
+    "agent", "nextStep", "reason", "cancellationReason", "messageSummary",
 )
 _RUN_NOTIFICATION_FLAGS = ("dispatchStopped", "unityWriteMayHaveExecuted")
 
@@ -811,8 +811,8 @@ class AgentRuntimeRunLedger:
             if started_at:
                 run["startedAt"] = started_at
         if notification_only:
-            # The desktop observer only needs lifecycle state. The merged rows
-            # own their top-level dicts and this projection copies only scalars.
+            # Give the observer one bounded excerpt from the durable receipt,
+            # including after restart, without shipping the timeline or steps.
             return {
                 "ok": True,
                 "schema": "vrcforge.runtime_runs.v1",
@@ -820,6 +820,7 @@ class AgentRuntimeRunLedger:
                     self._ports.redact({
                         **{key: run[key] for key in _RUN_NOTIFICATION_FIELDS if isinstance(run.get(key), str)},
                         **{key: run[key] for key in _RUN_NOTIFICATION_FLAGS if isinstance(run.get(key), bool)},
+                        **self._notification_excerpt(run),
                     })
                     for run in runs
                 ],
@@ -835,6 +836,14 @@ class AgentRuntimeRunLedger:
             ],
             "count": len(runs),
         }
+
+    def _notification_excerpt(self, run: dict[str, Any]) -> dict[str, str]:
+        receipt = _ensure_dict(run.get("continuationEvent"))
+        plan = _ensure_dict(receipt.get("plan"))
+        for value in (plan.get("reply"), run.get("error"), run.get("planSummary")):
+            if isinstance(value, str) and value.strip():
+                return {"notificationPreview": self._ports.summarize_text(value, 420)}
+        return {}
 
     def _list_runs_events(
         self, *, cache_key: tuple[Any, ...], session_id: str,

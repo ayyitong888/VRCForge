@@ -14,6 +14,7 @@ function Harness(){
   window.selectSession=setSelectedSessionId;
   window.state=useRuntimeWorkspace({endpoint:'fixture',runtimeConnected:true,sessionId:selectedSessionId,
     activeRuntimeProjectPath:'fixture-project',activeProjectPath:'fixture-project',sending:false,pendingApprovals:0,
+    chatForSessionId:id=>window.fixture.chats?.[id],
     setBootstrap:noop,setAgentApprovals:noop,setError:noop});
   return <div>Runtime notification harness</div>;
 }
@@ -86,6 +87,13 @@ try {
     assert.equal(state.toasts.at(-1).args.request.title,`workspace.notification${status==='failed'?'Failed':'Stopped'}Title`);
   }
   await page.close();
+  const detailed=await open({sessionId:'elsewhere',chats:{session:{id:'owner-chat',title:'工程依赖检查'},elsewhere:{id:'foreign-chat',title:'另一个对话'}},
+    snapshot:{runs:{runs:[{...identity,status:'completed',notificationPreview:'**VRCFury** 已安装。\n\n已读取版本。'},
+      {...identity,turnId:'different-backend',clientTurnId:'different-client',sessionId:'missing-chat',status:'failed',messageSummary:'检查包配置',notificationPreview:'无法读取包清单。'}]}}});
+  await detailed.waitForFunction(()=>window.calls.filter(c=>c.command==='show_background_goal_notification').length===2);
+  assert.deepEqual(await detailed.evaluate(()=>window.calls.filter(c=>c.command==='show_background_goal_notification').map(c=>c.args.request).sort((a,b)=>a.title.localeCompare(b.title))),
+    [{title:'工程依赖检查',body:'VRCFury 已安装。 已读取版本。',silent:true},{title:'检查包配置',body:'workspace.notificationFailedTitle · 无法读取包清单。',silent:true}]);
+  await detailed.close();
   const manual = process.env.VRCFORGE_MANUAL_STOP_REPLAY
     ? JSON.parse(await readFile(process.env.VRCFORGE_MANUAL_STOP_REPLAY,'utf8'))
     : {...identity,status:'cancelled',cancellationReason:'user_stop'};

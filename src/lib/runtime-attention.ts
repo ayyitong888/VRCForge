@@ -6,6 +6,17 @@ import { isWaitingForSubAgent } from "./runtime-run-status";
 export type RuntimeAttentionStatus = "completed" | "blocked" | "failed" | "cancelled" | "stopped";
 export type RuntimeAttention = { sessionId: string; clientTurnId: string; turnId: string; status: RuntimeAttentionStatus };
 
+export function normalizeRuntimeNotificationText(value: string | undefined, limit: number): string {
+  const compact = (value || "")
+    .replace(/\[([^\]]+)\]\([^\r\n)]+\)/g, "$1")
+    .replace(/(\*\*|__|~~|`+)(.+?)\1/g, "$2")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const characters = Array.from(compact);
+  return characters.length <= limit ? compact : characters.slice(0, limit - 1).join("") + "…";
+}
+
 function attentionStatus(status: string | undefined): RuntimeAttentionStatus | null {
   if (status === "denied") return "failed";
   return status === "completed" || status === "blocked" || status === "failed" || status === "cancelled" || status === "stopped" ? status : null;

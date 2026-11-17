@@ -1141,8 +1141,7 @@ export default function App() {
     setBootstrap,
     setAgentApprovals,
     setError,
-    chatIdForSessionId: (ownerSessionId) =>
-      sidebarChats.find((chat) => chat.sessionId === ownerSessionId)?.id || "",
+    chatForSessionId: (ownerSessionId) => sidebarChats.find((chat) => chat.sessionId === ownerSessionId),
   });
   const applyFollowupReceiptRef = useRef(applyFollowupReceipt);
   applyFollowupReceiptRef.current = applyFollowupReceipt;

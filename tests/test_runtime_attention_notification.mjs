@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const directory = await mkdtemp(path.resolve('local-review/runtime-attention-test-'));
+const directory = await mkdtemp(path.join(tmpdir(), 'vrcforge-runtime-attention-test-'));
 try {
   const bundle = await build({ entryPoints: ['src/lib/runtime-attention.ts'], bundle: true, write: false, format: 'esm', platform: 'node' });
   const file = path.join(directory, 'runtime.mjs');
