@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -58,9 +60,15 @@ def test_recycle_route_requires_confirmation_and_only_removes_selected_project(t
     async def no_log(*args, **kwargs):
         pass
     monkeypatch.setattr(server, "emit_log_async", no_log)
-    headers = {"Authorization": "Bearer recycle-test-token"}
+    auth = {"Authorization": "Bearer recycle-test-token"}
     client = TestClient(server.app, client=("127.0.0.1", 50000))
     url = "/api/projects/recycle"
+    proof = hmac.new(b"recycle-test-token", f"vrcforge.tauri-ipc-bridge.v1\nPOST\n{url}".encode(), hashlib.sha256).hexdigest()
+    headers = {**auth, "X-VRCForge-Transport": "tauri-ipc-bridge", "X-VRCForge-Transport-Proof": proof}
+    body = {"path": path, "confirmation": "DeLeTe"}
+    assert url not in server.app.openapi()["paths"]
+    assert client.post(url, headers=auth, json=body).status_code == 403
+    assert client.post(url, headers={**headers, "X-VRCForge-Transport-Proof": "0" * 64}, json=body).status_code == 403
     for invalid in ("delete", "DELETE", "Delete", "DeLeTe "):
         assert client.post(url, headers=headers, json={"path": path, "confirmation": invalid}).status_code == 422
     assert client.post(url, json={"path": path, "confirmation": "DeLeTe"}).status_code == 401

@@ -4990,7 +4990,7 @@ export default function App() {
         onArchiveProjectChats={archiveProjectChats}
         onHideProject={hideProject}
         onRemoveCustomProject={removeCustomProject}
-        canRecycleProject={canRecycleProject}
+        canRecycleProject={(path) => isTauriRuntime() && canRecycleProject(path)}
         onRecycleProject={async (path, confirmation) => {
           const { cleanupWarning } = await recycleProjectWithChats(path, () => recycleProject(path, confirmation));
           void refreshManagedProjectList().then(() => {

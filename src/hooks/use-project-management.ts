@@ -305,7 +305,7 @@ export function useProjectManagement({
     if (!canRecycleProject(path)) throw new Error(t("project.invalidProjectRoot"));
     const target = runtimeConnected ? endpoint : await startRuntime();
     if (!target) throw new Error(t("project.runtimeRequired"));
-    const result = await recycleUnityProject(target, path, confirmation);
+    const result = await recycleUnityProject(path, confirmation);
     const keys = new Set([path, result.path].map(normalizeProjectPathKey));
     const keepPath = (value: string) => !keys.has(normalizeProjectPathKey(value));
     const withoutRecycledProject = (prefs: ProjectPrefs): ProjectPrefs => ({

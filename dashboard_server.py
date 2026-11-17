@@ -10860,11 +10860,13 @@ def recycle_unity_project_sync(path: str) -> dict[str, Any]:
     return result
 
 
-@app.post("/api/projects/recycle")
+@app.post("/api/projects/recycle", include_in_schema=False)
 async def recycle_unity_project(request: Request, body: ProjectRecycleRequest) -> dict[str, Any]:
     supplied = extract_bearer_token(request)
     if not APP_SESSION_TOKEN or not hmac.compare_digest(supplied, APP_SESSION_TOKEN):
         raise HTTPException(status_code=401, detail="Project deletion requires a VRCForge app session.")
+    if request_transport_component(request) != "ipc":
+        raise HTTPException(status_code=403, detail="Delete projects manually in the VRCForge desktop app.")
     try:
         result = await asyncio.to_thread(recycle_unity_project_sync, body.path)
     except (ValueError, OSError, ProjectCatalogRegistrationError, UnityProcessDiscoveryUnavailable) as exc:

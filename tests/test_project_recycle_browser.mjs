@@ -65,7 +65,19 @@ const bundle = await build({
             onCancelDeleteChat={noop} onConfirmDeleteChat={noop}
             canRecycleProject={management.canRecycleProject}
             onRecycleProject={async(path,confirmation)=>{
-              const result = await sessions.recycleProjectWithChats(path,()=>management.recycleProject(path,confirmation));
+              const result = await sessions.recycleProjectWithChats(path,()=>{
+                window.__TAURI_INTERNALS__ = { invoke: async (command, args) => {
+                  if (command !== "recycle_project") throw new Error("Unexpected desktop command");
+                  const response = await fetch("/mock-desktop-recycle", {
+                    method:"POST", body:JSON.stringify(args.request),
+                  });
+                  const payload = await response.json();
+                  if (!response.ok) throw new Error(payload.detail);
+                  return payload;
+                } };
+                try { return management.recycleProject(path,confirmation); }
+                finally { delete window.__TAURI_INTERNALS__; }
+              });
               window.cleanupWarning = result.cleanupWarning;
             }}
           />
@@ -104,7 +116,7 @@ const server = createServer(async (req, res) => {
         hasOlder: false, nextBefore: null,
       });
     }
-  } else if (url.pathname === "/api/projects/recycle" && req.method === "POST") {
+  } else if (url.pathname === "/mock-desktop-recycle" && req.method === "POST") {
     let raw = "";
     for await (const data of req) raw += data;
     const body = JSON.parse(raw);
@@ -156,6 +168,8 @@ try {
 
   await openDialog();
   await input.fill("DeLeTe");
+  await confirm.evaluate((button) => { button.click(); button.form.requestSubmit(); });
+  assert.deepEqual(requests, []);
   await confirm.click();
   await dialog.getByRole("alert").waitFor();
   assert.match(await dialog.getByRole("alert").textContent(), /Close Unity Editor/);

@@ -57,7 +57,7 @@ export function DeleteProjectDialog({
       }}
       className="m-auto max-h-[calc(100vh-2rem)] w-[min(28rem,90vw)] overflow-y-auto rounded-xl border border-border bg-card p-5 text-foreground shadow-panel backdrop:bg-black/40"
     >
-      <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+      <form onSubmit={(event) => event.preventDefault()}>
         <h2 id="delete-project-title" className="text-base font-semibold text-destructive">{t("project.deleteProject")}</h2>
         <p id="delete-project-description" className="mt-3 text-sm text-muted-foreground">{t("project.deleteProjectDescription")}</p>
         <p id="delete-project-path" className="mt-3 select-text break-all rounded-md bg-muted px-3 py-2 font-mono text-xs">{path}</p>
@@ -75,7 +75,10 @@ export function DeleteProjectDialog({
         {error ? <p role="alert" className="mt-3 break-words text-sm text-destructive">{error}</p> : null}
         <div className="mt-5 flex justify-end gap-2">
           <Button type="button" variant="outline" disabled={submitting} onClick={onCancel}>{t("deleteModal.cancel")}</Button>
-          <Button type="submit" variant="danger" disabled={submitting || !confirmationMatches}>
+          <Button type="submit" variant="danger" disabled={submitting || !confirmationMatches}
+            onClick={(event) => {
+              if (event.nativeEvent.isTrusted) void submit();
+            }}>
             {t(submitting ? "project.deletingProject" : "project.deleteProject")}
           </Button>
         </div>
