@@ -207,6 +207,20 @@ def _truncation_metadata(settings: Settings, calls: Sequence[Any] = ()) -> dict[
     return result
 
 
+def _native_inline_image(part: Mapping[str, Any]) -> tuple[str, str] | None:
+    if part.get("type") not in {"image_url", "input_image"}:
+        return None
+    url = part.get("image_url")
+    if isinstance(url, Mapping):
+        url = url.get("url")
+    if not isinstance(url, str):
+        return None
+    header, _, data = url.partition(",")
+    if header.startswith("data:image/") and header.endswith(";base64") and data:
+        return header.removeprefix("data:").removesuffix(";base64"), data
+    return None
+
+
 def _native_messages_to_anthropic(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
     for message in messages:
@@ -251,8 +265,26 @@ def _native_messages_to_anthropic(messages: Sequence[Mapping[str, Any]]) -> list
             continue
         if role == "user":
             content = message.get("content", "")
+            if isinstance(content, list):
+                user_blocks = []
+                for part in content:
+                    if not isinstance(part, Mapping):
+                        continue
+                    image = _native_inline_image(part)
+                    if image:
+                        mime_type, data = image
+                        user_blocks.append({"type": "image", "source": {
+                            "type": "base64", "media_type": mime_type, "data": data,
+                        }})
+                    elif part.get("type") in {"text", "input_text"} and part.get("text"):
+                        user_blocks.append({"type": "text", "text": part["text"]})
+                if not user_blocks:
+                    continue
+                content = user_blocks
             if converted and converted[-1]["role"] == "user" and isinstance(converted[-1]["content"], list):
-                converted[-1]["content"].append({"type": "text", "text": str(content)})
+                converted[-1]["content"].extend(
+                    content if isinstance(content, list) else [{"type": "text", "text": str(content)}]
+                )
             else:
                 converted.append({"role": "user", "content": content})
     return converted
@@ -382,11 +414,26 @@ def _native_messages_to_gemini(
                 contents.append({"role": "user", "parts": [response_part]})
             continue
         if role == "user":
-            user_part = {"text": str(message.get("content") or "")}
+            content = message.get("content")
+            user_parts = []
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, Mapping):
+                        continue
+                    image = _native_inline_image(part)
+                    if image:
+                        mime_type, data = image
+                        user_parts.append({"inline_data": {"mime_type": mime_type, "data": base64.b64decode(data)}})
+                    elif part.get("type") in {"text", "input_text"} and part.get("text"):
+                        user_parts.append({"text": part["text"]})
+            elif content:
+                user_parts.append({"text": str(content)})
+            if not user_parts:
+                continue
             if contents and contents[-1]["role"] == "user":
-                contents[-1]["parts"].append(user_part)
+                contents[-1]["parts"].extend(user_parts)
             else:
-                contents.append({"role": "user", "parts": [user_part]})
+                contents.append({"role": "user", "parts": user_parts})
     return contents, "\n\n".join(system_parts)
 
 
