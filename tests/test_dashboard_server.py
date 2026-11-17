@@ -794,7 +794,7 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_conversation_read_can_recover_long_message_tail(self) -> None:
         with patch.object(dashboard_server, "_CROSS_SESSION_CONVERSATION_SERVICE", None):
-            full_reply = "a" * 8500 + "Final detail: use the spare palette."
+            full_reply = "a" * 8500 + "\nFinal detail:\n    use the spare palette."
             dashboard_server.write_chat_transcripts_storage(dashboard_server.ChatTranscriptsRequest(chats=[
                 {"id": "long-peer", "sessionId": "peer-session", "items": [
                     {"id": "question", "type": "user", "text": "What did you find?"},
@@ -816,9 +816,11 @@ class DashboardServerTests(unittest.TestCase):
             self.assertFalse(tail["messages"][0]["truncated"])
             self.assertEqual(tail["nextOffset"], 2)
             self.assertEqual(read({**params, "offset": tail["nextOffset"]})["messages"][0]["text"], "Another question.")
-            self.assertIn("use the spare palette", dashboard_server.RUNTIME_PLANNER.native_result_observation({
+            observation = dashboard_server.RUNTIME_PLANNER.native_result_observation({
                 "tool": "vrcforge_read_conversation", "kind": "skill", "status": "completed", "result": tail,
-            })["observation"])
+            })["observation"]
+            projected = json.JSONDecoder().raw_decode(observation.split("structuredEvidence=", 1)[1])[0]["data"]
+            self.assertEqual(projected["messages"][0]["text"], tail["messages"][0]["text"])
 
     def test_chat_storage_write_echoes_precise_origin(self) -> None:
         origin_id = "00000000-0000-4000-8000-000000000001"

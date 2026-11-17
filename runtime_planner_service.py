@@ -4885,6 +4885,7 @@ class RuntimePlannerService:
                 structured_evidence = project_structured_tool_evidence(
                     evidence_result, sanitize_text=sanitize_planner_observation_text,
                     mode="runtimecomplete",
+                    preserve_text_whitespace=tool_name == "vrcforge_read_conversation",
                 )
                 if structured_evidence:
                     # Appending domain data must not shorten the pre-existing

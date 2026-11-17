@@ -18,7 +18,7 @@ from tests.test_native_runtime_gateway import call, setup_gateway
 )
 def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_path, monkeypatch, target_plan, long_reply):
     workspace = str(tmp_path) if target_plan else ""
-    reply_prefix = "a" * 8500 + "\n" if long_reply else ""
+    reply_prefix = "a" * 8500 + "\nSnippet:\n    const label = \"blend shape\";\n" if long_reply else ""
     source_id, target_id = "relay-source", "relay-target"
     source_session, target_session = "relay-source-session", "relay-target-session"
     evidence = "The target's glossary uses the term blend shape."
@@ -40,8 +40,11 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
 
     def source_finishes(request):
         result_call = "read-report-tail" if reply_prefix else "read-report"
-        messages = [row for row in request["messages"] if row.get("tool_call_id") == result_call]
-        assert evidence in json.dumps(messages), messages
+        content = next(row["content"] for row in request["messages"] if row.get("tool_call_id") == result_call)
+        observation = json.loads(content)["observations"][0]["observation"]
+        data = json.JSONDecoder().raw_decode(observation.split("structuredEvidence=", 1)[1])[0]["data"]
+        expected = reply[host.CrossSessionConversationService.MAX_READ_MESSAGE_CHARS:] if reply_prefix else reply
+        assert data["reply"]["text"] == expected
         return {"role": "assistant", "content": f"Glossary verification: {evidence}"}
 
     def source_reads_tail(request):

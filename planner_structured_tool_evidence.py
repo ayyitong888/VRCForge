@@ -71,6 +71,7 @@ def project_structured_tool_evidence(
     sanitize_text: Callable[[object, int], str],
     max_chars: int = 6000,
     mode: str = "bounded",
+    preserve_text_whitespace: bool = False,
 ) -> dict[str, Any]:
     """Project untrusted structured data in bounded or owner-complete mode.
 
@@ -103,7 +104,7 @@ def project_structured_tool_evidence(
         return (3, str(name))
 
     def visit(value: object, budget: int, depth: int, *, exact_strings: bool = False,
-              exact_namespace: bool = False) -> object:
+              exact_namespace: bool = False, preserve_whitespace: bool = False) -> object:
         nonlocal source_truncated
         if not complete and budget < 8:
             return _ABSENT
@@ -140,6 +141,8 @@ def project_structured_tool_evidence(
                     return _ABSENT
                 return value
             if complete:
+                if preserve_whitespace:
+                    return sanitize_text(value, None, preserve_whitespace=True)
                 return sanitize_text(value, None)
             text = sanitize_text(value[:12000], 12000)
             kept = text[:500]
@@ -201,6 +204,7 @@ def project_structured_tool_evidence(
                 item, available, depth + 1,
                 exact_strings=exact_strings or _identity_key(name) or whole_request,
                 exact_namespace=_key(name) == "namespace" and isinstance(item, str),
+                preserve_whitespace=preserve_text_whitespace and name == "text",
             )
             # A partially projected request is not a safe continuation request.
             if whole_request and tuple(stats.values()) != previous_omissions:
