@@ -1749,12 +1749,12 @@ pub(crate) fn app_session_challenge_signature_matches(
 }
 
 pub(crate) fn ensure_backend_session_verified(token: &str) -> Result<(), String> {
+    if backend_session_verify_cache_valid() {
+        return Ok(());
+    }
     if !backend_port_open() {
         clear_backend_session_verify_cache();
         return Err("Could not connect to the VRCForge runtime.".to_string());
-    }
-    if backend_session_verify_cache_valid() {
-        return Ok(());
     }
     match wait_for_backend_session_probe(token, BACKEND_SESSION_VERIFY_WAIT) {
         BackendSessionProbe::Accepted => {
