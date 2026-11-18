@@ -7,14 +7,14 @@ from contextlib import closing
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 
 PDF_MAGIC = b"%PDF-"
 PDF_MAX_BYTES = 10 * 1024 * 1024
 PDF_READ_PROPERTIES = {
     "startPage": {"type": "integer", "minimum": 1, "description": "First physical PDF page (1-based)."},
     "maxPages": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum PDF pages in this read, default 4."},
-    "pageTextOffset": {"type": "integer", "minimum": 0, "description": "Copy from nextRequest to continue a long PDF page."},
+    "pageTextOffset": {"type": "integer", "minimum": 0, "description": "PDF character position. Copy from nextRequest to continue a long PDF page."},
     "renderScannedPages": {"type": "boolean", "description": "Return image previews for selected PDF pages with little or no extractable text."},
 }
 
@@ -22,6 +22,7 @@ PDF_READ_PROPERTIES = {
 _PDFIUM_LOCK = Lock()
 _PDF_TEXT_BUDGET = 32_000
 _PDF_VISUAL_TEXT_THRESHOLD = 200
+_PDF_VISUAL_SAMPLE_CHARS = _PDF_VISUAL_TEXT_THRESHOLD * 2
 _PDF_VISUAL_PAGE_LIMIT = 4
 
 
@@ -78,6 +79,7 @@ def read_pdf_document(
         raise ValueError("renderScannedPages must be a boolean.")
 
     import pypdfium2 as pdfium
+    from pypdfium2.raw import FPDFText_GetUnicode
 
     pages: list[dict[str, Any]] = []
     images: list[dict[str, Any]] = []
@@ -93,17 +95,30 @@ def read_pdf_document(
             for number in range(start_page, min(page_count + 1, start_page + max_pages)):
                 offset = page_text_offset if number == start_page else 0
                 with closing(document[number - 1]) as page, closing(page.get_textpage()) as text_page:
-                    text = text_page.get_text_bounded().replace("\r\n", "\n")
-                    if offset > len(text):
+                    char_count = text_page.count_chars()
+                    if offset > char_count:
                         raise ValueError(f"pageTextOffset exceeds the text on PDF page {number}.")
-                    needs_visual = len(text.strip()) < _PDF_VISUAL_TEXT_THRESHOLD
-                    if needs_visual and render_scanned_pages and len(images) == _PDF_VISUAL_PAGE_LIMIT:
+                    left, bottom, right, top = page.get_bbox()
+
+                    def visible(index: int) -> bool:
+                        char_left, char_bottom, char_right, char_top = text_page.get_charbox(index)
+                        return left < char_right and char_left < right and bottom < char_top and char_bottom < top
+
+                    text, end = _read_text_window(text_page, FPDFText_GetUnicode, offset, char_count, remaining_chars, visible)
+                    if offset == 0 and end == char_count:
+                        sample = text
+                    else:
+                        sample, _ = _read_text_window(
+                            text_page, FPDFText_GetUnicode, 0, char_count, _PDF_VISUAL_SAMPLE_CHARS, visible,
+                        )
+                    needs_visual = len(sample.strip()) < _PDF_VISUAL_TEXT_THRESHOLD
+                    should_render = needs_visual and render_scanned_pages and offset == 0
+                    if should_render and len(images) == _PDF_VISUAL_PAGE_LIMIT:
                         break
-                    end = min(len(text), offset + remaining_chars)
-                    row = {"page": number, "text": text[offset:end], "needsVisual": needs_visual}
+                    row = {"page": number, "text": text, "needsVisual": needs_visual}
                     if offset:
                         row["textOffset"] = offset
-                    if needs_visual and render_scanned_pages:
+                    if should_render:
                         try:
                             image = _render_page(page)
                         except (pdfium.PdfiumError, ValueError, OSError):
@@ -114,9 +129,9 @@ def read_pdf_document(
                             row["imageUri"] = image["uri"]
                             images.append(image)
                     pages.append(row)
-                    remaining_chars -= end - offset
+                    remaining_chars -= min(remaining_chars, end - offset)
                     next_page = number + 1
-                    if end < len(text):
+                    if end < char_count:
                         row["textContinues"] = True
                         next_page, next_offset = number, end
                         break
@@ -144,6 +159,32 @@ def read_pdf_document(
     if images:
         result["content"] = images
     return result
+
+
+def _read_text_window(
+    text_page: Any, get_unicode: Any, offset: int, char_count: int, budget: int, visible: Callable[[int], bool],
+) -> tuple[str, int]:
+    # PDFium's native character stream can be addressed directly. Its range
+    # string API is UCS-2 and the geometric API builds a whole-page string.
+    end = min(char_count, offset + budget)
+    chars = []
+    while offset < end:
+        index = offset
+        value = get_unicode(text_page, offset)
+        offset += 1
+        if offset < char_count and (value == 13 or 0xD800 <= value <= 0xDBFF):
+            after = get_unicode(text_page, offset)
+            if value == 13 and after == 10:
+                value = 10
+                offset += 1
+            elif 0xD800 <= value <= 0xDBFF and 0xDC00 <= after <= 0xDFFF:
+                value = 0x10000 + ((value - 0xD800) << 10) + after - 0xDC00
+                offset += 1
+        if 0 < value <= 0x10FFFF and not 0xD800 <= value <= 0xDFFF:
+            char = chr(value)
+            if char.isspace() or visible(index):
+                chars.append(char)
+    return "".join(chars), offset
 
 
 def _render_page(page: Any) -> dict[str, Any]:

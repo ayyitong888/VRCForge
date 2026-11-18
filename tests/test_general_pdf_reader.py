@@ -16,13 +16,14 @@ from runtime_planner_service import EXPOSURE_LAYER_PLANNING, planner_read_output
 from tests.test_native_runtime_gateway import call, finish as finish_native_turn, setup_gateway
 
 
-def _text_pdf():
-    words = b"VRCForge PDF manual. " * 12
+def _text_pdf(repeat=12):
+    words = b"VRCForge PDF manual. " * repeat
+    width = str(max(1400, 110 * repeat)).encode()
     stream = b"BT /F1 9 Tf 15 100 Td (" + words + b") Tj ET"
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1400 120] /Resources "
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " + width + b" 120] /Resources "
         b"<< /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
