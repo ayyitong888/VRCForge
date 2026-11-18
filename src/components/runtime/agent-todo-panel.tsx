@@ -1,4 +1,4 @@
-import { Check, CircleAlert, ListTodo, Minus } from "lucide-react";
+import { Check, CircleAlert, ListTodo, Minus, Pause } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { AgentProgress } from "../../lib/api";
@@ -6,7 +6,7 @@ import { cn } from "../../lib/utils";
 
 const todoMarkers = new Map([
   ["completed", { icon: Check, label: "workspace.progressCompleted" }],
-  ["blocked", { icon: null, label: "workspace.progressBlocked" }],
+  ["blocked", { icon: Pause, label: "workspace.progressBlocked" }],
   ["failed", { icon: CircleAlert, label: "skillStatus.failed" }],
   ["cancelled", { icon: Minus, label: "workspace.progressCancelled" }],
 ]);
@@ -31,15 +31,15 @@ function TodoItems({ progress }: { progress: AgentProgress[] }) {
           >
             <span role="img" aria-label={label} title={label} className={cn(
               "flex h-6 w-6 items-center justify-center rounded-full text-xs tabular-nums text-muted-foreground",
-              !marker && "border border-primary/30",
-              active && "border-primary bg-primary/10 text-foreground",
-              (status === "completed" || status === "blocked") && "bg-primary text-primary-foreground",
-              status === "blocked" && "motion-safe:animate-pulse",
+              !active && !marker && "border border-primary/30",
+              (active || status === "completed") && "bg-primary text-primary-foreground",
+              active && "motion-safe:animate-pulse",
+              status === "blocked" && "border border-muted-foreground/40 bg-muted/60",
               status === "failed" && "text-destructive",
             )}>
               {Icon ? (
                 <Icon
-                  className="h-3.5 w-3.5"
+                  className={cn("h-3.5 w-3.5", status === "blocked" && "fill-current")}
                   strokeWidth={status === "completed" ? 2.5 : 2}
                   // The check path spans y=6..17, so its center is 11.5.
                   viewBox={status === "completed" ? "0 -0.5 24 24" : "0 0 24 24"}
