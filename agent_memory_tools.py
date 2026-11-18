@@ -29,6 +29,19 @@ class MemoryToolContext:
 
 
 _CONTEXT: ContextVar[MemoryToolContext | None] = ContextVar("vrcforge_internal_memory_context", default=None)
+_REQUEST_PREFIX = r"^(?:(?:请|請|请帮我|請幫我|帮我|幫我|麻烦)\s*|please\s+)?"
+_REMEMBER_REQUEST = re.compile(
+    _REQUEST_PREFIX
+    + r"(?:记住|記住|记下|記下|保存到(?:长期)?记忆|存入(?:长期)?记忆|覚えて(?:おいて)?|記憶して|remember\b|save\s+(?:this\s+)?(?:to\s+)?memory\b)",
+    re.IGNORECASE,
+)
+_REMEMBER_CONTENT_PREFIX = re.compile(r"^(?:\s+(?:that|this)\b)?\s*[：:,，]?\s*", re.IGNORECASE)
+
+
+def remember_request_content(request: str) -> str:
+    text = request.strip()
+    match = _REMEMBER_REQUEST.match(text)
+    return _REMEMBER_CONTENT_PREFIX.sub("", text[match.end():], count=1) if match else text
 
 
 @contextmanager
@@ -53,13 +66,10 @@ def _explicit_request(request: str, *, delete: bool) -> bool:
     text = request.strip()
     if "?" in text or "？" in text or any(word in text for word in ("是什么意思", "如何调用", "怎么使用")):
         return False
-    prefix = r"^(?:(?:请|請|请帮我|請幫我|帮我|幫我|麻烦)\s*|please\s+)?"
-    action = (
-        r"(?:忘记|忘記|忘掉|删除(?:这条|这个|该条|这项)?记忆|刪除(?:這條|這個)?記憶|忘れて|記憶を削除|forget\b|delete\s+(?:this\s+|the\s+)?memory\b)"
-        if delete else
-        r"(?:记住|記住|记下|記下|保存到(?:长期)?记忆|存入(?:长期)?记忆|覚えて|記憶して|remember\b|save\s+(?:this\s+)?(?:to\s+)?memory\b)"
-    )
-    return re.search(prefix + action, text, re.IGNORECASE) is not None
+    if not delete:
+        return _REMEMBER_REQUEST.match(text) is not None
+    action = r"(?:忘记|忘記|忘掉|删除(?:这条|这个|该条|这项)?记忆|刪除(?:這條|這個)?記憶|忘れて|記憶を削除|forget\b|delete\s+(?:this\s+|the\s+)?memory\b)"
+    return re.search(_REQUEST_PREFIX + action, text, re.IGNORECASE) is not None
 
 
 def requested_memory_tool(request: str) -> str:

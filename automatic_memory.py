@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from agent_memory_tools import remember_request_content
 from memory_consolidation_sources import (
     MemoryScope,
     SourceProjection,
@@ -33,10 +34,6 @@ _REJECT = re.compile(
     r"(?:キー|トークン|パスワード|認証情報|秘密|権限|承認|許可|実行|削除|書き込み|ツール|コマンド)",
     re.I,
 )
-_REMEMBER_PREFIX = re.compile(
-    r"^\s*(?:(?:请|請|please)\s*)?(?:记住|記住|记下|記下|remember(?:\s+(?:that|this))?|覚えて)\s*[：:,，]?\s*",
-    re.IGNORECASE,
-)
 
 
 def _turn_has_verified_memory_receipt(
@@ -44,7 +41,7 @@ def _turn_has_verified_memory_receipt(
 ) -> bool:
     """Only a same-turn tool receipt plus accepted-store readback suppresses capture."""
     user_text = str(items[index].get("text") or "")
-    exact_texts = {" ".join(user_text.split()), " ".join(_REMEMBER_PREFIX.sub("", user_text, count=1).split())}
+    exact_texts = {" ".join(user_text.split()), " ".join(remember_request_content(user_text).split())}
     for later in items[index + 1:]:
         if not isinstance(later, Mapping):
             continue

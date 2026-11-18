@@ -1,4 +1,6 @@
 import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -7,6 +9,8 @@ import dashboard_server
 from agent_gateway import AgentGateway
 from agent_memory_tools import MEMORY_TOOL_NAMES, bind_memory_tool_context, register_memory_tools, requested_memory_tool
 from agent_task_loop import canonical_action_id
+from memory_consolidation import MemoryConsolidationService
+from memory_consolidation_sources import MemoryScope, project_scope_key
 from runtime_planner_service import PlannerModelResult, RuntimePlannerService
 
 
@@ -170,33 +174,59 @@ def test_real_planner_catalog_selects_memory_write_and_exposes_no_scope_override
     assert rejected["argumentValidation"]["ok"] is False
 
 
-def test_real_runtime_memory_write_returns_receipt_and_exact_completion():
+@pytest.mark.parametrize("project", [False, True])
+@pytest.mark.parametrize("request_prefix", ["记住", "覚えておいて："])
+def test_real_runtime_memory_write_returns_receipt_and_exact_completion(project, request_prefix):
     import test_agent_loop_p0 as loop_tests
     fixture = loop_tests.AgentLoopP0Tests("test_loaded_skill_policy_blocks_disallowed_tool_then_allows_real_evidence")
     fixture.setUp()
     gateway = fixture.gateway
+    project_root = str(fixture._unity_project()) if project else ""
+    service = MemoryConsolidationService(
+        Path(fixture.temp_dir.name) / "memory-review",
+        accepted_memory_store=gateway.agent_memory_store,
+    )
+    service.ensure_automatic_capture_watermark()
+    user_message = request_prefix + "状态更新简洁一些"
     observed = []
-    action_id = canonical_action_id("write", "vrcforge_remember_memory", {"text": "请用中文回复"})
+    action_id = canonical_action_id("write", "vrcforge_remember_memory", {"text": "状态更新简洁一些"})
 
     def planner(*_args, **kwargs):
         observed.append(kwargs.get("loop_state", []).copy())
         if len(observed) == 1:
-            return {"planner": "llm", "writeNeeded": True, "writeTool": "vrcforge_remember_memory", "writeParams": {"text": "请用中文回复"}, "continueLoop": True, "nextStep": "request_write"}
+            return {"planner": "llm", "writeNeeded": True, "writeTool": "vrcforge_remember_memory", "writeParams": {"text": "状态更新简洁一些"}, "continueLoop": True, "nextStep": "request_write"}
         return {"planner": "llm", "reply": "已记住", "nextStep": "done", "completionClaim": {"satisfied": True, "evidenceActionIds": [action_id]}}
 
     try:
         with patch.object(gateway, "memory_preferences", return_value={"memoryEnabled": True, "crossSessionEnabled": True}), patch.object(
             gateway.runtime_planner, "plan_agent_turn", side_effect=planner,
         ):
-            result = gateway.runtime_message({"message": "记住：请用中文回复", "session_id": "explicit-memory-receipt"})
+            result = gateway.runtime_message({
+                "message": user_message, "session_id": "explicit-memory-receipt",
+                **({"projectPath": project_root} if project else {}),
+            })
         assert result["plan"]["nextStep"] == "done", result["plan"]
         last = observed[-1][-1]
         receipt = last["result"]
-        assert gateway.agent_memory_store.get(receipt["memoryId"])["text"] == "请用中文回复"
+        stored = gateway.agent_memory_store.get(receipt["memoryId"])
+        assert stored["text"] == "状态更新简洁一些"
+        assert stored["scope"] == ("project" if project else "user")
         observation = gateway.runtime_planner._llm_loop_step_observation(last)
         assert receipt["memoryId"] in observation
         assert "memoryReceipt=" in observation
         assert result["plan"]["taskCompletion"]["evidenceActionIds"] == [action_id]
+        created_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        chats = [{
+            "id": "explicit-memory-receipt",
+            "projectPath": project_root,
+            "items": [
+                {"id": "u1", "type": "user", "text": user_message, "createdAt": created_at},
+                {"id": "a1", "type": "agent", "status": "completed", "text": "已记住", "response": result},
+            ],
+        }]
+        scope = MemoryScope("project", project_scope_key(project_root)) if project else MemoryScope("user", "user")
+        assert service.capture_automatic_chat_sources(chats, scope=scope, project_root=project_root)["acceptedCount"] == 0
+        assert len(service.accepted_store.list_active()) == 1
     finally:
         fixture.tearDown()
 
