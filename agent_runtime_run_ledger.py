@@ -820,7 +820,7 @@ class AgentRuntimeRunLedger:
                     self._ports.redact({
                         **{key: run[key] for key in _RUN_NOTIFICATION_FIELDS if isinstance(run.get(key), str)},
                         **{key: run[key] for key in _RUN_NOTIFICATION_FLAGS if isinstance(run.get(key), bool)},
-                        **self._notification_excerpt(run),
+                        **self._notification_details(run),
                     })
                     for run in runs
                 ],
@@ -837,13 +837,31 @@ class AgentRuntimeRunLedger:
             "count": len(runs),
         }
 
-    def _notification_excerpt(self, run: dict[str, Any]) -> dict[str, str]:
+    def _notification_details(self, run: dict[str, Any]) -> dict[str, str]:
         receipt = _ensure_dict(run.get("continuationEvent"))
         plan = _ensure_dict(receipt.get("plan"))
+        details = {}
+        gate = _ensure_dict(plan.get("completionGate"))
+        if run.get("status") == "blocked" and gate.get("reason") == "question_pending":
+            question_sources = {}
+            for step in run.get("steps") or []:
+                if not isinstance(step, dict) or step.get("historical"):
+                    continue
+                question = _ensure_dict(_ensure_dict(step.get("result")).get("question"))
+                candidate_id = question.get("questionId")
+                if isinstance(candidate_id, str) and candidate_id:
+                    question_sources[candidate_id] = step.get("tool")
+            question_id = gate.get("questionId")
+            # Older receipts can identify the cause when the turn created only one question.
+            if not question_id and len(question_sources) == 1:
+                question_id = next(iter(question_sources))
+            if question_sources.get(question_id) == "vrcforge_call_user":
+                details["notificationQuestionId"] = question_id
         for value in (plan.get("reply"), run.get("error"), run.get("planSummary")):
             if isinstance(value, str) and value.strip():
-                return {"notificationPreview": self._ports.summarize_text(value, 420)}
-        return {}
+                details["notificationPreview"] = self._ports.summarize_text(value, 420)
+                break
+        return details
 
     def _list_runs_events(
         self, *, cache_key: tuple[Any, ...], session_id: str,

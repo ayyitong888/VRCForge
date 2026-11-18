@@ -310,7 +310,7 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
     completion_gate = plan.get("completionGate")
     if isinstance(completion_gate, Mapping):
         gate = {
-            key: value for key in ("status", "reason")
+            key: value for key in ("status", "reason", "questionId")
             if (value := _planner_failure_identifier(completion_gate.get(key))) is not None
         }
         if gate:

@@ -642,7 +642,7 @@ export type AgentRuntimeResponse = {
       providerError?: { type?: string; code?: string; statusCode?: number; streamStarted?: boolean };
     };
     taskCompletion?: Record<string, unknown>;
-    completionGate?: { status?: string; reason?: string };
+    completionGate?: { status?: string; reason?: string; questionId?: string };
     choices?: Array<{
       id?: string;
       label: string;
@@ -781,6 +781,7 @@ export type AgentRuntimeRun = {
   agent?: string;
   messageSummary?: string;
   notificationPreview?: string;
+  notificationQuestionId?: string;
   provider?: string;
   providerLabel?: string;
   model?: string;

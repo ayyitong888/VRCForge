@@ -9493,7 +9493,10 @@ class AgentGateway:
                 "reply": prompt or "The tool action needs user input before it can continue.",
                 "continueLoop": False,
                 "nextStep": "needs_user_action",
-                "completionGate": {"status": "needs_user_action", "reason": "question_pending"},
+                "completionGate": {
+                    "status": "needs_user_action", "reason": "question_pending",
+                    **({"questionId": question["questionId"]} if question.get("questionId") else {}),
+                },
             }
         if pending_question:
             self.questions.refresh_pending_runtime_tasks(session_id=session_id, client_turn_id=client_turn_id,

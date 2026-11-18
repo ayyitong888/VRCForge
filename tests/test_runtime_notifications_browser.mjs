@@ -50,6 +50,46 @@ try {
   const identity={sessionId:'session',clientTurnId:'client-turn',turnId:'backend-turn'};
   const run={...identity,status:'blocked',startedAt:'2026-01-01T00:00:00Z'};
   const response={...identity,plan:{completionGate:{status:'needs_user_action',reason:'question_pending'}}};
+  // A pending call_user question and its terminal run arrive through independent observers.
+  const questionReplay = process.env.VRCFORGE_BLOCKED_QUESTION_REPLAY
+    ? JSON.parse(await readFile(process.env.VRCFORGE_BLOCKED_QUESTION_REPLAY, 'utf8'))
+    : { run: {...run, notificationQuestionId:'decision'}, question: {
+      sessionId:identity.sessionId, originTurnId:identity.turnId, originClientTurnId:identity.clientTurnId,
+      questionId:'decision', status:'pending', sourceTool:'call_user', needsUserAction:true, question:'Which project?',
+    }};
+  for (const ledgerFirst of [true, false]) {
+    const {run:blocked, question} = questionReplay;
+    const both = await open({sessionId:blocked.sessionId, selectedSessionId:ledgerFirst ? blocked.sessionId : 'other',
+      chats:{[blocked.sessionId]:{id:'owner-chat'}},
+      snapshot:{runs:{runs:ledgerFirst ? [blocked] : []}}});
+    await both.waitForFunction(() => window.calls.some(c => c.ledger));
+    if (ledgerFirst) await both.waitForFunction(() => window.state.runtimeAttention.length === 1);
+    else {
+      await both.evaluate(question => window.state.notifyCallUserQuestions([question]), question);
+      await both.waitForFunction(() => window.calls.some(c => c.command === 'show_agent_question_notification'));
+    }
+    await both.evaluate(({blocked, question}) => {
+      window.fixture.snapshot.runs.runs = [blocked];
+      window.state.notifyCallUserQuestions([question]);
+      window.tick();
+    }, {blocked, question});
+    await both.waitForFunction(() => window.calls.some(c => c.command === 'show_agent_question_notification')
+      && window.calls.filter(c => c.ledger).length >= 2);
+    await both.evaluate(() => window.tick());
+    const deliveries = await both.evaluate(() => window.calls.filter(c => c.command || c.sound));
+    assert.deepEqual(deliveries.filter(c => c.command).map(c => c.command), ['show_agent_question_notification'],
+      'the clickable question owns the only toast in either arrival order');
+    const request = deliveries.find(c => c.command).args.request;
+    assert.equal(request.questionId, question.questionId);
+    assert.equal(request.chatId, 'owner-chat');
+    assert.deepEqual(deliveries.filter(c => c.sound).map(c => c.sound[1]), ['blocking']);
+    await both.evaluate(question => window.state.notifyCallUserQuestions([
+      question, {...question, questionId:'second-decision'},
+    ]), question);
+    await both.waitForFunction(() => window.calls.filter(c => c.command === 'show_agent_question_notification').length === 2);
+    assert.equal(await both.evaluate(() => window.calls.filter(c => c.sound).length), 2, 'a new question in the same chat sounds once');
+    await both.close();
+  }
   const page=await open({sessionId:identity.sessionId,snapshot:{runs:{runs:[run]}},receipt:{...identity,ok:true,status:'missing'}});
   const waitToasts=async count=>page.waitForFunction(n=>window.calls.filter(c=>c.command==='show_background_goal_notification').length===n,count);
   const read=()=>page.evaluate(()=>({toasts:window.calls.filter(c=>c.command==='show_background_goal_notification'),sounds:window.calls.filter(c=>c.sound),reads:window.calls.filter(c=>c.receipt).length,attention:window.state.runtimeAttention}));

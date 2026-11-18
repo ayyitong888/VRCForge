@@ -167,7 +167,8 @@ export function useRuntimeWorkspace({
       const item = runtimeAttentionFromRun(run);
       if (!item) continue;
       attention.push(item);
-      if (!native) continue;
+      // call_user delivers its clickable question and sound through the question observer.
+      if (!native || (item.status === "blocked" && run.notificationQuestionId)) continue;
       const kind = item.status === "blocked" ? "Blocked" : item.status === "completed" ? "Completed" : item.status === "failed" ? "Failed" : "Stopped";
       const statusTitle = t(`workspace.notification${kind}Title`);
       const title = normalizeRuntimeNotificationText(chatLookupRef.current?.(item.sessionId)?.title, 120)

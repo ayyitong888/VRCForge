@@ -367,7 +367,7 @@ def test_long_question_continuation_retains_captures_and_final_in_order() -> Non
         "turnId": "turn",
         "clientTurnId": "client:question:original",
         "plan": {"completionGate": {
-            "status": "blocked", "reason": "question_pending", "private": "do not expose",
+            "status": "blocked", "reason": "question_pending", "questionId": "decision-1", "private": "do not expose",
         }},
         "timeline": timeline,
     }
@@ -378,6 +378,6 @@ def test_long_question_continuation_retains_captures_and_final_in_order() -> Non
     assert [event["sequence"] for event in events] == sorted(event["sequence"] for event in events)
     assert [event["sequence"] for event in events if event["payload"].get("captures")] == [101, 402, 404]
     assert events[-1]["payload"] == {"phase": "final_answer", "summary": "Review both images."}
-    assert projected["plan"]["completionGate"] == {"status": "blocked", "reason": "question_pending"}
+    assert projected["plan"]["completionGate"] == {"status": "blocked", "reason": "question_pending", "questionId": "decision-1"}
     assert "privateResult" not in repr(events) and "imagePath" not in repr(events)
     assert project_runtime_turn_event(projected) == projected

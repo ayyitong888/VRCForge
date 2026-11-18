@@ -612,6 +612,27 @@ def test_notification_runs_preserve_lifecycle_without_history_payload(tmp_path: 
     assert full["runs"][0]["steps"] and len(full["events"]) == 3
 
 
+@pytest.mark.parametrize(("gate", "status", "expected"), [
+    ({"reason": "question_pending", "questionId": "wake"}, "blocked", "wake"),
+    ({"reason": "question_pending", "questionId": "quiet"}, "blocked", None),
+    ({"reason": "verification_required", "questionId": "wake"}, "blocked", None),
+    ({"reason": "question_pending", "questionId": "wake"}, "failed", None),
+])
+def test_only_the_blocking_call_user_question_owns_the_notification(tmp_path, gate, status, expected):
+    ledger, _lock = make_ledger(tmp_path)
+    ledger.append({
+        "sessionId": "session", "clientTurnId": "client", "turnId": "turn",
+        "event": "runtime_turn_completed", "status": status,
+        "continuationEvent": {"plan": {"completionGate": gate}},
+        "steps": [
+            {"tool": "vrcforge_call_user", "result": {"question": {"questionId": "wake"}}},
+            {"tool": "vrcforge_ask_user", "result": {"question": {"questionId": "quiet"}}},
+        ],
+    })
+    projected = ledger.list_runs(notification_only=True)["runs"][0]
+    assert projected.get("notificationQuestionId") == expected
+
+
 def test_run_listing_does_not_fold_distinct_owners_reusing_client_id(tmp_path: Path) -> None:
     ledger, _lock = make_ledger(tmp_path)
     owners = [
