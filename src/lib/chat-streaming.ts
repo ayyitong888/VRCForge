@@ -1,6 +1,8 @@
 import type { ChatTimelineEvent, ChatTimelineEventKind, ConversationItem } from "./chat-types";
+import type { RuntimeTurnLineage } from "./api/types";
+import { runtimeTurnLineage } from "./runtime-turn-lineage";
 
-export type AgentRuntimeDeltaEvent = {
+export type AgentRuntimeDeltaEvent = RuntimeTurnLineage & {
   type: "agentRuntimeDelta";
   sessionId?: string;
   turnId?: string;
@@ -203,6 +205,7 @@ export function applyAgentRuntimeDeltaToStreamingItem(
         : item.providerLastActivityAt;
   return {
     ...item,
+    ...runtimeTurnLineage(delta),
     text: phase === "waiting_for_model" && item.phase !== "waiting_for_model"
       ? (delta.textDelta || "")
       : `${item.text}${delta.textDelta || ""}`,
@@ -248,6 +251,7 @@ export function finalizeCancelledStreamingTurn(
     id: `cancelled-${item.clientTurnId}`,
     type: "agent",
     response: {
+      ...runtimeTurnLineage(item),
       ok: false,
       status: "cancelled",
       session_id: sessionId,

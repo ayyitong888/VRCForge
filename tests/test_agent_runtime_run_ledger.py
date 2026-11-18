@@ -61,6 +61,7 @@ def test_startup_recovery_preserves_waiting_user_boundaries(tmp_path: Path) -> N
     """Crash recovery must interrupt dead runs but keep live decision waits."""
     ledger, _lock = make_ledger(tmp_path)
     ledger.append({"event": "runtime_turn_started", "sessionId": "s-wait", "turnId": "t-wait",
+                   "parentTurnId": "previous-turn", "parentClientTurnId": "previous-client",
                    "clientTurnId": "c-wait", "createdAt": "2026-01-01T00:00:00+00:00"})
     ledger.append_timeline_event(
         session_id="s-wait", turn_id="t-wait", client_turn_id="c-wait",
@@ -78,9 +79,14 @@ def test_startup_recovery_preserves_waiting_user_boundaries(tmp_path: Path) -> N
     assert created == 2
     continuations = {row["clientTurnId"]: row for row in ledger.list_runtime_continuations()}
     waiting = continuations["c-wait"]["plan"]
+    restarted = ledger.read_terminal_continuation(session_id="s-wait", client_turn_id="c-wait")
+    assert restarted["parentTurnId"] == "previous-turn"
+    assert restarted["parentClientTurnId"] == "previous-client"
+    assert restarted["status"] == "blocked" and restarted["plan"]["reason"] == "question_pending"
     assert waiting["taskCompletion"]["status"] == "waiting_user"
     assert waiting["reason"] == "question_pending"
     dead = continuations["c-dead"]["plan"]
+    assert continuations["c-dead"]["status"] == "interrupted"
     assert dead["taskCompletion"]["status"] == "interrupted"
     assert dead["reason"] == "runtime_interrupted"
 

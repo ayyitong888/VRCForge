@@ -1,3 +1,5 @@
+import pytest
+
 from agent_runtime_event_projection import project_runtime_turn_event
 
 
@@ -115,10 +117,11 @@ def test_runtime_turn_projection_rejects_non_shell_or_unowned_events() -> None:
     assert project_runtime_turn_event({"continuationSource": "shell_process_finished", "turnId": "t"}) is None
 
 
-def test_approval_runtime_turn_uses_the_same_bounded_owner_projection() -> None:
+@pytest.mark.parametrize("source", ["approval_finished", "approval_revision_requested"])
+def test_approval_runtime_turn_uses_the_same_bounded_owner_projection(source) -> None:
     projected = project_runtime_turn_event(
         {
-            "continuationSource": "approval_finished",
+            "continuationSource": source,
             "sessionId": "owner-session",
             "turnId": "approval-terminal",
             "execution": {"private": "must-not-cross"},
@@ -131,7 +134,7 @@ def test_approval_runtime_turn_uses_the_same_bounded_owner_projection() -> None:
     )
 
     assert projected is not None
-    assert projected["continuationSource"] == "approval_finished"
+    assert projected["continuationSource"] == source
     assert projected["plan"]["taskCompletion"]["taskId"] == "task-1"
     assert "execution" not in projected
 

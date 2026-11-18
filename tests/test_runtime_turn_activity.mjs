@@ -36,6 +36,25 @@ assert.equal(activity.runtimeActivityOwner([chat, { ...chat, id: "exact", items:
 assert.equal(activity.runtimeActivityOwner([{ ...chat, sessionId: "wrong" }], identity), undefined);
 const response = { ...identity, session_id: "session", turn_id: "turn", ok: true, observe: {}, plan: { nextStep: "needs_user_action", summary: "User decision required" } };
 const state = { ...identity, ok: true, status: "completed", response };
+const lineage = { parentClientTurnId: "parent-client", parentTurnId: "parent-run", continuationSource: "approval_revision_requested" };
+const parent = { ...chat, id: "parent-owner", items: [
+  { id: "parent", type: "agent", response: { ...response, clientTurnId: lineage.parentClientTurnId, turnId: lineage.parentTurnId } },
+] };
+const aliases = [chat, parent];
+assert.equal(activity.runtimeActivityOwner(aliases, { ...identity, ...lineage }), parent);
+assert.equal(activity.runtimeActivityOwner(aliases, { ...identity, ...lineage, parentTurnId: "different-run" }), undefined);
+assert.equal(activity.runtimeActivityCancelTarget(aliases, parent, [{ ...run, ...lineage }]).turnId, identity.turnId);
+for (const source of [undefined, "shell_process_finished"]) {
+  const nested = { ...run, ...lineage, clientTurnId: "root:question:choice:shell:process", continuationSource: source };
+  assert.equal(activity.runtimeActivityCancelTarget(aliases, parent, [nested])?.clientTurnId, nested.clientTurnId,
+    "a shell launched after answering can still be stopped from its own turn");
+}
+const resumedStream = activity.projectRuntimeTurnActivity(projected, { ...run, ...lineage });
+assert.equal(resumedStream.items[0].parentTurnId, lineage.parentTurnId, "a ledger refresh attaches a delta-first stream to the parent");
+const resumed = current.responseFromRuntimeTurnEvent(activity.runtimeEventFromExactResponse({
+  ...state, response: { ...response, ...lineage },
+}, identity));
+for (const [key, value] of Object.entries(lineage)) assert.equal(resumed[key], value, "reconnect must preserve " + key);
 assert.equal(activity.runtimeEventFromExactResponse({ ...state, status: "running" }, identity), undefined);
 assert.equal(activity.runtimeEventFromExactResponse({ ...state, clientTurnId: "wrong" }, identity), undefined);
 assert.equal(activity.runtimeEventFromExactResponse({ ...state, response: { ...response, turnId: "wrong" } }, identity), undefined);

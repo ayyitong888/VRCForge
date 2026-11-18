@@ -49,6 +49,7 @@ function Harness() {
     updateChat(initial.id, current => ({ ...current, items: current.items.filter(item => item.id !== 'question-continuation:' + value.clientTurnId) }));
   }});
   // Same ordering as App: bootstrap delivery effect precedes question activity projection.
+  window.deliver = deliver;
   useEffect(() => { deliver(event); window.deliveryEffectRan = true; }, [deliver]);
   useQuestionContinuationActivity({ chats, questions, runs, updateChat, settledContinuationKeys: settled.current });
   return <div data-mounted />;
@@ -83,6 +84,20 @@ try {
   assert.deepEqual(items.filter(item => item.type === "user" && ![confirmedId, unconfirmedId].includes(item.clientTurnId)), fixture.chat.items.filter(item => item.type === "user"));
   assert.equal(items.find(item => item.clientTurnId === confirmedId).queueStatus, undefined, "only the backend-confirmed consumed steer becomes ordinary history");
   assert.equal(items.find(item => item.clientTurnId === unconfirmedId).queueStatus, "steering", "an absent consumption receipt never claims delivery");
+  const revision = { schema: event.schema, sessionId: event.sessionId, turnId: "revision-run", clientTurnId: "revision-client",
+    parentTurnId: event.turnId, parentClientTurnId: event.clientTurnId };
+  await page.evaluate(id => window.deliver({ ...id, continuationSource: "foreground_interrupted",
+    plan: { nextStep: "needs_user_action", taskCompletion: { status: "interrupted" } } }), revision);
+  await page.waitForFunction(() => window.visibleChat.items.some(i => i.response?.turnId === "revision-run"));
+  await page.evaluate(id => {
+    const receipt = { ...id, continuationSource: "approval_revision_requested", plan: { nextStep: "done", reply: "Revised" } };
+    window.deliver(receipt);
+    window.deliver(receipt);
+  }, revision);
+  await page.waitForFunction(() => window.visibleChat.items.some(i => i.response?.turnId === "revision-run" && i.response.plan.reply === "Revised"));
+  const revisions = await page.evaluate(() => window.visibleChat.items.filter(i => i.response?.turnId === "revision-run"));
+  assert.equal(revisions.length, 1);
+  assert.equal(revisions[0].response.parentTurnId, event.turnId);
   console.log(`question continuation delivery race replay: passed (${process.env.VRCFORGE_QUESTION_CONTINUATION_REPLAY ? "original production final" : "fixture"}; confirmed-ID contract)`);
 } finally {
   await browser?.close();

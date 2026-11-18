@@ -220,6 +220,8 @@ def test_answer_after_async_round_finishes_starts_one_new_turn(tmp_path):
     [new_run] = gateway.runtime_runs.list_runs(session_id="native-continuation-session",
         client_turn_id=answer["runtimeContinuation"]["clientTurnId"])["runs"]
     assert new_run["turnId"] != first["turnId"]
+    assert "parentTurnId" not in new_run["continuationEvent"]
+    assert "parentClientTurnId" not in new_run["continuationEvent"]
 
 
 def test_active_answer_steers_240_character_origin_without_truncation(tmp_path):

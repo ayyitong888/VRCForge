@@ -8,6 +8,14 @@ export function isActiveRuntimeRunStatus(status?: string): boolean {
   return ACTIVE_RUNTIME_RUN_STATUSES.has(String(status || "").trim().toLowerCase());
 }
 
+/** Older restart receipts share a source for interrupted work and pending decisions. */
+export function isInterruptedRuntimeTurn(response: {
+  continuationSource?: string; status?: string; plan?: { taskCompletion?: Record<string, unknown> };
+}): boolean {
+  if (response.plan?.taskCompletion?.status === "waiting_user") return false;
+  return response.status === "interrupted" || response.continuationSource === "foreground_interrupted";
+}
+
 export function isWaitingForSubAgent(state: { nextStep?: string; reason?: string }): boolean {
   return state.nextStep === "waiting_for_tool" && state.reason === "sub_agent_pending";
 }

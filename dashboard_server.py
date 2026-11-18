@@ -17021,9 +17021,7 @@ class _RuntimePlannerModel:
             EVENT_BUS.broadcast_from_sync(
                 "agentRuntimeDelta",
                 {
-                    "sessionId": context.get("sessionId") or "",
-                    "turnId": context.get("turnId") or "",
-                    "clientTurnId": context.get("clientTurnId") or "",
+                    **context,
                     "phase": "waiting_for_model",
                 },
             )
@@ -17118,9 +17116,7 @@ class _RuntimePlannerModel:
             EVENT_BUS.broadcast_from_sync(
                 "agentRuntimeDelta",
                 {
-                    "sessionId": context.get("sessionId") or "",
-                    "turnId": context.get("turnId") or "",
-                    "clientTurnId": client_turn_id,
+                    **context,
                     "phase": "waiting_for_model",
                     "activity": True,
                 },

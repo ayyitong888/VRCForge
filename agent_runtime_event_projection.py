@@ -13,7 +13,8 @@ from chat_resource_image import public_capture_previews
 _TIMELINE_EVENT_LIMIT = 256
 RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1"
 RUNTIME_CONTINUATION_SOURCES = frozenset(
-    {"approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed", "foreground_interrupted"}
+    {"approval_finished", "approval_revision_requested", "shell_process_finished", "sub_agent_finished",
+     "question_answered", "foreground_completed", "foreground_interrupted"}
 )
 
 _CONTEXT_USAGE_FIELDS = (
@@ -261,6 +262,8 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
         "sessionId": session_id,
         "turnId": turn_id,
         "clientTurnId": _text(payload.get("clientTurnId"), 240),
+        **{key: bounded for key, limit in (("parentTurnId", 180), ("parentClientTurnId", 240))
+           if isinstance(payload.get(key), str) and (bounded := _text(payload[key], limit))},
         **{key: payload[key] for key in ("dispatchStopped", "unityWriteMayHaveExecuted")
            if isinstance(payload.get(key), bool)},
         "plan": {
@@ -305,6 +308,10 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
         ]
     if plan.get("reason") in ("native_final_answer_missing", "sub_agent_pending"):
         result["plan"]["reason"] = plan["reason"]
+    if source == "foreground_interrupted":
+        result["status"] = "blocked" if completion.get("status") == "waiting_user" else "interrupted"
+        if reason := _planner_failure_identifier(plan.get("reason")):
+            result["plan"]["reason"] = reason
     if planner_failure is not None:
         result["plan"]["plannerFailure"] = planner_failure
     completion_gate = plan.get("completionGate")

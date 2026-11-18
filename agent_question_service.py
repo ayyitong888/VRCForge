@@ -22,7 +22,7 @@ from typing import Callable, Mapping, Protocol
 AGENT_QUESTION_SCHEMA = "vrcforge.agent_question.v1"
 AGENT_QUESTION_MAX_ITEMS = 60
 QUESTION_KINDS = frozenset({"decision", "visual_checkpoint"})
-_PRIVATE_QUESTION_FIELDS = frozenset({"runtimeTaskSeed", "runtimeSessionId", "runtimeClientTurnId", "runtimeTaskId"})
+_PRIVATE_QUESTION_FIELDS = frozenset({"runtimeTaskSeed", "runtimeSessionId", "runtimeClientTurnId", "runtimeTaskId", "runtimeContinuesParent"})
 VISUAL_RESOLUTIONS = frozenset({"pass", "fail", "uncertain", "later"})
 RUNTIME_TOOL_LOOP_SOURCE = "runtime_tool_loop"
 ASK_USER_USAGE_INSTRUCTION = (
@@ -632,14 +632,14 @@ class AgentQuestionService:
             **{str(key): value for key, value in fields.items()},
         })
 
-    def claim_runtime_continuation(self, question_id: str, *, client_turn_id: str = "") -> bool:
+    def claim_runtime_continuation(self, question_id: str, *, client_turn_id: str = "", continues_parent: bool = False) -> bool:
         """Only an unanswered dispatch claim can cross into the runtime."""
         with _locked(self._persistence.shared_state_lock):
             question = self._project(include_answered=True).get(question_id, {})
             if question.get("status") not in {"answered", "pending"} or question.get("runtimeContinuationStatus") != "queued":
                 return False
             identity = {"runtimeContinuationClientTurnId": client_turn_id, "runtimeContinuationTurnId": ""} if client_turn_id else {}
-            self.record_runtime_continuation(question_id, "claimed", **identity)
+            self.record_runtime_continuation(question_id, "claimed", runtimeContinuesParent=continues_parent, **identity)
             return True
 
     def cancel_queued_runtime_continuation(self, *, session_id: str, client_turn_id: str) -> bool:
@@ -689,6 +689,7 @@ class AgentQuestionService:
             if self._runtime_resolution.interrupt is not None:
                 for question in interrupted:
                     seed = deepcopy(dict(question.get("runtimeTaskSeed") or {}))
+                    seed["_continuedParent"] = question.get("runtimeContinuesParent") is True
                     if claimed_id := question.get("runtimeContinuationClientTurnId"):
                         seed["_interruptedRuntimeClientTurnId"] = claimed_id
                     self._runtime_resolution.interrupt(

@@ -465,6 +465,8 @@ def test_scripted_runtime_message_question_answer_resumes_same_task(tmp_path: Pa
     assert results[0]["task"]["objective"] == first["task"]["objective"]
     assert results[0]["sessionId"] == first["sessionId"]
     assert results[0]["continuationSource"] == "question_answered"
+    assert results[0]["parentTurnId"] == first["turnId"]
+    assert results[0]["parentClientTurnId"] == first["clientTurnId"]
     assert results[0]["clientTurnId"] == "runtime-turn:question:" + question["questionId"]
     assert _answer(gateway, question, tmp_path)["idempotent"] is True
     assert gateway.shutdown_runtime_continuations(5)["ok"]
@@ -475,8 +477,8 @@ def test_scripted_runtime_message_question_answer_resumes_same_task(tmp_path: Pa
     assert public["runtimeContinuationStatus"] == "delivered"
     assert "runtimeTaskSeed" not in public
     events = gateway.runtime_runs.list_runtime_continuations(limit=10)
-    assert len(events) == 1
-    assert events[0]["continuationSource"] == "question_answered"
+    assert [e["continuationSource"] for e in events] == ["foreground_completed", "question_answered"]
+    assert events[1]["parentTurnId"] == events[0]["turnId"]
 
 
 def test_stopped_question_cannot_resume_after_restart(tmp_path: Path) -> None:
@@ -517,22 +519,24 @@ def test_claimed_answer_is_not_replayed_after_restart(tmp_path: Path) -> None:
     assert state["runtimeContinuationStatus"] == "interrupted"
     assert not restarted.questions.claim_runtime_continuation(question["questionId"])
     events = restarted.runtime_runs.list_runtime_continuations(limit=10)
-    assert len(events) == 1
-    assert events[0]["plan"]["nextStep"] == "needs_user_action"
+    assert [e["continuationSource"] for e in events] == ["foreground_completed", "question_answered"]
+    assert events[1]["plan"]["nextStep"] == "needs_user_action"
 
 
-def test_claimed_question_restart_preserves_recorded_dispatch_identity(tmp_path: Path) -> None:
-    gateway, _, question, _, _, _ = _scripted_question(tmp_path)
+@pytest.mark.parametrize("continues_parent", [True, False])
+def test_claimed_question_restart_preserves_recorded_dispatch_identity(tmp_path: Path, continues_parent: bool) -> None:
+    gateway, first, question, _, _, _ = _scripted_question(tmp_path)
     gateway.shutdown_runtime_continuations(5)
     _answer(gateway, question, tmp_path)
     claimed_id = f"runtime-turn:question:{question['questionId']}:feedback:2"
-    assert gateway.questions.claim_runtime_continuation(question["questionId"], client_turn_id=claimed_id)
+    assert gateway.questions.claim_runtime_continuation(question["questionId"], client_turn_id=claimed_id, continues_parent=continues_parent)
 
     restarted = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     assert restarted.questions.reconcile_runtime_continuations() == {"queued": 0, "interrupted": 1}
     receipt = restarted.get_runtime_session("runtime-session", client_turn_id=claimed_id)
     assert receipt["status"] == "completed"
     assert receipt["response"]["clientTurnId"] == claimed_id
+    assert receipt["response"].get("parentTurnId") == (first["turnId"] if continues_parent else None)
     assert receipt["response"]["plan"]["nextStep"] == "needs_user_action"
 
 

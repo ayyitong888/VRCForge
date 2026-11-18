@@ -36,6 +36,10 @@ const interruptedEvent = {
   timeline: [{ id: "visible", sequence: 0, timestamp: "2026-01-01T00:00:00Z", kind: "assistant", payload: { summary: "Already visible before exit" } }],
 };
 const interruptedResponse = responseFromRuntimeTurnEvent(interruptedEvent);
+const recoveredQuestion = responseFromRuntimeTurnEvent({ ...interruptedEvent, plan: {
+  nextStep: "needs_user_action", taskCompletion: { status: "waiting_user" },
+} });
+assert.equal(recoveredQuestion.status, "blocked", "an outstanding decision survives a runtime restart");
 assert.equal(interruptedResponse.status, "interrupted");
 assert.equal(interruptedResponse.continuationSource, "foreground_interrupted");
 assert.deepEqual(interruptedResponse.timeline, interruptedEvent.timeline);
@@ -44,6 +48,8 @@ assert.notEqual(interruptedResponse.plan.nextStep, "done", "a recovered partial 
 const interruptedItem = { id: "recovered", type: "agent", response: interruptedResponse };
 assert.equal(runtimeContinuationDeliveryState(interruptedEvent, [interruptedItem]), "stored", "reopening must not duplicate the partial reply");
 assert.equal(runtimeContinuationDeliveryState({ ...interruptedEvent, continuationSource: "foreground_completed" }, [interruptedItem]), "replace-failed", "a real final reply supersedes an interrupted snapshot");
+assert.equal(runtimeContinuationDeliveryState({ ...interruptedEvent, continuationSource: "shell_process_finished" }, [interruptedItem]), "replace-failed",
+  "a continuation receipt also replaces its own interrupted placeholder");
 
 const plannerFailure = responseFromRuntimeTurnEvent({
   schema: "vrcforge.runtime_turn_event.v1",

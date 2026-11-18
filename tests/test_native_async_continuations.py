@@ -112,6 +112,8 @@ def test_child_result_then_second_delegation_preserves_wait_without_fabricating_
         call("delegate-second", "vrcforge_delegate_subagent", {"task": "Read the second fixture."}),
     ])
     seeds = []
+    phases = []
+    gateway._runtime_status_changed = phases.append
 
     def delegate(params):
         seeds.append(params["_taskSeed"])
@@ -120,7 +122,7 @@ def test_child_result_then_second_delegation_preserves_wait_without_fabricating_
     gateway.register_tool("vrcforge_delegate_subagent",
                           "When to use: read with a specialist. When NOT to use: write files.",
                           "plan/preview", delegate)
-    parent = {"sessionId": "parent", "clientTurnId": "client", "projectRoot": str(tmp_path)}
+    parent = {"sessionId": "parent", "clientTurnId": "long:" + "p" * 230, "projectRoot": str(tmp_path)}
     first = gateway.runtime_message({**parent, "message": "Ask the specialists to read two fixtures."})
     assert first["plan"]["nextStep"] == "waiting_for_tool", first
     assert first["plan"]["reason"] == "sub_agent_pending"
@@ -142,6 +144,14 @@ def test_child_result_then_second_delegation_preserves_wait_without_fabricating_
         }
     resumed = gateway.resume_runtime_task_after_sub_agent(child)
     assert resumed is not None
+    assert resumed["parentClientTurnId"] == first["clientTurnId"]
+    assert resumed["parentTurnId"] == first["turnId"]
+    preparing = next(p for p in phases if p["phase"] == "preparing" and p["turnId"] == resumed["turnId"])
+    assert preparing["parentClientTurnId"] == first["clientTurnId"]
+    assert preparing["parentTurnId"] == first["turnId"]
+    receipt = gateway.runtime_runs.read_terminal_continuation(session_id="parent", client_turn_id=resumed["clientTurnId"])
+    assert receipt["parentClientTurnId"] == first["clientTurnId"]
+    assert receipt["parentTurnId"] == first["turnId"]
     assert resumed["plan"]["nextStep"] == "waiting_for_tool"
     assert resumed["plan"]["reason"] == "sub_agent_pending"
     assert resumed["turnStatus"]["status"] == "running"
@@ -149,6 +159,8 @@ def test_child_result_then_second_delegation_preserves_wait_without_fabricating_
     assert "write" not in resumed
     assert "resumedApprovalId" not in resumed
     assert len(seeds) == 2
+    assert seeds[1]["usageParentTurnId"] == resumed["turnId"]
+    assert seeds[1]["clientTurnId"] == resumed["clientTurnId"]
     assert len(model.requests) == 2
     assert gateway.resume_runtime_task_after_sub_agent(child) is None
     snapshot = gateway.runtime_sessions.native_conversation("parent", binding=seeds[0]["_nativeConversation"]["binding"])

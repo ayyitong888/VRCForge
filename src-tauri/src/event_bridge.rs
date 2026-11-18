@@ -171,13 +171,17 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
         }
         // Match the terminal event's identity limits. A clipped ID creates
         // a different live owner that the terminal receipt cannot settle.
-        for (key, max_chars) in [("sessionId", 180), ("turnId", 180), ("clientTurnId", 240)] {
+        for (key, max_chars) in [("sessionId", 180), ("turnId", 180), ("clientTurnId", 240),
+            ("parentTurnId", 180), ("parentClientTurnId", 240)] {
             if let Some(value) = runtime_delta.get(key).and_then(|value| value.as_str()) {
                 if value.chars().count() > max_chars {
                     return None;
                 }
                 event[key] = serde_json::Value::String(value.to_owned());
             }
+        }
+        if let Some(source) = runtime_delta.get("continuationSource").and_then(|v| v.as_str()).filter(|s| runtime_continuation_source(s)) {
+            event["continuationSource"] = source.into();
         }
         if let Some(value) = runtime_delta
             .get("textDelta")
@@ -655,17 +659,15 @@ fn sanitize_context_usage(value: &serde_json::Value) -> Option<serde_json::Value
     (!result.is_empty()).then_some(serde_json::Value::Object(result))
 }
 
+fn runtime_continuation_source(source: &str) -> bool {
+    matches!(source, "approval_finished" | "approval_revision_requested" | "shell_process_finished"
+        | "sub_agent_finished" | "question_answered" | "foreground_completed" | "foreground_interrupted")
+}
+
 fn sanitize_runtime_turn_event(payload: &serde_json::Value) -> Option<serde_json::Value> {
     let continuation_source = payload.get("continuationSource")?.as_str()?;
     if payload.get("schema")?.as_str()? != "vrcforge.runtime_turn_event.v1"
-        || !matches!(
-            continuation_source,
-            "approval_finished"
-                | "shell_process_finished"
-                | "sub_agent_finished"
-                | "question_answered"
-                | "foreground_completed"
-        )
+        || !runtime_continuation_source(continuation_source)
     {
         return None;
     }
@@ -707,6 +709,20 @@ fn sanitize_runtime_turn_event(payload: &serde_json::Value) -> Option<serde_json
             }
         }
     });
+    for (key, limit) in [("parentTurnId", 180), ("parentClientTurnId", 240)] {
+        if let Some(value) = payload.get(key).and_then(|v| v.as_str()) {
+            if value.chars().count() > limit { return None; }
+            result[key] = value.into();
+        }
+    }
+    for key in ["ok", "dispatchStopped", "unityWriteMayHaveExecuted"] {
+        if let Some(value) = payload.get(key).and_then(|v| v.as_bool()) {
+            result[key] = value.into();
+        }
+    }
+    if let Some(status) = bounded_safe_identifier(payload.get("status")) {
+        result["status"] = status.into();
+    }
     let started_at = bounded_event_text(payload.get("startedAt"), 80);
     if !started_at.is_empty() {
         result["startedAt"] = serde_json::Value::String(started_at);
@@ -934,6 +950,8 @@ mod tests {
                 "sessionId": "session-owner",
                 "turnId": "turn-terminal",
                 "clientTurnId": "client-terminal",
+                "parentClientTurnId": "parent-client",
+                "parentTurnId": "parent-run",
                 "secret": "must-not-cross",
                 "observe": {"path": "C:\\private"},
                 "plan": {
@@ -953,6 +971,8 @@ mod tests {
 
         assert_eq!(sanitized["type"], "agentRuntimeTurn");
         assert_eq!(sanitized["payload"]["sessionId"], "session-owner");
+        assert_eq!(sanitized["payload"]["parentClientTurnId"], "parent-client");
+        assert_eq!(sanitized["payload"]["parentTurnId"], "parent-run");
         assert_eq!(
             sanitized["payload"]["plan"]["reply"],
             "The background task finished."
@@ -1079,10 +1099,12 @@ mod tests {
     fn runtime_turn_bridge_allows_existing_continuation_sources_and_rejects_unknown() {
         for source in [
             "approval_finished",
+            "approval_revision_requested",
             "shell_process_finished",
             "sub_agent_finished",
             "question_answered",
             "foreground_completed",
+            "foreground_interrupted",
         ] {
             let sanitized = sanitize_backend_event(serde_json::json!({
                 "type": "agentRuntimeTurn",
@@ -1380,6 +1402,9 @@ mod tests {
                     "sessionId": "s".repeat(180),
                     "turnId": "backend-turn",
                     "clientTurnId": client_turn_id,
+                    "parentClientTurnId": "p".repeat(240),
+                    "parentTurnId": "parent-run",
+                    "continuationSource": "question_answered",
                     "phase": "waiting_for_model"
                 }
             }))
@@ -1390,6 +1415,9 @@ mod tests {
             let delta = event(&id).expect("valid continuation delta");
             assert_eq!(delta["sessionId"], "s".repeat(180));
             assert_eq!(delta["clientTurnId"], id);
+            assert_eq!(delta["parentClientTurnId"], "p".repeat(240));
+            assert_eq!(delta["parentTurnId"], "parent-run");
+            assert_eq!(delta["continuationSource"], "question_answered");
         }
         assert!(event(&"q".repeat(241)).is_none());
     }

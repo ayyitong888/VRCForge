@@ -1536,7 +1536,7 @@ class AgentTaskLoop:
             _bounded_text(context.get("objective"), None),
             session_id=_bounded_text(context.get("sessionId"), 180),
             turn_id=_bounded_text(context.get("turnId"), 180),
-            client_turn_id=_bounded_text(context.get("clientTurnId"), 180),
+            client_turn_id=_bounded_text(context.get("clientTurnId"), MAX_RUNTIME_CLIENT_TURN_ID_LENGTH),
             project_root=_bounded_text(context.get("projectRoot"), 600),
             task_id=_bounded_text(context.get("taskId"), 80),
             agent_name=_bounded_text(context.get("agentName"), 160),

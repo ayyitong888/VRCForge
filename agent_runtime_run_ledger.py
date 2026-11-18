@@ -418,46 +418,25 @@ class AgentRuntimeRunLedger:
                 # a run parked on a live user question or approval is waiting,
                 # not interrupted — its continuation resumes on the answer.
                 waiting_reason = self._recovered_waiting_reason(timeline)
-                if waiting_reason:
-                    continuation = {
-                        "schema": "vrcforge.runtime_turn_event.v1",
-                        "continuationSource": "foreground_interrupted",
-                        "sessionId": str(started.get("sessionId") or ""),
-                        "turnId": str(started.get("turnId") or ""),
-                        "clientTurnId": str(started.get("clientTurnId") or ""),
-                        "provider": str(started.get("provider") or ""),
-                        "providerLabel": str(started.get("providerLabel") or ""),
-                        "model": str(started.get("model") or ""),
-                        "projectRoot": str(started.get("projectRoot") or ""),
-                        "plan": {"nextStep": "needs_user_action", "reason": waiting_reason,
-                                 "taskCompletion": {"status": "waiting_user"}},
-                    }
-                else:
-                    continuation = {
+                identity = {key: started[key] for key in (
+                    "sessionId", "turnId", "clientTurnId", "parentTurnId", "parentClientTurnId",
+                    "provider", "providerLabel", "model", "projectRoot",
+                ) if key in started}
+                status = "blocked" if waiting_reason else "interrupted"
+                continuation = {
                     "schema": "vrcforge.runtime_turn_event.v1",
                     "continuationSource": "foreground_interrupted",
-                    "sessionId": str(started.get("sessionId") or ""),
-                    "turnId": str(started.get("turnId") or ""),
-                    "clientTurnId": str(started.get("clientTurnId") or ""),
-                    "provider": str(started.get("provider") or ""),
-                    "providerLabel": str(started.get("providerLabel") or ""),
-                    "model": str(started.get("model") or ""),
-                    "projectRoot": str(started.get("projectRoot") or ""),
-                    "plan": {"nextStep": "needs_user_action", "reason": "runtime_interrupted",
-                             "taskCompletion": {"status": "interrupted"}},
+                    **identity,
+                    "status": status,
+                    "plan": {"nextStep": "needs_user_action", "reason": waiting_reason or "runtime_interrupted",
+                             "taskCompletion": {"status": "waiting_user" if waiting_reason else "interrupted"}},
                 }
                 if timeline:
                     continuation["timeline"] = timeline
                 self.append({
                     "event": "runtime_turn_interrupted",
-                    "status": "interrupted",
-                    "sessionId": started.get("sessionId") or "",
-                    "turnId": started.get("turnId") or "",
-                    "clientTurnId": started.get("clientTurnId") or "",
-                    "provider": started.get("provider") or "",
-                    "providerLabel": started.get("providerLabel") or "",
-                    "model": started.get("model") or "",
-                    "projectRoot": started.get("projectRoot") or "",
+                    **identity,
+                    "status": status,
                     "continuationEvent": continuation,
                 })
                 created += 1
@@ -582,7 +561,8 @@ class AgentRuntimeRunLedger:
         has_more = False
         last_sequence = cursor - 1
         terminal_captures: dict[tuple[str, str], dict] = {}
-        run_fields = ("sessionId", "turnId", "clientTurnId", "status", "provider", "providerLabel",
+        run_fields = ("sessionId", "turnId", "clientTurnId", "continuationSource", "parentTurnId", "parentClientTurnId",
+                      "status", "provider", "providerLabel",
                       "model", "projectRoot", "createdAt", "updatedAt", "startedAt", "completedAt")
         with self._ports.shared_state_lock:
             timeline_rows, _, _ = self._list_runs_events(
@@ -670,6 +650,7 @@ class AgentRuntimeRunLedger:
         if not session_id or not client_turn_id:
             return None
         terminal = None
+        current_turn_id = requested_turn_id
         for row in self._exact_run_events(session_id, client_turn_id):
             row_turn_id = str(row.get("turnId") or "").strip()
             if select_latest_turn and row.get("event") == "runtime_turn_started":
@@ -677,13 +658,20 @@ class AgentRuntimeRunLedger:
                 # not resurrect an earlier terminal if this turn is still live
                 # or its durable public response was never recorded.
                 terminal = None
+                current_turn_id = row_turn_id
                 continue
-            if row.get("event") != "runtime_turn_completed":
+            event = row.get("event")
+            if event not in {"runtime_turn_completed", "runtime_turn_interrupted"}:
+                continue
+            # Recovery may append an interruption for an older dispatch after
+            # a newer start or terminal already owns this client id.
+            if event == "runtime_turn_interrupted" and (terminal is not None or current_turn_id != row_turn_id):
                 continue
             if select_latest_turn:
                 # This row is the newest exact terminal even if an early
                 # failure persisted it before a runtime_turn_started record.
                 terminal = None
+                current_turn_id = row_turn_id
             elif row_turn_id != requested_turn_id:
                 continue
             continuation = _terminal_continuation(row)

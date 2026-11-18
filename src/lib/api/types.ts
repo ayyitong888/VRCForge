@@ -574,7 +574,13 @@ export type AgentVisionAnalysis = {
   notice?: string;
 };
 
-export type AgentRuntimeResponse = {
+export type RuntimeTurnLineage = {
+  parentClientTurnId?: string;
+  parentTurnId?: string;
+  continuationSource?: string;
+};
+
+export type AgentRuntimeResponse = RuntimeTurnLineage & {
   ok: boolean;
   session_id: string;
   sessionId: string;
@@ -595,7 +601,6 @@ export type AgentRuntimeResponse = {
     status?: string;
     reason?: string;
   }>;
-  continuationSource?: string;
   dispatchStopped?: boolean;
   unityWriteMayHaveExecuted?: boolean;
   goalDeliveryId?: string;
@@ -765,7 +770,7 @@ export type AgentTurnResponseRecovery = {
   error?: string;
 };
 
-export type AgentRuntimeRun = {
+export type AgentRuntimeRun = RuntimeTurnLineage & {
   dispatchStopped?: boolean;
   unityWriteMayHaveExecuted?: boolean;
   id?: string;

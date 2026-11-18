@@ -1,4 +1,4 @@
-import type { AgentContextUsage, AgentRuntimeResponse, AgentShellResult, CompactionRecoveryEntry, SubAgentTask } from "./api";
+import type { AgentContextUsage, AgentRuntimeResponse, AgentShellResult, CompactionRecoveryEntry, RuntimeTurnLineage, SubAgentTask } from "./api";
 import type { AgentRuntimePhase } from "./chat-streaming";
 
 export const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
@@ -166,7 +166,7 @@ export type ChatTimelineEvent = {
 export type ConversationItem =
   | { id: string; type: "user"; text: string; planMode?: boolean; attachments?: ChatAttachment[]; queuedFrom?: boolean; composerQueued?: boolean; queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled"; clientTurnId?: string; queueEnvelope?: { planMode?: boolean; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; projectPath?: string; projectType?: ProjectType; sessionId?: string; laneId?: string; computerUseRequested?: boolean; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; queueId?: string; sequence?: number }; deliveryMode?: "queue_only" | "trigger_turn"; forwardedByAgent?: boolean; forwardedFrom?: { sourceChatId?: string; sourceClientTurnId?: string; sourceActionId?: string }; createdAt?: string }
   | { id: string; type: "question_answer"; questionId: string; header?: string; question?: string; selectedOptionId?: string; text: string; revision?: number; updatedAt?: string; attachments?: ChatAttachment[] }
-  | { id: string; type: "streaming"; clientTurnId: string; turnId?: string; text: string; phase?: AgentRuntimePhase; stopRequested?: boolean; timeline?: ChatTimelineEvent[]; providerLastActivityAt?: string; providerResponding?: boolean; providerRetry?: { attempt: number; max: number; reason?: "connection" | "timeout" | "rate_limit" | "capacity"; statusCode?: number; terminal?: "NO_MORE_RETRY" }; providerLabel?: string; model?: string; createdAt?: string }
+  | RuntimeTurnLineage & { id: string; type: "streaming"; clientTurnId: string; sessionId?: string; turnId?: string; text: string; phase?: AgentRuntimePhase; stopRequested?: boolean; timeline?: ChatTimelineEvent[]; providerLastActivityAt?: string; providerResponding?: boolean; providerRetry?: { attempt: number; max: number; reason?: "connection" | "timeout" | "rate_limit" | "capacity"; statusCode?: number; terminal?: "NO_MORE_RETRY" }; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "agent"; response: AgentRuntimeResponse; timeline?: ChatTimelineEvent[]; compactionRecovery?: CompactionRecoveryEntry[]; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string; completedAt?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string; createdAt?: string }
   | { id: string; type: "timeline_event"; event: ChatTimelineEvent; createdAt?: string }

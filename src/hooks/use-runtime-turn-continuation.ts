@@ -7,11 +7,14 @@ import { materializeRuntimeTimeline, mergeRuntimeTimelines } from "../lib/chat-t
 import { coalesceRuntimeTurnStreams, isExternalRuntimeStream, QUESTION_CONTINUATION_STREAM_PREFIX } from "../lib/runtime-stream-owner";
 
 import { questionContinuationOwner } from "../lib/runtime-scope";
+import { runtimeParentOwner, runtimeTurnLineage } from "../lib/runtime-turn-lineage";
+import type { RuntimeTurnLineage } from "../lib/api/types";
+import { isInterruptedRuntimeTurn } from "../lib/runtime-run-status";
 
 export { RUNTIME_ACTIVITY_STREAM_PREFIX } from "../lib/runtime-stream-owner";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
-const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed", "foreground_interrupted"]);
+const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "approval_revision_requested", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed", "foreground_interrupted"]);
 const MAX_PENDING_CONTINUATIONS = 32;
 const MAX_DELIVERED_CONTINUATIONS = 512;
 const PLANNER_FAILURE_RETRY_ATTEMPTS_LIMIT = 100;
@@ -68,11 +71,11 @@ function sanitizePlannerFailure(value: unknown): PlannerFailure | undefined {
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-export type RuntimeTurnEvent = {
+export type RuntimeTurnEvent = RuntimeTurnLineage & {
   schema?: string;
   ok?: boolean;
   status?: string;
-  continuationSource?: string;
+  dispatchStopped?: boolean;
   unityWriteMayHaveExecuted?: boolean;
   sessionId?: string;
   turnId?: string;
@@ -203,6 +206,8 @@ export function projectQuestionContinuationActivity(
       id,
       type: "streaming",
       clientTurnId,
+      sessionId,
+      ...runtimeTurnLineage(run || {}),
       text: "",
       phase: undefined,
       // Only a ledger-backed runtime_turn_started timestamp represents this
@@ -229,10 +234,9 @@ export function projectQuestionContinuationActivity(
       continue;
     }
     const existing = items[existingIndex];
-    if (existing.type === "streaming" && item.createdAt && existing.createdAt !== item.createdAt) {
-      // A queued snapshot can arrive before the exact runtime_turn_started
-      // timestamp. Fill only that verified field when the started event lands.
-      items[existingIndex] = { ...existing, createdAt: item.createdAt };
+    if (existing.type === "streaming" && ((item.createdAt && existing.createdAt !== item.createdAt)
+      || (item.parentTurnId && !existing.parentTurnId) || (item.parentClientTurnId && !existing.parentClientTurnId))) {
+      items[existingIndex] = { ...existing, ...runtimeTurnLineage(item), createdAt: item.createdAt || existing.createdAt };
       changed = true;
     }
   }
@@ -372,8 +376,10 @@ export function runtimeContinuationDeliveryState(
   }
   const stored = items.find(matches);
   if (!stored || stored.type !== "agent") return "append";
-  if (event.continuationSource === "foreground_completed"
-    && ["cancelled", "failed", "error", "interrupted"].includes(String(stored.response.status || "").toLowerCase())) {
+  if ((event.continuationSource === "foreground_completed"
+    && ["cancelled", "failed", "error", "interrupted"].includes(String(stored.response.status || "").toLowerCase()))
+    || (event.continuationSource !== "foreground_interrupted" && isInterruptedRuntimeTurn(stored.response)
+      && (!stored.response.turnId || stored.response.turnId === event.turnId || stored.response.turnId === event.clientTurnId))) {
     return "replace-failed";
   }
   return "stored";
@@ -402,8 +408,9 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
   return {
     ok: event.ok ?? true,
     ...(event.status ? { status: event.status } : {}),
-    ...(event.continuationSource === "foreground_interrupted" ? { status: "interrupted" } : {}),
-    continuationSource: event.continuationSource,
+    ...(event.continuationSource === "foreground_interrupted" ? { status: isInterruptedRuntimeTurn(event) ? "interrupted" : "blocked" } : {}),
+    ...runtimeTurnLineage(event),
+    ...(event.dispatchStopped && { dispatchStopped: true }),
     unityWriteMayHaveExecuted: event.unityWriteMayHaveExecuted,
     session_id: sessionId,
     sessionId,
@@ -463,8 +470,9 @@ export function useRuntimeTurnContinuationDelivery({
     // A foreground retry can keep its client id and receive a new backend
     // turn. Async continuations instead replay one logical delivery across runs.
     const continuationId = event.clientTurnId?.trim() || event.turnId!;
-    const key = event.continuationSource === "foreground_completed"
-      ? JSON.stringify([event.sessionId, continuationId, event.turnId])
+    const foreground = event.continuationSource === "foreground_completed" || event.continuationSource === "foreground_interrupted";
+    const key = foreground
+      ? JSON.stringify([event.sessionId, continuationId, event.turnId, event.continuationSource])
       : runtimeContinuationKey(event.sessionId!, continuationId);
     if (deliveredRef.current.has(key)) {
       return true;
@@ -481,8 +489,9 @@ export function useRuntimeTurnContinuationDelivery({
       ? questionContinuationOwner(candidates, {
         questionId, sessionId: event.sessionId,
         runtimeContinuation: { questionId, sessionId: event.sessionId, clientTurnId: event.clientTurnId },
-      })
-      : candidates.length === 1 ? candidates[0] : exactOwners.length === 1 ? exactOwners[0] : undefined;
+      }) || runtimeParentOwner(candidates, event)
+      : candidates.length === 1 ? candidates[0] : exactOwners.length === 1 ? exactOwners[0]
+        : runtimeParentOwner(exactOwners.length ? exactOwners : candidates, event);
     if (!ownerChat) {
       pendingRef.current.set(key, event);
       while (pendingRef.current.size > MAX_PENDING_CONTINUATIONS) {

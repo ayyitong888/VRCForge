@@ -107,7 +107,7 @@ from optimization_service import (
 from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO_SKILL_WRITE_INPUT_SCHEMA
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from agent_runtime_turn_identity import (
-    MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH, continuation_client_turn_id,
+    MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH, continuation_client_turn_id, continuation_identity,
 )
 from agent_native_history_store import NativeHistoryStore
 from agent_runtime_native_turn import NativeRuntimeTurn
@@ -980,6 +980,7 @@ class AgentGateway:
                 ),
                 interrupt=lambda question_id, seed, summary: self.record_interrupted_runtime_task(
                     task_seed=dict(seed), continuation_source="question_answered", owned_id=question_id, summary=summary,
+                    continues_parent=seed.get("_continuedParent") is True,
                 ),
                 settle_skip=lambda seed: NativeRuntimeTurn.cancel_question(self._runtime_session_state, seed, skipped=True),
                 accept_visual=self._accept_todo_visual_receipt,
@@ -1687,6 +1688,7 @@ class AgentGateway:
             return
         # These are the same identifiers used by the ledger and provider stream.
         payload = {
+            **self._runtime_session_state.stream_context(),
             "sessionId": session_id,
             "turnId": turn_id,
             "clientTurnId": client_turn_id,
@@ -1919,11 +1921,12 @@ class AgentGateway:
                 runtimeContinuationClientTurnId=client_turn_id, runtimeContinuationTurnId="")
             self._question_continuations_inflight.add(stable_id)
         def run() -> None:
+            new_turn = True
             try:
                 if not self.wait_runtime_session_idle(session_id):
                     return
                 new_turn = async_answer or self._blocking_question_turn_closed(task_seed)
-                if not self.questions.claim_runtime_continuation(stable_id, client_turn_id=client_turn_id):
+                if not self.questions.claim_runtime_continuation(stable_id, client_turn_id=client_turn_id, continues_parent=not new_turn):
                     return
                 if not new_turn and self._runtime_session_state.cancel_requested(
                     session_id=session_id,
@@ -1961,6 +1964,7 @@ class AgentGateway:
                 self.record_interrupted_runtime_task(
                     task_seed=dict(task_seed), continuation_source="question_answered", owned_id=stable_id,
                     summary="Your answer was saved, but the task continuation stopped. " + summarize_text(str(exc), 500),
+                    continues_parent=not new_turn,
                 )
             finally:
                 retry_queued_question = False
@@ -5535,6 +5539,7 @@ class AgentGateway:
         continuation_source: str,
         owned_id: str,
         summary: str,
+        continues_parent: bool = True,
     ) -> dict[str, Any] | None:
         """Persist a UI-only ambiguous terminal without resampling or executing tools."""
 
@@ -5564,9 +5569,10 @@ class AgentGateway:
         requested_action_id = str(seed.get("requestedActionId") or "").strip()[:80]
         requested_kind = str(seed.get("requestedKind") or "").strip()[:32]
         requested_tool = str(seed.get("requestedTool") or "").strip()[:160]
+        identity = continuation_identity(source, seed if continues_parent else None)
         projected = project_runtime_turn_event(
             {
-                "continuationSource": source,
+                **identity,
                 "sessionId": session_id,
                 "turnId": f"interrupted:{suffix}:{stable_id}"[:180],
                 "clientTurnId": client_turn_id,
@@ -5592,6 +5598,7 @@ class AgentGateway:
             {
                 "event": "runtime_turn_completed",
                 "status": "needs_user_action",
+                **identity,
                 "sessionId": session_id,
                 "turnId": projected["turnId"],
                 "clientTurnId": client_turn_id,
@@ -5865,7 +5872,10 @@ class AgentGateway:
                     **({"settlementError": settlement_failure} if settlement_failure else {}),
                 })
                 recovery_failure = failure
+                continuation = ensure_dict(task_continuation)
+                identity = continuation_identity(str(continuation.get("source") or ""), ensure_dict(continuation.get("context")))
                 failed_turn = redact_sensitive({
+                    **identity,
                     "id": str(owned_params.get("_resolvedRuntimeTurnId") or ""),
                     "clientTurnId": str(owned_params.get("_resolvedRuntimeClientTurnId") or ""),
                     "createdAt": now, "status": "failed", "error": failure,
@@ -5878,6 +5888,7 @@ class AgentGateway:
                 })
                 session_id = str(owned_params.get("_resolvedRuntimeSessionId") or "")
                 response_payload = {
+                    **identity,
                     "ok": False,
                     "session_id": session_id,
                     "sessionId": session_id,
@@ -5914,6 +5925,7 @@ class AgentGateway:
                     pass
                 try:
                     terminal_record = self._runtime_run_ledger.append({
+                        **identity,
                         "event": "runtime_turn_completed", "status": "failed", "agent": agent_name,
                         "sessionId": session_id, "turnId": failed_turn["id"],
                         "clientTurnId": failed_turn["clientTurnId"], "error": failure,
@@ -6219,6 +6231,8 @@ class AgentGateway:
         resuming_task = task_continuation is not None and not question_reply_turn
         child_read_only = agent_name == "sub-agent"
         continuation_context = ensure_dict(continuation.get("context"))
+        continuation_source = str(continuation.get("source") or "").strip()
+        identity = continuation_identity(continuation_source, continuation_context)
         continuation_completion = ensure_dict(continuation.get("completion"))
         selected_mode = (continuation_context if continuation_context and continuation_completion else params).get("planMode")
         plan_mode = not child_read_only and selected_mode is True
@@ -6453,6 +6467,7 @@ class AgentGateway:
         context_usage: dict[str, Any] = {}
         self._runtime_session_state.set_stream_context(
             {
+                **identity,
                 "sessionId": session_id,
                 "turnId": turn_id,
                 "clientTurnId": client_turn_id,
@@ -6461,6 +6476,7 @@ class AgentGateway:
         started = self._runtime_run_ledger.append(
             {
                 "event": "runtime_turn_started",
+                **identity,
                 "status": "running",
                 "agent": agent_name,
                 "sessionId": session_id,
@@ -6560,6 +6576,7 @@ class AgentGateway:
                 project_context_active=project_context_active,
                 subagent_batch=([*batch_continuations, continuation] if "_subAgentBatch" in continuation else None),
                 on_steer_consumed=lambda ids: (self._settle_async_question_steers(ids, session_id=session_id, client_turn_id=client_turn_id, turn_id=turn_id), self._runtime_status_changed({
+                    **identity,
                     "sessionId": session_id, "turnId": turn_id,
                     "clientTurnId": client_turn_id, "consumedSteerInputIds": ids,
                 })),
@@ -6593,7 +6610,6 @@ class AgentGateway:
         checkpoint_skip_authority: dict[str, Any] | None = None
         checkpoint_correction_block_reason = ""
         checkpoint_correction_retryable = False
-        continuation_source = str(ensure_dict(task_continuation).get("source") or "")
         if (
             continuation_source in {
                 "question_answered",
@@ -9618,6 +9634,7 @@ class AgentGateway:
         memory_attribution = {"memoryUsage": memory_usage} if attributed_reply and final_reply == attributed_reply else {}
         turn = {
             "id": turn_id,
+            **identity,
             "createdAt": now,
             "message": message,
             "observe": summarize_params(observe),
@@ -9688,9 +9705,6 @@ class AgentGateway:
                 "goalDeliveryId": goal_delivery_id,
             }
         )
-        continuation_source = str(
-            ensure_dict(task_continuation).get("source") or ""
-        ).strip()
         run_status = self._runtime_run_ledger.turn_run_status(
             top_plan=top_plan,
             shell_payload=shell_payload,
@@ -9716,6 +9730,7 @@ class AgentGateway:
             }
         continuation_event = project_runtime_turn_event(
             {
+                **identity,
                 "continuationSource": continuation_source or foreground_source,
                 "sessionId": session_id,
                 "turnId": turn_id,
@@ -9751,10 +9766,11 @@ class AgentGateway:
                 usage_reconciliation=usage_reconciliation,
                 context_compaction=planner_policy.runtime_compaction_audit_view(runtime_compaction),
                 cancellation_reason=cancellation_reason if run_status == "cancelled" else None,
-            ), **stop_flags}
+            ), **identity, **stop_flags}
         )
 
         payload = {
+            **identity,
             "ok": True,
             "session_id": session_id,
             "sessionId": session_id,
@@ -9774,8 +9790,6 @@ class AgentGateway:
             payload["model"] = actual_response_model
         if timeline:
             payload["timeline"] = timeline
-        if continuation_source:
-            payload["continuationSource"] = continuation_source
         if resumed_approval_id and continuation_context:
             payload["resumedApprovalId"] = resumed_approval_id
         if client_turn_id:
@@ -10109,8 +10123,6 @@ class AgentGateway:
             response_plan = dict(ensure_dict(continuation.get("plan")))
             response_plan["shellNeeded"] = False
             response["plan"] = response_plan
-            if continuation.get("continuationSource") == "foreground_interrupted":
-                response["status"] = "interrupted"
             return {
                 "ok": True,
                 "sessionId": continuation["sessionId"],
