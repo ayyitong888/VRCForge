@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import shutil
 from pathlib import Path
 
 import pytest
@@ -10,13 +11,18 @@ import project_manager_registration as managers
 from project_lifecycle_service import ProjectLifecycleError, ProjectLifecycleService
 
 
-def test_desktop_creates_once_and_can_retry_manager_registration(tmp_path, monkeypatch):
-    template = tmp_path / "templates" / "Avatar"
+def _avatar_template(root: Path) -> Path:
+    template = root / "Avatar"
     (template / "Assets").mkdir(parents=True)
     (template / "Packages").mkdir()
     (template / "Packages" / "manifest.json").write_text("{}")
     (template / "ProjectSettings").mkdir()
     (template / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n")
+    return template
+
+
+def test_desktop_creates_once_and_can_retry_manager_registration(tmp_path, monkeypatch):
+    template = _avatar_template(tmp_path / "templates")
     prefs = tmp_path / "prefs.json"
     monkeypatch.setattr(server, "PROJECT_LIFECYCLES", ProjectLifecycleService(
         prefs_path=prefs, receipts_dir=tmp_path / "receipts", template_roots=[template.parent],
@@ -50,6 +56,7 @@ def test_desktop_creates_once_and_can_retry_manager_registration(tmp_path, monke
     retry = "/api/projects/register-managers"
     choices = client.get(options, headers=desktop_headers("GET", options)).json()["templates"]
     assert choices[0]["unityVersion"] == "2022.3.22f1"
+    assert choices[0]["source"] == "local"
     body = {"name": "Avatar demo", "parentPath": str(tmp_path), "templatePath": choices[0]["path"]}
     headers = desktop_headers("POST", create)
     assert client.post(create, headers=auth, json=body).status_code == 403
@@ -70,13 +77,30 @@ def test_desktop_creates_once_and_can_retry_manager_registration(tmp_path, monke
     assert registered == [project, project]
 
 
+def test_desktop_template_options_only_folds_identical_trees(tmp_path):
+    bundled = _avatar_template(tmp_path / "z" / "Programs" / "VRChat Creator Companion" / "Templates")
+    (bundled / "Assets" / "example.txt").write_bytes(b"first")
+    duplicate = tmp_path / "a" / "VRChatCreatorCompanion" / "VRCTemplates" / "avatar"
+    alcom = tmp_path / "ALCOM" / "Templates" / "Avatar"
+    local = tmp_path / "templates" / "Avatar"
+    for copy in (duplicate, alcom, local):
+        shutil.copytree(bundled, copy)
+    (alcom / "Assets" / "example.txt").write_bytes(b"other")
+    (local / "Assets" / "Empty").mkdir()
+    service = ProjectLifecycleService(
+        prefs_path=tmp_path / "prefs.json", receipts_dir=tmp_path / "receipts",
+        template_roots=[duplicate.parent, local.parent, alcom.parent, bundled.parent],
+    )
+
+    choices = service.desktop_template_options(server.parse_editor_version)
+    assert [(choice["path"], choice["source"]) for choice in choices] == [
+        (str(bundled), "vccBundled"), (str(alcom), "alcom"), (str(local), "local"),
+    ]
+    assert len(service.status()["templates"]) == 4
+
+
 def test_vpm_restore_failure_does_not_publish_an_incomplete_project(tmp_path, monkeypatch):
-    template = tmp_path / "Avatar"
-    (template / "Assets").mkdir(parents=True)
-    (template / "Packages").mkdir()
-    (template / "Packages" / "manifest.json").write_text("{}")
-    (template / "ProjectSettings").mkdir()
-    (template / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n")
+    template = _avatar_template(tmp_path)
     (template / "Packages" / "vpm-manifest.json").write_text('{"dependencies":{"com.vrchat.avatars":{"version":"3.10.6"}}}')
     service = ProjectLifecycleService(prefs_path=tmp_path / "prefs.json", receipts_dir=tmp_path / "receipts", template_roots=[template])
     monkeypatch.setattr(managers, "_vrc_get_executable", lambda entries: None)

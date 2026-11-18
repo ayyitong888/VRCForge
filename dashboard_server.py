@@ -10807,10 +10807,7 @@ def register_desktop_project_managers(project: Path) -> list[dict[str, Any]]:
 @app.get("/api/projects/create-options", include_in_schema=False)
 def desktop_create_project_options(request: Request) -> dict[str, Any]:
     require_desktop_project_session(request)
-    templates = PROJECT_LIFECYCLES.status()["templates"]
-    for template in templates:
-        template["unityVersion"] = parse_editor_version(Path(template["path"]) / "ProjectSettings" / "ProjectVersion.txt")
-    return {"ok": True, "templates": templates}
+    return {"ok": True, "templates": PROJECT_LIFECYCLES.desktop_template_options(parse_editor_version)}
 
 
 @app.post("/api/projects/create", include_in_schema=False)

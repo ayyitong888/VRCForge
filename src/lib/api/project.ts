@@ -6,7 +6,12 @@ export type ProjectPrefs = {
   hiddenPaths: string[];
 };
 
-export type UnityProjectTemplate = { name: string; path: string; unityVersion?: string };
+export type UnityProjectTemplate = {
+  name: string;
+  path: string;
+  unityVersion: string;
+  source: "vccBundled" | "vccLocal" | "alcom" | "local";
+};
 
 export type UnityProjectCreateRequest = { name: string; parentPath: string; templatePath: string };
 

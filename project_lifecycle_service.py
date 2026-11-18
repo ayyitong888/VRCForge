@@ -59,7 +59,7 @@ def _is_unity_project(path: Path) -> bool:
     )
 
 
-def _directory_entries(root: Path) -> dict[str, tuple[int, bytes]]:
+def _directory_entries(root: Path, *, include_directories: bool = False) -> dict[str, tuple[int, bytes]]:
     if not _is_unity_project(root):
         raise ProjectLifecycleError(f"Unity project/template is incomplete: {root}")
     entries: dict[str, tuple[int, bytes]] = {}
@@ -67,6 +67,8 @@ def _directory_entries(root: Path) -> dict[str, tuple[int, bytes]]:
         if candidate.is_symlink():
             raise ProjectLifecycleError(f"Linked project/template paths are not supported: {candidate}")
         if candidate.is_dir():
+            if include_directories:
+                entries[candidate.relative_to(root).as_posix() + "/"] = (0, b"")
             continue
         try:
             identity, sha256 = capture_regular_file(candidate, label="Project template")
@@ -74,6 +76,19 @@ def _directory_entries(root: Path) -> dict[str, tuple[int, bytes]]:
             raise ProjectLifecycleError(str(exc)) from exc
         entries[candidate.relative_to(root).as_posix()] = (identity["size"], bytes.fromhex(sha256))
     return entries
+
+
+def _template_source(path: Path) -> str:
+    root = path.parent
+    vendor = root.parent.name.casefold()
+    folder = root.name.casefold()
+    if vendor == "vrchat creator companion" and folder == "templates":
+        return "vccBundled"
+    if vendor == "vrchatcreatorcompanion" and folder in {"templates", "vrctemplates"}:
+        return "vccLocal"
+    if vendor in {"alcom", "vrc-get"} and folder == "templates":
+        return "alcom"
+    return "local"
 
 
 def _directory_digest(entries: dict[str, tuple[int, bytes]]) -> dict[str, Any]:
@@ -164,6 +179,37 @@ class ProjectLifecycleService:
                 "unityHub": "handoff_required",
             },
         }
+
+    def desktop_template_options(self, read_editor_version: Callable[[Path], str]) -> list[dict[str, str]]:
+        groups: dict[tuple[str, str], list[dict[str, str]]] = {}
+        for template in self.status()["templates"]:
+            path = Path(template["path"])
+            version = read_editor_version(path / "ProjectSettings" / "ProjectVersion.txt")
+            groups.setdefault((template["name"].casefold(), version.casefold()), []).append({
+                "name": template["name"],
+                "path": str(path),
+                "unityVersion": version,
+                "source": _template_source(path),
+            })
+
+        options: list[dict[str, str]] = []
+        source_order = ("vccBundled", "vccLocal", "alcom", "local")
+        for group in groups.values():
+            if len(group) == 1:
+                options.extend(group)
+                continue
+            identities: list[dict[str, tuple[int, bytes]]] = []
+            for option in sorted(group, key=lambda item: source_order.index(item["source"])):
+                try:
+                    entries = _directory_entries(Path(option["path"]), include_directories=True)
+                except ProjectLifecycleError:
+                    # A copy we cannot compare must stay selectable.
+                    options.append(option)
+                    continue
+                if entries not in identities:
+                    identities.append(entries)
+                    options.append(option)
+        return options
 
     def plan_create(self, arguments: dict[str, Any]) -> dict[str, Any]:
         prepared, preview = self.prepare_create(arguments, None)

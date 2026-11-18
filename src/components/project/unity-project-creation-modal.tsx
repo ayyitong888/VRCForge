@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { registerUnityProjectManagers } from "../../lib/api";
 import type { UnityProjectCreateRequest, UnityProjectCreateResult, UnityProjectTemplate } from "../../lib/api";
 import { Button } from "../ui/button";
+import { defaultUnityProjectTemplate, UnityProjectTemplatePicker } from "./unity-project-template-picker";
 
 export type UnityProjectCreation = {
   options: { templates: UnityProjectTemplate[]; loading: boolean; error: string };
@@ -36,8 +37,8 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
   const [result, setResult] = useState<UnityProjectCreateResult | null>(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
-  const selectedTemplate = (templates.find((template) => template.path === templatePath)
-    ?? templates.find((template) => template.name === "Avatar") ?? templates[0])?.path ?? "";
+  const selectedTemplate = templates.find((template) => template.path === templatePath)
+    ?? defaultUnityProjectTemplate(templates);
   const destination = parentPath && name.trim() ? `${parentPath.replace(/[\\/]+$/, "")}\\${name.trim()}` : "";
   const needsRetry = result?.catalogs.some(({ status }) => status !== "registered" && status !== "already_registered");
 
@@ -59,7 +60,7 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
     setSubmitting(true);
     setError("");
     try {
-      setResult(await creation.create({ name: name.trim(), parentPath, templatePath: selectedTemplate }));
+      setResult(await creation.create({ name: name.trim(), parentPath, templatePath: selectedTemplate.path }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -148,21 +149,21 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
             </div>
           ) : (
             <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-              <label className="block space-y-1.5 text-sm font-medium">
-                <span>{t("project.creation.name")}</span>
-                <input autoFocus className={fieldClass} value={name} disabled={submitting} onChange={(event) => setName(event.target.value)} required />
-              </label>
-              <label className="block space-y-1.5 text-sm font-medium">
-                <span>{t("project.creation.template")}</span>
-                <select className={fieldClass} value={selectedTemplate} disabled={submitting || loading || !templates.length} onChange={(event) => setTemplatePath(event.target.value)}>
-                  {!templates.length && <option value="">{t(loading ? "common.loading" : "project.creation.noTemplates")}</option>}
-                  {templates.map(({ name, path, unityVersion }) => {
-                    const label = unityVersion ? `${name} (${unityVersion})` : name;
-                    const duplicate = templates.some((template) => template.path !== path && template.name === name && template.unityVersion === unityVersion);
-                    return <option key={path} value={path}>{duplicate ? `${label} (${path})` : label}</option>;
-                  })}
-                </select>
-              </label>
+              {selectedTemplate ? (
+                <UnityProjectTemplatePicker
+                  templates={templates}
+                  selected={selectedTemplate}
+                  disabled={submitting || loading}
+                  onSelect={setTemplatePath}
+                />
+              ) : (
+                <div className="space-y-1.5">
+                  <p className="text-sm font-medium">{t("project.creation.template")}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {t(loading ? "common.loading" : "project.creation.noTemplates")}
+                  </p>
+                </div>
+              )}
               {optionsError && (
                 <div className="flex flex-wrap items-center gap-2">
                   <p role="alert" className="min-w-0 flex-1 break-words text-sm text-destructive">{optionsError}</p>
@@ -171,15 +172,18 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
                   </Button>
                 </div>
               )}
+              <label className="block space-y-1.5 text-sm font-medium">
+                <span>{t("project.creation.name")}</span>
+                <input autoFocus className={fieldClass} value={name} disabled={submitting} onChange={(event) => setName(event.target.value)} required />
+              </label>
               <div className="space-y-1.5">
                 <p className="text-sm font-medium">{t("project.creation.parentFolder")}</p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button type="button" variant="outline" className="h-9 shrink-0" disabled={submitting || pickingFolder} onClick={() => void chooseFolder()}>
-                    {pickingFolder ? <Loader2 className="h-4 w-4 animate-spin" /> : <Folder className="h-4 w-4" />}
-                    {t("project.creation.chooseFolder")}
-                  </Button>
-                  {parentPath && <p className="min-w-0 flex-1 break-all text-xs text-muted-foreground">{destination || parentPath}</p>}
-                </div>
+                <Button type="button" variant="outline" className="h-9 w-full justify-start gap-2 px-3" disabled={submitting || pickingFolder} onClick={() => void chooseFolder()}>
+                  {pickingFolder ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <Folder className="h-4 w-4 shrink-0" />}
+                  {parentPath && <span className="min-w-0 flex-1 truncate text-left text-muted-foreground" title={parentPath}>{parentPath}</span>}
+                  <span className="shrink-0">{t("project.creation.chooseFolder")}</span>
+                </Button>
+                {destination && <p className="select-text break-all text-xs text-muted-foreground">{t("project.creation.destination", { path: destination })}</p>}
               </div>
               {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
               <div className="flex justify-end">
