@@ -337,6 +337,32 @@ class CrossSessionConversationServiceTests(unittest.TestCase):
         self.assertEqual(service.process_pending(), 1)
         self.assertEqual(len(harness.dispatched), 1)
 
+    def test_exact_followup_read_after_frontend_persists_the_runtime_turn_id(self):
+        harness = Harness()
+        service = harness.service()
+        receipt = service.followup_task({
+            **trusted_context(), "chatId": "offscreen", "message": "Check the fixture.",
+        })
+        client_turn_id = receipt["clientTurnId"]
+        items = harness.chats["offscreen"]["items"]
+        items[-1].update(queuedFrom=False, composerQueued=False)
+        harness.queue[0]["status"] = "acked"
+        for turn_id, client_id, session_id, text in [
+            ("actual-runtime-turn", client_turn_id, "offscreen-session", "Exact answer."),
+            ("old-session-turn", client_turn_id, "old-session", "Old branch."),
+            ("unrelated-runtime-turn", "other-client-turn", "offscreen-session", "Unrelated answer."),
+        ]:
+            items.append({"id": turn_id, "type": "agent", "response": {
+                "turnId": turn_id, "clientTurnId": client_id, "sessionId": session_id,
+                "ok": True, "plan": {"nextStep": "done", "reply": text},
+            }})
+        lookup = {**trusted_context(), "chatId": "offscreen", "clientTurnId": client_turn_id}
+        result = harness.service().read_conversation(lookup)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["reply"]["text"], "Exact answer.")
+        with self.assertRaises(CrossSessionConversationError):
+            harness.service().read_conversation({**lookup, **trusted_context(chat_id="another")})
+
     def _assert_dispatch_failure_pauses_queue_and_marks_chat_retryable(self, status_after_dispatch):
         harness = Harness()
         service = harness.service()

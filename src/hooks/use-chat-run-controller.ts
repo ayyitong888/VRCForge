@@ -373,6 +373,9 @@ export function useChatRunController({
           item.type === "user" && item.clientTurnId === entry.clientTurnId
           && (!staleBranch || (item.queueEnvelope?.sessionId === runtimeSessionId && item.queueEnvelope.queueId === entry.queueId))
         ));
+        // The backend can dispatch this relay using the durable transcript.
+        // Wait for its attributed row before restoring it into the local UI.
+        if (entry.clientTurnId.startsWith("agent-forward-") && savedItem?.deliveryMode !== "trigger_turn") continue;
         const attachments = savedItem?.attachments || (entry.attachments || []) as ChatAttachment[];
         const unresolvedAttachment = attachments.some((attachment) => (
           !savedItem && attachment.payloadKind !== "vault_file"
@@ -1427,7 +1430,12 @@ export function useChatRunController({
           .filter((item) => item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact")
           .map((item) => item.id),
       );
+      const savedFollowupInput = presentingFollowup ? chat?.items.find(
+        (item): item is Extract<ConversationItem, { type: "user" }> =>
+          item.type === "user" && item.clientTurnId === turn.id,
+      ) : undefined;
       const userItem: Extract<ConversationItem, { type: "user" }> = {
+        ...savedFollowupInput,
         id: turn.goalDelivery?.userItemId || `user-${turn.id}`,
         type: "user",
         text: turn.text,

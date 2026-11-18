@@ -288,7 +288,8 @@ class CrossSessionConversationService:
         }
         # The owning runtime can recover results after restart or after an
         # asynchronous continuation. The transcript covers retained replies.
-        exact = self._read_runtime_result(str(target.get("sessionId") or ""), client_turn_id)
+        session_id = str(target.get("sessionId") or "")
+        exact = self._read_runtime_result(session_id, client_turn_id)
         status = str(exact.get("status") or "")
         if status == "running":
             return {**result, "status": "running"}
@@ -296,9 +297,7 @@ class CrossSessionConversationService:
             return {**result, "status": "failed"}
         response = exact.get("response")
         if not isinstance(response, Mapping):
-            reply_id = f"runtime-reply-{client_turn_id}"
-            response = next((row.get("response") for row in items
-                             if isinstance(row, Mapping) and row.get("id") == reply_id), None)
+            response = self._persisted_followup_response(items, session_id, client_turn_id)
         if isinstance(response, Mapping):
             response_status = str(response.get("status") or "")
             if response_status in {"cancelled", "canceled", "interrupted", "failed"}:
@@ -332,6 +331,24 @@ class CrossSessionConversationService:
         if queue_status == "acked":
             return {**result, "status": "result_unavailable"}
         return {**result, "status": item.get("queueStatus") or "queued"}
+
+    @staticmethod
+    def _persisted_followup_response(
+        items: list[Any], session_id: str, client_turn_id: str,
+    ) -> Mapping[str, Any] | None:
+        reply_id = f"runtime-reply-{client_turn_id}"
+        for row in reversed(items):
+            if not isinstance(row, Mapping) or row.get("type") != "agent":
+                continue
+            response = row.get("response")
+            if not isinstance(response, Mapping):
+                continue
+            if row.get("id") == reply_id or (
+                response.get("clientTurnId") == client_turn_id
+                and (response.get("sessionId") or response.get("session_id")) == session_id
+            ):
+                return response
+        return None
 
     def create_conversation(self, params: Mapping[str, Any]) -> dict[str, Any]:
         host = self._host(params)
@@ -964,7 +981,7 @@ class CrossSessionConversationService:
                 raise CrossSessionConversationError("Target conversation disappeared before response persistence.")
             items = list(chat.get("items") or []) if isinstance(chat.get("items"), list) else []
             reply_id = f"runtime-reply-{client_turn_id}"
-            if any(isinstance(item, Mapping) and item.get("id") == reply_id for item in items):
+            if self._persisted_followup_response(items, str(chat.get("sessionId") or ""), client_turn_id) is not None:
                 return
             user_found = False
             updated_items = []
