@@ -414,6 +414,8 @@ class CrossSessionConversationService:
                 }
         client_turn_id = f"{AGENT_RELAY_INPUT_PREFIX}{host['clientTurnId'][:64]}-{host['actionId'][:72]}"
         forwarded_text = self.FORWARD_NOTICE + message
+        if not trigger_turn:
+            forwarded_text = self._note_with_source(forwarded_text, host["chatId"])
         now = self._now()
         active_client_turn_id = (
             "" if trigger_turn else self._active_client_turn(chat_id, session_id, host["projectRoot"])
@@ -696,6 +698,14 @@ class CrossSessionConversationService:
         return str(plan.get("reply") or "")
 
     @classmethod
+    def _note_with_source(cls, text: str, source_chat_id: Any) -> str:
+        if not isinstance(source_chat_id, str) or not source_chat_id or not text.startswith(cls.FORWARD_NOTICE):
+            return text
+        source_link = CHAT_LINK_PREFIX + quote(source_chat_id, safe="")
+        notice = cls.FORWARD_NOTICE.removesuffix("]\n\n")
+        return f"{notice} Source conversation: {source_link}]\n\n{text[len(cls.FORWARD_NOTICE):]}"
+
+    @classmethod
     def _history_before(cls, chat: Mapping[str, Any], client_turn_id: str) -> list[dict[str, Any]]:
         items = chat.get("items") if isinstance(chat.get("items"), list) else []
         history: list[dict[str, Any]] = []
@@ -708,8 +718,12 @@ class CrossSessionConversationService:
                 # relay provenance separate from that transport role; public
                 # readers and memory extraction must never call it user-authored.
                 if public["role"] == "agent_relay":
-                    history.append({"role": "user", "text": public["text"],
-                                    "authorRole": "agent_relay", "forwardedFrom": public.get("forwardedFrom", {})})
+                    source = public.get("forwardedFrom", {})
+                    text = public["text"]
+                    if item.get("deliveryMode") == "queue_only":
+                        text = cls._note_with_source(text, source.get("sourceChatId"))
+                    history.append({"role": "user", "text": text,
+                                    "authorRole": "agent_relay", "forwardedFrom": source})
                 else:
                     history.append({"role": public["role"], "text": public["text"]})
         return history

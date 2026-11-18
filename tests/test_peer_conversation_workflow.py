@@ -11,9 +11,10 @@ import dashboard_server as host
 from tests.test_native_runtime_gateway import call, setup_gateway
 
 
-@pytest.mark.parametrize("scenario", ["app-chat", "general-workspace-plan", "text-continuation", "delayed-peer"])
+@pytest.mark.parametrize("scenario", ["app-chat", "general-workspace-plan", "text-continuation", "delayed-peer", "idle-note"])
 def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_path, monkeypatch, scenario):
     delayed = scenario == "delayed-peer"
+    idle_note = scenario == "idle-note"
     long_reply = scenario == "text-continuation"
     target_plan = delayed or scenario == "general-workspace-plan"
     workspace = str(tmp_path) if target_plan else ""
@@ -61,6 +62,11 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
             result_call = "read-report-tail"
             expected = reply[host.CrossSessionConversationService.MAX_READ_MESSAGE_CHARS:]
         assert tool_data(request, result_call)["reply"]["text"] == expected
+        if not target_plan:
+            note = [row["content"] for row in request["messages"] if row.get("role") == "user"
+                    and "I checked the glossary and am returning the result." in str(row.get("content"))]
+            assert len(note) == 1
+            assert f"vrcforge://chat/{target_id}" in note[0]
         return {"role": "assistant", "content": f"Glossary verification: {evidence}"}
 
     def source_reads_tail(request):
@@ -83,6 +89,24 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
         })
 
     def model_step(request):
+        if idle_note:
+            index = state.get("idle", 0)
+            state["idle"] = index + 1
+            if index == 0:
+                return call("note-tools", "load_internal_tool_block", {
+                    "block": "project_environment/conversations", "tools": ["send_message"],
+                })
+            if index == 1:
+                return call("idle-note", "send_message", {"chatId": target_id, "message": evidence})
+            if index == 2:
+                assert tool_data(request, "idle-note")["status"] == "queued"
+                return {"role": "assistant", "content": "I left the note."}
+            assert index == 3
+            notes = [row["content"] for row in request["messages"]
+                     if row.get("role") == "user" and evidence in str(row.get("content"))]
+            assert len(notes) == 1
+            assert f"vrcforge://chat/{source_id}" in notes[0]
+            return {"role": "assistant", "content": f"I received the note. {evidence}"}
         # A and B can run concurrently; route the deterministic model by
         # the distinct turns it actually receives.
         as_target = any(isinstance(row.get("content"), str)
@@ -122,7 +146,7 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
         assert index == (4 if long_reply or delayed else 3)
         return source_finishes(request)
 
-    request_count = (5 if target_plan else 7) + int(long_reply or delayed)
+    request_count = 4 if idle_note else (5 if target_plan else 7) + int(long_reply or delayed)
     gateway, model, _ = setup_gateway(tmp_path, [model_step] * request_count)
     runtime = Mock(wraps=gateway.runtime_message)
     monkeypatch.setattr(gateway, "runtime_message", runtime)
@@ -173,16 +197,35 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
         host.EVENT_BUS.set_loop(asyncio.get_running_loop())
         service.start()
         try:
-            return await host.app_agent_runtime_message(host.AgentRuntimeMessageRequest(
-                message="Ask the existing glossary chat to verify its wording and summarize its answer.",
+            result = await host.app_agent_runtime_message(host.AgentRuntimeMessageRequest(
+                message="Leave a note for the glossary chat." if idle_note else
+                        "Ask the existing glossary chat to verify its wording and summarize its answer.",
                 session_id=source_session, chatId=source_id, clientTurnId="request-glossary",
                 projectPath=workspace, projectType="general", maxAgenticTurns=6,
+            ))
+            if not idle_note:
+                return result
+            assert result["plan"]["reply"] == "I left the note."
+            assert len(model.requests) == 3
+            assert gateway.list_runtime_followups(session_id=target_id) == []
+            saved = host._load_handoff_chat(target_id, workspace)
+            note = next(item for item in saved["items"] if item.get("forwardedByAgent") is True)
+            assert note["forwardedFrom"]["sourceChatId"] == source_id
+            return await host.app_agent_runtime_message(host.AgentRuntimeMessageRequest(
+                message="What notes did I receive?", session_id=target_session, chatId=target_id,
+                clientTurnId="next-user-turn", projectPath=workspace, projectType="general",
+                history=[{"role": "user", "text": item["text"]} for item in saved["items"]],
             ))
         finally:
             release_target.set()
             await asyncio.to_thread(service.shutdown)
 
     result = asyncio.run(exercise())
+    if idle_note:
+        assert result["plan"]["reply"] == f"I received the note. {evidence}"
+        assert calls[0][0] == "send_message"
+        assert len(model.requests) == request_count
+        return
     assert result["plan"]["reply"] == f"Glossary verification: {evidence}", (result["plan"], calls)
     reads = [receipt for name, receipt in calls if name == "read_conversation"]
     assert sorted(name for name, _ in calls if name != "read_conversation") == (

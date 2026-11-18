@@ -26,11 +26,17 @@ def test_real_queue_only_item_keeps_relay_authorship_in_read_and_memory(tmp_path
     assert entry["role"] == "agent_relay"
     assert entry["forwardedFrom"] == relay["forwardedFrom"]
 
+    # Recover an earlier transcript whose saved relay wrapper had no source line.
+    legacy_text = service.FORWARD_NOTICE + "Use the blue outfit for the delegated task."
+    relay["text"] = legacy_text
     history = service._history_before(harness.chats["offscreen"], "next-user-turn")
     state, _ = make_state()
     state.begin_native_turn("s", binding="b", turn_id="first", message="old request")
     native = state.begin_native_turn("s", binding="b", turn_id="second", message="continue", initial_history=history)
-    assert any("delegated task" in str(row.get("content")) for row in native["messages"])
+    note = next(row["content"] for row in native["messages"] if "delegated task" in str(row.get("content")))
+    assert "Source conversation: vrcforge://chat/source]" in note
+    assert note.endswith("Use the blue outfit for the delegated task.")
+    assert relay["text"] == legacy_text
     assert harness.queue == []
 
 
