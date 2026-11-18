@@ -239,7 +239,8 @@ namespace VRCForge.Editor
 
                 // ---- APPLY -------------------------------------------------------
                 var rootMenu = addMenuToggle ? descriptor.expressionsMenu : null;
-                var saveScope = new WardrobeAssetSaveScope(fxController, !boolParamExists ? parametersAsset : null, rootMenu);
+                var changedParametersAsset = boolParamExists ? null : parametersAsset;
+                var saveScope = new WardrobeAssetSaveScope(fxController, changedParametersAsset, rootMenu);
                 var menusBefore = ExpressionWritePersistence.Capture(rootMenu);
                 var sceneBefore = setObjectsDefaultOff && !defaultOn && resolvedTargets.Any(item => item.gameObject.activeSelf)
                     ? ComponentCrudCore.ResolveSavedSceneFor(descriptor.gameObject) : null;
@@ -254,7 +255,7 @@ namespace VRCForge.Editor
                 AvatarAuthoringCrudCore.EnsureAssetFolder(clipDir);
 
                 // a. Ensure the Bool expression parameter.
-                if (!boolParamExists)
+                if (changedParametersAsset != null)
                 {
                     Undo.RegisterCompleteObjectUndo(parametersAsset, "Add part expression parameter");
                     var list = parametersAsset.parameters.ToList();
@@ -366,14 +367,14 @@ namespace VRCForge.Editor
 
                 var expectedController = WardrobeToggleReadback.DescribeController(fxController, new[] { layerName },
                     new[] { parameterName, partParameterName });
-                var expectedParameters = ExpressionWritePersistence.Capture(parametersAsset);
+                var expectedParameters = ExpressionWritePersistence.Capture(changedParametersAsset);
                 var expectedMenus = ExpressionWritePersistence.Capture(rootMenu).Where(pair =>
                     !menusBefore.TryGetValue(pair.Key, out var before) || !JToken.DeepEquals(pair.Value, before))
                     .ToDictionary(pair => pair.Key, pair => pair.Value);
                 var expectedOn = WardrobeToggleReadback.CaptureActiveCurves(onClip, onObjects, true);
                 var expectedOff = WardrobeToggleReadback.CaptureActiveCurves(offClip, onObjects, false);
                 failurePhase = "asset_save";
-                saveScope.Save(fxController, !boolParamExists ? parametersAsset : null, rootMenu, onClip, offClip);
+                saveScope.Save(fxController, changedParametersAsset, rootMenu, onClip, offClip);
                 var sceneAfter = sceneBefore == null ? null : ComponentCrudCore.SaveAndResolveScene(sceneBefore);
                 failurePhase = "persisted_readback";
                 var controllerReadback = WardrobeToggleReadback.ReadController(fxControllerPath, expectedController,
