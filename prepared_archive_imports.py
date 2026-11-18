@@ -19,6 +19,7 @@ from prepared_file_imports import (
     capture_directory,
     capture_regular_file,
     verify_directory,
+    verify_opened_regular_file,
     verify_regular_file,
 )
 
@@ -58,6 +59,7 @@ def _entry_manifest(
     *,
     selected_paths: set[str] | None = None,
     max_uncompressed_bytes: int | None = MAX_UNCOMPRESSED_BYTES,
+    hash_contents: bool = True,
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -101,25 +103,27 @@ def _entry_manifest(
             )
         if size > 0 and (compressed == 0 or size / compressed > MAX_COMPRESSION_RATIO):
             raise ValueError(f"Archive member compression ratio exceeds the extraction cap: {name}")
-        digest = hashlib.sha256()
-        bytes_read = 0
-        with archive.open(info, "r") as handle:
-            while chunk := handle.read(1024 * 1024):
-                bytes_read += len(chunk)
-                if bytes_read > size:
-                    raise ValueError(f"Archive member exceeded its declared size: {name}")
-                digest.update(chunk)
-        if bytes_read != size:
-            raise ValueError(f"Archive member size did not match its central-directory record: {name}")
-        entries.append({
+        entry = {
             "path": name,
             "zipPath": info.filename,
             "crc": int(info.CRC),
             "compressedSize": compressed,
             "compressionRatio": (float(size) / float(compressed)) if compressed else (0.0 if size == 0 else float("inf")),
             "size": size,
-            "sha256": digest.hexdigest(),
-        })
+        }
+        if hash_contents:
+            digest = hashlib.sha256()
+            bytes_read = 0
+            with archive.open(info, "r") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    bytes_read += len(chunk)
+                    if bytes_read > size:
+                        raise ValueError(f"Archive member exceeded its declared size: {name}")
+                    digest.update(chunk)
+            if bytes_read != size:
+                raise ValueError(f"Archive member size did not match its central-directory record: {name}")
+            entry["sha256"] = digest.hexdigest()
+        entries.append(entry)
     if selected is not None and found_selected != selected:
         raise ValueError("Selected archive member is absent or duplicated.")
     keys = sorted(archive_paths)
@@ -131,21 +135,14 @@ def _entry_manifest(
     return entries
 
 
-def _opened_source_matches(handle: Any, identity: dict[str, Any], expected_sha256: str) -> None:
-    opened = os.fstat(handle.fileno())
-    if (
-        int(opened.st_dev) != int(identity.get("device", -1))
-        or int(opened.st_ino) != int(identity.get("inode", -1))
-        or int(opened.st_size) != int(identity.get("size", -1))
-        or int(opened.st_mtime_ns) != int(identity.get("mtimeNs", -1))
-    ):
-        raise ValueError("Archive source handle identity drifted after approval.")
-    digest = hashlib.sha256()
-    while chunk := handle.read(1024 * 1024):
-        digest.update(chunk)
-    if digest.hexdigest() != expected_sha256:
-        raise ValueError("Archive source content drifted after approval.")
-    handle.seek(0)
+def _manifest_metadata(manifest: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{key: value for key, value in entry.items() if key != "sha256"} for entry in manifest]
+
+
+def _opened_source_matches(
+    handle: Any, identity: dict[str, Any], expected_sha256: str, *, require_digest: bool = False,
+) -> None:
+    verify_opened_regular_file(handle, identity, expected_sha256, label="Archive source", require_digest=require_digest)
 
 
 def prepare_zip_extract(
@@ -398,7 +395,7 @@ def execute_zip_member_materialization(facts: dict[str, Any]) -> dict[str, Any]:
     """Materialize sealed members in sealed order using one verified read handle."""
     if not isinstance(facts, dict) or facts.get("schema") != "vrcforge.prepared-zip-materialization.v1":
         raise ValueError("Prepared ZIP materialization facts are invalid.")
-    source = verify_regular_file(facts["sourceIdentity"], facts["sourceSha256"], label="Archive source")
+    source = Path(facts["sourceIdentity"]["path"])
     parent = verify_directory(facts["tempParent"], label="Materialization temp parent")
     manifest = facts.get("manifest")
     selected = facts.get("selected")
@@ -422,8 +419,9 @@ def execute_zip_member_materialization(facts: dict[str, Any]) -> dict[str, Any]:
                     archive,
                     selected_paths=selected_paths,
                     max_uncompressed_bytes=None,
-                ) != manifest:
-                    raise ValueError("Archive central directory or member content drifted after approval.")
+                    hash_contents=False,
+                ) != _manifest_metadata(manifest):
+                    raise ValueError("Archive central directory drifted after approval.")
                 manifest_by_path = {str(entry["path"]): entry for entry in manifest}
                 seen_targets: set[str] = set()
                 seen_paths: set[str] = set()
@@ -489,7 +487,7 @@ def execute_zip_extract(facts: dict[str, Any]) -> dict[str, Any]:
     """Revalidate sealed facts and extract only into the owned create-new root."""
     if not isinstance(facts, dict) or facts.get("schema") != "vrcforge.prepared-zip-extract.v1":
         raise ValueError("Prepared ZIP extraction facts are invalid.")
-    source = verify_regular_file(facts["sourceIdentity"], facts["sourceSha256"], label="Archive source")
+    source = Path(facts["sourceIdentity"]["path"])
     project = verify_directory(facts["project"], label="Unity project")
     assets = verify_directory(facts["assets"], label="Unity Assets")
     for identity in facts.get("parentIdentities") or []:
@@ -517,8 +515,8 @@ def execute_zip_extract(facts: dict[str, Any]) -> dict[str, Any]:
         with source.open("rb") as source_handle:
             _opened_source_matches(source_handle, facts["sourceIdentity"], facts["sourceSha256"])
             with zipfile.ZipFile(source_handle) as archive:
-                if _entry_manifest(archive) != manifest:
-                    raise ValueError("Archive central directory or member content drifted after approval.")
+                if _entry_manifest(archive, hash_contents=False) != _manifest_metadata(manifest):
+                    raise ValueError("Archive central directory drifted after approval.")
                 _create_safe_root(assets, root, created_dirs)
                 for expected in manifest:
                     relative = str(expected["path"])

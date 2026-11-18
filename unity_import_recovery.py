@@ -101,17 +101,17 @@ def _verify_operation_sources(journal: dict, package: str) -> list[dict]:
         _require(not facts and not receipts, "Direct import unexpectedly owns temporary sources.")
         if item.get("folderRootIdentity") is not None:
             verify_directory(item["folderRootIdentity"], label="Recovery source folder")
-        verify_regular_file({k: v for k, v in identity.items() if k != "sha256"}, identity["sha256"], label="Recovery original package")
+        verify_regular_file({k: v for k, v in identity.items() if k != "sha256"}, identity["sha256"], label="Recovery original package", require_digest=True)
         return []
     _require(type(index) is int and index == 0 and len(facts) == len(receipts) == 1, "Materialization ownership is incomplete.")
     fact, receipt = facts[0], receipts[0]
-    source = verify_regular_file(fact["sourceIdentity"], fact["sourceSha256"], label="Recovery original archive")
+    source = Path(fact["sourceIdentity"]["path"])
     parent = verify_directory(fact["tempParent"], label="Recovery materialization parent")
     selected = fact["selected"]
     _require(len(selected) == 1 and receipt.get("schema") == "vrcforge.zip-materialization-receipt.v1"
              and len(receipt.get("ownedFiles", [])) == 1, "Materialization receipt is incomplete.")
     with source.open("rb") as handle:
-        _opened_source_matches(handle, fact["sourceIdentity"], fact["sourceSha256"])
+        _opened_source_matches(handle, fact["sourceIdentity"], fact["sourceSha256"], require_digest=True)
         with zipfile.ZipFile(handle) as archive:
             actual = _entry_manifest(archive, selected_paths={entry["path"] for entry in selected}, max_uncompressed_bytes=None)
     _require(actual == fact["manifest"], "Recovery original archive manifest changed.")
@@ -119,7 +119,7 @@ def _verify_operation_sources(journal: dict, package: str) -> list[dict]:
     _require(_same_path(parent / member["targetName"], package) and _same_path(owned.get("path"), package)
              and owned.get("sha256") == member["sha256"] == identity["sha256"]
              and owned.get("size") == member["size"] == identity["size"], "Owned source differs from its sealed archive member.")
-    verify_regular_file({k: v for k, v in owned.items() if k != "sha256"}, owned["sha256"], label="Recovery owned package")
+    verify_regular_file({k: v for k, v in owned.items() if k != "sha256"}, owned["sha256"], label="Recovery owned package", require_digest=True)
     # Recheck the original container after reading its manifest as well.
     verify_regular_file(fact["sourceIdentity"], fact["sourceSha256"], label="Recovery original archive")
     return receipts

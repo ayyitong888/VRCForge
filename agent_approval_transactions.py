@@ -24,6 +24,7 @@ from external_tool_result_contract import (
     external_write_failure_view,
     is_gesture_manager_entry_pending,
 )
+from prepared_file_imports import prepared_source_read_scope
 from prepared_unity_execution import (
     PREPARED_EVIDENCE_KEY,
     PREPARED_UNITY_EXECUTION_ARGUMENT_KEY,
@@ -1943,6 +1944,7 @@ class AgentApprovalTransactionService:
             payload["error"] = str(applied.get("error") or "Scoped-rule execution failed.")
         return payload
 
+    @prepared_source_read_scope()
     def apply_approved(self, params: dict[str, Any]) -> dict[str, Any]:
         approval_id = str(params.get("approval_id") or params.get("approvalId") or "").strip()
         if not approval_id:
@@ -4594,6 +4596,7 @@ class AgentApprovalTransactionService:
             )
         return result
 
+    @prepared_source_read_scope()
     def execute_prepared_external_mcp_write(
         self,
         prepared: Mapping[str, Any],

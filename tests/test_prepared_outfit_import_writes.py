@@ -575,7 +575,7 @@ def test_prepared_import_rejects_source_drift_before_core(tmp_path: Path, monkey
     assert result["committed"] is False
     assert result["commitState"] == "not_started"
     assert result["checkpointRecoveryRequired"] is False
-    assert "identity or content drifted" in result["error"]
+    assert result["error"] == "该文件在预览后被修改"
 
 
 def test_prepared_import_executes_exact_calls_and_verifies_receipts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

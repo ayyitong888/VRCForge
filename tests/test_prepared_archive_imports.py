@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import zipfile
 from pathlib import Path
 
@@ -55,9 +56,17 @@ def test_zip_target_root_race_is_zero_overwrite(tmp_path: Path) -> None:
 def test_zip_source_drift_makes_zero_project_write(tmp_path: Path) -> None:
     project, source, facts = _facts(tmp_path)
     _zip(source, {"Folder/a.prefab": b"changed"})
-    with pytest.raises(ValueError, match="drifted"):
+    with pytest.raises(ValueError, match="^该文件在预览后被修改$"):
         archive_imports.execute_zip_extract(facts)
     assert not (project / "Assets" / "VRCForge").exists()
+
+
+def test_zip_extract_accepts_timestamp_only_change(tmp_path: Path) -> None:
+    project, source, facts = _facts(tmp_path)
+    stamp = source.stat()
+    os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 10_000_000_000))
+    assert archive_imports.execute_zip_extract(facts)["fileCount"] == 2
+    assert (project / facts["targetRootRelativePath"] / "Folder/a.prefab").read_bytes() == b"prefab"
 
 
 def test_zip_parent_identity_drift_is_rejected_before_create(tmp_path: Path) -> None:
@@ -87,7 +96,7 @@ def test_zip_partial_failure_cleans_only_owned_outputs(monkeypatch, tmp_path: Pa
         if mode == "r":
             calls += 1
             # Preparation has already run; fail the second execution member.
-            if calls > 3:
+            if calls > 1:
                 raise OSError("simulated read failure")
         return original_open(self, name, mode, *args, **kwargs)
 

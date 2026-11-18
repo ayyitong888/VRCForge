@@ -10,6 +10,8 @@ from prepared_file_imports import (
     cleanup_owned_import,
     copy_approved_file_create_new,
     prepare_project_asset_target,
+    prepared_source_read_scope,
+    verify_regular_file,
 )
 from prepared_loose_outfit_import import execute_loose_outfit_import, prepare_loose_outfit_import
 
@@ -40,6 +42,41 @@ def test_prepare_and_execute_create_new_manifest_with_meta(tmp_path: Path) -> No
     assert (project / "Assets/VRCForge/Imported/Dress.prefab").read_bytes() == b"prefab"
     assert (project / "Assets/VRCForge/Imported/Dress.prefab.meta").read_bytes() == b"meta"
     assert (project / "Assets/VRCForge/Imported/nested/Texture.png").read_bytes() == b"png"
+
+
+def test_loose_import_allows_timestamp_only_change_and_verifies_target(tmp_path: Path, monkeypatch) -> None:
+    project, source = _project(tmp_path), _source(tmp_path)
+    plan = prepare_loose_outfit_import(source_root=source, project_root=project, target_folder="Assets/Imported")
+    path = source / "Dress.prefab"
+    stamp = path.stat()
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 10_000_000_000))
+    read_bytes = 0
+    open_path = Path.open
+
+    def track_source(path_to_open, mode="r", *args, **kwargs):
+        handle = open_path(path_to_open, mode, *args, **kwargs)
+        if path_to_open != path or mode != "rb":
+            return handle
+        read = handle.read
+
+        def counted_read(*args):
+            nonlocal read_bytes
+            body = read(*args)
+            read_bytes += len(body)
+            return body
+
+        handle.read = counted_read
+        return handle
+
+    monkeypatch.setattr(Path, "open", track_source)
+    item = next(item for item in plan["files"] if item["relativePath"] == "Dress.prefab")
+    with prepared_source_read_scope():
+        # Checkpoint validation and the Windows copy share the same apply scope.
+        assert verify_regular_file(item["sourceIdentity"], item["sourceSha256"], label="Import source") == path
+        result = execute_loose_outfit_import(plan)
+    assert result["copiedFileCount"] == 3
+    assert read_bytes == 2 * len(b"prefab")
+    assert (project / "Assets/Imported/Dress.prefab").read_bytes() == b"prefab"
 
 
 def test_completed_copy_keeps_commit_facts_when_later_console_validation_fails(tmp_path: Path) -> None:
@@ -87,8 +124,11 @@ def test_prepare_and_execute_copies_asmdef_and_companion_meta_with_readback(tmp_
 def test_source_content_or_manifest_drift_blocks_before_output(tmp_path: Path) -> None:
     project, source = _project(tmp_path), _source(tmp_path)
     plan = prepare_loose_outfit_import(source_root=source, project_root=project, target_folder="Assets/VRCForge/Imported")
-    (source / "Dress.prefab").write_bytes(b"changed")
-    with pytest.raises(ValueError, match="drifted"):
+    edited = source / "Dress.prefab"
+    stamp = edited.stat()
+    edited.write_bytes(b"edited")
+    os.utime(edited, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 10_000_000_000))
+    with pytest.raises(ValueError, match="^该文件在预览后被修改$"):
         execute_loose_outfit_import(plan)
     assert not (project / "Assets/VRCForge/Imported").exists()
 

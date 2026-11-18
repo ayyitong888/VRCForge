@@ -146,7 +146,7 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
                                              "sha256": selected["sha256"], "size": selected["size"]}
                         if identity != expected_identity or package.exists() or package.is_symlink():
                             raise ValueError("The nested package target drifted from its sealed ZIP member.")
-                        source = verify_regular_file(facts["sourceIdentity"], facts["sourceSha256"], label="Archive source")
+                        source = Path(facts["sourceIdentity"]["path"])
                         handle = resources.enter_context(source.open("rb"))
                         _opened_source_matches(handle, facts["sourceIdentity"], facts["sourceSha256"])
                         container = resources.enter_context(zipfile.ZipFile(handle))
@@ -158,13 +158,15 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
                             container,
                             selected_paths={str(selected["path"])},
                             max_uncompressed_bytes=None,
+                            hash_contents=False,
                         )
                         # The seal is the selected entry itself: path, raw zip
                         # name, CRC, sizes, content hash and ratio.  Whole-list
                         # manifest equality broke across producer versions and
                         # companion files the import never touches.
                         if not any(
-                            selected == {**entry, "targetName": target_name} for entry in manifest
+                            {key: value for key, value in selected.items() if key != "sha256"}
+                            == {**entry, "targetName": target_name} for entry in manifest
                         ):
                             raise ValueError("The nested package ZIP member drifted from its sealed identity.")
                         # The executor owns the future materialization. Inspection uses only an

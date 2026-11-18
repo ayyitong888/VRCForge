@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 from prepared_file_imports import (
     capture_directory,
+    capture_file_identity,
     capture_regular_file,
     cleanup_owned_import,
     copy_approved_file_create_new,
@@ -63,7 +64,7 @@ def _manifest_paths(root: Path, allowed_suffixes: frozenset[str]) -> list[tuple[
         meta = path.with_name(path.name + ".meta")
         if meta.exists() or meta.is_symlink():
             # A present companion must itself be a regular, non-reparse file.
-            capture_regular_file(meta, label="Loose outfit companion metadata")
+            capture_file_identity(meta, label="Loose outfit companion metadata")
             selected.append((meta, _relative(meta, root)))
     return sorted(selected, key=lambda item: item[1].lower())
 

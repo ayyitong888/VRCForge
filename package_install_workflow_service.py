@@ -1603,6 +1603,7 @@ class VpmPackageInstallExecutor:
                 _ensure_dict(binary_evidence.get("identity")),
                 str(binary_evidence.get("sha256") or ""),
                 label="VPM CLI",
+                require_digest=True,
             )
             package_id = str(evidence.get("packageId") or "")
             package_version = str(evidence.get("packageVersion") or "")

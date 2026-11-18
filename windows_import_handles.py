@@ -375,21 +375,17 @@ def secure_copy_create_new(
         target_handle = _create_target_handle(target)
         target_fd = msvcrt.open_osfhandle(target_handle, os.O_BINARY | os.O_RDWR)
         with os.fdopen(target_fd, "w+b", closefd=False) as target_file:
-            digest = hashlib.sha256()
             for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
                 target_file.write(chunk)
-                digest.update(chunk)
             target_file.flush()
             if not _kernel32.FlushFileBuffers(target_handle):
                 raise _win_error("Could not flush approval-bound target")
-            copied_digest = digest.hexdigest()
-            if copied_digest != source_sha256:
-                raise WindowsImportHandleError("Copied import bytes do not match the approval-bound source hash.")
             target_file.seek(0)
             readback = hashlib.sha256()
             for chunk in iter(lambda: target_file.read(1024 * 1024), b""):
                 readback.update(chunk)
-            if readback.hexdigest() != source_sha256:
+            target_sha256 = readback.hexdigest()
+            if target_sha256 != source_sha256:
                 raise WindowsImportHandleError("Imported target handle readback hash does not match approval.")
             opened = os.fstat(target_fd)
             target_identity = {
@@ -407,12 +403,12 @@ def secure_copy_create_new(
             "guardDirectories": [item["identity"] for item in held if not item["created"]],
             "createdDirectories": [item["identity"] for item in held if item["created"]],
             "targetIdentity": target_identity,
-            "targetSha256": source_sha256,
+            "targetSha256": target_sha256,
         }
         os.close(target_fd)
         target_fd = None
         target_handle = None
-        return source_sha256, ownership
+        return target_sha256, ownership
     except Exception as exc:
         cleanup_errors: list[str] = []
         if target_handle is not None:

@@ -9,6 +9,9 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from contextlib import contextmanager
+from contextvars import ContextVar
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -16,6 +19,20 @@ from windows_import_handles import secure_cleanup_owned, secure_copy_create_new
 
 
 _REPARSE_POINT = 0x0400
+FILE_CHANGED_AFTER_PREVIEW = "该文件在预览后被修改"
+_VERIFIED_SOURCES: ContextVar[dict[str, tuple[dict[str, Any], str]] | None] = ContextVar(
+    "verified_prepared_import_sources", default=None,
+)
+
+
+@contextmanager
+def prepared_source_read_scope() -> Iterator[None]:
+    """Reuse a source read between checkpoint preparation and the same apply."""
+    token = _VERIFIED_SOURCES.set({})
+    try:
+        yield
+    finally:
+        _VERIFIED_SOURCES.reset(token)
 
 
 def _stat_identity(path: Path, *, kind: str) -> dict[str, Any]:
@@ -24,7 +41,7 @@ def _stat_identity(path: Path, *, kind: str) -> dict[str, Any]:
     except OSError as exc:
         raise ValueError(f"{kind} is unavailable: {path}") from exc
     attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
-    if path.is_symlink() or attributes & _REPARSE_POINT:
+    if stat.S_ISLNK(metadata.st_mode) or attributes & _REPARSE_POINT:
         raise ValueError(f"{kind} may not be a symlink or reparse point: {path}")
     if kind.endswith("directory") and not stat.S_ISDIR(metadata.st_mode):
         raise ValueError(f"{kind} is not a directory: {path}")
@@ -75,11 +92,59 @@ def capture_regular_file(path: Path, *, label: str) -> tuple[dict[str, Any], str
     return identity, digest.hexdigest()
 
 
-def verify_regular_file(identity: dict[str, Any], expected_sha256: str, *, label: str) -> Path:
+def capture_file_identity(path: Path, *, label: str) -> dict[str, Any]:
+    return _stat_identity(path, kind=f"{label} file")
+
+
+def _source_metadata_matches(actual: dict[str, Any], approved: dict[str, Any], digest: str) -> bool:
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("Prepared import source digest is invalid.")
+    if any(actual[key] != approved.get(key) for key in ("path", "device", "inode", "attributes", "size")):
+        raise ValueError(FILE_CHANGED_AFTER_PREVIEW)
+    checks = _VERIFIED_SOURCES.get()
+    return bool(actual["inode"] and (actual["mtimeNs"] == approved.get("mtimeNs")
+        or (checks is not None and checks.get(actual["path"]) == (actual, digest))))
+
+
+def _source_handle_identity(handle: Any, path_identity: dict[str, Any]) -> dict[str, Any]:
+    opened = os.fstat(handle.fileno())
+    return {
+        "path": path_identity["path"], "device": int(opened.st_dev), "inode": int(opened.st_ino),
+        "attributes": int(getattr(opened, "st_file_attributes", path_identity["attributes"]) or 0),
+        "size": int(opened.st_size), "mtimeNs": int(opened.st_mtime_ns),
+    }
+
+
+def verify_opened_regular_file(
+    handle: Any, identity: dict[str, Any], expected_sha256: str, *, label: str, require_digest: bool = False,
+) -> dict[str, Any]:
     path = Path(str(identity.get("path") or ""))
-    actual, digest = capture_regular_file(path, label=label)
-    if actual != identity or digest != expected_sha256:
-        raise ValueError(f"{label} identity or content drifted after approval.")
+    actual = capture_file_identity(path, label=label)
+    if _source_handle_identity(handle, actual) != actual:
+        raise ValueError(FILE_CHANGED_AFTER_PREVIEW)
+    if _source_metadata_matches(actual, identity, expected_sha256) and not require_digest:
+        return actual
+    digest = hashlib.sha256()
+    while chunk := handle.read(1024 * 1024):
+        digest.update(chunk)
+    if (digest.hexdigest() != expected_sha256 or _source_handle_identity(handle, actual) != actual
+            or capture_file_identity(path, label=label) != actual):
+        raise ValueError(FILE_CHANGED_AFTER_PREVIEW)
+    handle.seek(0)
+    checks = _VERIFIED_SOURCES.get()
+    if checks is not None:
+        checks[actual["path"]] = (actual, expected_sha256)
+    return actual
+
+
+def verify_regular_file(
+    identity: dict[str, Any], expected_sha256: str, *, label: str, require_digest: bool = False,
+) -> Path:
+    path = Path(str(identity.get("path") or ""))
+    actual = capture_file_identity(path, label=label)
+    if not _source_metadata_matches(actual, identity, expected_sha256) or require_digest:
+        with path.open("rb") as handle:
+            verify_opened_regular_file(handle, identity, expected_sha256, label=label, require_digest=require_digest)
     return path
 
 
@@ -208,31 +273,10 @@ def copy_approved_file_create_new(
     if target.exists() or target.is_symlink():
         raise ValueError("The approval-bound import target appeared after approval.")
     created_directories: list[dict[str, Any]] = []
-    digest = hashlib.sha256()
     target_identity: dict[str, Any] | None = None
     try:
         with source.open("rb") as source_handle:
-            opened_source = os.fstat(source_handle.fileno())
-            opened_source_identity = {
-                "path": os.path.abspath(source),
-                "device": int(opened_source.st_dev),
-                "inode": int(opened_source.st_ino),
-                "attributes": int(getattr(opened_source, "st_file_attributes", 0) or 0),
-                "size": int(opened_source.st_size),
-                "mtimeNs": int(opened_source.st_mtime_ns),
-            }
-            if opened_source_identity != source_identity:
-                raise ValueError("Import source identity drifted after approval.")
-            source_digest = hashlib.sha256()
-            for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
-                source_digest.update(chunk)
-            if source_digest.hexdigest() != source_sha256:
-                raise ValueError("Import source content drifted after approval.")
-            if os.fstat(source_handle.fileno()).st_mtime_ns != opened_source.st_mtime_ns:
-                raise ValueError("Import source changed while it was verified.")
-            if _stat_identity(source, kind="Import source file") != source_identity:
-                raise ValueError("Import source path identity drifted after approval.")
-            source_handle.seek(0)
+            opened_source = verify_opened_regular_file(source_handle, source_identity, source_sha256, label="Import source")
 
             if os.name == "nt":
                 copied_digest, ownership = secure_copy_create_new(
@@ -246,19 +290,13 @@ def copy_approved_file_create_new(
                     parent_identities=parent_identities,
                     absent_parent_relative_paths=absent_parent_relative_paths,
                 )
-                closed_source = os.fstat(source_handle.fileno())
-                if (
-                    int(closed_source.st_dev) != int(opened_source.st_dev)
-                    or int(closed_source.st_ino) != int(opened_source.st_ino)
-                    or int(closed_source.st_size) != int(opened_source.st_size)
-                    or int(closed_source.st_mtime_ns) != int(opened_source.st_mtime_ns)
-                ):
+                if _source_handle_identity(source_handle, opened_source) != opened_source:
                     cleanup_error = secure_cleanup_owned(target, ownership)
                     if cleanup_error:
                         raise RuntimeError(
                             f"Import source changed during copy; handle-bound target cleanup failed: {cleanup_error}"
                         )
-                    raise ValueError("Import source changed while it was copied.")
+                    raise ValueError(FILE_CHANGED_AFTER_PREVIEW)
                 return target, copied_digest, ownership
 
             # Recheck every existing and newly created parent immediately before
@@ -285,20 +323,10 @@ def copy_approved_file_create_new(
                 }
                 for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
                     target_handle.write(chunk)
-                    digest.update(chunk)
                 target_handle.flush()
                 os.fsync(target_handle.fileno())
-            closed_source = os.fstat(source_handle.fileno())
-            if (
-                int(closed_source.st_dev) != int(opened_source.st_dev)
-                or int(closed_source.st_ino) != int(opened_source.st_ino)
-                or int(closed_source.st_size) != int(opened_source.st_size)
-                or int(closed_source.st_mtime_ns) != int(opened_source.st_mtime_ns)
-            ):
-                raise ValueError("Import source changed while it was copied.")
-        copied_digest = digest.hexdigest()
-        if copied_digest != source_sha256:
-            raise ValueError("Copied import bytes do not match the approval-bound source hash.")
+            if _source_handle_identity(source_handle, opened_source) != opened_source:
+                raise ValueError(FILE_CHANGED_AFTER_PREVIEW)
         # Reopen and hash the target so the result is a readback, not only the
         # bytes seen while writing.
         readback_identity, readback_digest = capture_regular_file(target, label="Imported target")
