@@ -77,7 +77,7 @@ def test_dashboard_has_no_package_lifecycle_facade_or_monkeypatch_seam() -> None
         "def _build_package_install_fix_suggestions(",
     ):
         assert forbidden not in source
-    assert "def _package_entry_version(" in source
+    assert "def detect_unity_project_package(" not in source
     assert "def _is_unity_project_root(" in source
 
 

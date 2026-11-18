@@ -63,8 +63,7 @@ _PREPARATION_ACTIONS: dict[str, dict[str, Any]] = {
         "id": "install_or_repair_editor_plugin",
         "kind": "reviewed_project_setup",
         "instruction": (
-            "Open onboarding Step 3. In Unity, Import All from VRCForge.unitypackage; "
-            "keep it open, then select it in VRCForge and recheck."
+            "Use vrcforge_install_unity_core to install or repair the bundled Core in the selected project."
         ),
         "approvalRequired": True,
     },
@@ -72,28 +71,15 @@ _PREPARATION_ACTIONS: dict[str, dict[str, Any]] = {
         "id": "install_required_sdk",
         "kind": "supervised_dependency_install",
         "instruction": (
-            "Install or repair the official VRChat Avatar SDK through VCC or ALCOM, "
-            "then wait for Unity to finish compiling."
-        ),
-        "approvalRequired": True,
-    },
-    "mcp_dependency_present": {
-        "id": "install_mcp_dependency",
-        "kind": "supervised_dependency_install",
-        "instruction": (
-            "Request the Unity MCP dependency through the supervised package "
-            "workflow and wait for installation to finish."
+            "Use vrcforge_package_install_plan for the missing SDK package and follow its executable installation route."
         ),
         "approvalRequired": True,
     },
     "newtonsoft_dependency_present": {
-        "id": "install_newtonsoft_dependency",
-        "kind": "supervised_dependency_install",
-        "instruction": (
-            "Install or repair the official VRChat Avatar SDK through VCC or ALCOM, "
-            "then wait for Unity to finish compiling before running Know Yourself again."
-        ),
-        "approvalRequired": True,
+        "id": "diagnose_unity_package_resolution",
+        "kind": "read_only_diagnosis_then_supervised_fix",
+        "instruction": "Check Unity package resolution and the project Editor log for the Newtonsoft dependency.",
+        "approvalRequired": False,
     },
 }
 
@@ -171,6 +157,17 @@ def _preparation_action(step: Mapping[str, Any]) -> dict[str, Any]:
             ),
             "approvalRequired": False,
         }
+    if step["status"] == "unknown" and step["id"] in {
+        "editor_plugin_present", "required_sdk_present", "mcp_dependency_present",
+    }:
+        return {
+            "id": "inspect_project_packages",
+            "kind": "read_only_diagnosis",
+            "instruction": "Inspect the selected project's Core and package metadata before choosing a repair.",
+            "approvalRequired": False,
+        }
+    if step["id"] == "mcp_dependency_present":
+        return _PREPARATION_ACTIONS["editor_plugin_present"]
     return _PREPARATION_ACTIONS[step["id"]]
 
 
@@ -231,7 +228,7 @@ def _preparation_steps(
         steps.append(
             {
                 "id": "newtonsoft_dependency_present",
-                "title": "VRChat Avatar SDK",
+                "title": "Unity Newtonsoft JSON",
                 "source": "doctor",
                 "sourceCheck": "package.newtonsoft",
                 "status": "error",
@@ -274,28 +271,21 @@ def _compile_readback(compile_diagnostics: Mapping[str, Any]) -> dict[str, Any]:
     has_errors_value = _bounded_named_value(raw_result, {"haserrors"})
     compiling_value = _bounded_named_value(raw_result, {"iscompiling", "compiling"})
     if error_count_value is None:
-        match = re.search(r"\berrorCount\s*:\s*(\d+)", stdout, flags=re.IGNORECASE)
-        error_count_value = match.group(1) if match else 0
-    else:
-        match = None
-    has_structured_evidence = any(
-        value is not None
-        for value in (has_errors_value, compiling_value, _bounded_named_value(raw_result, {"errorcount"}))
-    ) or match is not None or bool(re.search(r"\bhasErrors\s*:", stdout, flags=re.IGNORECASE))
-    if not has_structured_evidence:
+        count_match = re.search(r"\berrorCount\s*:\s*(\d+)", stdout, re.IGNORECASE)
+        error_count_value = count_match.group(1) if count_match else None
+    if has_errors_value is None:
+        errors_match = re.search(r"\bhasErrors\s*:\s*(true|false)\b", stdout, re.IGNORECASE)
+        has_errors_value = errors_match.group(1) if errors_match else None
+    count_known = str(error_count_value).isdigit()
+    error_count = int(error_count_value) if count_known else None
+    error_flag = str(has_errors_value).strip().lower()
+    has_errors = error_flag == "true" or bool(error_count)
+    compiling = str(compiling_value).lower() == "true" or bool(re.search(r"\bisCompiling\s*:\s*True\b", stdout, re.IGNORECASE))
+    captured = _bounded_named_value(raw_result, {"capturecomplete"})
+    if not has_errors and not compiling and (
+        captured is False or (not count_known and error_flag != "false")
+    ):
         return {"status": "unavailable", "checked": True, "hasErrors": None, "errorCount": None}
-    error_count = _nonnegative_int(error_count_value)
-    has_errors = (
-        has_errors_value is True
-        or str(has_errors_value or "").strip().lower() == "true"
-        or bool(re.search(r"\bhasErrors\s*:\s*True\b", stdout, flags=re.IGNORECASE))
-        or error_count > 0
-    )
-    compiling = (
-        compiling_value is True
-        or str(compiling_value or "").strip().lower() == "true"
-        or bool(re.search(r"\bisCompiling\s*:\s*True\b", stdout, flags=re.IGNORECASE))
-    )
     return {
         "status": "errors" if has_errors else "compiling" if compiling else "clean",
         "checked": True,
@@ -656,7 +646,6 @@ def _blocking_gap_projection(
     *,
     preparation: list[dict[str, Any]],
     live: Mapping[str, Any],
-    focus_status: str,
 ) -> list[dict[str, Any]]:
     preparation_by_id = {str(item.get("id")): item for item in preparation}
     result: list[dict[str, Any]] = []
@@ -690,14 +679,6 @@ def _blocking_gap_projection(
                 "selected_project_process_unavailable",
                 "unavailable",
                 "recheck_selected_unity_project",
-            )
-        elif gap_id in {"unity_editor_activation", "unity_editor_activation_stale"}:
-            fields = (
-                "user_action",
-                focus_status,
-                "editor_focus_scope_stale" if gap_id.endswith("stale") else "editor_focus_required",
-                "observed",
-                "activate_unity_editor",
             )
         elif gap_id == "bridge":
             fields = (
@@ -797,20 +778,8 @@ def _readiness_sequence(
             "source": "user_action_and_live_readback",
             "status": focus_status,
             "ready": focus_acknowledged or focus_status == "satisfied_by_live_readback",
-            "reasonCode": (
-                None
-                if focus_acknowledged or focus_status == "satisfied_by_live_readback"
-                else "editor_focus_scope_stale"
-                if focus_status == "stale_acknowledgement"
-                else "selected_project_not_running"
-                if focus_status == "blocked_by_project_not_open"
-                else "selected_project_process_unavailable"
-                if focus_status == "blocked_by_project_process_unknown"
-                else "prerequisites_not_ready"
-                if focus_status == "blocked"
-                else "editor_focus_required"
-            ),
-            "nextActionId": "activate_unity_editor",
+            "reasonCode": None,
+            "nextActionId": "retry_unity_bridge",
         }
     )
     for item_id, title in (
@@ -855,8 +824,6 @@ def _next_action(
     preparation: list[dict[str, Any]],
     live: Mapping[str, Any],
     project_context: Mapping[str, Any],
-    *,
-    editor_focus_acknowledged: bool,
 ) -> dict[str, Any]:
     for step in preparation:
         if not step["ready"]:
@@ -865,21 +832,11 @@ def _next_action(
     selected_project_running = project_context.get("selectedProjectRunning")
     if selected_project_running is not True:
         if selected_project_running is False:
-            launch_configured = project_context.get("editorLaunchConfigured") is True
             return {
                 "id": "open_selected_unity_project",
-                "kind": "explicit_user_action",
-                "instruction": (
-                    "Open the selected Unity project from VRCForge or open it manually, "
-                    "then wait for the editor window."
-                    if launch_configured
-                    else (
-                        "The Unity editor launch path is not configured. Open the "
-                        "selected project manually, or configure the editor path first."
-                    )
-                ),
-                "approvalRequired": False,
-                "requiresUnityWindowFocus": True,
+                "kind": "open_project",
+                "instruction": "Call vrcforge_open_unity_project for this project and check its bridge after Unity starts.",
+                "tool": "vrcforge_open_unity_project",
                 "readbackRequired": True,
             }
         return {
@@ -896,28 +853,13 @@ def _next_action(
     bridge_ready = _as_mapping(live.get("bridge")).get("ready") is True
     instance_ready = _as_mapping(live.get("instance")).get("ready") is True
     tools_ready = _as_mapping(live.get("tools")).get("ready") is True
-    if not bridge_ready and not editor_focus_acknowledged:
-        return {
-            "id": "activate_unity_editor",
-            "kind": "explicit_user_action",
-            "instruction": (
-                "Open the selected project in Unity if needed. After dependencies finish "
-                "installing, click once inside the Unity editor window so package "
-                "resolution and MCP loading can start, then run Know Yourself again."
-            ),
-            "approvalRequired": False,
-            "requiresUnityWindowFocus": True,
-            "readbackRequired": True,
-        }
-
     if not bridge_ready:
         return {
             "id": "retry_unity_bridge",
             "kind": "read_only_retry_or_guided_repair",
             "instruction": (
-                "The editor-focus step was acknowledged, but the bridge is still not "
-                "reachable. Retry the bridge check and use the guided repair surface "
-                "if it remains unavailable."
+                "Check Core startup and Unity package resolution for this running project. "
+                "Use the project Editor log or a reported dialog to diagnose a persistent blocker."
             ),
             "approvalRequired": False,
             "readbackRequired": True,
@@ -928,10 +870,9 @@ def _next_action(
             "kind": "read_only_retry_or_guided_repair",
             "instruction": (
                 "The bridge is reachable, but the selected Unity instance is not "
-                "registered. Keep the intended editor active and retry instance discovery."
+                "registered. Recheck instance discovery for the selected project."
             ),
             "approvalRequired": False,
-            "requiresUnityWindowFocus": True,
             "readbackRequired": True,
         }
     compile_status = str(_as_mapping(live.get("compile")).get("status") or "not_checked")
@@ -1046,13 +987,12 @@ def build_know_yourself_report(
     elif focus_acknowledgement_stale:
         focus_status = "stale_acknowledgement"
     else:
-        focus_status = "action_required"
+        focus_status = "pending_live_readback"
 
     next_action = _next_action(
         preparation,
         live,
         project_context,
-        editor_focus_acknowledged=focus_acknowledged,
     )
     capabilities = _capability_projection(tool_registry, skill_registry)
     capabilities["unityEnvironmentReady"] = unity_environment_ready
@@ -1066,12 +1006,6 @@ def build_know_yourself_report(
                 else "selected_unity_project_process_unknown"
             )
         else:
-            if not bridge_ready and not focus_acknowledged:
-                gaps.append(
-                    "unity_editor_activation_stale"
-                    if focus_acknowledgement_stale
-                    else "unity_editor_activation"
-                )
             if not live_environment_ready:
                 gaps.extend(
                     name
@@ -1104,7 +1038,6 @@ def build_know_yourself_report(
         gaps,
         preparation=preparation,
         live=live,
-        focus_status=focus_status,
     )
     readiness_sequence = _readiness_sequence(
         preparation,
@@ -1147,7 +1080,7 @@ def build_know_yourself_report(
         "readinessSequence": readiness_sequence,
         "editorFocusGate": {
             "status": focus_status,
-            "explicitUserAction": True,
+            "explicitUserAction": False,
             "claimedActionNeverProvesReadiness": True,
             "liveReadbackRequired": True,
             "scope": expected_focus_scope,

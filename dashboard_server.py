@@ -9443,56 +9443,6 @@ def _selected_project_path_from_health(health: dict[str, Any]) -> str:
     ).strip()
 
 
-def _package_entry_version(entry: Any) -> str:
-    if isinstance(entry, dict):
-        return str(entry.get("version") or entry.get("hash") or entry.get("url") or "").strip()
-    return str(entry or "").strip()
-
-
-def detect_unity_project_package(project_path: Path | None, package_ids: list[str]) -> dict[str, Any]:
-    info: dict[str, Any] = {"installed": False, "packageId": "", "version": "", "source": "", "checkedPackageIds": package_ids}
-    if project_path is None:
-        info["warning"] = "No Unity project selected; package detection skipped."
-        return info
-    packages_dir = project_path / "Packages"
-    for package_id in package_ids:
-        embedded = packages_dir / package_id / "package.json"
-        if embedded.exists():
-            try:
-                data = json.loads(embedded.read_text(encoding="utf-8-sig"))
-            except (OSError, json.JSONDecodeError):
-                data = {}
-            info.update({"installed": True, "packageId": package_id, "version": str(data.get("version") or ""), "source": "embedded"})
-            return info
-    manifest_specs = (
-        ("manifest.json", "upm", ("dependencies",)),
-        ("packages-lock.json", "lock", ("dependencies",)),
-        ("vpm-manifest.json", "vpm", ("locked", "dependencies")),
-    )
-    for manifest_name, source, section_names in manifest_specs:
-        manifest_path = packages_dir / manifest_name
-        payload = load_manifest_payload(manifest_path)
-        if not payload:
-            continue
-        for section_name in section_names:
-            section = payload.get(section_name)
-            if not isinstance(section, dict):
-                continue
-            for package_id in package_ids:
-                if package_id not in section:
-                    continue
-                info.update(
-                    {
-                        "installed": True,
-                        "packageId": package_id,
-                        "version": _package_entry_version(section.get(package_id)),
-                        "source": source,
-                    }
-                )
-                return info
-    return info
-
-
 def build_unity_dependency_preflight(project_path: Path) -> dict[str, Any]:
     return build_unity_dependency_preflight_report(
         project_path,
@@ -9509,10 +9459,16 @@ def _package_doctor_check(
     how_to_fix: str,
     optional: bool = False,
 ) -> dict[str, Any]:
-    info = detect_unity_project_package(project_path, package_ids)
+    info = PACKAGE_DETECTION.detect(project_path, package_ids)
     if project_path is None:
         status = "unknown"
         message = "No Unity environment root is selected; dependency version detection was skipped."
+    elif info.get("resolution") == "version_mismatch":
+        status = "warning"
+        message = info["warning"]
+    elif info.get("installed") is None:
+        status = "unknown"
+        message = info.get("warning") or f"{title} package resolution has not been confirmed."
     elif info.get("installed"):
         status = "ok"
         version = str(info.get("version") or "").strip()
@@ -10185,18 +10141,6 @@ def repair_project_chat_store_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _repair_unity_bridge_doctor(context: dict[str, Any], mode: str, phases: PhaseLog) -> dict[str, Any]:
-    project_path = str(context.get("selected_project_path") or "").strip()
-    if project_path and vrcforge_mcp_core_installed(Path(project_path)):
-        status = UNITY_STATUS.build_unity_status_snapshot(project_root=Path(project_path))
-        if status.get("connected"):
-            phases.add("core_ready", "ok", "The project-scoped VRCForge MCP Core is reachable.")
-            return {"status": "healthy", "changed": False}
-        phases.add(
-            "open_unity",
-            "warning",
-            "Open the selected Unity project and wait for VRCForge MCP Core Ready, then retry.",
-        )
-        return {"status": "needs_user_action", "changed": False}
     request = UnityMcpRepairRequest(
         projectPath=str(context.get("selected_project_path") or ""),
         allowUnityRelaunch=mode == "force",
@@ -10207,9 +10151,7 @@ def _repair_unity_bridge_doctor(context: dict[str, Any], mode: str, phases: Phas
     for item in result.get("phases") or []:
         if isinstance(item, dict):
             phases.add(str(item.get("id") or "bridge"), str(item.get("status") or "warning"), str(item.get("message") or "Bridge repair phase completed."))
-    if result.get("ok"):
-        return {"status": "repaired" if result.get("status") != "healthy" else "healthy", "changed": result.get("status") != "healthy"}
-    return {"status": "needs_user_action" if result.get("status") == "needs_user_action" else "failed", "changed": False}
+    return {"status": result["status"], "changed": result.get("changed", False)}
 
 
 def _detect_runtime_settings_doctor(_context: dict[str, Any]) -> dict[str, Any]:
@@ -20383,15 +20325,16 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
             before = _unity_repair_status_summary(before_status, project_root)
             phases.append(
                 _repair_phase(
-                    "import_vrcforge_package",
+                    "core_missing",
                     "warning",
-                    "Import the VRCForge unitypackage into the selected project; no external Unity MCP connector is used.",
+                    "The selected project needs the bundled VRCForge Core. Use the Core installer, then retry the connection.",
                 )
             )
             return {
                 "ok": False,
                 "schema": "vrcforge.unity_mcp_repair.v1",
-                "status": "needs_user_action",
+                "status": "failed",
+                "nextAction": {"tool": "vrcforge_install_unity_core", "arguments": {"projectPath": str(project_root)}},
                 "generatedAt": generated_at,
                 "projectPath": str(project_root),
                 "phases": phases,
@@ -20414,24 +20357,28 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                 "after": summary,
             }
 
-        phases.append(
-            _repair_phase(
-                "open_unity",
-                "warning",
-                "Open the selected project in Unity and wait for VRCForge MCP Core Ready, then retry. "
-                "Repair does not start an external server or use a fallback connector.",
-                {"error": str(status.get("error") or "")},
-            )
-        )
+        launch = open_unity_project_sync({"projectPath": str(project_root)})
+        changed = launch["status"] == "launched"
+        phases.append(_repair_phase(
+            "open_unity", "ok", "Started the matching Unity Editor." if changed else "The selected project is already open.",
+        ))
+        ready, after = wait_for_unity_tools_ready(settings, project_root, request.wait_seconds)
+        detail = after.get("error") or (after.get("readiness") or {}).get("blockerCode")
+        phases.append(_repair_phase(
+            "core_ready", "ok" if ready else "warning",
+            "The selected project's Core is ready." if ready else "The selected project's Core is not ready yet.",
+            detail,
+        ))
         return {
-            "ok": False,
+            "ok": ready,
             "schema": "vrcforge.unity_mcp_repair.v1",
-            "status": "needs_user_action",
+            "status": "repaired" if ready else "failed",
+            "changed": changed,
             "generatedAt": generated_at,
             "projectPath": str(project_root),
             "phases": phases,
             "before": summary,
-            "after": summary,
+            "after": after,
         }
     except Exception as exc:  # noqa: BLE001 - Doctor repair should report actionable failure instead of crashing the UI.
         phases.append(_repair_phase("repair", "error", str(exc)))
@@ -25017,7 +24964,7 @@ def validation_dependency_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         "projectConfigured": bool(project_value),
         "projectReadable": project_path is not None,
         "packages": {
-            "vrchat_sdk": PACKAGE_DETECTION.detect(project_path, VRCHAT_SDK_PACKAGE_IDS),
+            "vrchat_sdk": build_unity_dependency_preflight(project_path)["checks"]["vrchatSdk"] if project_path else {},
             "modular_avatar": PACKAGE_DETECTION.detect(project_path, list(ADDON_FRAMEWORKS["modular_avatar"]["packageIds"])),
             "vrcfury": PACKAGE_DETECTION.detect(project_path, list(ADDON_FRAMEWORKS["vrcfury"]["packageIds"])),
         },
@@ -25141,6 +25088,8 @@ def _dependency_validation(findings: list[dict[str, Any]], result: dict[str, Any
         _validation_add_finding(findings, "VRChat SDK", "Warning", "No Unity project selected", "VRChat SDK package detection needs a selected Unity project.", "dependencies")
     elif not payload.get("projectReadable"):
         _validation_add_finding(findings, "VRChat SDK", "Warning", "Unity project path is not readable", "VRChat SDK package detection could not read the configured Unity project.", "dependencies")
+    elif vrchat_sdk.get("installed") is None or vrchat_sdk.get("status") in {"unknown", "pending"}:
+        _validation_add_finding(findings, "VRChat SDK", "Warning", "VRChat SDK status is unknown", vrchat_sdk.get("message") or "Package resolution has not been confirmed.", "dependencies", vrchat_sdk)
     elif vrchat_sdk.get("installed"):
         _validation_add_finding(findings, "VRChat SDK", "Info", "VRChat SDK detected", "VRChat SDK package metadata is present.", "dependencies", vrchat_sdk)
     else:
@@ -25150,7 +25099,11 @@ def _dependency_validation(findings: list[dict[str, Any]], result: dict[str, Any
         ("Modular Avatar conflicts", "Modular Avatar", modular_avatar, "modular_avatar"),
         ("VRCFury conflicts", "VRCFury", vrcfury, "vrcfury"),
     ):
-        if package_info.get("installed"):
+        if package_info.get("resolution") == "version_mismatch":
+            _validation_add_finding(findings, section, "Warning", f"{label} version differs from the VPM lock", package_info["warning"], source, package_info)
+        elif package_info.get("installed") is None:
+            _validation_add_finding(findings, section, "Info", f"{label} status is unknown", package_info.get("warning") or "Package resolution has not been confirmed.", source)
+        elif package_info.get("installed"):
             _validation_add_finding(findings, section, "Info", f"{label} package detected", f"{label} metadata is present; conflict scanners can use this context.", source, package_info)
         else:
             _validation_add_finding(findings, section, "Info", f"{label} package not detected", f"{label} is optional unless this avatar uses it.", source)

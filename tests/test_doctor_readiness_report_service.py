@@ -161,6 +161,7 @@ def test_newtonsoft_projection_is_error_only_for_known_blocked_preflight():
                         "ready": False,
                         "status": "error",
                         "missing": ["newtonsoft"],
+                        "checks": {"newtonsoft": {"status": "missing", "message": "Unity Newtonsoft JSON was not detected."}},
                         "message": "Required package metadata was not detected: Unity Newtonsoft Json.",
                     },
                 },
@@ -170,10 +171,8 @@ def test_newtonsoft_projection_is_error_only_for_known_blocked_preflight():
     report = DoctorReadinessReportService(replace(ports, build_health=lambda: blocked_health)).build_app_doctor_report()
     check = next(item for item in report["checks"] if item["id"] == "package.newtonsoft")
     assert check["status"] == "error"
-    assert "Avatar SDK setup is incomplete" in check["message"]
-    assert "VCC or ALCOM" in check["message"]
-    assert "Unity to finish compiling" in check["message"]
-    assert "Newtonsoft" not in check["message"]
+    assert "Newtonsoft" in check["message"]
+    assert "VCC" not in check["message"]
 
     healthy_health = {
         **blocked_health,
@@ -187,6 +186,7 @@ def test_newtonsoft_projection_is_error_only_for_known_blocked_preflight():
                         "ready": False,
                         "status": "error",
                         "missing": ["newtonsoft"],
+                        "checks": {"newtonsoft": {"status": "missing", "message": "Unity Newtonsoft JSON was not detected."}},
                     },
                 },
             },
@@ -197,3 +197,52 @@ def test_newtonsoft_projection_is_error_only_for_known_blocked_preflight():
     ).build_app_doctor_report()
     healthy_check = next(item for item in healthy_report["checks"] if item["id"] == "package.newtonsoft")
     assert healthy_check["status"] == "ok"
+
+
+def test_readiness_preserves_separate_sdk_and_pending_dependency_evidence():
+    ports = _ports(calls=[])
+    health = ports.build_health()
+    health["components"]["vrcForgeUnityTools"] = {"detail": {"dependencyPreflight": {
+        "status": "pending", "ready": None, "checks": {
+            "vrchatSdk": {"status": "installed", "message": "Both SDK packages detected."},
+            "newtonsoft": {"status": "pending", "message": "Unity has not resolved this dependency yet."},
+        },
+    }}}
+    report = DoctorReadinessReportService(replace(ports, build_health=lambda: health)).build_app_doctor_report()
+    checks = {check["id"]: check for check in report["checks"]}
+    assert checks["package.vrchat_sdk"]["status"] == "ok"
+    assert checks["package.newtonsoft"]["status"] == "unknown"
+    assert "not resolved" in checks["package.newtonsoft"]["message"]
+
+
+def test_optional_unreadable_package_is_not_reported_installed_or_missing(tmp_path):
+    package = tmp_path / "Packages" / "com.vrcfury.vrcfury"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text("{")
+    result = dashboard_server._package_doctor_check(
+        "package.vrcfury", "VRCFury", tmp_path, ["com.vrcfury.vrcfury"], "", "", optional=True,
+    )
+    assert result["status"] == "unknown"
+
+
+def test_vpm_version_conflict_is_visible_in_doctor_and_avatar_validation(tmp_path):
+    import json
+
+    package_id = "com.vrcfury.vrcfury"
+    package = tmp_path / "Packages" / package_id
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"name": package_id, "version": "1.0.0"}))
+    (package.parent / "vpm-manifest.json").write_text(json.dumps({"locked": {package_id: {"version": "1.1.0"}}}))
+    check = dashboard_server._package_doctor_check("package.vrcfury", "VRCFury", tmp_path, [package_id], "", "", optional=True)
+    assert check["status"] == "warning"
+    assert "1.0.0" in check["message"] and "1.1.0" in check["message"]
+
+    findings = []
+    dashboard_server._dependency_validation(findings, {"ok": True, "payload": {
+        "projectConfigured": True, "projectReadable": True, "packages": {
+            "vrchat_sdk": {"status": "unknown", "installed": True, "message": "SDK version differs from the lock."},
+            "vrcfury": check["detail"],
+        },
+    }})
+    assert any("SDK version differs" in finding["message"] for finding in findings)
+    assert any("1.1.0" in finding["message"] and finding["severity"] == "Warning" for finding in findings)

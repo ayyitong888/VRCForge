@@ -278,14 +278,9 @@ def test_missing_newtonsoft_blocks_with_dependency_action_before_editor_focus() 
         unity=_unity(connected=False, registered=False, tools=False),
     )
 
-    assert report["stage"] == "install_newtonsoft_dependency"
-    assert report["nextAction"]["kind"] == "supervised_dependency_install"
-    assert report["nextAction"]["approvalRequired"] is True
-    assert "VRChat Avatar SDK" in report["message"]
-    instruction = report["nextAction"]["instruction"]
-    assert "VCC or ALCOM" in instruction
-    assert "Unity to finish compiling" in instruction
-    assert "Newtonsoft" not in instruction
+    assert report["stage"] == "diagnose_unity_package_resolution"
+    assert report["nextAction"]["approvalRequired"] is False
+    assert "Newtonsoft" in report["message"]
     assert "newtonsoft_dependency_present" in report["gaps"]
     assert "unity_editor_activation" not in report["gaps"]
 
@@ -297,18 +292,13 @@ def test_missing_plugin_and_mcp_dependency_follow_setup_order() -> None:
     )
     assert missing_plugin["stage"] == "install_or_repair_editor_plugin"
     assert missing_plugin["nextAction"]["approvalRequired"] is True
-    assert missing_plugin["message"] == (
-        "Open onboarding Step 3. In Unity, Import All from VRCForge.unitypackage; "
-        "keep it open, then select it in VRCForge and recheck."
-    )
-    assert len(missing_plugin["message"]) <= 130
+    assert "vrcforge_install_unity_core" in missing_plugin["message"]
 
     missing_mcp = _report(
         doctor=_doctor(**{"unity.mcp.package": "error"}),
         unity=_unity(connected=False, registered=False, tools=False),
     )
-    assert missing_mcp["stage"] == "install_mcp_dependency"
-    assert missing_mcp["nextAction"]["kind"] == "supervised_dependency_install"
+    assert missing_mcp["stage"] == "install_or_repair_editor_plugin"
 
 
 def test_unsupported_unity_editor_version_blocks_before_dependency_setup() -> None:
@@ -346,14 +336,12 @@ def test_unity_6_readiness_reports_pending_validation_without_downgrade_guidance
     assert "copy" in report["message"]
 
 
-def test_dependencies_ready_require_explicit_unity_editor_activation() -> None:
+def test_starting_editor_checks_the_bridge_without_requiring_a_click() -> None:
     report = _report(unity=_unity(connected=False, registered=False, matched=None, tools=False))
 
-    assert report["stage"] == "activate_unity_editor"
-    assert report["editorFocusGate"]["status"] == "action_required"
-    assert report["nextAction"]["requiresUnityWindowFocus"] is True
+    assert report["stage"] == "retry_unity_bridge"
+    assert report["editorFocusGate"]["explicitUserAction"] is False
     assert report["nextAction"]["readbackRequired"] is True
-    assert "click once inside the Unity editor window" in report["nextAction"]["instruction"]
 
 
 def test_closed_selected_project_is_opened_before_editor_activation() -> None:
@@ -371,7 +359,7 @@ def test_closed_selected_project_is_opened_before_editor_activation() -> None:
 
     assert report["stage"] == "open_selected_unity_project"
     assert report["editorFocusGate"]["status"] == "blocked_by_project_not_open"
-    assert "open the selected project manually" in report["nextAction"]["instruction"].lower()
+    assert "vrcforge_open_unity_project" in report["nextAction"]["instruction"]
     assert "selected_unity_project_not_running" in report["gaps"]
 
 
@@ -448,17 +436,11 @@ def test_stale_focus_acknowledgement_is_rejected_after_scope_changes() -> None:
         editor_focus_scope="focus-scope-from-prior-project",
     )
 
-    assert report["stage"] == "activate_unity_editor"
+    assert report["stage"] == "retry_unity_bridge"
     assert report["editorFocusGate"]["status"] == "stale_acknowledgement"
     assert report["editorFocusGate"]["acknowledgementValid"] is False
     assert report["editorFocusGate"]["acknowledgementStale"] is True
-    assert "unity_editor_activation_stale" in report["gaps"]
-    stale_gap = next(
-        item
-        for item in report["blockingGaps"]
-        if item["id"] == "unity_editor_activation_stale"
-    )
-    assert stale_gap["reasonCode"] == "editor_focus_scope_stale"
+    assert "unity_editor_activation_stale" not in report["gaps"]
 
 
 def test_selected_instance_mismatch_and_missing_tools_remain_distinct() -> None:
@@ -576,6 +558,13 @@ def test_missing_sources_are_not_claimed_as_observed_self_knowledge() -> None:
         {"id": "skill_registry", "status": "unavailable"},
         {"id": "permission_state", "status": "unavailable"},
     ]
+
+
+def test_idle_editor_does_not_prove_compile_success():
+    for payload in ({"isCompiling": False}, {"captureComplete": False, "errorCount": 0}):
+        report = _report(compile_diagnostics={"ok": True, "result": {"exitCode": 0, "payload": payload}})
+        assert report["liveReadback"]["compile"]["status"] == "unavailable"
+        assert report["readyForUnityWork"] is False
 
 
 def test_provider_configuration_never_claims_untested_connectivity() -> None:

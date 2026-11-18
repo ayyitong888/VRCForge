@@ -5207,35 +5207,25 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(rule.title, "VRCForge MCP Core")
         self.assertFalse(rule.fixable)
 
-    def test_doctor_core_bridge_repair_never_starts_the_legacy_bridge(self) -> None:
+    def test_doctor_repair_opens_closed_project_and_checks_its_core(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "Avatar"
-            for relative in (
-                "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
-                "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
-            ):
-                target = project / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text("// probe", encoding="utf-8")
-
+            for folder in ("Assets", "Packages", "ProjectSettings"):
+                (project / folder).mkdir(parents=True)
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1")
             with (
-                patch(
-                    "unity_status_service.UnityStatusService.build_unity_status_snapshot",
-                    return_value={"connected": False, "error": "Unity is closed."},
-                ),
-                patch("dashboard_server.repair_unity_mcp_bridge_sync") as legacy_repair,
+                patch("dashboard_server.vrcforge_mcp_core_installed", return_value=True),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value={"connected": False}),
+                patch("dashboard_server.open_unity_project_sync", return_value={"status": "launched"}) as launch,
+                patch("dashboard_server.wait_for_unity_tools_ready", return_value=(True, {"readiness": {"ready": True}})) as wait,
             ):
                 result = dashboard_server._repair_unity_bridge_doctor(
-                    {"selected_project_path": str(project)},
-                    "force",
-                    dashboard_server.PhaseLog(),
+                    {"selected_project_path": str(project)}, "safe", dashboard_server.PhaseLog(),
                 )
 
-        self.assertEqual(result, {"status": "needs_user_action", "changed": False})
-        legacy_repair.assert_not_called()
+        self.assertEqual(result, {"status": "repaired", "changed": True})
+        self.assertEqual(Path(launch.call_args.args[0]["projectPath"]), project)
+        self.assertEqual(wait.call_args.args[1], project)
 
     def test_mcp_core_install_detection_needs_the_complete_owned_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5364,7 +5354,7 @@ class DashboardServerTests(unittest.TestCase):
         external_start.assert_not_called()
         launch_unity.assert_not_called()
 
-    def test_core_only_repair_without_package_requires_import_and_never_falls_back(self) -> None:
+    def test_bridge_repair_without_core_returns_the_supervised_install_action(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
             for directory in ("Assets", "Packages", "ProjectSettings"):
@@ -5379,8 +5369,9 @@ class DashboardServerTests(unittest.TestCase):
                 )
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "needs_user_action")
-        self.assertEqual(result["phases"][0]["id"], "import_vrcforge_package")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["nextAction"]["tool"], "vrcforge_install_unity_core")
+        self.assertEqual(Path(result["nextAction"]["arguments"]["projectPath"]), project)
         external_start.assert_not_called()
         launch_unity.assert_not_called()
 

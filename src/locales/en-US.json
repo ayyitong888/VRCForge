@@ -29,7 +29,7 @@
     "selectProject": "Select the Unity project in the App and open the same project in Unity.",
     "reloadDialog": "Unity is waiting for a reload dialog to be handled. Switch to Unity, make sure your edits are safely preserved, then handle the dialog and check the connection again.",
     "vrchatSdkMissing": "The VRChat SDK is missing from this project. Install the project's required VRChat SDK package, wait for Unity to finish compiling, then check the connection again.",
-    "newtonsoftMissing": "VRChat Avatar SDK dependencies are not ready. Install or repair the SDK with VCC or ALCOM, wait for Unity to resolve dependencies and finish compiling, then check the connection. No separate dependency installation is needed.",
+    "newtonsoftMissing": "Unity has not resolved Newtonsoft JSON. Check package resolution and Unity errors for this project.",
     "unknown": "Unity readiness could not be confirmed. Check the selected project and Unity Console. If the problem persists, send connection information through Feedback in Settings; do not delete the project."
   },
   "coreVersion": {
