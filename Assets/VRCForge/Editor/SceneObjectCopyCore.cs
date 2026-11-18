@@ -84,17 +84,10 @@ namespace VRCForge.Editor
             bool preserveWorldTransform)
         {
             var sourceSnapshot = BuildSourceSnapshot(sourceScenePath, sourceObjectPath);
-            var targetScene = ResolveSavedScene(targetScenePath, "target scene");
-            if (sourceSnapshot.Scene.Path == targetScene.Path
-                && (sourceSnapshot.Scene.Guid != targetScene.Guid
-                    || sourceSnapshot.Scene.Handle != targetScene.Handle
-                    || sourceSnapshot.Scene.FileDigest != targetScene.FileDigest
-                    || sourceSnapshot.Scene.FileIdentity != targetScene.FileIdentity
-                    || sourceSnapshot.Scene.MetaDigest != targetScene.MetaDigest
-                    || sourceSnapshot.Scene.MetaIdentity != targetScene.MetaIdentity))
-            {
-                throw new SceneObjectCopyException("The selected scene changed while it was verified.");
-            }
+            var normalizedTargetScenePath = NormalizeSceneAssetPath(targetScenePath, "target scene");
+            var targetScene = sourceSnapshot.Scene.Path == normalizedTargetScenePath
+                ? sourceSnapshot.Scene
+                : ResolveSavedScene(normalizedTargetScenePath, "target scene");
             var targetParent = ResolveUniqueGameObject(targetScene.Scene, targetParentPath, "target parent");
             var source = sourceSnapshot.GameObject;
             var normalizedName = NormalizeObjectName(targetName, "targetName");
@@ -264,9 +257,10 @@ namespace VRCForge.Editor
 
         internal static void VerifySourceUnchanged(
             SourceObjectSnapshot before,
-            bool requireSceneFileUnchanged)
+            bool requireSceneFileUnchanged,
+            SavedSceneSnapshot scene = null)
         {
-            var after = BuildSourceSnapshot(before.Scene.Path, before.ObjectPath);
+            var after = BuildSourceSnapshot(scene ?? ResolveSavedScene(before.Scene.Path, "source scene"), before.ObjectPath);
             if (after.Scene.Guid != before.Scene.Guid
                 || after.Scene.Handle != before.Scene.Handle
                 || after.ObjectId != before.ObjectId
@@ -285,7 +279,11 @@ namespace VRCForge.Editor
             string scenePath,
             string objectPath)
         {
-            var scene = ResolveSavedScene(scenePath, "source scene");
+            return BuildSourceSnapshot(ResolveSavedScene(scenePath, "source scene"), objectPath);
+        }
+
+        private static SourceObjectSnapshot BuildSourceSnapshot(SavedSceneSnapshot scene, string objectPath)
+        {
             var normalizedPath = NormalizeHierarchyPath(objectPath, "sourceObjectPath");
             var source = ResolveUniqueGameObject(scene.Scene, normalizedPath, "source object");
             return new SourceObjectSnapshot

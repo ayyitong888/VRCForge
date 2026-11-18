@@ -180,9 +180,9 @@ namespace VRCForge.Editor
                 {
                     throw new SceneObjectCopyException("The duplicate target scene did not persist a change.");
                 }
-                SceneObjectCopyCore.VerifySourceUnchanged(
-                    snapshot.Source,
-                    snapshot.Source.Scene.Path != snapshot.Target.Scene.Path);
+                var sameScene = snapshot.Source.Scene.Path == snapshot.Target.Scene.Path;
+                SceneObjectCopyCore.VerifySourceUnchanged(snapshot.Source, !sameScene,
+                    sameScene ? readback.Scene : null);
                 Undo.CollapseUndoOperations(undoGroup);
 
                 return SceneObjectCopyCore.Success(new
