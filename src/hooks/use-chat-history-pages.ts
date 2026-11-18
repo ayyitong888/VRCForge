@@ -11,6 +11,7 @@ export function useChatHistoryPages(
   chatId: string,
   sourceProjectPath: string | undefined,
   complete: ChatThread | null,
+  updatedAt: string | undefined,
   enabled: boolean,
   sourceConfirmed: boolean,
   reportError: (cause: unknown) => void,
@@ -19,6 +20,8 @@ export function useChatHistoryPages(
   const [page, setPage] = useState<HistoryPage | null>(null);
   const [failedKey, setFailedKey] = useState("");
   const [speculativeFailureKey, setSpeculativeFailureKey] = useState("");
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const observedSource = useRef({ key, sourceConfirmed, updatedAt });
   const request = useRef<AbortController | null>(null);
   const olderPending = useRef(false);
   const onError = useRef(reportError);
@@ -27,6 +30,18 @@ export function useChatHistoryPages(
   confirmed.current = sourceConfirmed;
   const retryConfirmedSource = sourceConfirmed && speculativeFailureKey === key;
   const visible = page?.key === key ? page : null;
+  const hasCompleteHistory = complete !== null;
+
+  useEffect(() => {
+    const previous = observedSource.current;
+    observedSource.current = { key, sourceConfirmed, updatedAt };
+    // The first catalog confirmation can reuse a page from the same source.
+    // Later changes refresh the active page when no complete record is loaded.
+    if (!hasCompleteHistory && sourceConfirmed && previous.sourceConfirmed
+      && previous.key === key && previous.updatedAt !== updatedAt) {
+      setRefreshRevision((revision) => revision + 1);
+    }
+  }, [hasCompleteHistory, key, sourceConfirmed, updatedAt]);
 
   useEffect(() => {
     if (!enabled || !chatId || sourceProjectPath === undefined) return;
@@ -49,7 +64,7 @@ export function useChatHistoryPages(
       onError.current(cause);
     });
     return () => controller.abort();
-  }, [chatId, enabled, endpoint, key, retryConfirmedSource, sourceProjectPath]);
+  }, [chatId, enabled, endpoint, key, refreshRevision, retryConfirmedSource, sourceProjectPath]);
 
   const firstVisibleId = visible?.chat.items[0]?.id;
   const firstCompleteIndex = firstVisibleId && complete

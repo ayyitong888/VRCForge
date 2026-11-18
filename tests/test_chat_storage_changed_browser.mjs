@@ -28,7 +28,9 @@ window.sessions=sessions;
 window.setTitle=title=>sessions.updateChat('chat',chat=>({...chat,title}));
 window.localEdit=()=>sessions.updateChat('chat',chat=>({...chat,title:'local-dirty'}));
 window.localAppend=()=>sessions.appendToChat('chat',{id:'local-extra',type:'user',text:'local-added'});
-return <pre id="state">{JSON.stringify({ready:sessions.chatStorageReady,chats:sessions.chats,blocked:sessions.chatPersistenceBlocked})}</pre>}
+window.openChat=()=>sessions.openChat(sessions.sidebarChats.find(chat=>chat.id==='chat'));
+window.startStreaming=()=>sessions.appendToChat('chat',{id:'active-stream',type:'streaming',clientTurnId:'active-turn',text:'in-progress response'});
+return <pre id="state">{JSON.stringify({ready:sessions.chatStorageReady,chats:sessions.chats,display:sessions.displayChat,blocked:sessions.chatPersistenceBlocked})}</pre>}
 const root=createRoot(document.getElementById('root'));root.render(<Fixture/>);window.unmount=()=>root.unmount();
 `},bundle:true,write:false,format:"esm",jsx:"automatic",define:{"process.env.NODE_ENV":'"test"'},plugins:(process.env.VRCFORGE_TEST_LEGACY_CHAT_ECHO==="1"||process.env.VRCFORGE_TEST_LEGACY_CHAT_RELOAD_QUEUE==="1")?[{
 name:"legacy-chat-storage-control",setup(builder){builder.onLoad({filter:/use-chat-sessions\.ts$/},async(args)=>{
@@ -86,18 +88,36 @@ const receipt={ok:true,sourceRevisions:sources(),chatDigests:{[updated.id]:diges
 saveReceipts.set(saveKey,receipt);res.end(JSON.stringify(receipt));return;}
 if(url.pathname==='/api/app/chats'&&req.method==='GET'){res.setHeader('Content-Type','application/json');gets++;
 if(url.searchParams.get('catalog')==='1'){res.end(JSON.stringify({ok:true,entries:chats.map(({items,...metadata})=>({...metadata,sourceProjectPath,sourceStoreId:source().storeId})),sources:sources(),recoveries:[],writeBlocked:false,pendingChatIds:[]}));return;}
-assert.equal(url.searchParams.get('chatId'),chat.id);assert.equal(url.searchParams.get('full'),'1');
+assert.equal(url.searchParams.get('chatId'),chat.id);
 const snapshot=structuredClone(chats);const revision=source();const held=nextGetHold;nextGetHold=null;if(held){held.markStarted();await held.gate;}
 res.end(JSON.stringify({ok:true,chats:snapshot,sourceRevision:revision,hasOlder:false,nextBefore:null,chatDigests:Object.fromEntries(snapshot.map(item=>[item.id,digest(item)])),chatMetadataShapes:Object.fromEntries(snapshot.map(item=>[item.id,metadataShape(item)]))}));return;}
 if(req.url==='/fixture.js'){res.setHeader('Content-Type','text/javascript');res.end(bundle.outputFiles[0].text);return;}
 res.end('<div id="root"></div><script type="module" src="/fixture.js"></script>');});
 await new Promise(done=>server.listen(0,'127.0.0.1',done));
 let browser;
+function appendRelay(id) {
+  const previous = chats[0];
+  chats = [{...previous, revision: previous.revision + 1, updatedAt: new Date().toISOString(),
+    items: [...previous.items, {
+      id, type: 'user', text: id, deliveryMode: 'queue_only', forwardedByAgent: true,
+      forwardedFrom: {sourceChatId: 'agent-source', sourceClientTurnId: 'source-turn', sourceActionId: id},
+    }],
+  }];
+}
 try{
 browser=await chromium.launch({headless:true,channel:process.env.VRCFORGE_BROWSER_CHANNEL||'msedge'});
 const page=await browser.newPage();const origin='http://127.0.0.1:'+server.address().port;
 await page.route('**/*',route=>route.request().url().startsWith(origin)?route.continue():route.abort());
 await page.goto(origin);await page.waitForFunction(()=>window.sessions?.chatStorageReady);
+await page.evaluate(()=>window.openChat());
+await page.waitForFunction(()=>window.sessions.displayChat?.items.some(item=>item.id==='u1'));
+assert.equal(await page.evaluate(()=>window.sessions.activeChat),null,'browsing selected chat uses paged history');
+appendRelay('visible-while-browsing');
+await page.evaluate(()=>window.notify('cross-session-agent'));
+await page.waitForFunction(()=>window.sessions.displayChat?.items.some(item=>item.id==='visible-while-browsing'),
+  undefined,{timeout:3000});
+assert.equal(await page.evaluate(()=>window.sessions.activeChat),null,'live relay keeps browsing history paged');
+await page.evaluate(()=>window.sessions.setActiveChatId(''));
 await page.evaluate(()=>window.sessions.loadChat('chat'));
 await page.waitForFunction(()=>document.querySelector('#state')?.textContent.includes('initial'));
 const before=gets;
@@ -149,6 +169,23 @@ return state.chats[0].items.some(item=>item.id==='local-extra')&&state.chats[0].
 });
 assert.equal(await page.evaluate(()=>JSON.parse(document.querySelector('#state').textContent).blocked),false,
   'independent appended messages reconcile without pausing storage or discarding local content');
+appendRelay('retained-while-offscreen');
+await page.evaluate(()=>window.notify('cross-session-agent'));
+await page.evaluate(()=>window.openChat());
+await page.waitForFunction(()=>window.sessions.displayChat?.items.some(item=>item.id==='retained-while-offscreen'));
+await page.evaluate(()=>window.startStreaming());
+await page.evaluate(()=>window.persist());
+appendRelay('visible-while-streaming');
+await page.evaluate(()=>window.notify('cross-session-agent'));
+await page.waitForFunction(()=>window.sessions.displayChat?.items.some(item=>item.id==='visible-while-streaming'));
+assert.ok(await page.evaluate(()=>window.sessions.displayChat.items.some(item=>item.id==='active-stream')),
+  'incoming relay preserves the live response');
+await page.evaluate(()=>window.setTitle('during-live-response'));
+assert.ok(await page.evaluate(()=>window.sessions.displayChat.items.some(item=>item.id==='active-stream')),
+  'subsequent local mutations preserve the live response');
+await page.evaluate(()=>window.persist());
+assert.ok(chats[0].items.some(item=>item.id==='visible-while-streaming' && item.forwardedFrom.sourceChatId==='agent-source'),
+  'local persistence preserves the incoming relay attribution');
 await page.evaluate(()=>window.localEdit());
 chats=[{...chats[0],title:'remote-dirty'}];
 await page.evaluate(()=>window.notify());

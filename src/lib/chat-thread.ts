@@ -129,7 +129,8 @@ export function stripSupersededStreamingItems(items: ConversationItem[]): Conver
     const item = items[index];
     // Queued and same-turn steering inputs belong to the current response.
     // Only a delivered new turn may supersede an earlier live response.
-    if (item?.type !== "streaming" && !(item?.type === "user" && (item.composerQueued === true || item.queuedFrom === true))) {
+    if (item?.type !== "streaming" && !(item?.type === "user"
+      && (item.composerQueued === true || item.queuedFrom === true || item.deliveryMode === "queue_only"))) {
       lastDurableIndex = index;
       break;
     }
