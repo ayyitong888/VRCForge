@@ -70,6 +70,18 @@ def test_expired_claim_is_reclaimable_without_reordering(tmp_path: Path) -> None
     assert reclaimed["claimToken"] != first["claimToken"]
 
 
+def test_unconsumed_targeted_relay_cannot_be_claimed_after_restart(tmp_path: Path) -> None:
+    path = tmp_path / "followups.json"
+    queue = make_queue(path)
+    queue.enqueue(session_id="chat", client_turn_id="agent-forward-source-action",
+                  target_client_turn_id="original-turn", message="A note", steer_turn_id="active-runtime-turn")
+    queue.enqueue(session_id="chat", client_turn_id="agent-forward-separate-task",
+                  message="Run another task")
+    restarted = make_queue(path)
+    claim = restarted.claim(session_id="chat", owner_id="desktop")
+    assert [item["clientTurnId"] for item in claim] == ["agent-forward-separate-task"]
+
+
 def test_attachment_only_followup_keeps_safe_references_not_inline_payloads(tmp_path: Path) -> None:
     path = tmp_path / "followups.json"
     result = make_queue(path).enqueue(

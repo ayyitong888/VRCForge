@@ -5986,6 +5986,7 @@ class AgentGateway:
                         if entry.get("runtimeSessionId") == resolved_session_id
                         and entry.get("steerTurnId") == resolved_turn_id
                         and entry.get("targetClientTurnId") == resolved_client_turn_id
+                        and not AgentRuntimeFollowupQueue.is_targeted_relay(entry)
                     ]
             late_steers = self._runtime_session_state.finish_turn(
                 session_id=resolved_session_id, turn_id=resolved_turn_id,
@@ -6002,7 +6003,7 @@ class AgentGateway:
                 if question:
                     self.questions.reconcile_runtime_continuation(str(question["questionId"]))
             if response_payload is not None and persisted_steers:
-                outstanding = [entry for entry in persisted_steers if entry["status"] != "acked"]
+                outstanding = [entry for entry in persisted_steers if entry["status"] not in {"acked", "cancelled"}]
                 deferred = [
                     {"inputId": entry["clientTurnId"], "queueId": entry["queueId"],
                      "sequence": entry["sequence"], "status": entry["status"]}

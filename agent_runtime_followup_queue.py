@@ -52,7 +52,9 @@ class AgentRuntimeFollowupQueue:
             self._entries = [x for x in raw if isinstance(x, dict)]
             self._entries.sort(key=lambda item: int(item.get("sequence", 0)))
             for entry in self._entries:
-                if entry.get("status") in self.LIVE_STEER_STATES:
+                if self.is_targeted_relay(entry) and entry.get("status") not in {"acked", "cancelled"}:
+                    self._make_terminal_tombstone(entry, "cancelled")
+                elif entry.get("status") in self.LIVE_STEER_STATES:
                     # A restart has no original turn. Only inputs that never
                     # crossed its drain boundary are eligible for auto-delivery.
                     if entry["status"] != "steering":
@@ -177,6 +179,10 @@ class AgentRuntimeFollowupQueue:
                     entry["status"] = "steer_stopping"
                 elif entry["clientTurnId"] in (consumed or set()):
                     self._make_terminal_tombstone(entry, "acked")
+                elif self.is_targeted_relay(entry):
+                    # The attributed note is already saved in the transcript.
+                    # Its attempt to join this turn must never outlive the turn.
+                    self._make_terminal_tombstone(entry, "cancelled")
                 else:
                     if stopped or entry["status"] != "steering":
                         entry.update(status="paused", steerNeedsConfirmation=True)
@@ -263,6 +269,12 @@ class AgentRuntimeFollowupQueue:
 
     def ack(self, *, queue_id: str, session_id: str, claim_token: str) -> bool:
         return self._transition(queue_id, session_id, claim_token, "acked")
+
+    @staticmethod
+    def is_targeted_relay(item: dict[str, Any]) -> bool:
+        return bool(item.get("targetClientTurnId")) and str(item.get("clientTurnId") or "").startswith(
+            AGENT_RELAY_INPUT_PREFIX,
+        )
 
     def cancel(self, *, queue_id: str, session_id: str, claim_token: str = "") -> bool:
         with self._ports.lock:

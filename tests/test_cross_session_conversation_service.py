@@ -4,7 +4,9 @@ import copy
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
+from agent_gateway import AgentGateway
 from cross_session_conversation_service import (
     CrossSessionConversationError,
     CrossSessionConversationService,
@@ -262,6 +264,43 @@ class CrossSessionConversationServiceTests(unittest.TestCase):
         self.assertEqual(harness.steers[0]["targetClientTurnId"], "active-turn")
         self.assertEqual(harness.dispatched, [])
         self.assertEqual(harness.queue, [])
+
+    def test_late_queue_only_relay_remains_a_transcript_note(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            harness = Harness()
+            service = harness.service()
+            service._submit_steer = gateway.submit_runtime_steer
+            harness.busy.add("offscreen")
+
+            def body(params, **_kwargs):
+                params.update(_resolvedRuntimeSessionId="offscreen-session",
+                              _resolvedRuntimeTurnId="last-runtime-turn",
+                              _resolvedRuntimeClientTurnId="active-turn")
+                gateway._runtime_session_state.begin_turn(
+                    session_id="offscreen-session", turn_id="last-runtime-turn", client_turn_id="active-turn",
+                )
+                note = service.send_message({
+                    **trusted_context(), "chatId": "offscreen", "message": "Note for the next review.",
+                })
+                self.assertEqual(note["status"], "delivered_to_active_turn")
+                return {"ok": True, "plan": {"nextStep": "done"}}
+
+            with patch.object(gateway, "_runtime_message_impl_body", side_effect=body):
+                outcome = gateway._runtime_message_impl({})
+            self.assertNotIn("deferredSteerFollowups", outcome)
+            self.assertNotIn("deferredSteerFollowupOutcomes", outcome)
+            self.assertEqual(gateway.list_runtime_followups(session_id="offscreen", include_terminal=False), [])
+            harness.busy.clear()
+            self.assertEqual(service.process_pending(), 0)
+            saved = harness.chats["offscreen"]["items"][-1]
+            self.assertEqual(saved["deliveryMode"], "queue_only")
+            self.assertNotIn("queueStatus", saved)
+            self.assertIn("Note for the next review.", service._history_before(harness.chats["offscreen"], "")[-1]["text"])
 
     def test_followup_task_starts_idle_offscreen_target_and_persists_terminal_result(self):
         harness = Harness()
