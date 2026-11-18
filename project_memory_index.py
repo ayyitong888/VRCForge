@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from file_change_time import file_change_time_ns
+
 
 INDEX_SCHEMA = "vrcforge.project_memory_index.v1"
 INDEXED_ROOTS = ("Assets", "Packages", "ProjectSettings")
@@ -60,14 +62,17 @@ def scan_project_memory(project_path: str | Path, index_root: str | Path, max_fi
             break
         stat = file_path.stat()
         previous_entry = ensure_dict(previous_files.get(rel_path))
+        change_time = file_change_time_ns(file_path, stat)
         stamp = {
             "device": stat.st_dev,
             "inode": stat.st_ino,
             "size": stat.st_size,
             "mtimeNs": stat.st_mtime_ns,
-            "ctimeNs": stat.st_ctime_ns,
+            "ctimeNs": change_time,
         }
-        if previous_entry.get("sha256") and all(previous_entry.get(key) == value for key, value in stamp.items()):
+        if change_time is not None and previous_entry.get("sha256") and all(
+            previous_entry.get(key) == value for key, value in stamp.items()
+        ):
             digest = str(previous_entry["sha256"])
             guid = str(previous_entry.get("guid") or "")
             hashes_reused += 1
