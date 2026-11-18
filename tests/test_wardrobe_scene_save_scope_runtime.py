@@ -13,7 +13,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCOPE = ROOT / "Assets/VRCForge/Editor/WardrobeSceneSaveScope.cs"
-WRITERS = ("WardrobeManagerWriter", "WardrobeOutfitWriter", "WardrobeOutfitPartWriter")
+# The part writer's separate save path is exercised by the Unity WardrobeScopeAudit fixture.
+WRITERS = ("WardrobeManagerWriter", "WardrobeOutfitWriter")
 
 
 def _compile_and_run(tmp_path, source):
@@ -89,10 +90,9 @@ namespace VRCForge.Editor {
         internal static int SceneSaves, AssetSaves;
         internal static UnityEngine.GameObject Target;
         static SavedSceneSnapshot Unrelated;
-        static object fxController = new object(), parametersAsset = new object(), clip = new object(),
-            onClip = new object(), offClip = new object();
+        static object fxController = new object(), parametersAsset = new object(), clip = new object();
         static object[] saveRoots = new object[] { fxController };
-        static bool addMenuToggle = true, boolParamExists = false;
+        static bool addMenuToggle = true;
         static MenuOwner descriptor = new MenuOwner();
         class MenuOwner { internal object expressionsMenu = new object(); }
         static int failures;
@@ -111,13 +111,12 @@ namespace VRCForge.Editor {
         public static int Main() {
             WardrobeManagerWriter(true); WardrobeManagerWriter(false);
             WardrobeOutfitWriter(true); WardrobeOutfitWriter(false);
-            WardrobeOutfitPartWriter(true); WardrobeOutfitPartWriter(false);
             return failures == 0 ? 0 : 1;
         }
     }
 }
 '''.replace("// METHODS", "\n".join(methods))
-    assert _compile_and_run(tmp_path, source).count("PASS ") == 6
+    assert _compile_and_run(tmp_path, source).count("PASS ") == 4
 
 
 @pytest.mark.parametrize("name", WRITERS)

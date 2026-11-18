@@ -5,6 +5,7 @@ using System.Linq;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
@@ -242,10 +243,20 @@ namespace VRCForge.Editor
                 var changedParametersAsset = boolParamExists ? null : parametersAsset;
                 var saveScope = new WardrobeAssetSaveScope(fxController, changedParametersAsset, rootMenu);
                 var menusBefore = ExpressionWritePersistence.Capture(rootMenu);
-                var sceneBefore = setObjectsDefaultOff && !defaultOn && resolvedTargets.Any(item => item.gameObject.activeSelf)
-                    ? ComponentCrudCore.ResolveSavedSceneFor(descriptor.gameObject) : null;
-                var sceneTargets = sceneBefore == null ? Array.Empty<GameObject>() : resolvedTargets.Select(item =>
-                    SceneObjectCopyCore.ResolveUniqueGameObject(sceneBefore.Scene, GetTransformPath(item), "outfit part target")).ToArray();
+                var sceneTargets = setObjectsDefaultOff && !defaultOn
+                    ? resolvedTargets.Select(item => item.gameObject).Where(item => item.activeSelf).ToArray()
+                    : Array.Empty<GameObject>();
+                var targetScene = descriptor.gameObject.scene;
+                string scenePath = null;
+                if (sceneTargets.Length > 0)
+                {
+                    if (!targetScene.IsValid() || !targetScene.isLoaded || targetScene.isDirty)
+                        throw new InvalidOperationException("Outfit part scene changes require a loaded, saved scene with no unsaved changes.");
+                    scenePath = SceneObjectCopyCore.NormalizeSceneAssetPath(targetScene.path, "outfit part scene");
+                    if (!File.Exists(SceneObjectCopyCore.ToAbsoluteAssetPath(scenePath))
+                        || !SceneObjectCopyCore.SafeSiblingFileExists(scenePath, ".meta"))
+                        throw new InvalidOperationException("The outfit part scene asset is incomplete.");
+                }
                 WardrobeToggleReadback.RequireParameterType(fxController, parameterName, AnimatorControllerParameterType.Int);
                 WardrobeToggleReadback.RequireParameterType(fxController, partParameterName, AnimatorControllerParameterType.Bool);
                 var undoGroup = Undo.GetCurrentGroup();
@@ -271,15 +282,12 @@ namespace VRCForge.Editor
                 }
 
                 // b. Part objects scene-default OFF (unless they should default on).
-                if (setObjectsDefaultOff && !defaultOn)
+                foreach (var go in sceneTargets)
                 {
-                    foreach (var t in resolvedTargets.Where(item => item.gameObject.activeSelf))
-                    {
-                        var go = t.gameObject;
-                        Undo.RecordObject(go, "Outfit part default off");
-                        if (go.activeSelf) { go.SetActive(false); }
-                        EditorUtility.SetDirty(go);
-                    }
+                    Undo.RecordObject(go, "Outfit part default off");
+                    go.SetActive(false);
+                    if (PrefabUtility.IsPartOfPrefabInstance(go))
+                        PrefabUtility.RecordPrefabInstancePropertyModifications(go);
                 }
 
                 // c. Author the On / Off clips for the part objects.
@@ -375,7 +383,13 @@ namespace VRCForge.Editor
                 var expectedOff = WardrobeToggleReadback.CaptureActiveCurves(offClip, onObjects, false);
                 failurePhase = "asset_save";
                 saveScope.Save(fxController, changedParametersAsset, rootMenu, onClip, offClip);
-                var sceneAfter = sceneBefore == null ? null : ComponentCrudCore.SaveAndResolveScene(sceneBefore);
+                if (scenePath != null)
+                {
+                    Undo.FlushUndoRecordObjects();
+                    EditorSceneManager.MarkSceneDirty(targetScene);
+                    if (!EditorSceneManager.SaveScene(targetScene))
+                        throw new InvalidOperationException("The outfit part scene could not be saved.");
+                }
                 failurePhase = "persisted_readback";
                 var controllerReadback = WardrobeToggleReadback.ReadController(fxControllerPath, expectedController,
                     new[] { layerName }, new[] { parameterName, partParameterName });
@@ -386,20 +400,13 @@ namespace VRCForge.Editor
                     WardrobeToggleReadback.ReadActiveCurves(createdOnClipPath, expectedOn),
                     WardrobeToggleReadback.ReadActiveCurves(createdOffClipPath, expectedOff)
                 };
-                var objects = Array.Empty<object>();
-                if (sceneAfter != null)
+                var objects = sceneTargets.Select(target =>
                 {
-                    if (sceneAfter.FileDigest == sceneBefore.FileDigest)
-                        throw new InvalidOperationException("Outfit part scene write did not change the saved scene.");
-                    objects = sceneTargets.Select(target =>
-                    {
-                        var path = GetTransformPath(target.transform);
-                        var saved = SceneObjectCopyCore.ResolveUniqueGameObject(sceneAfter.Scene, path, "saved outfit part target");
-                        if (saved != target || saved.activeSelf)
-                            throw new InvalidOperationException("Outfit part target did not persist inactive: " + path);
-                        return (object)new { path, activeSelf = saved.activeSelf };
-                    }).ToArray();
-                }
+                    var path = GetTransformPath(target.transform);
+                    if (target.scene != targetScene || target.activeSelf)
+                        throw new InvalidOperationException("Outfit part target is not inactive in the saved scene: " + path);
+                    return new { path, activeSelf = false };
+                }).ToArray();
                 Undo.CollapseUndoOperations(undoGroup);
 
                 return VRCForgeToolResult.Completed(
@@ -416,7 +423,7 @@ namespace VRCForge.Editor
                         committed = true,
                         commitState = "committed",
                         readback = new { persisted = true, controller = controllerReadback, parameters = parameterReadback,
-                            menus = menuReadback, toggleAssetPath, curves, scenePath = sceneAfter?.Path, objects },
+                            menus = menuReadback, toggleAssetPath, curves, scenePath, objects },
                         action = "add_outfit_part",
                         avatarPath = avatarRootPath,
                         avatarName = descriptor.name,

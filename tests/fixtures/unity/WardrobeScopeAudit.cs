@@ -7,6 +7,7 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
 using VRCForge.Core.MCP;
@@ -14,13 +15,14 @@ using VRCForge.Editor;
 
 // In a disposable Unity project with the source Core and VRChat SDK, copy to Assets/VRCForge/Editor.
 // Run Unity in batch mode with -executeMethod WardrobeScopeAudit.Run; set
-// VRCFORGE_WARDROBE_AUDIT_CASE to "dirty" (reuse) or "new" (create).
+// VRCFORGE_WARDROBE_AUDIT_CASE to "dirty", "new", "meta", "inactive", or "dirty-scene".
 internal static class WardrobeScopeAudit
 {
     public static void Run()
     {
         var scenario = Environment.GetEnvironmentVariable("VRCFORGE_WARDROBE_AUDIT_CASE");
-        Require(Application.isBatchMode && (scenario == "dirty" || scenario == "new"), "Select a batch fixture case.");
+        Require(Application.isBatchMode && new[] { "dirty", "new", "meta", "inactive", "dirty-scene" }.Contains(scenario),
+            "Select a batch fixture case.");
         var reply = (JObject)typeof(VRCForgeMcpCoreServer)
             .GetMethod("HandleMessage", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] {
                 new JObject { ["jsonrpc"] = "2.0", ["id"] = 1, ["method"] = "server/core-info" }, null, null
@@ -34,8 +36,16 @@ internal static class WardrobeScopeAudit
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         var avatar = new GameObject("Avatar");
         var descriptor = avatar.AddComponent<VRCAvatarDescriptor>();
-        var part = new GameObject("Hat");
-        part.transform.SetParent(avatar.transform);
+        var source = new GameObject("Hat");
+        var prefab = PrefabUtility.SaveAsPrefabAsset(source, Unique("Assets/WardrobeAuditHat.prefab"));
+        UnityEngine.Object.DestroyImmediate(source);
+        var part = (GameObject)PrefabUtility.InstantiatePrefab(prefab, avatar.transform);
+        part.name = "Hat";
+        part.SetActive(scenario != "inactive");
+        PrefabUtility.RecordPrefabInstancePropertyModifications(part);
+        var inactivePart = new GameObject("AlreadyOff");
+        inactivePart.transform.SetParent(avatar.transform);
+        inactivePart.SetActive(false);
         var controller = AnimatorController.CreateAnimatorControllerAtPath(Unique("Assets/WardrobeAuditFX.controller"));
         controller.AddParameter("Wardrobe", AnimatorControllerParameterType.Int);
         var machine = controller.layers[0].stateMachine;
@@ -52,7 +62,8 @@ internal static class WardrobeScopeAudit
         AssetDatabase.CreateAsset(expressions, parametersPath);
         descriptor.expressionParameters = expressions;
         AssetDatabase.SaveAssets();
-        Require(EditorSceneManager.SaveScene(scene, Unique("Assets/WardrobeScopeAudit.unity")), "Fixture save failed.");
+        var scenePath = Unique("Assets/WardrobeScopeAudit.unity");
+        Require(EditorSceneManager.SaveScene(scene, scenePath), "Fixture save failed.");
         var originalParameters = File.ReadAllBytes(parametersPath);
         var reuse = scenario == "dirty";
         if (reuse)
@@ -61,21 +72,61 @@ internal static class WardrobeScopeAudit
             EditorUtility.SetDirty(expressions);
         }
 
-        var partParameter = reuse ? "Hat" : "FreshHat";
-        var result = (VRCForgeToolResult)WardrobeOutfitPartWriter.HandleCommand(new JObject {
+        var partParameter = scenario == "new" ? "FreshHat" : "Hat";
+        var sceneWrites = scenario == "meta" || scenario == "inactive" || scenario == "dirty-scene";
+        var args = new JObject {
             ["avatarPath"] = "Avatar", ["parameterName"] = "Wardrobe", ["partName"] = "Hat",
-            ["partParameterName"] = partParameter, ["value"] = 1, ["objectPaths"] = new JArray("Hat"),
-            ["writeDefaults"] = false, ["addMenuToggle"] = false, ["setObjectsDefaultOff"] = false
-        });
+            ["partParameterName"] = partParameter, ["value"] = 1, ["objectPaths"] = new JArray("Hat", "AlreadyOff"),
+            ["writeDefaults"] = false, ["addMenuToggle"] = false, ["setObjectsDefaultOff"] = sceneWrites
+        };
+        if (scenario == "dirty-scene")
+            EditorSceneManager.MarkSceneDirty(scene);
+        var sceneSaves = 0;
+        void OnSceneSaved(Scene saved)
+        {
+            if (saved.path != scenePath) return;
+            sceneSaves++;
+            if (scenario == "meta")
+                File.AppendAllText(scenePath + ".meta", "\n# unrelated metadata comment\n");
+        }
+        VRCForgeToolResult result;
+        EditorSceneManager.sceneSaved += OnSceneSaved;
+        try { result = (VRCForgeToolResult)WardrobeOutfitPartWriter.HandleCommand(args); }
+        finally { EditorSceneManager.sceneSaved -= OnSceneSaved; }
+        if (scenario == "dirty-scene")
+        {
+            Require(!result.IsSuccessful && !(bool)JObject.FromObject(result.Payload)["mutationStarted"]
+                && sceneSaves == 0 && part.activeSelf, "Dirty scene was not rejected before mutation.");
+            Debug.Log("WARDROBE_AUDIT_PASS " + scenario);
+            return;
+        }
+        if (scenario == "meta")
+        {
+            var reopened = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
+            var savedPart = reopened.GetRootGameObjects().Single().transform.Find("Hat");
+            Require(sceneSaves == 1 && !savedPart.gameObject.activeSelf, "Prefab part did not persist inactive.");
+        }
         Require(result.IsSuccessful, result.Message);
         var readback = JObject.FromObject(result.Payload)["readback"];
+        if (scenario == "meta")
+        {
+            var changedObject = readback["objects"].Single();
+            Require((string)readback["scenePath"] == scenePath
+                && (string)changedObject["path"] == "Avatar/Hat" && !(bool)changedObject["activeSelf"],
+                "Scene receipt did not describe the saved change.");
+        }
+        else
+        {
+            Require(sceneSaves == 0 && readback["scenePath"].Type == JTokenType.Null && !readback["objects"].Any(),
+                "Unchanged scene was saved or claimed in receipt.");
+        }
         if (reuse)
         {
             Require(EditorUtility.IsDirty(expressions) && expressions.parameters[1].defaultValue == 1
                 && File.ReadAllBytes(parametersPath).SequenceEqual(originalParameters)
                 && !readback["parameters"].Any(), "Reused expression asset was saved, reloaded or claimed in the receipt.");
         }
-        else
+        if (scenario == "new")
         {
             Require((string)readback["parameters"].Single() == parametersPath
                 && AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(parametersPath).parameters.Any(p =>
