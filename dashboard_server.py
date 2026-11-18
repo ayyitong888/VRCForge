@@ -1572,6 +1572,12 @@ def persist_runtime_turn_journey_receipt(payload: dict[str, Any]) -> dict[str, A
     return projected
 
 
+def _notify_cross_session_runtime_available() -> None:
+    cross_session = globals().get("_CROSS_SESSION_CONVERSATION_SERVICE")
+    if cross_session is not None:
+        cross_session.notify_runtime_available()
+
+
 def broadcast_runtime_turn_completed(payload: dict[str, Any]) -> None:
     """Publish an app-owned async task continuation after its terminal event."""
 
@@ -1580,9 +1586,7 @@ def broadcast_runtime_turn_completed(payload: dict[str, Any]) -> None:
     )
     if projected is None:
         return
-    cross_session = globals().get("_CROSS_SESSION_CONVERSATION_SERVICE")
-    if cross_session is not None:
-        cross_session.notify_runtime_available()
+    _notify_cross_session_runtime_available()
     EVENT_BUS.broadcast_from_sync("agentRuntimeTurn", projected)
     telegram_service = globals().get("TELEGRAM_SERVICE")
     if telegram_service is not None:
@@ -2111,6 +2115,7 @@ SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
         build_handlers=lambda gateway: build_sub_agent_role_handlers(gateway, _SUB_AGENT_ROLES),
         task_finished=_sub_agent_task_finished,
         worker_terminal=_publish_sub_agent_worker_terminal,
+        parent_delivery_settled=_notify_cross_session_runtime_available,
         defer_projection_load=True,
     )
 )
@@ -3429,9 +3434,8 @@ async def _execute_app_agent_runtime_message(
                         await asyncio.to_thread(RUNTIME_QUEUE_PORT.ack_runtime_followup, runtime_request.followup_queue_id, followup_lane_id, followup_claim_token)
             except (OSError, AgentGatewayError):
                 pass
-        cross_session = globals().get("_CROSS_SESSION_CONVERSATION_SERVICE")
-        if cross_session is not None:
-            cross_session.notify_runtime_available()
+        if not deferred_for_child:
+            _notify_cross_session_runtime_available()
     try:
         terminal_event = await asyncio.to_thread(
             AGENT_GATEWAY.runtime_runs.read_terminal_continuation,

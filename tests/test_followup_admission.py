@@ -92,6 +92,8 @@ def test_queued_user_turn_waits_for_child_delivery_before_native_history_advance
     dispatching = threading.Event()
     parent_resume = threading.Event()
     child_results = []
+    dispatcher = Mock()
+    monkeypatch.setattr(host, "_CROSS_SESSION_CONVERSATION_SERVICE", dispatcher)
 
     def worker(_params, _cancel):
         assert worker_release.wait(5)
@@ -106,6 +108,7 @@ def test_queued_user_turn_waits_for_child_delivery_before_native_history_advance
         tmp_path / "tasks", roles=[SubAgentRole("fixture", "Fixture", "Read the fixture.")],
         handlers={"fixture": worker}, task_finished=deliver,
         wait_parent_idle=gateway.wait_runtime_session_idle,
+        parent_delivery_settled=host._notify_cross_session_runtime_available,
     )
     gateway.bind_runtime_subagent_control(
         active_parent_task_ids=registry.active_parent_task_ids, cancel_task=registry.cancel_task,
@@ -140,6 +143,7 @@ def test_queued_user_turn_waits_for_child_delivery_before_native_history_advance
         assert failure.value.detail["code"] == "followup_queue_not_ready"
         assert gateway.list_runtime_followups(session_id="lane")[0]["status"] == "pending"
         assert len(model.requests) == 1
+        dispatcher.notify_runtime_available.assert_not_called()
 
     try:
         assert_deferred()
@@ -152,6 +156,7 @@ def test_queued_user_turn_waits_for_child_delivery_before_native_history_advance
         registry._threads[task_id].join(5)
     assert len(child_results) == 1 and child_results[0]["plan"]["nextStep"] == "done"
     assert registry.get_task(task_id)["task"]["parentContinuationStatus"] == "delivered"
+    dispatcher.notify_runtime_available.assert_called_once()
     sent = asyncio.run(host.app_agent_runtime_message(request))
     assert sent["plan"]["reply"] == "Queued input handled after the report."
     assert gateway.list_runtime_followups(session_id="lane")[0]["status"] == "acked"

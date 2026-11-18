@@ -122,6 +122,7 @@ class SubAgentTaskRegistry:
         lane_budget: RuntimeLaneBudget | None = None,
         task_finished: Callable[[dict[str, Any]], None] | None = None,
         worker_terminal: Callable[[], None] | None = None,
+        parent_delivery_settled: Callable[[], None] | None = None,
         wait_parent_idle: Callable[..., bool] | None = None,
         defer_projection_load: bool = False,
     ) -> None:
@@ -132,6 +133,7 @@ class SubAgentTaskRegistry:
         self._lane_budget = lane_budget
         self._task_finished = task_finished or (lambda _event: None)
         self._worker_terminal = worker_terminal
+        self._parent_delivery_settled = parent_delivery_settled
         self._wait_parent_idle = wait_parent_idle
         self._tasks: dict[str, SubAgentTask] = {}
         self._cancel_events: dict[str, threading.Event] = {}
@@ -901,6 +903,8 @@ class SubAgentTaskRegistry:
                 # Recovery uses the owner's claim/outcome without replaying
                 # a callback that could already have affected its parent.
                 return
+        if self._parent_delivery_settled is not None:
+            self._parent_delivery_settled()
 
     def _clear_parent_continuation_inflight_locked(self, task_id: str) -> None:
         self._parent_continuations_inflight.discard(task_id)
