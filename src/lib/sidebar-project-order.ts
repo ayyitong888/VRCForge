@@ -6,6 +6,7 @@ type SidebarProjectItem = {
   name?: string;
   path?: string;
   projectType?: ProjectType;
+  lastOpenedAt?: string;
 };
 
 export type SidebarProjectGroups<TProject extends SidebarProjectItem> = {
@@ -27,17 +28,15 @@ type IndexedProject<TProject extends SidebarProjectItem> = {
   project: TProject;
   index: number;
   pinned: boolean;
-  latestChatTime: number | null;
+  lastUsedTime: number;
   manualIndex: number;
 };
 
 /**
  * Orders the sidebar-only project view without mutating project state.
  *
- * Pinned projects form the first group. Within each group, the most recently
- * updated conversation wins unless the user has arranged that group by hand.
- * A missing updatedAt falls back to createdAt. Projects without a usable timestamp retain their
- * incoming order.
+ * Within each pin group, use the newest project opening or chat activity time
+ * unless the user has arranged the projects by hand. Ties keep the incoming order.
  */
 export function sortSidebarProjects<TProject extends SidebarProjectItem>(
   projects: readonly TProject[],
@@ -51,11 +50,15 @@ export function sortSidebarProjects<TProject extends SidebarProjectItem>(
   return projects
     .map((project, index): IndexedProject<TProject> => {
       const key = normalizeProjectPathKey(projectKey(project));
+      const openedAt = Date.parse(project.lastOpenedAt || "");
       return {
         project,
         index,
         pinned: pinnedProjectKeys.has(key),
-        latestChatTime: key ? latestChatTimeByProject.get(key) ?? null : null,
+        lastUsedTime: Math.max(
+          Number.isFinite(openedAt) ? openedAt : Number.NEGATIVE_INFINITY,
+          latestChatTimeByProject.get(key) ?? Number.NEGATIVE_INFINITY,
+        ),
         manualIndex: manualOrder.get(key) ?? Number.POSITIVE_INFINITY,
       };
     })
@@ -97,14 +100,8 @@ function compareSidebarProjects<TProject extends SidebarProjectItem>(
   if (left.manualIndex !== right.manualIndex) {
     return left.manualIndex < right.manualIndex ? -1 : 1;
   }
-  if (left.latestChatTime !== null && right.latestChatTime !== null && left.latestChatTime !== right.latestChatTime) {
-    return right.latestChatTime - left.latestChatTime;
-  }
-  if (left.latestChatTime !== null && right.latestChatTime === null) {
-    return -1;
-  }
-  if (left.latestChatTime === null && right.latestChatTime !== null) {
-    return 1;
+  if (left.lastUsedTime !== right.lastUsedTime) {
+    return right.lastUsedTime - left.lastUsedTime;
   }
   return left.index - right.index;
 }

@@ -87,6 +87,7 @@
     "dragChat": "長押しして会話を並べ替え",
     "dragProject": "長押ししてプロジェクトを並べ替え",
     "sortProjectsByConversation": "最後の会話順に並べ替え",
+    "sortProjectsByLastUsed": "最終使用順に並べ替え",
     "noTempChats": "一時チャットはありません",
     "expandSidebar": "サイドバーを展開",
     "collapseSidebar": "サイドバーを折りたたむ"

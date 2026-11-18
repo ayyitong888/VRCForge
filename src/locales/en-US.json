@@ -87,6 +87,7 @@
     "dragChat": "Press and hold to reorder conversations",
     "dragProject": "Press and hold to reorder projects",
     "sortProjectsByConversation": "Sort by last conversation",
+    "sortProjectsByLastUsed": "Sort by last used",
     "noTempChats": "No quick chats yet",
     "expandSidebar": "Expand sidebar",
     "collapseSidebar": "Collapse sidebar"

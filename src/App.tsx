@@ -767,6 +767,7 @@ export default function App() {
     projectOrder,
     reorderProjects,
     resetProjectOrder,
+    recordProjectOpen,
     projectItems,
     hiddenProjects,
     addProjectPath,
@@ -874,7 +875,10 @@ export default function App() {
     activeProjectPath,
     activeProjectType,
     setActiveProjectType,
-    setActiveProjectPath,
+    setActiveProjectPath: (projectPath) => {
+      recordProjectOpen(projectPath);
+      setActiveProjectPath(projectPath);
+    },
     setActiveView,
     setError,
     expandProjectGroup,

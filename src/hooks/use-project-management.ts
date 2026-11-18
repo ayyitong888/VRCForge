@@ -146,13 +146,24 @@ export function useProjectManagement({
     () =>
       allProjectItems
         .filter((project) => !hiddenPathSet.has(normalizeProjectPathKey(project.path || "")))
+        .map((project) => ({ ...project, lastOpenedAt: projectUiPrefs.lastOpenedAt?.[normalizeProjectPathKey(projectKey(project))] }))
         .sort((a, b) => Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(b)))) - Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(a))))),
-    [allProjectItems, hiddenPathSet, pinnedProjectSet],
+    [allProjectItems, hiddenPathSet, pinnedProjectSet, projectUiPrefs.lastOpenedAt],
   );
   const hiddenProjects = useMemo(
     () => allProjectItems.filter((project) => hiddenPathSet.has(normalizeProjectPathKey(project.path || ""))),
     [allProjectItems, hiddenPathSet],
   );
+
+  const recordProjectOpen = useCallback((projectPath: string) => {
+    const key = normalizeProjectPathKey(projectPath);
+    if (!key) return;
+    const openedAt = new Date().toISOString();
+    setProjectUiPrefs((current) => ({
+      ...current,
+      lastOpenedAt: { ...current.lastOpenedAt, [key]: openedAt },
+    }));
+  }, []);
 
   useEffect(() => {
     try {
@@ -639,6 +650,7 @@ export function useProjectManagement({
     projectOrder,
     reorderProjects,
     resetProjectOrder,
+    recordProjectOpen,
     projectItems,
     hiddenProjects,
     addProjectPath,

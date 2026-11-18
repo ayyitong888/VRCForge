@@ -73,7 +73,8 @@ const bundle = await build({
             backgroundGoalUnreadByChat={{}} collapsedProjects={{}} temporaryChatsCollapsed={false}
             pinnedProjectSet={state.pinnedProjectSet} renamingProjectPath="" projectRenameDraft=""
             renamingChatId="" renameDraft="" projectDisplayName={item=>item.name}
-            onSelectProject={setActiveProjectPath} onReorderProjects={state.reorderProjects}
+            onSelectProject={(path)=>{state.recordProjectOpen(path);setActiveProjectPath(path);}}
+            onReorderProjects={state.reorderProjects}
             onResetProjectOrder={state.resetProjectOrder}/>
         </div>;
       }
@@ -139,21 +140,15 @@ try {
   });
   page.on("websocket", (socket) => unexpectedRequests.push({ url: socket.url(), resourceType: "websocket" }));
   await page.addInitScript(() => {
-    // Old open-times deliberately oppose chat recency and must no longer sort projects.
+    // Load an older activation and retain the newer conversation as the initial order.
     if (!localStorage.getItem("vrcforge_project_ui_prefs")) {
       localStorage.setItem("vrcforge_project_ui_prefs", JSON.stringify({
         pinnedPaths: [], aliases: {}, projectOrder: [], lastOpenedAt: {
-          "c:\\hook-probe\\a": "2099-01-01T00:00:00.000Z",
-          "c:\\hook-probe\\b": "2000-01-01T00:00:00.000Z",
+          "c:\\hook-probe\\a": "2024-01-01T00:00:00.000Z",
+          "c:\\hook-probe\\b": "invalid",
         },
       }));
     }
-    window.__projectPreferenceWrites = [];
-    const originalSetItem = Storage.prototype.setItem;
-    Storage.prototype.setItem = function(key, value) {
-      if (key === "vrcforge_project_ui_prefs") window.__projectPreferenceWrites.push(value);
-      return originalSetItem.call(this, key, value);
-    };
   });
   await page.goto(fixtureUrl);
 
@@ -227,34 +222,38 @@ try {
   const manualNames = ["A", "B", "C", "D", "E", "F", "G"].map((name) => "Hook project " + name);
   const flushEffects = () => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await flushEffects();
-  assert.deepEqual((await readProbe()).sortedPaths, conversationOrder, "default project order follows saved conversation updatedAt, ignoring legacy open times");
+  assert.deepEqual((await readProbe()).sortedPaths, conversationOrder, "a newer conversation ranks ahead of an older activation");
   assert.deepEqual(await probeProjectRows.allTextContents(), conversationNames.slice(0, 5), "the real hook group starts folded, hiding its last two projects");
   const prefsBeforeClick = await readPrefs();
-  const writesBeforeClick = await page.evaluate(() => window.__projectPreferenceWrites.length);
+  assert.deepEqual(prefsBeforeClick.lastOpenedAt, { "c:\\hook-probe\\a": "2024-01-01T00:00:00.000Z" });
   await orderProbe.getByRole("button", { name: "Hook project A", exact: true }).click();
   await page.waitForFunction(() => JSON.parse(document.querySelector('[data-testid="project-hook-probe"]').textContent).activeProjectPath === "C:/hook-probe/a");
   await flushEffects();
-  assert.deepEqual((await readProbe()).sortedPaths, conversationOrder, "selecting an older project cannot promote it above a newer conversation");
-  assert.deepEqual(await readPrefs(), prefsBeforeClick, "selecting a project leaves stored preferences and times unchanged");
-  assert.equal(await page.evaluate(() => window.__projectPreferenceWrites.length), writesBeforeClick, "selecting a project does not write project preferences");
+  assert.deepEqual((await readProbe()).sortedPaths, manualOrder, "an explicit project open moves it above the older conversation");
+  assert.deepEqual(await probeProjectRows.allTextContents(), manualNames.slice(0, 5), "the reordered project is first in the visible sidebar");
+  assert.ok(Date.parse((await readPrefs()).lastOpenedAt["c:\\hook-probe\\a"]) > Date.parse(prefsBeforeClick.lastOpenedAt["c:\\hook-probe\\a"]));
 
   // The whole project button activates dragging only after a hold; quick movement
   // must not turn normal project selection into a saved reordering.
   const handle = orderProbe.getByRole("button", { name: "Hook project A", exact: true });
   const target = orderProbe.getByRole("button", { name: "Hook project B", exact: true });
   await handle.scrollIntoViewIfNeeded();
-  const sourceBox = await handle.boundingBox();
-  const targetBox = await target.boundingBox();
-  assert.ok(sourceBox && targetBox, "both project rows have browser geometry");
+  const quickBox = await handle.boundingBox();
+  assert.ok(quickBox, "the project row has browser geometry");
   assert.equal(await orderProbe.locator('[data-vrcforge-project-drag-handle]').count(), 0, "project dragging does not require a separate handle");
-  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.mouse.move(quickBox.x + quickBox.width / 2, quickBox.y + quickBox.height / 2);
   await page.mouse.down();
-  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2 - 12, { steps: 2 });
+  await page.mouse.move(quickBox.x + quickBox.width / 2, quickBox.y + quickBox.height / 2 - 12, { steps: 2 });
   await page.mouse.up();
   await flushEffects();
-  assert.deepEqual((await readProbe()).sortedPaths, conversationOrder, "movement before the hold threshold cannot reorder a project");
-  assert.deepEqual(await readPrefs(), prefsBeforeClick, "a quick gesture does not persist an accidental order");
+  assert.deepEqual((await readProbe()).sortedPaths, manualOrder, "movement before the hold threshold cannot reorder a project");
+  assert.deepEqual((await readPrefs()).projectOrder, [], "a quick gesture does not persist an accidental order");
   await target.click();
+  await flushEffects();
+  assert.deepEqual((await readProbe()).sortedPaths, conversationOrder, "reopening B promotes it ahead of A");
+  const sourceBox = await handle.boundingBox();
+  const targetBox = await target.boundingBox();
+  assert.ok(sourceBox && targetBox, "both reordered project rows have browser geometry");
   await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
   await page.mouse.down();
   await page.waitForTimeout(260);
@@ -280,24 +279,23 @@ try {
   await orderUnitySection.getByRole("button", { name: "More projects (2)", exact: true }).click();
   assert.deepEqual(await probeProjectRows.allTextContents(), manualNames, "expanding after reload recovers both hidden projects in preserved order");
   const prefsBeforeManualSelection = await readPrefs();
-  const writesBeforeManualSelection = await page.evaluate(() => window.__projectPreferenceWrites.length);
   await orderProbe.getByRole("button", { name: "Hook project B", exact: true }).click();
   await page.waitForFunction(() => JSON.parse(document.querySelector('[data-testid="project-hook-probe"]').textContent).activeProjectPath === "C:/hook-probe/b");
   await flushEffects();
   assert.deepEqual((await readProbe()).sortedPaths, manualOrder, "project selection also preserves an existing manual order");
-  assert.deepEqual(await readPrefs(), prefsBeforeManualSelection, "project selection cannot replace saved manual order or timestamps");
-  assert.equal(await page.evaluate(() => window.__projectPreferenceWrites.length), writesBeforeManualSelection, "manual-order project selection does not persist preferences");
-  await orderUnitySection.getByRole("button", { name: "Sort by last conversation", exact: true }).click();
+  assert.deepEqual((await readPrefs()).projectOrder, prefsBeforeManualSelection.projectOrder, "opening a project leaves explicit manual order intact");
+  assert.ok(Date.parse((await readPrefs()).lastOpenedAt["c:\\hook-probe\\b"]) > Date.parse(prefsBeforeManualSelection.lastOpenedAt["c:\\hook-probe\\b"]));
+  await orderUnitySection.getByRole("button", { name: "Sort by last used", exact: true }).click();
   await page.waitForFunction(() => {
     const order = JSON.parse(localStorage.getItem("vrcforge_project_ui_prefs") || "{}").projectOrder || [];
     return order.length === 0;
   });
-  assert.deepEqual((await readProbe()).sortedPaths, conversationOrder, "reset returns all seven projects to conversation order while keeping unknown-time relative order");
+  assert.deepEqual((await readProbe()).sortedPaths, conversationOrder, "reset returns all seven projects to last-used order while keeping unknown-time relative order");
   assert.deepEqual(await probeProjectRows.allTextContents(), conversationNames, "reset reorders expanded rows without losing the formerly hidden projects");
   await page.reload();
   await page.getByTestId("project-hook-probe").waitFor();
   assert.deepEqual((await readPrefs()).projectOrder, [], "reset persists removal of the manual group order");
-  assert.deepEqual((await readProbe()).sortedPaths, conversationOrder, "conversation ordering remains the default after reloading a reset");
+  assert.deepEqual((await readProbe()).sortedPaths, conversationOrder, "last-used ordering and activation times survive reloading");
   assert.deepEqual(await probeProjectRows.allTextContents(), conversationNames.slice(0, 5), "reset plus reload folds the complete restored list back to five");
 
   const keyboardProject = orderProbe.getByRole("button", { name: "Hook project A", exact: true });
@@ -373,7 +371,7 @@ try {
   assert.deepEqual(await readChatOrder(), [], "resetting every chat group clears the custom order");
   assert.deepEqual(unexpectedRequests, [], "offline hook persistence makes no API, provider, asset, or WebSocket requests");
   assert.deepEqual(errors, []);
-  console.log("PASS: project/chat folding, conversation-only default order, short click and movement guards, whole-row hold drag persistence/reload/reset, keyboard drag, all four chat groups, pinned boundary and selected older chat; no API/provider requests.");
+  console.log("PASS: last-used project order after selection and reload, project/chat folding, pointer and keyboard drag, reset, pinned boundary and selected older chat; no API/provider requests.");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

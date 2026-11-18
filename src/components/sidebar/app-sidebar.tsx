@@ -227,7 +227,7 @@ export function AppSidebar({
 
       {collapsed || !projectGroups.general.length ? null : (
         <SidebarSection title={t("project.generalProject")} action={onResetProjectOrder ? (
-          <button type="button" onClick={() => onResetProjectOrder(projectGroups.general.map((project) => projectKey(project)).filter(Boolean))} title={t("sidebar.sortProjectsByConversation")} aria-label={t("sidebar.sortProjectsByConversation")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+          <button type="button" onClick={() => onResetProjectOrder(projectGroups.general.map((project) => projectKey(project)).filter(Boolean))} title={t("sidebar.sortProjectsByLastUsed")} aria-label={t("sidebar.sortProjectsByLastUsed")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
             <ListFilter className="h-3.5 w-3.5" />
           </button>
         ) : undefined}>
@@ -296,7 +296,7 @@ export function AppSidebar({
           title={t("project.unityProject")}
           action={onResetProjectOrder ? (
             <div className="flex items-center gap-0.5">
-              <button type="button" onClick={() => onResetProjectOrder(projectGroups.unity.map((project) => projectKey(project)).filter(Boolean))} title={t("sidebar.sortProjectsByConversation")} aria-label={t("sidebar.sortProjectsByConversation")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+              <button type="button" onClick={() => onResetProjectOrder(projectGroups.unity.map((project) => projectKey(project)).filter(Boolean))} title={t("sidebar.sortProjectsByLastUsed")} aria-label={t("sidebar.sortProjectsByLastUsed")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
                 <ListFilter className="h-3.5 w-3.5" />
               </button>
               <button type="button" onClick={onRefreshProjects} disabled={!runtimeConnected || loadingProjects} title={t("workspace.refreshStatus")} aria-label={t("workspace.refreshStatus")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50">
