@@ -997,7 +997,7 @@
     "contextUsageCached": "缓存上下文：{{value}}",
     "deletePermanentlyFailed": "删除聊天失败，已恢复聊天。",
     "deletePermanentlyPartialSuccess": "聊天记录已删除，但运行历史清理未完成：{{error}}",
-    "forwardedByAgent": "来自其他对话的代理转发",
+    "forwardedByAgent": "来自另一对话的 Agent",
     "openSourceConversation": "打开来源对话",
     "openConversation": "打开对话"
   },

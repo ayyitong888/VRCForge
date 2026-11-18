@@ -191,6 +191,7 @@ export function ChatWorkspace({
   reviewQuestionReveal,
   onReplyInChat,
   onOpenChatById,
+  lookupChatTitle,
   focusInput = false,
   onCancelReply,
   pendingReplyQuestionId = "",
@@ -300,6 +301,7 @@ export function ChatWorkspace({
   onReplyInChat?: (questionId: string) => void;
   /** Opens another conversation in this project scope by chat id. */
   onOpenChatById?: (chatId: string) => void;
+  lookupChatTitle?: (chatId: string) => string | undefined;
   focusInput?: boolean;
   onCancelReply?: () => void;
   pendingReplyQuestionId?: string;
@@ -841,6 +843,7 @@ export function ChatWorkspace({
                 pendingQuestions={pendingQuestionsByOrigin.get(item)}
                 renderQuestionEntry={renderQuestionEntry}
                 onOpenChatById={onOpenChatById}
+                lookupChatTitle={lookupChatTitle}
                 interleavedUserMessages={turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined}
                 steeringNavAnchorKeys={steeringAnchorsByOwner.get(renderKey)}
                 steeringRevealSequence={steeringReveal?.ownerKey === renderKey ? steeringReveal.sequence : undefined}
@@ -848,6 +851,8 @@ export function ChatWorkspace({
                   <div data-chat-nav-anchor={conversationItemRenderKey(initialUser, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={initialUser.id} data-turn-initial-user>
                     <ConversationCard
                       item={initialUser}
+                      onOpenChatById={onOpenChatById}
+                      lookupChatTitle={lookupChatTitle}
                       attachmentPayloads={attachmentPayloads}
                       canRetry={!sending && queued.length === 0 && initialUser.id === latestRetryableItemId}
                       canEdit={initialUser.id === latestEditableUserItemId}

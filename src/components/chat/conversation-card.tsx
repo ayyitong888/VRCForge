@@ -17,6 +17,7 @@ import i18n from "../../i18n";
 import type { AgentApproval, AgentQuestion } from "../../lib/api";
 import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
+import { agentRelaySource, displayedUserMessageText } from "../../lib/chat-relay-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
 import { isSelectedTextAttachment } from "../../lib/chat-types";
 import { elapsedSecondsSince, providerWaitingWindow, type AgentRuntimePhase } from "../../lib/chat-streaming";
@@ -67,6 +68,7 @@ export function ConversationCard({
   pendingQuestions = [],
   renderQuestionEntry,
   onOpenChatById,
+  lookupChatTitle,
   runtimeActive,
 }: {
   item: Exclude<ConversationItem, { type: "handoff_card" }>;
@@ -103,10 +105,22 @@ export function ConversationCard({
   renderQuestionEntry?: (question: AgentQuestion, showPrompt: boolean) => ReactNode;
   /** Opens another conversation in this project scope by chat id. */
   onOpenChatById?: (chatId: string) => void;
+  lookupChatTitle?: (chatId: string) => string | undefined;
   /** Exact session/CID activity from the current runtime ledger, when available. */
   runtimeActive?: boolean;
 }) {
   const { t } = useTranslation();
+  const renderSteeringMessage = (message: Extract<ConversationItem, { type: "user" }>) => (
+    <InterleavedUserMessage
+      key={message.id}
+      message={message}
+      attachmentPayloads={attachmentPayloads}
+      navigationAnchor={steeringNavAnchorKeys?.get(message.id)}
+      lookupChatTitle={lookupChatTitle}
+      onOpenChatById={onOpenChatById}
+      onCopyItem={onCopyItem}
+    />
+  );
   const unplacedQuestions = new Set(pendingQuestions);
   const renderQuestionActions = pendingQuestions.length && renderQuestionEntry ? (reply: string) => {
     const entries = [...unplacedQuestions].filter((question) => includesQuestionText(reply, question.question || ""));
@@ -228,31 +242,17 @@ export function ConversationCard({
       );
     }
 
-    const sourceChatId = item.forwardedFrom?.sourceChatId?.trim() || "";
+    const sourceChatId = agentRelaySource(item);
+    const text = displayedUserMessageText(item);
     return (
-      <div className="group flex min-w-0 justify-end" data-forwarded-by-agent={item.forwardedByAgent ? "true" : undefined}>
+      <div className="group flex min-w-0 justify-end" data-forwarded-by-agent={sourceChatId !== undefined ? "true" : undefined}>
         <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
-          {item.forwardedByAgent ? (
-            <div className="flex w-full flex-wrap items-center justify-end gap-1.5 text-[11px] text-muted-foreground/80" data-forwarded-agent-attribution>
-              <span>{t("chat.forwardedByAgent")}</span>
-              {sourceChatId && onOpenChatById ? (
-                <button
-                  type="button"
-                  className="inline-flex items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
-                  data-open-conversation={sourceChatId}
-                  onClick={() => onOpenChatById(sourceChatId)}
-                >
-                  <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                  {t("chat.openSourceConversation")}
-                </button>
-              ) : null}
-            </div>
-          ) : null}
+          <AgentRelayAttribution sourceChatId={sourceChatId} lookupChatTitle={lookupChatTitle} onOpenChatById={onOpenChatById} />
           {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} /> : null}
           <UserSelectedTextAttachments attachments={otherAttachments} />
-          {item.text ? (
+          {text ? (
             <div className="min-w-0 max-w-full rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
-              <UserMessageText text={item.text} />
+              <UserMessageText text={text} />
             </div>
           ) : null}
           {files.length ? (
@@ -264,7 +264,7 @@ export function ConversationCard({
             align="right"
             createdAt={item.createdAt}
             metadata={deliveryMetadata}
-            onCopy={() => onCopyItem?.(item)}
+            onCopy={() => onCopyItem?.({ ...item, text })}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
           />
@@ -380,7 +380,7 @@ export function ConversationCard({
       interleavedUserMessages,
       interleavedUsersExpanded,
       onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
-      renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, steeringNavAnchorKeys?.get(message.id)),
+      renderInterleavedUserMessage: renderSteeringMessage,
       onOpenChatById,
       renderQuestionActions,
     });
@@ -511,7 +511,7 @@ export function ConversationCard({
     interleavedUserMessages,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
-    renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, steeringNavAnchorKeys?.get(message.id)),
+    renderInterleavedUserMessage: renderSteeringMessage,
     onOpenChatById,
     renderQuestionActions,
     live: runtimeActive ?? false,
@@ -546,23 +546,56 @@ export function ConversationCard({
   );
 }
 
-function renderInterleavedUserMessage(
-  message: Extract<ConversationItem, { type: "user" }>,
-  attachmentPayloads?: AttachmentPayloadVault,
-  navigationAnchor?: string,
-) {
+type RelayAttributionProps = {
+  sourceChatId?: string;
+  lookupChatTitle?: (chatId: string) => string | undefined;
+  onOpenChatById?: (chatId: string) => void;
+};
+
+function AgentRelayAttribution({ sourceChatId, lookupChatTitle, onOpenChatById }: RelayAttributionProps) {
+  const { t } = useTranslation();
+  if (sourceChatId === undefined) return null;
+  const title = sourceChatId && (lookupChatTitle?.(sourceChatId)?.trim() || sourceChatId);
+  return (
+    <div className="flex w-full flex-wrap items-center justify-end gap-1.5 text-[11px] text-muted-foreground/80" data-forwarded-agent-attribution>
+      <span>{t("chat.forwardedByAgent")}</span>
+      {sourceChatId && onOpenChatById ? (
+        <button
+          type="button"
+          className="inline-flex min-w-0 items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
+          title={t("chat.openSourceConversation")}
+          data-open-conversation={sourceChatId}
+          onClick={() => onOpenChatById(sourceChatId)}
+        >
+          <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
+          <span className="truncate">{title}</span>
+        </button>
+      ) : title ? <span className="truncate">{title}</span> : null}
+    </div>
+  );
+}
+
+function InterleavedUserMessage({ message, attachmentPayloads, navigationAnchor, lookupChatTitle, onOpenChatById, onCopyItem }: {
+  message: Extract<ConversationItem, { type: "user" }>;
+  attachmentPayloads?: AttachmentPayloadVault;
+  navigationAnchor?: string;
+  onCopyItem?: (item: ConversationItem) => void;
+} & Omit<RelayAttributionProps, "sourceChatId">) {
+  const sourceChatId = agentRelaySource(message);
+  const text = displayedUserMessageText(message);
   const attachments = resolveAttachmentPayloadReferences(message.attachments || [], attachmentPayloads);
   const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
   const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
   const files = otherAttachments.filter((attachment) => !isSelectedTextAttachment(attachment));
   return (
-    <div key={`steering-${message.id}`} className="group flex min-w-0 justify-end" data-chat-steering-message={message.id} data-chat-nav-anchor={navigationAnchor}>
+    <div className="group flex min-w-0 justify-end" data-chat-steering-message={message.id} data-chat-nav-anchor={navigationAnchor} data-forwarded-by-agent={sourceChatId !== undefined ? "true" : undefined}>
       <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
+        <AgentRelayAttribution sourceChatId={sourceChatId} lookupChatTitle={lookupChatTitle} onOpenChatById={onOpenChatById} />
         {images.length ? <UserImageAttachments messageId={message.id} attachments={images} /> : null}
         <UserSelectedTextAttachments attachments={otherAttachments} />
-        {message.text ? (
+        {text ? (
           <div className="min-w-0 max-w-full rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
-            <UserMessageText text={message.text} />
+            <UserMessageText text={text} />
           </div>
         ) : null}
         {files.length ? (
@@ -570,7 +603,8 @@ function renderInterleavedUserMessage(
             <AttachmentStrip attachments={files} compact />
           </div>
         ) : null}
-        <MessageActions createdAt={message.createdAt} />
+        <MessageActions createdAt={message.createdAt} onCopy={sourceChatId !== undefined && onCopyItem
+          ? () => onCopyItem({ ...message, text }) : undefined} />
       </div>
     </div>
   );

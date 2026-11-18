@@ -7,6 +7,7 @@ import type {
   ProviderModelInfo,
 } from "./api";
 import { formatAttachmentSize } from "./chat-format";
+import { userMessageTextForHistory } from "./chat-relay-presentation";
 import type { ChatAttachment, ChatThread, ContextUsage, ConversationItem } from "./chat-types";
 import { isSelectedTextAttachment, SELECTED_TEXT_ATTACHMENT_NAME } from "./chat-types";
 import {
@@ -225,7 +226,7 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatH
       continue;
     }
     if (item.type === "user") {
-      const text = appendAttachmentSummary(item.text, item.attachments || [], t).trim();
+      const text = appendAttachmentSummary(userMessageTextForHistory(item), item.attachments || [], t).trim();
       if (text) {
         history.push({ role: "user", text });
       }

@@ -1,6 +1,7 @@
 import { projectDiscoveryState } from "./lib/project-discovery-state";
 import { useChatDeepLinks } from "./hooks/use-chat-deep-links";
 import { chatDeepLink, OpenChatLinkContext } from "./lib/chat-deep-link";
+import { agentRelaySource } from "./lib/chat-relay-presentation";
 import { conversationQuoteFromSelection, dismissConversationQuoteOnOutsidePointerDown } from "./lib/chat-selection-quote";
 import { hasRecentConnectorSelfTest } from "./lib/connector-verification";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -3069,8 +3070,9 @@ export default function App() {
   }
 
   function copyConversationItem(item: ConversationItem) {
-    const text = conversationItemText(item, t).trim();
-    if (!text) {
+    const text = item.type === "user" && agentRelaySource(item) !== undefined
+      ? item.text : conversationItemText(item, t).trim();
+    if (!text.trim()) {
       showTransientNotice("error", "copy", t("chat.copyFailed", { reason: t("chat.copyNoText") }));
       return;
     }
@@ -4759,6 +4761,7 @@ export default function App() {
               }}
               onSwitchMode={switchMode}
               onOpenChatById={openChatById}
+              lookupChatTitle={(chatId) => sidebarChats.find((chat) => chat.id === chatId)?.title}
               commands={slashCommands}
               planMode={displayChat?.planMode === true}
               onPlanModeChange={(planMode) => {
