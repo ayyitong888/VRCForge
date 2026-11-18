@@ -1,4 +1,4 @@
-import { Check, Circle, CircleAlert, ListTodo, Minus } from "lucide-react";
+import { Check, CircleAlert, ListTodo, Minus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { AgentProgress } from "../../lib/api";
@@ -6,7 +6,7 @@ import { cn } from "../../lib/utils";
 
 const todoMarkers = new Map([
   ["completed", { icon: Check, label: "workspace.progressCompleted" }],
-  ["blocked", { icon: Circle, label: "workspace.progressBlocked" }],
+  ["blocked", { icon: null, label: "workspace.progressBlocked" }],
   ["failed", { icon: CircleAlert, label: "skillStatus.failed" }],
   ["cancelled", { icon: Minus, label: "workspace.progressCancelled" }],
 ]);
@@ -31,15 +31,15 @@ function TodoItems({ progress }: { progress: AgentProgress[] }) {
           >
             <span role="img" aria-label={label} title={label} className={cn(
               "flex h-6 w-6 items-center justify-center rounded-full text-xs tabular-nums text-muted-foreground",
-              !Icon && "border border-primary/30",
+              !marker && "border border-primary/30",
               active && "border-primary bg-primary/10 text-foreground",
-              status === "completed" && "bg-primary text-primary-foreground",
-              status === "blocked" && "border border-primary/50 bg-primary/10 text-primary",
+              (status === "completed" || status === "blocked") && "bg-primary text-primary-foreground",
+              status === "blocked" && "motion-safe:animate-pulse",
               status === "failed" && "text-destructive",
             )}>
               {Icon ? (
                 <Icon
-                  className={status === "blocked" ? "size-2.5 fill-current motion-safe:animate-pulse" : "h-3.5 w-3.5"}
+                  className="h-3.5 w-3.5"
                   strokeWidth={status === "completed" ? 2.5 : 2}
                   // The check path spans y=6..17, so its center is 11.5.
                   viewBox={status === "completed" ? "0 -0.5 24 24" : "0 0 24 24"}
