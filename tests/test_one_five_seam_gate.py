@@ -329,21 +329,9 @@ def test_question_owner_is_constructed_once_inside_gateway_without_dashboard_ali
     }
 
 
-def test_build_and_publish_invoke_gate_before_build_or_remote_mutation() -> None:
+def test_historical_diagnostic_is_independent_of_build_and_publish() -> None:
     build = (REPO_ROOT / "packaging" / "build_release.ps1").read_text(encoding="utf-8-sig")
     publish = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8-sig")
-    invocation = (
-        "& $pythonExe .\\packaging\\check_one_five_seams.py "
-        "--repo-root $repoRoot --version $Version"
-    )
-
-    assert build.count(invocation) == 1
-    assert build.index("$pythonExe = Resolve-PythonExe") < build.index(invocation)
-    assert build.index(invocation) < build.index("scan_release_sensitive_strings.py")
-    assert build.index(invocation) < build.index("Build-TauriDesktopApp -DestinationExe")
-
-    assert publish.count(invocation) == 1
-    assert "function Resolve-PythonExe" in publish
-    assert publish.index("$pythonExe = Resolve-PythonExe") < publish.index(invocation)
-    assert publish.index(invocation) < publish.index("git fetch origin --tags --prune")
-    assert publish.index(invocation) < publish.index("& gh @createArgs")
+    assert SCRIPT_PATH.is_file()
+    assert SCRIPT_PATH.name not in build
+    assert SCRIPT_PATH.name not in publish
