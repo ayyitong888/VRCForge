@@ -10463,8 +10463,9 @@ class AgentGateway:
             "items": normalized_items,
         }
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
-        projected = list(self._project_agent_progress().values())
-        snapshot = self._agent_progress_page(projected, limit=50, project_root=project_root, session_id=session_id)
+        projected = list(self._project_agent_progress(include_replacement_tombstones=True).values())
+        active = [row for row in projected if row.get("status") != "deleted"]
+        snapshot = self._agent_progress_page(active, limit=50, project_root=project_root, session_id=session_id)
         expected = {row["progressId"]: redact_sensitive(row) for row in normalized_items}
         observed = {
             row["progressId"]: redact_sensitive(row)
@@ -11033,7 +11034,9 @@ class AgentGateway:
                 events.append(payload)
         return events
 
-    def _project_agent_progress(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
+    def _project_agent_progress(
+        self, *, include_deleted: bool = False, include_replacement_tombstones: bool = False,
+    ) -> dict[str, dict[str, Any]]:
         progress: dict[str, dict[str, Any]] = {}
         deleted: set[str] = set()
 
@@ -11101,7 +11104,10 @@ class AgentGateway:
             }
         if include_deleted:
             return progress
-        return {item_key: item for item_key, item in progress.items() if item_key not in deleted and str(item.get("status") or "") != "deleted"}
+        return {
+            item_key: item for item_key, item in progress.items()
+            if item_key not in deleted and (include_replacement_tombstones or item.get("status") != "deleted")
+        }
 
     def _project_agent_memory(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
         return self._agent_memory_store.project(include_deleted=include_deleted)

@@ -77,6 +77,28 @@ def test_replace_verifies_full_scoped_snapshot_beyond_the_response_page(tmp_path
     assert result.get("readbackVerified") is True
 
 
+@pytest.mark.parametrize("count", [49, 50, 51])
+def test_replace_verifies_explicit_tombstone_alongside_active_items(tmp_path, count):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    scope = {"sessionId": "owner", "projectRoot": str(tmp_path)}
+    tombstone = {"id": "removed", "title": "Removed", "order": count, "status": "deleted"}
+    gateway.replace_agent_progress({**scope, "items": [
+        {"id": "omitted", "title": "Omitted"}, {"id": "removed", "title": "Previously active"},
+    ]})
+    active = [{"id": f"task-{n}", "title": f"Task {n}", "order": n} for n in range(count)]
+    result = gateway.replace_agent_progress({**scope, "items": [*active, tombstone]})
+
+    assert result.get("readbackVerified") is True
+    assert [item["id"] for item in result["items"]] == [item["id"] for item in active[:50]]
+    reopened = AgentGateway(gateway.config_path, tmp_path / "audit")
+    assert {item["id"] for item in reopened._scoped_runtime_todos("owner", str(tmp_path))} == {
+        item["id"] for item in active
+    }
+    persisted = next(item for item in reopened._project_agent_progress(include_deleted=True).values()
+                     if item["id"] == tombstone["id"])
+    assert {key: persisted[key] for key in tombstone} == tombstone
+
+
 @pytest.mark.parametrize("layer", ["planning", "execution"])
 @pytest.mark.parametrize("project", [False, True])
 def test_native_catalog_contains_complete_progress_schemas(layer, project):
