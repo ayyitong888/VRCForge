@@ -9,7 +9,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from prepared_file_imports import capture_regular_file
 
@@ -170,6 +170,21 @@ class ProjectLifecycleService:
         del prepared
         return {"ok": True, "schema": "vrcforge.project_create_plan.v1", **preview}
 
+    def create_installed_project(
+        self, name: str, parent_path: str, template_path: str, *, resolve_packages: Callable[[Path], bool],
+    ) -> dict[str, Any]:
+        name = _normalize_project_name(name)
+        parent = Path(parent_path)
+        if not parent.is_absolute() or not parent.is_dir():
+            raise ProjectLifecycleError("Choose an existing folder for the new project.")
+        if template_path not in {template["path"] for template in self.status()["templates"]}:
+            raise ProjectLifecycleError("Choose an installed Unity project template.")
+        return self.create_project({
+            "projectName": name,
+            "projectPath": str(parent / name),
+            "templatePath": template_path,
+        }, resolve_packages=resolve_packages)
+
     def prepare_create(
         self,
         arguments: dict[str, Any],
@@ -216,7 +231,9 @@ class ProjectLifecycleService:
         }
         return prepared, preview
 
-    def create_project(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def create_project(
+        self, arguments: dict[str, Any], *, resolve_packages: Callable[[Path], bool] | None = None,
+    ) -> dict[str, Any]:
         values = dict(arguments or {})
         evidence = values.get(_PREPARED_KEY)
         if not isinstance(evidence, dict):
@@ -237,6 +254,8 @@ class ProjectLifecycleService:
             staged_entries = _directory_entries(staging)
             if _directory_digest(staged_entries) != evidence.get("templateIdentity"):
                 raise ProjectLifecycleError("Project template changed after preparation.")
+            if resolve_packages is not None and resolve_packages(staging):
+                staged_entries = _directory_entries(staging)
             marker_path = staging / ".vrcforge" / "project-creation.json"
             marker_path.parent.mkdir(parents=True, exist_ok=True)
             self._atomic_write_json(

@@ -420,6 +420,15 @@ pub(crate) struct DesktopRecycleProjectRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopCreateUnityProjectRequest {
+    name: String,
+    parent_path: String,
+    template_path: String,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProjectIndexScanRequest {
     project_path: String,
@@ -1826,6 +1835,58 @@ pub async fn save_project_prefs(
                 "hiddenPaths": request.hidden_paths.unwrap_or_default(),
             })),
             request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn fetch_project_create_options(
+    request: DesktopTimeoutRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/projects/create-options".to_string(),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn create_unity_project(
+    request: DesktopCreateUnityProjectRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/projects/create".to_string(),
+            Some(serde_json::json!({
+                "name": request.name,
+                "parentPath": request.parent_path,
+                "templatePath": request.template_path,
+            })),
+            request.timeout_ms.or(Some(300_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn register_unity_project_managers(
+    request: DesktopProjectSelectionRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/projects/register-managers".to_string(),
+            Some(serde_json::json!({ "projectPath": request.project_path })),
+            request.timeout_ms.or(Some(120_000)),
         )
         .map(sanitize_webview_response)
     })

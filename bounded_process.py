@@ -45,6 +45,15 @@ def _drain_tail(stream: object, limit: int, output: dict[str, object], key: str)
     output[f"{key}_truncated"] = truncated
 
 
+def _decode_output(data: bytes, fallback_encoding: str) -> str:
+    if fallback_encoding:
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.decode(fallback_encoding, errors="replace")
+    return data.decode("utf-8", errors="replace")
+
+
 def run_bounded_process(
     argv: Sequence[str],
     *,
@@ -53,6 +62,7 @@ def run_bounded_process(
     timeout_seconds: int,
     max_output_bytes: int = 2 * 1024 * 1024,
     creationflags: int = 0,
+    fallback_encoding: str = "",
 ) -> BoundedProcessResult:
     if not argv or not all(isinstance(item, str) and item for item in argv):
         raise ValueError("Bounded process argv is invalid.")
@@ -101,8 +111,8 @@ def run_bounded_process(
     stderr_thread.join()
     return BoundedProcessResult(
         returncode=returncode,
-        stdout=bytes(captured.get("stdout", b"")).decode("utf-8", errors="replace"),
-        stderr=bytes(captured.get("stderr", b"")).decode("utf-8", errors="replace"),
+        stdout=_decode_output(bytes(captured.get("stdout", b"")), fallback_encoding),
+        stderr=_decode_output(bytes(captured.get("stderr", b"")), fallback_encoding),
         stdout_truncated=bool(captured.get("stdout_truncated")),
         stderr_truncated=bool(captured.get("stderr_truncated")),
     )

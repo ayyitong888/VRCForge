@@ -737,6 +737,9 @@ export default function App() {
     newProjectPath,
     pickingProjectFolder,
     browseProjectFolder,
+    creationOptions,
+    loadCreationOptions,
+    createProjectFromTemplate,
     setNewProjectPath,
     newProjectType,
     setNewProjectType,
@@ -5044,6 +5047,12 @@ export default function App() {
         saving={savingProjectPrefs}
         newProjectPath={newProjectPath}
         projectType={newProjectType}
+        creation={isTauriRuntime() ? {
+          options: creationOptions,
+          loadOptions: () => void loadCreationOptions(),
+          create: createProjectFromTemplate,
+          select: (path) => selectProjectByPath(path),
+        } : undefined}
         error={projectModalError}
         onClose={() => {
           setShowProjectModal(false);

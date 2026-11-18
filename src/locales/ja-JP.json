@@ -1239,6 +1239,38 @@
     "runtimeRequired": "プロジェクト設定を保存する前に VRCForge ランタイムへ接続してください。",
     "editPath": "記録済みパスを編集",
     "selectProjectTitle": "プロジェクトを選択",
+    "creation": {
+      "open": "Unity プロジェクトを作成",
+      "back": "プロジェクト一覧に戻る",
+      "name": "プロジェクト名",
+      "template": "テンプレート",
+      "noTemplates": "インストール済みの Unity プロジェクトテンプレートが見つかりません",
+      "parentFolder": "保存先",
+      "chooseFolder": "フォルダーを選択",
+      "submit": "プロジェクトを作成",
+      "creating": "プロジェクトを作成中…",
+      "created": "プロジェクトを作成しました",
+      "unconfirmed": "プロジェクトが作成されたか確認できませんでした。",
+      "registrationUnconfirmed": "プロジェクトの登録結果を確認できませんでした。",
+      "retryRegistration": "登録を再試行",
+      "copyPath": "プロジェクトのパスをコピー",
+      "copied": "パスをコピーしました",
+      "copyFailed": "自動でコピーできませんでした。上に表示されたパスを選択してコピーしてください。",
+      "guide": "公式ガイド",
+      "guideFor": "{{manager}} の公式ガイド",
+      "status": {
+        "registered": "登録済み",
+        "already_registered": "すでに一覧にあります",
+        "manual_required": "このアプリで追加してください",
+        "unavailable": "登録できません",
+        "failed": "登録に失敗しました"
+      },
+      "handoff": {
+        "unityHub": "Projects で Add → Add project from disk を選び、このフォルダーを選択します。",
+        "vcc": "Projects で Add を選び、このフォルダーを選択します。",
+        "alcom": "プロジェクト一覧で既存のプロジェクトを追加を選び、このフォルダーを選択します。"
+      }
+    },
     "generalProject": "一般プロジェクト",
     "unityProject": "Unity プロジェクト",
     "generalPathPlaceholder": "例: D:\\Code\\MyRepository",

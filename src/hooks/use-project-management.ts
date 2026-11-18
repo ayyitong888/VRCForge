@@ -2,13 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  createUnityProject,
+  fetchProjectCreateOptions,
   fetchProjectPrefs,
   planOutfitImport,
   recycleUnityProject,
   requestOutfitImport,
   saveProjectPrefs,
 } from "../lib/api";
-import type { AppBootstrap, OutfitImportPlanResult, ProjectPrefs, ProjectRecycleResult } from "../lib/api";
+import type { AppBootstrap, OutfitImportPlanResult, ProjectPrefs, ProjectRecycleResult, UnityProjectCreateRequest, UnityProjectTemplate } from "../lib/api";
 import type { ProjectType } from "../lib/chat-types";
 import { isAbsoluteLocalPath, isTauriRuntime } from "../lib/app-runtime";
 import {
@@ -58,6 +60,9 @@ export function useProjectManagement({
   const [newProjectType, setNewProjectType] = useState<ProjectType>("unity");
   const [savingProjectPrefs, setSavingProjectPrefs] = useState(false);
   const [projectModalError, setProjectModalError] = useState("");
+  const [creationOptions, setCreationOptions] = useState<{ templates: UnityProjectTemplate[]; loading: boolean; error: string }>({
+    templates: [], loading: false, error: "",
+  });
   const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>(() => loadProjectPrefsCache());
   const [projectPrefsReady, setProjectPrefsReady] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
@@ -298,6 +303,36 @@ export function useProjectManagement({
     } finally {
       setPickingProjectFolder(false);
     }
+  }
+
+  async function loadCreationOptions() {
+    setCreationOptions({ templates: [], loading: true, error: "" });
+    try {
+      if (!runtimeConnected && !await startRuntime()) throw new Error(t("project.runtimeRequired"));
+      const templates = await fetchProjectCreateOptions();
+      setCreationOptions({ templates, loading: false, error: "" });
+    } catch (cause) {
+      setCreationOptions({ templates: [], loading: false, error: cause instanceof Error ? cause.message : String(cause) });
+    }
+  }
+
+  async function createProjectFromTemplate(request: UnityProjectCreateRequest) {
+    const result = await createUnityProject(request);
+    if (!result.ok || !result.projectPath) throw new Error(t("project.creation.unconfirmed"));
+    const path = result.projectPath;
+    const key = normalizeProjectPathKey(path);
+    setProjectRemovedAt((current) => {
+      if (!current.has(key)) return current;
+      const next = new Map(current);
+      next.delete(key);
+      return next;
+    });
+    setProjectPrefs((current) => ({
+      ...current,
+      customPaths: [...current.customPaths.filter((item) => normalizeProjectPathKey(item) !== key), path],
+      customProjects: [...current.customProjects.filter((item) => normalizeProjectPathKey(item.path) !== key), { path, projectType: "unity" }],
+    }));
+    return result;
   }
 
   function removeCustomProject(path: string) {
@@ -574,6 +609,9 @@ export function useProjectManagement({
     newProjectPath,
     pickingProjectFolder,
     browseProjectFolder,
+    creationOptions,
+    loadCreationOptions,
+    createProjectFromTemplate,
     setNewProjectPath,
     newProjectType,
     setNewProjectType,

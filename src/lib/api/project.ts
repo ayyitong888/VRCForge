@@ -6,6 +6,41 @@ export type ProjectPrefs = {
   hiddenPaths: string[];
 };
 
+export type UnityProjectTemplate = { name: string; path: string; unityVersion?: string };
+
+export type UnityProjectCreateRequest = { name: string; parentPath: string; templatePath: string };
+
+export type ProjectManagerRegistration = {
+  catalog: "unityHub" | "vcc" | "alcom";
+  status: "registered" | "already_registered" | "manual_required" | "unavailable" | "failed";
+  reason?: string;
+};
+
+export type UnityProjectCreateResult = {
+  ok: boolean;
+  projectPath: string;
+  catalogs: ProjectManagerRegistration[];
+};
+
+export async function fetchProjectCreateOptions(): Promise<UnityProjectTemplate[]> {
+  const payload = await invokeTauriWithAbort<{ ok: boolean; templates: UnityProjectTemplate[] }>(
+    "fetch_project_create_options", { request: { timeoutMs: 30000 } },
+  );
+  return payload.templates;
+}
+
+export function createUnityProject(request: UnityProjectCreateRequest): Promise<UnityProjectCreateResult> {
+  return invokeTauriWithAbort<UnityProjectCreateResult>("create_unity_project", {
+    request: { ...request, timeoutMs: 300000 },
+  });
+}
+
+export function registerUnityProjectManagers(projectPath: string): Promise<UnityProjectCreateResult> {
+  return invokeTauriWithAbort<UnityProjectCreateResult>("register_unity_project_managers", {
+    request: { projectPath, timeoutMs: 120000 },
+  });
+}
+
 export type ProjectRecycleResult = {
   ok: boolean;
   path: string;

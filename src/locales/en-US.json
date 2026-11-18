@@ -1247,6 +1247,38 @@
     "runtimeRequired": "Connect VRCForge runtime before saving project preferences.",
     "editPath": "Edit recorded path",
     "selectProjectTitle": "Select Project",
+    "creation": {
+      "open": "Create Unity Project",
+      "back": "Back to project list",
+      "name": "Project name",
+      "template": "Template",
+      "noTemplates": "No installed Unity project templates found",
+      "parentFolder": "Save location",
+      "chooseFolder": "Choose Folder",
+      "submit": "Create Project",
+      "creating": "Creating project…",
+      "created": "Project created",
+      "unconfirmed": "VRCForge could not confirm that the project was created.",
+      "registrationUnconfirmed": "VRCForge could not confirm the registration results.",
+      "retryRegistration": "Retry registration",
+      "copyPath": "Copy project path",
+      "copied": "Path copied",
+      "copyFailed": "Could not copy the path. Select the path above and copy it.",
+      "guide": "Official guide",
+      "guideFor": "{{manager}} official guide",
+      "status": {
+        "registered": "Registered",
+        "already_registered": "Already listed",
+        "manual_required": "Add in this manager",
+        "unavailable": "Registration unavailable",
+        "failed": "Registration failed"
+      },
+      "handoff": {
+        "unityHub": "In Projects, choose Add → Add project from disk, then select this folder.",
+        "vcc": "In Projects, choose Add and select this folder.",
+        "alcom": "Open the project list, choose Add Existing Project, then select this folder."
+      }
+    },
     "generalProject": "General project",
     "unityProject": "Unity project",
     "generalPathPlaceholder": "e.g. D:\\Code\\MyRepository",

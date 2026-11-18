@@ -1,10 +1,12 @@
 import { Edit3, Eye, EyeOff, Folder, FolderPlus, Loader2, RefreshCw, Trash2, X } from "lucide-react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ProjectSnapshot } from "../../lib/api";
 import type { ProjectType } from "../../lib/chat-types";
 import { normalizeProjectPathKey, projectKey, shortPath } from "../../lib/project-path";
 import { Button } from "../ui/button";
 import { HoverScrollText } from "../ui/hover-scroll-text";
+import { UnityProjectCreationModal, type UnityProjectCreation } from "./unity-project-creation-modal";
 
 type ProjectEntry = NonNullable<ProjectSnapshot["projects"]>[number];
 
@@ -37,6 +39,7 @@ export function ProjectPickerModal({
   onSaveEditProject,
   projectType = "general",
   onProjectTypeChange,
+  creation,
 }: {
   open: boolean;
   projects: ProjectEntry[];
@@ -66,10 +69,23 @@ export function ProjectPickerModal({
   onSaveEditProject?: () => void;
   projectType?: ProjectType;
   onProjectTypeChange?: (value: ProjectType) => void;
+  creation?: UnityProjectCreation;
 }) {
   const { t } = useTranslation();
+  const [showCreation, setShowCreation] = useState(false);
   if (!open) {
     return null;
+  }
+  if (showCreation && creation) {
+    function closeCreation() {
+      setShowCreation(false);
+      onClose();
+    }
+    return <UnityProjectCreationModal
+      creation={{ ...creation, select: (path) => { creation.select(path); closeCreation(); } }}
+      onBack={() => setShowCreation(false)}
+      onClose={closeCreation}
+    />;
   }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
@@ -86,6 +102,15 @@ export function ProjectPickerModal({
           </button>
         </div>
         <div className="app-scrollbar mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
+          {creation && (
+            <Button type="button" variant="outline" disabled={saving || pickingProjectFolder} onClick={() => {
+              setShowCreation(true);
+              creation.loadOptions();
+            }}>
+              <FolderPlus className="h-4 w-4" />
+              {t("project.creation.open")}
+            </Button>
+          )}
           <div>
             <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.addProjectFolder")}</div>
             <div className="mb-2 flex gap-3" role="radiogroup" aria-label={t("project.chooseProjectType")}>

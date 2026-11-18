@@ -619,6 +619,7 @@ from project_catalog_registration_service import (
     ProjectCatalogRegistrationService,
 )
 from project_lifecycle_service import ProjectLifecycleError, ProjectLifecycleService
+from project_manager_registration import register_project_managers, resolve_template_packages
 from project_snapshot_selection_service import ProjectSnapshotSelectionPorts, ProjectSnapshotSelectionService
 from provider_model_catalog_service import (
     ProviderModelCatalogPolicyPorts,
@@ -10775,6 +10776,74 @@ async def refresh_projects() -> dict[str, Any]:
     await EVENT_BUS.broadcast("projects", payload)
     await emit_log_async("info", "project", "Project list refreshed.", {"count": len(payload["projects"])})
     return payload
+
+
+class DesktopCreateProjectRequest(BaseModel):
+    name: str
+    parentPath: str
+    templatePath: str
+
+
+class DesktopRegisterProjectManagersRequest(BaseModel):
+    projectPath: str
+
+
+_DESKTOP_MANAGER_REGISTRATION_LOCK = Lock()
+
+
+def require_desktop_project_session(request: Request) -> None:
+    supplied = extract_bearer_token(request)
+    if not APP_SESSION_TOKEN or not hmac.compare_digest(supplied, APP_SESSION_TOKEN):
+        raise HTTPException(status_code=401, detail="A VRCForge app session is required.")
+    if request_transport_component(request) != "ipc":
+        raise HTTPException(status_code=403, detail="Open the VRCForge desktop app to manage Unity projects.")
+
+
+def register_desktop_project_managers(project: Path) -> list[dict[str, Any]]:
+    with _DESKTOP_MANAGER_REGISTRATION_LOCK:
+        return register_project_managers(project, package_managers=PACKAGE_MANAGER_DISCOVERY.locate())
+
+
+@app.get("/api/projects/create-options", include_in_schema=False)
+def desktop_create_project_options(request: Request) -> dict[str, Any]:
+    require_desktop_project_session(request)
+    templates = PROJECT_LIFECYCLES.status()["templates"]
+    for template in templates:
+        template["unityVersion"] = parse_editor_version(Path(template["path"]) / "ProjectSettings" / "ProjectVersion.txt")
+    return {"ok": True, "templates": templates}
+
+
+@app.post("/api/projects/create", include_in_schema=False)
+async def desktop_create_unity_project(request: Request, body: DesktopCreateProjectRequest) -> dict[str, Any]:
+    require_desktop_project_session(request)
+    try:
+        result = await asyncio.to_thread(
+            PROJECT_LIFECYCLES.create_installed_project, body.name, body.parentPath, body.templatePath,
+            resolve_packages=lambda project: resolve_template_packages(project, PACKAGE_MANAGER_DISCOVERY.locate()),
+        )
+    except (ProjectLifecycleError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    project = Path(result["projectPath"])
+    result["catalogs"] = await asyncio.to_thread(register_desktop_project_managers, project)
+    result.pop("managerRegistration", None)
+    await emit_log_async("info", "project", "Unity project created.", {"projectPath": str(project)})
+    return refresh_projects_after_lifecycle(result)
+
+
+@app.post("/api/projects/register-managers", include_in_schema=False)
+async def desktop_register_project_managers(request: Request, body: DesktopRegisterProjectManagersRequest) -> dict[str, Any]:
+    require_desktop_project_session(request)
+    try:
+        submitted = Path(body.projectPath)
+        if not submitted.is_absolute():
+            raise ValueError("An absolute Unity project path is required.")
+        project = submitted.resolve(strict=True)
+        if not is_unity_project_path(project) or not (project / "Packages" / "manifest.json").is_file():
+            raise ValueError("The selected folder is not a Unity project.")
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    catalogs = await asyncio.to_thread(register_desktop_project_managers, project)
+    return refresh_projects_after_lifecycle({"ok": True, "projectPath": str(project), "catalogs": catalogs})
 
 
 class ProjectRecycleRequest(BaseModel):
