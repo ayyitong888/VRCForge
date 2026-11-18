@@ -36,6 +36,7 @@ def test_explicit_save_preserves_unrelated_assets_unless_requested(tmp_path, kin
         begin = source.index("mutationStarted = true;", source.index("public static class SceneSaveTool"))
         end = source.index('return VRCForgeToolResult.Completed("Scene save committed', begin)
         setup = 'bool saveProjectAssets='+str(save_project_assets).lower()+'; var scene = new Scene { path="Assets/Existing.unity", isDirty='+("false" if kind == "save_clean" else "true")+' }; Probe.saved=scene; Probe.savedPath=scene.path; string action="'+("save" if kind == "save_clean" else kind)+'", scenePath=scene.path, destination="Assets/Copy.unity";'
+        setup += ' bool savesExistingScene = action == "save"; var evidence = new Evidence();'
     segment = source[begin:end]
     program = r'''
 using System;
@@ -43,9 +44,12 @@ class Scene {public string path=""; public bool isDirty=true,isLoaded=true;publi
 class Snapshot {public Scene Scene=new Scene();public string ScenePath="Assets/New.unity",SceneHierarchyDigest="original";public int SceneHandle=7;}
 class SceneObjectCopyException:Exception {public SceneObjectCopyException(string s):base(s){}}
 [Flags] enum ImportAssetOptions {ForceSynchronousImport=1,ForceUpdate=2}
+class Evidence {public string Guid="fixture";public EvidenceFile Meta=new EvidenceFile();}
+class EvidenceFile {public string Digest="digest",Identity="identity";}
 static class SceneObjectCopyCore {
+ public static object SceneMetadata(string g,string d,string i){return new object();}
  public static bool AssetOrMetaExists(string p){return false;}
- public static object ReadStableAssetEvidence(string p,string reason){Probe.evidenceReads++;if(p!=Probe.savedPath)throw new Exception("wrong persisted scene");return new object();}
+ public static object ReadStableAssetEvidence(string p,string reason,object approvedMetadata=null){Probe.evidenceReads++;if(p!=Probe.savedPath)throw new Exception("wrong persisted scene");return new object();}
 }
 static class EditorSceneManager {public static bool SaveScene(Scene s,string p,bool copy){s.path=p;s.isDirty=false;Probe.saved=s;Probe.savedPath=p;Probe.sceneWrites++;return true;}}
 static class SceneManager {public static Scene GetSceneByPath(string p){Probe.sceneReads++;if(p!=Probe.savedPath)throw new Exception("wrong loaded scene");return Probe.saved;}}

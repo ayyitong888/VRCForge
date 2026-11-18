@@ -190,6 +190,8 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected preview digest.", IsRequired = false)] public string expectedPreviewDigest { get; set; } = "";
             [VRCForgeInput("Expected scene handle.", IsRequired = false)] public int? expectedSceneHandle { get; set; }
             [VRCForgeInput("Expected scene GUID.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
+            [VRCForgeInput("Scene disk version captured by preview.", IsRequired = false)] public string expectedSceneFileVersion { get; set; }
+            [VRCForgeInput("Pending scene hierarchy digest captured by preview.", IsRequired = false)] public string expectedSceneHierarchyDigest { get; set; }
             [VRCForgeInput("Expected scene file digest.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = "";
             [VRCForgeInput("Expected scene file identity.", IsRequired = false)] public string expectedSceneFileIdentity { get; set; } = "";
             [VRCForgeInput("Expected scene metadata digest.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; } = "";
@@ -220,13 +222,22 @@ namespace VRCForge.Editor
                 if (action == "save_as" && SceneObjectCopyCore.AssetOrMetaExists(destination))
                     throw new SceneObjectCopyException("The save_as destination or its metadata exists; overwrite is unsupported.");
                 if (action == "save_as") Stage1SceneToolCore.RequireDestinationParentExists(destination, action);
-                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scenePath, "scene asset");
+                var savesExistingScene = action == "save";
+                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scenePath, "scene asset",
+                    captureFileVersion: savesExistingScene,
+                    expectedFileVersion: savesExistingScene && !preview ? parameters["expectedSceneFileVersion"]?.Value<string>() : null,
+                    expectedFileDigest: savesExistingScene && !preview ? parameters["expectedSceneFileDigest"]?.Value<string>() : null,
+                    approvedMetadata: savesExistingScene && !preview ? SceneObjectCopyCore.SceneMetadataFromApproval(parameters) : null);
                 var hierarchy = Stage1SceneToolCore.HierarchyDigest(scene);
+                if (savesExistingScene && !preview
+                    && ((parameters["expectedSceneDirty"]?.Value<bool?>() is bool expectedDirty && expectedDirty != scene.isDirty)
+                        || (parameters["expectedSceneHierarchyDigest"]?.Value<string>() is string expectedHierarchy && expectedHierarchy != hierarchy)))
+                    throw new SceneObjectCopyException(SceneObjectCopyCore.SceneChangedAfterPreview);
                 var setup = Stage1SceneToolCore.SetupDigest();
                 var open = Stage1SceneToolCore.OpenStateDigest();
                 var dirtyAssets = saveProjectAssets ? DirtyAssets() : Array.Empty<UnityEngine.Object>();
                 var assetState = string.Join("|", dirtyAssets.Select(asset => AssetDatabase.GetAssetPath(asset) + ":" + asset.GetInstanceID() + ":" + EditorUtility.GetDirtyCount(asset)));
-                var digest = Stage1SceneToolCore.Digest(new[] { Stage1SceneToolCore.SaveSchema, action, project, scenePath, destination, saveProjectAssets ? "true" : "false", scene.handle.ToString(CultureInfo.InvariantCulture), scene.isDirty ? "true" : "false", evidence.Guid, evidence.File.Digest, evidence.File.Identity, evidence.Meta.Digest, evidence.Meta.Identity, hierarchy, setup, open, assetState });
+                var digest = Stage1SceneToolCore.Digest(new[] { Stage1SceneToolCore.SaveSchema, action, project, scenePath, destination, saveProjectAssets ? "true" : "false", scene.handle.ToString(CultureInfo.InvariantCulture), scene.isDirty ? "true" : "false", evidence.Guid, evidence.FileVersion ?? string.Empty, evidence.File.Digest, evidence.File.Identity, evidence.Meta.Digest, evidence.Meta.Identity, hierarchy, setup, open, assetState });
                 var binding = new Dictionary<string, object>
                 {
                     ["expectedSceneHandle"] = scene.handle, ["expectedSceneGuid"] = evidence.Guid,
@@ -236,6 +247,11 @@ namespace VRCForge.Editor
                     ["expectedSceneSetupDigest"] = setup,
                     ["expectedOpenSceneStateDigest"] = open
                 };
+                if (savesExistingScene)
+                {
+                    binding["expectedSceneFileVersion"] = evidence.FileVersion ?? string.Empty;
+                    binding["expectedSceneHierarchyDigest"] = hierarchy;
+                }
                 if (preview)
                     return VRCForgeToolResult.Completed("Scene save preview completed.", SavePayload(action, project, scenePath, destination, digest, binding, scene, evidence, hierarchy, setup, open, saveProjectAssets));
 
@@ -268,7 +284,8 @@ namespace VRCForge.Editor
                     AssetDatabase.ImportAsset(destination, ImportAssetOptions.ForceSynchronousImport);
                 }
                 var loaded = SceneManager.GetSceneByPath(action == "save_as" ? destination : scenePath);
-                var afterEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(action == "save_as" ? destination : scenePath, "saved scene asset");
+                var afterEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(action == "save_as" ? destination : scenePath, "saved scene asset",
+                    approvedMetadata: savesExistingScene ? SceneObjectCopyCore.SceneMetadata(evidence.Guid, evidence.Meta.Digest, evidence.Meta.Identity) : null);
                 if (!loaded.IsValid() || !loaded.isLoaded || loaded.isDirty || Stage1SceneToolCore.HierarchyDigest(loaded) != hierarchy)
                     throw new SceneObjectCopyException("Scene save readback did not match the approved scene.");
                 return VRCForgeToolResult.Completed("Scene save committed and verified.", SavePayload(action, project, scenePath, destination, digest, binding, loaded, afterEvidence, hierarchy, Stage1SceneToolCore.SetupDigest(), Stage1SceneToolCore.OpenStateDigest(), saveProjectAssets, true, false));
