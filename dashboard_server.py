@@ -22199,9 +22199,9 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
         settings,
         tool_name,
         arguments,
-        preserve_tool_error=strict_result,
+        preserve_tool_error=True,
     )
-    if strict_result and result.exit_code != 0:
+    if result.exit_code != 0:
         payload = extract_tool_result_payload(result)
         envelope = result.payload if isinstance(result.payload, dict) else {}
         if isinstance(payload, dict) and (
@@ -22275,19 +22275,20 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
                 failure["checkpointRecoveryRequired"] = True
                 failure["requestMayHaveCommitted"] = True
             return failure
-        return {
-            "ok": False,
-            "toolName": tool_name,
-            "error": "The authoritative Unity write transport failed.",
-            "errorCode": "unity_tool_transport_failed",
-            "failureCause": _mcp_transport_failure_cause(result),
-            "commitState": "unknown",
-            "mutationStarted": None,
-            "committed": None,
-            "requestMayHaveCommitted": True,
-            "checkpointRecoveryRequired": True,
-            "result": _safe_transport_result(result),
-        }
+        if strict_result:
+            return {
+                "ok": False,
+                "toolName": tool_name,
+                "error": "The authoritative Unity write transport failed.",
+                "errorCode": "unity_tool_transport_failed",
+                "failureCause": _mcp_transport_failure_cause(result),
+                "commitState": "unknown",
+                "mutationStarted": None,
+                "committed": None,
+                "requestMayHaveCommitted": True,
+                "checkpointRecoveryRequired": True,
+                "result": _safe_transport_result(result),
+            }
     if result.exit_code == 0:
         try:
             validated_payload = validate_authoritative_unity_write_result(

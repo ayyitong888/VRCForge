@@ -260,6 +260,67 @@ def test_native_approved_prewrite_failure_resumes_planner_without_replaying_writ
     assert resumed["plan"].get("completionClaim", {}).get("satisfied") is not True
 
 
+@pytest.mark.parametrize("mode", ["approval", "roslyn_full_auto"])
+def test_native_texture_prewrite_rejection_reaches_model_and_app_without_retry(tmp_path, monkeypatch, mode):
+    message = "该文件在预览后被修改"
+    core_reply = {"isError": True, "structuredContent": {"success": False,
+        "code": "texture_import_settings_rejected", "error": message, "data": {
+            "failureLayer": "unity_core_tool", "failurePhase": "pre_mutation_validation",
+            "toolRoutingStarted": True, "mutationStarted": False, "committed": False,
+            "commitState": "not_started", "commitStateKnown": True, "retryable": False,
+            "checkpointRecoveryRequired": False, "temporaryCleanupRequired": False,
+        }}}
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _: None)
+    core_calls = []
+
+    def invoke(_settings, name, arguments, *, preserve_tool_error):
+        assert preserve_tool_error
+        core_calls.append((name, arguments))
+        return dashboard_server.McpResult(exit_code=1, stdout="", stderr="", payload=core_reply)
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    decision = "文件在预览后有变更，我先停在这里。"
+
+    def decide(request):
+        tool_messages = [row for row in request["messages"] if row["role"] == "tool"]
+        assert any(message in json.dumps(row, ensure_ascii=False) for row in tool_messages)
+        return {"role": "assistant", "content": decision}
+
+    project = str(tmp_path / "UnityProject")
+    gateway, model, _ = _write_gateway_for_mode(tmp_path, [
+        call("enter", "vrcforge_runtime_action", {"action": "enter_execution"}),
+        call("write", "fixture_write", {"projectRoot": project, "value": "texture"}),
+        decide,
+    ])
+    _set_mode(gateway, mode)
+    gateway.approval_transactions._ports.state.write_handlers["fixture_write"].handler = (
+        lambda _: dashboard_server.unity_mcp_write_sync({"toolName": "vrc_set_texture_import_settings",
+            "projectPath": project, "arguments": {"textureAssetPath": "Assets/Cloth.png"}})
+    )
+    first = _run(gateway, tmp_path, clientTurnId="texture-file-modified")
+    if mode == "approval":
+        approval_id = first["approval_id"]
+        gateway.approval_transactions.approve(approval_id)
+        applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+        resumed = gateway.resume_runtime_task_after_approval(applied["approval"], applied)
+    else:
+        resumed = first
+        applied = first["write"]
+    assert applied["error"] == message
+    failure = applied.get("writeFailure") or applied.get("result") or {}
+    assert failure.get("safeToRetry") is not True
+    assert failure.get("checkpointRecoveryRequired") is False, applied
+    assert gateway.approval_transactions._ports.checkpoint.active_apply_recoveries() == []
+
+    assert len(model.requests) == 3
+    assert len(core_calls) == 1
+    assert resumed["plan"]["reply"] == decision
+    assert gateway.questions.list(session_id=first["sessionId"])["questions"] == []
+    projected = dashboard_server.public_approval_http_payload({"ok": True, "execution": applied, "continuation": resumed})
+    assert projected["execution"]["error"] == message
+    assert projected["continuation"]["plan"]["reply"] == decision
+
+
 @pytest.mark.parametrize("reviewer_setup", ["missing", "exception", "not_applicable"])
 def test_native_auto_unavailable_reviewer_cannot_publish_or_execute(
     tmp_path: Path, reviewer_setup: str,

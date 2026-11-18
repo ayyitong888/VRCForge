@@ -12,7 +12,7 @@ from agent_task_loop import (
     prepare_approval_task_continuation,
     prepare_sub_agent_task_continuation,
     rejected_approval_completion,
-    safe_recoverable_write_failure,
+    reportable_pre_mutation_write_failure,
 )
 
 
@@ -438,10 +438,10 @@ def test_explicit_prewrite_approval_failure_has_no_terminal_plan_but_keeps_faile
 
 def test_safe_recoverable_failure_requires_unconflicted_explicit_facts() -> None:
     clean = {"mutationStarted": False, "safeToRetry": True, "committed": False, "commitState": "not_started"}
-    assert safe_recoverable_write_failure(clean)
-    assert not safe_recoverable_write_failure(clean, {"mutationStarted": True})
-    assert not safe_recoverable_write_failure(clean, {"commitState": "unknown"})
-    assert not safe_recoverable_write_failure({"mutationStarted": False, "safeToRetry": True})
+    assert reportable_pre_mutation_write_failure(clean)
+    assert not reportable_pre_mutation_write_failure(clean, {"mutationStarted": True})
+    assert not reportable_pre_mutation_write_failure(clean, {"commitState": "unknown"})
+    assert not reportable_pre_mutation_write_failure({"mutationStarted": False, "safeToRetry": True})
 
 
 def test_async_task_seed_preserves_bounded_parent_history_for_resampling() -> None:

@@ -134,7 +134,7 @@ from agent_task_loop import (
     prepare_approval_task_continuation,
     prepare_shell_task_continuation,
     prepare_sub_agent_task_continuation,
-    safe_recoverable_write_failure,
+    reportable_pre_mutation_write_failure,
 )
 from checkpoint_user_policy import (
     bind_approved_write,
@@ -9088,7 +9088,7 @@ class AgentGateway:
                 safe_failure_recovery = (
                     not requires_direct_user_input
                     and recoverable_failure_refeeds == 0
-                    and safe_recoverable_write_failure(step_payload, step_outcome)
+                    and reportable_pre_mutation_write_failure(step_payload, step_outcome)
                 )
                 corrective_failure = explicit_corrective_tool_failure(
                     step_payload, step_outcome, action_kind=action_kind,
@@ -9130,7 +9130,7 @@ class AgentGateway:
                 )
                 safe_failure_recovery = (
                     recoverable_failure_refeeds == 0
-                    and safe_recoverable_write_failure(step_payload, step_outcome)
+                    and reportable_pre_mutation_write_failure(step_payload, step_outcome)
                 )
                 if (
                     str(plan.get("planner") or "").strip().casefold() != "llm"

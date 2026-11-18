@@ -517,8 +517,8 @@ def _failure_envelope(value: Any, *, depth: int = 0) -> dict[str, Any]:
     return fields
 
 
-def safe_recoverable_write_failure(*values: Any) -> bool:
-    """Only admit a failed write back to the planner with explicit no-write facts."""
+def reportable_pre_mutation_write_failure(*values: Any) -> bool:
+    """Admit a failed write to the planner when the receipt proves no mutation."""
     candidates: list[Mapping[str, Any]] = []
 
     def collect(value: Any, depth: int = 0) -> None:
@@ -533,19 +533,18 @@ def safe_recoverable_write_failure(*values: Any) -> bool:
     if not candidates:
         return False
     if any(candidate.get("mutationStarted") is True or candidate.get("saved") is True
-           or candidate.get("safeToRetry") is False
            or candidate.get("committed") is True
            or candidate.get("checkpointRecoveryRequired") is True
+           or candidate.get("temporaryCleanupRequired") is True
+           or candidate.get("requestMayHaveCommitted") is True
            or (candidate.get("commitState") is not None
                and str(candidate.get("commitState") or "").strip().casefold() != "not_started")
            for candidate in candidates):
         return False
     mutation_facts = {candidate.get("mutationStarted") for candidate in candidates if isinstance(candidate.get("mutationStarted"), bool)}
-    retry_facts = {candidate.get("safeToRetry") for candidate in candidates if isinstance(candidate.get("safeToRetry"), bool)}
     committed_facts = {candidate.get("committed") for candidate in candidates if isinstance(candidate.get("committed"), bool)}
     commit_states = {str(candidate.get("commitState") or "").strip().casefold() for candidate in candidates if candidate.get("commitState") is not None}
-    if (mutation_facts != {False} or retry_facts != {True} or committed_facts != {False}
-            or commit_states != {"not_started"}):
+    if mutation_facts != {False} or committed_facts != {False} or commit_states != {"not_started"}:
         return False
     for candidate in candidates:
         phase = str(candidate.get("failurePhase") or "").strip().casefold()
@@ -556,7 +555,7 @@ def safe_recoverable_write_failure(*values: Any) -> bool:
         candidate.get("mutationStarted") is False
         and candidate.get("committed") is False
         and str(candidate.get("commitState") or "").strip().casefold() == "not_started"
-        and candidate.get("safeToRetry") is True
+        and (candidate.get("checkpointRecoveryRequired") is False or candidate.get("safeToRetry") is True)
         and candidate.get("saved") is not True
         for candidate in candidates
     )
@@ -1122,7 +1121,7 @@ def prepare_approval_task_continuation(
         and not rejected
         and context.get("continueAfterApproval") is not False
         and _status(context.get("tool")) != "vrcforge_restore_checkpoint"
-        and safe_recoverable_write_failure(execution, outcome)
+        and reportable_pre_mutation_write_failure(execution, outcome)
     ):
         # Preserve the failed write facts and let the owner planner decide
         # whether to diagnose or choose another action. This does not retry it.
