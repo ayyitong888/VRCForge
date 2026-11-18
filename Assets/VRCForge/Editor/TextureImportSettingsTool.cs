@@ -22,7 +22,6 @@ namespace VRCForge.Editor
     {
         private const string ResultSchema = "vrcforge.texture_import_settings.v1";
         private const string SettingsDigestSchema = "vrcforge.texture_import_settings_digest.v1";
-        private const string FileIdentityDigestSchema = "vrcforge.texture_file_identity.v1";
         private const uint NativeFileShareRead = 0x00000001;
         private const uint NativeFileShareWrite = 0x00000002;
         private const uint NativeFileShareDelete = 0x00000004;
@@ -45,9 +44,9 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected texture asset path from preview.", IsRequired = false)] public string expectedTextureAssetPath { get; set; } = "";
             [VRCForgeInput("Expected texture asset GUID from preview.", IsRequired = false)] public string expectedTextureAssetGuid { get; set; } = "";
             [VRCForgeInput("Expected texture source-file digest from preview.", IsRequired = false)] public string expectedSourceFileDigest { get; set; } = "";
-            [VRCForgeInput("Expected texture source-file identity and version from preview.", IsRequired = false)] public string expectedSourceFileIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Expected texture source-file identity and version from preview.", IsRequired = false)] public string expectedSourceFileVersion { get; set; } = "";
             [VRCForgeInput("Expected texture meta-file digest from preview.", IsRequired = false)] public string expectedMetaFileDigest { get; set; } = "";
-            [VRCForgeInput("Expected texture meta-file identity digest from preview.", IsRequired = false)] public string expectedMetaFileIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Expected texture metadata-file identity and version from preview.", IsRequired = false)] public string expectedMetaFileVersion { get; set; } = "";
             [VRCForgeInput("Expected importer type from preview.", IsRequired = false)] public string expectedImporterType { get; set; } = "";
             [VRCForgeInput("Expected importer settings digest from preview.", IsRequired = false)] public string expectedImporterSettingsDigest { get; set; } = "";
             [VRCForgeInput("Expected target settings digest from preview.", IsRequired = false)] public string expectedTargetSettingsDigest { get; set; } = "";
@@ -231,29 +230,18 @@ namespace VRCForge.Editor
                 var platformSpec = PlatformSpec.Create(platform);
                 var format = FormatValues[formatName];
                 var compression = CompressionValues[compressionName];
-                var evidence = InspectTextureAsset(textureAssetPath);
+                var evidence = InspectTextureAsset(textureAssetPath, preview);
                 using var source = OpenSource(evidence.sourceFilePath);
                 evidence.sourceFileIdentity = ReadSingleLinkIdentity(source.SafeFileHandle);
-                evidence.sourceFileIdentityDigest = ComputeFileIdentityDigest(evidence.sourceFileIdentity, includeVersion: true);
-                if (preview)
-                {
-                    evidence.sourceFileDigest = ComputeStreamSha256(source);
-                }
-                else
-                {
-                    var expectedDigest = NormalizeHex(ReadRequiredString(@params, "expectedSourceFileDigest"), 64);
-                    var expectedVersion = NormalizeHex(ReadRequiredString(@params, "expectedSourceFileIdentityDigest"), 64);
-                    // The held source was already read in preview. Check bytes only if the observed version changed.
-                    evidence.sourceFileDigest = expectedVersion == evidence.sourceFileIdentityDigest
-                        ? expectedDigest
-                        : ComputeStreamSha256(source);
-                    if (evidence.sourceFileDigest != expectedDigest)
-                        throw new InvalidOperationException("The texture source changed after the verified preview.");
-                }
+                evidence.sourceFileVersion = ReadFileVersion(evidence.sourceFileIdentity, PreviewAssetFileVersion.Read(source));
+                evidence.sourceFileDigest = ReadPreviewBoundDigest(source, preview, @params,
+                    "expectedSourceFileDigest", "expectedSourceFileVersion", evidence.sourceFileVersion);
+
                 using var meta = new FileStream(evidence.metaFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
                 evidence.metaFileIdentity = ReadSingleLinkIdentity(meta.SafeFileHandle);
-                evidence.metaFileIdentityDigest = ComputeFileIdentityDigest(evidence.metaFileIdentity);
-                evidence.metaFileDigest = ComputeStreamSha256(meta);
+                evidence.metaFileVersion = ReadFileVersion(evidence.metaFileIdentity, PreviewAssetFileVersion.Read(meta));
+                evidence.metaFileDigest = ReadPreviewBoundDigest(meta, preview, @params,
+                    "expectedMetaFileDigest", "expectedMetaFileVersion", evidence.metaFileVersion);
                 ValidateFormatForImporter(evidence.importer, platformSpec, format);
 
                 var beforeSettings = ReadSettings(evidence.importer, platformSpec);
@@ -425,11 +413,11 @@ namespace VRCForge.Editor
                     textureAssetGuid = evidence.assetGuid,
                     sourceFileDigestBefore = evidence.sourceFileDigest,
                     sourceFileDigestAfter,
-                    sourceFileIdentityDigest = evidence.sourceFileIdentityDigest,
+                    sourceFileVersion = evidence.sourceFileVersion,
                     sourceFileLinkCount = evidence.sourceFileIdentity.numberOfLinks,
                     metaFileDigestBefore = evidence.metaFileDigest,
                     metaFileDigestAfter,
-                    metaFileIdentityDigest = evidence.metaFileIdentityDigest,
+                    metaFileVersion = evidence.metaFileVersion,
                     metaFileLinkCount = evidence.metaFileIdentity.numberOfLinks,
                     importerType,
                     beforeSettings,
@@ -568,9 +556,9 @@ namespace VRCForge.Editor
                 "expectedTextureAssetPath",
                 "expectedTextureAssetGuid",
                 "expectedSourceFileDigest",
-                "expectedSourceFileIdentityDigest",
+                "expectedSourceFileVersion",
                 "expectedMetaFileDigest",
-                "expectedMetaFileIdentityDigest",
+                "expectedMetaFileVersion",
                 "expectedImporterType",
                 "expectedImporterSettingsDigest",
                 "expectedTargetSettingsDigest"
@@ -589,11 +577,6 @@ namespace VRCForge.Editor
         {
             var expectedTextureAssetPath = NormalizeAssetPath(ReadRequiredString(@params, "expectedTextureAssetPath"));
             var expectedTextureAssetGuid = NormalizeHex(ReadRequiredString(@params, "expectedTextureAssetGuid"), 32);
-            var expectedMetaFileDigest = NormalizeHex(ReadRequiredString(@params, "expectedMetaFileDigest"), 64);
-            var expectedMetaFileIdentityDigest = NormalizeHex(
-                ReadRequiredString(@params, "expectedMetaFileIdentityDigest"),
-                64
-            );
             var expectedImporterType = ReadRequiredString(@params, "expectedImporterType");
             var expectedImporterSettingsDigest = NormalizeHex(
                 ReadRequiredString(@params, "expectedImporterSettingsDigest"),
@@ -607,8 +590,6 @@ namespace VRCForge.Editor
             if (!MatchesCurrentProject(expectedProjectPath)
                 || expectedTextureAssetPath != evidence.assetPath
                 || expectedTextureAssetGuid != evidence.assetGuid
-                || expectedMetaFileDigest != evidence.metaFileDigest
-                || expectedMetaFileIdentityDigest != evidence.metaFileIdentityDigest
                 || expectedImporterType != importerType
                 || expectedImporterSettingsDigest != beforeSettingsDigest
                 || expectedTargetSettingsDigest != targetSettingsDigest)
@@ -617,7 +598,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static TextureAssetEvidence InspectTextureAsset(string textureAssetPath)
+        private static TextureAssetEvidence InspectTextureAsset(string textureAssetPath, bool preview)
         {
             var importer = TextureImporter.GetAtPath(textureAssetPath) as TextureImporter;
             var asset = AssetDatabase.LoadMainAssetAtPath(textureAssetPath) as Texture;
@@ -626,10 +607,12 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("Texture target must be a persistent imported texture asset.");
             }
             var resolvedAssetPath = NormalizeAssetPath(AssetDatabase.GetAssetPath(asset));
-            if (resolvedAssetPath != textureAssetPath || EditorUtility.IsDirty(importer))
+            if (resolvedAssetPath != textureAssetPath)
             {
                 throw new InvalidOperationException("Texture importer identity is unstable or dirty.");
             }
+            if (EditorUtility.IsDirty(importer))
+                throw new InvalidOperationException(preview ? "Texture importer has unsaved changes." : "该文件在预览后被修改");
             if (!AssetDatabase.IsOpenForEdit(importer, StatusQueryOptions.UseCachedIfPossible))
             {
                 throw new InvalidOperationException("Texture importer is not writable.");
@@ -985,9 +968,7 @@ namespace VRCForge.Editor
             {
                 volumeSerialNumber = information.volumeSerialNumber,
                 fileIndex = ((ulong)information.fileIndexHigh << 32) | information.fileIndexLow,
-                numberOfLinks = information.numberOfLinks,
-                fileLength = ((ulong)information.fileSizeHigh << 32) | information.fileSizeLow,
-                lastWriteTime = ((ulong)information.lastWriteTimeHigh << 32) | information.lastWriteTimeLow
+                numberOfLinks = information.numberOfLinks
             };
         }
 
@@ -1000,28 +981,21 @@ namespace VRCForge.Editor
                 && left.numberOfLinks == right.numberOfLinks;
         }
 
-        private static string ComputeFileIdentityDigest(FileIdentity identity, bool includeVersion = false)
+        private static string ReadFileVersion(FileIdentity identity, string version)
         {
-            if (identity == null || identity.numberOfLinks != 1)
-            {
-                throw new InvalidOperationException("Texture file identity is invalid.");
-            }
-            var builder = new StringBuilder();
-            AppendDigestField(builder, FileIdentityDigestSchema);
-            AppendDigestField(builder, identity.volumeSerialNumber.ToString("x8", CultureInfo.InvariantCulture));
-            AppendDigestField(builder, identity.fileIndex.ToString("x16", CultureInfo.InvariantCulture));
-            AppendDigestField(builder, identity.numberOfLinks.ToString(CultureInfo.InvariantCulture));
-            if (includeVersion)
-            {
-                AppendDigestField(builder, identity.fileLength.ToString(CultureInfo.InvariantCulture));
-                AppendDigestField(builder, identity.lastWriteTime.ToString(CultureInfo.InvariantCulture));
-            }
-            using (var sha256 = SHA256.Create())
-            {
-                return BitConverter.ToString(sha256.ComputeHash(Encoding.UTF8.GetBytes(builder.ToString())))
-                    .Replace("-", string.Empty)
-                    .ToLowerInvariant();
-            }
+            return string.IsNullOrEmpty(version) ? string.Empty
+                : FormattableString.Invariant($"{identity.volumeSerialNumber}:{identity.fileIndex}:{identity.numberOfLinks}:{version}");
+        }
+
+        private static string ReadPreviewBoundDigest(
+            FileStream file, bool preview, JObject parameters, string digestField, string versionField, string currentVersion)
+        {
+            if (preview) return ComputeStreamSha256(file);
+            var expectedDigest = NormalizeHex(ReadRequiredString(parameters, digestField), 64);
+            var expectedVersion = ReadRequiredString(parameters, versionField);
+            if ((string.IsNullOrEmpty(currentVersion) || expectedVersion != currentVersion) && ComputeStreamSha256(file) != expectedDigest)
+                throw new InvalidOperationException("该文件在预览后被修改");
+            return expectedDigest;
         }
 
         private static string ComputeStreamSha256(FileStream stream)
@@ -1180,9 +1154,9 @@ namespace VRCForge.Editor
             public string sourceFileDigest = string.Empty;
             public string metaFileDigest = string.Empty;
             public FileIdentity sourceFileIdentity;
-            public string sourceFileIdentityDigest = string.Empty;
+            public string sourceFileVersion = string.Empty;
             public FileIdentity metaFileIdentity;
-            public string metaFileIdentityDigest = string.Empty;
+            public string metaFileVersion = string.Empty;
         }
 
         private sealed class FileIdentity
@@ -1190,8 +1164,6 @@ namespace VRCForge.Editor
             public uint volumeSerialNumber;
             public ulong fileIndex;
             public uint numberOfLinks;
-            public ulong fileLength;
-            public ulong lastWriteTime;
         }
 
         private sealed class StableFileLease : IDisposable

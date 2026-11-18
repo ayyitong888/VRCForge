@@ -71,7 +71,7 @@ public static class TextureImportSettingsFixtureProbe
             Require(Sha256(metaPath) == metaAfterApply, "no-op meta bytes");
 
             var staleRequest = ApprovedRequest(projectPath, noOpPreview);
-            staleRequest["expectedMetaFileDigest"] = new string('d', 64);
+            staleRequest["expectedImporterSettingsDigest"] = new string('d', 64);
             var stale = JObject.FromObject(TextureImportSettingsTool.HandleCommand(staleRequest));
             Require(!(bool)stale["IsSuccessful"], "stale precondition accepted");
             Require(Sha256(sourcePath) == sourceBefore, "stale source bytes");
@@ -81,17 +81,29 @@ public static class TextureImportSettingsFixtureProbe
             VerifyMetadataHardlinkRejected(projectPath, sourcePath, metaPath, sourceBefore, metaAfterApply);
             Debug.Log("TEXTURE_IMPORT_LIFECYCLE_TOUCHED");
             File.SetLastWriteTimeUtc(sourcePath, File.GetLastWriteTimeUtc(sourcePath).AddSeconds(10));
+            File.SetLastWriteTimeUtc(metaPath, File.GetLastWriteTimeUtc(metaPath).AddSeconds(10));
             var touched = RequireSuccess(TextureImportSettingsTool.HandleCommand(ApprovedRequest(projectPath, noOpPreview)));
             Require(!(bool)touched["changed"] && Sha256(metaPath) == metaAfterApply, "timestamp-only touch altered metadata");
 
             Debug.Log("TEXTURE_IMPORT_LIFECYCLE_CHANGED");
             var sourceBytes = File.ReadAllBytes(sourcePath);
-            File.WriteAllText(sourcePath, "source edited after preview");
+            var previousSourceTime = File.GetLastWriteTimeUtc(sourcePath);
+            var changedSourceBytes = (byte[])sourceBytes.Clone();
+            changedSourceBytes[changedSourceBytes.Length - 1] ^= 0x01;
+            File.WriteAllBytes(sourcePath, changedSourceBytes);
+            File.SetLastWriteTimeUtc(sourcePath, previousSourceTime);
             var sourceChanged = JObject.FromObject(
                 TextureImportSettingsTool.HandleCommand(ApprovedRequest(projectPath, noOpPreview)));
-            Require(!(bool)sourceChanged["IsSuccessful"], "changed source accepted");
+            Require(!(bool)sourceChanged["IsSuccessful"] && (string)sourceChanged["Message"] == "该文件在预览后被修改", "changed source accepted");
             Require(Sha256(metaPath) == metaAfterApply, "changed source altered metadata");
             File.WriteAllBytes(sourcePath, sourceBytes);
+            var fresh = RequireSuccess(TextureImportSettingsTool.HandleCommand(Request(projectPath, true)));
+            var metaBytes = File.ReadAllBytes(metaPath);
+            File.AppendAllText(metaPath, "\n# modified after preview\n");
+            var metaChanged = JObject.FromObject(
+                TextureImportSettingsTool.HandleCommand(ApprovedRequest(projectPath, fresh)));
+            Require(!(bool)metaChanged["IsSuccessful"] && (string)metaChanged["Message"] == "该文件在预览后被修改", "changed metadata accepted");
+            File.WriteAllBytes(metaPath, metaBytes);
             Require(AssetDatabase.DeleteAsset(ProbeFolder), "fixture cleanup failed");
             Require(!File.Exists(sourcePath), "fixture source residue");
             Require(!File.Exists(metaPath), "fixture metadata residue");
@@ -130,9 +142,9 @@ public static class TextureImportSettingsFixtureProbe
         request["expectedTextureAssetPath"] = preview["textureAssetPath"];
         request["expectedTextureAssetGuid"] = preview["textureAssetGuid"];
         request["expectedSourceFileDigest"] = preview["sourceFileDigestBefore"];
-        request["expectedSourceFileIdentityDigest"] = preview["sourceFileIdentityDigest"];
+        request["expectedSourceFileVersion"] = preview["sourceFileVersion"];
         request["expectedMetaFileDigest"] = preview["metaFileDigestBefore"];
-        request["expectedMetaFileIdentityDigest"] = preview["metaFileIdentityDigest"];
+        request["expectedMetaFileVersion"] = preview["metaFileVersion"];
         request["expectedImporterType"] = preview["importerType"];
         request["expectedImporterSettingsDigest"] = preview["importerSettingsDigestBefore"];
         request["expectedTargetSettingsDigest"] = preview["targetSettingsDigest"];

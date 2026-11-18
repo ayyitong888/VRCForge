@@ -100,11 +100,11 @@ def preview_payload(*, would_change: bool = True) -> dict:
         "textureAssetGuid": "a" * 32,
         "sourceFileDigestBefore": "b" * 64,
         "sourceFileDigestAfter": "b" * 64,
-        "sourceFileIdentityDigest": "d" * 64,
+        "sourceFileVersion": "1:123:1:1234567:2345678:3456789:1024",
         "sourceFileLinkCount": 1,
         "metaFileDigestBefore": "c" * 64,
         "metaFileDigestAfter": "c" * 64,
-        "metaFileIdentityDigest": "e" * 64,
+        "metaFileVersion": "2:123:1:1234567:2345678:3456789:1024",
         "metaFileLinkCount": 1,
         "importerType": "Default",
         "beforeSettings": before,
@@ -281,9 +281,9 @@ def test_preview_arguments_strip_all_caller_preconditions_and_force_zero_write()
             "saveAndReimport": True,
             "expectedTextureAssetGuid": "1" * 32,
             "expectedSourceFileDigest": "2" * 64,
-            "expectedSourceFileIdentityDigest": "6" * 64,
+            "expectedSourceFileVersion": "1:123:1:1234567:2345678:3456789:1024",
             "expectedMetaFileDigest": "3" * 64,
-            "expectedMetaFileIdentityDigest": "7" * 64,
+            "expectedMetaFileVersion": "2:123:1:1234567:2345678:3456789:1024",
             "expectedImporterSettingsDigest": "4" * 64,
             "expectedTargetSettingsDigest": "5" * 64,
             "expectedProjectPath": "D:/OtherProject",
@@ -321,9 +321,9 @@ def test_authoritative_preview_binds_asset_project_and_expected_before_receipts(
         "textureAssetPath": "Assets/Avatar/Textures/Body.png",
         "textureAssetGuid": "a" * 32,
         "sourceFileDigest": "b" * 64,
-        "sourceFileIdentityDigest": "d" * 64,
+        "sourceFileVersion": "1:123:1:1234567:2345678:3456789:1024",
         "metaFileDigest": "c" * 64,
-        "metaFileIdentityDigest": "e" * 64,
+        "metaFileVersion": "2:123:1:1234567:2345678:3456789:1024",
         "importerType": "Default",
     }
     assert approval["change"]["before"] == before_settings()
@@ -337,9 +337,9 @@ def test_authoritative_preview_binds_asset_project_and_expected_before_receipts(
     assert nested["expectedTextureAssetPath"] == "Assets/Avatar/Textures/Body.png"
     assert nested["expectedTextureAssetGuid"] == "a" * 32
     assert nested["expectedSourceFileDigest"] == "b" * 64
-    assert nested["expectedSourceFileIdentityDigest"] == "d" * 64
+    assert nested["expectedSourceFileVersion"] == "1:123:1:1234567:2345678:3456789:1024"
     assert nested["expectedMetaFileDigest"] == "c" * 64
-    assert nested["expectedMetaFileIdentityDigest"] == "e" * 64
+    assert nested["expectedMetaFileVersion"] == "2:123:1:1234567:2345678:3456789:1024"
     assert nested["expectedImporterType"] == "Default"
     assert nested["expectedImporterSettingsDigest"] == compute_settings_digest("Default", before_settings())
     assert nested["expectedTargetSettingsDigest"] == compute_settings_digest("Default", target_settings())
@@ -360,10 +360,10 @@ def test_authoritative_preview_binds_asset_project_and_expected_before_receipts(
         lambda payload: payload.update({"textureAssetGuid": "a" * 31}),
         lambda payload: payload.update({"sourceFileDigestAfter": "d" * 64}),
         lambda payload: payload.update({"sourceFileLinkCount": 2}),
-        lambda payload: payload.update({"sourceFileIdentityDigest": "z" * 64}),
+        lambda payload: payload.update({"sourceFileVersion": "z" * 64}),
         lambda payload: payload.update({"metaFileDigestAfter": "d" * 64}),
         lambda payload: payload.update({"metaFileLinkCount": 2}),
-        lambda payload: payload.update({"metaFileIdentityDigest": "z" * 64}),
+        lambda payload: payload.update({"metaFileVersion": "z" * 64}),
         lambda payload: payload.update({"importerSettingsDigestAfter": "d" * 64}),
         lambda payload: payload.update({"importerDirtyBefore": True}),
         lambda payload: payload.update({"importerDirtyAfter": True}),
@@ -418,8 +418,8 @@ def test_csharp_domain_module_keeps_preview_zero_write_and_apply_exact() -> None
     assert "FileAccess.Read, FileShare.Read" in source
     assert "LeaseFileObjectMatches(metaLease)" in source
     assert "numberOfLinks != 1" in source
-    assert "expectedSourceFileIdentityDigest" in source
-    assert "expectedMetaFileIdentityDigest" in source
+    assert "expectedSourceFileVersion" in source
+    assert "expectedMetaFileVersion" in source
     assert "checkpointRestoreRequired" in source
     assert "cleanupRequired" in source
     assert "TryRestoreBeforeSettings" in source
@@ -441,11 +441,12 @@ def test_csharp_domain_module_keeps_preview_zero_write_and_apply_exact() -> None
     assert "metaFileDigestAfter: evidence.metaFileDigest" in preview_branch
     assert "importerSettingsDigestAfter: beforeSettingsDigest" in preview_branch
     handler = source.split("public static object HandleCommand", 1)[1].split("private static object BuildSuccessResponse", 1)[0]
-    assert handler.count("ComputeStreamSha256(source)") == 2
-    assert "expectedVersion == evidence.sourceFileIdentityDigest" in handler
-    assert ": ComputeStreamSha256(source)" in handler
-    assert "ComputeFileIdentityDigest(evidence.sourceFileIdentity, includeVersion: true)" in handler
-    assert handler.count("ComputeStreamSha256(meta)") == 1
+    guard = source.split("private static string ReadPreviewBoundDigest", 1)[1].split("private static string ComputeStreamSha256", 1)[0]
+    assert "if (preview) return ComputeStreamSha256(file)" in guard
+    assert "expectedVersion != currentVersion) && ComputeStreamSha256(file) != expectedDigest" in guard
+    assert 'InvalidOperationException("该文件在预览后被修改")' in guard
+    assert "ReadPreviewBoundDigest(source, preview" in handler
+    assert "ReadPreviewBoundDigest(meta, preview" in handler
     assert handler.index("if (preview || !wouldChange)") < handler.index("SetPlatformTextureSettings")
     assert handler.index(".SaveAndReimport();") < handler.index("ReadMetaDigest(evidence.metaFilePath)")
 

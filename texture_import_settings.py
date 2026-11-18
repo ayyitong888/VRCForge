@@ -29,15 +29,16 @@ _PRECONDITION_KEYS = (
     "expectedTextureAssetPath",
     "expectedTextureAssetGuid",
     "expectedSourceFileDigest",
-    "expectedSourceFileIdentityDigest",
+    "expectedSourceFileVersion",
     "expectedMetaFileDigest",
-    "expectedMetaFileIdentityDigest",
+    "expectedMetaFileVersion",
     "expectedImporterType",
     "expectedImporterSettingsDigest",
     "expectedTargetSettingsDigest",
 )
 
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_FILE_VERSION_PATTERN = re.compile(r"^[0-9]+(?::[0-9]+){6}$")
 _GUID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _IMPORTER_TYPES = {
     "Default",
@@ -232,10 +233,10 @@ def bind_authoritative_preview(
         label="sourceFileDigestAfter",
         pattern=_DIGEST_PATTERN,
     )
-    source_identity_digest = _lower_hex(
-        result.get("sourceFileIdentityDigest"),
-        label="sourceFileIdentityDigest",
-        pattern=_DIGEST_PATTERN,
+    source_version = _lower_hex(
+        result.get("sourceFileVersion"),
+        label="sourceFileVersion",
+        pattern=_FILE_VERSION_PATTERN,
     )
     if _strict_int(result.get("sourceFileLinkCount"), label="sourceFileLinkCount") != 1:
         raise TextureImportSettingsError("Texture source must have exactly one filesystem link.")
@@ -249,10 +250,10 @@ def bind_authoritative_preview(
         label="metaFileDigestAfter",
         pattern=_DIGEST_PATTERN,
     )
-    meta_identity_digest = _lower_hex(
-        result.get("metaFileIdentityDigest"),
-        label="metaFileIdentityDigest",
-        pattern=_DIGEST_PATTERN,
+    meta_version = _lower_hex(
+        result.get("metaFileVersion"),
+        label="metaFileVersion",
+        pattern=_FILE_VERSION_PATTERN,
     )
     if _strict_int(result.get("metaFileLinkCount"), label="metaFileLinkCount") != 1:
         raise TextureImportSettingsError("Texture metadata must have exactly one filesystem link.")
@@ -333,9 +334,9 @@ def bind_authoritative_preview(
     canonical_nested["expectedTextureAssetPath"] = texture_path
     canonical_nested["expectedTextureAssetGuid"] = texture_guid
     canonical_nested["expectedSourceFileDigest"] = source_digest
-    canonical_nested["expectedSourceFileIdentityDigest"] = source_identity_digest
+    canonical_nested["expectedSourceFileVersion"] = source_version
     canonical_nested["expectedMetaFileDigest"] = meta_digest
-    canonical_nested["expectedMetaFileIdentityDigest"] = meta_identity_digest
+    canonical_nested["expectedMetaFileVersion"] = meta_version
     canonical_nested["expectedImporterType"] = importer_type
     canonical_nested["expectedImporterSettingsDigest"] = before_settings_digest
     canonical_nested["expectedTargetSettingsDigest"] = target_settings_digest
@@ -355,9 +356,9 @@ def bind_authoritative_preview(
             "textureAssetPath": texture_path,
             "textureAssetGuid": texture_guid,
             "sourceFileDigest": source_digest,
-            "sourceFileIdentityDigest": source_identity_digest,
+            "sourceFileVersion": source_version,
             "metaFileDigest": meta_digest,
-            "metaFileIdentityDigest": meta_identity_digest,
+            "metaFileVersion": meta_version,
             "importerType": importer_type,
         },
         "change": {

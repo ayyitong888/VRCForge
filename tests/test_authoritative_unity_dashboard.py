@@ -154,11 +154,11 @@ def _texture_payload(project: Path) -> dict:
         "textureAssetGuid": "4" * 32,
         "sourceFileDigestBefore": "5" * 64,
         "sourceFileDigestAfter": "5" * 64,
-        "sourceFileIdentityDigest": "6" * 64,
+        "sourceFileVersion": "1:123:1:1234567:2345678:3456789:1024",
         "sourceFileLinkCount": 1,
         "metaFileDigestBefore": "7" * 64,
         "metaFileDigestAfter": "7" * 64,
-        "metaFileIdentityDigest": "8" * 64,
+        "metaFileVersion": "2:123:1:1234567:2345678:3456789:1024",
         "metaFileLinkCount": 1,
         "importerType": "Default",
         "beforeSettings": before,
@@ -397,8 +397,8 @@ def test_texture_plan_and_approval_use_one_authoritative_mapping(tmp_path: Path)
     assert plan == {"ok": True, "preview": approval}
     assert prepared["toolName"] == TEXTURE_TOOL_NAME
     assert prepared["projectPath"] == str(project.resolve())
-    assert prepared["arguments"]["expectedSourceFileIdentityDigest"] == "6" * 64
-    assert prepared["arguments"]["expectedMetaFileIdentityDigest"] == "8" * 64
+    assert prepared["arguments"]["expectedSourceFileVersion"] == "1:123:1:1234567:2345678:3456789:1024"
+    assert prepared["arguments"]["expectedMetaFileVersion"] == "2:123:1:1234567:2345678:3456789:1024"
     assert prepared["arguments"]["saveAndReimport"] is True
     assert "spoofed" not in approval
     assert [call.args[1] for call in invoke.call_args_list] == [TEXTURE_TOOL_NAME, TEXTURE_TOOL_NAME]
