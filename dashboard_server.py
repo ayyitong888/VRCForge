@@ -25935,6 +25935,8 @@ def list_execution_targets_sync(params: dict[str, Any]) -> dict[str, Any]:
         if key in raw and raw[key] not in (None, "")
     }
     request.setdefault("scope", "avatar")
+    if raw.get("includeSceneDigest") is False:
+        request["includeSceneDigest"] = False
     if "offset" in raw:
         offset = raw["offset"]
         if type(offset) is not int or offset < 0:
@@ -28583,7 +28585,7 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_list_execution_targets",
         "When to use: List current Unity execution targets to inspect the exact identity of the running project, Scene, Avatar, object or component before binding. When NOT to use: Do not use hierarchy names as identity or treat candidates as write approval. Negative example: Choose one of two same-named Avatars without an exact GlobalObjectId.",
         "read/debug",
-        list_execution_targets_sync,
+        lambda params: list_execution_targets_sync({**params, "includeSceneDigest": False}),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_bind_execution_target",

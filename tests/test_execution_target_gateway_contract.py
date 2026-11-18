@@ -86,7 +86,7 @@ def test_list_execution_targets_accepts_one_core_issued_target(monkeypatch) -> N
     assert result["targets"] == [target]
 
 
-def test_list_execution_targets_forwards_bounded_component_page(monkeypatch) -> None:
+def test_public_discovery_forwards_component_page_without_scene_content_digest(monkeypatch) -> None:
     observed = {}
     target = {"schema": "vrcforge.execution_target.v1", "scope": "component", "namespace": "vrcforge://projects/abc/components/id"}
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: object())
@@ -96,7 +96,8 @@ def test_list_execution_targets_forwards_bounded_component_page(monkeypatch) -> 
         return SimpleNamespace(payload={"structuredContent": {"success": True, "data": {"targets": [target], "complete": True}}})
 
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
-    result = dashboard_server.list_execution_targets_sync(
+    discover = dashboard_server.AGENT_GATEWAY._tools["vrcforge_list_execution_targets"].handler
+    result = discover(
         {
             "projectPath": "D:/Unity/Avatar",
             "scope": "component",
@@ -114,6 +115,7 @@ def test_list_execution_targets_forwards_bounded_component_page(monkeypatch) -> 
             "componentType": "UnityEngine.SkinnedMeshRenderer",
             "offset": 64,
             "maxItems": 32,
+            "includeSceneDigest": False,
         },
     }
     assert result["candidateCount"] == 1

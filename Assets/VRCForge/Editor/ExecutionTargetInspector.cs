@@ -27,6 +27,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Exact object GlobalObjectId, when already known.", IsRequired = false)] public string objectGlobalObjectId { get; set; }
             [VRCForgeInput("Exact component GlobalObjectId, when already known.", IsRequired = false)] public string componentGlobalObjectId { get; set; }
             [VRCForgeInput("Expected fully qualified component type, when already known.", IsRequired = false)] public string componentType { get; set; }
+            [VRCForgeInput("Include the saved scene content digest for binding and refresh.", IsRequired = false, DefaultLiteral = "true")] public bool? includeSceneDigest { get; set; } = true;
             [VRCForgeInput("Zero-based component candidate offset for bounded Avatar discovery.", IsRequired = false, DefaultLiteral = "0")] public int? offset { get; set; } = 0;
             [VRCForgeInput("Maximum component candidates returned for bounded Avatar discovery.", IsRequired = false, DefaultLiteral = "50")] public int? maxItems { get; set; } = 50;
         }
@@ -41,7 +42,7 @@ namespace VRCForge.Editor
                 var project = new JObject { ["root"] = root, ["projectId"] = ComputeProjectId(root) };
                 var editor = new JObject { ["unityPid"] = System.Diagnostics.Process.GetCurrentProcess().Id, ["processStartTime"] = CurrentProcessStartTime(), ["coreInstanceId"] = GetCoreInstanceId() };
                 if (scope == "project") return VRCForgeToolResult.Completed("Execution target discovered.", BuildTarget(scope, project, editor, null, null, null, null));
-                var scene = BuildScene(SceneManager.GetActiveScene());
+                var scene = BuildScene(SceneManager.GetActiveScene(), parameters.includeSceneDigest ?? true);
                 if (scene == null) return VRCForgeToolResult.FailedWithCode("execution_target_scene_unavailable", "The current Unity scene has no saved scene identity.", BuildDiscovery(project, editor, scope, null));
                 if (scope == "scene") return VRCForgeToolResult.Completed("Execution target discovered.", BuildTarget(scope, project, editor, scene, null, null, null));
                 if (scope == "component"
@@ -162,12 +163,21 @@ namespace VRCForge.Editor
             if (scene != null) value += "/scenes/" + scene["guid"]; if (avatar != null) value += "/avatars/" + avatar["globalObjectId"]; if (targetObject != null) value += "/objects/" + targetObject["globalObjectId"]; if (component != null) value += "/components/" + component["globalObjectId"]; return value;
         }
 
-        private static JObject BuildScene(Scene scene)
+        private static JObject BuildScene(Scene scene, bool includeDigest)
         {
             if (!scene.IsValid() || !scene.isLoaded || string.IsNullOrEmpty(scene.path)) return null;
             var assetPath = scene.path.Replace('\\', '/'); var absolute = Path.GetFullPath(Path.Combine(GetProjectRoot(), assetPath.Replace('/', Path.DirectorySeparatorChar)));
             if (!File.Exists(absolute)) return null;
-            return new JObject { ["assetPath"] = assetPath, ["absolutePath"] = absolute, ["guid"] = ReadUnityMetaGuid(absolute + ".meta"), ["revision"] = File.GetLastWriteTimeUtc(absolute).Ticks.ToString(CultureInfo.InvariantCulture), ["digest"] = ComputeFileSha256(absolute) };
+            var result = new JObject
+            {
+                ["assetPath"] = assetPath,
+                ["absolutePath"] = absolute,
+                ["guid"] = ReadUnityMetaGuid(absolute + ".meta"),
+                ["revision"] = File.GetLastWriteTimeUtc(absolute).Ticks.ToString(CultureInfo.InvariantCulture)
+            };
+            if (includeDigest)
+                result["digest"] = ComputeFileSha256(absolute);
+            return result;
         }
 
         private static List<JObject> DiscoverAvatars(string assetPath)
