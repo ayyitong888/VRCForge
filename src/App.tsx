@@ -325,6 +325,20 @@ export default function App() {
   const [backendMessage, setBackendMessage] = useState("starting");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [chatRunErrors, setChatRunErrors] = useState<Record<string, string>>({});
+  function setChatRunError(message: string, chatId?: string) {
+    if (!chatId) {
+      setError(message);
+      return;
+    }
+    setChatRunErrors((current) => {
+      if (message) return { ...current, [chatId]: message };
+      if (!(chatId in current)) return current;
+      const next = { ...current };
+      delete next[chatId];
+      return next;
+    });
+  }
   const {
     notice: transientFailure,
     showTransientNotice,
@@ -1058,8 +1072,7 @@ export default function App() {
   const {
     sending: chatRunSending,
     queued,
-    currentTurn,
-    stopRequested,
+    foreground,
     isRunning: isChatRunActive,
     submitTurn,
     editQueuedTurn,
@@ -1075,8 +1088,6 @@ export default function App() {
   } = useChatRunController({
     endpoint,
     runtimeConnected,
-    sessionId,
-    activeRuntimeProjectPath,
     getChatById,
     ensureActiveChat,
     updateChat,
@@ -1087,7 +1098,7 @@ export default function App() {
     refreshRuntimeRuns: (includeEvents, target) => refreshRuntimeRunsRef.current(includeEvents, target),
     refreshBackgroundGoals: () => setBackgroundGoalRefreshSignal((current) => current + 1),
     handleRuntimeSessionFailure,
-    setError,
+    setError: setChatRunError,
     prepareTurnContext,
     persistChatsNow,
     reportChatSaveError,
@@ -1169,7 +1180,8 @@ export default function App() {
   );
   const reviewQuestionTarget = questionReview.target;
   const runtimeReviewItem = runtimeReviewItemForChat(activeChat || undefined, runtimeAttention, scopedAgentQuestions);
-  const selectedForegroundTurn = currentTurn?.chatId === activeChatId ? currentTurn : null;
+  const selectedForeground = foreground.find(({ turn }) => turn.chatId === activeChatId);
+  const selectedForegroundTurn = selectedForeground?.turn;
   const selectedCompaction = compacting && activeChat?.compaction?.status === "compacting";
   const sending = Boolean(selectedForegroundTurn || selectedCompaction || activeRuntimeCancelTarget);
   const runtimeAwareChatSidebar = useMemo(() => {
@@ -3084,7 +3096,7 @@ export default function App() {
   messageEditSnapshotRef.current = {
     draft: editingMessage,
     chatId: activeChatId,
-    busy: isChatRunActive() || compacting || visibleQueued.length > 0
+    busy: isChatRunActive(activeChatId) || compacting || visibleQueued.length > 0
       || Boolean(editingMessage && hasUnresolvedRuntimeState(editingMessage.chatId, getChatById(editingMessage.chatId)?.sessionId || "")),
   };
 
@@ -3157,7 +3169,7 @@ export default function App() {
   async function saveMessageEdit() {
     const draft = editingMessage;
     if (!draft || messageEditSaveInFlightRef.current) return false;
-    if (isChatRunActive() || compacting || visibleQueued.length > 0
+    if (isChatRunActive(activeChatId) || compacting || visibleQueued.length > 0
       || hasUnresolvedRuntimeState(draft.chatId, getChatById(draft.chatId)?.sessionId || "")) {
       setError(t("chat.cannotActionWhileRunning"));
       return true;
@@ -3191,7 +3203,7 @@ export default function App() {
         }
       }
       const current = messageEditSnapshotRef.current;
-      if (current.draft !== draft || current.chatId !== draft.chatId || current.busy || isChatRunActive()) return true;
+      if (current.draft !== draft || current.chatId !== draft.chatId || current.busy || isChatRunActive(draft.chatId)) return true;
       const chat = getChatById(draft.chatId);
       if (!chat || chat.sessionId !== originalChat.sessionId) return true;
       const index = chat.items.findIndex((item) => item.id === draft.itemId);
@@ -3235,7 +3247,7 @@ export default function App() {
   }
 
   async function retryConversationItem(itemId: string) {
-    if (isChatRunActive() || compacting) {
+    if (isChatRunActive(activeChatId) || compacting) {
       setError(t("chat.cannotActionWhileRunning"));
       return;
     }
@@ -3347,7 +3359,7 @@ export default function App() {
   }
 
   async function compactChat() {
-    if (isChatRunActive() || visibleQueued.length > 0 || compacting) {
+    if (isChatRunActive(activeChatId) || visibleQueued.length > 0 || compacting) {
       setError(t("compact.busy"));
       return;
     }
@@ -3511,6 +3523,7 @@ export default function App() {
     }
     if (!validateMessageAttachmentCounts(attachments)) return;
     setError("");
+    setChatRunError("", activeChatId);
     const owner = activeChatId ? await loadChat(activeChatId).catch(() => undefined) : undefined;
     if (activeChatId && !owner) {
       setError(t("chat.sessionRestoreFailed"));
@@ -3647,7 +3660,7 @@ export default function App() {
       const result = await submitTurn(turn, { deliveryMode });
       accepted = result === "started" || result === "steered" || result === "queued";
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setChatRunError(cause instanceof Error ? cause.message : String(cause), ownerChatId);
     } finally {
       const owner = getChatById(ownerChatId);
       finishSubmission(accepted, owner && !isUnstartedChat(owner) ? ownerChatId : undefined);
@@ -3657,8 +3670,9 @@ export default function App() {
   function stopInteractiveActivity(actionId?: string) {
     if (actionId) {
       const action = activeDesktopActions.find((candidate) => (candidate.actionId || candidate.id) === actionId);
-      if (action?.sessionId && action.clientTurnId && currentTurn?.sessionId === action.sessionId
-        && currentTurn.clientTurnId === action.clientTurnId && stopCurrentRun(currentTurn.chatId)) {
+      const owner = action?.sessionId && action.clientTurnId && foreground.find(({ turn }) =>
+        turn.sessionId === action.sessionId && turn.clientTurnId === action.clientTurnId);
+      if (owner && stopCurrentRun(owner.turn.chatId)) {
         return;
       }
       void cancelDesktopAction(actionId);
@@ -4478,14 +4492,14 @@ export default function App() {
             runtimeStarting={runtimeStartingRef.current}
             runtimeStartupPhase={runtimeStartupPhase}
             cachedListAvailable={cachedListAvailable}
-            error={error}
+            error={error || chatRunErrors[activeChatId] || ""}
             chatStorageError={chatStorageError?.message || ""}
             chatStorageNeedsDoctor={chatStorageError?.kind === "blocked" || chatStorageError?.kind === "conflict"}
             onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
             onOpenDoctor={() => void openDoctor()}
             onRetryStartupOrHealth={() => void retryStartupOrHealth()}
             onDismissDoctorPrompt={() => setDismissedDoctorPromptSignature(doctorPromptSignature)}
-            onDismissError={() => setError("")}
+            onDismissError={() => error ? setError("") : setChatRunError("", activeChatId)}
             onRetryChatStorage={() => { void reloadChatStorageState().catch(() => undefined); }}
           />
 
@@ -4721,17 +4735,17 @@ export default function App() {
               input={input}
               setInput={setInput}
               sending={sending}
-              stopRequested={Boolean(selectedForegroundTurn && stopRequested) || activeChat?.items.some((item) => item.type === "streaming" && item.stopRequested)}
+              stopRequested={Boolean(selectedForeground?.stopRequested) || activeChat?.items.some((item) => item.type === "streaming" && item.stopRequested)}
               queueAllowed={(Boolean(selectedForegroundTurn) || pendingParentWorkSessionIds.has(activeChat?.sessionId || ""))
-                && !(selectedForegroundTurn && stopRequested)}
+                && !selectedForeground?.stopRequested}
               runningEnterAction={runningEnterAction}
               permission={permission}
               onSubmit={submitMessage}
               onQueue={() => void submitMessage(undefined, "queue")}
               onSteerNow={() => void submitMessage(undefined, "steer")}
               onStop={() => stopInteractiveActivity()}
-              onResumeQueue={() => void resumeQueuedTurns(true)}
-              onCancelQueue={() => void cancelQueuedTurns()}
+              onResumeQueue={() => void resumeQueuedTurns(true, activeChatId)}
+              onCancelQueue={() => void cancelQueuedTurns(activeChatId)}
               onEditQueuedTurn={async (turnId) => {
                 const turn = await editQueuedTurn(turnId, activeChatId);
                 if (!turn) return;

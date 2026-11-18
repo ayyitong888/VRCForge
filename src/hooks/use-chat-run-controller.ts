@@ -103,6 +103,21 @@ export type CurrentTurn = {
   computerUseRequested?: boolean;
 };
 
+type ForegroundLane = {
+  sending: boolean;
+  stopping: boolean;
+  resuming: boolean;
+  resumeRequested: boolean;
+  cancellingQueue: boolean;
+  cancellationGeneration: number;
+  arbitration: RuntimeQueueArbitrator;
+  dispatchTail: Promise<void>;
+  pendingDispatches: number;
+  turn?: CurrentTurn;
+  controller?: AbortController;
+  dispatched?: DispatchedTurn;
+};
+
 type DispatchedTurn = {
   chatId: string;
   clientTurnId: string;
@@ -201,8 +216,6 @@ function queueLane(turn: QueuedTurn): string {
 type UseChatRunControllerParams = {
   endpoint: string;
   runtimeConnected: boolean;
-  sessionId: string;
-  activeRuntimeProjectPath: string;
   getChatById: (chatId: string) => ChatThread | undefined;
   ensureActiveChat: () => string;
   updateChat: (chatId: string, updater: (chat: ChatThread) => ChatThread) => void;
@@ -213,7 +226,7 @@ type UseChatRunControllerParams = {
   refreshRuntimeRuns: (includeEvents?: boolean, target?: string) => Promise<void>;
   refreshBackgroundGoals: () => void;
   handleRuntimeSessionFailure: (message: string) => void;
-  setError: (message: string) => void;
+  setError: (message: string, chatId?: string) => void;
   prepareTurnContext?: (input: PrepareTurnContextInput) => Promise<PreparedTurnContext | null>;
   persistChatsNow: () => Promise<void>;
   reportChatSaveError: (cause: unknown) => void;
@@ -233,8 +246,6 @@ type FollowupAdmission = { admitted: boolean };
 export function useChatRunController({
   endpoint,
   runtimeConnected,
-  sessionId,
-  activeRuntimeProjectPath,
   getChatById,
   ensureActiveChat,
   updateChat,
@@ -259,7 +270,7 @@ export function useChatRunController({
   bindRuntimeProviderConnection,
 }: UseChatRunControllerParams) {
   const { t } = useTranslation();
-  const [sending, setSending] = useState(false);
+  const [, refreshForeground] = useState(0);
   const [queued, setQueued] = useState<QueuedTurn[]>([]);
   const [queueTransitions, setQueueTransitions] = useState<QueuedTurn[]>([]);
   const visibleQueue = useMemo(() => {
@@ -270,23 +281,9 @@ export function useChatRunController({
       ...queueTransitions.filter((turn) => turn.queueTransition === "enqueue"),
     ];
   }, [queued, queueTransitions]);
-  const [currentTurn, setCurrentTurn] = useState<CurrentTurn | null>(null);
-  const [stopRequested, setStopRequested] = useState(false);
   const queueRef = useRef<QueuedTurn[]>([]);
-  const queueResumeInFlightRef = useRef(false);
-  const queueResumeRequestedRef = useRef(false);
-  const sendingRef = useRef(false);
-  const currentTurnRef = useRef<CurrentTurn | null>(null);
-  const stopRequestedRef = useRef(false);
-  const queueArbitratorRef = useRef(new RuntimeQueueArbitrator());
-  const queueDispatchTailRef = useRef<Promise<void>>(Promise.resolve());
-  const queueDispatchPendingRef = useRef(0);
-  const queueCancellationGenerationRef = useRef(0);
-  const queueCancellationInFlightRef = useRef(false);
+  const lanesRef = useRef(new Map<string, ForegroundLane>());
   const steerIntentRef = useRef(new Map<string, QueuedTurn>());
-  const dispatchedTurnRef = useRef<DispatchedTurn | null>(null);
-  const activeTurnAbortRef = useRef<AbortController | null>(null);
-  const dispatchedTurnAbortRef = useRef<AbortController | null>(null);
   const backgroundTurnAbortRefs = useRef(new Map<string, AbortController>());
   const titleGenerationAttemptedRef = useRef(new Set<string>());
   const rehydratedRef = useRef(false);
@@ -345,8 +342,7 @@ export function useChatRunController({
         // A live claim belongs to an in-flight dispatch whose turn stream
         // already owns the UI; re-syncing it would resurrect a ghost copy.
         if (!initialRestore && (entry.status === "claimed"
-          || (dispatchedTurnRef.current?.clientTurnId === entry.clientTurnId
-            && dispatchedTurnRef.current.sessionId === entry.runtimeSessionId))) continue;
+          || findDispatched(entry.runtimeSessionId, entry.clientTurnId))) continue;
         const existingTurn = next.find((candidate) => candidate.queueId === entry.queueId
           || (candidate.id === entry.clientTurnId && candidate.queueLaneId === entry.sessionId
             && (!entry.runtimeSessionId || candidate.sessionId === entry.runtimeSessionId)));
@@ -454,10 +450,10 @@ export function useChatRunController({
       setQueued(next);
       if (next.some((turn) => turn.queueStatus === "queued")) {
         void persistChatsNow?.().catch(() => undefined);
-        if (nextQueueTurn()?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
+        queueMicrotask(() => void resumeQueuedTurns());
       }
     }).catch(() => {
-      if (!cancelled && nextQueueTurn()?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
+      if (!cancelled) queueMicrotask(() => void resumeQueuedTurns());
     });
     return () => { cancelled = true; };
     // runtimeQueueVersion bumps on backend agentRuntimeQueue events so entries
@@ -465,13 +461,40 @@ export function useChatRunController({
     // queue instead of silently waiting for the next app restart.
   }, [chatStorageReady, runtimeQueueVersion]);
 
-  function isRunning() {
-    return sendingRef.current;
+  function foregroundLane(chatId: string): ForegroundLane {
+    let lane = lanesRef.current.get(chatId);
+    if (!lane) {
+      lane = {
+        sending: false, stopping: false, resuming: false, resumeRequested: false,
+        cancellingQueue: false, cancellationGeneration: 0, arbitration: new RuntimeQueueArbitrator(),
+        dispatchTail: Promise.resolve(), pendingDispatches: 0,
+      };
+      lanesRef.current.set(chatId, lane);
+    }
+    return lane;
   }
 
-  function nextQueueTurn(): QueuedTurn | undefined {
+  function findDispatched(sessionId: string | undefined, clientTurnId: string): DispatchedTurn | undefined {
+    for (const lane of lanesRef.current.values()) {
+      const owner = lane.dispatched;
+      if (owner?.sessionId === sessionId && owner?.clientTurnId === clientTurnId) return owner;
+    }
+    return undefined;
+  }
+
+  function foregroundChanged() {
+    refreshForeground((revision) => revision + 1);
+  }
+
+  function isRunning(chatId?: string) {
+    return chatId ? Boolean(lanesRef.current.get(chatId)?.sending)
+      : [...lanesRef.current.values()].some((lane) => lane.sending);
+  }
+
+  function nextQueueTurn(chatId: string): QueuedTurn | undefined {
     const blockedLanes = new Set<string>();
     for (const turn of queueRef.current) {
+      if (turn.chatId !== chatId) continue;
       const lane = queueLane(turn);
       if (turn.staleBranch) blockedLanes.add(lane);
       else if (!blockedLanes.has(lane)) return turn;
@@ -529,24 +552,30 @@ export function useChatRunController({
     void persistChatsNow?.().catch(() => undefined);
   }
 
-  async function resumeQueuedTurns(manual = false): Promise<void> {
-    if (queueResumeInFlightRef.current) {
-      queueResumeRequestedRef.current = true;
+  async function resumeQueuedTurns(manual = false, chatId?: string): Promise<void> {
+    if (!chatId) {
+      const owners = new Set(queueRef.current.map((turn) => turn.chatId).filter((id): id is string => Boolean(id)));
+      await Promise.all([...owners].map((id) => resumeQueuedTurns(manual, id)));
       return;
     }
-    if (sendingRef.current || stopRequestedRef.current || queueCancellationInFlightRef.current || queueRef.current.length === 0) return;
-    queueResumeInFlightRef.current = true;
+    const lane = foregroundLane(chatId);
+    if (lane.resuming) {
+      lane.resumeRequested = true;
+      return;
+    }
+    if (lane.sending || lane.stopping || lane.cancellingQueue || queueRef.current.length === 0) return;
+    lane.resuming = true;
     try {
-      const head = nextQueueTurn();
+      const head = nextQueueTurn(chatId);
       if (!head || (!manual && (head.queueStatus === "paused" || head.queueStatus === "delivery_unverified"))) return;
       const owner = head.chatId ? getChatById(head.chatId) : undefined;
       if (!owner || !followsChatSession(owner, head.sessionId)) {
         head.staleBranch = true;
         markQueuedTurnStatus(head, "paused");
-        if (nextQueueTurn()?.queueStatus === "queued") queueResumeRequestedRef.current = true;
+        if (nextQueueTurn(chatId)?.queueStatus === "queued") lane.resumeRequested = true;
         return;
       }
-      if (await hasPendingParentWorkForTurn(head) || nextQueueTurn() !== head) return;
+      if (await hasPendingParentWorkForTurn(head) || lane.sending || lane.cancellingQueue || nextQueueTurn(chatId) !== head) return;
       if (head.queueStatus === "waiting_for_resources" || head.queueStatus === "delivery_unverified" || !head.queueId) {
         const result = await recordAgentRunQueued(endpoint, {
           sessionId: head.sessionId,
@@ -562,7 +591,7 @@ export function useChatRunController({
           projectRoot: head.projectPath,
           projectType: head.projectType,
         }).catch(() => null);
-        if (nextQueueTurn() !== head) return;
+        if (lane.sending || lane.cancellingQueue || nextQueueTurn(chatId) !== head) return;
         if (!result?.accepted || result.mode !== "followup" || !result.queueId) {
           markQueuedTurnStatus(head, "waiting_for_resources");
           return;
@@ -575,14 +604,14 @@ export function useChatRunController({
           dequeueTurn(head);
           markQueuedTurnStatus(head, "delivery_unverified");
           setQueued([...queueRef.current]);
-          if (nextQueueTurn()?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
+          if (nextQueueTurn(chatId)?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns(false, chatId));
           return;
         }
         if (result.status === "cancelled") {
           dequeueTurn(head);
           markQueuedTurnStatus(head, "cancelled");
           setQueued([...queueRef.current]);
-          if (nextQueueTurn()?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
+          if (nextQueueTurn(chatId)?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns(false, chatId));
           return;
         }
         if (result.status === "claimed") return;
@@ -594,11 +623,11 @@ export function useChatRunController({
       setQueued([...queueRef.current]);
       void submitTurn({ ...head, queueStatus: "queued" });
     } finally {
-      queueResumeInFlightRef.current = false;
-      if (queueResumeRequestedRef.current) {
-        queueResumeRequestedRef.current = false;
-        if (!sendingRef.current && !stopRequestedRef.current && queueRef.current.length > 0) {
-          queueMicrotask(() => void resumeQueuedTurns());
+      lane.resuming = false;
+      if (lane.resumeRequested) {
+        lane.resumeRequested = false;
+        if (!lane.sending && !lane.stopping && queueRef.current.length > 0) {
+          queueMicrotask(() => void resumeQueuedTurns(false, chatId));
         }
       }
     }
@@ -629,12 +658,21 @@ export function useChatRunController({
     }
   }
 
-  async function cancelQueuedTurns(): Promise<void> {
-    if (queueCancellationInFlightRef.current) return;
-    queueCancellationInFlightRef.current = true;
-    const pending = [...queueRef.current];
-    queueCancellationGenerationRef.current += 1;
-    queueArbitratorRef.current.stop();
+  async function cancelQueuedTurns(chatId?: string): Promise<void> {
+    if (!chatId) {
+      const owners = new Set([
+        ...lanesRef.current.keys(),
+        ...queueRef.current.map((turn) => turn.chatId).filter((id): id is string => Boolean(id)),
+      ]);
+      await Promise.all([...owners].map((id) => cancelQueuedTurns(id)));
+      return;
+    }
+    const lane = foregroundLane(chatId);
+    if (lane.cancellingQueue) return;
+    lane.cancellingQueue = true;
+    const pending = queueRef.current.filter((turn) => turn.chatId === chatId);
+    lane.cancellationGeneration += 1;
+    lane.arbitration.stop();
     // Stop local draining while cancellation is pending. Only an authoritative
     // cancelled receipt may remove a durable follow-up from the visible queue.
     for (const turn of pending) {
@@ -645,18 +683,17 @@ export function useChatRunController({
       for (const turn of pending) {
         if (!await removeQueuedTurn(turn.id, turn.chatId)) failed = true;
       }
-      if (failed) setError(t("chat.queueCancellationFailed"));
+      if (failed) setError(t("chat.queueCancellationFailed"), chatId);
       await persistChatsNow?.().catch(reportChatSaveError);
     } finally {
-      queueCancellationInFlightRef.current = false;
+      lane.cancellingQueue = false;
     }
   }
 
   function applyFollowupReceipt(receipt: FollowupReceipt) {
     const { clientTurnId, sessionId, startedAt, turnId } = receipt;
     if (!clientTurnId || !sessionId || !startedAt || !turnId) return;
-    const active = dispatchedTurnRef.current;
-    const owner = active?.clientTurnId === clientTurnId && active.sessionId === sessionId ? active : undefined;
+    const owner = findDispatched(sessionId, clientTurnId);
     if (owner?.turnId && owner.turnId !== turnId) return;
     if (owner) owner.turnId = turnId;
     const queued = queueRef.current.find((turn) => turn.id === clientTurnId && turn.sessionId === sessionId && turn.queueId);
@@ -681,7 +718,7 @@ export function useChatRunController({
     }
     setQueueTransitions((current) => current.filter((turn) => turn.id !== clientTurnId || turn.queueTransition !== "dispatch"));
     void persistChatsNow().catch(reportChatSaveError);
-    if (queued && nextQueueTurn()?.queueStatus === "queued") queueMicrotask(() => void resumeQueuedTurns());
+    if (queued?.chatId) queueMicrotask(() => void resumeQueuedTurns(false, queued.chatId));
   }
 
   function applyRuntimeDelta(delta: AgentRuntimeDeltaEvent) {
@@ -692,10 +729,9 @@ export function useChatRunController({
     if (!clientTurnId || (!delta.textDelta && !phase && !timelineEvent && delta.activity !== true)) {
       return;
     }
-    const owner = dispatchedTurnRef.current;
-    if (!owner || owner.clientTurnId !== clientTurnId || owner.sessionId !== delta.sessionId
-      || (owner.turnId && owner.turnId !== delta.turnId)
-      || stopRequestedRef.current
+    const owner = findDispatched(delta.sessionId, clientTurnId);
+    if (!owner || (owner.turnId && owner.turnId !== delta.turnId)
+      || lanesRef.current.get(owner.chatId)?.stopping
       || getChatById(owner.chatId)?.sessionId !== owner.sessionId) {
       return;
     }
@@ -745,7 +781,7 @@ export function useChatRunController({
       try {
         if (!await loadChat(turn.chatId)) throw new Error(t("chat.sessionRestoreFailed"));
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(cause instanceof Error ? cause.message : String(cause), turn.chatId);
         return "not_accepted";
       }
     }
@@ -765,23 +801,25 @@ export function useChatRunController({
       sessionId: turn.sessionId,
       clientTurnId: turn.id,
     });
-    trace("submit_received", { pendingDispatches: queueDispatchPendingRef.current, requestedDeliveryMode: options.deliveryMode || "steer" });
-    if ((sendingRef.current || continuedTurn || queueRef.current.length > 0) && !turn.queueId) {
-      const reservation = queueArbitratorRef.current.reserve(turn.id, queueRef.current.length);
+    const lane = foregroundLane(visibleOwnerChatId);
+    trace("submit_received", { pendingDispatches: lane.pendingDispatches, requestedDeliveryMode: options.deliveryMode || "steer" });
+    if ((lane.sending || continuedTurn || nextQueueTurn(visibleOwnerChatId)) && !turn.queueId) {
+      const reservation = lane.arbitration.reserve(turn.id, queueRef.current.length);
       if (!reservation) {
         trace("reservation_rejected");
         return "queued";
       }
-      const cancellationGeneration = queueCancellationGenerationRef.current;
+      const cancellationGeneration = lane.cancellationGeneration;
       const ownerChatId = visibleOwnerChatId;
       const ownerChat = getChatById(ownerChatId);
+      const projectPath = ownerChat?.projectPath || undefined;
       const queuedTurn = {
         ...turn,
         queuedFrom: true,
         chatId: ownerChatId,
-        sessionId: turn.sessionId || ownerChat?.sessionId || sessionId || `session-${turn.id}`,
-        projectPath: turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
-        projectType: turn.projectType || ownerChat?.projectType || ((turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath) ? "unity" : "general"),
+        sessionId: turn.sessionId || ownerChat?.sessionId || lane.turn?.sessionId || `session-${lane.turn?.clientTurnId || turn.id}`,
+        projectPath,
+        projectType: ownerChat?.projectType || (projectPath ? "unity" : "general"),
         queueLaneId: ownerChatId,
       };
       trace("reservation_acquired", { chatId: ownerChatId, sessionId: queuedTurn.sessionId });
@@ -816,29 +854,29 @@ export function useChatRunController({
       }
       await preserveLocalInput(endpoint, ownerChatId, turn.id);
       steerIntentRef.current.set(turn.id, queuedTurn);
-      const active = dispatchedTurnRef.current;
+      const active = lane.dispatched;
       const localOwner = active?.chatId === ownerChatId && active.sessionId === queuedTurn.sessionId ? active : undefined;
-      const current = currentTurnRef.current;
+      const current = lane.turn;
       const localPreparing = current?.chatId === ownerChatId && current.clientTurnId === continuedTurn?.clientTurnId;
       const target = localOwner || (!localPreparing ? continuedTurn : undefined);
       const targetClientTurnId = target
-        && (!localOwner || (turn.planMode === true) === (currentTurnRef.current?.planMode === true))
+        && (!localOwner || (turn.planMode === true) === (lane.turn?.planMode === true))
         ? target.clientTurnId : undefined;
       const queueEndpoint = localOwner?.endpoint || endpoint;
-      const stoppingOwner = () => stopRequestedRef.current
-        && currentTurnRef.current?.chatId === ownerChatId
-        && currentTurnRef.current.sessionId === queuedTurn.sessionId;
+      const stoppingOwner = () => lane.stopping
+        && lane.turn?.chatId === ownerChatId
+        && lane.turn.sessionId === queuedTurn.sessionId;
       const dispatchQueuedAt = performance.now();
-      const pendingDispatches = ++queueDispatchPendingRef.current;
+      const pendingDispatches = ++lane.pendingDispatches;
       trace("dispatch_wait_started", { targetClientTurnId, pendingDispatches });
-      const dispatch = queueDispatchTailRef.current
+      const dispatch = lane.dispatchTail
         .catch(() => undefined)
         .then(async () => {
-          queueDispatchPendingRef.current = Math.max(0, queueDispatchPendingRef.current - 1);
+          lane.pendingDispatches = Math.max(0, lane.pendingDispatches - 1);
           trace("dispatch_wait_resolved", {
             targetClientTurnId,
             waitMs: performance.now() - dispatchQueuedAt,
-            pendingDispatches: queueDispatchPendingRef.current,
+            pendingDispatches: lane.pendingDispatches,
           });
           if (stoppingOwner()) {
             trace("dispatch_skipped_stop", { targetClientTurnId });
@@ -880,9 +918,9 @@ export function useChatRunController({
             return null;
           }
         });
-      queueDispatchTailRef.current = dispatch.then(() => undefined, () => undefined);
+      lane.dispatchTail = dispatch.then(() => undefined, () => undefined);
        const queueResult = await dispatch;
-       if (cancellationGeneration !== queueCancellationGenerationRef.current) {
+       if (cancellationGeneration !== lane.cancellationGeneration) {
          const cancellation = queueResult?.queueId && queuedTurn.queueLaneId
            ? await cancelAgentRunFollowup(queueEndpoint, queueResult.queueId, { sessionId: queuedTurn.queueLaneId }).catch(() => null)
            : null;
@@ -895,7 +933,7 @@ export function useChatRunController({
            queuedTurn.queueStatus = queuedTurn.queueId ? "paused" : "delivery_unverified";
            queueRef.current = [...queueRef.current.filter(item => item.id !== turn.id), queuedTurn];
            setQueued([...queueRef.current]);
-           setError(t("chat.queueCancellationFailed"));
+           setError(t("chat.queueCancellationFailed"), ownerChatId);
          }
          updateChat(ownerChatId, (current) => ({
            ...touchChat(current),
@@ -909,10 +947,10 @@ export function useChatRunController({
          return "failed";
        }
        const backpressured = queueResult?.accepted !== true;
-       queueArbitratorRef.current.settle(turn.id, {
+       lane.arbitration.settle(turn.id, {
          acceptedSteer: queueResult?.accepted === true && queueResult.mode === "steer",
          stopRequested: stoppingOwner(),
-       }, sendingRef.current || stopRequestedRef.current || queueRef.current.length > 0);
+       }, lane.sending || lane.stopping || Boolean(nextQueueTurn(visibleOwnerChatId)));
       const arbitration = await reservation.decision;
        if (arbitration === "steered") {
           const persistStartedAt = performance.now();
@@ -953,25 +991,24 @@ export function useChatRunController({
       void refreshRuntimeRuns(false).catch(() => undefined);
       // The active run may have reached its finally block while the queue
       // request was in flight. In that race, take ownership of this queued
-      // turn immediately; runTurnNow re-checks sendingRef to prevent a
-      // concurrent drain from starting a second runner.
-       if (!backpressured && !stopRequestedRef.current && (arbitration === "start" || !sendingRef.current) && nextQueueTurn() === durableTurn) {
+      // turn immediately if this chat no longer has a foreground runner.
+       if (!backpressured && !lane.stopping && !lane.sending && nextQueueTurn(visibleOwnerChatId) === durableTurn) {
          dequeueTurn(durableTurn);
         setQueued([...queueRef.current]);
-        queueArbitratorRef.current.runnerStarted();
+        lane.arbitration.runnerStarted();
          void submitTurn(durableTurn);
-       } else if (!sendingRef.current && !stopRequestedRef.current && nextQueueTurn()?.queueStatus === "queued") {
-         void resumeQueuedTurns();
+       } else if (!lane.sending && !lane.stopping && nextQueueTurn(visibleOwnerChatId)?.queueStatus === "queued") {
+         void resumeQueuedTurns(false, visibleOwnerChatId);
       }
       return "queued";
     }
 
     trace("submit_direct");
     const chatId = visibleOwnerChatId;
-    sendingRef.current = true;
-    setSending(true);
-    setStopRequested(false);
-    stopRequestedRef.current = false;
+    if (lane.sending) return "not_accepted";
+    lane.sending = true;
+    lane.stopping = false;
+    foregroundChanged();
     try {
        let next: QueuedTurn | undefined = turn;
       let initialTurnSucceeded = false;
@@ -991,10 +1028,10 @@ export function useChatRunController({
           initialTurnSucceeded = succeeded;
           isInitialTurn = false;
         }
-        if (stopRequestedRef.current) {
+        if (lane.stopping) {
           break;
         }
-        const queuedCandidate = nextQueueTurn();
+        const queuedCandidate = nextQueueTurn(visibleOwnerChatId);
         if (queuedCandidate?.queueStatus === "queued" && await hasPendingParentWorkForTurn(queuedCandidate)) {
           break;
         }
@@ -1007,10 +1044,9 @@ export function useChatRunController({
       return inputRetained ? "failed" : "not_accepted";
     } finally {
       setQueued([...queueRef.current]);
-      sendingRef.current = false;
-      setSending(false);
-      setStopRequested(false);
-      stopRequestedRef.current = false;
+      lane.sending = false;
+      lane.stopping = false;
+      foregroundChanged();
     }
   }
 
@@ -1018,13 +1054,15 @@ export function useChatRunController({
     const ownerChatId = turn.chatId && getChatById(turn.chatId) ? turn.chatId : ensureActiveChat();
     const ownerChat = getChatById(ownerChatId);
     if (ownerChat && !followsChatSession(ownerChat, turn.sessionId)) return "not_accepted";
+    const active = lanesRef.current.get(ownerChatId)?.turn;
+    const projectPath = ownerChat?.projectPath || undefined;
     const queuedTurn: QueuedTurn = {
       ...turn,
       queuedFrom: true,
       chatId: ownerChatId,
-      sessionId: turn.sessionId || ownerChat?.sessionId || sessionId || `session-${turn.id}`,
-      projectPath: turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
-      projectType: turn.projectType || ownerChat?.projectType || ((turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath) ? "unity" : "general"),
+      sessionId: turn.sessionId || ownerChat?.sessionId || active?.sessionId || `session-${active?.clientTurnId || turn.id}`,
+      projectPath,
+      projectType: ownerChat?.projectType || (projectPath ? "unity" : "general"),
       queueLaneId: ownerChatId,
       queueStatus: "queued",
     };
@@ -1046,7 +1084,7 @@ export function useChatRunController({
       sessionId: queuedTurn.sessionId,
       clientTurnId: turn.id,
     });
-    trace("submit_received", { pendingDispatches: queueDispatchPendingRef.current, requestedDeliveryMode: "queue" });
+    trace("submit_received", { pendingDispatches: foregroundLane(ownerChatId).pendingDispatches, requestedDeliveryMode: "queue" });
     const existing = ownerChat?.items.some((item) => item.type === "user" && item.clientTurnId === turn.id);
     if (!existing) {
       updateChat(ownerChatId, (current) => {
@@ -1159,8 +1197,8 @@ export function useChatRunController({
       // transcript failure must never erase or relabel accepted work.
       reportChatSaveError(cause);
     });
-    if (!sendingRef.current && !stopRequestedRef.current && nextQueueTurn() === queuedTurn) {
-      void resumeQueuedTurns();
+    if (!isRunning(ownerChatId) && nextQueueTurn(ownerChatId) === queuedTurn) {
+      void resumeQueuedTurns(false, ownerChatId);
     }
     return result?.accepted === true && result.mode === "followup" && Boolean(result.queueId) ? "queued" : "not_accepted";
   }
@@ -1200,7 +1238,7 @@ export function useChatRunController({
       if (!turn.staleBranch) await preserveLocalInput(endpoint, chatId, turnId);
       void persistChatsNow?.().catch(reportChatSaveError);
     }
-    if (turn.staleBranch && nextQueueTurn()?.queueStatus === "queued") void resumeQueuedTurns();
+    if (turn.staleBranch && turn.chatId) void resumeQueuedTurns(false, turn.chatId);
     return true;
   }
 
@@ -1248,22 +1286,21 @@ export function useChatRunController({
   }
 
   async function runTurnNow(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions) {
-    if (sendingRef.current) {
-      setError(t("chat.cannotActionWhileRunning"));
+    const lane = foregroundLane(chatId);
+    if (lane.sending) {
+      setError(t("chat.cannotActionWhileRunning"), chatId);
       return false;
     }
-    sendingRef.current = true;
-    setSending(true);
-    setStopRequested(false);
-    stopRequestedRef.current = false;
+    lane.sending = true;
+    lane.stopping = false;
+    foregroundChanged();
     try {
       return await runSingleTurn(chatId, turn, options);
     } finally {
        setQueued([...queueRef.current]);
-      sendingRef.current = false;
-      setSending(false);
-      setStopRequested(false);
-      stopRequestedRef.current = false;
+      lane.sending = false;
+      lane.stopping = false;
+      foregroundChanged();
     }
   }
 
@@ -1296,6 +1333,7 @@ export function useChatRunController({
   async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: InternalRunSingleTurnOptions): Promise<boolean> {
     const startedAt = Date.now();
     const background = options?.background === true;
+    const lane = background ? undefined : foregroundLane(chatId);
     const presentingFollowup = !background && Boolean(turn.queueId);
     const finishPresentation = () => {
       if (presentingFollowup) setQueueTransitions((current) => current.filter(
@@ -1311,9 +1349,9 @@ export function useChatRunController({
     let runtimeRequestStarted = false;
     let savingBeforeDispatch = false;
     let followup: FollowupAdmission | undefined;
-    if (!background) {
-      activeTurnAbortRef.current = abortController;
-      const activeTurn = {
+    if (lane) {
+      lane.controller = abortController;
+      lane.turn = {
         chatId,
         clientTurnId: turn.id,
         text: turn.text,
@@ -1323,8 +1361,7 @@ export function useChatRunController({
         model: turn.model,
         computerUseRequested: turn.computerUseRequested,
       };
-      currentTurnRef.current = activeTurn;
-      setCurrentTurn(activeTurn);
+      foregroundChanged();
     }
     try {
       if (loadChat && !getChatById(chatId) && !await loadChat(chatId)) {
@@ -1475,7 +1512,7 @@ export function useChatRunController({
         ? await issueComputerUseTurnGrant(targetEndpoint, {
             sessionId: chatSessionId || undefined,
             clientTurnId: turn.id,
-            projectRoot: chat?.projectPath || activeRuntimeProjectPath || undefined,
+            projectRoot: chat?.projectPath || undefined,
           })
         : null;
       if (abortController.signal.aborted) throw new Error("Request cancelled.");
@@ -1486,23 +1523,21 @@ export function useChatRunController({
       const confirmProviderConnection = bindRuntimeProviderConnection?.(targetEndpoint, turn.provider, turn.model);
       const owner: DispatchedTurn = { chatId, clientTurnId: turn.id, sessionId: chatSessionId,
         endpoint: targetEndpoint, confirmProviderConnection, followup };
-      if (!background) {
-        const activeTurn = currentTurnRef.current;
+      if (lane) {
+        const activeTurn = lane.turn;
         if (activeTurn?.clientTurnId === turn.id && activeTurn.sessionId !== chatSessionId) {
-          const dispatchedTurn = { ...activeTurn, sessionId: chatSessionId };
-          currentTurnRef.current = dispatchedTurn;
-          setCurrentTurn(dispatchedTurn);
+          lane.turn = { ...activeTurn, sessionId: chatSessionId };
+          foregroundChanged();
         }
-        dispatchedTurnAbortRef.current = abortController;
-        dispatchedTurnRef.current = owner;
+        lane.dispatched = owner;
       }
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
         planMode: turn.planMode === true,
         attachments: serializeChatAttachments(requestAttachments),
         chatId,
-        projectPath: chat?.projectPath || activeRuntimeProjectPath || undefined,
-        projectType: turn.projectType || chat?.projectType || ((chat?.projectPath || activeRuntimeProjectPath) ? "unity" : "general"),
+        projectPath: chat?.projectPath || undefined,
+        projectType: chat?.projectType || (chat?.projectPath ? "unity" : "general"),
         provider: turn.provider,
         providerLabel: turn.providerLabel,
         model: turn.model,
@@ -1866,10 +1901,8 @@ export function useChatRunController({
       // the exact runtime receipt owns the eventual execution status.
       const interrupted = cause instanceof AgentTurnDeliveryUnconfirmedError
         || abortController.signal.aborted || text.toLowerCase().includes("cancel");
-      const stopped = dispatchedTurnRef.current?.chatId === chatId
-        && dispatchedTurnRef.current.clientTurnId === turn.id
-        && dispatchedTurnRef.current.sessionId === chatSessionId
-        ? dispatchedTurnRef.current.stopAcknowledgement : undefined;
+      const stopped = lane?.dispatched?.clientTurnId === turn.id && lane.dispatched.sessionId === chatSessionId
+        ? lane.dispatched.stopAcknowledgement : undefined;
       const queueFailure = cause instanceof ApiError && cause.detail && typeof cause.detail === "object"
         ? cause.detail as { code?: string; message?: string } : null;
       if (presentingFollowup && !followup?.admitted) {
@@ -1890,7 +1923,7 @@ export function useChatRunController({
             : item),
         }));
         if (savingBeforeDispatch) reportChatSaveError(cause);
-        else if (!abortController.signal.aborted && !notReady) setError(queueFailure?.message || text);
+        else if (!abortController.signal.aborted && !notReady) setError(queueFailure?.message || text, chatId);
         void persistChatsNow().catch(reportChatSaveError);
         return false;
       }
@@ -1956,7 +1989,10 @@ export function useChatRunController({
           updatedAt: snapshot.updatedAt || current.updatedAt,
           items: stripTransientConversationItems(snapshot.items),
         }));
-        if (!savingBeforeDispatch && !sessionFailure) (options.onFailure ?? setError)(text);
+        if (!savingBeforeDispatch && !sessionFailure) {
+          if (options.onFailure) options.onFailure(text);
+          else setError(text, chatId);
+        }
       } else {
         if (!savingBeforeDispatch && !sessionFailure) {
           appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text,
@@ -1977,27 +2013,24 @@ export function useChatRunController({
         );
         return items.length === current.items.length ? current : { ...current, items };
       });
-      if (!background) {
-        if (activeTurnAbortRef.current === abortController) {
-          activeTurnAbortRef.current = null;
-        }
-        if (dispatchedTurnAbortRef.current === abortController) {
-          dispatchedTurnAbortRef.current = null;
-          dispatchedTurnRef.current = null;
-        }
-        currentTurnRef.current = null;
-        setCurrentTurn(null);
+      if (lane?.controller === abortController) {
+        lane.controller = undefined;
+        lane.dispatched = undefined;
+        lane.turn = undefined;
+        foregroundChanged();
       }
       finishPresentation();
     }
   }
 
   function stopCurrentRun(ownerChatId?: string): boolean {
-    const current = currentTurnRef.current;
-    if (!current || (ownerChatId && current.chatId !== ownerChatId)) return false;
-    if (stopRequestedRef.current) return true;
-    stopRequestedRef.current = true;
-    setStopRequested(true);
+    const active = [...lanesRef.current.values()].filter((lane) => lane.turn);
+    const lane = ownerChatId ? lanesRef.current.get(ownerChatId) : active.length === 1 ? active[0] : undefined;
+    const current = lane?.turn;
+    if (!lane || !current) return false;
+    if (lane.stopping) return true;
+    lane.stopping = true;
+    foregroundChanged();
     const sessionId = current.sessionId || getChatById(current.chatId)?.sessionId;
     for (const turn of queueRef.current) {
       if (turn.chatId === current.chatId && turn.sessionId === sessionId) markQueuedTurnStatus(turn, "paused");
@@ -2005,25 +2038,25 @@ export function useChatRunController({
     // Keep the user's queued messages paused and available for explicit resume.
     // React state can lag while a send completes; the ref is the CAS owner
     // for the currently active turn and avoids cancelling a stale turn.
-    const controller = activeTurnAbortRef.current;
-    if (controller && dispatchedTurnAbortRef.current !== controller) {
+    const controller = lane.controller;
+    if (controller && !lane.dispatched) {
       // No backend turn has been dispatched yet. Stop local preparation and
       // let the pre-dispatch signal check prevent admission after pending I/O.
       controller.abort();
       return true;
     }
-    const owner = dispatchedTurnRef.current;
+    const owner = lane.dispatched;
     if (owner && owner.chatId === current.chatId && owner.clientTurnId === current.clientTurnId) {
       const { chatId, clientTurnId, sessionId } = owner;
       const showStopping = (stopping: boolean) => updateChat(chatId, (chat) => chat.sessionId === sessionId
         ? markRuntimeStreamStopping(chat, clientTurnId, stopping) : chat);
       showStopping(true);
       const rejectStop = (message: string) => {
-        if (dispatchedTurnRef.current !== owner) return;
-        stopRequestedRef.current = false;
-        setStopRequested(false);
+        if (lane.dispatched !== owner) return;
+        lane.stopping = false;
+        foregroundChanged();
         showStopping(false);
-        setError(message);
+        setError(message, chatId);
       };
       void requestAgentRunCancel(owner.endpoint, {
         sessionId,
@@ -2034,7 +2067,7 @@ export function useChatRunController({
         .then((result) => {
           if (!result.ok) {
             rejectStop(result.status || "Agent cancellation was not accepted.");
-          } else if (result.dispatchStopped && dispatchedTurnRef.current === owner) {
+          } else if (result.dispatchStopped && lane.dispatched === owner) {
             owner.stopAcknowledgement = { unityWriteMayHaveExecuted: result.unityWriteMayHaveExecuted === true };
             // The backend owns any submitted write through settlement. Stop
             // waiting here and reconcile the original receipt by exact ID.
@@ -2046,11 +2079,12 @@ export function useChatRunController({
     return true;
   }
 
+  const foreground = [...lanesRef.current.values()].flatMap((lane) =>
+    lane.turn ? [{ turn: lane.turn, stopRequested: lane.stopping }] : []);
   return {
-    sending,
+    sending: isRunning(),
     queued: visibleQueue,
-    currentTurn,
-    stopRequested,
+    foreground,
     isRunning,
     submitTurn,
     editQueuedTurn,

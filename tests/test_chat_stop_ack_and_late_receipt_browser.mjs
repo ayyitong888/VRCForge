@@ -18,7 +18,7 @@ export const fetchReasoningVariants = async () => ({});
 export const testProviderCapability = async () => { throw new Error('Unexpected provider probe'); };
 export const updateApiConfig = async () => ({});
 export const updateVisionConfig = async () => ({});
-export const cancelAgentRunFollowup = async () => ({ok:true});
+export const cancelAgentRunFollowup = async () => ({ok:true,status:'cancelled'});
 export const listAgentRunFollowups = async () => ({ok:true,items:[]});
 export const fetchAgentQuestions = async () => ({ok:true,questions:[]});
 export const issueComputerUseTurnGrant = async () => null;
@@ -27,6 +27,7 @@ export const recordAgentRunQueued = async (_endpoint,payload) => {window.queueRe
 export const requestAgentRunCancel = (endpoint,payload) => new Promise((resolve,reject) => {window.cancelRequests.push({...payload,endpoint});window.cancelResolve=resolve;window.cancelReject=reject;});
 export const sendAgentMessage = (endpoint,_message,session,_history,_agent,options) => new Promise((resolve,reject) => {
  window.sendCount++;window.sendEndpoint=endpoint;window.sentSession=session;window.sendSignal=options.signal;window.sendResolve=resolve;window.sendReject=reject;
+ window.dispatches.push({session,signal:options.signal,resolve,reject,projectPath:options.projectPath,projectType:options.projectType});
  options.signal.addEventListener('abort',()=>reject(new Error('Request cancelled.')),{once:true});
 });
 export const fetchAgentRunTimeline = async (_endpoint,sessionId,clientTurnId,afterSequence) => {
@@ -50,6 +51,7 @@ const initial={id:'owner',sessionId:'session',projectPath:'',title:'Existing',it
 const other={id:'other',sessionId:'other-session',projectPath:'',title:'Other',items:[{type:'streaming',id:'runtime-activity:peer',clientTurnId:'peer',text:''}]};
 window.identity={sessionId:'session',clientTurnId:'cid',turnId:'backend-turn'};
 window.cancelRequests=[];window.queueRequests=[];window.observedStops=[];window.desktopStops=[];window.errors=[];window.sendCount=0;window.reads=[];window.receiptReads=0;window.ledgerStatus='running';
+window.dispatches=[];
 window.receipt={ok:true,sessionId:'session',clientTurnId:'cid',status:'running'};
 function Harness(){
  const[chats,setChats]=useState([initial,other]);const latest=useRef(chats);latest.current=chats;
@@ -70,11 +72,12 @@ function Harness(){
  window.failStatusRead=()=>window.sendReject(new AgentTurnDeliveryUnconfirmedError('temporary read failure'));
  window.start=()=>{window.turnPromise=controller.submitTurn({id:'cid',text:'fixture only',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',sessionId:'session',planMode:false});};
  window.startBranch=(id)=>{window.turnPromise=controller.runTurnNow('owner',{id,text:'fixture only',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',planMode:false},{baseItems:[],sessionId:''});};
- window.steerOther=()=>controller.submitTurn({id:'steer',chatId:'other',text:'steer other chat',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',planMode:false});
+ window.steerOther=(id='steer')=>controller.submitTurn({id,chatId:'other',text:'steer other chat',attachments:[],provider:'chatgpt',providerLabel:'ChatGPT',model:'fixture',planMode:false});
+ window.makeOtherIdle=()=>setChats([{...initial,projectPath:'D:/fixture/a',projectType:'unity'},{...other,items:[],projectType:'general'}]);
  window.replace=(items,nextRuns)=>{latest.current=[{...initial,items}];setChats(latest.current);setRuns(nextRuns);};
  window.replaceChat=(chat,nextRuns)=>{latest.current=[chat];setChats(latest.current);setRuns(nextRuns);};
  window.setRuns=setRuns;
- const {currentTurn,stopCurrentRun}=controller;
+ const {foreground,stopCurrentRun}=controller;
  const activeRuntimeCancelTarget=runtimeActivityCancelTarget(chats,chats.find(chat=>chat.id===activeChatId),runs);
  window.observedCancelTarget=activeRuntimeCancelTarget;
  const activeDesktopActions=[{actionId:'desktop-b',sessionId:'other-session',clientTurnId:'peer'}];
@@ -166,6 +169,45 @@ try{
  assert.equal(await page.evaluate(()=>window.cancelRequests.length),0);
  console.log('PASS Stop endpoint and chat-scoped Stop/steer routing');
  await reload();
+ await page.evaluate(()=>window.makeOtherIdle());
+ await page.waitForFunction(()=>window.chats[1].items.length===0);
+ await page.evaluate(()=>window.start());
+ await page.waitForFunction(()=>window.sendCount===1);
+ await page.locator('#select-other').click();
+ await page.evaluate(()=>{void window.steerOther();});
+ await page.waitForFunction(()=>window.sendCount===2||window.queueRequests.length>0);
+ assert.deepEqual(await page.evaluate(()=>window.dispatches.map(d=>d.session)),['session','other-session'],
+   'an idle second chat starts immediately while first response remains unresolved');
+ assert.deepEqual(await page.evaluate(()=>window.dispatches.map(d=>[d.projectPath??null,d.projectType])),
+   [['D:/fixture/a','unity'],[null,'general']]);
+ await page.evaluate(()=>{
+   window.controller.applyRuntimeDelta({sessionId:'session',clientTurnId:'cid',turnId:'backend-turn',textDelta:'A first'});
+   window.controller.applyRuntimeDelta({sessionId:'other-session',clientTurnId:'steer',turnId:'backend-other',textDelta:'B first'});
+   void window.steerOther('same-chat-steer');
+ });
+ await page.waitForFunction(()=>window.queueRequests.length===1);
+ await page.waitForFunction(()=>window.controller.queued.some(t=>t.id==='same-chat-steer'&&t.queueId));
+ assert.deepEqual(await page.evaluate(()=>window.chats.map(c=>c.items.find(i=>i.type==='streaming')?.text)),['A first','B first']);
+ assert.equal(await page.evaluate(()=>window.queueRequests[0].targetClientTurnId),'steer');
+ assert.equal(await page.evaluate(()=>window.sendCount),2);
+ await page.locator('#stop').click();
+ assert.deepEqual(await page.evaluate(()=>window.cancelRequests.map(({sessionId,clientTurnId,turnId})=>({sessionId,clientTurnId,turnId}))),
+   [{sessionId:'other-session',clientTurnId:'steer',turnId:'backend-other'}]);
+ assert.equal(await page.evaluate(()=>window.dispatches.some(d=>d.signal.aborted)),false,'Stop waits for the backend acknowledgement');
+ await page.evaluate(()=>window.cancelResolve({ok:true,dispatchStopped:true}));
+ await page.waitForFunction(()=>window.dispatches[1].signal.aborted && !window.controller.isRunning('other'));
+ assert.equal(await page.evaluate(()=>window.dispatches[0].signal.aborted),false,'stopping B leaves A running');
+ await page.evaluate(async()=>{await window.controller.cancelQueuedTurns('other');void window.steerOther('other-next');});
+ await page.waitForFunction(()=>window.sendCount===3);
+ assert.deepEqual(await page.evaluate(()=>window.dispatches.map(d=>d.session)),['session','other-session','other-session']);
+ await page.evaluate(()=>window.controller.applyRuntimeDelta({sessionId:'session',clientTurnId:'cid',turnId:'backend-turn',textDelta:' A continued'}));
+ assert.equal(await page.evaluate(()=>window.chats[0].items.find(i=>i.type==='streaming')?.text),'A first A continued');
+ await page.evaluate(()=>window.dispatches[2].reject(new Error('B fixture provider failure')));
+ await page.waitForFunction(()=>!window.controller.isRunning('other'));
+ assert.deepEqual(await page.evaluate(()=>window.chats.map(c=>c.items.filter(i=>i.type==='error').map(i=>i.text))),[[],['B fixture provider failure']]);
+ assert.equal(await page.evaluate(()=>window.controller.isRunning('owner')),true);
+ console.log('PASS isolated foreground dispatch, stream, same-chat steer, Stop and restart');
+ await reload();
  await page.evaluate(()=>{window.holdPreparation=true;window.start();});await page.waitForFunction(()=>typeof window.finishPreparation==='function');await page.evaluate(async()=>{window.controller.stopCurrentRun();window.finishPreparation(null);await window.turnPromise;});
  assert.equal(await page.evaluate(()=>window.sendCount),0,'Stop before runtime dispatch prevents admission instead of abandoning a pending turn into execution');
  assert.equal(await page.evaluate(()=>window.cancelRequests.length),0,'local preparation Stop does not claim to cancel an unadmitted backend turn');
@@ -200,7 +242,7 @@ try{
  console.log('PASS pending/rejected/accepted Stop acknowledgements retain the real reader until backend terminal receipt');
  await reload();await page.evaluate(()=>window.start());await page.waitForFunction(()=>window.sendCount===1);
  await page.evaluate(()=>{window.holdStopPersistence=true;window.controller.stopCurrentRun();window.cancelResolve({ok:true,status:'cancel_requested',dispatchStopped:true,unityWriteMayHaveExecuted:true});});
- await page.waitForFunction(()=>window.sendSignal.aborted && !window.controller.currentTurn && !window.controller.sending,null,{timeout:2000});
+ await page.waitForFunction(()=>window.sendSignal.aborted && window.controller.foreground.length===0 && !window.controller.sending,null,{timeout:2000});
  assert.equal(await page.evaluate(()=>typeof window.releaseStopPersistence),'function','stopped turn still persists');
  await page.evaluate(()=>{window.holdStopPersistence=false;window.releaseStopPersistence();});
  await page.getByText('chat.stoppedUnityWriteUnconfirmed',{exact:true}).waitFor();
@@ -218,7 +260,7 @@ try{
    window.controller.stopCurrentRun();
    window.sendResolve({ok:true,status:'cancelled',dispatchStopped:true,...window.identity,observe:{},plan:{reply:'',summary:'',nextStep:'cancelled',planner:'fixture',shellNeeded:false},timeline:[]});
  });
- await page.waitForFunction(()=>!window.controller.currentTurn && !window.controller.sending,null,{timeout:2000});
+ await page.waitForFunction(()=>window.controller.foreground.length===0 && !window.controller.sending,null,{timeout:2000});
  assert.equal(await page.evaluate(()=>window.sendCount),1,'a terminal stop arriving before the acknowledgement never resubmits');
 
 
