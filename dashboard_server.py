@@ -244,6 +244,7 @@ from chat_attachment_vault import (
     extract_archive_entry_text,
     guard_vault_archive,
     inspect_image_bytes,
+    inspect_vault_unitypackage,
     is_vault_payload_hash,
 )
 from material_shader_assignment import (
@@ -6920,20 +6921,25 @@ def inspect_chat_attachment_sync(params: dict[str, Any]) -> dict[str, Any]:
             if dimensions.get("width") and dimensions.get("height"):
                 result["summary"] += f" Dimensions: {dimensions['width']}x{dimensions['height']}."
             return result
-        result["archiveGuard"] = guard_vault_archive(path, str(resolved["kind"]))
+        kind = str(resolved["kind"])
+        entry_path = str(params.get("entryPath") or params.get("entry_path") or "").strip()
+        max_entries = 2000
+        if not entry_path:
+            max_entries = max(1, min(int(params.get("maxEntries") or params.get("max_entries") or 2000), 10000))
+        if kind == "unitypackage":
+            result.update(inspect_vault_unitypackage(path, max_entries=max_entries, entry_path=entry_path))
+        else:
+            result["archiveGuard"] = guard_vault_archive(path, kind)
+            if entry_path:
+                result["entry"] = extract_archive_entry_text(path, kind, entry_path)
+            else:
+                result["listing"] = outfit_package_inspector_domain.inspect_outfit_package(str(path), max_entries=max_entries)
         result["entryCount"] = int(result["archiveGuard"].get("entryCount") or 0)
         result["totalUncompressedBytes"] = int(result["archiveGuard"].get("totalUncompressedBytes") or 0)
-        entry_path = str(params.get("entryPath") or params.get("entry_path") or "").strip()
         if entry_path:
-            result["entry"] = extract_archive_entry_text(path, str(resolved["kind"]), entry_path)
             result["summary"] = f"Read bounded text from archive entry {entry_path}."
             result["summaryText"] = str(result["entry"].get("text") or "")
         else:
-            max_entries = max(1, min(int(params.get("maxEntries") or params.get("max_entries") or 2000), 10000))
-            result["listing"] = outfit_package_inspector_domain.inspect_outfit_package(
-                str(path),
-                max_entries=max_entries,
-            )
             listing_summary = result["listing"].get("summary") if isinstance(result["listing"], dict) else {}
             if isinstance(listing_summary, dict):
                 for key, value in listing_summary.items():

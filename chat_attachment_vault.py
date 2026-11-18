@@ -717,49 +717,75 @@ def guard_vault_archive(path: Path, kind: str) -> dict[str, Any]:
             )
         return {"entryCount": len(entries), "totalUncompressedBytes": sum(item[2] for item in entries)}
     if kind == "unitypackage":
-        try:
-            compressed_total = max(1, path.stat().st_size)
-        except OSError as exc:
-            raise ChatAttachmentVaultError("Archive file is not readable.", reason="bad_archive") from exc
-        count = 0
-        uncompressed_total = 0
-        try:
-            with tarfile.open(path, mode="r:gz") as archive:
-                for member in archive:
-                    count += 1
-                    if count > INSPECT_MAX_ENTRIES:
-                        raise ChatAttachmentVaultError(
-                            f"Archive entry count exceeds the inspection cap ({INSPECT_MAX_ENTRIES}).",
-                            reason="entry_count_cap",
-                        )
-                    if _is_unsafe_archive_member(member.name):
-                        raise ChatAttachmentVaultError(
-                            f"Archive contains unsafe member paths: {member.name}",
-                            reason="unsafe_entry_path",
-                        )
-                    if member.issym() or member.islnk():
-                        raise ChatAttachmentVaultError(
-                            f"Archive contains a symbolic link: {member.name}",
-                            reason="unsafe_entry_type",
-                        )
-                    uncompressed_total += max(0, int(member.size or 0))
-                    if uncompressed_total > INSPECT_TOTAL_UNCOMPRESSED_MAX_BYTES:
-                        raise ChatAttachmentVaultError(
-                            "Archive total uncompressed size exceeds the inspection cap.",
-                            reason="uncompressed_total_cap",
-                        )
-        except tarfile.TarError as exc:
-            raise ChatAttachmentVaultError("Archive is not a readable unitypackage (gzipped tar).", reason="bad_archive") from exc
-        if (
-            uncompressed_total > INSPECT_BOMB_MIN_UNCOMPRESSED_BYTES
-            and uncompressed_total / compressed_total > INSPECT_BOMB_RATIO
-        ):
-            raise ChatAttachmentVaultError(
-                "Archive compression ratio looks like a decompression bomb.",
-                reason="bomb_ratio",
-            )
-        return {"entryCount": count, "totalUncompressedBytes": uncompressed_total}
+        with _guarded_unitypackage(path) as (_, __, guard):
+            pass
+        return guard
     raise ChatAttachmentVaultError("Archive guard only supports zip and unitypackage.", reason="unsupported_kind")
+
+
+@contextmanager
+def _guarded_unitypackage(
+    path: Path,
+) -> Iterator[tuple[tarfile.TarFile, Iterator[tarfile.TarInfo], dict[str, int]]]:
+    guard = {"entryCount": 0, "totalUncompressedBytes": 0}
+
+    def guard_members(archive: tarfile.TarFile, compressed_total: int) -> Iterator[tarfile.TarInfo]:
+        for member in archive:
+            guard["entryCount"] += 1
+            if guard["entryCount"] > INSPECT_MAX_ENTRIES:
+                raise ChatAttachmentVaultError(
+                    f"Archive entry count exceeds the inspection cap ({INSPECT_MAX_ENTRIES}).",
+                    reason="entry_count_cap",
+                )
+            if _is_unsafe_archive_member(member.name):
+                raise ChatAttachmentVaultError(
+                    f"Archive contains unsafe member paths: {member.name}", reason="unsafe_entry_path",
+                )
+            if member.issym() or member.islnk():
+                raise ChatAttachmentVaultError(
+                    f"Archive contains a symbolic link: {member.name}", reason="unsafe_entry_type",
+                )
+            guard["totalUncompressedBytes"] += max(0, int(member.size or 0))
+            total = guard["totalUncompressedBytes"]
+            if total > INSPECT_TOTAL_UNCOMPRESSED_MAX_BYTES:
+                raise ChatAttachmentVaultError(
+                    "Archive total uncompressed size exceeds the inspection cap.", reason="uncompressed_total_cap",
+                )
+            if total > INSPECT_BOMB_MIN_UNCOMPRESSED_BYTES and total / compressed_total > INSPECT_BOMB_RATIO:
+                raise ChatAttachmentVaultError(
+                    "Archive compression ratio looks like a decompression bomb.", reason="bomb_ratio",
+                )
+            yield member
+
+    try:
+        compressed_total = max(1, path.stat().st_size)
+        with tarfile.open(path, mode="r:gz") as archive:
+            members = guard_members(archive, compressed_total)
+            yield archive, members, guard
+            # A bounded listing or located text entry can stop collecting
+            # before the archive has passed its full guard.
+            for _ in members:
+                pass
+    except (OSError, EOFError, tarfile.TarError) as exc:
+        raise ChatAttachmentVaultError(
+            "Archive is not a readable unitypackage (gzipped tar).", reason="bad_archive",
+        ) from exc
+
+
+def inspect_vault_unitypackage(
+    path: Path, *, max_entries: int = 2000, entry_path: str = "",
+) -> dict[str, Any]:
+    from outfit_package_inspector import inspect_open_unitypackage
+
+    with _guarded_unitypackage(path) as (archive, members, guard):
+        if entry_path:
+            target = _archive_entry_target(entry_path)
+            raw = _read_unitypackage_entry(archive, members, target)
+        else:
+            listing = inspect_open_unitypackage(path, archive, members, max_entries)
+    if entry_path:
+        return {"archiveGuard": guard, "entry": _decode_archive_entry(raw, target)}
+    return {"archiveGuard": guard, "listing": listing}
 
 
 def _is_unsafe_archive_member(name: str) -> bool:
@@ -769,61 +795,59 @@ def _is_unsafe_archive_member(name: str) -> bool:
     return any(part == ".." for part in normalized.split("/"))
 
 
-def extract_archive_entry_text(path: Path, kind: str, entry_path: str) -> dict[str, Any]:
-    """Bounded single-entry text extract (max 64KB decoded, replacement on errors)."""
-
+def _archive_entry_target(entry_path: str) -> str:
     target = str(entry_path or "").strip().replace("\\", "/")
     if not target:
         raise ChatAttachmentVaultError("entryPath is required.", reason="entry_path_required")
     if _is_unsafe_archive_member(target):
         raise ChatAttachmentVaultError("Archive entry path is unsafe.", reason="unsafe_entry_path")
-    raw: bytes | None = None
-    if kind == "zip":
-        _preflight_zip_entry_count(path)
-        try:
-            with zipfile.ZipFile(path) as archive:
-                try:
-                    info = archive.getinfo(target)
-                except KeyError:
-                    raise ChatAttachmentVaultError("Archive entry was not found.", reason="entry_not_found") from None
-                if info.is_dir():
-                    raise ChatAttachmentVaultError("Archive entry is a directory.", reason="entry_is_directory")
-                if info.file_size > ENTRY_TEXT_MAX_BYTES * 8:
-                    raise ChatAttachmentVaultError("Archive entry is too large for text extract.", reason="entry_too_large")
-                with archive.open(info) as handle:
-                    raw = handle.read(ENTRY_TEXT_MAX_BYTES + 1)
-        except zipfile.BadZipFile as exc:
-            raise ChatAttachmentVaultError("Archive is not a readable zip file.", reason="bad_archive") from exc
-    elif kind == "unitypackage":
-        try:
-            with tarfile.open(path, mode="r:gz") as archive:
-                member: tarfile.TarInfo | None = None
-                scanned = 0
-                for candidate in archive:
-                    scanned += 1
-                    if scanned > INSPECT_MAX_ENTRIES:
-                        raise ChatAttachmentVaultError(
-                            f"Archive entry count exceeds the inspection cap ({INSPECT_MAX_ENTRIES}).",
-                            reason="entry_count_cap",
-                        )
-                    if candidate.name.replace("\\", "/") == target:
-                        member = candidate
-                        break
-                if member is None:
-                    raise ChatAttachmentVaultError("Archive entry was not found.", reason="entry_not_found")
-                if not member.isfile():
-                    raise ChatAttachmentVaultError("Archive entry is not a regular file.", reason="entry_is_directory")
-                if member.size > ENTRY_TEXT_MAX_BYTES * 8:
-                    raise ChatAttachmentVaultError("Archive entry is too large for text extract.", reason="entry_too_large")
-                handle = archive.extractfile(member)
-                if handle is None:
-                    raise ChatAttachmentVaultError("Archive entry could not be read.", reason="entry_not_found")
-                with handle:
-                    raw = handle.read(ENTRY_TEXT_MAX_BYTES + 1)
-        except tarfile.TarError as exc:
-            raise ChatAttachmentVaultError("Archive is not a readable unitypackage (gzipped tar).", reason="bad_archive") from exc
-    else:
+    return target
+
+
+def extract_archive_entry_text(path: Path, kind: str, entry_path: str) -> dict[str, Any]:
+    """Read the bounded UTF-8 text from one archive entry."""
+    target = _archive_entry_target(entry_path)
+    if kind == "unitypackage":
+        return inspect_vault_unitypackage(path, entry_path=target)["entry"]
+    if kind != "zip":
         raise ChatAttachmentVaultError("Entry text extract only supports zip and unitypackage.", reason="unsupported_kind")
+    _preflight_zip_entry_count(path)
+    try:
+        with zipfile.ZipFile(path) as archive:
+            try:
+                info = archive.getinfo(target)
+            except KeyError:
+                raise ChatAttachmentVaultError("Archive entry was not found.", reason="entry_not_found") from None
+            if info.is_dir():
+                raise ChatAttachmentVaultError("Archive entry is a directory.", reason="entry_is_directory")
+            if info.file_size > ENTRY_TEXT_MAX_BYTES * 8:
+                raise ChatAttachmentVaultError("Archive entry is too large for text extract.", reason="entry_too_large")
+            with archive.open(info) as handle:
+                raw = handle.read(ENTRY_TEXT_MAX_BYTES + 1)
+    except zipfile.BadZipFile as exc:
+        raise ChatAttachmentVaultError("Archive is not a readable zip file.", reason="bad_archive") from exc
+    return _decode_archive_entry(raw, target)
+
+
+def _read_unitypackage_entry(
+    archive: tarfile.TarFile, members: Iterator[tarfile.TarInfo], target: str,
+) -> bytes:
+    for member in members:
+        if member.name.replace("\\", "/") != target:
+            continue
+        if not member.isfile():
+            raise ChatAttachmentVaultError("Archive entry is not a regular file.", reason="entry_is_directory")
+        if member.size > ENTRY_TEXT_MAX_BYTES * 8:
+            raise ChatAttachmentVaultError("Archive entry is too large for text extract.", reason="entry_too_large")
+        handle = archive.extractfile(member)
+        if handle is not None:
+            with handle:
+                return handle.read(ENTRY_TEXT_MAX_BYTES + 1)
+        break
+    raise ChatAttachmentVaultError("Archive entry was not found.", reason="entry_not_found")
+
+
+def _decode_archive_entry(raw: bytes, target: str) -> dict[str, Any]:
     truncated = len(raw) > ENTRY_TEXT_MAX_BYTES
     bounded = raw[:ENTRY_TEXT_MAX_BYTES]
     if b"\x00" in bounded:

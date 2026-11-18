@@ -578,6 +578,24 @@ class ChatAttachmentEndpointTests(unittest.TestCase):
             result = dashboard_server.inspect_chat_attachment_sync({"payloadHash": stored["payloadHash"]})
         self.assertEqual((result["image"]["width"], result["image"]["height"]), (8, 12))
 
+    def test_unitypackage_inspection_uses_one_tar_pass_for_listing_and_entry(self) -> None:
+        data = make_unitypackage_bytes({
+            "a/pathname": b"Assets/Fabric.mat", "a/asset": b"fabric", "a/asset.meta": b"fileFormatVersion: 2",
+            "b/pathname": b"Assets/Cloth.prefab", "b/asset": b"cloth",
+        })
+        stored = self.vault.ingest(data=data, name="outfit.unitypackage", declared_type="", chat_id="chat-1")
+        for options in ({"maxEntries": 1}, {"entryPath": "a/pathname"}):
+            with self.subTest(options=options), patch.object(tarfile, "open", wraps=tarfile.open) as opened:
+                with bind_attachment_inspection_chat(("chat-1",)):
+                    result = dashboard_server.inspect_chat_attachment_sync({"payloadHash": stored["payloadHash"], **options})
+                self.assertEqual(opened.call_count, 1)
+                self.assertEqual(result["archiveGuard"]["entryCount"], 5)
+                if "entryPath" in options:
+                    self.assertEqual(result["entry"]["text"], "Assets/Fabric.mat")
+                else:
+                    self.assertTrue(result["listing"]["summary"]["truncated"])
+                    self.assertEqual(result["listing"]["materials"][0]["path"], "Assets/Fabric.mat")
+
 
 if __name__ == "__main__":
     unittest.main()

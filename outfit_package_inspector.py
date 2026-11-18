@@ -3,6 +3,7 @@ from __future__ import annotations
 import tarfile
 import zipfile
 from collections import Counter
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -371,6 +372,10 @@ def inspect_unitypackage(path: Path, max_entries: int) -> dict[str, Any]:
             max_entries=max_entries,
             package_path=path.name,
         )
+    return _build_unitypackage_result(path, parsed)
+
+
+def _build_unitypackage_result(path: Path, parsed: dict[str, Any]) -> dict[str, Any]:
     pathnames = parsed["pathnamesEvidence"]
     truncated = parsed["truncated"]
     member_count = parsed["archiveMemberCount"]
@@ -405,62 +410,78 @@ def inspect_unitypackage(path: Path, max_entries: int) -> dict[str, Any]:
 
 
 def inspect_unitypackage_stream(package_file: Any, max_entries: int, package_path: str) -> dict[str, Any]:
+    with tarfile.open(fileobj=package_file, mode="r|*") as archive:
+        return _collect_unitypackage_members(archive, archive, max_entries, package_path)
+
+
+def inspect_open_unitypackage(
+    path: Path, archive: tarfile.TarFile, members: Iterable[tarfile.TarInfo], max_entries: int,
+) -> dict[str, Any]:
+    parsed = _collect_unitypackage_members(archive, members, max_entries, path.name)
+    result = _build_unitypackage_result(path, parsed)
+    result["inspectedAt"] = utc_now()
+    result["privacy"] = privacy_policy()
+    return result
+
+
+def _collect_unitypackage_members(
+    archive: tarfile.TarFile, members: Iterable[tarfile.TarInfo], max_entries: int, package_path: str,
+) -> dict[str, Any]:
     records: dict[str, dict[str, Any]] = {}
     truncated = False
     member_count = 0
     pathname_count = 0
     unsafe_pathname_count = 0
     byte_limited = False
-    with tarfile.open(fileobj=package_file, mode="r|*") as archive:
-        try:
-            for member in archive:
-                member_count += 1
-                if member_count > MAX_UNITYPACKAGE_MEMBERS:
-                    truncated = True
-                    break
-                if not member.isfile():
-                    continue
-                parts = unitypackage_member_parts(member.name)
-                if parts is None or parts[1] not in {"pathname", "asset", "asset.meta"}:
-                    continue
-                record = records.setdefault(
-                    parts[0],
-                    {"path": None, "hasAsset": False, "folderAsset": False, "duplicatePathname": False},
-                )
-                if parts[1] == "asset":
-                    record["hasAsset"] = True
-                    continue
-                if parts[1] == "asset.meta":
-                    extracted = archive.extractfile(member)
-                    if extracted is not None:
-                        record["folderAsset"] = b"folderAsset: yes" in extracted.read(65536)
-                    continue
-                if pathname_count >= max_entries:
-                    truncated = True
-                    break
-                pathname_count += 1
+    try:
+        for member in members:
+            member_count += 1
+            if member_count > MAX_UNITYPACKAGE_MEMBERS:
+                truncated = True
+                break
+            if not member.isfile():
+                continue
+            parts = unitypackage_member_parts(member.name)
+            if parts is None or parts[1] not in {"pathname", "asset", "asset.meta"}:
+                continue
+            record = records.setdefault(
+                parts[0],
+                {"path": None, "hasAsset": False, "folderAsset": False, "duplicatePathname": False},
+            )
+            if parts[1] == "asset":
+                record["hasAsset"] = True
+                continue
+            if parts[1] == "asset.meta":
                 extracted = archive.extractfile(member)
-                if extracted is None:
-                    continue
-                raw = extracted.read(16385)
-                if len(raw) > 16384:
+                if extracted is not None:
+                    record["folderAsset"] = b"folderAsset: yes" in extracted.read(65536)
+                continue
+            if pathname_count >= max_entries:
+                truncated = True
+                break
+            pathname_count += 1
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                continue
+            raw = extracted.read(16385)
+            if len(raw) > 16384:
+                unsafe_pathname_count += 1
+                continue
+            name = raw.decode("utf-8", errors="replace").strip().replace("\\", "/")
+            if name:
+                if not is_safe_unitypackage_pathname(name):
                     unsafe_pathname_count += 1
                     continue
-                name = raw.decode("utf-8", errors="replace").strip().replace("\\", "/")
-                if name:
-                    if not is_safe_unitypackage_pathname(name):
-                        unsafe_pathname_count += 1
-                        continue
-                    if record["path"] is not None:
-                        record["duplicatePathname"] = True
-                        unsafe_pathname_count += 1
-                    else:
-                        record["path"] = name
-        except tarfile.ReadError as exc:
-            if "scan input byte limit exceeded" not in str(exc):
-                raise
-            truncated = True
-            byte_limited = True
+                if record["path"] is not None:
+                    record["duplicatePathname"] = True
+                    unsafe_pathname_count += 1
+                else:
+                    record["path"] = name
+    except tarfile.ReadError as exc:
+        if "scan input byte limit exceeded" not in str(exc):
+            raise
+        truncated = True
+        byte_limited = True
     pathnames: list[dict[str, Any]] = []
     folder_pathname_count = 0
     missing_asset_payload_count = 0
