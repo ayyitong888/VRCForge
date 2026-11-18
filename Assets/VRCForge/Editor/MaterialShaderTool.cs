@@ -683,7 +683,7 @@ namespace VRCForge.Editor
             };
         }
 
-        internal static MaterialAssetEvidence InspectWritableMaterialAsset(Material material)
+        internal static MaterialAssetEvidence InspectWritableMaterialAsset(Material material, bool includeFileDigest = true)
         {
             var normalizedPath = (AssetDatabase.GetAssetPath(material) ?? string.Empty).Replace("\\", "/").Trim();
             if (!AssetDatabase.Contains(material)
@@ -732,7 +732,7 @@ namespace VRCForge.Editor
                 assetPath = normalizedPath,
                 assetGuid = assetGuid,
                 filePath = filePath,
-                fileDigest = ComputeFileSha256(filePath)
+                fileDigest = includeFileDigest ? ComputeFileSha256(filePath) : string.Empty
             };
         }
 

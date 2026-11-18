@@ -15,20 +15,23 @@ SOURCE=(ROOT/'Assets/VRCForge/Editor/Generic/UnityMaterialTextureBatch.cs').read
 STUBS=r'''
 namespace VRCForge.Core.MCP {public class VRCForgeToolResult { public static object FailedWithException(string code,string message,System.Exception exception,object payload=null)=>FailedWithCode(code,message,payload); public static object FailedWithException(string message,System.Exception exception,object payload=null)=>FailedWithCode(message,message,payload); public bool Ok;public object Payload;public string Message;public static object Completed(string m,object p)=>new VRCForgeToolResult{Ok=true,Payload=p,Message=m};public static object FailedWithCode(string c,string m,object p)=>new VRCForgeToolResult{Payload=p,Message=m};}}
 namespace UnityEngine {
- public class Object{public string Path;public bool Dirty;}
+ public class Object{public string Path;public bool Dirty;public static void DestroyImmediate(Object o){}}
  public class Shader:Object{}
  public class Texture:Object{} public class Texture2D:Texture{}
  public struct Vector2 {public float x,y;public Vector2(float a,float b){x=a;y=b;}}
- public class Material:Object{public Material parent;public bool isVariant=>parent!=null;public Shader shader=new Shader{Path="Assets/S.shader"};public int Queue=2000;public Dictionary<string,Texture> Props=new Dictionary<string,Texture>();public bool HasProperty(string p)=>p=="_Mask"||p=="_Other";public string[] GetTexturePropertyNames()=>new[]{"_Mask","_Other"};public Texture GetTexture(string p)=>Props.ContainsKey(p)?Props[p]:null;public void SetTexture(string p,Texture t){Props[p]=t;}
+ public class Material:Object{public Material parent;public bool isVariant=>parent!=null;public Shader shader=new Shader{Path="Assets/S.shader"};public int Queue=2000;public bool DerivedState;public Dictionary<string,Texture> Props=new Dictionary<string,Texture>();public bool HasProperty(string p)=>p=="_Mask"||p=="_Other";public string[] GetTexturePropertyNames()=>new[]{"_Mask","_Other"};public Texture GetTexture(string p)=>Props.ContainsKey(p)?Props[p]:null;public void SetTexture(string p,Texture t){Props[p]=t;}
  public Vector2 Scale=new Vector2(1,1),Offset=new Vector2(0,0);public Vector2 GetTextureScale(string p)=>Scale;public Vector2 GetTextureOffset(string p)=>Offset;public void SetTextureScale(string p,Vector2 v){Scale=v;}public void SetTextureOffset(string p,Vector2 v){Offset=v;if(UnityEditor.AssetDatabase.Fault=="transform_setter"&&Path=="Assets/B.mat")throw new Exception("setter failure after mutation");}}
  public struct Hash128 {public string Value;public override string ToString()=>Value;}
  public static class Application{public static string dataPath=>System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(),"Assets");}
 }
 namespace UnityEditor {
  using UnityEngine;
+ public class ShaderGUI{public void ValidateMaterial(Material m){}}
+ public class MaterialEditor:Editor{public ShaderGUI customShaderGUI;}
+ public class Editor:UnityEngine.Object{public static Editor CreateEditor(Material m,Type t)=>new MaterialEditor();}
  [Flags]public enum ImportAssetOptions{ForceSynchronousImport=1,ForceUpdate=2}
  public static class EditorUtility{public static bool IsDirty(UnityEngine.Object o)=>o.Dirty;public static void SetDirty(UnityEngine.Object o){o.Dirty=true;}}
- public static class EditorJsonUtility{public static string ToJson(Material m)=>new JObject{["queue"]=m.Queue,["mask"]=m.GetTexture("_Mask")?.Path??"",["other"]=m.GetTexture("_Other")?.Path??"",["scale"]=new JArray(m.Scale.x,m.Scale.y),["offset"]=new JArray(m.Offset.x,m.Offset.y)}.ToString(Formatting.None);}
+ public static class EditorJsonUtility{public static string ToJson(Material m)=>new JObject{["queue"]=m.Queue,["derivedState"]=m.DerivedState,["mask"]=m.GetTexture("_Mask")?.Path??"",["other"]=m.GetTexture("_Other")?.Path??"",["scale"]=new JArray(m.Scale.x,m.Scale.y),["offset"]=new JArray(m.Offset.x,m.Offset.y)}.ToString(Formatting.None);}
  public static class AssetDatabase{
   public static Dictionary<string,Material> Mats=new Dictionary<string,Material>();public static Dictionary<string,Texture2D> Tex=new Dictionary<string,Texture2D>();public static string Fault="";public static int Saves,Globals,Imports;public static bool UnrelatedDirty=true;
   public static T LoadAssetAtPath<T>(string p) where T:class=>(Mats.ContainsKey(p)?(object)Mats[p]:Tex.ContainsKey(p)?Tex[p]:null) as T;
@@ -36,21 +39,29 @@ namespace UnityEditor {
   public static string AssetPathToGUID(string p)=>p=="Assets/A.mat"?new string('a',32):p=="Assets/B.mat"?new string('b',32):new string('c',32);
   public static bool TryGetGUIDAndLocalFileIdentifier(UnityEngine.Object o,out string guid,out long id){guid=AssetPathToGUID(o.Path);id=2800000;return true;}
   public static Hash128 GetAssetDependencyHash(string p)=>new Hash128{Value=VRCForge.Editor.MaterialShaderTool.ComputeFileSha256(p)};
-  public static void SaveAssetIfDirty(UnityEngine.Object o){Saves++;if(Fault=="save"&&Saves==2)throw new Exception("second save failure");File.WriteAllText(o.Path,EditorJsonUtility.ToJson((Material)o));o.Dirty=false;}
+  public static void SaveAssetIfDirty(UnityEngine.Object o){Saves++;if((Fault=="save"||Fault=="normalized_save_failure")&&Saves==2)throw new Exception("second save failure");var material=(Material)o;if(Fault=="normalized_save_failure")material.DerivedState=true;File.WriteAllText(o.Path,EditorJsonUtility.ToJson(material));o.Dirty=false;}
   public static void SaveAssets(){Globals++;UnrelatedDirty=false;foreach(var m in Mats.Values)SaveAssetIfDirty(m);}
   public static void Refresh(ImportAssetOptions o){foreach(var p in Mats.Keys.ToArray())ImportAsset(p,o);}
-  public static void ImportAsset(string p,ImportAssetOptions opts){Imports++;var j=JObject.Parse(File.ReadAllText(p));var m=Mats[p];m.Queue=(int)j["queue"];m.Props["_Mask"]=Tex[j["mask"].ToString()];m.Props["_Other"]=Tex[j["other"].ToString()];m.Scale=new Vector2((float)j["scale"][0],(float)j["scale"][1]);m.Offset=new Vector2((float)j["offset"][0],(float)j["offset"][1]);m.Dirty=false;if(Fault=="meta"&&Imports==1)File.WriteAllText(p+".meta","foreign");}
+  public static void ImportAsset(string p,ImportAssetOptions opts){Imports++;var j=JObject.Parse(File.ReadAllText(p));var m=Mats[p];m.Queue=(int)j["queue"];m.DerivedState=(bool)j["derivedState"];m.Props["_Mask"]=Tex[j["mask"].ToString()];m.Props["_Other"]=Tex[j["other"].ToString()];m.Scale=new Vector2((float)j["scale"][0],(float)j["scale"][1]);m.Offset=new Vector2((float)j["offset"][0],(float)j["offset"][1]);m.Dirty=false;if(Fault=="meta"&&Imports==1)File.WriteAllText(p+".meta","foreign");}
  }
 }
 namespace VRCForge.Editor {
  public static class File {
-  public static int SnapshotReads, SourceResolutions, SourceByteReads;
-  private static bool IsFinalSnapshotRead(){var frames=new global::System.Diagnostics.StackTrace().GetFrames();var build=false;var buildItem=false;foreach(var frame in frames){var method=frame.GetMethod();if(method==null||method.DeclaringType==null||method.DeclaringType.FullName!="VRCForge.Editor.UnityMaterialTextureBatch")continue;if(method.Name=="CaptureBeforeBytes")build=true;if(method.Name=="BuildItem")buildItem=true;}return build&&!buildItem;}
-  public static byte[] ReadAllBytes(string p){if(IsFinalSnapshotRead())SnapshotReads++;if(p.EndsWith(".png"))SourceByteReads++;return global::System.IO.File.ReadAllBytes(p);}
+  public static int SnapshotReads, SourceResolutions, SourceByteReads, ReadbackReads;
+  public static byte[] ReadAllBytes(string p){if(p.EndsWith(".png"))SourceByteReads++;return global::System.IO.File.ReadAllBytes(p);}
   public static bool Exists(string p)=>global::System.IO.File.Exists(p);public static void WriteAllBytes(string p,byte[] b)=>global::System.IO.File.WriteAllBytes(p,b);public static void Replace(string a,string b,string c)=>global::System.IO.File.Replace(a,b,c);public static void Delete(string p)=>global::System.IO.File.Delete(p);
  }
- public class FileEvidence{public string Digest;}public class StableAssetEvidence{public string Guid;public FileEvidence File,Meta;}
- public static class SceneObjectCopyCore{public static StableAssetEvidence ReadStableAssetEvidence(string p,string l)=>new StableAssetEvidence{Guid=UnityEditor.AssetDatabase.AssetPathToGUID(p),File=new FileEvidence{Digest=MaterialShaderTool.ComputeFileSha256(p)},Meta=new FileEvidence{Digest=MaterialShaderTool.ComputeFileSha256(p+".meta")}};}
+ public class FileEvidence{public string Digest;}public class StableAssetEvidence{public string Guid,FileVersion;public FileEvidence File,Meta;}
+ public static class SceneObjectCopyCore{
+  public static StableAssetEvidence ReadStableAssetEvidence(string p,string l,int? maxFileBytes=null,Action<byte[]> captureFileBytes=null,bool captureFileVersion=false,string expectedFileVersion=null,string expectedFileDigest=null){
+   if(l=="texture batch readback")File.ReadbackReads++;
+   var version=captureFileVersion?global::System.IO.File.GetLastWriteTimeUtc(p).Ticks.ToString():"";
+   if(captureFileBytes!=null){File.SnapshotReads++;captureFileBytes(File.ReadAllBytes(p));}
+   var digest=expectedFileVersion!=null&&version==expectedFileVersion?expectedFileDigest:MaterialShaderTool.ComputeFileSha256(p);
+   if(expectedFileDigest!=null&&digest!=expectedFileDigest)throw new Exception("该文件在预览后被修改");
+   return new StableAssetEvidence{Guid=UnityEditor.AssetDatabase.AssetPathToGUID(p),FileVersion=expectedFileVersion??version,File=new FileEvidence{Digest=digest},Meta=new FileEvidence{Digest=MaterialShaderTool.ComputeFileSha256(p+".meta")}};
+  }
+ }
  public static class MaterialTextureTool{
   public static (UnityEngine.Texture2D texture,string guid,long localId) ResolveTextureSource(string p){
    File.SourceResolutions++;
@@ -61,10 +72,10 @@ namespace VRCForge.Editor {
   }
  }
  public static class MaterialShaderTool{
-  public class MaterialAssetEvidence{public string assetGuid,fileDigest,filePath;}
+  public class MaterialAssetEvidence{public string assetPath,assetGuid,fileDigest,filePath;}
   public static bool MatchesCurrentProject(string p)=>p==Directory.GetCurrentDirectory();public static void EnsureNoReparseBoundary(string r,string p){}
   public static string ComputeFileSha256(string p){using(var h=System.Security.Cryptography.SHA256.Create())return BitConverter.ToString(h.ComputeHash(File.ReadAllBytes(p))).Replace("-","").ToLowerInvariant();}
-  public static MaterialAssetEvidence InspectWritableMaterialAsset(UnityEngine.Material m){if(m.Dirty)throw new Exception("dirty");return new MaterialAssetEvidence{assetGuid=UnityEditor.AssetDatabase.AssetPathToGUID(m.Path),fileDigest=ComputeFileSha256(m.Path),filePath=Path.GetFullPath(m.Path)};}
+  public static MaterialAssetEvidence InspectWritableMaterialAsset(UnityEngine.Material m,bool includeFileDigest=true){if(m.Dirty)throw new Exception("dirty");return new MaterialAssetEvidence{assetPath=m.Path,assetGuid=UnityEditor.AssetDatabase.AssetPathToGUID(m.Path),fileDigest=includeFileDigest?ComputeFileSha256(m.Path):"",filePath=Path.GetFullPath(m.Path)};}
  }
 }
 public static class Probe{
@@ -87,12 +98,13 @@ public static class Probe{
   var pre=(VRCForge.Core.MCP.VRCForgeToolResult)VRCForge.Editor.UnityMaterialTextureBatch.HandleCommand(args);var pp=JObject.FromObject(pre.Payload);
   if(argv[0]=="preview_only"){Console.WriteLine(new JObject{{"previewPayload",pp},{"snapshotReads",VRCForge.Editor.File.SnapshotReads}}.ToString(Formatting.None));return 0;}
   args["preview"]=false;args["expectedBatchPlan"]=new JObject{["assignments"]=pp["assignments"]?.DeepClone()};
+  if(argv[0]=="legacy_preview")foreach(JObject row in (JArray)args["expectedBatchPlan"]["assignments"])row.Remove("materialFileVersion");
   if(argv[0]=="stale")File.WriteAllText("Assets/B.mat.meta","stale");
   if(argv[0]=="transform_stale")UnityEditor.AssetDatabase.Mats["Assets/B.mat"].Scale=new UnityEngine.Vector2(2,2);
   UnityEditor.AssetDatabase.Fault=argv[0];
   if(argv[0]=="transform_save")UnityEditor.AssetDatabase.Fault="save";
   var r=(VRCForge.Core.MCP.VRCForgeToolResult)VRCForge.Editor.UnityMaterialTextureBatch.HandleCommand(args);
-  Console.WriteLine(new JObject{["ok"]=r.Ok,["message"]=r.Message,["previewPayload"]=pp,["payload"]=JObject.FromObject(r.Payload),["snapshotReads"]=VRCForge.Editor.File.SnapshotReads,["sourceResolutions"]=VRCForge.Editor.File.SourceResolutions,["sourceByteReads"]=VRCForge.Editor.File.SourceByteReads,["saves"]=UnityEditor.AssetDatabase.Saves,["globals"]=UnityEditor.AssetDatabase.Globals,["unrelatedDirty"]=UnityEditor.AssetDatabase.UnrelatedDirty,["a"]=JObject.Parse(File.ReadAllText("Assets/A.mat")),["b"]=JObject.Parse(File.ReadAllText("Assets/B.mat")),["memoryA"]=JObject.Parse(UnityEditor.EditorJsonUtility.ToJson(UnityEditor.AssetDatabase.Mats["Assets/A.mat"])),["memoryB"]=JObject.Parse(UnityEditor.EditorJsonUtility.ToJson(UnityEditor.AssetDatabase.Mats["Assets/B.mat"]))}.ToString(Formatting.None));return 0;
+  Console.WriteLine(new JObject{["ok"]=r.Ok,["message"]=r.Message,["previewPayload"]=pp,["payload"]=JObject.FromObject(r.Payload),["snapshotReads"]=VRCForge.Editor.File.SnapshotReads,["readbackReads"]=VRCForge.Editor.File.ReadbackReads,["sourceResolutions"]=VRCForge.Editor.File.SourceResolutions,["sourceByteReads"]=VRCForge.Editor.File.SourceByteReads,["saves"]=UnityEditor.AssetDatabase.Saves,["globals"]=UnityEditor.AssetDatabase.Globals,["unrelatedDirty"]=UnityEditor.AssetDatabase.UnrelatedDirty,["a"]=JObject.Parse(File.ReadAllText("Assets/A.mat")),["b"]=JObject.Parse(File.ReadAllText("Assets/B.mat")),["memoryA"]=JObject.Parse(UnityEditor.EditorJsonUtility.ToJson(UnityEditor.AssetDatabase.Mats["Assets/A.mat"])),["memoryB"]=JObject.Parse(UnityEditor.EditorJsonUtility.ToJson(UnityEditor.AssetDatabase.Mats["Assets/B.mat"]))}.ToString(Formatting.None));return 0;
  }
 }
 '''
@@ -135,19 +147,22 @@ def run_batch(compiled_texture,tmp_path,case):
     assert result.returncode==0,result.stdout+result.stderr
     return json.loads(result.stdout)
 
-@pytest.mark.parametrize('case',['success','nochange','same','invalid','stale','save','meta'])
+@pytest.mark.parametrize('case',['success','nochange','same','legacy_preview','invalid','stale','save','normalized_save_failure','meta'])
 def test_actual_complete_batch(compiled_texture,tmp_path,case):
     result=run_batch(compiled_texture,tmp_path,case);payload=result['payload']
     assert result['globals']==0 and result['unrelatedDirty'] is True
-    if case in ('success','same','nochange'):
+    if case in ('success','same','nochange','legacy_preview'):
         assert result['ok'] is True,result
         assert result['saves']==(0 if case=='nochange' else 2)
+        assert result['readbackReads']==result['saves']
         assert payload['persistedReadback'] is True
         assert result['a']['mask']==('Assets/Old.png' if case=='nochange' else 'Assets/New.png')
         assert result['a']['other']==('Assets/New.png' if case=='same' else 'Assets/Old.png')
-    elif case=='save':
+    elif case in ('save','normalized_save_failure'):
         assert result['ok'] is False and payload['commitState']=='rolled_back',result
-        for key in ('a','b','memoryA','memoryB'):assert result[key]['mask']=='Assets/Old.png'
+        for key in ('a','b','memoryA','memoryB'):
+            assert result[key]['mask']=='Assets/Old.png'
+            assert result[key]['derivedState'] is False
     elif case=='meta':
         assert result['ok'] is False and payload['checkpointRecoveryRequired'] is True
     else:
