@@ -189,5 +189,3 @@ def test_shared_texture_is_resolved_once_per_request_without_source_reads(compil
     assert result["ok"]
     assert result["sourceResolutions"] == 2
     assert result["sourceByteReads"] == 0
-
-
