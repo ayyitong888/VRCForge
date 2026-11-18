@@ -112,7 +112,8 @@ def test_create_failure_removes_staging_and_leaves_target_absent(tmp_path: Path,
     assert not list(target.parent.glob(".*.vrcforge-create-*"))
 
 
-def test_register_project_is_idempotent_and_has_exact_rollback(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_receipt", [False, True])
+def test_register_project_is_idempotent_and_has_exact_rollback(tmp_path: Path, legacy_receipt: bool) -> None:
     project = _unity_project(tmp_path / "projects" / "Existing")
     service = _service(tmp_path)
 
@@ -121,7 +122,13 @@ def test_register_project_is_idempotent_and_has_exact_rollback(tmp_path: Path) -
 
     assert first["ok"] is True and first["mutationStarted"] is True
     assert second["ok"] is True and second["mutationStarted"] is False
-    rolled_back = service.rollback({"receiptId": first["rollback"]["receiptId"]})
+    receipt_id = first["rollback"]["receiptId"]
+    if legacy_receipt:
+        receipt_path = service.receipts_dir / f"{receipt_id}.json"
+        receipt = service._read_json(receipt_path)
+        del receipt["registrationEntry"]
+        service._write_receipt(receipt)
+    rolled_back = service.rollback({"receiptId": receipt_id})
     assert rolled_back["ok"] is True
     assert project.is_dir()
     prefs = json.loads((tmp_path / "state" / "custom-projects.json").read_text(encoding="utf-8"))
@@ -143,8 +150,16 @@ def test_registration_readback_ignores_a_later_unrelated_registration(tmp_path: 
     receipt = service.register_project({"projectPath": str(first)})
     assert receipt["readbackVerified"]
     assert [item["path"] for item in service._load_prefs()["customProjects"]] == [str(first), str(later)]
-    with pytest.raises(ProjectLifecycleError, match="changed after this operation"):
-        service.rollback({"receiptId": receipt["rollback"]["receiptId"]})
+    monkeypatch.setattr(service, "_write_prefs", write)
+    raw = service._read_json(service.prefs_path)
+    raw.update(hiddenPaths=["Hidden"], unrelatedPreference={"keep": True})
+    write(raw)
+    rolled_back = service.rollback({"receiptId": receipt["rollback"]["receiptId"]})
+    assert rolled_back["readbackVerified"]
+    assert first.is_dir() and later.is_dir()
+    assert service._read_json(service.prefs_path) == {
+        **raw, "customProjects": [{"path": str(later), "projectType": "unity"}],
+    }
 
 
 def test_registration_receipt_failure_compensates_only_its_own_entry(tmp_path: Path, monkeypatch) -> None:
@@ -218,3 +233,23 @@ def test_status_and_plan_report_backend_capability_without_claiming_hub_registra
     assert plan["managerRegistration"]["vrcforge"] == "automatic"
     assert plan["managerRegistration"]["unityHub"] == "handoff_required"
     assert plan["mutationStarted"] is False
+
+
+def test_registration_rollback_receipt_failure_restores_entry_only(tmp_path: Path, monkeypatch) -> None:
+    first = _unity_project(tmp_path / "First")
+    later = _unity_project(tmp_path / "Later")
+    service, other = _service(tmp_path), _service(tmp_path)
+    receipt_id = service.register_project({"projectPath": str(first)})["rollback"]["receiptId"]
+    atomic_write = service._atomic_write_json
+
+    def fail_rollback_receipt(path, payload):
+        if path == service.receipts_dir / f"{receipt_id}.json":
+            other.register_project({"projectPath": str(later)})
+            raise OSError("injected rollback receipt failure")
+        atomic_write(path, payload)
+
+    monkeypatch.setattr(service, "_atomic_write_json", fail_rollback_receipt)
+    with pytest.raises(ProjectLifecycleError, match="injected rollback receipt failure"):
+        service.rollback({"receiptId": receipt_id})
+    assert [item["path"] for item in service._load_prefs()["customProjects"]] == [str(first), str(later)]
+    assert service._read_json(service.receipts_dir / f"{receipt_id}.json")["status"] == "active"

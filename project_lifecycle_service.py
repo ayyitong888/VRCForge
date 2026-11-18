@@ -340,9 +340,7 @@ class ProjectLifecycleService:
                     "status": "active",
                     "createdAt": _utc_now(),
                     "projectPath": str(project),
-                    "prefsBefore": registration["prefsBefore"],
-                    "prefsBeforeSha256": registration["prefsBeforeSha256"],
-                    "prefsAfterSha256": registration["prefsAfterSha256"],
+                    "registrationEntry": registration["entry"],
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -376,17 +374,22 @@ class ProjectLifecycleService:
         if not receipt_id or not re.fullmatch(r"[A-Za-z0-9_-]{10,160}", receipt_id):
             raise ProjectLifecycleError("A valid receiptId is required.")
         receipt_path = self.receipts_dir / f"{receipt_id}.json"
-        receipt = self._read_json(receipt_path)
-        if receipt.get("schema") != PROJECT_LIFECYCLE_RECEIPT_SCHEMA or receipt.get("receiptId") != receipt_id:
-            raise ProjectLifecycleError("Project lifecycle receipt is invalid.")
-        if receipt.get("status") != "active":
-            raise ProjectLifecycleError("Project lifecycle receipt is no longer active.")
+        with self.prefs_lock:
+            receipt = self._read_json(receipt_path)
+            if receipt.get("schema") != PROJECT_LIFECYCLE_RECEIPT_SCHEMA or receipt.get("receiptId") != receipt_id:
+                raise ProjectLifecycleError("Project lifecycle receipt is invalid.")
+            if receipt.get("status") != "active":
+                raise ProjectLifecycleError("Project lifecycle receipt is no longer active.")
+            kind = str(receipt.get("kind") or "")
+            if kind == "register_project":
+                return self._rollback_registration(receipt_path, receipt)
+        if kind != "create_project":
+            raise ProjectLifecycleError("Project lifecycle receipt kind is unsupported.")
         current_prefs = self._load_prefs()
         current_prefs_sha = _sha256_bytes(_canonical_json_bytes(current_prefs))
         if current_prefs_sha != receipt.get("prefsAfterSha256"):
             raise ProjectLifecycleError("Project catalogue changed after this operation; rollback refused.")
         current_prefs_snapshot = self._read_json(self.prefs_path)
-        kind = str(receipt.get("kind") or "")
         recovery_path = ""
         target: Path | None = None
         recovery: Path | None = None
@@ -402,8 +405,6 @@ class ProjectLifecycleService:
                 raise ProjectLifecycleError("Project rollback recovery directory already exists.")
             os.replace(target, recovery)
             recovery_path = str(recovery)
-        elif kind != "register_project":
-            raise ProjectLifecycleError("Project lifecycle receipt kind is unsupported.")
         try:
             self._write_prefs(receipt.get("prefsBefore"))
             if self._read_json(self.prefs_path) != receipt.get("prefsBefore"):
@@ -444,6 +445,67 @@ class ProjectLifecycleService:
             "kind": kind,
             "projectPath": str(receipt.get("projectPath") or ""),
             "recoveryPath": recovery_path,
+            "readbackVerified": True,
+            "mutationStarted": True,
+            "committed": True,
+            "commitState": "complete",
+        }
+
+    def _rollback_registration(self, receipt_path: Path, receipt: dict[str, Any]) -> dict[str, Any]:
+        receipt_id = receipt_path.stem
+        project_path = str(receipt.get("projectPath") or "")
+        entry = {"path": project_path, "projectType": "unity"}
+        # Older receipts recorded a complete catalogue rather than the entry.
+        if not project_path or receipt.get("registrationEntry", entry) != entry:
+            raise ProjectLifecycleError("Project registration receipt does not identify its catalogue entry.")
+
+        def read_entries() -> tuple[dict[str, Any], list[Any], list[int]]:
+            prefs = self._read_json(self.prefs_path)
+            projects = prefs.get("customProjects")
+            if not isinstance(projects, list):
+                raise ProjectLifecycleError("VRCForge project catalogue is invalid.")
+            matches = [
+                index for index, item in enumerate(projects)
+                if isinstance(item, dict) and str(item.get("path") or "").casefold() == project_path.casefold()
+            ]
+            return prefs, projects, matches
+
+        prefs, projects, matches = read_entries()
+        if len(matches) != 1 or projects[matches[0]] != entry:
+            raise ProjectLifecycleError("The registered project entry changed after registration.")
+        position = matches[0]
+        del projects[position]
+        try:
+            self._write_prefs(prefs)
+            if read_entries()[2]:
+                raise ProjectLifecycleError("Project registration rollback readback failed.")
+            receipt.update(status="rolled_back", rolledBackAt=_utc_now(), recoveryPath="")
+            self._atomic_write_json(receipt_path, receipt)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                current, current_projects, current_matches = read_entries()
+                if not current_matches:
+                    current_projects.insert(position, entry)
+                    self._write_prefs(current)
+                    _, restored, positions = read_entries()
+                    if len(positions) != 1 or restored[positions[0]] != entry:
+                        raise ProjectLifecycleError("Project entry compensation readback failed.")
+                elif len(current_matches) != 1 or current_projects[current_matches[0]] != entry:
+                    raise ProjectLifecycleError("Project entry compensation would overwrite another entry.")
+            except Exception as restore_exc:  # noqa: BLE001
+                raise ProjectLifecycleError(
+                    f"Project registration rollback failed: {exc}; compensation failed: {restore_exc}"
+                ) from exc
+            raise ProjectLifecycleError(f"Project registration rollback failed: {exc}") from exc
+
+        return {
+            "ok": True,
+            "schema": "vrcforge.project_lifecycle_rollback_result.v1",
+            "action": "rollback_project_lifecycle",
+            "receiptId": receipt_id,
+            "kind": "register_project",
+            "projectPath": project_path,
+            "recoveryPath": "",
             "readbackVerified": True,
             "mutationStarted": True,
             "committed": True,
