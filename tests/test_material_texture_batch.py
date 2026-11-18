@@ -44,13 +44,22 @@ namespace UnityEditor {
 }
 namespace VRCForge.Editor {
  public static class File {
-  public static int SnapshotReads;
-  private static bool IsFinalSnapshotRead(){var frames=new global::System.Diagnostics.StackTrace().GetFrames();var build=false;var buildItem=false;foreach(var frame in frames){var method=frame.GetMethod();if(method==null||method.DeclaringType==null||method.DeclaringType.FullName!="VRCForge.Editor.UnityMaterialTextureBatch")continue;if(method.Name=="Build")build=true;if(method.Name=="BuildItem")buildItem=true;}return build&&!buildItem;}
-  public static byte[] ReadAllBytes(string p){if(IsFinalSnapshotRead())SnapshotReads++;return global::System.IO.File.ReadAllBytes(p);}
+  public static int SnapshotReads, SourceResolutions, SourceByteReads;
+  private static bool IsFinalSnapshotRead(){var frames=new global::System.Diagnostics.StackTrace().GetFrames();var build=false;var buildItem=false;foreach(var frame in frames){var method=frame.GetMethod();if(method==null||method.DeclaringType==null||method.DeclaringType.FullName!="VRCForge.Editor.UnityMaterialTextureBatch")continue;if(method.Name=="CaptureBeforeBytes")build=true;if(method.Name=="BuildItem")buildItem=true;}return build&&!buildItem;}
+  public static byte[] ReadAllBytes(string p){if(IsFinalSnapshotRead())SnapshotReads++;if(p.EndsWith(".png"))SourceByteReads++;return global::System.IO.File.ReadAllBytes(p);}
   public static bool Exists(string p)=>global::System.IO.File.Exists(p);public static void WriteAllBytes(string p,byte[] b)=>global::System.IO.File.WriteAllBytes(p,b);public static void Replace(string a,string b,string c)=>global::System.IO.File.Replace(a,b,c);public static void Delete(string p)=>global::System.IO.File.Delete(p);
  }
  public class FileEvidence{public string Digest;}public class StableAssetEvidence{public string Guid;public FileEvidence File,Meta;}
  public static class SceneObjectCopyCore{public static StableAssetEvidence ReadStableAssetEvidence(string p,string l)=>new StableAssetEvidence{Guid=UnityEditor.AssetDatabase.AssetPathToGUID(p),File=new FileEvidence{Digest=MaterialShaderTool.ComputeFileSha256(p)},Meta=new FileEvidence{Digest=MaterialShaderTool.ComputeFileSha256(p+".meta")}};}
+ public static class MaterialTextureTool{
+  public static (UnityEngine.Texture2D texture,string guid,long localId) ResolveTextureSource(string p){
+   File.SourceResolutions++;
+   var t=UnityEditor.AssetDatabase.LoadAssetAtPath<UnityEngine.Texture2D>(p);
+   if(t==null)throw new Exception("missing texture");
+   UnityEditor.AssetDatabase.TryGetGUIDAndLocalFileIdentifier(t,out var guid,out var id);
+   return(t,guid,id);
+  }
+ }
  public static class MaterialShaderTool{
   public class MaterialAssetEvidence{public string assetGuid,fileDigest,filePath;}
   public static bool MatchesCurrentProject(string p)=>p==Directory.GetCurrentDirectory();public static void EnsureNoReparseBoundary(string r,string p){}
@@ -83,7 +92,7 @@ public static class Probe{
   UnityEditor.AssetDatabase.Fault=argv[0];
   if(argv[0]=="transform_save")UnityEditor.AssetDatabase.Fault="save";
   var r=(VRCForge.Core.MCP.VRCForgeToolResult)VRCForge.Editor.UnityMaterialTextureBatch.HandleCommand(args);
-  Console.WriteLine(new JObject{["ok"]=r.Ok,["message"]=r.Message,["previewPayload"]=pp,["payload"]=JObject.FromObject(r.Payload),["snapshotReads"]=VRCForge.Editor.File.SnapshotReads,["saves"]=UnityEditor.AssetDatabase.Saves,["globals"]=UnityEditor.AssetDatabase.Globals,["unrelatedDirty"]=UnityEditor.AssetDatabase.UnrelatedDirty,["a"]=JObject.Parse(File.ReadAllText("Assets/A.mat")),["b"]=JObject.Parse(File.ReadAllText("Assets/B.mat")),["memoryA"]=JObject.Parse(UnityEditor.EditorJsonUtility.ToJson(UnityEditor.AssetDatabase.Mats["Assets/A.mat"])),["memoryB"]=JObject.Parse(UnityEditor.EditorJsonUtility.ToJson(UnityEditor.AssetDatabase.Mats["Assets/B.mat"]))}.ToString(Formatting.None));return 0;
+  Console.WriteLine(new JObject{["ok"]=r.Ok,["message"]=r.Message,["previewPayload"]=pp,["payload"]=JObject.FromObject(r.Payload),["snapshotReads"]=VRCForge.Editor.File.SnapshotReads,["sourceResolutions"]=VRCForge.Editor.File.SourceResolutions,["sourceByteReads"]=VRCForge.Editor.File.SourceByteReads,["saves"]=UnityEditor.AssetDatabase.Saves,["globals"]=UnityEditor.AssetDatabase.Globals,["unrelatedDirty"]=UnityEditor.AssetDatabase.UnrelatedDirty,["a"]=JObject.Parse(File.ReadAllText("Assets/A.mat")),["b"]=JObject.Parse(File.ReadAllText("Assets/B.mat")),["memoryA"]=JObject.Parse(UnityEditor.EditorJsonUtility.ToJson(UnityEditor.AssetDatabase.Mats["Assets/A.mat"])),["memoryB"]=JObject.Parse(UnityEditor.EditorJsonUtility.ToJson(UnityEditor.AssetDatabase.Mats["Assets/B.mat"]))}.ToString(Formatting.None));return 0;
  }
 }
 '''
@@ -149,7 +158,7 @@ def test_before_bytes_snapshot_is_final_apply_only_and_shared_per_material(compi
     assert preview['snapshotReads'] == 0
     for case in ('success','nochange'):
         result = run_batch(compiled_texture,tmp_path,case)
-        assert result['snapshotReads'] == 2
+        assert result['snapshotReads'] == (0 if case == 'nochange' else 2)
     same = run_batch(compiled_texture,tmp_path,'same')
     assert same['snapshotReads'] == 2
 
@@ -173,3 +182,12 @@ def test_public_batch_and_legacy_schema():
     jsonschema.validate({'projectPath':'Project','assignments':ROWS},schema)
     jsonschema.validate(dict(ROWS[0],projectPath='Project'),schema)
     with pytest.raises(jsonschema.ValidationError):jsonschema.validate(dict(ROWS[0],projectPath='Project',assignments=ROWS),schema)
+
+
+def test_shared_texture_is_resolved_once_per_request_without_source_reads(compiled_texture, tmp_path):
+    result = run_batch(compiled_texture, tmp_path, "success")
+    assert result["ok"]
+    assert result["sourceResolutions"] == 2
+    assert result["sourceByteReads"] == 0
+
+

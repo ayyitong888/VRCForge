@@ -31,8 +31,6 @@ namespace VRCForge.Editor
             internal string BeforeTexturePath;
             internal string BeforeTextureGuid;
             internal string TextureGuid = string.Empty;
-            internal string TextureDigest;
-            internal string PostDigest;
             internal bool MutationOwned;
             internal StableAssetEvidence Stable, Owned;
             internal string BeforeJson, ExpectedJson;
@@ -122,16 +120,7 @@ namespace VRCForge.Editor
             return value;
         }
 
-        private static string TextureFile(string path)
-        {
-            var full = Path.GetFullPath(Path.Combine(Application.dataPath, "..", path.Replace('/', Path.DirectorySeparatorChar)));
-            var root = Path.GetFullPath(Application.dataPath).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) throw new InvalidOperationException("Texture source is missing or outside Assets.");
-            MaterialShaderTool.EnsureNoReparseBoundary(Path.GetFullPath(Application.dataPath), full);
-            return full;
-        }
-
-        private static Item BuildItem(JObject row)
+        private static Item BuildItem(JObject row, Dictionary<string, (Texture2D texture, string guid, long localId)> textures)
         {
             var item = new Item { MaterialPath = AssetPath(row, "materialAssetPath", true), PropertyName = Text(row, "propertyName"), TexturePath = AssetPath(row, "textureAssetPath", false) };
             item.Material = AssetDatabase.LoadAssetAtPath<Material>(item.MaterialPath);
@@ -160,11 +149,12 @@ namespace VRCForge.Editor
             item.BeforeTextureGuid = string.IsNullOrEmpty(item.BeforeTexturePath) ? string.Empty : AssetDatabase.AssetPathToGUID(item.BeforeTexturePath).ToLowerInvariant();
             if (!string.IsNullOrEmpty(item.TexturePath))
             {
-                item.TargetTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(item.TexturePath);
-                if (item.TargetTexture == null) throw new InvalidOperationException("The requested source must be one existing project Texture2D.");
-                if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(item.TargetTexture, out string textureGuid, out long textureLocalId)) throw new InvalidOperationException("Texture identity unavailable.");
-                item.TextureGuid = textureGuid.ToLowerInvariant(); item.TextureLocalId = textureLocalId;
-                item.TextureDigest = MaterialShaderTool.ComputeFileSha256(TextureFile(item.TexturePath));
+                if (!textures.TryGetValue(item.TexturePath, out var source))
+                {
+                    source = MaterialTextureTool.ResolveTextureSource(item.TexturePath);
+                    textures.Add(item.TexturePath, source);
+                }
+                (item.TargetTexture, item.TextureGuid, item.TextureLocalId) = source;
             }
             return item;
         }
@@ -173,7 +163,7 @@ namespace VRCForge.Editor
 
         private static JObject Evidence(Item item)
         {
-            var result = JObject.FromObject(new { materialAssetPath = item.MaterialPath, materialAssetGuid = item.Evidence.assetGuid, materialFileDigestBefore = item.Evidence.fileDigest, materialMetaDigest = item.Stable.Meta.Digest, materialStateDigest = Hash(item.BeforeJson), shaderDependencyHash = item.ShaderDependency, textureLocalId = item.TextureLocalId, propertyName = item.PropertyName, beforeTextureAssetPath = item.BeforeTexturePath, beforeTextureAssetGuid = item.BeforeTextureGuid, textureAssetPath = item.TexturePath, textureAssetGuid = item.TextureGuid, textureFileDigest = item.TextureDigest, afterTextureAssetPath = item.TexturePath, afterTextureAssetGuid = item.TextureGuid });
+            var result = JObject.FromObject(new { materialAssetPath = item.MaterialPath, materialAssetGuid = item.Evidence.assetGuid, materialFileDigestBefore = item.Evidence.fileDigest, materialMetaDigest = item.Stable.Meta.Digest, materialStateDigest = Hash(item.BeforeJson), shaderDependencyHash = item.ShaderDependency, textureLocalId = item.TextureLocalId, propertyName = item.PropertyName, beforeTextureAssetPath = item.BeforeTexturePath, beforeTextureAssetGuid = item.BeforeTextureGuid, textureAssetPath = item.TexturePath, textureAssetGuid = item.TextureGuid, afterTextureAssetPath = item.TexturePath, afterTextureAssetGuid = item.TextureGuid });
             if (item.HasTransform)
             {
                 if (item.HasScale) result["textureScale"] = VectorValue(item.AfterScale);
@@ -194,27 +184,23 @@ namespace VRCForge.Editor
             }
         }
 
-        private static List<Item> Build(JArray rows, out JArray evidence, bool captureBeforeBytes)
+        private static void CaptureBeforeBytes(List<Item> items)
         {
-            var items = rows.OfType<JObject>().Select(BuildItem).ToList();
-            if (captureBeforeBytes)
+            foreach (var group in items.Where(i => i.BeforeTexture != i.TargetTexture
+                    || (i.HasTransform && (!SameVector(i.BeforeScale, i.AfterScale) || !SameVector(i.BeforeOffset, i.AfterOffset))))
+                .GroupBy(i => i.MaterialPath, StringComparer.Ordinal))
             {
-                foreach (var group in items.GroupBy(i => i.MaterialPath, StringComparer.Ordinal))
+                var first = group.First();
+                var beforeBytes = File.ReadAllBytes(first.Evidence.filePath);
+                var beforeBytesDigest = Digest(beforeBytes);
+                if (!string.Equals(beforeBytesDigest, first.Stable.File.Digest, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Material snapshot digest changed during final apply preflight.");
+                foreach (var item in items.Where(i => i.MaterialPath == group.Key))
                 {
-                    var first = group.First();
-                    var beforeBytes = File.ReadAllBytes(first.Evidence.filePath);
-                    var beforeBytesDigest = Digest(beforeBytes);
-                    if (!string.Equals(beforeBytesDigest, first.Stable.File.Digest, StringComparison.OrdinalIgnoreCase))
-                        throw new InvalidOperationException("Material snapshot digest changed during final apply preflight.");
-                    foreach (var item in group)
-                    {
-                        item.BeforeBytes = beforeBytes;
-                        item.BeforeBytesDigest = beforeBytesDigest;
-                    }
+                    item.BeforeBytes = beforeBytes;
+                    item.BeforeBytesDigest = beforeBytesDigest;
                 }
             }
-            evidence = new JArray(items.Select(Evidence));
-            return items;
         }
 
         internal static object HandleCommand(JObject request)
@@ -226,26 +212,25 @@ namespace VRCForge.Editor
                 request = NormalizeSingleTransform(request);
                 var rows = ValidateEnvelope(request);
                 if (!MaterialShaderTool.MatchesCurrentProject(request["expectedProjectPath"]?.ToString() ?? string.Empty)) throw new InvalidOperationException("The selected Unity project does not match the active Editor.");
-                JArray planRows;
-                items = Build(rows, out planRows, captureBeforeBytes: false);
+                var textures = new Dictionary<string, (Texture2D texture, string guid, long localId)>(StringComparer.Ordinal);
+                items = rows.OfType<JObject>().Select(row => BuildItem(row, textures)).ToList();
+                var planRows = new JArray(items.Select(Evidence));
                 var plan = new JObject { ["assignments"] = planRows };
                 var sealedRequest = (JObject)request.DeepClone(); sealedRequest["expectedBatchPlan"] = plan;
                 if (Encoding.UTF8.GetByteCount(sealedRequest.ToString(Formatting.None)) > MaxBytes) throw new InvalidOperationException("Sealed texture assignments exceed 512 KiB; split the batch.");
                 if (request["preview"]?.Value<bool>() == true) return VRCForgeToolResult.Completed("Material texture assignments fully preflighted; no mutation.", new { schema = Schema, batch = true, ok = true, preview = true, verified = true, changed = false, saved = false, persistedReadback = false, mutationStarted = false, committed = false, commitState = "not_started", projectPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..")), assignments = planRows });
                 if (!(request["expectedBatchPlan"] is JObject) || !JToken.DeepEquals(request["expectedBatchPlan"], plan)) throw new InvalidOperationException("A sealed expectedBatchPlan from preview is required.");
-                var fresh = Build(rows, out var freshRows, captureBeforeBytes: true);
-                if (!JToken.DeepEquals(planRows, freshRows)) throw new InvalidOperationException("Texture assignment preconditions changed since preview.");
-                items = fresh;
+                CaptureBeforeBytes(items);
                 var changed = false;
                 foreach (var item in items)
                 {
-                    if (item.Material.GetTexture(item.PropertyName) == item.TargetTexture
+                    if (item.BeforeTexture == item.TargetTexture
                         && (!item.HasTransform || (SameVector(item.BeforeScale, item.AfterScale) && SameVector(item.BeforeOffset, item.AfterOffset)))) continue;
                     // Mark before the setter so failures still restore the affected material.
                     started = true; item.MutationOwned = true; changed = true;
                     try
                     {
-                        if (item.Material.GetTexture(item.PropertyName) != item.TargetTexture) item.Material.SetTexture(item.PropertyName, item.TargetTexture);
+                        if (item.BeforeTexture != item.TargetTexture) item.Material.SetTexture(item.PropertyName, item.TargetTexture);
                         if (item.HasScale) item.Material.SetTextureScale(item.PropertyName, item.AfterScale);
                         if (item.HasOffset) item.Material.SetTextureOffset(item.PropertyName, item.AfterOffset);
                         EditorUtility.SetDirty(item.Material);
@@ -262,7 +247,8 @@ namespace VRCForge.Editor
                     foreach (var same in group) same.Owned = owned;
                     if (EditorUtility.IsDirty(item.Material)) throw new InvalidOperationException("Saved material remained dirty.");
                 }
-                foreach (var group in items.GroupBy(i => i.MaterialPath)) AssetDatabase.ImportAsset(group.Key, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                foreach (var item in items.Where(i => i.MutationOwned).GroupBy(i => i.MaterialPath).Select(g => g.First()))
+                    AssetDatabase.ImportAsset(item.MaterialPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 var readback = new JArray();
                 foreach (var item in items)
                 {
@@ -272,9 +258,9 @@ namespace VRCForge.Editor
                         throw new InvalidOperationException("Material persisted state or identity differs from approved texture edit.");
                     var actual = persisted.GetTexture(item.PropertyName);
                     if (actual == null || AssetDatabase.GetAssetPath(actual) != item.TexturePath || !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(actual, out string guid, out long localId) || guid != item.TextureGuid || localId != item.TextureLocalId
-                        || MaterialShaderTool.ComputeFileSha256(TextureFile(item.TexturePath)) != item.TextureDigest || AssetDatabase.GetAssetDependencyHash(AssetDatabase.GetAssetPath(persisted.shader)).ToString() != item.ShaderDependency)
+                        || AssetDatabase.GetAssetDependencyHash(AssetDatabase.GetAssetPath(persisted.shader)).ToString() != item.ShaderDependency)
                         throw new InvalidOperationException("Texture or shader changed during material assignment.");
-                    var resultRow = JObject.FromObject(new { materialAssetPath = item.MaterialPath, materialAssetGuid = stable.Guid, materialMetaDigest = stable.Meta.Digest, propertyName = item.PropertyName, afterTextureAssetPath = item.TexturePath, afterTextureAssetGuid = guid, textureLocalId = localId, textureFileDigest = item.TextureDigest, materialFileDigestAfter = stable.File.Digest, materialStateDigest = Hash(item.ExpectedJson) });
+                    var resultRow = JObject.FromObject(new { materialAssetPath = item.MaterialPath, materialAssetGuid = stable.Guid, materialMetaDigest = stable.Meta.Digest, propertyName = item.PropertyName, afterTextureAssetPath = item.TexturePath, afterTextureAssetGuid = guid, textureLocalId = localId, materialFileDigestAfter = stable.File.Digest, materialStateDigest = Hash(item.ExpectedJson) });
                     if (item.HasTransform)
                     {
                         var scale = persisted.GetTextureScale(item.PropertyName); var offset = persisted.GetTextureOffset(item.PropertyName);

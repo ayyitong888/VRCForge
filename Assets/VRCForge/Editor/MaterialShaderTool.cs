@@ -1183,8 +1183,8 @@ namespace VRCForge.Editor
             public string expectedBeforeTextureAssetGuid { get; set; } = string.Empty;
             [VRCForgeInput("Target Texture2D asset GUID frozen by preview.", IsRequired = false)]
             public string expectedTextureAssetGuid { get; set; } = string.Empty;
-            [VRCForgeInput("Target Texture2D source SHA-256 frozen by preview.", IsRequired = false)]
-            public string expectedTextureFileDigest { get; set; } = string.Empty;
+            [VRCForgeInput("Target Texture2D local file ID frozen by preview.", IsRequired = false)]
+            public long? expectedTextureLocalId { get; set; }
         }
 
         public static object HandleCommand(JObject @params)
@@ -1237,16 +1237,9 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException("The resolved material asset does not match the requested path.");
                 }
 
-                var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(textureAssetPath);
-                if (texture == null || !AssetDatabase.IsMainAsset(texture)
-                    || !string.Equals(AssetDatabase.GetAssetPath(texture), textureAssetPath, StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException("The requested source must be one existing project Texture2D.");
-                }
-                var textureGuid = MaterialShaderTool.NormalizeHex(
-                    AssetDatabase.AssetPathToGUID(textureAssetPath), 32, allowEmpty: false);
-                var textureFilePath = ResolveTextureFilePath(textureAssetPath);
-                var textureDigest = MaterialShaderTool.ComputeFileSha256(textureFilePath);
+                var (texture, textureGuid, textureLocalId) = ResolveTextureSource(textureAssetPath);
+                if (!AssetDatabase.IsMainAsset(texture))
+                    throw new InvalidOperationException("The requested source must be a main Texture2D asset.");
                 beforeTexture = material.GetTexture(propertyName);
                 var beforeTexturePath = beforeTexture != null
                     ? (AssetDatabase.GetAssetPath(beforeTexture) ?? string.Empty)
@@ -1277,9 +1270,7 @@ namespace VRCForge.Editor
                         || !string.Equals(
                             MaterialShaderTool.NormalizeHex(@params?["expectedTextureAssetGuid"]?.ToString(), 32, allowEmpty: false),
                             textureGuid, StringComparison.OrdinalIgnoreCase)
-                        || !string.Equals(
-                            MaterialShaderTool.NormalizeHex(@params?["expectedTextureFileDigest"]?.ToString(), 64, allowEmpty: false),
-                            textureDigest, StringComparison.OrdinalIgnoreCase))
+                        || @params?["expectedTextureLocalId"]?.Value<long>() != textureLocalId)
                     {
                         throw new InvalidOperationException("The material or texture no longer matches its verified preview.");
                     }
@@ -1309,7 +1300,8 @@ namespace VRCForge.Editor
                     var persistedTexture = persisted != null ? persisted.GetTexture(propertyName) : null;
                     if (persistedTexture != texture
                         || !string.Equals(AssetDatabase.GetAssetPath(persistedTexture), textureAssetPath, StringComparison.Ordinal)
-                        || !string.Equals(MaterialShaderTool.ComputeFileSha256(textureFilePath), textureDigest, StringComparison.OrdinalIgnoreCase))
+                        || !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(persistedTexture, out string persistedGuid, out long persistedLocalId)
+                        || persistedGuid != textureGuid || persistedLocalId != textureLocalId)
                     {
                         throw new InvalidOperationException("Material texture persisted readback did not match its approved target.");
                     }
@@ -1349,7 +1341,7 @@ namespace VRCForge.Editor
                         beforeTextureAssetGuid = beforeTextureGuid,
                         textureAssetPath,
                         textureAssetGuid = textureGuid,
-                        textureFileDigest = textureDigest,
+                        textureLocalId,
                         afterTextureAssetPath = textureAssetPath,
                         afterTextureAssetGuid = textureGuid,
                         mutationStarted,
@@ -1396,7 +1388,18 @@ namespace VRCForge.Editor
             }
         }
 
-        private static string ResolveTextureFilePath(string textureAssetPath)
+        internal static (Texture2D texture, string guid, long localId) ResolveTextureSource(string assetPath)
+        {
+            ResolveTextureFilePath(assetPath);
+            var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath);
+            if (texture == null || AssetDatabase.GetAssetPath(texture) != assetPath
+                || !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(texture, out string guid, out long localId)
+                || string.IsNullOrEmpty(guid) || localId == 0)
+                throw new InvalidOperationException("The requested source must be one existing project Texture2D with a stable identity.");
+            return (texture, guid.ToLowerInvariant(), localId);
+        }
+
+        private static void ResolveTextureFilePath(string textureAssetPath)
         {
             var projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
             var assetsRoot = Path.GetFullPath(Application.dataPath);
@@ -1413,7 +1416,6 @@ namespace VRCForge.Editor
             {
                 throw new InvalidOperationException("Texture source is missing or crosses a reparse boundary.");
             }
-            return filePath;
         }
 
         private static bool RestoreTexturePreState(

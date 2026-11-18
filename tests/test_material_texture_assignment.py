@@ -54,7 +54,7 @@ def _preview() -> dict[str, object]:
         "beforeTextureAssetGuid": "c" * 32,
         "textureAssetPath": "Assets/Avatar/FaceFixed.png",
         "textureAssetGuid": "d" * 32,
-        "textureFileDigest": "e" * 64,
+        "textureLocalId": 2800000,
         "afterTextureAssetPath": "Assets/Avatar/FaceFixed.png",
         "afterTextureAssetGuid": "d" * 32,
     }
@@ -129,7 +129,7 @@ def test_authoritative_preview_freezes_exact_material_texture_and_previous_slot(
     assert nested["expectedBeforeTextureAssetPath"] == "Assets/Avatar/FaceOriginal.png"
     assert nested["expectedBeforeTextureAssetGuid"] == "c" * 32
     assert nested["expectedTextureAssetGuid"] == "d" * 32
-    assert nested["expectedTextureFileDigest"] == "e" * 64
+    assert nested["expectedTextureLocalId"] == 2800000
     assert nested["preview"] is False
     assert nested["saveAssets"] is True
 
@@ -141,7 +141,7 @@ def test_authoritative_preview_freezes_exact_material_texture_and_previous_slot(
         lambda result: result.update(materialAssetGuid="invalid"),
         lambda result: result.update(propertyName="_Unexpected"),
         lambda result: result.update(textureAssetPath="Packages/Other/Face.png"),
-        lambda result: result.update(textureFileDigest="f" * 63),
+        lambda result: result.update(textureLocalId=0),
         lambda result: result.update(changed=True),
         lambda result: result.update(saved=True),
         lambda result: result.update(materialFileDigestAfter="f" * 64),
@@ -174,7 +174,7 @@ def test_apply_requires_persisted_exact_material_and_texture_readback() -> None:
         lambda result: result.update(committed=False),
         lambda result: result.update(afterTextureAssetGuid="f" * 32),
         lambda result: result.update(materialFileDigestBefore="f" * 64),
-        lambda result: result.update(textureFileDigest="f" * 64),
+        lambda result: result.update(textureLocalId=2800001),
     ),
 )
 def test_apply_rejects_unverified_or_drifted_persistence(mutator) -> None:
@@ -224,7 +224,7 @@ def test_csharp_texture_tool_guards_property_and_rolls_back_failed_mutations() -
     assert "AllowedTextureProperties" not in source
     assert "material.HasProperty(propertyName)" in source
     assert "material.GetTexturePropertyNames()" in source
-    assert "AssetDatabase.LoadAssetAtPath<Texture2D>(textureAssetPath)" in source
+    assert "AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath)" in source
     assert "material.SetTexture(propertyName, texture)" in source
     assert "AssetDatabase.SaveAssetIfDirty(material);" in source
     assert "persisted.GetTexture(propertyName)" in source

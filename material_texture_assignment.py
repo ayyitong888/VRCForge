@@ -91,7 +91,7 @@ def bind_authoritative_preview(
         "Material texture preview changed material bytes.",
     )
     texture_guid = _hex(result.get("textureAssetGuid"), _GUID, "textureAssetGuid")
-    texture_digest = _hex(result.get("textureFileDigest"), _DIGEST, "textureFileDigest")
+    texture_local_id = _local_id(result.get("textureLocalId"))
     before_path = _optional_asset_path(result.get("beforeTextureAssetPath"), "beforeTextureAssetPath")
     before_guid = str(result.get("beforeTextureAssetGuid") or "").strip().lower()
     if before_path:
@@ -121,7 +121,7 @@ def bind_authoritative_preview(
         "expectedBeforeTextureAssetPath": before_path,
         "expectedBeforeTextureAssetGuid": before_guid,
         "expectedTextureAssetGuid": texture_guid,
-        "expectedTextureFileDigest": texture_digest,
+        "expectedTextureLocalId": texture_local_id,
         "preview": False,
         "saveAssets": True,
     }
@@ -135,7 +135,7 @@ def bind_authoritative_preview(
         "beforeTextureAssetGuid": before_guid,
         "textureAssetPath": texture_path,
         "textureAssetGuid": texture_guid,
-        "textureFileDigest": texture_digest,
+        "textureLocalId": texture_local_id,
         "wouldChange": result["wouldChange"],
     }
 
@@ -167,7 +167,6 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, 
         ("materialAssetGuid", "expectedMaterialAssetGuid", _GUID),
         ("materialFileDigestBefore", "expectedMaterialFileDigest", _DIGEST),
         ("textureAssetGuid", "expectedTextureAssetGuid", _GUID),
-        ("textureFileDigest", "expectedTextureFileDigest", _DIGEST),
         ("afterTextureAssetGuid", "expectedTextureAssetGuid", _GUID),
     ):
         _require(
@@ -175,6 +174,7 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, 
             == _hex(expected.get(expected_key), pattern, expected_key),
             f"Material texture apply changed {result_key}.",
         )
+    _require(_local_id(result.get("textureLocalId")) == _local_id(expected.get("expectedTextureLocalId")), "Material texture apply changed its local file ID.")
     _require(result.get("afterTextureAssetPath") == expected.get("textureAssetPath"), "Material texture apply persisted a different texture.")
     after_digest = _hex(result.get("materialFileDigestAfter"), _DIGEST, "materialFileDigestAfter")
     before_digest = _hex(expected.get("expectedMaterialFileDigest"), _DIGEST, "expectedMaterialFileDigest")
@@ -225,6 +225,11 @@ def _hex(value: Any, pattern: re.Pattern[str], label: str) -> str:
     if not pattern.fullmatch(text):
         raise MaterialTextureAssignmentError(f"{label} is invalid.")
     return text
+
+
+def _local_id(value: Any) -> int:
+    _require(type(value) is int and -(1 << 63) <= value < (1 << 63) and value != 0, "Texture local file ID is invalid.")
+    return value
 
 
 def _require(condition: bool, message: str) -> None:
@@ -280,9 +285,10 @@ def _plan_rows(rows, plan):
         _require(isinstance(evidence,dict) and all(evidence.get(k) == v for k,v in row.items()), 'Texture plan changed an ordered request.')
         for key in ('materialAssetGuid','textureAssetGuid','afterTextureAssetGuid'):
             _hex(evidence.get(key), _GUID, key)
-        for key in ('materialFileDigestBefore','materialMetaDigest','materialStateDigest','textureFileDigest'):
+        for key in ('materialFileDigestBefore','materialMetaDigest','materialStateDigest'):
             _hex(evidence.get(key), _DIGEST, key)
-        _require(type(evidence.get('textureLocalId')) is int and bool(evidence.get('shaderDependencyHash')), 'Texture or shader identity missing.')
+        _local_id(evidence.get('textureLocalId'))
+        _require(bool(evidence.get('shaderDependencyHash')), 'Shader identity missing.')
         _require(evidence.get('afterTextureAssetGuid') == evidence['textureAssetGuid'] and evidence.get('afterTextureAssetPath') == row['textureAssetPath'], 'Texture plan destination differs.')
         before = _optional_asset_path(evidence.get('beforeTextureAssetPath'), 'beforeTextureAssetPath')
         if before: _hex(evidence.get('beforeTextureAssetGuid'), _GUID, 'beforeTextureAssetGuid')
@@ -327,7 +333,7 @@ def _validate_batch(args, payload):
     _require(result.get('changed') is changed and result.get('saved') is changed and result.get('mutationStarted') is changed and result.get('commitState') == ('committed' if changed else 'no_change'), 'Texture commit state differs.')
     for before, after in zip(expected, actual):
         _require(isinstance(after,dict), 'Texture readback missing.')
-        for key in ('materialAssetPath','materialAssetGuid','materialMetaDigest','propertyName','afterTextureAssetPath','afterTextureAssetGuid','textureLocalId','textureFileDigest'):
+        for key in ('materialAssetPath','materialAssetGuid','materialMetaDigest','propertyName','afterTextureAssetPath','afterTextureAssetGuid','textureLocalId'):
             _require(after.get(key) == before[key], 'Texture persisted identity differs: '+key)
         if any(key in before for key in _TRANSFORMS):
             for name in ('Scale', 'Offset'):
