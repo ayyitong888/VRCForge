@@ -884,7 +884,7 @@ namespace VRCForge.Editor
             private readonly List<string> newFolders = new List<string>();
             private int undoGroup = -1;
 
-            internal void Capture(string path)
+            internal void Capture(string path, JObject expectedClip = null)
             {
                 if (files.ContainsKey(path)) return;
                 if (string.IsNullOrWhiteSpace(path) || !path.StartsWith("Assets/", StringComparison.Ordinal))
@@ -892,14 +892,19 @@ namespace VRCForge.Editor
                 var absolute = SceneObjectCopyCore.ToAbsoluteAssetPath(path);
                 if (File.Exists(absolute))
                 {
-                    var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "authoring pre-state");
-                    if (new FileInfo(absolute).Length > 64L * 1024 * 1024)
-                        throw new InvalidOperationException("Asset exceeds the 64 MiB rollback bound.");
-                    files.Add(path, File.ReadAllBytes(absolute));
+                    if (expectedClip?["exists"]?.Value<bool?>() == false)
+                        throw new InvalidOperationException(SceneObjectCopyCore.SceneChangedAfterPreview);
+                    var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "authoring pre-state",
+                        maxFileBytes: 64 * 1024 * 1024, captureFileBytes: bytes => files.Add(path, bytes),
+                        captureFileVersion: expectedClip != null,
+                        expectedFileVersion: expectedClip?["fileVersion"]?.Value<string>(),
+                        expectedFileDigest: expectedClip?["fileDigest"]?.Value<string>());
                     metaDigests.Add(path, evidence.Meta.Digest);
                 }
                 else
                 {
+                    if (expectedClip?["exists"]?.Value<bool?>() == true)
+                        throw new InvalidOperationException(SceneObjectCopyCore.SceneChangedAfterPreview);
                     GeneratedAssetPaths.ValidateNewAssetPath(path);
                     if (File.Exists(absolute + ".meta") || AssetDatabase.LoadMainAssetAtPath(path) != null)
                         throw new InvalidOperationException("New asset path or metadata is occupied.");
@@ -990,9 +995,9 @@ namespace VRCForge.Editor
         }
 
         internal static JObject ObserveClipFile(JObject arguments, string path, AnimationClip clip, bool preview,
-            string knownDigest = null)
+            StableAssetEvidence previewEvidence = null)
         {
-            const string changedMessage = "该文件在预览后被修改";
+            const string changedMessage = SceneObjectCopyCore.SceneChangedAfterPreview;
             var expectedFiles = arguments["expectedClipFiles"] as JArray;
             var expected = expectedFiles?.OfType<JObject>().SingleOrDefault(row => row["clipPath"]?.Value<string>() == path);
             if (!preview && expectedFiles != null && expected == null)
@@ -1013,20 +1018,11 @@ namespace VRCForge.Editor
             var guid = AssetDatabase.AssetPathToGUID(path);
             if (expected != null && expected["assetGuid"]?.Value<string>() != guid)
                 throw new InvalidOperationException(changedMessage);
-            var absolute = SceneObjectCopyCore.ToAbsoluteAssetPath(path);
-            if (!File.Exists(absolute)) throw new InvalidOperationException(changedMessage);
-            using var stream = new FileStream(absolute, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var version = PreviewAssetFileVersion.Read(stream);
-            var expectedDigest = expected?["fileDigest"]?.Value<string>();
-            if (preview || string.IsNullOrEmpty(version) || expected?["fileVersion"]?.Value<string>() != version)
-            {
-                using var sha = System.Security.Cryptography.SHA256.Create();
-                var digest = knownDigest ?? BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
-                if (!preview && expectedDigest != digest) throw new InvalidOperationException(changedMessage);
-                expectedDigest = digest;
-            }
+            if (!preview) return expected;
+            var observed = previewEvidence ?? SceneObjectCopyCore.ReadStableAssetEvidence(path, "animation clip preview",
+                maxFileBytes: 64 * 1024 * 1024, captureFileVersion: true);
             return new JObject { ["clipPath"] = path, ["exists"] = true, ["assetGuid"] = guid,
-                ["fileVersion"] = version, ["fileDigest"] = expectedDigest };
+                ["fileVersion"] = observed.FileVersion, ["fileDigest"] = observed.File.Digest };
         }
 
         public class Parameters
@@ -1171,7 +1167,7 @@ namespace VRCForge.Editor
                         bindingTargetValidated = action != "delete_curve" && bindingRoot != null });
                 }
 
-                recovery.Capture(clipPath);
+                recovery.Capture(clipPath, clipFile);
                 recovery.Begin();
                 mutationStarted = true;
                 failurePhase = "unity_mutation";

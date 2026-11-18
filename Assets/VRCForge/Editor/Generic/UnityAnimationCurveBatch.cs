@@ -143,7 +143,7 @@ namespace VRCForge.Editor
             {
                 var rows = ValidateClips(arguments);
                 var preview = arguments["preview"]?.Value<bool>() == true;
-                CheckSnapshotBudget(rows);
+                if (preview || arguments["expectedClipFiles"] == null) CheckSnapshotBudget(rows);
                 var remaining = MaxSnapshotBytes;
                 var bindingRoot = WriteAnimationCurveTool.ResolveBindingRoot(arguments);
                 var guids = new HashSet<string>(StringComparer.Ordinal);
@@ -156,9 +156,12 @@ namespace VRCForge.Editor
                         throw new InvalidOperationException("An exact saved existing clip is required: " + path);
                     var edit = new PreparedClip { Path = path, Clip = clip };
                     edit.Before = SceneObjectCopyCore.ReadStableAssetEvidence(path, "multi-clip preflight",
-                        maxFileBytes: remaining, captureFileBytes: preview ? (Action<byte[]>)null : bytes => edit.Bytes = bytes);
+                        maxFileBytes: remaining, captureFileBytes: preview ? (Action<byte[]>)null : bytes => edit.Bytes = bytes,
+                        captureFileVersion: preview || file != null,
+                        expectedFileVersion: file?["fileVersion"]?.Value<string>(),
+                        expectedFileDigest: file?["fileDigest"]?.Value<string>());
                     edit.PreviewFile = preview
-                        ? WriteAnimationCurveTool.ObserveClipFile(arguments, path, clip, true, edit.Before.File.Digest)
+                        ? WriteAnimationCurveTool.ObserveClipFile(arguments, path, clip, true, edit.Before)
                         : file;
                     remaining -= checked((int)edit.Before.File.Length);
                     if (!guids.Add(edit.Before.Guid)) throw new InvalidOperationException("Duplicate clip asset identity.");
@@ -308,7 +311,7 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed("Preview: would write one clip curve batch.", new {
                         ok = true, preview = true, action = "set_curve", clipPath = path, batch = true, bindingTargetValidated = bindingRoot != null,
                         curveCount = edits.Count, clipFiles = new JArray(clipFile), plan = edits.Select(edit => Describe(edit.binding, edit.curve)).ToArray() });
-                recovery.Capture(path);
+                recovery.Capture(path, clipFile);
                 recovery.Begin();
                 phase = "asset_mutation";
                 mutationStarted = true;
