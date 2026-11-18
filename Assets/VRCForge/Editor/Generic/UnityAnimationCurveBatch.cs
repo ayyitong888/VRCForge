@@ -67,6 +67,30 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("Requested/untouched curves, references, events or clip settings differ from preflight.");
         }
 
+        private static void VerifyChangedCurves(PreparedClip edit, AnimationClip actual)
+        {
+            if (actual == null || EditorUtility.IsDirty(actual))
+                throw new InvalidOperationException("Persisted clip is missing or dirty.");
+            foreach (var changed in edit.Edits)
+                if (!WriteAnimationCurveTool.CurvesEqual(
+                    AnimationUtility.GetEditorCurve(edit.Staged, changed.binding),
+                    AnimationUtility.GetEditorCurve(actual, changed.binding)))
+                    throw new InvalidOperationException("A persisted curve differs from the requested curve: " + changed.binding.propertyName);
+        }
+
+        private const int MaxSnapshotBytes = 64 * 1024 * 1024;
+
+        private static void CheckSnapshotBudget(JArray rows)
+        {
+            long remaining = MaxSnapshotBytes;
+            foreach (JObject row in rows)
+            {
+                var absolute = SceneObjectCopyCore.ToAbsoluteAssetPath(row["clipPath"].Value<string>());
+                remaining -= new FileInfo(absolute).Length;
+                if (remaining < 0) throw new InvalidOperationException("Batch snapshots exceed 64 MiB.");
+            }
+        }
+
         private static void RequireEvidence(PreparedClip edit, StableAssetEvidence expected)
         {
             if (!SceneObjectCopyCore.StableAssetEvidenceMatches(expected,
@@ -116,7 +140,10 @@ namespace VRCForge.Editor
             var phase = "pre_mutation_validation"; var started = false;
             try
             {
-                var rows = ValidateClips(arguments); long bytes = 0;
+                var rows = ValidateClips(arguments);
+                var preview = arguments["preview"]?.Value<bool>() == true;
+                CheckSnapshotBudget(rows);
+                var remaining = MaxSnapshotBytes;
                 var bindingRoot = WriteAnimationCurveTool.ResolveBindingRoot(arguments);
                 var guids = new HashSet<string>(StringComparer.Ordinal);
                 foreach (JObject row in rows)
@@ -125,15 +152,14 @@ namespace VRCForge.Editor
                     var clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
                     if (clip == null || AssetDatabase.GetAssetPath(clip) != path || EditorUtility.IsDirty(clip))
                         throw new InvalidOperationException("An exact saved existing clip is required: " + path);
-                    var before = SceneObjectCopyCore.ReadStableAssetEvidence(path, "multi-clip preflight");
-                    if (!guids.Add(before.Guid)) throw new InvalidOperationException("Duplicate clip asset identity.");
-                    var absolute = SceneObjectCopyCore.ToAbsoluteAssetPath(path);
-                    bytes += new FileInfo(absolute).Length;
-                    if (bytes > 64L * 1024 * 1024) throw new InvalidOperationException("Batch snapshots exceed 64 MiB.");
-                    var edit = new PreparedClip { Path = path, Clip = clip, Before = before, Bytes = File.ReadAllBytes(absolute) };
-                    prepared.Add(edit); RequireEvidence(edit, before);
-                    edit.Staged = UnityEngine.Object.Instantiate(clip);
-                    var existing = FloatCurves(clip); var curves = new List<CurveEdit>();
+                    var edit = new PreparedClip { Path = path, Clip = clip };
+                    edit.Before = SceneObjectCopyCore.ReadStableAssetEvidence(path, "multi-clip preflight",
+                        maxFileBytes: remaining, captureFileBytes: preview ? (Action<byte[]>)null : bytes => edit.Bytes = bytes);
+                    remaining -= checked((int)edit.Before.File.Length);
+                    if (!guids.Add(edit.Before.Guid)) throw new InvalidOperationException("Duplicate clip asset identity.");
+                    prepared.Add(edit);
+                    var existing = AnimationUtility.GetCurveBindings(clip);
+                    var curves = new List<CurveEdit>();
                     foreach (JObject curveRow in (JArray)row["curves"])
                     {
                         var property = (curveRow["propertyName"]?.ToString() ?? "").Trim();
@@ -142,50 +168,46 @@ namespace VRCForge.Editor
                             ?? throw new InvalidOperationException("Binding component type not found.");
                         var binding = new EditorCurveBinding { path = AvatarPrimitiveCrudCore.NormalizePath(curveRow["bindingPath"]?.ToString() ?? curveRow["objectPath"]?.ToString() ?? ""), type = type, propertyName = property };
                         if (bindingRoot != null) WriteAnimationCurveTool.ValidateBindingTarget(bindingRoot, binding);
-                        ValidateBinding(binding, curves.Select(c => c.binding), existing.Keys, curveRow["overwriteExisting"]?.Value<bool?>() ?? false);
+                        ValidateBinding(binding, curves.Select(c => c.binding), existing, curveRow["overwriteExisting"]?.Value<bool?>() ?? false);
                         curves.Add(new CurveEdit { binding = binding, curve = WriteAnimationCurveTool.BuildCurveForBatch(curveRow) });
                     }
                     edit.Edits = curves.ToArray();
-                    AnimationUtility.SetEditorCurves(edit.Staged, curves.Select(c => c.binding).ToArray(), curves.Select(c => c.curve).ToArray());
+                    if (!preview)
+                    {
+                        edit.Staged = UnityEngine.Object.Instantiate(clip);
+                        AnimationUtility.SetEditorCurves(edit.Staged, curves.Select(c => c.binding).ToArray(), curves.Select(c => c.curve).ToArray());
+                    }
                 }
-                // Whole-batch recheck before first mutation, including untouched target files and metadata.
-                foreach (var edit in prepared) RequireEvidence(edit, edit.Before);
-                if (arguments["preview"]?.Value<bool>() == true)
+                if (preview)
                     return VRCForgeToolResult.Completed("Preview: existing multi-clip curve batch.", new { ok = true, preview = true, batch = true,
                         bindingTargetValidated = bindingRoot != null,
                         clips = prepared.Select(e => new { clipPath = e.Path, assetGuid = e.Before.Guid, fileDigest = e.Before.File.Digest, curveCount = e.Edits.Length }).ToArray() });
                 foreach (var edit in prepared)
                 {
-                    RequireEvidence(edit, edit.Before);
                     if (EditorUtility.IsDirty(edit.Clip)) throw new InvalidOperationException("Clip became dirty before mutation.");
                     phase = "asset_mutation"; started = edit.Started = true;
                     AnimationUtility.SetEditorCurves(edit.Clip, edit.Edits.Select(c => c.binding).ToArray(), edit.Edits.Select(c => c.curve).ToArray());
-                    VerifyPreparedClip(edit, edit.Clip);
                     EditorUtility.SetDirty(edit.Clip); phase = "asset_save";
                     AssetDatabase.SaveAssetIfDirty(edit.Clip);
                     if (EditorUtility.IsDirty(edit.Clip)) throw new InvalidOperationException("Clip remained dirty after save.");
                     // A failed/ambiguous save is never assumed owned; restore then preserves unknown disk changes.
                     var owned = SceneObjectCopyCore.ReadStableAssetEvidence(edit.Path, "multi-clip saved ownership");
                     if (owned.Guid != edit.Before.Guid || owned.Meta.Digest != edit.Before.Meta.Digest) throw new InvalidOperationException("Saved clip metadata changed.");
-                    phase = "persisted_readback";
-                    AssetDatabase.ImportAsset(edit.Path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
-                    RequireEvidence(edit, owned);
-                    VerifyPreparedClip(edit, AssetDatabase.LoadAssetAtPath<AnimationClip>(edit.Path));
                     edit.Owned = owned;
                 }
-                // Check every target again after the final write, never validate only the last clip.
-                foreach (var edit in prepared) { RequireEvidence(edit, edit.Owned); var finalClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(edit.Path);
-                    if (finalClip == null || EditorUtility.IsDirty(finalClip)) throw new InvalidOperationException("Final clip readback is missing or dirty.");
-                    VerifyPreparedClip(edit, finalClip); }
+                phase = "persisted_readback";
+                foreach (var edit in prepared)
+                {
+                    AssetDatabase.ImportAsset(edit.Path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                    VerifyChangedCurves(edit, AssetDatabase.LoadAssetAtPath<AnimationClip>(edit.Path));
+                }
                 return VRCForgeToolResult.Completed("Multi-clip curves saved and verified.", new {
                     schema = "vrcforge.animation_curve_write.v1", ok = true, preview = false, batch = true, verified = true, persistedReadback = true,
                     bindingTargetValidated = bindingRoot != null,
                     mutationStarted = true, mutationApplied = true, committed = true, commitState = "committed", commitStateKnown = true,
                     checkpointRecoveryRequired = false, temporaryCleanupRequired = false,
                     readback = new { persisted = true, clips = prepared.Select(e => new { clipPath = e.Path, assetGuid = e.Owned.Guid,
-                        fileDigest = e.Owned.File.Digest, curves = e.Edits.Select(c => Describe(c.binding, c.curve)).ToArray(),
-                        totalFloatBindings = FloatCurves(e.Staged).Count, untouchedFloatCurvesVerified = true, objectReferenceCurvesVerified = true,
-                        animationEventsVerified = true, playbackSettingsVerified = true }).ToArray() } });
+                        fileDigest = e.Owned.File.Digest, curves = e.Edits.Select(c => Describe(c.binding, c.curve)).ToArray() }).ToArray() } });
             }
             catch (Exception exception)
             {

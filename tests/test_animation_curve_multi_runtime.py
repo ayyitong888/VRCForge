@@ -21,7 +21,7 @@ def test_actual_multi_clip_validation_and_owned_restore(tmp_path):
     newtonsoft = compiler.parents[2] / "Newtonsoft.Json.dll"
     source = (ROOT / "Assets/VRCForge/Editor/Generic/UnityAnimationCurveBatch.cs").read_text(encoding="utf-8")
     original = (ROOT / "Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs").read_text(encoding="utf-8-sig")
-    selected = [method(source, sig) for sig in ("internal static JArray ValidateClips", "internal static JArray ValidateEnvelope", "private static void RequireEvidence", "private static bool RestorePreparedClips")]
+    selected = [method(source, sig) for sig in ("internal static JArray ValidateClips", "internal static JArray ValidateEnvelope", "private static void CheckSnapshotBudget", "private static void RequireEvidence", "private static bool RestorePreparedClips")]
     runner = r'''
     static int failures;
     static void Check(bool ok,string name){Console.WriteLine((ok?"PASS ":"FAIL ")+name);if(!ok)failures++;}
@@ -36,6 +36,13 @@ def test_actual_multi_clip_validation_and_owned_restore(tmp_path):
       ((JArray)a["clips"])[1]=Row("Assets/B.anim");a["clipPath"]="Assets/C.anim";Check(Reject(()=>ValidateClips(a)),"mixed single rejects");a.Remove("clipPath");
       ((JObject)a["clips"][1]["curves"][0])["keys"]=new JArray();Check(Reject(()=>ValidateClips(a)),"invalid final curve preflight rejects");
       Directory.CreateDirectory("Assets");
+      using(var f=File.Create("Assets/A.anim"))f.SetLength(MaxSnapshotBytes / 2);
+      using(var f=File.Create("Assets/B.anim"))f.SetLength(MaxSnapshotBytes / 2 + 1);
+      var budgetRows=new JArray(Row("Assets/A.anim"),Row("Assets/B.anim"));
+      Check(Reject(()=>CheckSnapshotBudget(budgetRows)),"aggregate snapshot budget rejects oversize before reading");
+      using(var f=File.OpenWrite("Assets/B.anim"))f.SetLength(MaxSnapshotBytes / 2);
+      Check(!Reject(()=>CheckSnapshotBudget(budgetRows)),"aggregate snapshot budget permits exact limit");
+
       var one=Saved("Assets/A.anim","before-A","owned-A");var two=Saved("Assets/B.anim","before-B","owned-B");
       Check(RestorePreparedClips(new[]{one,two})&&File.ReadAllText(one.Path)=="before-A"&&File.ReadAllText(two.Path)=="before-B","later failure restores every owned saved clip");
       one=Saved("Assets/A.anim","before-A","owned-A");two=Saved("Assets/B.anim","before-B","owned-B");File.WriteAllText(two.Path,"external-B");
@@ -67,6 +74,7 @@ public static class SceneObjectCopyCore{
  public static bool StableAssetEvidenceMatches(StableAssetEvidence a,StableAssetEvidence b,bool strict)=>a.Guid==b.Guid&&a.File.Digest==b.File.Digest&&a.Meta.Digest==b.Meta.Digest;
 }
 public class Probe{
+ private const int MaxSnapshotBytes=64*1024*1024;
  private static void VerifyPreparedClip(PreparedClip e,AnimationClip a){if(EditorUtility.UnknownMemory)throw new InvalidOperationException("external dirty memory");}
  private class PreparedClip{internal string Path;internal StableAssetEvidence Before,Owned;internal byte[] Bytes;internal bool Started;}
 '''
@@ -82,4 +90,4 @@ public class Probe{
     (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8")
     result=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30,cwd=tmp_path)
     assert result.returncode==0,result.stdout+result.stderr
-    assert result.stdout.count("PASS ")==12
+    assert result.stdout.count("PASS ")==14

@@ -403,7 +403,9 @@ namespace VRCForge.Editor
             string assetPath,
             string label,
             Action<string, string> whileHandlesHeldProbe = null,
-            bool includeContentDigests = true)
+            bool includeContentDigests = true,
+            int? maxFileBytes = null,
+            Action<byte[]> captureFileBytes = null)
         {
             var absolutePath = ToAbsoluteAssetPath(assetPath);
             var metaPath = absolutePath + ".meta";
@@ -428,15 +430,18 @@ namespace VRCForge.Editor
                     RejectProjectPathReparsePoints(absolutePath);
                     RejectProjectPathReparsePoints(metaPath);
                     var fileBefore = ReadFileHandleEvidence(fileStream, absolutePath, label);
+                    if (maxFileBytes.HasValue && fileBefore.Length > (ulong)maxFileBytes.Value)
+                        throw new SceneObjectCopyException(label + " exceeds the remaining batch size.");
                     var metaBefore = ReadFileHandleEvidence(metaStream, metaPath, label + " metadata");
                     whileHandlesHeldProbe?.Invoke(absolutePath, metaPath);
 
                     fileStream.Position = 0;
                     string fileDigest = string.Empty;
+                    var fileBytes = captureFileBytes == null ? null : ReadBoundedStream(fileStream, maxFileBytes.Value, label);
                     if (includeContentDigests)
                     {
                         using (var sha256 = SHA256.Create())
-                            fileDigest = Hex(sha256.ComputeHash(fileStream));
+                            fileDigest = Hex(fileBytes == null ? sha256.ComputeHash(fileStream) : sha256.ComputeHash(fileBytes));
                     }
                     metaStream.Position = 0;
                     var metaBytes = ReadBoundedStream(metaStream, 1024 * 1024, label + " metadata");
@@ -464,6 +469,7 @@ namespace VRCForge.Editor
                         throw new SceneObjectCopyException(
                             "A required project asset changed while its evidence was read.");
                     }
+                    captureFileBytes?.Invoke(fileBytes);
                     return new StableAssetEvidence
                     {
                         Guid = databaseGuid,
