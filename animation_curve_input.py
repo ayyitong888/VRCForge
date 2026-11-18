@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
+from pathlib import PurePosixPath
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -74,3 +76,62 @@ def expand_animation_curve_sets(params: dict[str, Any]) -> dict[str, Any]:
     else:
         result["curves"] = clips[0]["curves"]
     return result
+
+
+def approved_clip_files(arguments: dict[str, Any], evidence: Any) -> list[dict[str, Any]]:
+    """Preserve the first Core preview evidence for the exact requested clip set."""
+    clips = arguments.get("clips")
+    if isinstance(clips, list):
+        requested = [clip.get("clipPath") for clip in clips if isinstance(clip, dict)]
+        if len(requested) != len(clips):
+            raise ValueError("The approved curve request has an invalid clip list.")
+    else:
+        requested = [arguments.get("clipPath") or arguments.get("clip_path")]
+    if not isinstance(evidence, list) or not 1 <= len(evidence) <= 32 or len(evidence) != len(requested):
+        raise ValueError("The approved curve preview did not identify an exact clip set.")
+    paths: set[str] = set()
+    guids: set[str] = set()
+    approved = []
+    for request, item in zip(requested, evidence):
+        if not isinstance(request, str) or not isinstance(item, dict):
+            raise ValueError("The approved curve preview returned an invalid clip.")
+        path = request.strip().replace("\\", "/")
+        if (item.get("clipPath") != path or not path.startswith("Assets/")
+                or PurePosixPath(path).suffix.casefold() != ".anim"
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or path.casefold() in paths):
+            raise ValueError("The approved curve preview returned a different clip path.")
+        paths.add(path.casefold())
+        exists = item.get("exists")
+        if type(exists) is not bool or (isinstance(clips, list) and not exists):
+            raise ValueError("The approved curve preview did not identify a saved clip.")
+        record = {"clipPath": path, "exists": exists}
+        if exists:
+            guid = item.get("assetGuid")
+            digest = item.get("fileDigest")
+            version = item.get("fileVersion")
+            if (not isinstance(guid, str) or not re.fullmatch(r"[0-9a-f]{32}", guid) or guid in guids
+                    or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                    or not isinstance(version, str) or (version and not re.fullmatch(r"[0-9]+(?::[0-9]+){3}", version))):
+                raise ValueError("The approved curve preview returned invalid clip file evidence.")
+            guids.add(guid)
+            record.update(assetGuid=guid, fileDigest=digest, fileVersion=version)
+        approved.append(record)
+    return approved
+
+
+CORE_TOOL_NAME = "vrc_write_animation_curve"
+
+
+def build_preview_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    expanded = expand_animation_curve_sets(arguments)
+    fields = ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA["properties"].keys() - {"projectPath", "executionTarget", "curveSets"}
+    return {**{key: deepcopy(value) for key, value in expanded.items() if key in fields}, "preview": True}
+
+
+def bind_authoritative_preview(wrapper: dict[str, Any], payload: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(payload, dict) or payload.get("ok") is not True or payload.get("preview") is not True:
+        raise ValueError("The Core did not return saved clip evidence for approval.")
+    arguments = build_preview_arguments(wrapper["arguments"])
+    files = approved_clip_files(arguments, payload.get("clipFiles"))
+    return {**wrapper, "arguments": {**arguments, "expectedClipFiles": files, "preview": False}}, payload

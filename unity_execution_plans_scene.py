@@ -302,7 +302,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
                 "expectedSourceObjectId", "expectedSourceHierarchyDigest", "expectedSourceSceneFileDigest",
                 "expectedSourceSceneFileIdentity", "expectedSourceSceneMetaDigest", "expectedSourceSceneMetaIdentity",
                 "expectedTargetSceneGuid", "expectedTargetSceneHandle", "expectedTargetParentObjectId",
-                "expectedTargetParentHierarchyDigest", "expectedTargetSceneFileDigest", "expectedTargetSceneFileIdentity",
+                "expectedTargetParentHierarchyDigest", "expectedTargetSceneFileDigest", "expectedTargetSceneFileVersion", "expectedTargetSceneFileIdentity",
                 "expectedTargetSceneMetaDigest", "expectedTargetSceneMetaIdentity", "expectedDestinationPath",
                 "expectedPreviewDigest",
             )
@@ -335,5 +335,9 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
     if target_name in primitive_tools:
         if target_name == "vrcforge_write_animation_curve":
             params = expand_animation_curve_sets(params)
+            request = _avatar_primitive(params)
+            if "expectedClipFiles" in params:
+                request["expectedClipFiles"] = params["expectedClipFiles"]
+            return [(primitive_tools[target_name], request)]
         return [(primitive_tools[target_name], _avatar_primitive(params))]
     raise ValueError(f"Unsupported scene execution-plan target: {target_name}")

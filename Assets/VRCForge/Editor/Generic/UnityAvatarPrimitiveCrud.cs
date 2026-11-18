@@ -989,6 +989,46 @@ namespace VRCForge.Editor
             });
         }
 
+        internal static JObject ObserveClipFile(JObject arguments, string path, AnimationClip clip, bool preview,
+            string knownDigest = null)
+        {
+            const string changedMessage = "该文件在预览后被修改";
+            var expectedFiles = arguments["expectedClipFiles"] as JArray;
+            var expected = expectedFiles?.OfType<JObject>().SingleOrDefault(row => row["clipPath"]?.Value<string>() == path);
+            if (!preview && expectedFiles != null && expected == null)
+                throw new InvalidOperationException(changedMessage);
+            if (clip != null && EditorUtility.IsDirty(clip))
+                throw new InvalidOperationException(preview ? "Save or discard existing clip edits before preview." : changedMessage);
+            var exists = clip != null;
+            if (!preview && expected == null) return null;
+            if (expected != null && expected["exists"]?.Value<bool?>() != exists)
+                throw new InvalidOperationException(changedMessage);
+            if (!exists)
+            {
+                if (SceneObjectCopyCore.AssetOrMetaExists(path))
+                    throw new InvalidOperationException(preview ? "The clip destination or metadata is occupied." : changedMessage);
+                return new JObject { ["clipPath"] = path, ["exists"] = false };
+            }
+
+            var guid = AssetDatabase.AssetPathToGUID(path);
+            if (expected != null && expected["assetGuid"]?.Value<string>() != guid)
+                throw new InvalidOperationException(changedMessage);
+            var absolute = SceneObjectCopyCore.ToAbsoluteAssetPath(path);
+            if (!File.Exists(absolute)) throw new InvalidOperationException(changedMessage);
+            using var stream = new FileStream(absolute, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var version = PreviewAssetFileVersion.Read(stream);
+            var expectedDigest = expected?["fileDigest"]?.Value<string>();
+            if (preview || string.IsNullOrEmpty(version) || expected?["fileVersion"]?.Value<string>() != version)
+            {
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                var digest = knownDigest ?? BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                if (!preview && expectedDigest != digest) throw new InvalidOperationException(changedMessage);
+                expectedDigest = digest;
+            }
+            return new JObject { ["clipPath"] = path, ["exists"] = true, ["assetGuid"] = guid,
+                ["fileVersion"] = version, ["fileDigest"] = expectedDigest };
+        }
+
         public class Parameters
         {
             [VRCForgeInput("Curve action: set_curve, delete_curve, or retarget_curve.", IsRequired = false)] public string action { get; set; } = "set_curve";
@@ -1008,6 +1048,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Optional animation keyframe array.", IsRequired = false)] public object[] keys { get; set; }
             [VRCForgeInput("Optional batch of up to 256 curves on this clip; mutually exclusive with single-curve fields. Supports at most 4096 keys and 512 KiB.", IsRequired = false)] public object[] curves { get; set; }
             [VRCForgeInput("Optional atomic batch of 1..32 existing clips, each clipPath and curves; total 4096 keys/512 KiB. Mutually exclusive with single clip fields.", IsRequired = false)] public object[] clips { get; set; }
+            [VRCForgeInput("Exact clip file states returned by the approved preview.", IsRequired = false)] public object[] expectedClipFiles { get; set; }
             [VRCForgeInput("Optional constant curve value.", IsRequired = false)] public float? constantFloat { get; set; }
         }
 
@@ -1041,6 +1082,7 @@ namespace VRCForge.Editor
                 var bindingRoot = ResolveBindingRoot(@params);
                 if (action != "delete_curve" && bindingRoot != null) ValidateBindingTarget(bindingRoot, binding);
                 var existingClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath);
+                var clipFile = ObserveClipFile(@params, clipPath, existingClip, preview);
                 if (existingClip == null && action == "set_curve")
                 {
                     clipPath = GeneratedAssetPaths.ValidateNewAssetPath(clipPath);
@@ -1125,7 +1167,7 @@ namespace VRCForge.Editor
                 }
                 if (preview)
                 {
-                    return VRCForgeToolResult.Completed($"Preview: would {action} on AnimationClip '{clipPath}'.", new { ok = true, preview = true, plan,
+                    return VRCForgeToolResult.Completed($"Preview: would {action} on AnimationClip '{clipPath}'.", new { ok = true, preview = true, plan, clipFiles = new JArray(clipFile),
                         bindingTargetValidated = action != "delete_curve" && bindingRoot != null });
                 }
 

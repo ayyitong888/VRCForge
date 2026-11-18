@@ -22844,59 +22844,18 @@ def prepare_authoritative_unity_checkpoint_sync(
                     "error": str(exc), "mutationStarted": False, "saved": False}
         return prepare_unity_checkpoint_sync(project_root, checkpoint_files=None)
 
-    if checkpoint_target == "vrcforge_write_animation_curve":
+    if checkpoint_target == "vrcforge_write_animation_curve" or nested_tool == "vrc_write_animation_curve":
+        from animation_curve_input import approved_clip_files
         from unity_planned_checkpoint import prepare_planned_asset_checkpoint
 
-        preview = ensure_dict(write_animation_curve_sync(arguments, preview=True))
-        raw_plan = preview.get("plan")
-        plan = ensure_dict(raw_plan)
-        asset_plan = plan if plan.get("clipPath") else preview
-        path = asset_plan.get("clipPath")
-        action = asset_plan.get("action")
-        if preview.get("ok") is not True or preview.get("preview") is not True:
+        request = ensure_dict(arguments.get("arguments")) if nested_tool else arguments
+        try:
+            clips = approved_clip_files(request, request.get("expectedClipFiles"))
+        except ValueError as exc:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
-                    "error": "The approved curve plan did not identify one exact clip asset.",
-                    "mutationStarted": False, "saved": False}
-        # Primitive previews and one-clip curve batches both identify one exact
-        # target with action + clipPath; the latter may create the asset, which
-        # prepare_planned_asset_checkpoint already snapshots as absent.
-        if (isinstance(path, str) and path.startswith("Assets/")
-                and action in {"set_curve", "delete_curve", "retarget_curve"}):
-            clip_paths = [path]
-        elif preview.get("batch") is True:
-            clips = preview.get("clips")
-            if not isinstance(clips, list) or not 1 <= len(clips) <= 32:
-                return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
-                        "error": "The approved curve batch did not identify a bounded exact clip set.",
-                        "mutationStarted": False, "saved": False}
-            clip_paths = []
-            asset_guids = set()
-            for clip in clips:
-                if not isinstance(clip, dict):
-                    clip_paths = []
-                    break
-                clip_path = clip.get("clipPath")
-                asset_guid = clip.get("assetGuid")
-                file_digest = clip.get("fileDigest")
-                if (not isinstance(clip_path, str) or not clip_path.startswith("Assets/")
-                        or not isinstance(asset_guid, str) or not asset_guid.strip()
-                        or not isinstance(file_digest, str) or not file_digest.strip()
-                        or clip_path.casefold() in {item.casefold() for item in clip_paths}
-                        or asset_guid.casefold() in asset_guids):
-                    clip_paths = []
-                    break
-                clip_paths.append(clip_path)
-                asset_guids.add(asset_guid.casefold())
-            if not clip_paths:
-                return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
-                        "error": "The approved curve batch did not identify one exact saved asset per clip.",
-                        "mutationStarted": False, "saved": False}
-        else:
-            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
-                    "error": "The approved curve plan did not identify one exact clip asset.",
-                    "mutationStarted": False, "saved": False}
+                    "error": str(exc), "mutationStarted": False, "saved": False}
         return prepare_planned_asset_checkpoint(
-            project_root, clip_paths, prepare=prepare_unity_checkpoint_sync,
+            project_root, [clip["clipPath"] for clip in clips], prepare=prepare_unity_checkpoint_sync,
         )
     if not nested_tool and PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
         # Shader tuning wrappers seal the real Core calls instead of exposing a
@@ -24329,11 +24288,28 @@ def write_avatar_descriptor_sync(params: dict[str, Any], preview: bool = False) 
     return payload
 
 
+def prepare_animation_curve_request(arguments: dict[str, Any], _caller_preview: Any):
+    from animation_curve_input import approved_clip_files
+
+    prepared = copy.deepcopy(arguments or {})
+    prepared.pop("expectedClipFiles", None)
+    preview = ensure_dict(write_animation_curve_sync(prepared, preview=True))
+    if preview.get("ok") is not True or preview.get("preview") is not True:
+        raise AgentGatewayError("The Core did not return saved clip evidence for approval.", status_code=409)
+    try:
+        prepared["expectedClipFiles"] = approved_clip_files(prepared, preview.get("clipFiles"))
+    except ValueError as exc:
+        raise AgentGatewayError(str(exc), status_code=409) from exc
+    return prepared, preview
+
+
 def write_animation_curve_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
     from animation_curve_input import expand_animation_curve_sets
 
     params = expand_animation_curve_sets(params or {})
     request = _avatar_primitive_request(params, preview=preview)
+    if not preview and "expectedClipFiles" in params:
+        request["expectedClipFiles"] = params["expectedClipFiles"]
     if "clips" not in request and not request.get("clipPath"):
         return {"ok": False, "error": "clipPath is required."}
     if "clips" not in request and "curves" not in request and not request.get("propertyName"):
@@ -29591,6 +29567,7 @@ def register_agent_gateway_tools() -> None:
         "Create, replace, delete, or retarget one AnimationClip binding, or atomically set up to 256 curves on one clip or 32 existing clips (4096 keys/512 KiB total). For shader Color/Vector animation, supply explicit curves for every component to preserve; alpha-only animation can leave RGB zero rather than inherit the material. See the input schema example; substitute inspected original values. Verified asset readback confirms stored curves, not runtime MaterialPropertyBlock values or transitions. Static material values are not runtime override values. When to use: exact single or batch curve authoring. When NOT to use: unbounded/new multi-clip creation, general workflow planning, or silent overwrite.",
         "medium",
         lambda params: write_animation_curve_sync(params, preview=False),
+        request_preparer=prepare_animation_curve_request,
     )
     register_write_handler(
         "vrcforge_manage_expression_parameters",

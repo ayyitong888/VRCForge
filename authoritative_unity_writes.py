@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from animation_curve_input import (
+    CORE_TOOL_NAME as ANIMATION_CURVE_TOOL,
+    bind_authoritative_preview as bind_animation_curve_preview,
+    build_preview_arguments as build_animation_curve_preview_arguments,
+)
 from material_shader_assignment import (
     MaterialShaderAssignmentError,
     TOOL_NAME as MATERIAL_SHADER_ASSIGNMENT_TOOL,
@@ -184,6 +189,15 @@ def _scene_preview_builder(tool_name: str) -> PreviewBuilder:
 
 
 _SPECS = {
+    ANIMATION_CURVE_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=ANIMATION_CURVE_TOOL,
+        request_error="Animation curve arguments are required.",
+        bridge_error="Animation curve preview could not be verified against the current project.",
+        receipt_error="Animation curve preview returned invalid clip file evidence.",
+        domain_error=ValueError,
+        build_preview=build_animation_curve_preview_arguments,
+        bind_preview=bind_animation_curve_preview,
+    ),
     MATERIAL_SHADER_ASSIGNMENT_TOOL: AuthoritativeUnityWriteSpec(
         tool_name=MATERIAL_SHADER_ASSIGNMENT_TOOL,
         request_error="Material shader arguments are required.",
