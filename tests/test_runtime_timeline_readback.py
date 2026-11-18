@@ -173,8 +173,10 @@ def test_app_broadcast_reuses_persisted_terminal_without_mutating_response(tmp_p
     import dashboard_server
     ledger, _ = make_ledger(tmp_path)
     identity = {"sessionId": "session", "turnId": "turn", "clientTurnId": "client"}
+    memory = {"id": "mem-language", "text": "Use Japanese for the release notes."}
     terminal = ledger.append({**identity, "event": "runtime_turn_completed", "status": terminal_status,
         **({"continuationEvent": {**identity, "schema": "vrcforge.runtime_turn_event.v1",
+            "memoryUsage": [{**memory, "internal": "omitted"}],
             "continuationSource": "foreground_completed", "plan": {"nextStep": "done", "reply": "Finished"}}}
            if terminal_status == "completed" else {})})
     response = {**identity, "ok": True, "plan": {"nextStep": "done", "reply": "Finished"}}
@@ -190,6 +192,10 @@ def test_app_broadcast_reuses_persisted_terminal_without_mutating_response(tmp_p
     returned = asyncio.run(dashboard_server.app_agent_runtime_message(
         dashboard_server.AgentRuntimeMessageRequest(message="Finish", session_id="session", client_turn_id="client")))
     event = next(payload for name, payload in published if name == "agentRuntimeTurn")
+    if terminal_status == "completed":
+        assert event.get("memoryUsage") == [memory]
+    else:
+        assert "memoryUsage" not in event
     assert event == (project_runtime_turn_event(terminal["continuationEvent"])
                      if terminal_status == "completed" else response)
     assert returned is response and "continuationSource" not in response and "schema" not in response

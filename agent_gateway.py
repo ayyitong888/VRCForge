@@ -9370,6 +9370,8 @@ class AgentGateway:
                 message, first_plan, last_plan, steps
             )
         )
+        memory_usage = top_plan.pop("memoryUsage", [])
+        attributed_reply = str(top_plan.get("reply") or "").strip() if memory_usage else ""
         actual_response_model = str(
             params["_runtimeFailureProgress"].get("model")
             or last_plan.get("model") or first_plan.get("model") or ""
@@ -9602,12 +9604,14 @@ class AgentGateway:
                 phase="final_answer",
             )
 
+        memory_attribution = {"memoryUsage": memory_usage} if attributed_reply and final_reply == attributed_reply else {}
         turn = {
             "id": turn_id,
             "createdAt": now,
             "message": message,
             "observe": summarize_params(observe),
             "plan": top_plan,
+            **memory_attribution,
         }
         if actual_response_model:
             turn["model"] = actual_response_model
@@ -9709,6 +9713,7 @@ class AgentGateway:
                 "plan": top_plan,
                 "timeline": timeline,
                 "contextUsage": context_usage,
+                **memory_attribution,
                 **stop_flags,
                 **({"model": actual_response_model} if actual_response_model else {}),
             }
@@ -9747,6 +9752,7 @@ class AgentGateway:
             "observe": observe,
             "plan": top_plan,
             "task": ensure_dict(top_plan.get("task")) or task_loop.snapshot(),
+            **memory_attribution,
             **stop_flags,
         }
         if ensure_dict(terminal_record).get("completedAt"):
@@ -9961,7 +9967,7 @@ class AgentGateway:
             if str(goal.get("status") or "") in {"active", "paused"}
         ]
         memory_preferences = self.memory_preferences()
-        automatic_memory = {"summary": "", "sources": []}
+        automatic_memory = {"summary": "", "sources": [], "items": []}
         if memory_preferences["memoryEnabled"] and memory_preferences["crossSessionEnabled"]:
             pipeline = AutomaticMemoryPipeline(
                 self.audit_dir / "memory-review" / "automatic-memory.json"
@@ -9970,17 +9976,22 @@ class AgentGateway:
             project_memory = pipeline.read(
                 MemoryScope("project", project_scope_key(project_root, require_existing=False), project_root)
             ) if project_root else {}
-            summaries = []
-            if user_memory.get("summary"):
-                summaries.append("User memory:\n" + user_memory["summary"])
-            if project_memory.get("summary"):
-                summaries.append("Project memory:\n" + project_memory["summary"])
+            summaries = [
+                {
+                    "memoryId": f"summary:{scope}",
+                    "scope": scope,
+                    "text": record["summary"],
+                }
+                for scope, record in (("user", user_memory), ("project", project_memory))
+                if record.get("summary")
+            ]
             # Conversation reads retain their existing scope. Global user
             # preferences apply in projects, but general-chat links do not.
             reachable_memory = project_memory if project_root else user_memory
             source_key = "sourceId" if project_root else "chatId"
             automatic_memory = {
-                "summary": "\n\n".join(summaries),
+                "summary": "\n\n".join(f"{row['scope'].title()} memory:\n{row['text']}" for row in summaries),
+                "items": summaries,
                 "sources": [{"chatId": chat_id} for chat_id in dict.fromkeys(
                     item[source_key] for item in reachable_memory.get("sources", []) if item.get(source_key)
                 )],

@@ -662,6 +662,7 @@ export type AgentRuntimeResponse = {
   };
   reasoning?: AgentReasoningTrace;
   contextUsage?: AgentContextUsage;
+  memoryUsage?: { id: string; text: string }[];
   contextCompaction?: {
     schema: "vrcforge.runtime_context_compaction.v1" | string;
     applied: boolean;

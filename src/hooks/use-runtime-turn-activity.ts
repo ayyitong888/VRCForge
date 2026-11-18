@@ -194,6 +194,7 @@ export function runtimeEventFromExactResponse(state: AgentTurnResponseRecovery, 
     unityWriteMayHaveExecuted: response.unityWriteMayHaveExecuted,
     sessionId: identity.sessionId, clientTurnId: identity.clientTurnId, turnId,
     plan: response.plan, timeline: response.timeline, contextUsage: response.contextUsage,
+    memoryUsage: response.memoryUsage,
     consumedSteerInputIds: response.consumedSteerInputIds, model: response.model,
     completedAt: response.completedAt, startedAt: response.startedAt,
   };

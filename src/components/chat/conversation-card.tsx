@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Brain,
   Check,
   ChevronRight,
   Copy,
@@ -11,10 +12,10 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
-import type { AgentApproval, AgentQuestion } from "../../lib/api";
+import type { AgentApproval, AgentQuestion, AgentRuntimeResponse } from "../../lib/api";
 import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import { agentRelaySource, displayedUserMessageText } from "../../lib/chat-relay-presentation";
@@ -533,6 +534,7 @@ export function ConversationCard({
           ) : null}
           <MessageActions
             createdAt={assistantReplyTimestamp(item)}
+            memoryUsage={response.memoryUsage}
             onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
             onRetry={canRetry && response.continuationSource !== "foreground_interrupted" ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
@@ -784,6 +786,7 @@ function MessageActions({
   align = "left",
   createdAt,
   metadata,
+  memoryUsage,
   onCopy,
   onRetry,
   onEdit,
@@ -794,6 +797,7 @@ function MessageActions({
   align?: "left" | "right";
   createdAt?: string | number;
   metadata?: ReactNode;
+  memoryUsage?: AgentRuntimeResponse["memoryUsage"];
   onCopy?: () => void;
   onRetry?: () => void;
   onEdit?: () => void;
@@ -802,12 +806,15 @@ function MessageActions({
   saveOperationClientTurnId?: string;
 }) {
   const { t } = useTranslation();
+  const [memoryExpanded, setMemoryExpanded] = useState(false);
+  const memoryPanelId = useId();
+  const memoryLabel = memoryUsage?.length ? t("chat.memoryUsage", { count: memoryUsage.length }) : "";
   const timestamp = typeof createdAt === "number" ? createdAt : parseMessageTimestamp(createdAt);
   const timeLabel = formatLocalMessageTime(timestamp, i18n.language, align === "left");
   const time = timestamp !== undefined && timeLabel ? (
     <time dateTime={new Date(timestamp).toISOString()} className="shrink-0 px-1 text-xs text-muted-foreground/80">{timeLabel}</time>
   ) : null;
-  const hasActions = Boolean(metadata || time || onCopy || onRetry || onEdit || onSaveAsSkill);
+  const hasActions = Boolean(metadata || time || onCopy || onRetry || onEdit || onSaveAsSkill || memoryLabel);
   if (!hasActions) {
     return null;
   }
@@ -817,6 +824,7 @@ function MessageActions({
       className={cn(
         "order-last mt-1 flex items-center gap-1 px-1 text-muted-foreground",
         align === "right" ? "justify-end" : "justify-start",
+        memoryExpanded && "flex-wrap",
       )}
     >
       {align === "right" ? time : null}
@@ -868,7 +876,32 @@ function MessageActions({
           <Pencil className="h-3.5 w-3.5" />
         </button>
       ) : null}
+      {memoryUsage?.length ? (
+        <button
+          type="button"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={() => setMemoryExpanded((expanded) => !expanded)}
+          title={memoryLabel}
+          aria-label={memoryLabel}
+          aria-expanded={memoryExpanded}
+          aria-controls={memoryPanelId}
+        >
+          <Brain className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      ) : null}
       {align === "left" ? time : null}
+      {memoryUsage?.length ? (
+        <div id={memoryPanelId} hidden={!memoryExpanded} className="min-w-0 basis-full">
+          {memoryExpanded ? (
+            <div className="w-fit max-w-full rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
+              <p className="font-medium text-foreground">{memoryLabel}</p>
+              <ul className="mt-1 list-disc space-y-1 pl-4 [overflow-wrap:anywhere]">
+                {memoryUsage.map(({ id, text }) => <li key={id} className="whitespace-pre-wrap">{text}</li>)}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

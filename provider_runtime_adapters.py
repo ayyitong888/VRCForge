@@ -92,6 +92,7 @@ _TOOL_SCHEMA = {
             },
             "summary": {"type": "string"},
             "reply": {"type": "string"},
+            "memory_ids": {"type": "array", "items": {"type": "string"}},
             "skill_tool": {"type": "string"},
             "skill_params": {"type": "object", "additionalProperties": True},
             "shell_command": {"type": "string"},
@@ -380,6 +381,7 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
             "action",
             "summary",
             "reply",
+            "memory_ids",
             "skill_tool",
             "skill_params",
             "shell_command",
@@ -413,6 +415,11 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
         for params_key in ("skill_params", "shell_params", "write_params"):
             if params_key in arguments and not isinstance(arguments[params_key], dict):
                 raise RuntimeError(f"{self._provider_label} planner action is invalid.")
+        if "memory_ids" in arguments and (
+            not isinstance(arguments["memory_ids"], list)
+            or not all(isinstance(item, str) for item in arguments["memory_ids"])
+        ):
+            raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         if "completion_claim" in arguments:
             claim = arguments["completion_claim"]
             if not isinstance(claim, dict) or set(claim) - {"satisfied", "evidence_action_ids"}:

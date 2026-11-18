@@ -318,6 +318,15 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
     context_usage = _project_context_usage(payload.get("contextUsage"))
     if context_usage is not None:
         result["contextUsage"] = context_usage
+    memory_usage = payload.get("memoryUsage")
+    if isinstance(memory_usage, list):
+        references = [
+            {"id": item["id"], "text": item["text"]}
+            for item in memory_usage
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str) and isinstance(item.get("text"), str)
+        ]
+        if references:
+            result["memoryUsage"] = references
     timeline = payload.get("timeline")
     if isinstance(timeline, list):
         projected_timeline = []

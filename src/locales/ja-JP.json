@@ -965,6 +965,7 @@
     "editQueuedMessage": "メッセージを編集",
     "tempChatDesc": "一時チャットでもフルエージェント機能（スキル / Shell / Unity ツール）が使えますが、プロジェクトには保存されません。",
     "copyMessage": "コピー",
+    "memoryUsage": "{{count}} 件のメモリを使用",
     "editMessage": "編集",
     "retryMessage": "再試行",
     "regenerateMessage": "再生成",

@@ -971,6 +971,7 @@
     "editQueuedMessage": "编辑消息",
     "tempChatDesc": "临时对话同样拥有完整智能体能力（技能 / Shell / Unity 工具），只是不归档到项目下。",
     "copyMessage": "复制",
+    "memoryUsage": "使用了 {{count}} 条记忆",
     "editMessage": "编辑",
     "retryMessage": "重试",
     "regenerateMessage": "重生成",

@@ -973,6 +973,7 @@
     "editQueuedMessage": "Edit message",
     "tempChatDesc": "Quick chats have full agent capabilities (skills / Shell / Unity tools) but are not archived under a project.",
     "copyMessage": "Copy",
+    "memoryUsage": "Memories used ({{count}})",
     "editMessage": "Edit",
     "retryMessage": "Retry",
     "regenerateMessage": "Regenerate",

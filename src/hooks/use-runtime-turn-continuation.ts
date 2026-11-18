@@ -83,6 +83,7 @@ export type RuntimeTurnEvent = {
   model?: string;
   consumedSteerInputIds?: string[];
   contextUsage?: AgentRuntimeResponse["contextUsage"];
+  memoryUsage?: AgentRuntimeResponse["memoryUsage"];
   plan?: {
     summary?: string;
     reply?: string;
@@ -412,6 +413,7 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
     model: event.model?.trim() || undefined,
     consumedSteerInputIds: event.consumedSteerInputIds?.filter((id) => typeof id === "string" && /^[A-Za-z0-9_.:-]{1,240}$/.test(id)).slice(0, 256),
     contextUsage: event.contextUsage,
+    memoryUsage: event.memoryUsage,
     observe: {},
     plan: {
       summary: event.plan?.summary || "",

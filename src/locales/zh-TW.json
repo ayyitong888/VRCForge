@@ -965,6 +965,7 @@
     "editQueuedMessage": "編輯訊息",
     "tempChatDesc": "臨時對話同樣擁有完整智能體能力（技能 / Shell / Unity 工具），只是不歸檔到專案下。",
     "copyMessage": "複製",
+    "memoryUsage": "使用了 {{count}} 條記憶",
     "editMessage": "編輯",
     "retryMessage": "重試",
     "regenerateMessage": "重新生成",
