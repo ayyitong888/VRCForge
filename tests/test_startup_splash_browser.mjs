@@ -26,6 +26,7 @@ export async function createStartupBrowserFixture() {
       debug,
       viewport = { width: 1120, height: 800 },
       beforeNavigate,
+      expectLoadFailure = false,
     } = {}) {
       const page = await browser.newPage({ viewport, reducedMotion });
       await page.route("**/*", (route) => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
@@ -85,6 +86,10 @@ export async function createStartupBrowserFixture() {
       await beforeNavigate?.(page);
       const url = debug === undefined ? origin : `${origin}/?startupDebug=${debug}`;
       await page.goto(url, { waitUntil: "domcontentloaded" });
+      if (expectLoadFailure) {
+        await page.waitForFunction(() => document.documentElement.dataset.vrcforgeStartupShell === "error");
+        return page;
+      }
       await page.waitForFunction(() => document.documentElement.dataset.vrcforgeShell === "ready");
       if (desktop && debug === undefined) await page.waitForFunction(() => window.startupReplay.invoked > 0);
       return page;
@@ -214,7 +219,8 @@ async function runTests() {
     });
     await expectPhase(exited, "error");
     assert.equal(await exited.locator(splash).getAttribute("data-startup-reason"), "exited");
-    assert.match(await exited.locator(splash).innerText(), /code 7/);
+    assert.doesNotMatch(await exited.locator(splash).innerText(), /code 7|fixture\/logs/);
+    assert.match(await exited.locator(splash).innerText(), /restart the VRCForge service/);
     assertDuration(await exited.evaluate(() => window.startupReplay.phases.find(({ phase }) => phase === "error").at) - exitedAt,
       0, 350, "process exit surfaces immediately");
     const invoked = await exited.evaluate(() => window.startupReplay.invoked);
@@ -223,6 +229,28 @@ async function runTests() {
     await exited.evaluate(() => window.startupReplay.send({ ok: true, status: "ready" }));
     await expectDismissed(exited);
     await exited.close();
+
+    const diagnostics = await openStartup({ beforeNavigate: page =>
+      page.addInitScript(() => localStorage.setItem("vrcforge_developer_options_enabled", "true")) });
+    await diagnostics.evaluate(() => window.startupReplay.send({
+      status: "exited", error: "Fixture process exited with code 7", logDir: "fixture/logs",
+    }));
+    await expectPhase(diagnostics, "error");
+    assert.match(await diagnostics.locator(splash).innerText(), /code 7/);
+    assert.match(await diagnostics.locator(splash).innerText(), /fixture\/logs/);
+    await diagnostics.close();
+
+    const failedModule = "**/src/App.tsx*";
+    const failed = await openStartup({ enabled: false, desktop: false, expectLoadFailure: true,
+      beforeNavigate: page => page.route(failedModule, route => route.abort()) });
+    const recovery = failed.getByRole("alertdialog");
+    await recovery.getByRole("button", { name: "Retry" }).waitFor();
+    assert.match(await recovery.innerText(), /VRCForge could not continue/);
+    assert.doesNotMatch(await recovery.innerText(), /https?:|imported module/);
+    await failed.unroute(failedModule);
+    await recovery.getByRole("button", { name: "Retry" }).click();
+    await failed.waitForFunction(() => document.documentElement.dataset.vrcforgeShell === "ready");
+    await failed.close();
 
     const listenerFailure = await openStartup({ listenerFails: true });
     await expectPhase(listenerFailure, "waiting");

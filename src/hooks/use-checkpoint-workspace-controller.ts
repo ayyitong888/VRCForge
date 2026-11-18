@@ -239,9 +239,6 @@ export function useCheckpointWorkspaceController({
   }
 
   async function resolveRecovery(recoveryId: string) {
-    if (!window.confirm("Mark this interrupted write as resolved without restoring its checkpoint?")) {
-      return;
-    }
     setRecoveryBusyId(`resolve:${recoveryId}`);
     setRecoveryMessage("");
     setError("");
@@ -294,10 +291,9 @@ export function useCheckpointWorkspaceController({
     }
   }
 
-  async function renameAdjustment(checkpoint: AdjustmentCheckpoint) {
+  async function renameAdjustment(checkpoint: AdjustmentCheckpoint, nextLabel: string) {
     const currentLabel = checkpoint.label || checkpoint.id;
-    const nextLabel = window.prompt("Checkpoint label", currentLabel);
-    if (nextLabel === null || nextLabel.trim() === currentLabel) {
+    if (nextLabel.trim() === currentLabel) {
       return;
     }
     setAdjustmentBusyId(checkpoint.id);
@@ -381,9 +377,6 @@ export function useCheckpointWorkspaceController({
   }
 
   async function overwriteAdjustment(checkpointId: string) {
-    if (!window.confirm("Overwrite this adjustment checkpoint with the current project state?")) {
-      return;
-    }
     setAdjustmentBusyId(`overwrite:${checkpointId}`);
     setAdjustmentMessage("");
     setError("");
@@ -400,9 +393,6 @@ export function useCheckpointWorkspaceController({
   }
 
   async function removeAdjustment(checkpointId: string) {
-    if (!window.confirm("Delete this adjustment checkpoint?")) {
-      return;
-    }
     setAdjustmentBusyId(`delete:${checkpointId}`);
     setAdjustmentMessage("");
     setError("");

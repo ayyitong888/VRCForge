@@ -66,8 +66,12 @@ export function SupportFeedbackPanel({ endpoint }: { endpoint: string }) {
       setMessage(t("settings.supportFeedbackCopyUnavailable"));
       return;
     }
-    await navigator.clipboard.writeText(preview);
-    setMessage(t("settings.supportFeedbackCopied"));
+    try {
+      await navigator.clipboard.writeText(preview);
+      setMessage(t("settings.supportFeedbackCopied"));
+    } catch {
+      setMessage(t("settings.supportFeedbackCopyUnavailable"));
+    }
   }
 
   function openIssuePage() {

@@ -1,5 +1,6 @@
 import { AlertTriangle, ChevronRight, Copy, Download, Loader2, RefreshCw, Settings, Shield, Wrench } from "lucide-react";
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
+import { ActionDialog } from "../ui/action-dialog";
 import { useTranslation } from "react-i18next";
 import type { ChatRecoveryMarker, DoctorCheck, DoctorFixMode, DoctorFixResult, DoctorReport, DoctorSkillTriageRow } from "../../lib/api";
 import { cn } from "../../lib/utils";
@@ -298,6 +299,7 @@ function DoctorCheckRow({
   const fixingAny = Boolean(fixingCheckId);
   const canFix = check.status !== "ok" && Boolean(check.fixable);
   const canForce = canFix && (check.fixModes || []).includes("force");
+  const [confirmForce, setConfirmForce] = useState(false);
   const skillRows = check.id === "skills.registry" ? doctorSkillRows(check.detail) : [];
   return (
     <details ref={detailRef} open={openByDefault} className="group overflow-hidden rounded-md border border-border/70 bg-background/70">
@@ -320,10 +322,14 @@ function DoctorCheckRow({
               {t("doctor.safeFix")}
             </Button>
             {canForce ? (
-              <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onFix(check.id, "force")} disabled={fixingAny}>
+              <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => setConfirmForce(true)} disabled={fixingAny}>
                 {t("doctor.forceFix")}
               </Button>
             ) : null}
+            {confirmForce && canForce && !fixingAny && <ActionDialog onClose={() => setConfirmForce(false)} action={{
+                title: check.title, description: t("doctor.forceConfirmBody"), confirmLabel: t("doctor.forceFix"), destructive: true,
+              onConfirm: () => onFix(check.id, "force"),
+            }} />}
           </div>
         ) : null}
         <DataLine label={t("doctor.message")} value={check.message || "-"} />

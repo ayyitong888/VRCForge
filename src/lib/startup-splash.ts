@@ -15,7 +15,7 @@ export type BackendStartupStatus = {
 type Phase = "drawing" | "coloring" | "waiting" | "holding" | "leaving" | "error";
 type Failure = "timeout" | "exited" | "error";
 type Copy = (key: string, variables?: Record<string, string | number>) => string;
-type Workspace = { retry: () => void; copy: Copy };
+type Workspace = { retry: () => void; copy: Copy; developerOptionsEnabled: boolean };
 
 const simulation = import.meta.env.DEV ? new URLSearchParams(location.search).get("startupDebug") : null;
 const readyTimes = new Map([["0.2", 200], ["1.5", 1500], ["3.5", 3500], ["8", 8000]]);
@@ -34,6 +34,33 @@ export function dismissStartupSplash(): void {
   splash = undefined;
   document.querySelector("main[data-vrcforge-startup-shell]")?.remove();
   document.getElementById("root")?.removeAttribute("inert");
+}
+
+// The main stylesheet, React or the locale bundle may have failed to load.
+// The opening screen and its styles are already in the first document.
+export function showWorkspaceLoadFailure() {
+  splash?.stop();
+  splash = undefined;
+  const shell = document.querySelector<HTMLElement>("main[data-vrcforge-startup-shell]")!;
+  const panel = shell.querySelector<HTMLElement>(".startup-failure")!;
+  const title = panel.querySelector("h1")!;
+  const detail = panel.querySelector("p")!;
+  const retry = panel.querySelector("button")!;
+  title.textContent = "VRCForge 无法显示工作区";
+  detail.textContent = "请重试。若仍无法打开，请从系统托盘退出 VRCForge 后重新启动。";
+  retry.textContent = "重试";
+  retry.onclick = () => window.location.reload();
+  shell.dataset.startupPhase = "error";
+  document.documentElement.dataset.vrcforgeStartupShell = "error";
+  shell.hidden = panel.hidden = false;
+  shell.querySelector<HTMLElement>(".startup-progress")!.hidden = true;
+  document.getElementById("root")!.inert = true;
+  retry.focus();
+  void import("../i18n").then(module => module.initializeI18n()).then(i18n => {
+    title.textContent = i18n.t("startupSplash.workspaceUnavailable");
+    detail.textContent = i18n.t("startupSplash.workspaceRecovery");
+    retry.textContent = i18n.t("startupSplash.retry");
+  }).catch(() => { /* The recovery button also works without a locale bundle. */ });
 }
 
 export function connectStartupWorkspace(workspace: Workspace): () => void {
@@ -88,8 +115,10 @@ function createStartupSplash(shell: HTMLElement) {
     retry.textContent = copy("retry");
     if (!failure) return;
     title.textContent = copy(failure);
-    detail.textContent = failureDetail || copy(step);
-    summary.textContent = [logSummary, logDir && copy("logs", { directory: logDir })].filter(Boolean).join("\n");
+    detail.textContent = copy("retryService");
+    summary.textContent = workspace.developerOptionsEnabled
+      ? [failureDetail, logSummary, logDir && copy("logs", { directory: logDir })].filter(Boolean).join("\n")
+      : "";
     summary.hidden = !summary.textContent;
   }
 

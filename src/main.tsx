@@ -1,6 +1,8 @@
-import { dismissStartupSplash, initializeStartupSplash } from "./lib/startup-splash";
+import { initializeStartupSplash, showWorkspaceLoadFailure } from "./lib/startup-splash";
+import { installDesktopDropGuard } from "./lib/desktop-drop-guard";
 
 initializeStartupSplash();
+installDesktopDropGuard();
 
 async function main() {
   const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
@@ -30,11 +32,7 @@ async function main() {
   metrics.appRenderRequestedMs ??= Math.round(performance.now());
 }
 
-void main().catch(() => {
-  dismissStartupSplash();
-  document.documentElement.dataset.vrcforgeStartupShell = "error";
-  const root = document.getElementById("root");
-  if (root) {
-    root.innerHTML = '<main class="flex h-screen items-center justify-center bg-workspace px-6 text-foreground"><div class="max-w-lg rounded-xl border border-destructive/40 bg-background p-6 text-center"><div class="font-semibold">VRCForge could not start</div><div class="mt-2 text-sm text-muted-foreground">Restart the app. If this continues, open the logs folder from the tray menu.</div></div></main>';
-  }
+void main().catch(error => {
+  console.error("[vrcforge:startup]", error);
+  showWorkspaceLoadFailure();
 });

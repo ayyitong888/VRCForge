@@ -1,5 +1,8 @@
 {
   "startupSplash": {
+    "workspaceUnavailable": "VRCForge 无法显示工作区",
+    "workspaceRecovery": "请重试。若仍无法打开，请从系统托盘退出 VRCForge 后重新启动。",
+    "retryService": "请重试以重新启动 VRCForge 服务。",
     "prepare": "正在准备运行时文件…",
     "listen": "正在等待运行时监听端口…",
     "verify": "正在验证运行时会话…",
@@ -981,6 +984,7 @@
     "copiedChatLink": "已复制对话链接",
     "linkTargetMissing": "找不到此对话。",
     "externalLinkOpenFailed": "无法打开这条 Codex 会话链接。",
+    "webLinkOpenFailed": "无法打开这条链接。",
     "copyNoText": "没有可复制的消息文本。",
     "copyClipboardUnavailable": "系统剪贴板当前不可用。",
     "copyUnknownReason": "剪贴板拒绝了复制请求。",
@@ -1760,6 +1764,12 @@
     "missing": "缺失"
   },
   "checkpoint": {
+    "resolveWrite": "标记为已解决",
+    "resolveWriteBody": "将「{{name}}」标记为已解决，并保留当前工程状态。检查点不会恢复。",
+    "overwrite": "覆盖检查点",
+    "overwriteBody": "将当前工程状态保存到「{{name}}」，覆盖原有记录？",
+    "rename": "重命名检查点",
+    "deleteAdjustment": "删除检查点",
     "manageStorage": "管理存储",
     "technicalDetails": "技术详情",
     "previewGuide": "选择检查点，查看所属工程、受影响的文件及是否可恢复。",

@@ -25,9 +25,6 @@ export function useDoctorFixController({
     if (fixingCheckId) {
       return;
     }
-    if (mode === "force" && !window.confirm(t("doctor.forceConfirmBody"))) {
-      return;
-    }
     setFixingCheckId(checkId);
     setLastFixResult(null);
     onMessage("", "ok");

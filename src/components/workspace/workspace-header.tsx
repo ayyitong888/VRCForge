@@ -16,6 +16,7 @@ export function WorkspaceHeader({
   healthErrors,
   healthWarnings,
   startupIssue,
+  developerOptionsEnabled,
   loadingDoctor,
   loading,
   runtimeStarting,
@@ -41,6 +42,7 @@ export function WorkspaceHeader({
   healthErrors: number;
   healthWarnings: number;
   startupIssue: string;
+  developerOptionsEnabled?: boolean;
   loadingDoctor: boolean;
   loading: boolean;
   runtimeStarting?: boolean;
@@ -111,7 +113,7 @@ export function WorkspaceHeader({
               <div className="break-words">
                 {hasStartupIssue ? t("header.startupIssueDesc") : t("header.envNeedsAttentionDesc", { errors: healthErrors, warnings: healthWarnings })}
               </div>
-              {hasStartupIssue ? <div className="break-words">{startupIssue}</div> : null}
+              {hasStartupIssue && developerOptionsEnabled ? <div className="break-words">{startupIssue}</div> : null}
             </div>
             {activeView !== "doctor" && <Button variant="outline" className="h-7 shrink-0 px-2 text-xs" onClick={onOpenDoctor} disabled={loadingDoctor}>
               {t("sidebar.doctor")}

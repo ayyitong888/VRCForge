@@ -1,5 +1,7 @@
 import { AlertTriangle, Archive, Check, Download, Eye, History, Loader2, Pencil, Plus, RefreshCw, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import i18n from "../../i18n";
+import { useState } from "react";
+import { ActionDialog, type DialogAction } from "../ui/action-dialog";
 import type { AdjustmentCheckpoint, AgentCheckpoint, AgentCheckpointPreview, InterruptedApplyRecovery, InterruptedApplyRecoveryPreview } from "../../lib/api";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -71,15 +73,17 @@ export function CheckpointWorkspace({
   onSelectAdjustment: (checkpointId: string, slot: "A" | "B") => void;
   onApplyAdjustment: (checkpointId: string) => void;
   onOverwriteAdjustment: (checkpointId: string) => void;
-  onRenameAdjustment: (checkpoint: AdjustmentCheckpoint) => void;
+  onRenameAdjustment: (checkpoint: AdjustmentCheckpoint, label: string) => void;
   onDeleteAdjustment: (checkpointId: string) => void;
 }) {
   const selectedId = preview?.checkpoint?.id || "";
+  const [action, setAction] = useState<DialogAction | null>(null);
   const selectedRecoveryId = recoveryPreview?.recovery?.id || "";
   const selectedAdjustmentId = adjustmentPreview?.adjustmentCheckpoint?.id || "";
   const recoveryCheckpointPreview = recoveryPreview?.checkpointPreview || null;
   return (
     <div className="min-h-0 min-w-0 flex-1 overflow-auto px-6 py-8">
+      {action && <ActionDialog action={action} onClose={() => setAction(null)} />}
       <div className="mx-auto grid max-w-6xl items-start gap-6" style={CHECKPOINT_WORKSPACE_GRID}>
         <div className="grid min-w-0 gap-6">
           {interruptedRecoveries.length > 0 || recoveryPreview ? <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
@@ -152,7 +156,14 @@ export function CheckpointWorkspace({
                         type="button"
                         variant="ghost"
                         className="h-7 px-2 text-xs"
-                        onClick={() => onResolveRecovery(recovery.id)}
+                        aria-label={i18n.t("checkpoint.resolveWrite")}
+                        title={i18n.t("checkpoint.resolveWrite")}
+                        onClick={() => setAction({
+                          title: i18n.t("checkpoint.resolveWrite"),
+                          description: i18n.t("checkpoint.resolveWriteBody", { name: recovery.targetTool || recovery.id }),
+                          confirmLabel: i18n.t("checkpoint.resolveWrite"),
+                          onConfirm: () => onResolveRecovery(recovery.id),
+                        })}
                         disabled={Boolean(recoveryBusyId)}
                       >
                         <Check className="h-3.5 w-3.5" />
@@ -345,7 +356,15 @@ export function CheckpointWorkspace({
                         type="button"
                         variant="outline"
                         className="h-7 px-2 text-xs"
-                        onClick={() => onOverwriteAdjustment(checkpoint.id)}
+                        aria-label={i18n.t("checkpoint.overwrite")}
+                        title={i18n.t("checkpoint.overwrite")}
+                        onClick={() => setAction({
+                          title: i18n.t("checkpoint.overwrite"),
+                          destructive: true,
+                          description: i18n.t("checkpoint.overwriteBody", { name: checkpoint.label || checkpoint.id }),
+                          confirmLabel: i18n.t("common.confirm"),
+                          onConfirm: () => onOverwriteAdjustment(checkpoint.id),
+                        })}
                         disabled={Boolean(adjustmentBusyId)}
                       >
                         <Archive className="h-3.5 w-3.5" />
@@ -354,7 +373,12 @@ export function CheckpointWorkspace({
                         type="button"
                         variant="ghost"
                         className="h-7 px-2 text-xs"
-                        onClick={() => onRenameAdjustment(checkpoint)}
+                        aria-label={i18n.t("checkpoint.rename")}
+                        title={i18n.t("checkpoint.rename")}
+                        onClick={() => setAction({
+                          title: i18n.t("checkpoint.rename"), initialValue: checkpoint.label || checkpoint.id,
+                          confirmLabel: i18n.t("common.save"), onConfirm: label => onRenameAdjustment(checkpoint, label),
+                        })}
                         disabled={Boolean(adjustmentBusyId)}
                       >
                         <Pencil className="h-3.5 w-3.5" />
@@ -363,7 +387,15 @@ export function CheckpointWorkspace({
                         type="button"
                         variant="ghost"
                         className="h-7 px-2 text-xs text-destructive"
-                        onClick={() => onDeleteAdjustment(checkpoint.id)}
+                        aria-label={i18n.t("checkpoint.deleteAdjustment")}
+                        title={i18n.t("checkpoint.deleteAdjustment")}
+                        onClick={() => setAction({
+                          title: i18n.t("checkpoint.deleteAdjustment"),
+                          destructive: true,
+                          description: checkpoint.label || checkpoint.id,
+                          confirmLabel: i18n.t("checkpoint.deleteAdjustment"),
+                          onConfirm: () => onDeleteAdjustment(checkpoint.id),
+                        })}
                         disabled={Boolean(adjustmentBusyId)}
                       >
                         <Trash2 className="h-3.5 w-3.5" />

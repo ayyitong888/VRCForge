@@ -1468,6 +1468,24 @@ pub fn open_codex_chat_url(url: String) -> Result<(), String> {
     open_validated_external_url(&url, "Codex chat")
 }
 
+fn chat_web_link_url(raw: &str) -> Option<tauri::Url> {
+    if raw.chars().any(char::is_control) {
+        return None;
+    }
+    let url = tauri::Url::parse(raw).ok()?;
+    match url.scheme() {
+        "http" | "https" if url.host().is_some() => Some(url),
+        "mailto" | "tel" if url.cannot_be_a_base() && !url.path().is_empty() => Some(url),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub fn open_chat_web_link(url: String) -> Result<(), String> {
+    let url = chat_web_link_url(&url).ok_or("The chat link cannot be opened.")?;
+    open_validated_external_url(url.as_str(), "the chat link")
+}
+
 // Callers must validate the complete URL first. The fixed platform opener receives only that URL;
 // its short-lived dispatcher is owned by the invoking desktop session, while the browser remains user-owned.
 pub(crate) fn open_validated_external_url(url: &str, target: &str) -> Result<(), String> {
@@ -1528,8 +1546,8 @@ pub(crate) fn bootstrap_query(request: &DesktopBootstrapRequest) -> String {
 #[cfg(test)]
 mod bootstrap_transport_tests {
     use super::{
-        bootstrap_query, is_codex_chat_url, validate_app_release_url, DesktopAppUpdateRequest,
-        DesktopBootstrapRequest,
+        bootstrap_query, chat_web_link_url, is_codex_chat_url, validate_app_release_url,
+        DesktopAppUpdateRequest, DesktopBootstrapRequest,
     };
 
     #[test]
@@ -1589,6 +1607,28 @@ mod bootstrap_transport_tests {
             "vrcforge://chat/019f052c-5b66-7ad3-829b-825371654321",
         ] {
             assert!(!is_codex_chat_url(invalid));
+        }
+    }
+
+    #[test]
+    fn chat_web_links_accept_only_web_and_explicit_contact_protocols() {
+        for url in [
+            "https://example.com/docs?q=1#section",
+            "http://example.com/",
+            "mailto:reader@example.com",
+            "tel:+1234567890",
+        ] {
+            assert_eq!(chat_web_link_url(url).unwrap().as_str(), url);
+        }
+        for invalid in [
+            "/docs",
+            "file:///C:/document.pdf",
+            "about:blank",
+            "vrcforge://chat/fixture",
+            "mailto:",
+            "https://example.com/\n",
+        ] {
+            assert!(chat_web_link_url(invalid).is_none(), "{invalid}");
         }
     }
 }

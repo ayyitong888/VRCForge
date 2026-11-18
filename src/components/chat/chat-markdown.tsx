@@ -1,5 +1,5 @@
 import { createContext, isValidElement, useContext, useEffect, useId, useMemo, useState } from "react";
-import type { ComponentPropsWithoutRef } from "react";
+import type { ComponentPropsWithoutRef, MouseEvent } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { Components } from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -116,7 +116,7 @@ function buildChatMarkdownComponents(inverted: boolean, allowImages: boolean): C
     a: ({ node: _node, href, ...props }) => {
       const chatId = chatIdFromDeepLink(href || "");
       if (chatId) return <ChatDeepLink chatId={chatId} href={href} {...props} />;
-      if (href && isCodexChatDeepLink(href)) return <CodexChatDeepLink href={href} className={linkClass} {...props} />;
+      if (href && isCodexChatDeepLink(href)) return <ExternalChatLink href={href} codex className={linkClass} {...props} />;
       const filePath = localChatFilePath(String(href || ""));
       if (filePath) return <ChatFileLink path={filePath} className={linkClass} {...props} />;
       const safeHref = safeMarkdownUrlTransform(String(href || ""));
@@ -124,9 +124,14 @@ function buildChatMarkdownComponents(inverted: boolean, allowImages: boolean): C
         return <span {...props} />;
       }
       if (safeHref.startsWith("#")) {
-        return <a className={linkClass} {...props} href={safeHref} target={undefined} />;
+        return <a className={linkClass} {...props} href={safeHref} target={undefined}
+          onClick={event => {
+            if (hasTauriInternals() && (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)) event.preventDefault();
+          }}
+          onAuxClick={event => { if (hasTauriInternals()) event.preventDefault(); }} />;
       }
-      return <a className={linkClass} {...props} href={safeHref} target="_blank" rel="noreferrer" />;
+      if (hasTauriInternals() && safeHref.startsWith("/")) return <span>{props.children}</span>;
+      return <ExternalChatLink className={linkClass} {...props} href={safeHref} />;
     },
     blockquote: ({ node: _node, ...props }) => <blockquote className={cn("my-3 border-l-2 pl-3", borderClass, mutedClass)} {...props} />,
     ul: ({ node: _node, className, ...props }) => <ul className={cn("my-3 list-disc space-y-1.5 pl-5 first:mt-0 last:mb-0", className)} {...props} />,
@@ -186,16 +191,21 @@ function remarkChatDeepLinks() {
   };
 }
 
-function CodexChatDeepLink({ children, className, href, title }: ComponentPropsWithoutRef<"a"> & { href: string }) {
+function ExternalChatLink({ children, href, codex = false, ...props }: ComponentPropsWithoutRef<"a"> & { href: string; codex?: boolean }) {
   const { t } = useTranslation();
   const [failed, setFailed] = useState(false);
-  return <><a className={className} href={href} title={title} onClick={event => {
-    if (!hasTauriInternals()) return;
+  const desktop = hasTauriInternals();
+  const openInSystem = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (!desktop) return;
     event.preventDefault();
     if (!event.isTrusted) return;
     setFailed(false);
-    void invokeTauriWithAbort<void>("open_codex_chat_url", { url: href }).catch(() => setFailed(true));
-  }}>{children}</a>{failed && <span role="status" className="ml-2 text-sm text-destructive">{t("chat.externalLinkOpenFailed")}</span>}</>;
+    void invokeTauriWithAbort<void>(codex ? "open_codex_chat_url" : "open_chat_web_link", { url: href }).catch(() => setFailed(true));
+  };
+  return <><a {...props} href={href} target={desktop || codex ? undefined : "_blank"} rel="noreferrer"
+    onClick={openInSystem} onAuxClick={event => { if (event.button === 1) openInSystem(event); }}>
+    {children}
+  </a>{failed && <span role="status" className="ml-2 text-sm text-destructive">{t(codex ? "chat.externalLinkOpenFailed" : "chat.webLinkOpenFailed")}</span>}</>;
 }
 
 function ChatFileLink({ path, children, className }: ComponentPropsWithoutRef<"a"> & { path: string }) {
@@ -203,13 +213,17 @@ function ChatFileLink({ path, children, className }: ComponentPropsWithoutRef<"a
   const [error, setError] = useState("");
   const [opening, setOpening] = useState(false);
   if (!context) return <span>{children}</span>;
-  return <><a className={className} href={chatFileHref(path) || undefined} aria-busy={opening} onClick={event => {
+  const openFile = (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
-    if (opening) return;
+    if (!event.isTrusted || opening) return;
     setOpening(true); setError("");
     void openChatFile(context, path).catch(cause => setError(String(cause instanceof Error ? cause.message : cause)))
       .finally(() => setOpening(false));
-  }}>{children}</a>{error && <span role="status" className="ml-2 text-sm text-destructive">{error}</span>}</>;
+  };
+  return <><a className={className} href={chatFileHref(path) || undefined} aria-busy={opening}
+    onClick={openFile} onAuxClick={event => { if (event.button === 1) openFile(event); }}>
+    {children}
+  </a>{error && <span role="status" className="ml-2 text-sm text-destructive">{error}</span>}</>;
 }
 
 function ChatMarkdownImage({ inverted, alt, src, ...props }: ComponentPropsWithoutRef<"img"> & { inverted: boolean }) {

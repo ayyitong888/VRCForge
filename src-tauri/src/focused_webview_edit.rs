@@ -14,10 +14,12 @@ pub async fn edit_focused_webview(window: WebviewWindow, action: EditAction) -> 
     #[cfg(windows)]
     {
         use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR};
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
-        if window.label() != "main" || !window.is_focused().map_err(|err| err.to_string())? {
+        if window.label() != "main" {
             return Err("Clipboard editing requires the focused main window".into());
         }
+        let main_hwnd = window.hwnd().map_err(|err| err.to_string())?.0 as usize;
 
         let (command, code, key, virtual_key) = match action {
             EditAction::Cut => ("Cut", "KeyX", "x", 88),
@@ -39,6 +41,14 @@ pub async fn edit_focused_webview(window: WebviewWindow, action: EditAction) -> 
         let (sender, mut result) = tauri::async_runtime::channel(1);
         window
             .with_webview(move |webview| {
+                // A focused child WebView can leave Tao's top-level focus flag unset.
+                // Check the actual foreground window at dispatch time.
+                if unsafe { GetForegroundWindow() } as usize != main_hwnd {
+                    let _ = sender.try_send(Err(
+                        "Clipboard editing requires the focused main window".into(),
+                    ));
+                    return;
+                }
                 let callback_sender = sender.clone();
                 let callback = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
                     move |status, _| {

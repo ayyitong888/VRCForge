@@ -271,22 +271,13 @@ export function Composer({
     };
   }, []);
   const handlePaste = (event: ClipboardEvent<HTMLFormElement>) => {
-    const pastedFiles = [
-      ...Array.from(event.clipboardData.files || []),
-      ...Array.from(event.clipboardData.items || [])
+    const files = Array.from(event.clipboardData.files || []);
+    if (!files.length) {
+      files.push(...Array.from(event.clipboardData.items || [])
         .filter((item) => item.kind === "file")
         .map((item) => item.getAsFile())
-        .filter((file): file is File => Boolean(file)),
-    ];
-    const seen = new Set<string>();
-    const files = pastedFiles.filter((file) => {
-      const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
-      if (seen.has(key)) {
-        return false;
-      }
-      seen.add(key);
-      return true;
-    });
+        .filter((file): file is File => Boolean(file)));
+    }
     if (files.length) {
       event.preventDefault();
       onAttachFiles?.(files);

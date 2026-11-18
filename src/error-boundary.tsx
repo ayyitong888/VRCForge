@@ -1,4 +1,5 @@
 import React from "react";
+import i18n from "./i18n";
 import { dismissStartupSplash } from "./lib/startup-splash";
 
 type ErrorBoundaryProps = { children: React.ReactNode };
@@ -26,16 +27,16 @@ export class RootErrorBoundary extends React.Component<ErrorBoundaryProps, Error
     if (this.state.error) {
       return (
         <main className="flex h-screen items-center justify-center bg-workspace px-6 text-foreground">
-          <div className="max-w-lg rounded-xl border border-destructive/40 bg-background p-6 text-center">
-            <div className="font-semibold">VRCForge could not continue</div>
-            <div className="mt-2 break-words text-sm text-muted-foreground">{String(this.state.error?.message || this.state.error)}</div>
+          <div role="alert" className="max-w-lg rounded-xl border border-border bg-background p-6 text-center">
+            <h1 className="font-semibold">{i18n.t("startupSplash.workspaceUnavailable")}</h1>
+            <p className="mt-2 text-sm text-muted-foreground">{i18n.t("startupSplash.workspaceRecovery")}</p>
             <button
               type="button"
               className="mt-4 rounded-lg border border-border px-4 py-2 text-sm hover:bg-muted"
               onClick={() => window.location.reload()}
               data-error-boundary-reload
             >
-              Reload
+              {i18n.t("startupSplash.retry")}
             </button>
           </div>
         </main>

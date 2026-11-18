@@ -11,6 +11,7 @@ const fixture = `
   import en from "./src/locales/en-US.json";
   import { TextEditContextMenu } from "./src/components/common/text-edit-context-menu";
   import { Composer } from "./src/components/chat/composer";
+  import { SupportFeedbackPanel } from "./src/components/settings/support-feedback-panel";
   await i18n.use(initReactI18next).init({ lng: "en-US", resources: { "en-US": { translation: en } } });
   const probe = window.probe = { webReads: 0, webWrites: 0, native: [], attached: [] };
   const clipboard = navigator.clipboard;
@@ -23,7 +24,10 @@ const fixture = `
   };
   Object.defineProperty(navigator, "clipboard", { value: {
     readText: async () => { probe.webReads++; throw new DOMException("User denied clipboard read", "NotAllowedError"); },
-    writeText: async () => { probe.webWrites++; },
+    writeText: async (text) => {
+      probe.webWrites++;
+      if (text === "Redacted fixture preview") throw new DOMException("Clipboard unavailable", "NotAllowedError");
+    },
   } });
   document.execCommand = () => false;
   window.isTauri = true;
@@ -32,6 +36,7 @@ const fixture = `
     transformCallback: () => 0,
     async invoke(command, args) {
       if (command.startsWith("plugin:event|")) return 1;
+      if (command === "preview_support_feedback") return { ok: true, text: "Redacted fixture preview" };
       assertCommand(command);
       const field = document.activeElement;
       probe.native.push([args.action, field.tagName]);
@@ -40,8 +45,13 @@ const fixture = `
         return;
       }
       const clipboardData = new DataTransfer();
-      clipboardData.items.add(new File(["file"], "notes.txt", { type: "text/plain" }));
-      field.dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
+      clipboardData.items.add(new File(["file"], "notes.txt", { type: "text/plain", lastModified: 1 }));
+      const event = new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true });
+      // Chromium can wrap the same clipboard entry as two File objects at different times.
+      Object.defineProperty(clipboardData, "files", {
+        value: [new File(["file"], "notes.txt", { type: "text/plain", lastModified: 2 })],
+      });
+      field.dispatchEvent(event);
     },
   };
   function assertCommand(command) {
@@ -51,7 +61,8 @@ const fixture = `
     const [input, setInput] = useState("Original draft");
     return <><TextEditContextMenu /><Composer input={input} setInput={setInput} attachments={[]}
       sending={false} onSubmit={() => {}} onSwitchMode={() => {}}
-      onAttachFiles={files => probe.attached.push(...files.map(file => [file.name, file.type]))} /></>;
+      onAttachFiles={files => probe.attached.push(...files.map(file => [file.name, file.type]))} />
+      <SupportFeedbackPanel endpoint={location.origin} /></>;
   }
   createRoot(document.getElementById("root")).render(<Fixture />);
 `;
@@ -90,7 +101,7 @@ try {
   const origin = `http://127.0.0.1:${server.address().port}`;
   await page.context().grantPermissions(["clipboard-write"], { origin });
   await page.goto(origin);
-  const input = page.locator("textarea");
+  const input = page.getByRole("textbox", { name: "Type anything" });
   await input.waitFor();
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const choose = async (action) => {
@@ -133,6 +144,14 @@ try {
   await page.waitForFunction(() => /粘贴文字/.test(document.querySelector("textarea").value));
   assert.equal(await page.evaluate(() => window.probe.webWrites), 0);
   console.log("Desktop context-menu text, image, file, copy and cut replay passed");
+  const support = page.locator("[data-vrcforge-support-feedback]");
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await support.getByRole("button", { name: "Create redacted preview" }).click();
+  await support.getByRole("button", { name: "Copy preview" }).click();
+  await support.getByText("The preview could not be copied.", { exact: true }).waitFor();
+  assert.deepEqual(errors, []);
+  console.log("Support preview clipboard failure is shown in the app");
 } finally {
   await browser?.close();
   server.close();

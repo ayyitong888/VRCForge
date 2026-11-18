@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>VRCForge</title>
+    <script>
+      if ("__TAURI_INTERNALS__" in window) {
+        // WebView2 context settings apply on the next navigation. The app owns
+        // the first document's menu too, including before React mounts.
+        window.addEventListener("contextmenu", function (event) { event.preventDefault(); }, true);
+        // Mouse history buttons still navigate with browser shortcuts disabled.
+        for (const type of ["mousedown", "mouseup", "auxclick"]) {
+          window.addEventListener(type, function (event) {
+            if (event.button === 3 || event.button === 4) event.preventDefault();
+          }, true);
+        }
+      }
+    </script>
     <link rel="preload" as="image" href="/vrcforge-startup-registered-ink.webp" />
     <link rel="preload" as="image" href="/vrcforge-startup-portrait.webp" />
     <style>

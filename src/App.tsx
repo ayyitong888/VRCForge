@@ -2288,10 +2288,11 @@ export default function App() {
       return;
     }
     return connectStartupWorkspace({
+      developerOptionsEnabled,
       copy: (key, variables) => t(`startupSplash.${key}`, variables),
       retry: () => void startRuntime({ waitForBootstrap: false, retry: true }),
     });
-  }, [t]);
+  }, [developerOptionsEnabled, t]);
 
   useEffect(() => {
     if (isStartupSimulation) return;
@@ -4492,6 +4493,7 @@ export default function App() {
             healthErrors={healthErrors}
             healthWarnings={healthWarnings}
             startupIssue={startupIssue}
+            developerOptionsEnabled={developerOptionsEnabled}
             loadingDoctor={loadingDoctor}
             loading={loading}
             runtimeStarting={runtimeStartingRef.current}
@@ -4510,6 +4512,7 @@ export default function App() {
 
           {activeView === "doctor" ? (
             <DoctorWorkspace
+              key={activeProjectPath}
               report={doctorReport}
               loading={loadingDoctor}
               message={doctorMessage}
@@ -4583,6 +4586,7 @@ export default function App() {
             />
           ) : activeView === "checkpoints" ? (
             <CheckpointWorkspace
+              key={activeProjectPath}
               checkpoints={checkpoints}
               interruptedRecoveries={interruptedRecoveries}
               adjustmentCheckpoints={adjustmentCheckpoints}

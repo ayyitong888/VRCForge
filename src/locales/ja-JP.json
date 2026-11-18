@@ -1,5 +1,8 @@
 {
   "startupSplash": {
+    "workspaceUnavailable": "VRCForge のワークスペースを表示できません",
+    "workspaceRecovery": "もう一度お試しください。開かない場合は、システムトレイから VRCForge を終了し、再度起動してください。",
+    "retryService": "再試行すると VRCForge サービスが再起動します。",
     "prepare": "ランタイムのファイルを準備しています…",
     "listen": "ランタイムがポートを開くまで待機しています…",
     "verify": "ランタイムのセッションを確認しています…",
@@ -975,6 +978,7 @@
     "copiedChatLink": "チャットのリンクをコピーしました",
     "linkTargetMissing": "チャットが見つかりません。",
     "externalLinkOpenFailed": "Codex のチャットを開けませんでした。",
+    "webLinkOpenFailed": "このリンクを開けませんでした。",
     "copyNoText": "コピーできるメッセージテキストがありません。",
     "copyClipboardUnavailable": "システムのクリップボードを利用できません。",
     "copyUnknownReason": "クリップボードがコピー要求を拒否しました。",
@@ -1753,6 +1757,12 @@
     "missing": "missing"
   },
   "checkpoint": {
+    "resolveWrite": "解決済みにする",
+    "resolveWriteBody": "チェックポイントを復元せずに「{{name}}」を解決済みにしますか？",
+    "overwrite": "チェックポイントを上書き",
+    "overwriteBody": "現在のプロジェクトの状態で「{{name}}」を上書きしますか？",
+    "rename": "チェックポイント名を変更",
+    "deleteAdjustment": "チェックポイントを削除",
     "manageStorage": "ストレージを管理",
     "technicalDetails": "技術情報",
     "previewGuide": "チェックポイントを選ぶと、対象のプロジェクト、影響するファイル、復元の可否を確認できます。",

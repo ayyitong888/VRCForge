@@ -48,6 +48,8 @@ mod sanitize;
 mod telegram;
 mod theme_background;
 mod vsk_open;
+#[cfg(windows)]
+mod webview_chrome;
 
 use approval_notification_windows::*;
 use backend::*;
@@ -158,6 +160,7 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(windows)]
                 {
+                    webview_chrome::configure(&window)?;
                     let _ = bind_main_window_taskbar_icon(&window);
                     install_restart_manager_window_hook(&window).map_err(std::io::Error::other)?;
                 }
@@ -241,6 +244,7 @@ fn main() {
             check_app_update,
             open_app_release_url,
             open_codex_chat_url,
+            open_chat_web_link,
             open_support_feedback_url,
             check_skills,
             clear_agent_memory,

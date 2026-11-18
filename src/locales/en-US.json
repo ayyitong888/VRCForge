@@ -1,5 +1,8 @@
 {
   "startupSplash": {
+    "workspaceUnavailable": "VRCForge could not continue",
+    "workspaceRecovery": "Try again. If the workspace still won’t open, quit VRCForge from the system tray, then start it again.",
+    "retryService": "Try again to restart the VRCForge service.",
     "prepare": "Preparing runtime files…",
     "listen": "Waiting for the runtime to listen…",
     "verify": "Verifying the runtime session…",
@@ -983,6 +986,7 @@
     "copiedChatLink": "Chat link copied",
     "linkTargetMissing": "Chat not found.",
     "externalLinkOpenFailed": "Could not open this Codex chat.",
+    "webLinkOpenFailed": "Could not open this link.",
     "copyNoText": "There is no message text to copy.",
     "copyClipboardUnavailable": "The system clipboard is unavailable.",
     "copyUnknownReason": "The clipboard rejected the copy request.",
@@ -1762,6 +1766,12 @@
     "missing": "missing"
   },
   "checkpoint": {
+    "resolveWrite": "Mark as resolved",
+    "resolveWriteBody": "Mark “{{name}}” as resolved without restoring its checkpoint?",
+    "overwrite": "Overwrite checkpoint",
+    "overwriteBody": "Replace “{{name}}” with the current project state?",
+    "rename": "Rename checkpoint",
+    "deleteAdjustment": "Delete checkpoint",
     "manageStorage": "Manage storage",
     "technicalDetails": "Technical details",
     "previewGuide": "Select a checkpoint to see the project, affected files, and whether it can be restored.",
