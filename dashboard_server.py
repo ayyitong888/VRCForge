@@ -29812,6 +29812,7 @@ def register_agent_gateway_tools() -> None:
         "medium",
         PACKAGE_INSTALL_APPROVED_WRITE.execute,
         request_preparer=PACKAGE_INSTALL_APPROVED_WRITE.prepare,
+        closed_project_archive_check=_checkpoint_restore_editor_is_definitely_closed,
         external_mcp_capability="sealed_vrc_get_install_v1",
     )
     register_write_handler(

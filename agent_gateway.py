@@ -473,6 +473,7 @@ class AgentWriteHandler:
     # a brand-new project at an absent path). Existing project writes keep the
     # default checkpoint requirement.
     pre_write_checkpoint_required: PreWriteCheckpointPolicy = True
+    closed_project_archive_check: Callable[[Path], bool] | None = None
 
 
 @dataclass

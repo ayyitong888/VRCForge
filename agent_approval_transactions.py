@@ -1210,6 +1210,7 @@ class AgentApprovalTransactionService:
         allow_future_category: bool = False,
         external_mcp_capability: str = "",
         pre_write_checkpoint_required: PreWriteCheckpointPolicy = True,
+        closed_project_archive_check: Callable[[Path], bool] | None = None,
     ) -> None:
         bounded_verification_profile = str(verification_profile or "").strip()[:80]
         if bounded_verification_profile and (
@@ -1236,6 +1237,7 @@ class AgentApprovalTransactionService:
             allow_future_category=bool(allow_future_category),
             external_mcp_capability=str(external_mcp_capability or "").strip(),
             pre_write_checkpoint_required=pre_write_checkpoint_required,
+            closed_project_archive_check=closed_project_archive_check,
         )
 
     def registered_write_target_names(self) -> set[str]:
@@ -3124,6 +3126,12 @@ class AgentApprovalTransactionService:
             return self._ports.checkpoint.create_project_chat_checkpoint(project_root, record)
 
         write_handler = self._ports.state.write_handlers.get(target_tool)
+        closed_project_check = write_handler.closed_project_archive_check if write_handler else None
+        if closed_project_check and closed_project_check(project_root):
+            # Package resolution can replace ignored or untracked embedded packages and legacy Assets.
+            # Capture the whole disk scope even when the enclosing Git worktree appears clean.
+            record["archiveScopeReason"] = "host_write_to_closed_project"
+            return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
         dedicated_checkpoint_prepare = (
             write_handler.checkpoint_prepare_handler
             if write_handler is not None
