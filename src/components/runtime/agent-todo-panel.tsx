@@ -36,7 +36,15 @@ function TodoItems({ progress }: { progress: AgentProgress[] }) {
               status === "completed" && "bg-primary text-primary-foreground",
               status === "failed" && "text-destructive",
             )}>
-              {Icon ? <Icon className="h-3.5 w-3.5" strokeWidth={status === "completed" ? 2.5 : 2} aria-hidden="true" /> : index + 1}
+              {Icon ? (
+                <Icon
+                  className="h-3.5 w-3.5"
+                  strokeWidth={status === "completed" ? 2.5 : 2}
+                  // The check path spans y=6..17, so its center is 11.5.
+                  viewBox={status === "completed" ? "0 -0.5 24 24" : "0 0 24 24"}
+                  aria-hidden="true"
+                />
+              ) : <span className="[text-box:trim-both_cap_alphabetic]">{index + 1}</span>}
             </span>
             <span className={cn("min-w-0 break-words text-sm leading-6",
               active ? "font-medium text-foreground" : "text-muted-foreground",
