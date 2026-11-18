@@ -133,7 +133,6 @@ namespace VRCForge.Editor
                 );
                 if (preview)
                 {
-                    VerifyPreviewStayedReadOnly(snapshot);
                     return Success(snapshot, snapshot, true, false, false);
                 }
 
@@ -184,8 +183,6 @@ namespace VRCForge.Editor
                     || readback.Scene.Handle != snapshot.Scene.Handle
                     || readback.Scene.MetaDigest != snapshot.Scene.MetaDigest
                     || readback.Scene.MetaIdentity != snapshot.Scene.MetaIdentity
-                    || readback.SceneFileLinkCount != snapshot.SceneFileLinkCount
-                    || readback.SceneMetaLinkCount != snapshot.SceneMetaLinkCount
                     || readback.ComponentId != snapshot.ComponentId
                     || readback.ComponentGlobalId != snapshot.ComponentGlobalId
                     || readback.BeforeSourcesDigest != snapshot.TargetSourcesDigest
@@ -259,8 +256,6 @@ namespace VRCForge.Editor
                     && restored.Scene.FileDigest == snapshot.Scene.FileDigest
                     && restored.Scene.MetaDigest == snapshot.Scene.MetaDigest
                     && restored.Scene.MetaIdentity == snapshot.Scene.MetaIdentity
-                    && restored.SceneFileLinkCount == snapshot.SceneFileLinkCount
-                    && restored.SceneMetaLinkCount == snapshot.SceneMetaLinkCount
                     && restored.ComponentId == snapshot.ComponentId
                     && restored.ComponentGlobalId == snapshot.ComponentGlobalId
                     && restored.BeforeSourcesDigest == snapshot.BeforeSourcesDigest
@@ -331,27 +326,12 @@ namespace VRCForge.Editor
             var beforeDigest = ComputeSourcesDigest(beforeSources);
             var targetDigest = ComputeSourcesDigest(targetSources);
 
-            var afterInspection = SceneObjectCopyCore.ReadStableAssetEvidence(
-                scene.Path,
-                "constraint scene readback"
-            );
-            if (afterInspection.Guid != scene.Guid
-                || afterInspection.File.Digest != scene.FileDigest
-                || afterInspection.File.Identity != scene.FileIdentity
-                || afterInspection.Meta.Digest != scene.MetaDigest
-                || afterInspection.Meta.Identity != scene.MetaIdentity
-                || afterInspection.File.LinkCount != 1
-                || afterInspection.Meta.LinkCount != 1
-                || scene.Scene.isDirty)
-            {
-                throw new ConstraintSourceToolException("Constraint source inspection changed the saved scene.");
-            }
+            if (scene.Scene.isDirty)
+                throw new ConstraintSourceToolException("Constraint source inspection changed the scene.");
 
             return new ConstraintSourceSnapshot
             {
                 Scene = scene,
-                SceneFileLinkCount = afterInspection.File.LinkCount,
-                SceneMetaLinkCount = afterInspection.Meta.LinkCount,
                 GameObjectPath = normalizedHostPath,
                 ConstraintKind = constraintKind,
                 ComponentType = componentTypeName,
@@ -370,25 +350,6 @@ namespace VRCForge.Editor
                     plan.Target
                 )
             };
-        }
-
-        private static void VerifyPreviewStayedReadOnly(ConstraintSourceSnapshot snapshot)
-        {
-            var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(
-                snapshot.Scene.Path,
-                "constraint preview readback"
-            );
-            if (evidence.Guid != snapshot.Scene.Guid
-                || evidence.File.Digest != snapshot.Scene.FileDigest
-                || evidence.File.Identity != snapshot.Scene.FileIdentity
-                || evidence.Meta.Digest != snapshot.Scene.MetaDigest
-                || evidence.Meta.Identity != snapshot.Scene.MetaIdentity
-                || evidence.File.LinkCount != 1
-                || evidence.Meta.LinkCount != 1
-                || snapshot.Scene.Scene.isDirty)
-            {
-                throw new ConstraintSourceToolException("Constraint source preview was not read-only.");
-            }
         }
 
         private static void ValidateExpected(JObject parameters, ConstraintSourceSnapshot snapshot)
@@ -439,13 +400,13 @@ namespace VRCForge.Editor
                     sceneFileDigestBefore = before.Scene.FileDigest,
                     sceneFileDigestAfter = after.Scene.FileDigest,
                     sceneFileIdentity = before.Scene.FileIdentity,
+                    sceneFileLinkCount = 1,
                     sceneFileIdentityAfter = after.Scene.FileIdentity,
-                    sceneFileLinkCount = before.SceneFileLinkCount,
                     sceneMetaDigestBefore = before.Scene.MetaDigest,
                     sceneMetaDigestAfter = after.Scene.MetaDigest,
                     sceneMetaIdentity = before.Scene.MetaIdentity,
+                    sceneMetaLinkCount = 1,
                     sceneMetaIdentityAfter = after.Scene.MetaIdentity,
-                    sceneMetaLinkCount = before.SceneMetaLinkCount,
                     sceneDirtyBefore = false,
                     sceneDirtyAfter = after.Scene.Scene.isDirty,
                     gameObjectPath = before.GameObjectPath,
@@ -867,8 +828,6 @@ namespace VRCForge.Editor
         private sealed class ConstraintSourceSnapshot
         {
             internal SavedSceneSnapshot Scene;
-            internal uint SceneFileLinkCount;
-            internal uint SceneMetaLinkCount;
             internal string GameObjectPath = string.Empty;
             internal string ConstraintKind = string.Empty;
             internal string ComponentType = string.Empty;

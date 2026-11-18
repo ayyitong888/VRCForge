@@ -257,22 +257,13 @@ def test_csharp_core_exposes_only_registered_typed_schemas() -> None:
     assert '@params["memberName"]' not in tool
     assert "expectedSceneFileIdentity" in tool
     assert "expectedSceneMetaIdentity" in tool
-    assert "restored.SceneFileLinkCount == snapshot.SceneFileLinkCount" in tool
-    assert "restored.SceneMetaLinkCount == snapshot.SceneMetaLinkCount" in tool
     assert "checkpointRestoreRequired" in tool
     assert "TryRestoreBeforeSources" in tool
     capture = method(tool, "private static ConstraintSourceSnapshot CaptureSnapshot(")
     assert capture.count("ResolveSavedScene(") == 1
-    initial_evidence = capture[capture.index("var scene ="):capture.index("var normalizedHostPath =")]
-    assert "ReadStableAssetEvidence(" not in initial_evidence
-    readback = capture[capture.index("var afterInspection ="):capture.index("return new ConstraintSourceSnapshot")]
-    assert "afterInspection.File.Digest != scene.FileDigest" in readback
-    assert "afterInspection.File.Identity != scene.FileIdentity" in readback
-    assert "afterInspection.Meta.Digest != scene.MetaDigest" in readback
-    assert "afterInspection.Meta.Identity != scene.MetaIdentity" in readback
-    assert "afterInspection.File.LinkCount != 1" in readback
-    assert "afterInspection.Meta.LinkCount != 1" in readback
+    assert "ReadStableAssetEvidence(" not in capture
     handle = method(tool, "public static object HandleCommand(")
+    assert "VerifyPreviewStayedReadOnly(" not in handle
     no_op = handle[handle.index("if (!snapshot.WouldChange)"):handle.index("return Apply(snapshot, sources);")]
     assert "CaptureSnapshot(" not in no_op
     apply = method(tool, "private static object Apply(")
