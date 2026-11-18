@@ -47,14 +47,14 @@ def test_actual_core_sealed_null_precondition(tmp_path):
     program=r'''using System;using System.Linq;using Newtonsoft.Json.Linq;
 class Shader {public string name="shader";}
 class Material {public Shader shader=new Shader();public int renderQueue=2000;}
-class MaterialEvidence {public string Path="Assets/Old.mat",Guid="old",Digest="oldhash";}
+class MaterialEvidence {public string Path="Assets/Old.mat",Guid="old";public long LocalId=2100000;}
 class SavedSceneSnapshot {public string Path="Assets/Scene.unity",Guid="scene";public int Handle=1;}
 class Identity {public string componentType="Renderer";public int componentIndex=0;}
 class Target {public Identity Identity=new Identity();}
 class Probe {
 METHODS
-static bool Reject(JObject p,Material m,MaterialEvidence before){try{RequireApplyFields(p,new Target(),new SavedSceneSnapshot(),"renderer",0,m,before,new MaterialEvidence{Guid="new",Digest="newhash"});return false;}catch(InvalidOperationException){return true;}}
-static JObject Request(){return new JObject{["expectedScenePath"]="Assets/Scene.unity",["expectedSceneGuid"]="scene",["expectedSceneHandle"]=1,["expectedRendererComponentType"]="Renderer",["expectedRendererComponentIndex"]=0,["rendererComponentId"]="renderer",["slotIndex"]=0,["expectedNewMaterialGuid"]="new",["expectedNewMaterialFileDigest"]="newhash"};}
+static bool Reject(JObject p,Material m,MaterialEvidence before){try{RequireApplyFields(p,new Target(),new SavedSceneSnapshot(),"renderer",0,before,new MaterialEvidence{Guid="new",LocalId=2100001});return false;}catch(InvalidOperationException){return true;}}
+static JObject Request(){return new JObject{["expectedScenePath"]="Assets/Scene.unity",["expectedSceneGuid"]="scene",["expectedSceneHandle"]=1,["expectedRendererComponentType"]="Renderer",["expectedRendererComponentIndex"]=0,["rendererComponentId"]="renderer",["slotIndex"]=0,["expectedNewMaterialGuid"]="new",["expectedNewMaterialLocalId"]=2100001};}
 static void Check(bool ok,string label){if(!ok)throw new Exception(label);}
 static int Main(){
 var p=Request();p["expectedBeforeMaterialIsNull"]=true;Check(!Reject(p,null,null),"sealed empty slot must accept");
@@ -62,7 +62,7 @@ Check(Reject(Request(),null,null),"missing null evidence rejects");
 foreach(var value in new JToken[]{new JValue(false),new JValue("true"),JValue.CreateNull()}){p=Request();p["expectedBeforeMaterialIsNull"]=value;Check(Reject(p,null,null),"invalid null evidence rejects");}
 p=Request();p["expectedBeforeMaterialIsNull"]=true;p["expectedBeforeMaterialGuid"]="old";Check(Reject(p,null,null),"contradictory evidence rejects");
 p=Request();p["expectedBeforeMaterialIsNull"]=true;Check(Reject(p,new Material(),new MaterialEvidence()),"newly occupied slot rejects");
-p=Request();p["expectedBeforeMaterialAssetPath"]="Assets/Old.mat";p["expectedBeforeMaterialGuid"]="old";p["expectedBeforeMaterialFileDigest"]="oldhash";p["expectedBeforeMaterialShader"]="shader";p["expectedBeforeMaterialRenderQueue"]=2000;
+p=Request();p["expectedBeforeMaterialAssetPath"]="Assets/Old.mat";p["expectedBeforeMaterialGuid"]="old";p["expectedBeforeMaterialLocalId"]=2100000;
 Check(!Reject(p,new Material(),new MaterialEvidence()),"existing nonempty contract accepts");Check(Reject(p,null,null),"newly emptied slot rejects");
 Console.WriteLine("PASS null and existing material identity preconditions");return 0;}
 }'''.replace("METHODS",methods)

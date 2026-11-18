@@ -23,19 +23,19 @@ def test_actual_renderer_array_planner(tmp_path):
     static int failures;
     static void Check(bool v,string name){Console.WriteLine((v?"PASS ":"FAIL ")+name);if(!v)failures++;}
     static bool Reject(Action a){try{a();return false;}catch(InvalidOperationException){return true;}}
-    static JArray Before()=>JArray.Parse(@"[{'rendererPath':'Avatar/A','rendererComponentId':'aaa','slots':['old|1','null','keep|2']},{'rendererPath':'Avatar/B','rendererComponentId':'bbb','slots':['old|1']}]" );
-    static JArray Rows()=>JArray.Parse(@"[{'rendererPath':'Avatar/A','rendererComponentId':'aaa','slotIndex':0,'newMaterial':{'assetPath':'new','assetGuid':'3'}},{'rendererPath':'Avatar/B','rendererComponentId':'bbb','slotIndex':0,'newMaterial':{'assetPath':'new','assetGuid':'3'}}]");
+    static JArray Before()=>JArray.Parse(@"[{'rendererPath':'Avatar/A','rendererComponentId':'aaa','slots':['old|1|10','null','keep|2|20']},{'rendererPath':'Avatar/B','rendererComponentId':'bbb','slots':['old|1|10']}]" );
+    static JArray Rows()=>JArray.Parse(@"[{'rendererPath':'Avatar/A','rendererComponentId':'aaa','slotIndex':0,'newMaterial':{'assetPath':'new','assetGuid':'3','assetLocalId':30}},{'rendererPath':'Avatar/B','rendererComponentId':'bbb','slotIndex':0,'newMaterial':{'assetPath':'new','assetGuid':'3','assetLocalId':30}}]");
     static JObject Request(int count) { var rows=new JArray();for(int i=0;i<count;i++)rows.Add(new JObject{["rendererPath"]="Avatar/A",["rendererComponentId"]=new string('a',64),["slotIndex"]=i,["newMaterialAssetPath"]="Assets/New.mat"});return new JObject{["assignments"]=rows}; }
     public static int Main(){
       var before=Before();var original=before.DeepClone();var after=BuildExpected(before,Rows());
-      Check(after[0]["slots"][0].Value<string>()=="new|3" && after[1]["slots"][0].Value<string>()=="new|3","multiple renderers updated");
-      Check(after[0]["slots"][1].Value<string>()=="null" && after[0]["slots"][2].Value<string>()=="keep|2","untouched null order retained");
+      Check(after[0]["slots"][0].Value<string>()=="new|3|30" && after[1]["slots"][0].Value<string>()=="new|3|30","multiple renderers updated");
+      Check(after[0]["slots"][1].Value<string>()=="null" && after[0]["slots"][2].Value<string>()=="keep|2|20","untouched null order retained");
       Check(JToken.DeepEquals(before,original),"planning immutable");
       var rows=Rows();rows.Add(rows[0].DeepClone());Check(Reject(()=>BuildExpected(before,rows)),"duplicate slot rejects");
       rows=Rows();rows[1]["slotIndex"]=2;Check(Reject(()=>BuildExpected(before,rows)) && JToken.DeepEquals(before,original),"illegal final item rejects without partial plan mutation");
       rows=Rows();rows[1]["rendererComponentId"]="missing";Check(Reject(()=>BuildExpected(before,rows)),"missing renderer rejects");
       rows=Rows();rows[1]["newMaterial"]=null;Check(Reject(()=>BuildExpected(before,rows)),"missing material rejects");
-      rows=Rows();rows[0]["newMaterial"]["assetPath"]="old";rows[0]["newMaterial"]["assetGuid"]="1";Check(Reject(()=>BuildExpected(before,rows)),"unchanged row rejects");
+      rows=Rows();rows[0]["newMaterial"]["assetPath"]="old";rows[0]["newMaterial"]["assetGuid"]="1";rows[0]["newMaterial"]["assetLocalId"]=10;Check(Reject(()=>BuildExpected(before,rows)),"unchanged row rejects");
       Check(ValidateEnvelope(Request(256)).Count==256,"256 rows accepted");
       Check(Reject(()=>ValidateEnvelope(Request(257))),"257 rows reject");
       var req=Request(1);req["rendererPath"]="single";Check(Reject(()=>ValidateEnvelope(req)),"mixed fields reject");

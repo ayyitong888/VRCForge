@@ -1,8 +1,6 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -14,7 +12,7 @@ namespace VRCForge.Editor
 {
     [VRCForgeCommand(
         toolId: "vrc_set_renderer_material_slot",
-        Summary = "Preview or replace exactly one Renderer.sharedMaterials slot with one persistent writable Assets/*.mat asset. Use for one generic renderer slot; do not use for batch or hierarchy-only targeting.")]
+        Summary = "Preview or replace exactly one Renderer.sharedMaterials slot with one persistent Assets/*.mat asset. Use for one generic renderer slot; do not use for batch or hierarchy-only targeting.")]
     public static class RendererMaterialSlotTool
     {
         private const string ResultSchema = "vrcforge.renderer_material_slot.v1";
@@ -27,7 +25,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Exact loaded-scene renderer hierarchy path; required when assignments is absent.", IsRequired = false)] public string rendererPath { get; set; } = "";
             [VRCForgeInput("Required stable RendererComponentIdentity id.", IsRequired = false)] public string rendererComponentId { get; set; } = "";
             [VRCForgeInput("One zero-based sharedMaterials slot; required when assignments is absent.", IsRequired = false)] public int? slotIndex { get; set; }
-            [VRCForgeInput("One persistent writable Assets/*.mat main asset; required when assignments is absent.", IsRequired = false)] public string newMaterialAssetPath { get; set; } = "";
+            [VRCForgeInput("One persistent Assets/*.mat main asset; required when assignments is absent.", IsRequired = false)] public string newMaterialAssetPath { get; set; } = "";
             [VRCForgeInput("Exact active Unity project root.", IsRequired = true)] public string expectedProjectPath { get; set; } = "";
             [VRCForgeInput("Return all validated preconditions without mutation.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Preview scene path.", IsRequired = false)] public string expectedScenePath { get; set; } = "";
@@ -38,11 +36,9 @@ namespace VRCForge.Editor
             [VRCForgeInput("Preview before material asset path.", IsRequired = false)] public string expectedBeforeMaterialAssetPath { get; set; } = "";
             [VRCForgeInput("Explicit preview evidence that the original slot is empty; omit for a nonempty slot.", IsRequired = false)] public bool? expectedBeforeMaterialIsNull { get; set; }
             [VRCForgeInput("Preview before material GUID.", IsRequired = false)] public string expectedBeforeMaterialGuid { get; set; } = "";
-            [VRCForgeInput("Preview before material file digest.", IsRequired = false)] public string expectedBeforeMaterialFileDigest { get; set; } = "";
-            [VRCForgeInput("Preview before material shader.", IsRequired = false)] public string expectedBeforeMaterialShader { get; set; } = "";
-            [VRCForgeInput("Preview before material render queue.", IsRequired = false)] public int? expectedBeforeMaterialRenderQueue { get; set; }
+            [VRCForgeInput("Preview before material local file ID.", IsRequired = false)] public long? expectedBeforeMaterialLocalId { get; set; }
             [VRCForgeInput("Preview new material GUID.", IsRequired = false)] public string expectedNewMaterialGuid { get; set; } = "";
-            [VRCForgeInput("Preview new material file digest.", IsRequired = false)] public string expectedNewMaterialFileDigest { get; set; } = "";
+            [VRCForgeInput("Preview new material local file ID.", IsRequired = false)] public long? expectedNewMaterialLocalId { get; set; }
         }
 
         internal sealed class Target
@@ -68,30 +64,28 @@ namespace VRCForge.Editor
                 RequireProject(parameters);
                 var scene = ResolveTarget(path, componentId, out target);
                 var materialEvidence = ReadMaterial(newPath, "new material");
-                if (slot < 0 || slot >= target.Renderer.sharedMaterials.Length)
+                var slots = target.Renderer.sharedMaterials;
+                if (slot < 0 || slot >= slots.Length)
                     throw new InvalidOperationException("slotIndex is outside sharedMaterials.");
-                var before = target.Renderer.sharedMaterials[slot];
+                var before = slots[slot];
                 var beforeEvidence = before == null ? null : ReadMaterialAsset(before, "before material");
                 var newMaterial = materialEvidence.Material;
-                if (beforeEvidence != null && beforeEvidence.Path == materialEvidence.Path && beforeEvidence.Guid == materialEvidence.Guid)
+                if (beforeEvidence != null && beforeEvidence.Identity == materialEvidence.Identity)
                     throw new InvalidOperationException("The selected renderer slot already uses the requested material.");
-                beforeSlots = target.Renderer.sharedMaterials.Select(MaterialIdentity).ToArray();
+                beforeSlots = slots.Select(MaterialIdentity).ToArray();
                 if (!IsPreview(parameters))
                 {
-                    RequireApplyFields(parameters, target, scene, componentId, slot, before, beforeEvidence, materialEvidence);
+                    RequireApplyFields(parameters, target, scene, componentId, slot, beforeEvidence, materialEvidence);
                     Undo.IncrementCurrentGroup();
                     undoGroup = Undo.GetCurrentGroup();
                     Undo.SetCurrentGroupName("Set VRCForge renderer material slot");
                     Undo.RegisterCompleteObjectUndo(target.Renderer, "Set VRCForge renderer material slot");
                     mutationStarted = true;
-                    var slots = target.Renderer.sharedMaterials;
                     slots[slot] = newMaterial;
                     target.Renderer.sharedMaterials = slots;
                     EditorSceneManager.MarkSceneDirty(scene.Scene);
                     if (!EditorSceneManager.SaveScene(scene.Scene))
                         throw new InvalidOperationException("The exact renderer scene could not be saved.");
-                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                    ResolveTarget(path, componentId, out target);
                     VerifySlots(target.Renderer, beforeSlots, slot, materialEvidence);
                     var receipt = Payload(target, slot, beforeEvidence, materialEvidence, true, true, true, true, true);
                     return VRCForgeToolResult.Completed("Renderer material slot replaced and persisted.", receipt);
@@ -137,9 +131,9 @@ namespace VRCForge.Editor
                 scenePath = scene.Path, sceneGuid = scene.Guid, sceneHandle = scene.Handle,
                 slotIndex = slot,
                 beforeMaterial = MaterialPayload(before), newMaterial = MaterialPayload(next),
-                newMaterialAssetPath = next.Path, newMaterialAssetGuid = next.Guid, newMaterialFileDigest = next.Digest,
+                newMaterialAssetPath = next.Path, newMaterialAssetGuid = next.Guid, newMaterialAssetLocalId = next.LocalId,
                 preconditions = new { exactScene = true, exactRendererIdentity = true, exactSlot = true,
-                    expectedBeforeMaterial = before == null ? "null" : before.Path + "|" + before.Guid, exactNewPersistentMaterial = true,
+                    expectedBeforeMaterial = before == null ? "null" : before.Identity, exactNewPersistentMaterial = true,
                     hierarchyPathIsDisplayOnly = true }
             };
         }
@@ -147,11 +141,7 @@ namespace VRCForge.Editor
         internal static object MaterialPayload(MaterialEvidence evidence)
         {
             if (evidence == null) return null;
-            var material = evidence.Material;
-            if (material == null) return null;
-            return new { name = material.name, shader = material.shader == null ? "" : material.shader.name,
-                renderQueue = material.renderQueue, assetPath = evidence.Path,
-                assetGuid = evidence.Guid, fileDigest = evidence.Digest };
+            return new { assetPath = evidence.Path, assetGuid = evidence.Guid, assetLocalId = evidence.LocalId };
         }
 
         private static bool IsPreview(JObject p) { return p?["preview"]?.Value<bool?>() ?? false; }
@@ -191,27 +181,54 @@ namespace VRCForge.Editor
         }
         internal static MaterialEvidence ReadMaterial(string path, string label)
         {
-            var material = AssetDatabase.LoadAssetAtPath<Material>(path); if (material == null || !AssetDatabase.IsMainAsset(material) || !EditorUtility.IsPersistent(material)) throw new InvalidOperationException(label + " is not a persistent main material asset.");
-            var full = Path.GetFullPath(Path.Combine(Directory.GetParent(Application.dataPath).FullName, path)); RejectReparse(full); if ((File.GetAttributes(full) & FileAttributes.ReadOnly) != 0) throw new InvalidOperationException(label + " is not writable.");
-            return new MaterialEvidence { Material = material, Path = path, Guid = AssetDatabase.AssetPathToGUID(path), Digest = Sha256(File.ReadAllBytes(full)) };
+            var full = Path.GetFullPath(Path.Combine(Directory.GetParent(Application.dataPath).FullName, path));
+            RejectReparse(full);
+            var material = AssetDatabase.LoadAssetAtPath<Material>(path);
+            if (material == null || !AssetDatabase.IsMainAsset(material))
+                throw new InvalidOperationException(label + " is not a persistent main material asset.");
+            return ReadMaterialAsset(material, label);
         }
-        internal static MaterialEvidence ReadMaterialAsset(Material m, string label) { var p = NormalizeMaterialPath(AssetDatabase.GetAssetPath(m)); return ReadMaterial(p, label); }
-        internal static string MaterialIdentity(Material m) { if (m == null) return "null"; var p = AssetDatabase.GetAssetPath(m); return p + "|" + AssetDatabase.AssetPathToGUID(p); }
-        private static string Sha256(byte[] bytes) { using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant(); }
+
+        internal static MaterialEvidence ReadMaterialAsset(Material material, string label)
+        {
+            if (!EditorUtility.IsPersistent(material)
+                || !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(material, out string guid, out long localId)
+                || string.IsNullOrEmpty(guid) || localId == 0)
+                throw new InvalidOperationException(label + " has no persistent material identity.");
+            return new MaterialEvidence { Material = material, Path = AssetDatabase.GetAssetPath(material), Guid = guid, LocalId = localId };
+        }
+
+        internal static string MaterialIdentity(Material material)
+        {
+            return material == null ? "null" : ReadMaterialAsset(material, "renderer slot material").Identity;
+        }
         private static void RejectReparse(string path) { var current = Directory.GetParent(Application.dataPath).FullName; foreach (var part in path.Substring(current.Length).TrimStart('\\', '/').Split('\\', '/')) { current = Path.Combine(current, part); if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new InvalidOperationException("A material path contains a reparse point."); } }
-        private static void RequireApplyFields(JObject p, Target t, SavedSceneSnapshot s, string id, int slot, Material beforeMaterial, MaterialEvidence before, MaterialEvidence next)
+        private static void RequireApplyFields(JObject p, Target t, SavedSceneSnapshot s, string id, int slot, MaterialEvidence before, MaterialEvidence next)
         {
             var nullEvidence = p["expectedBeforeMaterialIsNull"];
             var expectsNull = nullEvidence?.Type == JTokenType.Boolean && nullEvidence.Value<bool>();
             var beforeMatches = before == null
-                ? beforeMaterial == null && expectsNull && !new[] { "expectedBeforeMaterialAssetPath", "expectedBeforeMaterialGuid", "expectedBeforeMaterialFileDigest", "expectedBeforeMaterialShader", "expectedBeforeMaterialRenderQueue" }.Any(key => p.Property(key) != null)
-                : nullEvidence == null && beforeMaterial != null && Required(p, "expectedBeforeMaterialAssetPath") == before.Path && Required(p, "expectedBeforeMaterialGuid") == before.Guid && Required(p, "expectedBeforeMaterialFileDigest") == before.Digest && Required(p, "expectedBeforeMaterialShader") == (beforeMaterial.shader == null ? "" : beforeMaterial.shader.name) && p["expectedBeforeMaterialRenderQueue"]?.Value<int>() == beforeMaterial.renderQueue;
-            if (Required(p, "expectedScenePath").Replace('\\', '/') != s.Path || Required(p, "expectedSceneGuid") != s.Guid || p["expectedSceneHandle"]?.Value<int>() != s.Handle || Required(p, "expectedRendererComponentType") != t.Identity.componentType || p["expectedRendererComponentIndex"]?.Value<int>() != t.Identity.componentIndex || Required(p, "rendererComponentId") != id || p["slotIndex"]?.Value<int>() != slot || Required(p, "expectedNewMaterialGuid") != next.Guid || Required(p, "expectedNewMaterialFileDigest") != next.Digest || !beforeMatches) throw new InvalidOperationException("The current state no longer matches the verified preview.");
+                ? expectsNull && !new[] { "expectedBeforeMaterialAssetPath", "expectedBeforeMaterialGuid", "expectedBeforeMaterialLocalId" }.Any(key => p.Property(key) != null)
+                : nullEvidence == null && Required(p, "expectedBeforeMaterialAssetPath") == before.Path
+                    && Required(p, "expectedBeforeMaterialGuid") == before.Guid && p["expectedBeforeMaterialLocalId"]?.Value<long>() == before.LocalId;
+            if (Required(p, "expectedScenePath").Replace('\\', '/') != s.Path || Required(p, "expectedSceneGuid") != s.Guid
+                || p["expectedSceneHandle"]?.Value<int>() != s.Handle || Required(p, "expectedRendererComponentType") != t.Identity.componentType
+                || p["expectedRendererComponentIndex"]?.Value<int>() != t.Identity.componentIndex || Required(p, "rendererComponentId") != id
+                || p["slotIndex"]?.Value<int>() != slot || Required(p, "expectedNewMaterialGuid") != next.Guid
+                || p["expectedNewMaterialLocalId"]?.Value<long>() != next.LocalId || !beforeMatches)
+                throw new InvalidOperationException("The current state no longer matches the verified preview.");
         }
         private static void VerifySlots(Renderer r, string[] before, int slot, MaterialEvidence next)
         {
-            var after = r.sharedMaterials; if (after.Length != before.Length || MaterialIdentity(after[slot]) != next.Path + "|" + next.Guid || Enumerable.Range(0, before.Length).Any(i => i != slot && MaterialIdentity(after[i]) != before[i])) throw new InvalidOperationException("Renderer material slots did not persist exactly.");
+            var after = r.sharedMaterials; if (after.Length != before.Length || MaterialIdentity(after[slot]) != next.Identity || Enumerable.Range(0, before.Length).Any(i => i != slot && MaterialIdentity(after[i]) != before[i])) throw new InvalidOperationException("Renderer material slots did not persist exactly.");
         }
-        internal sealed class MaterialEvidence { internal Material Material; internal string Path; internal string Guid; internal string Digest; }
+        internal sealed class MaterialEvidence
+        {
+            internal Material Material;
+            internal string Path;
+            internal string Guid;
+            internal long LocalId;
+            internal string Identity => Path + "|" + Guid + "|" + LocalId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
     }
 }

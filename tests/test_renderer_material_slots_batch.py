@@ -31,10 +31,10 @@ from renderer_material_slot_assignment import bind_authoritative_preview, valida
 
 def preview():
  row=request()["assignments"][0]
- old={"name":"Old","shader":"lilToon","renderQueue":2000,"assetPath":"Assets/Old.mat","assetGuid":"b"*32,"fileDigest":"c"*64}
- new={**old,"name":"New","assetPath":"Assets/New.mat","assetGuid":"d"*32,"fileDigest":"e"*64}
- before={"rendererPath":row["rendererPath"],"rendererComponentId":row["rendererComponentId"],"rendererComponentType":"UnityEngine.SkinnedMeshRenderer","rendererComponentIndex":0,"slots":["Assets/Old.mat|"+"b"*32,"null","Assets/Keep.mat|"+"f"*32]}
- after=deepcopy(before);after["slots"][0]="Assets/New.mat|"+"d"*32
+ old={"name":"Old","shader":"lilToon","renderQueue":2000,"assetPath":"Assets/Old.mat","assetGuid":"b"*32,"assetLocalId":2100000}
+ new={**old,"name":"New","assetPath":"Assets/New.mat","assetGuid":"d"*32,"assetLocalId":2100001}
+ before={"rendererPath":row["rendererPath"],"rendererComponentId":row["rendererComponentId"],"rendererComponentType":"UnityEngine.SkinnedMeshRenderer","rendererComponentIndex":0,"slots":["Assets/Old.mat|"+"b"*32+"|2100000","null","Assets/Keep.mat|"+"f"*32+"|2100000"]}
+ after=deepcopy(before);after["slots"][0]="Assets/New.mat|"+"d"*32+"|2100001"
  plan={"scene":{"scenePath":"Assets/Main.unity","sceneGuid":"1"*32,"sceneHandle":1},"beforeRenderers":[before],"afterRenderers":[after],"assignments":[{**row,"beforeMaterial":old,"newMaterial":new}]}
  return {"schema":"vrcforge.renderer_material_slot.v1","batch":True,"preview":True,"verified":True,"mutationStarted":False,"applied":False,"committed":False,"sceneSaved":False,"persistedReadback":False,"plan":plan}
 

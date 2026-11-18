@@ -545,11 +545,9 @@
         "expectedRendererComponentIndex": 0,
         "expectedBeforeMaterialAssetPath": "${BEFORE_MATERIAL_PATH}",
         "expectedBeforeMaterialGuid": "${BEFORE_MATERIAL_GUID}",
-        "expectedBeforeMaterialFileDigest": "${BEFORE_MATERIAL_FILE_DIGEST}",
-        "expectedBeforeMaterialShader": "${BEFORE_MATERIAL_SHADER}",
-        "expectedBeforeMaterialRenderQueue": 2000,
+        "expectedBeforeMaterialLocalId": 2100000,
         "expectedNewMaterialGuid": "${NEW_MATERIAL_GUID}",
-        "expectedNewMaterialFileDigest": "${NEW_MATERIAL_FILE_DIGEST}"
+        "expectedNewMaterialLocalId": 2100000
       },
       "requiredFixtures": [
         "saved scene with a uniquely resolved Renderer",
@@ -578,7 +576,7 @@
         "newMaterial",
         "newMaterialAssetPath",
         "newMaterialAssetGuid",
-        "newMaterialFileDigest",
+        "newMaterialAssetLocalId",
         "preconditions"
       ],
       "cleanup": "Restore the saved scene through the run-owned checkpoint/backup lane; never mutate the source material asset."

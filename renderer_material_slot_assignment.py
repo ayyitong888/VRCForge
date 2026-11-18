@@ -95,22 +95,20 @@ def bind_authoritative_preview(
     requested_new_path = _asset_path(nested.get("newMaterialAssetPath"), "newMaterialAssetPath", ".mat")
     new_path = _asset_path(result.get("newMaterialAssetPath"), "newMaterialAssetPath", ".mat")
     new_guid = _hex(result.get("newMaterialAssetGuid"), "newMaterialAssetGuid", _GUID)
-    new_digest = _hex(result.get("newMaterialFileDigest"), "newMaterialFileDigest", _DIGEST)
-    if new_path != requested_new_path or new_material["assetPath"] != new_path or new_material["assetGuid"] != new_guid:
+    new_local_id = _local_id(result.get("newMaterialAssetLocalId"), "newMaterialAssetLocalId")
+    if new_path != requested_new_path or new_material["assetPath"] != new_path or new_material["assetGuid"] != new_guid or new_material["assetLocalId"] != new_local_id:
         raise RendererMaterialSlotError("Preview changed the requested new material.")
-    if before is not None and before["assetPath"] == new_path and before["assetGuid"] == new_guid:
+    if before is not None and before["assetPath"] == new_path and before["assetGuid"] == new_guid and before["assetLocalId"] == new_local_id:
         raise RendererMaterialSlotError("The requested slot already uses the new material.")
 
     canonical_nested = deepcopy(nested)
-    before_keys = ("expectedBeforeMaterialAssetPath", "expectedBeforeMaterialGuid", "expectedBeforeMaterialFileDigest",
-                   "expectedBeforeMaterialShader", "expectedBeforeMaterialRenderQueue", "expectedBeforeMaterialIsNull")
+    before_keys = ("expectedBeforeMaterialAssetPath", "expectedBeforeMaterialGuid", "expectedBeforeMaterialLocalId", "expectedBeforeMaterialIsNull")
     for key in before_keys:
         canonical_nested.pop(key, None)
     if before is None:
         canonical_nested["expectedBeforeMaterialIsNull"] = True
     else:
-        canonical_nested.update(dict(zip(before_keys[:5], (before["assetPath"], before["assetGuid"],
-            before["fileDigest"], before["shader"], before["renderQueue"]))))
+        canonical_nested.update(dict(zip(before_keys[:3], (before["assetPath"], before["assetGuid"], before["assetLocalId"]))))
     canonical_nested.update(
         {
             "rendererPath": actual_path,
@@ -124,7 +122,7 @@ def bind_authoritative_preview(
             "expectedRendererComponentType": component_type,
             "expectedRendererComponentIndex": component_index,
             "expectedNewMaterialGuid": new_guid,
-            "expectedNewMaterialFileDigest": new_digest,
+            "expectedNewMaterialLocalId": new_local_id,
         }
     )
     canonical_wrapper = deepcopy(wrapper_arguments)
@@ -145,7 +143,7 @@ def bind_authoritative_preview(
             "rendererComponentIndex": component_index,
             "slotIndex": requested_slot,
         },
-        "change": {"beforeMaterial": before, "newMaterial": {**new_material, "fileDigest": new_digest}},
+        "change": {"beforeMaterial": before, "newMaterial": new_material},
         "rollbackRequired": True,
         "freshReadbackRequired": True,
     }
@@ -167,6 +165,9 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, 
         raise RendererMaterialSlotError("Apply slot does not match approval.")
     if _asset_path(result.get("newMaterialAssetPath"), "newMaterialAssetPath", ".mat") != _asset_path(arguments.get("newMaterialAssetPath"), "newMaterialAssetPath", ".mat"):
         raise RendererMaterialSlotError("Apply material does not match approval.")
+    if (_hex(result.get("newMaterialAssetGuid"), "newMaterialAssetGuid", _GUID) != arguments.get("expectedNewMaterialGuid")
+            or _local_id(result.get("newMaterialAssetLocalId"), "newMaterialAssetLocalId") != arguments.get("expectedNewMaterialLocalId")):
+        raise RendererMaterialSlotError("Apply material identity does not match approval.")
     if arguments.get("expectedBeforeMaterialIsNull") is True:
         if "beforeMaterial" not in result or result["beforeMaterial"] is not None:
             raise RendererMaterialSlotError("Apply empty-slot pre-state does not match approval.")
@@ -175,15 +176,22 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, 
 
 def _material(value: Any, label: str) -> dict[str, Any]:
     item = _object(value, label)
-    path = _asset_path(item.get("assetPath"), f"{label}.assetPath", ".mat")
     return {
-        "name": _text(item.get("name"), f"{label}.name", 512),
-        "shader": _text(item.get("shader"), f"{label}.shader", 512),
-        "renderQueue": _integer(item.get("renderQueue"), f"{label}.renderQueue", -1, 5000),
-        "assetPath": path,
+        "assetPath": _text(item.get("assetPath"), f"{label}.assetPath", 2048),
         "assetGuid": _hex(item.get("assetGuid"), f"{label}.assetGuid", _GUID),
-        "fileDigest": _hex(item.get("fileDigest"), f"{label}.fileDigest", _DIGEST),
+        "assetLocalId": _local_id(item.get("assetLocalId"), f"{label}.assetLocalId"),
     }
+
+
+def _local_id(value: Any, label: str) -> int:
+    local_id = _integer(value, label, -(1 << 63), (1 << 63) - 1)
+    if local_id == 0:
+        raise RendererMaterialSlotError(f"{label} must be nonzero.")
+    return local_id
+
+
+def _material_identity(material: dict[str, Any]) -> str:
+    return f'{material["assetPath"]}|{material["assetGuid"]}|{material["assetLocalId"]}'
 
 
 def _object(value: Any, label: str) -> dict[str, Any]:
@@ -293,11 +301,11 @@ def _validate_batch_plan(rows: list[dict[str, Any]], value: Any) -> dict[str, An
         slot = actual["slotIndex"]
         if slot >= len(renderer["slots"]): raise RendererMaterialSlotError("Batch slot is out of range.")
         old = None if actual.get("beforeMaterial") is None else _material(actual["beforeMaterial"], "beforeMaterial")
-        old_identity = "null" if old is None else old["assetPath"] + "|" + old["assetGuid"]
+        old_identity = "null" if old is None else _material_identity(old)
         if renderer["slots"][slot] != old_identity: raise RendererMaterialSlotError("Before material differs from renderer slot.")
         new = _material(actual.get("newMaterial"), "newMaterial")
         if new["assetPath"] != actual["newMaterialAssetPath"]: raise RendererMaterialSlotError("New material differs from request.")
-        new_identity = new["assetPath"] + "|" + new["assetGuid"]
+        new_identity = _material_identity(new)
         if new_identity == old_identity: raise RendererMaterialSlotError("Batch includes an unchanged slot.")
         renderer["slots"][slot] = new_identity
     if touched != set(by_id) or expected != plan["afterRenderers"]:

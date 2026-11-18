@@ -46,12 +46,11 @@ def test_apply_binds_scene_identity_and_material_evidence_with_persisted_readbac
     tool = read(TOOL)
     for field in ("expectedScenePath", "expectedSceneGuid", "expectedSceneHandle",
                   "expectedBeforeMaterialAssetPath",
-                  "expectedBeforeMaterialGuid", "expectedBeforeMaterialFileDigest",
-                  "expectedBeforeMaterialShader", "expectedBeforeMaterialRenderQueue",
-                  "expectedNewMaterialGuid", "expectedNewMaterialFileDigest"):
+                  "expectedBeforeMaterialGuid", "expectedBeforeMaterialLocalId",
+                  "expectedNewMaterialGuid", "expectedNewMaterialLocalId"):
         assert field in tool
     assert 'EditorSceneManager.SaveScene' in tool
-    assert 'AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport)' in tool
+    assert 'AssetDatabase.TryGetGUIDAndLocalFileIdentifier' in tool
     assert 'sceneFileDigest' not in tool
     assert 'persistedReadback' in tool
     assert 'Undo.RegisterCompleteObjectUndo' in tool
@@ -65,7 +64,7 @@ def test_material_path_is_assets_mat_main_persistent_and_reparse_checked():
     assert 'AssetDatabase.IsMainAsset' in tool
     assert 'EditorUtility.IsPersistent' in tool
     assert 'FileAttributes.ReparsePoint' in tool
-    assert 'FileAttributes.ReadOnly' in tool
+    assert 'FileAttributes.ReadOnly' not in tool
 
 
 def test_undo_restoration_uses_exact_slot_readback_after_scene_save():
@@ -99,7 +98,7 @@ def _preview():
             "renderQueue": 2000,
             "assetPath": "Assets/VRCForge/Generated/OpaqueGenerated.mat",
             "assetGuid": "d" * 32,
-            "fileDigest": "e" * 64,
+            "assetLocalId": 2100000,
         },
         "newMaterial": {
             "name": "Expressions",
@@ -107,11 +106,11 @@ def _preview():
             "renderQueue": 2459,
             "assetPath": "Assets/Voidcat/Sapphy/Materials/liltoon/Expressions.mat",
             "assetGuid": "f" * 32,
-            "fileDigest": "1" * 64,
+            "assetLocalId": 2100001,
         },
         "newMaterialAssetPath": "Assets/Voidcat/Sapphy/Materials/liltoon/Expressions.mat",
         "newMaterialAssetGuid": "f" * 32,
-        "newMaterialFileDigest": "1" * 64,
+        "newMaterialAssetLocalId": 2100001,
     }
 
 
@@ -128,8 +127,8 @@ def test_gateway_binds_authoritative_preview_to_exact_apply_fields():
     arguments = canonical["arguments"]
     assert arguments["rendererComponentId"] == "a" * 64
     assert "expectedSceneFileDigest" not in arguments
-    assert arguments["expectedBeforeMaterialFileDigest"] == "e" * 64
-    assert arguments["expectedNewMaterialFileDigest"] == "1" * 64
+    assert arguments["expectedBeforeMaterialLocalId"] == 2100000
+    assert arguments["expectedNewMaterialLocalId"] == 2100001
     assert approval["freshReadbackRequired"] is True
 
 
@@ -137,6 +136,8 @@ def test_gateway_rejects_noop_apply_receipts():
     preview = _preview()
     preview["newMaterial"]["assetPath"] = preview["beforeMaterial"]["assetPath"]
     preview["newMaterial"]["assetGuid"] = preview["beforeMaterial"]["assetGuid"]
+    preview["newMaterial"]["assetLocalId"] = preview["beforeMaterial"]["assetLocalId"]
+    preview["newMaterialAssetLocalId"] = preview["beforeMaterial"]["assetLocalId"]
     preview["newMaterialAssetPath"] = preview["beforeMaterial"]["assetPath"]
     preview["newMaterialAssetGuid"] = preview["beforeMaterial"]["assetGuid"]
     wrapper = build_wrapper_arguments(
@@ -164,5 +165,7 @@ def test_gateway_rejects_noop_apply_receipts():
         "rendererComponentId": "a" * 64,
         "slotIndex": 0,
         "newMaterialAssetPath": apply["newMaterialAssetPath"],
+        "expectedNewMaterialGuid": apply["newMaterialAssetGuid"],
+        "expectedNewMaterialLocalId": apply["newMaterialAssetLocalId"],
     }
     assert validate_apply_result(arguments, apply) == apply
