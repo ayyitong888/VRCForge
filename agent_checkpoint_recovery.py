@@ -57,6 +57,7 @@ from agent_gateway import (
     utc_now_iso,
 )
 from checkpoint_storage_baseline import measure_checkpoint_storage, verify_duplicate_candidates
+from file_change_time import file_change_time_ns
 
 RESTORE_ATTEMPT_LIMIT = 3
 
@@ -95,13 +96,13 @@ class _LocalStateRestoreRecoveryError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _LocalStateFileEvidence:
-    metadata: tuple[int, int, int, int, int]
+    metadata: tuple[int, int, int, int, int | None]
     sha256: str
     crc: int | None
 
     @staticmethod
-    def identify(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
-        return (metadata.st_size, metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, metadata.st_ctime_ns)
+    def identify(path: Path, metadata: os.stat_result) -> tuple[int, int, int, int, int | None]:
+        return (metadata.st_size, metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, file_change_time_ns(path, metadata))
 
     @property
     def size(self) -> int:
@@ -3673,10 +3674,10 @@ class AgentCheckpointRecoveryService:
                             f"Local state contains a non-regular path: {child}"
                         )
                     before = child.stat(follow_symlinks=False)
-                    identity = _LocalStateFileEvidence.identify(before)
+                    identity = _LocalStateFileEvidence.identify(child, before)
                     file_name = f"{scope}/{relative_text}"
                     evidence = previous.get(file_name) if previous is not None else None
-                    if before.st_ino and evidence is not None and evidence.metadata == identity:
+                    if before.st_ino and identity[-1] is not None and evidence is not None and evidence.metadata == identity:
                         files[file_name] = evidence
                         entry_rows.append([scope, "file", relative_text, before.st_size, evidence.sha256])
                         continue
@@ -3692,7 +3693,7 @@ class AgentCheckpointRecoveryService:
                     after = child.stat(follow_symlinks=False)
                     if (
                         consumed != before.st_size
-                        or _LocalStateFileEvidence.identify(after) != identity
+                        or _LocalStateFileEvidence.identify(child, after) != identity
                     ):
                         raise ValueError(
                             f"Local state changed while being verified: {child}"

@@ -714,9 +714,9 @@ def test_local_state_restore_rejects_missing_or_malformed_digest_without_writes(
 
 
 @pytest.mark.parametrize("changed_scope", ["skill-packages", "skills"])
-@pytest.mark.parametrize("replace_same_length", [False, True])
+@pytest.mark.parametrize("drift", ["add", "replace", "in-place"])
 def test_local_state_approved_restore_rejects_each_root_drift_after_preview(
-    changed_scope: str, replace_same_length: bool, monkeypatch,
+    changed_scope: str, drift: str, monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway, checkpoint, roots, _live = _local_state_restore_fixture(
@@ -737,16 +737,17 @@ def test_local_state_approved_restore_rejects_each_root_drift_after_preview(
         )
         assert request["approval"]["arguments"]["currentStateDigest"] == digest
         gateway.approval_transactions.approve(request["approval"]["id"])
-        if replace_same_length:
-            drift_file = roots[changed_scope] / "sample" / "live-only.bin"
-            before = drift_file.stat()
-            replacement = Path(temp_dir) / "replacement.bin"
-            replacement.write_bytes(b"X" * before.st_size)
-            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
-            replacement.replace(drift_file)
-        else:
+        if drift == "add":
             drift_file = roots[changed_scope] / "approval-drift.bin"
             drift_file.write_bytes(f"changed {changed_scope}".encode("utf-8"))
+        else:
+            drift_file = roots[changed_scope] / "sample" / "live-only.bin"
+            before = drift_file.stat()
+            edited = drift_file if drift == "in-place" else Path(temp_dir) / "replacement.bin"
+            edited.write_bytes(b"X" * before.st_size)
+            os.utime(edited, ns=(before.st_atime_ns, before.st_mtime_ns))
+            if drift == "replace":
+                edited.replace(drift_file)
         drifted = {scope: _tree_bytes(path) for scope, path in roots.items()}
         live_reads = []
         open_path = Path.open
