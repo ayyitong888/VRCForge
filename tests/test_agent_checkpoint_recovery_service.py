@@ -714,8 +714,9 @@ def test_local_state_restore_rejects_missing_or_malformed_digest_without_writes(
 
 
 @pytest.mark.parametrize("changed_scope", ["skill-packages", "skills"])
+@pytest.mark.parametrize("replace_same_length", [False, True])
 def test_local_state_approved_restore_rejects_each_root_drift_after_preview(
-    changed_scope: str,
+    changed_scope: str, replace_same_length: bool, monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway, checkpoint, roots, _live = _local_state_restore_fixture(
@@ -736,9 +737,26 @@ def test_local_state_approved_restore_rejects_each_root_drift_after_preview(
         )
         assert request["approval"]["arguments"]["currentStateDigest"] == digest
         gateway.approval_transactions.approve(request["approval"]["id"])
-        drift_file = roots[changed_scope] / "approval-drift.bin"
-        drift_file.write_bytes(f"changed {changed_scope}".encode("utf-8"))
+        if replace_same_length:
+            drift_file = roots[changed_scope] / "sample" / "live-only.bin"
+            before = drift_file.stat()
+            replacement = Path(temp_dir) / "replacement.bin"
+            replacement.write_bytes(b"X" * before.st_size)
+            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+            replacement.replace(drift_file)
+        else:
+            drift_file = roots[changed_scope] / "approval-drift.bin"
+            drift_file.write_bytes(f"changed {changed_scope}".encode("utf-8"))
         drifted = {scope: _tree_bytes(path) for scope, path in roots.items()}
+        live_reads = []
+        open_path = Path.open
+
+        def track_live_reads(path, mode="r", *args, **kwargs):
+            if mode == "rb" and any(path.is_relative_to(root) for root in roots.values()):
+                live_reads.append(path)
+            return open_path(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", track_live_reads)
 
         applied = gateway.approval_transactions.apply_approved(
             {"approval_id": request["approval"]["id"]}
@@ -746,11 +764,13 @@ def test_local_state_approved_restore_rejects_each_root_drift_after_preview(
 
         assert applied["ok"] is False
         assert "currentStateDigest" in str(applied["error"])
+        assert live_reads == [drift_file]
         assert {scope: _tree_bytes(path) for scope, path in roots.items()} == drifted
         assert _restore_workspaces(roots) == []
 
 
-def test_local_state_restore_with_matching_preview_digest_restores_checkpoint(monkeypatch) -> None:
+@pytest.mark.parametrize("restart", [False, True])
+def test_local_state_restore_with_matching_preview_digest_restores_checkpoint(monkeypatch, restart) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway, checkpoint, roots, _live = _local_state_restore_fixture(
             Path(temp_dir),
@@ -769,6 +789,8 @@ def test_local_state_restore_with_matching_preview_digest_restores_checkpoint(mo
         digest = _preview_local_state_digest(gateway, checkpoint)
         assert live_reads == Counter(dict.fromkeys(live_paths, 1))
         live_reads.clear()
+        if restart:
+            gateway = _gateway(Path(temp_dir))
 
         result = gateway.checkpoint_recovery.restore_checkpoint(
             {
@@ -779,7 +801,7 @@ def test_local_state_restore_with_matching_preview_digest_restores_checkpoint(mo
         )
 
         assert result["ok"] is True
-        assert live_reads == Counter(dict.fromkeys(live_paths, 1))
+        assert live_reads == (Counter(dict.fromkeys(live_paths, 1)) if restart else Counter())
         assert _tree_bytes(roots["skill-packages"]) == {
             "sample/installed.json": b'{"version": "checkpoint"}\n',
         }

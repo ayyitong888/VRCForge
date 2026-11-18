@@ -94,6 +94,21 @@ class _LocalStateRestoreRecoveryError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class _LocalStateFileEvidence:
+    metadata: tuple[int, int, int, int, int]
+    sha256: str
+    crc: int | None
+
+    @staticmethod
+    def identify(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (metadata.st_size, metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+    @property
+    def size(self) -> int:
+        return self.metadata[0]
+
+
+@dataclass(frozen=True, slots=True)
 class CheckpointApprovalRecoveryPorts:
     apply_recovery_blocks_writes: Callable[[dict[str, Any]], bool]
     create_pre_write_checkpoint: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | None]
@@ -151,6 +166,7 @@ class AgentCheckpointRecoveryService:
         "_checkpoint_project_root_resolver",
         "_checkpoint_restore_handler",
         "_checkpoint_restore_prepare_handler",
+        "_local_state_preview",
         "_ports",
         "_project_chat_checkpoint_lock",
     )
@@ -168,6 +184,7 @@ class AgentCheckpointRecoveryService:
         self._checkpoint_project_root_resolver: Callable[[], str] | None = None
         self._checkpoint_restore_prepare_handler: Callable[..., dict[str, Any]] | None = None
         self._checkpoint_restore_handler: Callable[[Path, dict[str, Any]], dict[str, Any]] | None = None
+        self._local_state_preview: tuple[str, dict[str, _LocalStateFileEvidence]] | None = None
 
     @contextmanager
     def _scan_mutation(self, project_root: Any, reason: str) -> Iterator[None]:
@@ -2555,7 +2572,9 @@ class AgentCheckpointRecoveryService:
                 }
                 for name in archived:
                     self._validate_local_state_archive_member(name)
-            current_state_digest, current = self._inspect_current_local_state(include_crc=True)
+            current_state_digest, evidence = self._inspect_current_local_state(include_crc=True)
+            self._local_state_preview = (current_state_digest, evidence)
+            current = {name: (item.size, item.crc) for name, item in evidence.items()}
             changed = [f"M\t{name}" for name in sorted(archived.keys() & current.keys()) if archived[name] != current[name]]
             changed.extend(f"D\t{name}" for name in sorted(archived.keys() - current.keys()))
             changed.extend(f"A\t{name}" for name in sorted(current.keys() - archived.keys()))
@@ -3135,7 +3154,9 @@ class AgentCheckpointRecoveryService:
                 "error": "currentStateDigest from the restore preview is required.",
             }
         try:
-            current_state_digest, current = self._inspect_current_local_state()
+            preview = self._local_state_preview
+            previous = preview[1] if preview and preview[0] == expected_current_state_digest else None
+            current_state_digest, current = self._inspect_current_local_state(previous=previous)
         except Exception as exc:  # noqa: BLE001 - validation must fail before staging.
             return {
                 "ok": False,
@@ -3185,6 +3206,7 @@ class AgentCheckpointRecoveryService:
                 for name in sorted(current)
                 if name == scope or name.startswith(scope + "/")
             ]
+            self._local_state_preview = None
             self._publish_local_state_restore(records)
 
             return {
@@ -3605,14 +3627,14 @@ class AgentCheckpointRecoveryService:
         }
 
     def _inspect_current_local_state(
-        self, *, include_crc: bool = False,
-    ) -> tuple[str, dict[str, tuple[int, int | None]]]:
+        self, *, include_crc: bool = False, previous: dict[str, _LocalStateFileEvidence] | None = None,
+    ) -> tuple[str, dict[str, _LocalStateFileEvidence]]:
         """Bind restore to the current trees and collect ZIP comparison data for preview."""
 
         roots = self._local_state_checkpoint_roots()
         root_rows: list[list[Any]] = []
         entry_rows: list[list[Any]] = []
-        files: dict[str, tuple[int, int | None]] = {}
+        files: dict[str, _LocalStateFileEvidence] = {}
         for scope, root in sorted(roots.items()):
             exists = os.path.lexists(root)
             if exists and (_path_is_link_like(root) or not root.is_dir()):
@@ -3651,6 +3673,13 @@ class AgentCheckpointRecoveryService:
                             f"Local state contains a non-regular path: {child}"
                         )
                     before = child.stat(follow_symlinks=False)
+                    identity = _LocalStateFileEvidence.identify(before)
+                    file_name = f"{scope}/{relative_text}"
+                    evidence = previous.get(file_name) if previous is not None else None
+                    if before.st_ino and evidence is not None and evidence.metadata == identity:
+                        files[file_name] = evidence
+                        entry_rows.append([scope, "file", relative_text, before.st_size, evidence.sha256])
+                        continue
                     file_digest = hashlib.sha256()
                     consumed = 0
                     crc = 0 if include_crc else None
@@ -3663,20 +3692,20 @@ class AgentCheckpointRecoveryService:
                     after = child.stat(follow_symlinks=False)
                     if (
                         consumed != before.st_size
-                        or after.st_size != before.st_size
-                        or after.st_mtime_ns != before.st_mtime_ns
+                        or _LocalStateFileEvidence.identify(after) != identity
                     ):
                         raise ValueError(
                             f"Local state changed while being verified: {child}"
                         )
-                    files[f"{scope}/{relative_text}"] = (consumed, crc)
+                    evidence = _LocalStateFileEvidence(identity, file_digest.hexdigest(), crc)
+                    files[file_name] = evidence
                     entry_rows.append(
                         [
                             scope,
                             "file",
                             relative_text,
                             consumed,
-                            file_digest.hexdigest(),
+                            evidence.sha256,
                         ]
                     )
         payload = {
