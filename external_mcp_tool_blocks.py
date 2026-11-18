@@ -265,6 +265,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
         {
             "vrcforge_create_project",
             "vrcforge_install_unity_core",
+            "vrcforge_open_unity_project",
             "vrcforge_restore_unity_core",
             "vrcforge_install_vpm_package",
             "vrcforge_refresh_asset_database",

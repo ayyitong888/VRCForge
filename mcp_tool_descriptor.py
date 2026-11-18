@@ -162,7 +162,7 @@ _READ_RUNTIME_IDENTITY_SCOPES = frozenset({"scene", "avatar", "object", "compone
 _APPLICATION_OWNED_WRITE_TOOLS = frozenset({
     "vrcforge_create_project", "vrcforge_register_project",
     "vrcforge_register_project_catalog", "vrcforge_restore_unity_core",
-    "vrcforge_install_unity_core",
+    "vrcforge_install_unity_core", "vrcforge_open_unity_project",
     "vrcforge_rollback_project_catalog_registration",
     "vrcforge_rollback_project_lifecycle", "vrcforge_select_project",
     "vrcforge_create_project_checkpoint",

@@ -1,9 +1,36 @@
 from __future__ import annotations
 
 import ctypes
+import json
+import os
 import sys
 from ctypes import wintypes
 from pathlib import Path
+
+
+def unity_hub_editor_paths(version: str) -> list[Path]:
+    app_data = os.environ.get("APPDATA")
+    if not app_data:
+        return []
+    try:
+        catalogue = json.loads((Path(app_data) / "UnityHub" / "editors-v2.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return []
+    entries = catalogue.get("data") if isinstance(catalogue, dict) else None
+    if not isinstance(entries, list):
+        return []
+    paths = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("version") != version:
+            continue
+        locations = entry.get("location")
+        if isinstance(locations, list):
+            for location in locations:
+                if isinstance(location, str):
+                    path = Path(location)
+                    if path.is_absolute() and path.name.casefold() == "unity.exe":
+                        paths.append(path)
+    return paths
 
 
 def read_unity_editor_version(path: Path) -> str | None:

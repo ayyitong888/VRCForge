@@ -1214,6 +1214,11 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_restore_unity_core'] = {
         'installedSha256': {'type': 'string', 'description': 'Expected currently installed Core SHA256 from the same receipt. Do not guess either hash.'},
     },
 }
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_open_unity_project"] = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"projectPath": {"type": "string", "description": "Exact existing Unity project root to open."}},
+    "required": ["projectPath"],
+}
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_select_project'] = {
     'type': 'object', 'additionalProperties': True,
     'properties': {key: {'type': 'string', 'description': 'Exact existing Unity project root to select. Existing precedence: projectPath, project_path, projectRoot, project_root.'} for key in ('projectPath', 'project_path', 'projectRoot', 'project_root')},

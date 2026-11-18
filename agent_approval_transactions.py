@@ -3776,6 +3776,13 @@ class AgentApprovalTransactionService:
                     "no automatic user-level rollback is advertised."
                 ),
             }
+        if handler.name == "vrcforge_open_unity_project":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA, "kind": "editor_process_launch",
+                "required": False, "approvalRequired": True, "preWriteCheckpointRequired": False,
+                "checkpointScope": [], "restoreTool": "", "postRestoreValidationRequired": False,
+                "note": "Opens the interactive Editor under the current user. Unity owns its process and normal project import; the user can close it from the Editor.",
+            }
         if handler.name == "vrcforge_select_project":
             return {
                 "schema": ROLLBACK_POLICY_SCHEMA,

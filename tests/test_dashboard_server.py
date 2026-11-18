@@ -15722,6 +15722,42 @@ class DashboardServerTests(unittest.TestCase):
                 dashboard_server.DASHBOARD_STATE.unity_editor_path = previous_editor
                 dashboard_server.DASHBOARD_STATE.selected_project_path = previous_selected
 
+    def test_agent_opens_exact_project_using_hub_editor_and_reuses_live_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "My Project"
+            for folder in ("ProjectSettings", "Assets", "Packages"):
+                (project / folder).mkdir(parents=True)
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n")
+            editor = root / "Custom Unity" / "Editor" / "Unity.exe"
+            editor.parent.mkdir(parents=True)
+            editor.touch()
+            hub = root / "UnityHub"
+            hub.mkdir()
+            (hub / "editors-v2.json").write_text(json.dumps({
+                "data": [{"version": "2022.3.22f1", "location": [str(editor)]}]
+            }))
+            running = {"commandLine": f'Unity.exe -projectPath "{project}"', "executablePath": str(editor), "processId": 17}
+            sibling = {**running, "commandLine": f'Unity.exe -projectPath "{project} Other"'}
+            name = "vrcforge_open_unity_project"
+            handler = dashboard_server.AGENT_GATEWAY._write_handlers[name]
+            with (
+                patch.dict(os.environ, {"APPDATA": str(root)}),
+                patch.object(dashboard_server.DASHBOARD_STATE, "unity_editor_path", ""),
+                patch("dashboard_server.read_unity_editor_version", side_effect={editor: "2022.3.22f1"}.get),
+                patch("dashboard_server.list_running_unity_processes", side_effect=[[sibling], [sibling, running]]),
+                patch("dashboard_server.launch_unity_subprocess", return_value=SimpleNamespace(pid=17)) as launch,
+            ):
+                result = handler.handler({"projectPath": str(project)})
+                self.assertEqual((result["status"], result["processId"]), ("launched", 17))
+                self.assertEqual(handler.handler({"projectPath": str(project)})["status"], "already_open")
+                launch.assert_called_once_with([str(editor), "-projectPath", project.as_posix()], editor, project)
+            catalog = dashboard_server._RuntimePlannerCatalog()
+            for layer, visible in (("execution", True), ("planning", False)):
+                nodes = catalog.read(layer, project_context_active=True).visible_tools
+                self.assertEqual([(t.name, t.block) for t in nodes if t.runtime_name == name],
+                                 [("unity_open_project", "project_environment/assets_packages")] if visible else [])
+
     def test_discover_vrcforge_unity_tool_definitions_uses_core_registry_not_legacy_attributes(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         contract_text = (

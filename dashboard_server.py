@@ -583,7 +583,7 @@ from session_store_integrity import (
     scan_session_stores,
 )
 from project_chat_store_read_service import inspect_project_chat_store
-from unity_editor_executable import read_unity_editor_version
+from unity_editor_executable import read_unity_editor_version, unity_hub_editor_paths
 from shader_adapter_registry import (
     PRIMARY_AVATAR_ENCRYPTION_ADAPTER_IDS,
     normalize_shader_family_id,
@@ -12051,33 +12051,61 @@ async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
     return payload
 
 
-@app.post("/api/projects/open")
-async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
+_OPEN_UNITY_PROJECT_LOCK = Lock()
+
+
+def open_unity_project_sync(params: dict[str, Any], *, select_in_app: bool = False) -> dict[str, Any]:
     live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
     if live_connection is not None and live_connection.is_frozen():
-        raise HTTPException(status_code=409, detail="Opening another project is blocked during the fixed live run.")
-    project_path = resolve_target_project(request.project_path)
-    editor_path, _ = await asyncio.to_thread(resolve_unity_editor_path_for_repair, Path(project_path))
-    if editor_path is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No Unity editor matches this project's version. Open it in Unity Hub or configure the matching editor path.",
-        )
-
+        raise AgentGatewayError("Opening another project is blocked during the fixed live run.", status_code=409)
     try:
-        DASHBOARD_STATE.selected_project_path = await asyncio.to_thread(
-            PROJECT_SNAPSHOT_SELECTION.persist_selected_project_path,
-            project_path,
-        )
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Unable to persist the selected Unity project: {exc}") from exc
-    DASHBOARD_STATE.unity_instance = Path(project_path).name
-    editor_executable = str(editor_path)
-    launch_unity_subprocess([editor_executable, "-projectPath", project_path], editor_path, Path(project_path))
-    payload = serialize_dashboard_state()
-    await EVENT_BUS.broadcast("state", payload)
-    await emit_log_async("info", "project", "Opened Unity project.", {"projectPath": project_path, "unityEditorPath": editor_executable})
-    return {"ok": True, "projectPath": project_path, "unityEditorPath": editor_executable}
+        project_path = PROJECT_SNAPSHOT_SELECTION.canonical_selected_project_path(params.get("projectPath"))
+    except ValueError as exc:
+        raise AgentGatewayError(str(exc), status_code=400) from exc
+    if not project_path:
+        raise AgentGatewayError("An exact Unity projectPath is required.", status_code=400)
+    root = Path(project_path)
+    with _OPEN_UNITY_PROJECT_LOCK:
+        editors = list_running_unity_processes(exclude_asset_import_workers=True)
+        running = next((item for item in editors if unity_process_exactly_matches_project(item, root)), None)
+        if running is None:
+            editor_path, _ = resolve_unity_editor_path_for_repair(root, running_processes=editors)
+            if editor_path is None:
+                version = parse_editor_version(root / "ProjectSettings" / "ProjectVersion.txt")
+                raise AgentGatewayError(
+                    f"No matching Unity Editor ({version}) was found. Install it using Unity Hub or configure its path."
+                )
+        if select_in_app:
+            try:
+                DASHBOARD_STATE.selected_project_path = PROJECT_SNAPSHOT_SELECTION.persist_selected_project_path(project_path)
+            except OSError as exc:
+                raise AgentGatewayError(f"Unable to persist the selected Unity project: {exc}", status_code=500) from exc
+            DASHBOARD_STATE.unity_instance = root.name
+        if running is not None:
+            return {
+                "ok": True, "status": "already_open", "projectPath": project_path,
+                "unityEditorPath": running.get("executablePath"), "processId": running["processId"],
+            }
+        try:
+            process = launch_unity_subprocess([str(editor_path), "-projectPath", project_path], editor_path, root)
+        except OSError as exc:
+            raise AgentGatewayError(f"Unable to start the matching Unity Editor: {exc}", status_code=500) from exc
+        return {
+            "ok": True, "status": "launched", "projectPath": project_path,
+            "unityEditorPath": str(editor_path), "processId": int(process.pid),
+        }
+
+
+@app.post("/api/projects/open")
+async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
+    project_path = resolve_target_project(request.project_path)
+    try:
+        result = await asyncio.to_thread(open_unity_project_sync, {"projectPath": project_path}, select_in_app=True)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("state", serialize_dashboard_state())
+    await emit_log_async("info", "project", "Opened Unity project.", result)
+    return result
 
 
 @app.post("/api/unity/status")
@@ -17601,6 +17629,7 @@ def _build_runtime_profiled_tool_registry() -> ProfiledToolRegistry:
             handler.name,
             handler.handler,
             _runtime_tool_set(handler.name),
+            model_name="unity_open_project" if handler.name == "vrcforge_open_unity_project" else None,
             metadata={"source": "write"},
         )
     registry.add_unity_shell("vrcforge_execute_shell")
@@ -20141,7 +20170,9 @@ def wait_for_unity_tools_ready(
     return False, latest
 
 
-def resolve_unity_editor_path_for_repair(project_root: Path, requested_path: str = "") -> tuple[Path | None, str]:
+def resolve_unity_editor_path_for_repair(
+    project_root: Path, requested_path: str = "", *, running_processes: list[dict[str, Any]] | None = None,
+) -> tuple[Path | None, str]:
     editor_version = parse_editor_version(project_root / "ProjectSettings" / "ProjectVersion.txt")
     if not editor_version or editor_version == "Unknown":
         return None, "not-found"
@@ -20152,12 +20183,14 @@ def resolve_unity_editor_path_for_repair(project_root: Path, requested_path: str
     if DASHBOARD_STATE.unity_editor_path.strip():
         candidates.append(("settings", Path(DASHBOARD_STATE.unity_editor_path.strip()).expanduser()))
 
-    running_processes = list_running_unity_processes()
+    if running_processes is None:
+        running_processes = list_running_unity_processes()
     for process in running_processes:
         executable = str(process.get("executablePath") or "").strip()
         if executable and unity_process_exactly_matches_project(process, project_root):
             candidates.append(("running-unity-project", Path(executable)))
 
+    candidates.extend(("unity-hub", path) for path in unity_hub_editor_paths(editor_version))
     for base_value in [
         os.environ.get("ProgramFiles", ""),
         os.environ.get("ProgramFiles(x86)", ""),
@@ -29132,6 +29165,13 @@ def register_agent_gateway_tools() -> None:
         "medium",
         register_project_catalog_sync,
         request_preparer=PROJECT_CATALOG_REGISTRATIONS.prepare_register,
+        pre_write_checkpoint_required=False,
+    )
+    register_write_handler(
+        "vrcforge_open_unity_project",
+        "When-to-use: open the exact existing Unity project in its matching installed Editor for a requested connection, dependency resolution or project launch. Reuses a running instance for that project. A launched or already_open receipt identifies the Editor process; use Core status for compilation and connection. When-NOT-to-use: do not switch scenes, restart an editor or install an SDK with this tool. Negative example: do not launch Unity for a read-only inventory.",
+        "low",
+        open_unity_project_sync,
         pre_write_checkpoint_required=False,
     )
     register_write_handler(
