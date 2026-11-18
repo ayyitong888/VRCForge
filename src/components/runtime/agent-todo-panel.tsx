@@ -14,7 +14,7 @@ const todoMarkers = new Map([
 function TodoItems({ progress }: { progress: AgentProgress[] }) {
   const { t } = useTranslation();
   return (
-    <ol className="m-0 list-none space-y-0.5 p-0">
+    <ol className="m-0 grid list-none gap-2 p-0">
       {progress.map((item, index) => {
         const status = (item.status || "pending").toLowerCase();
         const active = status === "in_progress" || status === "running";
@@ -24,20 +24,21 @@ function TodoItems({ progress }: { progress: AgentProgress[] }) {
         return (
           <li
             key={item.progressId}
-            className="grid min-w-0 grid-cols-[1.25rem_minmax(0,1fr)] items-start gap-2 rounded-md px-1.5 py-1"
+            className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-3 px-1 py-0.5"
             data-vrcforge-agent-todo-item={item.progressId}
             data-vrcforge-agent-todo-status={status}
             aria-current={active ? "step" : undefined}
           >
             <span role="img" aria-label={label} title={label} className={cn(
-              "flex h-5 w-5 items-center justify-center rounded-full text-xs tabular-nums text-muted-foreground",
-              !Icon && "border border-border",
-              active && "border-primary/40 bg-primary/10 text-foreground",
+              "flex h-6 w-6 items-center justify-center rounded-full text-xs tabular-nums text-muted-foreground",
+              !Icon && "border border-primary/30",
+              active && "border-primary bg-primary/10 text-foreground",
+              status === "completed" && "bg-primary text-primary-foreground",
               status === "failed" && "text-destructive",
             )}>
-              {Icon ? <Icon className="h-3.5 w-3.5" aria-hidden="true" /> : index + 1}
+              {Icon ? <Icon className="h-3.5 w-3.5" strokeWidth={status === "completed" ? 2.5 : 2} aria-hidden="true" /> : index + 1}
             </span>
-            <span className={cn("min-w-0 break-words text-[0.8125rem] leading-5",
+            <span className={cn("min-w-0 break-words text-sm leading-6",
               active ? "font-medium text-foreground" : "text-muted-foreground",
               status === "completed" && "line-through",
               (status === "blocked" || status === "failed") && "text-foreground",

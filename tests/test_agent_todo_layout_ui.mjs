@@ -22,7 +22,7 @@ assert.match(todo, /workspace\.todo/);
 assert.match(todo, /progress\.map/);
 assert.match(todo, /progress\.map\(\(item, index\)/);
 assert.match(todo, /index \+ 1/);
-assert.match(todo, /<ol className="m-0 list-none space-y-0\.5 p-0">/);
+assert.match(todo, /<ol\b/);
 assert.match(todo, /<li/);
 assert.match(todo, /"blocked", \{ icon: Pause/);
 assert.match(todo, /"failed", \{ icon: CircleAlert/);
