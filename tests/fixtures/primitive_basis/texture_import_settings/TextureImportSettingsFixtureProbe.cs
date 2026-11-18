@@ -28,6 +28,7 @@ public static class TextureImportSettingsFixtureProbe
             var sourceBefore = Sha256(sourcePath);
             var metaBefore = Sha256(metaPath);
 
+            Debug.Log("TEXTURE_IMPORT_LIFECYCLE_PREVIEW");
             var preview = RequireSuccess(TextureImportSettingsTool.HandleCommand(Request(projectPath, true)));
             Require((bool)preview["preview"], "preview flag");
             Require(!(bool)preview["changed"], "preview changed");
@@ -42,6 +43,7 @@ public static class TextureImportSettingsFixtureProbe
             Require(Sha256(metaPath) == metaBefore, "preview meta bytes");
             VerifySourceWriteDeniedByApplyLease(sourcePath, sourceBefore);
 
+            Debug.Log("TEXTURE_IMPORT_LIFECYCLE_APPLY");
             var apply = RequireSuccess(
                 TextureImportSettingsTool.HandleCommand(ApprovedRequest(projectPath, preview))
             );
@@ -54,6 +56,7 @@ public static class TextureImportSettingsFixtureProbe
             Require(Sha256(metaPath) != metaBefore, "apply meta bytes");
             VerifyImporterReadback();
 
+            Debug.Log("TEXTURE_IMPORT_LIFECYCLE_NOOP");
             var metaAfterApply = Sha256(metaPath);
             var noOpPreview = RequireSuccess(
                 TextureImportSettingsTool.HandleCommand(Request(projectPath, true))
@@ -76,6 +79,19 @@ public static class TextureImportSettingsFixtureProbe
             VerifyImporterReadback();
 
             VerifyMetadataHardlinkRejected(projectPath, sourcePath, metaPath, sourceBefore, metaAfterApply);
+            Debug.Log("TEXTURE_IMPORT_LIFECYCLE_TOUCHED");
+            File.SetLastWriteTimeUtc(sourcePath, File.GetLastWriteTimeUtc(sourcePath).AddSeconds(10));
+            var touched = RequireSuccess(TextureImportSettingsTool.HandleCommand(ApprovedRequest(projectPath, noOpPreview)));
+            Require(!(bool)touched["changed"] && Sha256(metaPath) == metaAfterApply, "timestamp-only touch altered metadata");
+
+            Debug.Log("TEXTURE_IMPORT_LIFECYCLE_CHANGED");
+            var sourceBytes = File.ReadAllBytes(sourcePath);
+            File.WriteAllText(sourcePath, "source edited after preview");
+            var sourceChanged = JObject.FromObject(
+                TextureImportSettingsTool.HandleCommand(ApprovedRequest(projectPath, noOpPreview)));
+            Require(!(bool)sourceChanged["IsSuccessful"], "changed source accepted");
+            Require(Sha256(metaPath) == metaAfterApply, "changed source altered metadata");
+            File.WriteAllBytes(sourcePath, sourceBytes);
             Require(AssetDatabase.DeleteAsset(ProbeFolder), "fixture cleanup failed");
             Require(!File.Exists(sourcePath), "fixture source residue");
             Require(!File.Exists(metaPath), "fixture metadata residue");

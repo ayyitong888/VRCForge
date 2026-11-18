@@ -441,7 +441,10 @@ def test_csharp_domain_module_keeps_preview_zero_write_and_apply_exact() -> None
     assert "metaFileDigestAfter: evidence.metaFileDigest" in preview_branch
     assert "importerSettingsDigestAfter: beforeSettingsDigest" in preview_branch
     handler = source.split("public static object HandleCommand", 1)[1].split("private static object BuildSuccessResponse", 1)[0]
-    assert handler.count("ComputeStreamSha256(source)") == 1
+    assert handler.count("ComputeStreamSha256(source)") == 2
+    assert "expectedVersion == evidence.sourceFileIdentityDigest" in handler
+    assert ": ComputeStreamSha256(source)" in handler
+    assert "ComputeFileIdentityDigest(evidence.sourceFileIdentity, includeVersion: true)" in handler
     assert handler.count("ComputeStreamSha256(meta)") == 1
     assert handler.index("if (preview || !wouldChange)") < handler.index("SetPlatformTextureSettings")
     assert handler.index(".SaveAndReimport();") < handler.index("ReadMetaDigest(evidence.metaFilePath)")
@@ -468,6 +471,8 @@ def test_disposable_unity_fixture_covers_the_authoritative_lifecycle() -> None:
         "VerifyImporterReadback",
         "no-op meta bytes",
         "stale precondition accepted",
+        "changed source accepted",
+        "timestamp-only touch altered metadata",
         "VRCFORGE_TEXTURE_IMPORT_SETTINGS_PROBE_OK",
         "EditorApplication.Exit(0)",
         "EditorApplication.Exit(1)",

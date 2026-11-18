@@ -45,7 +45,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected texture asset path from preview.", IsRequired = false)] public string expectedTextureAssetPath { get; set; } = "";
             [VRCForgeInput("Expected texture asset GUID from preview.", IsRequired = false)] public string expectedTextureAssetGuid { get; set; } = "";
             [VRCForgeInput("Expected texture source-file digest from preview.", IsRequired = false)] public string expectedSourceFileDigest { get; set; } = "";
-            [VRCForgeInput("Expected texture source-file identity digest from preview.", IsRequired = false)] public string expectedSourceFileIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Expected texture source-file identity and version from preview.", IsRequired = false)] public string expectedSourceFileIdentityDigest { get; set; } = "";
             [VRCForgeInput("Expected texture meta-file digest from preview.", IsRequired = false)] public string expectedMetaFileDigest { get; set; } = "";
             [VRCForgeInput("Expected texture meta-file identity digest from preview.", IsRequired = false)] public string expectedMetaFileIdentityDigest { get; set; } = "";
             [VRCForgeInput("Expected importer type from preview.", IsRequired = false)] public string expectedImporterType { get; set; } = "";
@@ -234,8 +234,22 @@ namespace VRCForge.Editor
                 var evidence = InspectTextureAsset(textureAssetPath);
                 using var source = OpenSource(evidence.sourceFilePath);
                 evidence.sourceFileIdentity = ReadSingleLinkIdentity(source.SafeFileHandle);
-                evidence.sourceFileIdentityDigest = ComputeFileIdentityDigest(evidence.sourceFileIdentity);
-                evidence.sourceFileDigest = ComputeStreamSha256(source);
+                evidence.sourceFileIdentityDigest = ComputeFileIdentityDigest(evidence.sourceFileIdentity, includeVersion: true);
+                if (preview)
+                {
+                    evidence.sourceFileDigest = ComputeStreamSha256(source);
+                }
+                else
+                {
+                    var expectedDigest = NormalizeHex(ReadRequiredString(@params, "expectedSourceFileDigest"), 64);
+                    var expectedVersion = NormalizeHex(ReadRequiredString(@params, "expectedSourceFileIdentityDigest"), 64);
+                    // The held source was already read in preview. Check bytes only if the observed version changed.
+                    evidence.sourceFileDigest = expectedVersion == evidence.sourceFileIdentityDigest
+                        ? expectedDigest
+                        : ComputeStreamSha256(source);
+                    if (evidence.sourceFileDigest != expectedDigest)
+                        throw new InvalidOperationException("The texture source changed after the verified preview.");
+                }
                 using var meta = new FileStream(evidence.metaFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
                 evidence.metaFileIdentity = ReadSingleLinkIdentity(meta.SafeFileHandle);
                 evidence.metaFileIdentityDigest = ComputeFileIdentityDigest(evidence.metaFileIdentity);
@@ -575,11 +589,6 @@ namespace VRCForge.Editor
         {
             var expectedTextureAssetPath = NormalizeAssetPath(ReadRequiredString(@params, "expectedTextureAssetPath"));
             var expectedTextureAssetGuid = NormalizeHex(ReadRequiredString(@params, "expectedTextureAssetGuid"), 32);
-            var expectedSourceFileDigest = NormalizeHex(ReadRequiredString(@params, "expectedSourceFileDigest"), 64);
-            var expectedSourceFileIdentityDigest = NormalizeHex(
-                ReadRequiredString(@params, "expectedSourceFileIdentityDigest"),
-                64
-            );
             var expectedMetaFileDigest = NormalizeHex(ReadRequiredString(@params, "expectedMetaFileDigest"), 64);
             var expectedMetaFileIdentityDigest = NormalizeHex(
                 ReadRequiredString(@params, "expectedMetaFileIdentityDigest"),
@@ -598,8 +607,6 @@ namespace VRCForge.Editor
             if (!MatchesCurrentProject(expectedProjectPath)
                 || expectedTextureAssetPath != evidence.assetPath
                 || expectedTextureAssetGuid != evidence.assetGuid
-                || expectedSourceFileDigest != evidence.sourceFileDigest
-                || expectedSourceFileIdentityDigest != evidence.sourceFileIdentityDigest
                 || expectedMetaFileDigest != evidence.metaFileDigest
                 || expectedMetaFileIdentityDigest != evidence.metaFileIdentityDigest
                 || expectedImporterType != importerType
@@ -978,7 +985,9 @@ namespace VRCForge.Editor
             {
                 volumeSerialNumber = information.volumeSerialNumber,
                 fileIndex = ((ulong)information.fileIndexHigh << 32) | information.fileIndexLow,
-                numberOfLinks = information.numberOfLinks
+                numberOfLinks = information.numberOfLinks,
+                fileLength = ((ulong)information.fileSizeHigh << 32) | information.fileSizeLow,
+                lastWriteTime = ((ulong)information.lastWriteTimeHigh << 32) | information.lastWriteTimeLow
             };
         }
 
@@ -991,7 +1000,7 @@ namespace VRCForge.Editor
                 && left.numberOfLinks == right.numberOfLinks;
         }
 
-        private static string ComputeFileIdentityDigest(FileIdentity identity)
+        private static string ComputeFileIdentityDigest(FileIdentity identity, bool includeVersion = false)
         {
             if (identity == null || identity.numberOfLinks != 1)
             {
@@ -1002,6 +1011,11 @@ namespace VRCForge.Editor
             AppendDigestField(builder, identity.volumeSerialNumber.ToString("x8", CultureInfo.InvariantCulture));
             AppendDigestField(builder, identity.fileIndex.ToString("x16", CultureInfo.InvariantCulture));
             AppendDigestField(builder, identity.numberOfLinks.ToString(CultureInfo.InvariantCulture));
+            if (includeVersion)
+            {
+                AppendDigestField(builder, identity.fileLength.ToString(CultureInfo.InvariantCulture));
+                AppendDigestField(builder, identity.lastWriteTime.ToString(CultureInfo.InvariantCulture));
+            }
             using (var sha256 = SHA256.Create())
             {
                 return BitConverter.ToString(sha256.ComputeHash(Encoding.UTF8.GetBytes(builder.ToString())))
@@ -1176,6 +1190,8 @@ namespace VRCForge.Editor
             public uint volumeSerialNumber;
             public ulong fileIndex;
             public uint numberOfLinks;
+            public ulong fileLength;
+            public ulong lastWriteTime;
         }
 
         private sealed class StableFileLease : IDisposable
