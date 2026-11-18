@@ -102,15 +102,6 @@ export function ProjectPickerModal({
           </button>
         </div>
         <div className="app-scrollbar mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
-          {creation && (
-            <Button type="button" variant="outline" disabled={saving || pickingProjectFolder} onClick={() => {
-              setShowCreation(true);
-              creation.loadOptions();
-            }}>
-              <FolderPlus className="h-4 w-4" />
-              {t("project.creation.open")}
-            </Button>
-          )}
           <div>
             <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.addProjectFolder")}</div>
             <div className="mb-2 flex gap-3" role="radiogroup" aria-label={t("project.chooseProjectType")}>
@@ -118,6 +109,7 @@ export function ProjectPickerModal({
                 <label key={value} className="flex items-center gap-1.5 text-xs">
                   <input
                     type="radio"
+                    className="accent-primary"
                     name="project-type"
                     value={value}
                     checked={projectType === value}
@@ -129,10 +121,21 @@ export function ProjectPickerModal({
               ))}
             </div>
             {onBrowseProjectFolder ? (
-              <Button type="button" variant="outline" disabled={saving || pickingProjectFolder} onClick={onBrowseProjectFolder}>
-                {saving || pickingProjectFolder ? <Loader2 className="h-4 w-4 animate-spin" /> : <Folder className="h-4 w-4" />}
-                {t("project.chooseProjectFolder")}
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="button" variant="outline" disabled={saving || pickingProjectFolder} onClick={onBrowseProjectFolder}>
+                  {saving || pickingProjectFolder ? <Loader2 className="h-4 w-4 animate-spin" /> : <Folder className="h-4 w-4" />}
+                  {t("project.chooseProjectFolder")}
+                </Button>
+                {projectType === "unity" && creation && (
+                  <Button type="button" variant="outline" disabled={saving || pickingProjectFolder} onClick={() => {
+                    setShowCreation(true);
+                    creation.loadOptions();
+                  }}>
+                    <FolderPlus className="h-4 w-4" />
+                    {t("project.creation.open")}
+                  </Button>
+                )}
+              </div>
             ) : <div className="flex gap-2">
               <input
                 value={newProjectPath}
