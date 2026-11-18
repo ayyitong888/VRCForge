@@ -11,6 +11,7 @@ def empty_project_service(tmp_path):
     project = tmp_path / "Empty Unity Project"
     for directory in ("Assets", "Packages", "ProjectSettings"):
         (project / directory).mkdir(parents=True)
+    (project / "Packages/manifest.json").write_text('{"dependencies":{}}', encoding="utf-8")
     reads = []
 
     def detect(path, package_ids):
@@ -64,6 +65,68 @@ def test_installed_requested_package_does_not_become_missing_because_core_is_dow
     result = service.diagnose_install({"packageId": "com.vrchat.avatars"})
     assert result["packageManager"]["packages"]["com.vrchat.avatars"]["installed"] is True
     assert not any(item["code"] == "missing_package" for item in result["symptoms"])
+
+
+@pytest.mark.parametrize("declaring_file", ["Packages/manifest.json", "Packages/com.vrchat.base/package.json"])
+def test_pending_upm_dependency_is_resolved_by_unity_across_package_tools(empty_project_service, declaring_file):
+    service, project, _ = empty_project_service
+    target = "com.example.registry-tool"
+    manifest = project / declaring_file
+    manifest.parent.mkdir(exist_ok=True)
+    manifest.write_text('{"dependencies":{"com.example.registry-tool":"1.2.0"}}', encoding="utf-8")
+    args = {"packageId": target}
+    package = service.package_manager_status(args)["packages"][target]
+    assert package["installed"] is None and package["resolution"] == "pending"
+    assert package["declaredBy"] == declaring_file and package["requestedVersion"] == "1.2.0"
+    plan = service.plan_install(args)
+    assert plan["executionStrategy"] == "unity_package_manager"
+    assert not plan["canCreateInstallRequest"] and not plan["canExecuteCommandInstall"]
+    assert service.request_install(args)["errorCode"] == "unity_package_manager_required"
+    diagnosis = service.diagnose_install(args)
+    codes = {item["code"] for item in diagnosis["symptoms"]}
+    assert "upm_resolution_pending" in codes
+    assert not {"missing_package", "no_vpm_cli"} & codes
+    assert not any(item.get("id") == "retry_vpm_install_request" for item in diagnosis["suggestedFixPlans"])
+    (project / "Packages/packages-lock.json").write_text(
+        '{"dependencies":{"com.example.registry-tool":{"version":"1.2.1","source":"registry"}}}', encoding="utf-8",
+    )
+    resolved = service.plan_install(args)
+    assert resolved["compatibilityAction"] == "use_installed" and resolved["installedVersion"] == "1.2.1"
+
+
+def test_missing_project_manifest_is_unknown_not_an_install_request(empty_project_service):
+    service, project, _ = empty_project_service
+    (project / "Packages/manifest.json").unlink()
+    args = {"packageId": "com.example.unobserved"}
+    assert service.plan_install(args)["compatibilityAction"] == "inspect_package_state"
+    assert service.request_install(args)["status"] == "blocked"
+
+
+def test_unlocked_vpm_declaration_can_still_be_installed(empty_project_service):
+    service, project, _ = empty_project_service
+    (project / "Packages/vpm-manifest.json").write_text('{"dependencies":{"com.example.vpm-tool":{"version":"1.0.0"}}}', encoding="utf-8")
+    assert service.plan_install({"packageId": "com.example.vpm-tool"})["compatibilityAction"] == "install_missing"
+
+
+def test_disabled_upm_lock_does_not_prove_an_indirect_package_is_present_or_missing(empty_project_service):
+    service, project, _ = empty_project_service
+    (project / "Packages/manifest.json").write_text('{"enableLockFile":false,"dependencies":{}}', encoding="utf-8")
+    (project / "Packages/packages-lock.json").write_text('{"dependencies":{"com.example.old":{"version":"1.0.0"}}}', encoding="utf-8")
+    for name in ("com.example.old", "com.example.other"):
+        state = service.package_manager_status({"packageId": name})["packages"][name]
+        assert state["installed"] is None and "disables" in state["warning"]
+
+
+def test_locked_recovery_preserves_folder_owned_by_another_package(empty_project_service):
+    service, project, _ = empty_project_service
+    name = "com.example.locked"
+    (project / "Packages/vpm-manifest.json").write_text('{"locked":{"com.example.locked":{"version":"1.0.0"}}}', encoding="utf-8")
+    folder = project / "Packages" / name
+    folder.mkdir()
+    (folder / "package.json").write_text('{"name":"com.example.custom","version":"1.0.0"}', encoding="utf-8")
+    plan = service.plan_install({"packageId": name})
+    assert plan["compatibilityAction"] == "inspect_package_state" and not plan["canCreateInstallRequest"]
+    assert "com.example.custom" in plan["packageState"]["readErrors"][0]["error"]
 
 
 def test_shared_diagnosis_facts_survive_external_mcp_projection(empty_project_service, monkeypatch):
@@ -126,7 +189,7 @@ def test_unreadable_package_state_is_unknown_and_points_to_file_not_install(empt
 def test_valid_package_evidence_survives_another_broken_manifest(empty_project_service):
     service, project, _reads = empty_project_service
     (project / "Packages/vpm-manifest.json").write_text("{broken", encoding="utf-8")
-    (project / "Packages/manifest.json").write_text('{"dependencies":{"com.vrchat.avatars":"3.10.6"}}', encoding="utf-8")
+    (project / "Packages/packages-lock.json").write_text('{"dependencies":{"com.vrchat.avatars":{"version":"3.10.6"}}}', encoding="utf-8")
     result = service.diagnose_install({"packageId": "com.vrchat.avatars"})
     state = result["packageManager"]["packages"]["com.vrchat.avatars"]
     assert state["installed"] is True and state["version"] == "3.10.6"
@@ -139,7 +202,7 @@ def test_unrelated_invalid_package_does_not_block_confirmed_installed_target(emp
     broken = project / "Assets/UnrelatedTool/package.json"
     broken.parent.mkdir()
     broken.write_text("{broken", encoding="utf-8")
-    (project / "Packages/manifest.json").write_text('{"dependencies":{"com.example.target":"1.0.0"}}', encoding="utf-8")
+    (project / "Packages/packages-lock.json").write_text('{"dependencies":{"com.example.target":{"version":"1.0.0"}}}', encoding="utf-8")
     plan = service.plan_install({"packageId": "com.example.target"})
     assert plan["packageState"]["readErrors"]
     assert plan["packageState"]["installed"] is True

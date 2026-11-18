@@ -43,6 +43,10 @@ _VPM_REPOSITORY_INPUT_REJECTION = (
     "Omit repository and retry with the same package ID and version using the configured sources. "
     "A new source requires a separate registration step if the package cannot be resolved."
 )
+_UPM_RESOLUTION_GUIDANCE = (
+    "Open the selected project with its matching Unity Editor and let Unity Package Manager resolve "
+    "the declared dependency. If resolution fails, inspect the Editor's package error."
+)
 
 
 class RunBoundedProcessPort(Protocol):
@@ -283,6 +287,7 @@ class PackageDetectionService:
             "source": "",
         }
         if project_path is None:
+            info["installed"] = None
             info["warning"] = "No Unity project selected; package detection skipped."
             return info
 
@@ -302,97 +307,107 @@ class PackageDetectionService:
                 return None
 
         packages_dir = project_path / "Packages"
-        for package_id in package_ids:
-            embedded = packages_dir / package_id / "package.json"
-            if self._ports.path_exists(embedded):
-                data = read_object(embedded)
-                if data is None:
-                    continue
-                info.update(
-                    {
-                        "installed": True,
-                        "packageId": package_id,
-                        "version": str(data.get("version") or ""),
-                        "source": "embedded",
-                    }
-                )
-                return info
-        # Some VPM packages (notably shader packages) are imported under Assets
-        # while retaining a package.json identity. Inspect only direct children
-        # to keep detection bounded and avoid treating arbitrary project JSON as
-        # package state.
-        assets_dir = project_path / "Assets"
-        try:
-            asset_candidates = assets_dir.iterdir() if assets_dir.is_dir() else ()
-            for candidate in asset_candidates:
-                package_json = candidate / "package.json"
-                if not self._ports.path_exists(package_json):
-                    continue
-                data = read_object(package_json)
-                if data is None:
-                    continue
-                matched_id = next(
-                    (
-                        package_id
-                        for package_id in package_ids
-                        if str(data.get("name") or "").strip().lower()
-                        == str(package_id).strip().lower()
-                    ),
-                    None,
-                )
-                if matched_id is None:
-                    continue
-                info.update(
-                    {
-                        "installed": True,
-                        "packageId": matched_id,
-                        "version": str(data.get("version") or ""),
-                        "source": "assets",
-                        "path": str(package_json).replace("\\", "/"),
-                    }
-                )
-                return info
-        except OSError as exc:
-            record_read_error(assets_dir, exc, directory=True)
-        # Keep direct project declarations ahead of the resolved lock graph:
-        # embedded packages, VPM, and direct UPM state are authoritative when
-        # more than one source is present. The lock file is still needed for
-        # transitive packages that are absent from manifest.json.
+        upm_declaration = None
+        vpm_manifest = packages_dir / "vpm-manifest.json"
+        vpm = read_object(vpm_manifest) if self._ports.path_exists(vpm_manifest) else None
+        # Unity identifies embedded packages by their manifest name; folder names may differ.
+        # Older VPM packages can also keep a package manifest one level below Assets.
+        for root, source in ((packages_dir, "embedded"), (project_path / "Assets", "assets")):
+            try:
+                candidates = root.iterdir() if root.is_dir() else ()
+                for directory in candidates:
+                    manifest_path = directory / "package.json"
+                    if not self._ports.path_exists(manifest_path):
+                        continue
+                    manifest = read_object(manifest_path)
+                    if manifest is None:
+                        continue
+                    package_id = str(manifest.get("name") or "").strip().lower()
+                    if source == "embedded" and directory.name in package_ids and package_id != directory.name:
+                        record_read_error(manifest_path, ValueError(f"Expected {directory.name}; package manifest names {package_id!r}."))
+                    if package_id in package_ids:
+                        installed_version = str(manifest.get("version") or "")
+                        result = {**info, "installed": True, "packageId": package_id, "version": installed_version,
+                                  "source": source, "path": manifest_path.as_posix()}
+                        locked_version = _package_entry_version(_ensure_dict((vpm or {}).get("locked")).get(package_id))
+                        if locked_version and locked_version != installed_version:
+                            result.update(resolution="version_mismatch", lockedVersion=locked_version,
+                                          warning=f"{package_id} is installed at {installed_version}, but VPM locked {locked_version}.")
+                        return result
+                    dependencies = manifest.get("dependencies")
+                    if source == "embedded" and isinstance(dependencies, dict):
+                        match = next((name for name in package_ids if name in dependencies), None)
+                        if match:
+                            upm_declaration = (match, dependencies[match], manifest_path)
+            except OSError as exc:
+                record_read_error(root, exc, directory=True)
+
+        vpm_lock = None
+        readable_manifest = False
+        lock_enabled = True
         for manifest_name, source in (
             ("vpm-manifest.json", "vpm"),
             ("manifest.json", "upm"),
             ("packages-lock.json", "packages-lock"),
         ):
             manifest_path = packages_dir / manifest_name
+            if source == "packages-lock" and not lock_enabled:
+                continue
             if not self._ports.path_exists(manifest_path):
                 continue
-            manifest = read_object(manifest_path)
+            manifest = vpm if manifest_path == vpm_manifest else read_object(manifest_path)
             if manifest is None:
                 continue
-            sections = (
-                [manifest.get("locked"), manifest.get("dependencies")]
-                if source == "vpm"
-                else [manifest.get("dependencies")]
-            )
-            for section in sections:
+            if source == "upm":
+                lock_enabled = manifest.get("enableLockFile") is not False
+            sections = ("locked", "dependencies") if source == "vpm" else ("dependencies",)
+            for section_name in sections:
+                section = manifest.get(section_name)
                 if not isinstance(section, dict):
                     if section is not None:
                         record_read_error(manifest_path, ValueError("Package dependency section must be an object."))
                     continue
+                readable_manifest = True
                 for package_id in package_ids:
                     entry = section.get(package_id)
                     if entry is None:
                         continue
-                    version = entry.get("version") if isinstance(entry, dict) else entry
+                    if source == "upm":
+                        upm_declaration = (package_id, entry, manifest_path)
+                        continue
+                    if source == "vpm":
+                        if section_name == "locked":
+                            vpm_lock = (package_id, entry)
+                        continue
+                    if vpm_lock or isinstance(entry, dict) and entry.get("source") == "embedded":
+                        # The embedded package the lock refers to has no matching files on disk.
+                        continue
                     info.update(
                         {
                             "installed": True,
                             "packageId": package_id,
-                            "version": str(version or ""),
+                            "version": _package_entry_version(entry),
                             "source": source,
                         }
                     )
                     return info
+        if vpm_lock is not None:
+            package_id, entry = vpm_lock
+            info.update(packageId=package_id, lockedVersion=_package_entry_version(entry), source="vpm")
+            if info["installed"] is False:
+                info["resolution"] = "restore_required"
+            return info
+        if upm_declaration is not None:
+            package_id, requested, declaring_file = upm_declaration
+            info.update({
+                "installed": None, "resolution": "pending", "packageId": package_id,
+                "source": "upm", "requestedVersion": _package_entry_version(requested),
+                "declaredBy": declaring_file.relative_to(project_path).as_posix(),
+            })
+        elif not readable_manifest and not info.get("readErrors"):
+            info.update(installed=None, warning="No readable project package manifest or lock is available.")
+        elif not lock_enabled and info["installed"] is False:
+            info.update(installed=None, warning="This project disables the UPM lock. Use the running Editor's package state to confirm resolution.")
         return info
 
 
@@ -659,7 +674,7 @@ class PackageInstallWorkflowService:
         installed = bool(
             isinstance(package_state, dict) and package_state.get("installed")
         )
-        unreadable_state = (package_state or {}).get("installed") is None and bool((package_state or {}).get("readErrors"))
+        unreadable_state = bool(package_state is not None and package_state.get("installed") is None and not package_state.get("resolution"))
         installed_version = str((package_state or {}).get("version") or "")
         requested_version = str(
             normalized.get("packageVersion")
@@ -670,6 +685,7 @@ class PackageInstallWorkflowService:
             normalized.get("upgrade") or normalized.get("upgradePackage")
             or normalized.get("upgrade_package")
         )
+        restore_version = _missing_vpm_locked_version(package_state or {}, requested_version)
         installed_key = _semver_precedence(installed_version)
         requested_key = _semver_precedence(requested_version)
         upgrade_available = bool(
@@ -699,10 +715,35 @@ class PackageInstallWorkflowService:
         preserve_legacy = normalized.get("preserveLegacyFiles") is True
         preservation_ready = bool(preserve_legacy and baseline_report and "treeDigest" in baseline_report)
         assets_migration_required = assets_migration_required and not (baseline_ok or preservation_ready)
-        repository_blocker = {
+        blocker = {
             "code": "vpm_repository_input_unsupported",
             "message": _VPM_REPOSITORY_INPUT_REJECTION,
         } if explicit_repository else None
+        upm_pending = (package_state or {}).get("resolution") == "pending"
+        upm_upgrade = upgrade_requested and (package_state or {}).get("source") == "packages-lock"
+        version_conflict = (package_state or {}).get("resolution") == "version_mismatch"
+        if version_conflict and not (upgrade_requested and requested_version):
+            action = "inspect_version_mismatch"
+            blocker = {"code": "vpm_version_mismatch", "message": (
+                f"Installed {installed_version}; VPM locked {package_state['lockedVersion']}. "
+                "Determine the intended version before changing this package."
+            )}
+        elif upm_pending or upm_upgrade:
+            blocker = {"code": "unity_package_manager_required", "message": _UPM_RESOLUTION_GUIDANCE}
+            strategy.update(strategy="unity_package_manager", executionStrategy="unity_package_manager", preferredManager=None)
+            action = "resolve_in_unity"
+        elif unreadable_state:
+            action = "inspect_package_state"
+        elif restore_version:
+            action = "restore_locked"
+        elif assets_migration_required:
+            action = "migration_required"
+        elif upgrade_available:
+            action = "upgrade"
+        else:
+            action = "use_installed" if installed else "install_missing"
+        if action == "use_installed":
+            strategy["message"] = f"Use the installed {package_id} {installed_version}."
         return {
             "ok": True,
             **strategy,
@@ -715,14 +756,14 @@ class PackageInstallWorkflowService:
             "upgradeRequested": upgrade_requested,
             "legacyBaselineVerification": baseline_report,
             "legacyPreservationRequired": preservation_ready,
-            "compatibilityAction": "inspect_package_state" if unreadable_state else "migration_required" if assets_migration_required else "upgrade" if upgrade_available else "use_installed" if installed else "install_missing",
+            "compatibilityAction": action,
             "canExecuteCommandInstall": bool(strategy.get("commandInstaller"))
-            and bool(project_value) and not unreadable_state and not explicit_repository,
+            and bool(project_value) and action in {"restore_locked", "upgrade", "install_missing"} and not blocker,
             "canCreateInstallRequest": bool(project_value) and (not installed or upgrade_available)
-            and not assets_migration_required and not unreadable_state and not explicit_repository,
+            and not assets_migration_required and not unreadable_state and not blocker,
             "canPrepareUpgradeRequest": upgrade_available and not assets_migration_required
-            and not unreadable_state and not explicit_repository,
-            **({"commandInstallBlocker": repository_blocker, "message": repository_blocker["message"]} if repository_blocker else {}),
+            and not unreadable_state and not blocker,
+            **({"commandInstallBlocker": blocker, "message": blocker["message"]} if blocker else {}),
         }
 
     def diagnose_install(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -791,6 +832,12 @@ class PackageInstallWorkflowService:
                 "packageId": package_id,
                 "title": f"Requested package {package_id} was not found in the project package state",
                 "suggestion": "Plan installation of this package through the existing package manager; package absence alone does not establish the cause of a Core connection failure.",
+            })
+        if (package_state or {}).get("resolution") == "pending":
+            symptoms = [item for item in symptoms if item["code"] not in {"unknown", "no_vpm_cli"}]
+            symptoms.insert(0, {
+                "code": "upm_resolution_pending", "title": f"Unity has not confirmed resolution of {package_id}",
+                "suggestion": _UPM_RESOLUTION_GUIDANCE,
             })
         if compile_errors.get("ok") is False:
             symptoms = [item for item in symptoms if item["code"] != "unknown"]
@@ -912,7 +959,11 @@ class PackageInstallWorkflowService:
             suggestions.append({"id": "dependency_repair_plan", "risk": "plan_only", "tool": "vrcforge_package_manager_status", "summary": "Compare package manager status with manifest/lock state before any repair."})
         if "unitypackage" in codes:
             suggestions.append({"id": "unitypackage_import_plan", "risk": "plan_only", "tool": "vrcforge_plan_outfit_import", "summary": "Inspect the package and build a supervised import plan with rollback proof."})
-        if package_id and package_status.get("preferredCli") and not {"missing_package", "package_state_unreadable"} & codes:
+        if "upm_resolution_pending" in codes:
+            suggestions.append({"id": "resolve_in_unity", "risk": "plan_only", "summary": _UPM_RESOLUTION_GUIDANCE})
+        if (package_id and package_status.get("preferredCli")
+                and (package_status.get("packages") or {}).get(package_id, {}).get("installed") is False
+                and not {"missing_package", "package_state_unreadable"} & codes):
             suggestions.append({"id": "retry_vpm_install_request", "risk": "approval_required", "tool": "vrcforge_install_vpm_package", "summary": f"Retry package install for {package_id} only through the approval/checkpoint path."})
         if not suggestions:
             suggestions.append({"id": "support_bundle", "risk": "read_only", "tool": "vrcforge_support_bundle", "summary": "Collect redacted diagnostics before attempting repair."})
@@ -939,8 +990,8 @@ class PackageInstallWorkflowService:
             if isinstance(plan.get("packageState"), dict)
             else {}
         )
-        if package_state.get("installed") is None and package_state.get("readErrors"):
-            return {"ok": False, "status": "blocked", "error": "Package state could not be read; inspect the reported files before requesting installation.", "installPlan": plan}
+        if plan.get("compatibilityAction") == "inspect_package_state":
+            return {"ok": False, "status": "blocked", "error": "Package state could not be determined. Inspect project package metadata.", "installPlan": plan}
         installed = bool(package_state.get("installed"))
         upgrade_requested = bool(
             normalized.get("upgrade") or normalized.get("upgradePackage")
@@ -1258,8 +1309,11 @@ def _vpm_install_argv(
     package_id: str,
     package_version: str,
     include_prerelease: bool,
+    restore_locked: bool = False,
 ) -> list[str]:
     if cli_name == "vrc-get":
+        if restore_locked:
+            return [cli_path, "reinstall", "-p", project_path, "-y", package_id]
         return [cli_path, "install", "-p", project_path, "-y"] + (
             ["--prerelease"] if include_prerelease else []
         ) + [package_id, package_version]
@@ -1296,6 +1350,11 @@ def _package_entry_version(entry: Any) -> str:
     return str(entry or "").strip()
 
 
+def _missing_vpm_locked_version(state: dict[str, Any], requested_version: str) -> str:
+    version = state.get("lockedVersion") if state.get("resolution") == "restore_required" else ""
+    return version if version and requested_version in {"", version} else ""
+
+
 def _read_vpm_install_readback(
     project_path: Path,
     package_id: str,
@@ -1313,37 +1372,28 @@ def _read_vpm_install_readback(
             "VPM manifest locked readback does not prove the exact approved package "
             "version."
         )
-    dependency_entry = _ensure_dict(manifest.get("dependencies")).get(package_id)
-    dependency_version = _package_entry_version(dependency_entry)
-    if dependency_entry is not None and dependency_version != expected_version:
-        raise RuntimeError(
-            "VPM manifest dependency readback does not match the exact approved "
-            "package version."
-        )
-    embedded_readback = None
     embedded_root = project_path / "Packages" / package_id
-    if embedded_root.exists() or embedded_root.is_symlink():
-        embedded_identity = capture_directory(
-            embedded_root,
-            label="Installed embedded VPM package",
+    embedded_identity = capture_directory(
+        embedded_root,
+        label="Installed embedded VPM package",
+    )
+    embedded_manifest = _read_bounded_vpm_json(
+        embedded_root / "package.json",
+        "Embedded VPM package readback",
+    )
+    if (
+        str(embedded_manifest.get("name") or "") != package_id
+        or str(embedded_manifest.get("version") or "") != expected_version
+    ):
+        raise RuntimeError(
+            "Embedded VPM package readback does not match the exact approved "
+            "package/version."
         )
-        embedded_manifest = _read_bounded_vpm_json(
-            embedded_root / "package.json",
-            "Embedded VPM package readback",
-        )
-        if (
-            str(embedded_manifest.get("name") or "") != package_id
-            or str(embedded_manifest.get("version") or "") != expected_version
-        ):
-            raise RuntimeError(
-                "Embedded VPM package readback does not match the exact approved "
-                "package/version."
-            )
-        embedded_readback = {
-            "directory": embedded_identity,
-            "name": package_id,
-            "version": expected_version,
-        }
+    embedded_readback = {
+        "directory": embedded_identity,
+        "name": package_id,
+        "version": expected_version,
+    }
     return {
         "packageId": package_id,
         "version": expected_version,
@@ -1447,11 +1497,18 @@ class VpmPackageInstallPreparer:
             arguments.get("upgrade") or arguments.get("upgradePackage")
             or arguments.get("upgrade_package")
         )
+        if package_state.get("resolution") == "pending" or (upgrade_requested and package_state.get("source") == "packages-lock"):
+            raise AgentGatewayError(_UPM_RESOLUTION_GUIDANCE, status_code=409)
+        if package_state.get("installed") is None:
+            raise AgentGatewayError("Cannot confirm package state from the project package metadata.", status_code=409)
         requested_version = str(
             arguments.get("packageVersion")
             or arguments.get("package_version")
             or ""
         ).strip()
+        restore_version = _missing_vpm_locked_version(package_state, requested_version)
+        if package_state.get("resolution") == "version_mismatch" and not (upgrade_requested and requested_version):
+            raise AgentGatewayError("Installed and VPM-locked versions differ; determine the intended version before changing it.", status_code=409)
         if installed and not upgrade_requested:
             raise AgentGatewayError(
                 "The installed package version must be tried first; this install "
@@ -1502,18 +1559,7 @@ class VpmPackageInstallPreparer:
             or arguments.get("include_prerelease")
             or arguments.get("prerelease")
         )
-        try:
-            selected_version = select_sealed_vpm_version(
-                package_info,
-                str(
-                    arguments.get("packageVersion")
-                    or arguments.get("package_version")
-                    or ""
-                ).strip(),
-                prerelease,
-            )
-        except RuntimeError:
-            raise
+        selected_version = select_sealed_vpm_version(package_info, restore_version or requested_version, prerelease)
         argv = _vpm_install_argv(
             cli_name=str(cli["name"]),
             cli_path=str(binary["identity"]["path"]),
@@ -1521,6 +1567,7 @@ class VpmPackageInstallPreparer:
             package_id=package_id,
             package_version=selected_version,
             include_prerelease=prerelease,
+            restore_locked=bool(restore_version),
         )
         approval_arguments = dict(arguments)
         approval_arguments["packageVersion"] = selected_version
@@ -1532,6 +1579,7 @@ class VpmPackageInstallPreparer:
             "packageId": package_id,
             "packageVersion": selected_version,
             "upgrade": upgrade_requested,
+            "restoreLocked": bool(restore_version),
             "includePrerelease": prerelease,
             "repository": "",
         }
@@ -1558,7 +1606,7 @@ class VpmPackageInstallPreparer:
             "projectPath": str(state["project"]["path"]),
             "packageId": package_id,
             "packageVersion": selected_version,
-            "compatibilityAction": "upgrade" if upgrade_requested else "install_missing",
+            "compatibilityAction": "restore_locked" if restore_version else "upgrade" if upgrade_requested else "install_missing",
             "command": argv,
             "processPolicy": {
                 "scope": "one synchronous child owned by this approved request",
@@ -1627,6 +1675,7 @@ class VpmPackageInstallExecutor:
                 package_id=package_id,
                 package_version=package_version,
                 include_prerelease=bool(evidence.get("includePrerelease")),
+                restore_locked=bool(evidence.get("restoreLocked")),
             )
             if argv != expected_argv or cwd != str(project_path):
                 raise RuntimeError(

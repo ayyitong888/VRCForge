@@ -245,8 +245,8 @@ def test_dependency_preflight_uses_newtonsoft_blocker_when_sdk_is_present(tmp_pa
     project = tmp_path / "Project"
     packages = project / "Packages"
     packages.mkdir(parents=True)
-    (packages / "manifest.json").write_text(
-        '{"dependencies": {"com.vrchat.avatars": "3.7.0", "com.vrchat.base": "3.7.0"}}',
+    (packages / "packages-lock.json").write_text(
+        '{"dependencies": {"com.vrchat.avatars": {"version":"3.7.0"}, "com.vrchat.base": {"version":"3.7.0"}}}',
         encoding="utf-8",
     )
 
@@ -263,11 +263,11 @@ def test_dependency_preflight_requires_base_with_avatar_sdk_before_ready(tmp_pat
     packages.mkdir(parents=True)
     manifest = {
         "dependencies": {
-            "com.vrchat.avatars": "3.7.0",
-            "com.unity.nuget.newtonsoft-json": "3.0.2",
+            "com.vrchat.avatars": {"version": "3.7.0"},
+            "com.unity.nuget.newtonsoft-json": {"version": "3.0.2"},
         }
     }
-    manifest_path = packages / "manifest.json"
+    manifest_path = packages / "packages-lock.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     before = dashboard_server.build_unity_dependency_preflight(project)
@@ -277,7 +277,7 @@ def test_dependency_preflight_requires_base_with_avatar_sdk_before_ready(tmp_pat
     assert before["missing"] == ["vrchat_sdk"]
     assert before["checks"]["vrchatSdk"]["installed"] is False
 
-    manifest["dependencies"]["com.vrchat.base"] = "3.7.0"
+    manifest["dependencies"]["com.vrchat.base"] = {"version": "3.7.0"}
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     after = dashboard_server.build_unity_dependency_preflight(project)
     assert after["status"] == "ok"
@@ -293,11 +293,11 @@ def test_dependency_preflight_requires_avatar_sdk_when_only_base_sdk_is_present(
     packages.mkdir(parents=True)
     manifest = {
         "dependencies": {
-            "com.vrchat.base": "3.7.0",
-            "com.unity.nuget.newtonsoft-json": "3.0.2",
+            "com.vrchat.base": {"version": "3.7.0"},
+            "com.unity.nuget.newtonsoft-json": {"version": "3.0.2"},
         }
     }
-    manifest_path = packages / "manifest.json"
+    manifest_path = packages / "packages-lock.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     result = dashboard_server.build_unity_dependency_preflight(project)
@@ -306,7 +306,7 @@ def test_dependency_preflight_requires_avatar_sdk_when_only_base_sdk_is_present(
     assert result["blockerCode"] == "unity_vrchat_sdk_missing"
     assert result["checks"]["vrchatSdk"]["status"] == "missing"
 
-    manifest["dependencies"]["com.vrchat.avatars"] = "3.7.0"
+    manifest["dependencies"]["com.vrchat.avatars"] = {"version": "3.7.0"}
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     recovered = dashboard_server.build_unity_dependency_preflight(project)
     assert recovered["status"] == "ok"

@@ -6,6 +6,27 @@ from package_install_workflow_service import PackageDetectionPorts, PackageDetec
 from unity_dependency_preflight import build_unity_dependency_preflight_report
 
 
+def test_sdk_template_reports_pending_until_unity_resolves_its_dependency(tmp_path):
+    packages = tmp_path / "Packages"
+    for name in ("com.vrchat.avatars", "com.vrchat.base"):
+        package = packages / name
+        package.mkdir(parents=True)
+        dependencies = {"com.unity.nuget.newtonsoft-json": "3.2.1"} if name == "com.vrchat.base" else {}
+        (package / "package.json").write_text(json.dumps({"name": name, "version": "3.10.6", "dependencies": dependencies}))
+    (packages / "manifest.json").write_text('{"dependencies":{}}')
+    detector = PackageDetectionService(PackageDetectionPorts(
+        path_exists=lambda path: path.exists(), read_utf8_sig_text=lambda path: path.read_text(encoding="utf-8-sig"),
+    ))
+    before = build_unity_dependency_preflight_report(tmp_path, detect_package=detector.detect)
+    assert before["status"] == "pending" and before["ready"] is None
+    assert before["blockerCode"] == "" and before["missing"] == [] and before["pending"] == ["newtonsoft"]
+    assert before["checks"]["vrchatSdk"]["status"] == "installed"
+    assert before["checks"]["newtonsoft"]["title"] == "Newtonsoft JSON"
+    (packages / "packages-lock.json").write_text('{"dependencies":{"com.unity.nuget.newtonsoft-json":{"version":"3.2.1","depth":1}}}')
+    after = build_unity_dependency_preflight_report(tmp_path, detect_package=detector.detect)
+    assert after["ready"] is True and after["pending"] == []
+
+
 @pytest.mark.parametrize("package_id,key", [
     ("com.vrchat.avatars", "vrchatSdk"),
     ("com.vrchat.base", "vrchatSdk"),
@@ -41,7 +62,9 @@ def test_readable_package_facts_keep_installed_and_missing_semantics(tmp_path, p
     dependencies = {name: "1.0.0" for name in (
         "com.vrchat.avatars", "com.vrchat.base", "com.unity.nuget.newtonsoft-json"
     )} if present else {}
-    (packages / "manifest.json").write_text(json.dumps({"dependencies": dependencies}), encoding="utf-8")
+    (packages / "packages-lock.json").write_text(json.dumps({
+        "dependencies": {name: {"version": version} for name, version in dependencies.items()}
+    }), encoding="utf-8")
     detector = PackageDetectionService(PackageDetectionPorts(
         path_exists=lambda path: path.exists(),
         read_utf8_sig_text=lambda path: path.read_text(encoding="utf-8-sig"),

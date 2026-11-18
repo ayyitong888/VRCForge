@@ -99,7 +99,7 @@ def test_package_detection_reports_real_missing_package(tmp_path: Path) -> None:
     assert result["source"] == ""
 
 
-def test_package_detection_preserves_embedded_vpm_and_upm_priority(tmp_path: Path) -> None:
+def test_package_detection_preserves_embedded_vpm_and_resolved_upm_priority(tmp_path: Path) -> None:
     project = tmp_path / "Project"
     packages = project / "Packages"
     embedded = packages / "com.example.package"
@@ -109,7 +109,7 @@ def test_package_detection_preserves_embedded_vpm_and_upm_priority(tmp_path: Pat
         encoding="utf-8",
     )
     (packages / "vpm-manifest.json").write_text(
-        json.dumps({"dependencies": {"com.example.package": "3.0.0"}}),
+        json.dumps({"locked": {"com.example.package": {"version": "3.0.0"}}}),
         encoding="utf-8",
     )
     (packages / "manifest.json").write_text(
@@ -130,13 +130,13 @@ def test_package_detection_preserves_embedded_vpm_and_upm_priority(tmp_path: Pat
     (embedded / "package.json").unlink()
     embedded.rmdir()
     result = _real_package_detector().detect(project, ["com.example.package"])
-    assert result["version"] == "3.0.0"
-    assert result["source"] == "vpm"
+    assert result["installed"] is False and result["resolution"] == "restore_required"
+    assert result["lockedVersion"] == "3.0.0" and result["source"] == "vpm"
 
     (packages / "vpm-manifest.json").unlink()
     result = _real_package_detector().detect(project, ["com.example.package"])
-    assert result["version"] == "2.0.0"
-    assert result["source"] == "upm"
+    assert result["version"] == "1.0.0"
+    assert result["source"] == "packages-lock"
 
 
 def _service(

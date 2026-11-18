@@ -64,8 +64,10 @@ def _project(tmp_path: Path) -> Path:
 
 
 def _set_installed_package(project: Path, package_id: str, version: str) -> None:
-    (project / "Packages" / "manifest.json").write_text(
-        json.dumps({"dependencies": {package_id: version}}),
+    package = project / "Packages" / package_id
+    package.mkdir()
+    (package / "package.json").write_text(
+        json.dumps({"name": package_id, "version": version}),
         encoding="utf-8",
     )
 
@@ -250,16 +252,13 @@ def test_package_detection_keeps_embedded_vpm_upm_precedence(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    assert detection.detect(project, [package_id]) == {
-        "installed": True,
-        "packageId": package_id,
-        "version": "2.1.0",
-        "source": "vpm",
-    }
+    locked = detection.detect(project, [package_id])
+    assert locked["installed"] is False and locked["resolution"] == "restore_required"
+    assert locked["lockedVersion"] == "2.1.0" and locked["source"] == "vpm"
 
-    embedded = project / "Packages" / package_id / "package.json"
+    embedded = project / "Packages" / "My embedded package" / "package.json"
     embedded.parent.mkdir()
-    embedded.write_text('{"version":"3.0.0"}', encoding="utf-8")
+    embedded.write_text(json.dumps({"name": package_id, "version": "3.0.0"}), encoding="utf-8")
     assert detection.detect(project, [package_id])["source"] == "embedded"
     assert detection.detect(project, [package_id])["version"] == "3.0.0"
     assert detection.detect(None, [package_id])["warning"].startswith(
@@ -306,6 +305,26 @@ def test_preparer_freezes_version_argv_identity_and_bounded_probe_policy(
         assert kwargs["creationflags"] == 64
         assert kwargs["env"]["PATH"] == str(cli.parent.resolve())
         assert "UNRELATED_SECRET" not in kwargs["env"]
+
+
+def test_locked_package_without_files_restores_only_this_exact_version(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    name = "com.example.package"
+    (project / "Packages/vpm-manifest.json").write_text(json.dumps({"locked": {name: {"version": "1.2.3"}}}))
+    cli = tmp_path / "vrc-get.exe"
+    cli.write_bytes(b"fixed-cli")
+    detector = _detection()
+    preparer = _preparer(project, cli, detector, [], versions=[{"version": "1.2.3"}, {"version": "2.0.0"}])
+    prepared, preview = preparer.prepare({"projectPath": str(project), "packageId": name}, None)
+    assert preview["compatibilityAction"] == "restore_locked"
+    assert preview["packageVersion"] == "1.2.3"
+    assert prepared_call(prepared)[1]["argv"][1:] == ["reinstall", "-p", str(project), "-y", name]
+
+    _set_installed_package(project, name, "1.1.0")
+    state = detector.detect(project, [name])
+    assert state["resolution"] == "version_mismatch" and state["lockedVersion"] == "1.2.3"
+    with pytest.raises(AgentGatewayError, match="versions differ"):
+        preparer.prepare({"projectPath": str(project), "packageId": name}, None)
 
 
 def test_preparer_rejects_reserved_repository_and_unavailable_prerelease(
@@ -586,6 +605,7 @@ def test_preserved_assets_upgrade_creates_verified_backup_before_cli(
             ),
             encoding="utf-8",
         )
+        _set_installed_package(project, package_id, "1.3.0")
         return _process_result(stdout="upgraded")
 
     executor = VpmPackageInstallExecutor(
@@ -632,6 +652,7 @@ def test_approved_executor_owns_one_child_and_requires_exact_readback(
             ),
             encoding="utf-8",
         )
+        _set_installed_package(project, "com.example.package", "1.2.3")
         return _process_result(stdout="installed", stderr="warning")
 
     executor = VpmPackageInstallExecutor(
@@ -657,12 +678,10 @@ def test_approved_executor_owns_one_child_and_requires_exact_readback(
     assert install_calls[0][1]["max_output_bytes"] == 4194304
     assert install_calls[0][1]["creationflags"] == 128
     assert "SECRET" not in install_calls[0][1]["env"]
-    assert result["vpmManifestReadback"] == {
-        "packageId": "com.example.package",
-        "version": "1.2.3",
-        "source": "vpm-manifest.locked",
-        "embeddedPackage": None,
-    }
+    readback = result["vpmManifestReadback"]
+    assert readback["packageId"] == readback["embeddedPackage"]["name"] == "com.example.package"
+    assert readback["version"] == readback["embeddedPackage"]["version"] == "1.2.3"
+    assert readback["source"] == "vpm-manifest.locked"
 
 
 def test_prestate_drift_blocks_before_install_child(tmp_path: Path) -> None:
@@ -764,7 +783,7 @@ def test_timeout_after_child_start_is_unknown_and_recoverable(tmp_path: Path) ->
     }
 
 
-@pytest.mark.parametrize("readback_version", [None, "9.9.9"])
+@pytest.mark.parametrize("readback_version", [None, "9.9.9", "1.2.3"])
 def test_missing_or_wrong_readback_after_success_is_unknown_and_recoverable(
     tmp_path: Path,
     readback_version: str | None,
