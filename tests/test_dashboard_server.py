@@ -15618,11 +15618,11 @@ class DashboardServerTests(unittest.TestCase):
             version_file = project / "ProjectSettings" / "ProjectVersion.txt"
             version_file.parent.mkdir(parents=True)
             old = root / "custom" / "Editor" / "Unity.exe"
-            new = root / "Unity" / "Hub" / "Editor" / "6000.3.5f1" / "Editor" / "Unity.exe"
+            new = root / "Unity" / "Hub" / "Editor" / "6000.0.67f1" / "Editor" / "Unity.exe"
             for editor in (old, new):
                 editor.parent.mkdir(parents=True)
                 editor.touch()
-            versions = {old.resolve(): "2022.3.22f1", new.resolve(): "6000.3.5f1"}
+            versions = {old.resolve(): "2022.3.22f1", new.resolve(): "6000.0.67f1"}
             resolve = dashboard_server.resolve_unity_editor_path_for_repair
             with (
                 patch.dict(os.environ, {"ProgramFiles": str(root), "ProgramFiles(x86)": "", "LOCALAPPDATA": ""}),
@@ -15632,7 +15632,7 @@ class DashboardServerTests(unittest.TestCase):
             ):
                 version_file.write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
                 self.assertEqual(resolve(project), (old.resolve(), "settings"))
-                version_file.write_text("m_EditorVersion: 6000.3.5f1\n", encoding="utf-8-sig")
+                version_file.write_text("m_EditorVersion: 6000.0.67f1\n", encoding="utf-8-sig")
                 self.assertEqual(resolve(project, str(old)), (new.resolve(), "unity-hub"))
                 new.unlink()
                 self.assertEqual(resolve(project), (None, "not-found"))
