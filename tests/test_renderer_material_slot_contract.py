@@ -51,7 +51,7 @@ def test_apply_binds_scene_identity_and_material_evidence_with_persisted_readbac
         assert field in tool
     assert 'EditorSceneManager.SaveScene' in tool
     assert 'AssetDatabase.TryGetGUIDAndLocalFileIdentifier' in tool
-    assert 'sceneFileDigest' not in tool
+    assert 'SceneObjectCopyCore.ResolveSceneForWrite' in tool
     assert 'persistedReadback' in tool
     assert 'Undo.RegisterCompleteObjectUndo' in tool
     assert 'VerifySlots' in tool
@@ -91,6 +91,10 @@ def _preview():
         "scenePath": "Assets/2.unity",
         "sceneGuid": "b" * 32,
         "sceneHandle": 7,
+        "sceneFileVersion": "123:456:789:1024",
+        "sceneFileDigest": "7" * 64,
+        "sceneMetaDigest": "8" * 64,
+        "sceneMetaIdentity": "meta",
         "slotIndex": 0,
         "beforeMaterial": {
             "name": "OpaqueGenerated",
@@ -126,7 +130,7 @@ def test_gateway_binds_authoritative_preview_to_exact_apply_fields():
     canonical, approval = bind_authoritative_preview(wrapper, _preview())
     arguments = canonical["arguments"]
     assert arguments["rendererComponentId"] == "a" * 64
-    assert "expectedSceneFileDigest" not in arguments
+    assert arguments["expectedSceneFileDigest"] == "7" * 64
     assert arguments["expectedBeforeMaterialLocalId"] == 2100000
     assert arguments["expectedNewMaterialLocalId"] == 2100001
     assert approval["freshReadbackRequired"] is True

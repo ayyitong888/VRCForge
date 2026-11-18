@@ -10,7 +10,7 @@ from test_renderer_material_slots_batch import request as batch_request, preview
 TOOL='vrcforge_set_renderer_material_slot'
 
 @pytest.mark.parametrize('batch',[False,True])
-def test_registered_prepare_and_archive_use_only_revalidated_scene(tmp_path,monkeypatch,batch):
+def test_registered_prepare_and_archive_use_only_approved_scene(tmp_path,monkeypatch,batch):
     import dashboard_server as server
     root=tmp_path/'project'
     for folder in ('Assets','Packages','ProjectSettings'):(root/folder).mkdir(parents=True)
@@ -22,10 +22,11 @@ def test_registered_prepare_and_archive_use_only_revalidated_scene(tmp_path,monk
     if batch:params['executionTarget']['scene']['absolutePath']=str(root/scene)
     monkeypatch.setattr(server,'_invoke_authoritative_unity_preview',lambda *a:deepcopy(preview))
     canonical,_=server.prepare_renderer_material_slot_request(params,None)
+    monkeypatch.setattr(server, "_invoke_authoritative_unity_preview", lambda *_: pytest.fail("checkpoint cannot refresh the approved preview"))
     handler=server.AGENT_GATEWAY._write_handlers[TOOL]
     prepared=handler.checkpoint_prepare_handler(root,{**canonical,'_checkpointTargetTool':TOOL})
     assert prepared['archiveAssetPaths']==[scene]
-    assert prepared['archiveScopeReason']=='revalidated_renderer_saved_scene_only'
+    assert prepared['archiveScopeReason']=='approved_renderer_saved_scene_only'
     gateway=_gateway(tmp_path/'app');service=gateway.approval_transactions
     service.register_write_handler(TOOL,'renderer slot','medium',lambda _:None,checkpoint_prepare_handler=handler.checkpoint_prepare_handler)
     service._ports=replace(service._ports,run_git=lambda *a,**k:{'ok':False,'returncode':1,'stdout':'','error':'not git'})
@@ -37,11 +38,6 @@ def test_registered_prepare_and_archive_use_only_revalidated_scene(tmp_path,monk
     assert gateway.checkpoint_recovery._restore_archive_checkpoint(checkpoint)['ok'] is True
     assert (root/scene).read_text(encoding='utf8')==scene
     assert (root/'Assets/Unrelated.mat').read_text(encoding='utf8')=='preserve'
-    # Fresh authoritative preview drift must block before any archive offer.
-    if batch:preview['plan']['scene']['sceneGuid']='9'*32
-    else:preview['sceneGuid']='9'*32
-    rejected=handler.checkpoint_prepare_handler(root,{**canonical,'_checkpointTargetTool':TOOL})
-    assert rejected['ok'] is False and 'archiveAssetPaths' not in rejected
 
 @pytest.mark.parametrize('offer',[None,['Assets/Missing.unity'],['Assets/../Outside.unity'],['Assets/NoMeta.unity']])
 def test_unproven_or_missing_scene_offer_keeps_full_archive(tmp_path,offer):

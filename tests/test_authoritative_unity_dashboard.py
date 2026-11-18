@@ -884,6 +884,13 @@ def test_strict_checkpoint_revalidates_canonical_state_without_saving(
         # Material preparation now rejects it before any save or baseline call.
         assert result["ok"] is False
         assert "exact material asset paths" in result["error"]
+        reprepare.assert_not_called()
+        save_prepare.assert_not_called()
+        return
+    if nested_tool == RENDERER_MATERIAL_SLOT_TOOL_NAME:
+        assert result["ok"] is True
+        assert "archiveAssetPaths" not in result
+        reprepare.assert_not_called()
         save_prepare.assert_not_called()
         return
     assert result["ok"] is True

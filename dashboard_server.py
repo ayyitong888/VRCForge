@@ -22945,6 +22945,52 @@ def prepare_authoritative_unity_checkpoint_sync(
                 "archiveAssetPaths": [scene_path],
                 "archiveScopeReason": "revalidated_avatar_descriptor_scene_only"}
 
+    if nested_tool in {MATERIAL_TEXTURE_ASSIGNMENT_TOOL, MATERIAL_SHADER_ASSIGNMENT_TOOL}:
+        request = ensure_dict(arguments.get("arguments"))
+        rows = request.get("assignments")
+        rows = rows if isinstance(rows, list) else [request]
+        paths = sorted({str(ensure_dict(row).get("expectedMaterialAssetPath")
+                            or ensure_dict(row).get("materialAssetPath") or "") for row in rows})
+        if not paths or len(paths) > 128 or any(
+            not path.startswith("Assets/") or not path.lower().endswith(".mat")
+            or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/"))
+            for path in paths
+        ):
+            return {"ok": False, "error": "The approved material preview did not resolve exact material asset paths."}
+        settings = load_dashboard_settings(build_agent_connection_request({}))
+        result = invoke_unity_mcp(
+            settings, "vrc_prepare_checkpoint",
+            {"projectPath": str(project_root), "checkpointAssetPaths": paths, "materialBaselineOnly": True},
+            execution_context={"lane": "app_safety_control"}, preserve_tool_error=True,
+        )
+        prepared = normalize_unity_checkpoint_result(result, project_root)
+        if prepared.get("ok") is not True:
+            return prepared
+        baseline = prepared.get("assetBaseline")
+        if (not isinstance(baseline, list)
+                or any(not isinstance(item, dict) for item in baseline)
+                or [item.get("assetPath") for item in baseline] != paths):
+            return {**prepared, "ok": False, "error": "Unity did not capture the exact approved material asset baseline."}
+        return {**prepared, "assetBaselineRequired": True, "mode": "read_only_approved_material_baseline", "toolName": nested_tool}
+    if nested_tool == RENDERER_MATERIAL_SLOT_TOOL:
+        request = ensure_dict(arguments.get("arguments"))
+        if "assignments" in request:
+            scene = ensure_dict(ensure_dict(request.get("expectedBatchPlan")).get("scene"))
+            scene_path = scene.get("scenePath")
+        else:
+            scene_path = request.get("expectedScenePath")
+        # The original approved preview identified the only saved scene changed.
+        exact_scene = (
+            isinstance(scene_path, str) and scene_path.startswith("Assets/")
+            and scene_path.lower().endswith(".unity") and "\\" not in scene_path
+            and all(part not in {"", ".", ".."} for part in scene_path.split("/"))
+        )
+        return {
+            "ok": True, "projectPath": str(project_root), "toolName": nested_tool,
+            "mode": "read_only_approved_scene_archive",
+            **({"archiveAssetPaths": [scene_path]} if exact_scene else {}),
+            "archiveScopeReason": "approved_renderer_saved_scene_only" if exact_scene else "full_project_renderer_scene_scope_not_proven",
+        }
     if nested_tool not in {
         PARAMETER_BIT_PACKING_TOOL,
         ATOMIC_REFERENCE_RENAME_TOOL,
@@ -22958,9 +23004,6 @@ def prepare_authoritative_unity_checkpoint_sync(
         SCENE_TRANSITION_TOOL,
         TEXTURE_PATCH_TOOL,
         USER_ADJUSTMENT_HANDOFF_TOOL,
-        RENDERER_MATERIAL_SLOT_TOOL,
-        MATERIAL_SHADER_ASSIGNMENT_TOOL,
-        MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
         MATERIAL_VARIANT_FLATTEN_TOOL,
     }:
         from agent_approval_transactions import _checkpoint_archive_files_for_write
@@ -23042,54 +23085,6 @@ def prepare_authoritative_unity_checkpoint_sync(
         return {
             "ok": False,
             "error": "The approved Unity project changed before checkpointing.",
-        }
-    if nested_tool in {MATERIAL_TEXTURE_ASSIGNMENT_TOOL, MATERIAL_SHADER_ASSIGNMENT_TOOL}:
-        request = ensure_dict(refreshed_arguments.get("arguments"))
-        rows = request.get("assignments")
-        rows = rows if isinstance(rows, list) else [request]
-        paths = sorted({str(ensure_dict(row).get("expectedMaterialAssetPath")
-                            or ensure_dict(row).get("materialAssetPath") or "") for row in rows})
-        if not paths or len(paths) > 128 or any(
-            not path.startswith("Assets/") or not path.lower().endswith(".mat")
-            or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/"))
-            for path in paths
-        ):
-            return {"ok": False, "error": "The approved material preview did not resolve exact material asset paths."}
-        settings = load_dashboard_settings(build_agent_connection_request({}))
-        result = invoke_unity_mcp(
-            settings, "vrc_prepare_checkpoint",
-            {"projectPath": str(project_root), "checkpointAssetPaths": paths, "materialBaselineOnly": True},
-            execution_context={"lane": "app_safety_control"}, preserve_tool_error=True,
-        )
-        prepared = normalize_unity_checkpoint_result(result, project_root)
-        if prepared.get("ok") is not True:
-            return prepared
-        baseline = prepared.get("assetBaseline")
-        if (not isinstance(baseline, list)
-                or any(not isinstance(item, dict) for item in baseline)
-                or [item.get("assetPath") for item in baseline] != paths):
-            return {**prepared, "ok": False, "error": "Unity did not capture the exact approved material asset baseline."}
-        return {**prepared, "assetBaselineRequired": True, "canonicalRevalidated": True,
-                "mode": "read_only_authoritative_revalidation", "toolName": nested_tool}
-    if checkpoint_target == "vrcforge_set_renderer_material_slot" and nested_tool == RENDERER_MATERIAL_SLOT_TOOL:
-        request = ensure_dict(refreshed_arguments.get("arguments"))
-        if "assignments" in request:
-            scene = ensure_dict(ensure_dict(request.get("expectedBatchPlan")).get("scene"))
-            scene_path = scene.get("scenePath")
-        else:
-            scene_path = request.get("expectedScenePath")
-        # The fresh canonical preview above validates one saved scene, its seal,
-        # and the exact renderer changes. This tool only saves that scene.
-        exact_scene = (
-            isinstance(scene_path, str) and scene_path.startswith("Assets/")
-            and scene_path.lower().endswith(".unity") and "\\" not in scene_path
-            and all(part not in {"", ".", ".."} for part in scene_path.split("/"))
-        )
-        return {
-            "ok": True, "projectPath": str(project_root), "toolName": nested_tool,
-            "mode": "read_only_authoritative_revalidation", "canonicalRevalidated": True,
-            **({"archiveAssetPaths": [scene_path]} if exact_scene else {}),
-            "archiveScopeReason": "revalidated_renderer_saved_scene_only" if exact_scene else "full_project_renderer_scene_scope_not_proven",
         }
     return {
         "ok": True,

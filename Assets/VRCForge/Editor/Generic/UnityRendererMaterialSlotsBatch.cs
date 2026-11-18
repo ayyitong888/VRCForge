@@ -90,7 +90,7 @@ namespace VRCForge.Editor
                 slots = target.Renderer.sharedMaterials.Select(RendererMaterialSlotTool.MaterialIdentity).ToArray() });
         }
 
-        private static Plan Build(JArray requests)
+        private static Plan Build(JArray requests, JObject approvedScene)
         {
             var plan = new Plan();
             var before = new JArray();
@@ -104,7 +104,7 @@ namespace VRCForge.Editor
                 {
                     var scenePath = RendererMaterialSlotTool.FindScenePath(rendererPath);
                     var scene = plan.Scene != null && plan.Scene.Path == scenePath
-                        ? plan.Scene : SceneObjectCopyCore.ResolveSavedSceneOwner(scenePath, "renderer batch scene");
+                        ? plan.Scene : SceneObjectCopyCore.ResolveSceneForWrite(scenePath, "renderer batch scene", approvedScene, "scene");
                     RendererMaterialSlotTool.ResolveTarget(rendererPath, rendererId, out target, scene);
                     if (plan.Scene == null) plan.Scene = scene;
                     else Verify(SceneEvidence(plan.Scene), SceneEvidence(scene));
@@ -120,7 +120,12 @@ namespace VRCForge.Editor
                 rows.Add(JObject.FromObject(new { rendererPath = target.Identity.rendererPath, rendererComponentId = target.Identity.componentId,
                     slotIndex = slot, newMaterialAssetPath = path, beforeMaterial = RendererMaterialSlotTool.MaterialPayload(old), newMaterial = RendererMaterialSlotTool.MaterialPayload(next) }));
             }
-            plan.Evidence = new JObject { ["scene"] = SceneEvidence(plan.Scene), ["beforeRenderers"] = before, ["assignments"] = rows, ["afterRenderers"] = BuildExpected(before, rows) };
+            var sceneEvidence = SceneEvidence(plan.Scene);
+            sceneEvidence["sceneFileVersion"] = approvedScene?["sceneFileVersion"]?.Value<string>() ?? plan.Scene.FileVersion;
+            sceneEvidence["sceneFileDigest"] = plan.Scene.FileDigest;
+            sceneEvidence["sceneMetaDigest"] = plan.Scene.MetaDigest;
+            sceneEvidence["sceneMetaIdentity"] = plan.Scene.MetaIdentity;
+            plan.Evidence = new JObject { ["scene"] = sceneEvidence, ["beforeRenderers"] = before, ["assignments"] = rows, ["afterRenderers"] = BuildExpected(before, rows) };
             return plan;
         }
 
@@ -133,7 +138,8 @@ namespace VRCForge.Editor
             {
                 var rows = ValidateEnvelope(request);
                 RendererMaterialSlotTool.RequireProject(request);
-                plan = Build(rows);
+                var approvedScene = request["preview"]?.Value<bool>() == true ? null : request["expectedBatchPlan"]?["scene"] as JObject;
+                plan = Build(rows, approvedScene);
                 var sealedRequest = (JObject)request.DeepClone(); sealedRequest["expectedBatchPlan"] = plan.Evidence;
                 if (Encoding.UTF8.GetByteCount(sealedRequest.ToString(Formatting.None)) > MaxBytes) throw new InvalidOperationException("Sealed renderer batch exceeds 512 KiB; split the batch.");
                 if (request["preview"]?.Value<bool>() == true)
@@ -166,6 +172,9 @@ namespace VRCForge.Editor
             }
             catch (Exception exception)
             {
+                if (!started)
+                    return VRCForgeToolResult.RejectedBeforeMutation("renderer_material_slots_batch_rejected", exception.Message,
+                        "unity_core_tool", "pre_mutation_validation", exception: exception);
                 var restored = false;
                 if (started && plan != null)
                 {
@@ -174,7 +183,7 @@ namespace VRCForge.Editor
                         Undo.RevertAllDownToGroup(undoGroup);
                         if (!EditorSceneManager.SaveScene(plan.Scene.Scene)) throw new InvalidOperationException("Batch restoration save failed.");
                         var restoredScene = SceneObjectCopyCore.ResolveSavedSceneOwner(plan.Scene.Path, "restored renderer batch scene");
-                        Verify(plan.Evidence["scene"], SceneEvidence(restoredScene));
+                        Verify(SceneEvidence(plan.Scene), SceneEvidence(restoredScene));
                         Verify(plan.Evidence["beforeRenderers"], ReadRenderers(plan, restoredScene));
                         restored = true;
                     }

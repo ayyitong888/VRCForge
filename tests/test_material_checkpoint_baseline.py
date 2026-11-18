@@ -1,4 +1,3 @@
-from copy import deepcopy
 from types import SimpleNamespace
 import pytest
 import dashboard_server as server
@@ -8,7 +7,7 @@ import dashboard_server as server
 def test_material_checkpoint_preserves_real_core_rejection(tmp_path, monkeypatch, mutation_started):
     args = {"projectPath": str(tmp_path), "toolName": server.MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
             "arguments": {"materialAssetPath": "Assets/Clothes.mat"}}
-    monkeypatch.setattr(server, "prepare_unity_mcp_write_request", lambda args, _: (deepcopy(args), {}))
+    monkeypatch.setattr(server, "prepare_unity_mcp_write_request", lambda *_: pytest.fail("checkpoint cannot refresh the approved preview"))
     monkeypatch.setattr(server, "load_dashboard_settings", lambda *_: object())
     monkeypatch.setattr(server, "build_agent_connection_request", lambda *_: {})
     payload = {"isError": True, "structuredContent": {"success": False,
@@ -24,51 +23,12 @@ def test_material_checkpoint_preserves_real_core_rejection(tmp_path, monkeypatch
     assert result["mutationStarted"] is mutation_started
 
 
-def test_material_checkpoint_revalidation_preserves_authoritative_preview_rejection(tmp_path, monkeypatch):
-    for name in ("Assets", "Packages", "ProjectSettings"):
-        (tmp_path / name).mkdir(parents=True)
-    args = {
-        "projectPath": str(tmp_path),
-        "toolName": server.MATERIAL_SHADER_ASSIGNMENT_TOOL,
-        "arguments": {
-            "materialAssetPath": "Assets/Body.mat",
-            "propertyChanges": [{"propertyName": "_Smoothness", "value": 0.8}],
-        },
-    }
-    monkeypatch.setattr(
-        server, "_invoke_authoritative_unity_preview",
-        lambda *_: {
-            "isError": True,
-            "structuredContent": {
-                "ok": False,
-                "errorCode": "material_property_evidence_changed",
-                "error": "The material preview no longer matches the approved property evidence.",
-                "failureLayer": "unity_core_preview",
-                "failurePhase": "preview_rejected",
-                "nextAction": "Refresh the material preview and review the changed values before retrying.",
-            },
-        },
-    )
-
-    result = server.prepare_authoritative_unity_checkpoint_sync(tmp_path, args)
-
-    assert result["ok"] is False
-    assert result["blocking"] is True
-    assert result["code"] == "material_property_evidence_changed"
-    assert result["error"] == "The material preview no longer matches the approved property evidence."
-    assert result["failureLayer"] == "unity_core_preview"
-    assert result["failurePhase"] == "preview_rejected"
-    assert result["nextAction"] == "Refresh the material preview and review the changed values before retrying."
-    assert result["diagnostics"]["errorCode"] == "material_property_evidence_changed"
-    assert result["mutationStarted"] is False
-    assert result["saved"] is False
-
 @pytest.mark.parametrize("valid", [True, False])
 def test_single_material_checkpoint_captures_readonly_baseline(tmp_path, monkeypatch, valid):
     path = "Assets/Clothes.mat"
     arguments = {"projectPath": str(tmp_path), "toolName": server.MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
                  "arguments": {"materialAssetPath": path, "propertyName": "_MainTex"}}
-    monkeypatch.setattr(server, "prepare_unity_mcp_write_request", lambda args, preview: (deepcopy(args), {}))
+    monkeypatch.setattr(server, "prepare_unity_mcp_write_request", lambda *_: pytest.fail("checkpoint cannot refresh the approved preview"))
     monkeypatch.setattr(server, "load_dashboard_settings", lambda *_: SimpleNamespace())
     monkeypatch.setattr(server, "build_agent_connection_request", lambda *_: {})
     monkeypatch.setattr(server, "prepare_unity_checkpoint_sync", lambda *_: pytest.fail("must not save unrelated dirty assets"))
@@ -93,7 +53,7 @@ def test_material_checkpoint_exact_footprint(tmp_path, monkeypatch, tool, mode):
     if mode == "missing": nested = {"rendererPath": "Avatar/Clothes"}
     if mode == "traversal": nested = {"materialAssetPath": "Assets/../One.mat"}
     args = {"projectPath": str(tmp_path), "toolName": tool, "arguments": nested}
-    monkeypatch.setattr(server, "prepare_unity_mcp_write_request", lambda args, preview: (deepcopy(args), {}))
+    monkeypatch.setattr(server, "prepare_unity_mcp_write_request", lambda *_: pytest.fail("checkpoint cannot refresh the approved preview"))
     monkeypatch.setattr(server, "load_dashboard_settings", lambda *_: object())
     monkeypatch.setattr(server, "build_agent_connection_request", lambda *_: {})
     calls = []

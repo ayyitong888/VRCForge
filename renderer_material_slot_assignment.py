@@ -88,6 +88,8 @@ def bind_authoritative_preview(
     if scene_handle == 0:
         raise RendererMaterialSlotError("sceneHandle must be nonzero.")
 
+    scene_file = _scene_file_evidence(result)
+
     if "beforeMaterial" not in result:
         raise RendererMaterialSlotError("Preview is missing beforeMaterial evidence.")
     before = None if result["beforeMaterial"] is None else _material(result["beforeMaterial"], "beforeMaterial")
@@ -119,6 +121,7 @@ def bind_authoritative_preview(
             "expectedScenePath": scene_path,
             "expectedSceneGuid": scene_guid,
             "expectedSceneHandle": scene_handle,
+            **{"expected" + key[0].upper() + key[1:]: value for key, value in scene_file.items()},
             "expectedRendererComponentType": component_type,
             "expectedRendererComponentIndex": component_index,
             "expectedNewMaterialGuid": new_guid,
@@ -172,6 +175,18 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, 
         if "beforeMaterial" not in result or result["beforeMaterial"] is not None:
             raise RendererMaterialSlotError("Apply empty-slot pre-state does not match approval.")
     return result
+
+
+def _scene_file_evidence(scene: dict[str, Any]) -> dict[str, str]:
+    version = scene.get("sceneFileVersion")
+    if not isinstance(version, str) or version and not re.fullmatch(r"[0-9]+(?::[0-9]+){3}", version):
+        raise RendererMaterialSlotError("sceneFileVersion is invalid.")
+    return {
+        "sceneFileVersion": version,
+        "sceneFileDigest": _hex(scene.get("sceneFileDigest"), "sceneFileDigest", _DIGEST),
+        "sceneMetaDigest": _hex(scene.get("sceneMetaDigest"), "sceneMetaDigest", _DIGEST),
+        "sceneMetaIdentity": _text(scene.get("sceneMetaIdentity"), "sceneMetaIdentity", 512),
+    }
 
 
 def _material(value: Any, label: str) -> dict[str, Any]:
@@ -268,6 +283,7 @@ def _validate_batch_plan(rows: list[dict[str, Any]], value: Any) -> dict[str, An
     scene = _object(plan["scene"], "scene")
     _asset_path(scene.get("scenePath"), "scenePath", ".unity")
     _hex(scene.get("sceneGuid"), "sceneGuid", _GUID)
+    _scene_file_evidence(scene)
     if _integer(scene.get("sceneHandle"), "sceneHandle", -2147483648, 2147483647) == 0:
         raise RendererMaterialSlotError("sceneHandle must be nonzero.")
     before = plan["beforeRenderers"]
@@ -358,6 +374,6 @@ def _validate_batch_apply(arguments: dict[str, Any], payload: Any) -> dict[str, 
         raise RendererMaterialSlotError("Batch apply differs from sealed plan.")
     readback = _object(result.get("readback"), "batch readback")
     scene = _object(readback.get("scene"), "readback scene")
-    if scene != expected["scene"] or readback.get("renderers") != expected["afterRenderers"]:
+    if scene != {key: expected["scene"][key] for key in ("scenePath", "sceneGuid", "sceneHandle")} or readback.get("renderers") != expected["afterRenderers"]:
         raise RendererMaterialSlotError("Batch independent readback differs from expected arrays or scene identity.")
     return result

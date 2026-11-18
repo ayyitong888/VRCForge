@@ -35,7 +35,7 @@ def preview():
  new={**old,"name":"New","assetPath":"Assets/New.mat","assetGuid":"d"*32,"assetLocalId":2100001}
  before={"rendererPath":row["rendererPath"],"rendererComponentId":row["rendererComponentId"],"rendererComponentType":"UnityEngine.SkinnedMeshRenderer","rendererComponentIndex":0,"slots":["Assets/Old.mat|"+"b"*32+"|2100000","null","Assets/Keep.mat|"+"f"*32+"|2100000"]}
  after=deepcopy(before);after["slots"][0]="Assets/New.mat|"+"d"*32+"|2100001"
- plan={"scene":{"scenePath":"Assets/Main.unity","sceneGuid":"1"*32,"sceneHandle":1},"beforeRenderers":[before],"afterRenderers":[after],"assignments":[{**row,"beforeMaterial":old,"newMaterial":new}]}
+ plan={"scene":{"scenePath":"Assets/Main.unity","sceneGuid":"1"*32,"sceneHandle":1,"sceneFileVersion":"123:456:789:1024","sceneFileDigest":"7"*64,"sceneMetaDigest":"8"*64,"sceneMetaIdentity":"meta"},"beforeRenderers":[before],"afterRenderers":[after],"assignments":[{**row,"beforeMaterial":old,"newMaterial":new}]}
  return {"schema":"vrcforge.renderer_material_slot.v1","batch":True,"preview":True,"verified":True,"mutationStarted":False,"applied":False,"committed":False,"sceneSaved":False,"persistedReadback":False,"plan":plan}
 
 
@@ -79,7 +79,7 @@ def test_batch_explicit_plan_is_not_refreshed():
 
 def applied():
  result=preview();result.update(preview=False,mutationStarted=True,applied=True,committed=True,sceneSaved=True,persistedReadback=True,commitState="committed",commitStateKnown=True,assignmentCount=1,rendererCount=1)
- result["readback"]={"scene":deepcopy(result["plan"]["scene"]),"renderers":deepcopy(result["plan"]["afterRenderers"])}
+ result["readback"]={"scene":{key:result["plan"]["scene"][key] for key in ("scenePath","sceneGuid","sceneHandle")},"renderers":deepcopy(result["plan"]["afterRenderers"])}
  return result
 
 

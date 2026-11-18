@@ -30,6 +30,10 @@ namespace VRCForge.Editor
             [VRCForgeInput("Return all validated preconditions without mutation.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Preview scene path.", IsRequired = false)] public string expectedScenePath { get; set; } = "";
             [VRCForgeInput("Preview scene GUID.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
+            [VRCForgeInput("Preview scene disk version.", IsRequired = false)] public string expectedSceneFileVersion { get; set; }
+            [VRCForgeInput("Preview scene content digest.", IsRequired = false)] public string expectedSceneFileDigest { get; set; }
+            [VRCForgeInput("Preview scene metadata digest.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; }
+            [VRCForgeInput("Preview scene metadata identity.", IsRequired = false)] public string expectedSceneMetaIdentity { get; set; }
             [VRCForgeInput("Preview scene handle.", IsRequired = false)] public int? expectedSceneHandle { get; set; }
             [VRCForgeInput("Preview renderer component type.", IsRequired = false)] public string expectedRendererComponentType { get; set; } = "";
             [VRCForgeInput("Preview renderer component index.", IsRequired = false)] public int? expectedRendererComponentIndex { get; set; }
@@ -62,7 +66,8 @@ namespace VRCForge.Editor
                 var slot = RequiredInt(parameters, "slotIndex");
                 var newPath = NormalizeMaterialPath(Required(parameters, "newMaterialAssetPath"));
                 RequireProject(parameters);
-                var scene = ResolveTarget(path, componentId, out target);
+                var scene = SceneObjectCopyCore.ResolveSceneForWrite(FindScenePath(path), "renderer scene", IsPreview(parameters) ? null : parameters);
+                ResolveTarget(path, componentId, out target, scene);
                 var materialEvidence = ReadMaterial(newPath, "new material");
                 var slots = target.Renderer.sharedMaterials;
                 if (slot < 0 || slot >= slots.Length)
@@ -96,6 +101,9 @@ namespace VRCForge.Editor
             }
             catch (Exception exception)
             {
+                if (!mutationStarted)
+                    return VRCForgeToolResult.RejectedBeforeMutation("renderer_material_slot_rejected", exception.Message,
+                        "unity_core_tool", "pre_mutation_validation", exception: exception);
                 if (mutationStarted)
                 {
                     try
@@ -129,6 +137,8 @@ namespace VRCForge.Editor
                 rendererPath = identity.rendererPath, rendererComponentId = identity.componentId,
                 rendererComponentType = identity.componentType, rendererComponentIndex = identity.componentIndex,
                 scenePath = scene.Path, sceneGuid = scene.Guid, sceneHandle = scene.Handle,
+                sceneFileVersion = scene.FileVersion, sceneFileDigest = scene.FileDigest,
+                sceneMetaDigest = scene.MetaDigest, sceneMetaIdentity = scene.MetaIdentity,
                 slotIndex = slot,
                 beforeMaterial = MaterialPayload(before), newMaterial = MaterialPayload(next),
                 newMaterialAssetPath = next.Path, newMaterialAssetGuid = next.Guid, newMaterialAssetLocalId = next.LocalId,
