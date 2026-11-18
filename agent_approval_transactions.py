@@ -2926,16 +2926,15 @@ class AgentApprovalTransactionService:
             )
         try:
             persisted_plan = validate_frozen_approved_unity_execution_plan(frozen_execution_plan)
-            recomputed_plan_json = freeze_approved_unity_execution_plan(
+            calls_match = persisted_plan.matches_calls(
                 write_handler.approved_execution_plan_builder(dict(handler_arguments))
             )
-            recomputed_plan = validate_frozen_approved_unity_execution_plan(recomputed_plan_json)
         except Exception as exc:  # noqa: BLE001 - plan loss/drift is a hard write boundary.
             raise AgentGatewayError(
                 "The approved Unity execution plan is unavailable or invalid.",
                 status_code=409,
             ) from exc
-        if persisted_plan.plan_digest != recomputed_plan.plan_digest:
+        if not calls_match:
             raise AgentGatewayError(
                 "The approved Unity execution plan drifted after approval.",
                 status_code=409,
@@ -2960,7 +2959,7 @@ class AgentApprovalTransactionService:
                 ] = value
         execution_plan = create_approved_unity_execution_plan(
             execution_context,
-            frozen_execution_plan,
+            persisted_plan,
         )
         try:
             from prepared_outfit_import_workflow_service import bind_import_operation_journal
@@ -4359,9 +4358,8 @@ class AgentApprovalTransactionService:
             and not authoritative_preview_only
         ):
             try:
-                approved_execution_plan = self._build_external_mcp_execution_plan(
-                    write_handler,
-                    arguments,
+                approved_execution_plan = freeze_approved_unity_execution_plan(
+                    self._external_mcp_planned_calls(write_handler, arguments)
                 )
             except AgentGatewayError:
                 raise
@@ -4423,12 +4421,12 @@ class AgentApprovalTransactionService:
                 prepared["confirmationReason"] = "The independent approval reviewer requires manual confirmation."
         return prepared
 
-    def _build_external_mcp_execution_plan(
+    def _external_mcp_planned_calls(
         self,
         write_handler: AgentWriteHandler,
         arguments: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """Freeze the exact Core calls for the external handler invocation.
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Build the exact Core calls for the external handler invocation.
 
         Internal approved-write builders intentionally canonicalize their plan
         to the apply form (``preview=false``). External MCP may legitimately
@@ -4463,7 +4461,7 @@ class AgentApprovalTransactionService:
                     adjusted_arguments["preview"] = True
                 adjusted_calls.append((tool_name, adjusted_arguments))
             planned_calls = adjusted_calls
-        return freeze_approved_unity_execution_plan(planned_calls)
+        return planned_calls
 
     def _call_external_mcp_write_handler(
         self,
@@ -4511,12 +4509,8 @@ class AgentApprovalTransactionService:
             persisted_plan = validate_frozen_approved_unity_execution_plan(
                 frozen_execution_plan
             )
-            recomputed_plan_json = self._build_external_mcp_execution_plan(
-                write_handler,
-                handler_arguments,
-            )
-            recomputed_plan = validate_frozen_approved_unity_execution_plan(
-                recomputed_plan_json
+            calls_match = persisted_plan.matches_calls(
+                self._external_mcp_planned_calls(write_handler, handler_arguments)
             )
         except AgentGatewayError:
             raise
@@ -4534,7 +4528,7 @@ class AgentApprovalTransactionService:
                 committed=False,
                 commit_state="not_started",
             ) from exc
-        if persisted_plan.plan_digest != recomputed_plan.plan_digest:
+        if not calls_match:
             raise AgentGatewayError(
                 "The external Unity execution plan drifted after preparation.",
                 status_code=409,
@@ -4566,7 +4560,7 @@ class AgentApprovalTransactionService:
                 "issuedAtUnixMs": now_ms,
                 "expiresAtUnixMs": now_ms + 60_000,
             },
-            frozen_execution_plan,
+            persisted_plan,
         )
         result: Any = None
         try:

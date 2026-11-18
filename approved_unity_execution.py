@@ -68,6 +68,11 @@ class FrozenApprovedUnityExecutionPlan:
             "planDigest": self.plan_digest,
         }
 
+    def matches_calls(
+        self, calls: Sequence[ApprovedUnityExecutionCall | Mapping[str, Any] | tuple[str, dict[str, Any]]],
+    ) -> bool:
+        return self.calls == _normalized_plan_calls(calls)
+
 
 @dataclass(frozen=True)
 class ApprovedUnityExecutionClaim:
@@ -245,17 +250,29 @@ def freeze_approved_unity_execution_plan(
     Checkpoint identity, TTL, project root, and execution ids are deliberately
     absent: those values only exist after approval and checkpoint creation.
     """
+    return _make_frozen_plan(calls).as_json()
+
+
+def _normalized_plan_calls(
+    calls: Sequence[ApprovedUnityExecutionCall | Mapping[str, Any] | tuple[str, dict[str, Any]]],
+) -> tuple[ApprovedUnityExecutionCall, ...]:
     normalized_calls = tuple(_normalize_call(call) for call in calls)
     if not normalized_calls:
         raise ValueError("approved Unity execution plan must contain at least one call.")
     if len(normalized_calls) > MAX_APPROVED_UNITY_EXECUTION_CALLS:
         raise ValueError("approved Unity execution plan contains too many calls.")
-    digest_input = {
+    return normalized_calls
+
+
+def _make_frozen_plan(
+    calls: Sequence[ApprovedUnityExecutionCall | Mapping[str, Any] | tuple[str, dict[str, Any]]],
+) -> FrozenApprovedUnityExecutionPlan:
+    normalized_calls = _normalized_plan_calls(calls)
+    digest = _canonical_json_sha256({
         "schema": FROZEN_PLAN_SCHEMA,
         "calls": [call.as_json() for call in normalized_calls],
-    }
-    digest = _canonical_json_sha256(digest_input)
-    return {**digest_input, "planDigest": digest}
+    })
+    return FrozenApprovedUnityExecutionPlan(normalized_calls, digest)
 
 
 def validate_frozen_approved_unity_execution_plan(value: Mapping[str, Any]) -> FrozenApprovedUnityExecutionPlan:
@@ -267,29 +284,27 @@ def validate_frozen_approved_unity_execution_plan(value: Mapping[str, Any]) -> F
         raise ValueError("approved Unity execution plan calls are invalid.")
     if len(raw_calls) > MAX_APPROVED_UNITY_EXECUTION_CALLS:
         raise ValueError("approved Unity execution plan contains too many calls.")
-    calls = tuple(_normalize_call(call) for call in raw_calls)
-    expected_digest = _canonical_json_sha256(
-        {"schema": FROZEN_PLAN_SCHEMA, "calls": [call.as_json() for call in calls]}
-    )
+    frozen = _make_frozen_plan(raw_calls)
     supplied_digest = value.get("planDigest")
-    if not isinstance(supplied_digest, str) or not secrets.compare_digest(supplied_digest, expected_digest):
+    if not isinstance(supplied_digest, str) or not secrets.compare_digest(supplied_digest, frozen.plan_digest):
         raise ValueError("approved Unity execution plan digest is invalid.")
-    return FrozenApprovedUnityExecutionPlan(calls, expected_digest)
+    return frozen
 
 
 def create_approved_unity_execution_plan(
     context: Mapping[str, Any],
     calls: (
-        Mapping[str, Any]
+        FrozenApprovedUnityExecutionPlan | Mapping[str, Any]
         | Sequence[ApprovedUnityExecutionCall | Mapping[str, Any] | tuple[str, dict[str, Any]]]
     ),
 ) -> ApprovedUnityExecutionPlan:
     """Gateway-only factory for an in-process execution capability."""
-    frozen = (
-        validate_frozen_approved_unity_execution_plan(calls)
-        if isinstance(calls, Mapping)
-        else validate_frozen_approved_unity_execution_plan(freeze_approved_unity_execution_plan(calls))
-    )
+    if isinstance(calls, FrozenApprovedUnityExecutionPlan):
+        frozen = calls
+    elif isinstance(calls, Mapping):
+        frozen = validate_frozen_approved_unity_execution_plan(calls)
+    else:
+        frozen = _make_frozen_plan(calls)
     return ApprovedUnityExecutionPlan(context, frozen)
 
 

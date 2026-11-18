@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import approved_unity_execution
 from agent_gateway import AgentGateway, AgentGatewayError
 
 
@@ -55,6 +56,42 @@ def _receipt(*, verified: bool = True) -> dict:
         "verified": verified,
         "readback": {"verified": verified},
     }
+
+
+def test_external_core_handler_reuses_the_verified_plan(monkeypatch, tmp_path):
+    service = _gateway(tmp_path).approval_transactions
+    project = _project(tmp_path)
+    name = "vrcforge_test_external_exact_plan"
+
+    def handler(_args):
+        plan = approved_unity_execution.current_approved_unity_execution()
+        claim = plan.claim("vrc_test_write", {"preview": True}, project)
+        assert claim.execution_context["operationId"] == "external-test"
+        claim.complete()
+        return {"ok": True}
+
+    service.register_write_handler(name, "external plan fixture", "medium", handler,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=lambda _args: [("vrc_test_write", {"preview": False})])
+    plan_json = approved_unity_execution.freeze_approved_unity_execution_plan([
+        ("vrc_test_write", {"preview": True}),
+    ])
+    digests = []
+    canonical_sha256 = approved_unity_execution._canonical_json_sha256
+
+    def track_digest(value):
+        digests.append(value)
+        return canonical_sha256(value)
+
+    monkeypatch.setattr(approved_unity_execution, "_canonical_json_sha256", track_digest)
+    arguments = {"projectRoot": str(project), "preview": True, "executionTarget": {
+        "schema": "vrcforge.execution_target.v1", "fixture": "exact",
+    }}
+    result = service._call_external_mcp_write_handler(
+        service._ports.state.write_handlers[name], name, "external-test", arguments, "a" * 64, plan_json,
+    )
+    assert result == {"ok": True}
+    assert len(digests) == 1
 
 
 def test_external_exception_records_needs_recovery_with_operation_and_target(

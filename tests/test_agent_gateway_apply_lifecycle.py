@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import approved_unity_execution
 from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
@@ -826,7 +827,7 @@ def test_lifecycle_observer_runs_at_authoritative_write_boundaries(tmp_path: Pat
     ]
 
 
-def test_core_write_handler_receives_one_use_context_only_after_checkpoint(tmp_path: Path) -> None:
+def test_core_write_handler_receives_one_use_context_only_after_checkpoint(tmp_path: Path, monkeypatch) -> None:
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
@@ -869,9 +870,18 @@ def test_core_write_handler_receives_one_use_context_only_after_checkpoint(tmp_p
     approval_id = str(request["approval"]["id"])
     assert request["approval"]["approvedUnityExecutionPlan"]["calls"][0]["toolName"] == "vrc_create_gameobject"
     gateway.approval_transactions.approve(approval_id)
+    digests = []
+    canonical_sha256 = approved_unity_execution._canonical_json_sha256
+
+    def track_digest(value):
+        digests.append(value)
+        return canonical_sha256(value)
+
+    monkeypatch.setattr(approved_unity_execution, "_canonical_json_sha256", track_digest)
     result = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
     assert result["ok"] is True
+    assert len(digests) == 1
     context = observed_context
     assert "_vrcforge_approved_execution" not in observed
     assert context["lane"] == "approved_write"
