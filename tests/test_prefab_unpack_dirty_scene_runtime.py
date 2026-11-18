@@ -41,7 +41,12 @@ def test_dirty_scene_resolver_is_strict_except_for_completely_unpack(tmp_path):
     source = _source("Assets/VRCForge/Editor/SceneObjectCopyCore.cs")
     strict = _method(source, r"internal static SavedSceneSnapshot ResolveSavedScene\(string rawPath, string label\)")
     unpack = _method(source, r"internal static SavedSceneSnapshot ResolveSavedSceneForPrefabUnpack\(GameObject gameObject\)")
-    shared = _method(source, r"private static SavedSceneSnapshot ResolveSavedScene\(string rawPath, string label, bool allowDirtyScene, bool includeContentDigests\)")
+    shared = _method(source, r"private static SavedSceneSnapshot ResolveSavedScene\(")
+    loaded = (
+        _method(source, r"private static Scene ResolveLoadedSavedScene\(")
+        if "private static Scene ResolveLoadedSavedScene(" in source
+        else ""
+    )
     harness = r'''
 using System;
 using System.Collections.Generic;
@@ -49,9 +54,9 @@ using System.Linq;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 class SceneObjectCopyException : Exception { public SceneObjectCopyException(string m):base(m){} }
-class SavedSceneSnapshot { public Scene Scene; public string Path, Guid, FileDigest, FileIdentity, MetaDigest, MetaIdentity; public int Handle; }
+class SavedSceneSnapshot { public Scene Scene; public string Path, Guid, FileVersion, FileDigest, FileIdentity, MetaDigest, MetaIdentity; public int Handle; }
 class StableFileEvidence { public string Digest, Identity; }
-class StableAssetEvidence { public string Guid; public StableFileEvidence File, Meta; }
+class StableAssetEvidence { public string Guid, FileVersion; public StableFileEvidence File, Meta; }
 static class Probe {
  public static List<Scene> Scenes = new List<Scene>();
  public static StableAssetEvidence ReadStableAssetEvidence(string path,string label) => new StableAssetEvidence { Guid="synthetic-guid", File=new StableFileEvidence{Digest="file-digest",Identity="file-id"}, Meta=new StableFileEvidence{Digest="meta-digest",Identity="meta-id"} };
@@ -66,11 +71,13 @@ namespace UnityEngine.SceneManagement {
 static class SceneObjectCopyCore {
  static string NormalizeSceneAssetPath(string p,string l)=>Probe.NormalizeSceneAssetPath(p,l);
  static string NormalizeSlashes(string p)=>Probe.NormalizeSlashes(p);
- static StableAssetEvidence ReadStableAssetEvidence(string p,string l,bool includeContentDigests=true)=>Probe.ReadStableAssetEvidence(p,l);
+ static string SceneChangedAfterPreview="scene changed";
+ static StableAssetEvidence ReadStableAssetEvidence(string p,string l,bool includeContentDigests=true,bool captureFileVersion=false,string expectedFileVersion=null,string expectedFileDigest=null,StableAssetEvidence approvedMetadata=null)=>Probe.ReadStableAssetEvidence(p,l);
  // production methods
  STRICT
  UNPACK
  SHARED
+ LOADED
 }
 class Program {
  static Scene Target(bool dirty=true) => new Scene{valid=true,isLoaded=true,isDirty=dirty,path="Assets/Synthetic.unity",handle=17};
@@ -96,7 +103,7 @@ class Program {
   Console.WriteLine("PASS production dirty-scene resolver: complete-only exception, strict default, identity and ambiguity guards");
  }
 }
-'''.replace("STRICT", strict).replace("UNPACK", unpack).replace("SHARED", shared)
+'''.replace("STRICT", strict).replace("UNPACK", unpack).replace("SHARED", shared).replace("LOADED", loaded)
     dotnet = shutil.which("dotnet")
     base = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "dotnet"
     compilers = sorted((base / "sdk").glob("*/Roslyn/bincore/csc.dll"))
