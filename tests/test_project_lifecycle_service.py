@@ -253,3 +253,46 @@ def test_registration_rollback_receipt_failure_restores_entry_only(tmp_path: Pat
         service.rollback({"receiptId": receipt_id})
     assert [item["path"] for item in service._load_prefs()["customProjects"]] == [str(first), str(later)]
     assert service._read_json(service.receipts_dir / f"{receipt_id}.json")["status"] == "active"
+
+
+def test_prepare_streams_large_template_and_create_hashes_staged_output_only(tmp_path: Path, monkeypatch) -> None:
+    import tracemalloc
+    import project_lifecycle_service as lifecycle
+
+    template = _unity_project(tmp_path / "Template")
+    source = template / "Assets" / "Large.bin"
+    with source.open("wb") as handle:
+        handle.truncate(16 * 1024 * 1024)
+    service = _service(tmp_path)
+    target = tmp_path / "Published"
+
+    tracemalloc.start()
+    try:
+        args, _ = service.prepare_create({"projectPath": str(target), "templatePath": str(template)}, None)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024
+
+    read_paths = []
+    capture = lifecycle.capture_regular_file
+
+    def observe(path, *, label):
+        read_paths.append(path)
+        return capture(path, label=label)
+
+    monkeypatch.setattr(lifecycle, "capture_regular_file", observe)
+    assert service.create_project(args)["readbackVerified"]
+    assert not any(path.is_relative_to(template) for path in read_paths)
+    assert sum(path.name == source.name for path in read_paths) == 1
+
+
+def test_create_rejects_output_drift_from_prepared_template(tmp_path: Path) -> None:
+    template = _unity_project(tmp_path / "Template")
+    service = _service(tmp_path)
+    target = tmp_path / "Published"
+    args, _ = service.prepare_create({"projectPath": str(target), "templatePath": str(template)}, None)
+    (template / "Assets" / "Template.txt").write_text("edited", encoding="utf-8")
+    with pytest.raises(ProjectLifecycleError, match="template changed after preparation"):
+        service.create_project(args)
+    assert not target.exists() and not list(tmp_path.glob(".Published.vrcforge-create-*"))

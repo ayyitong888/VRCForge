@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from prepared_file_imports import capture_regular_file
+
 
 PROJECT_LIFECYCLE_RECEIPT_SCHEMA = "vrcforge.project_lifecycle_receipt.v1"
 PROJECT_CREATION_MARKER_SCHEMA = "vrcforge.project_creation_marker.v1"
@@ -57,33 +59,34 @@ def _is_unity_project(path: Path) -> bool:
     )
 
 
-def _directory_digest(root: Path) -> dict[str, Any]:
+def _directory_entries(root: Path) -> dict[str, tuple[int, bytes]]:
     if not _is_unity_project(root):
         raise ProjectLifecycleError(f"Unity project/template is incomplete: {root}")
-    digest = hashlib.sha256()
-    file_count = 0
-    total_bytes = 0
+    entries: dict[str, tuple[int, bytes]] = {}
     for candidate in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
         if candidate.is_symlink():
             raise ProjectLifecycleError(f"Linked project/template paths are not supported: {candidate}")
         if candidate.is_dir():
             continue
-        if not candidate.is_file():
-            raise ProjectLifecycleError(f"Irregular project/template entry is not supported: {candidate}")
-        relative = candidate.relative_to(root).as_posix()
-        data = candidate.read_bytes()
+        try:
+            identity, sha256 = capture_regular_file(candidate, label="Project template")
+        except (OSError, ValueError) as exc:
+            raise ProjectLifecycleError(str(exc)) from exc
+        entries[candidate.relative_to(root).as_posix()] = (identity["size"], bytes.fromhex(sha256))
+    return entries
+
+
+def _directory_digest(entries: dict[str, tuple[int, bytes]]) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    total_bytes = 0
+    for relative, (size, file_digest) in sorted(entries.items(), key=lambda item: item[0].casefold()):
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(str(len(data)).encode("ascii"))
+        digest.update(str(size).encode("ascii"))
         digest.update(b"\0")
-        digest.update(hashlib.sha256(data).digest())
-        file_count += 1
-        total_bytes += len(data)
-    return {
-        "sha256": digest.hexdigest(),
-        "fileCount": file_count,
-        "bytes": total_bytes,
-    }
+        digest.update(file_digest)
+        total_bytes += size
+    return {"sha256": digest.hexdigest(), "fileCount": len(entries), "bytes": total_bytes}
 
 
 def _normalize_project_name(value: str) -> str:
@@ -181,7 +184,7 @@ class ProjectLifecycleService:
         if not target.parent.is_dir():
             raise ProjectLifecycleError("Target project parent directory does not exist.")
         template = self._resolve_template(values)
-        template_identity = _directory_digest(template)
+        template_identity = _directory_digest(_directory_entries(template))
         prepared = {
             **values,
             "projectPath": str(target),
@@ -223,8 +226,6 @@ class ProjectLifecycleService:
         template = Path(str(evidence.get("templatePath") or ""))
         if target.exists() or os.path.lexists(target):
             raise ProjectLifecycleError(f"Target project already exists: {target}")
-        if _directory_digest(template) != evidence.get("templateIdentity"):
-            raise ProjectLifecycleError("Project template changed after preparation.")
         receipt_id = f"project_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}"
         staging = target.parent / f".{target.name}.vrcforge-create-{receipt_id}"
         if staging.exists() or os.path.lexists(staging):
@@ -232,9 +233,10 @@ class ProjectLifecycleService:
         registration: dict[str, Any] | None = None
         published = False
         try:
-            shutil.copytree(template, staging, copy_function=shutil.copy2)
-            if not _is_unity_project(staging):
-                raise ProjectLifecycleError("Staged project failed Unity project readback.")
+            shutil.copytree(template, staging, symlinks=True, copy_function=shutil.copy2)
+            staged_entries = _directory_entries(staging)
+            if _directory_digest(staged_entries) != evidence.get("templateIdentity"):
+                raise ProjectLifecycleError("Project template changed after preparation.")
             marker_path = staging / ".vrcforge" / "project-creation.json"
             marker_path.parent.mkdir(parents=True, exist_ok=True)
             self._atomic_write_json(
@@ -246,7 +248,9 @@ class ProjectLifecycleService:
                     "templateIdentity": evidence.get("templateIdentity"),
                 },
             )
-            created_identity = _directory_digest(staging)
+            marker_identity, marker_digest = capture_regular_file(marker_path, label="Project creation marker")
+            staged_entries[marker_path.relative_to(staging).as_posix()] = (marker_identity["size"], bytes.fromhex(marker_digest))
+            created_identity = _directory_digest(staged_entries)
             os.replace(staging, target)
             published = True
             if (not _is_unity_project(target)
@@ -395,7 +399,7 @@ class ProjectLifecycleService:
         recovery: Path | None = None
         if kind == "create_project":
             target = Path(str(receipt.get("projectPath") or ""))
-            if not target.is_dir() or _directory_digest(target) != receipt.get("createdIdentity"):
+            if not target.is_dir() or _directory_digest(_directory_entries(target)) != receipt.get("createdIdentity"):
                 raise ProjectLifecycleError("Created project changed after creation; rollback refused.")
             marker = self._read_json(target / ".vrcforge" / "project-creation.json")
             if marker.get("schema") != PROJECT_CREATION_MARKER_SCHEMA or marker.get("receiptId") != receipt_id:
