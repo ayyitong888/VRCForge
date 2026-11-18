@@ -7189,7 +7189,8 @@ async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
         hidden_paths.append(normalized)
     path = project_prefs_path()
     try:
-        atomic_write_json(path, {"version": 2, "customProjects": custom_projects, "hiddenPaths": hidden_paths})
+        with PROJECT_LIFECYCLES.prefs_lock:
+            atomic_write_json(path, {"version": 2, "customProjects": custom_projects, "hiddenPaths": hidden_paths})
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"无法写入项目配置: {exc}") from exc
     await EVENT_BUS.broadcast("projects", PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False))

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -117,6 +118,7 @@ class ProjectLifecycleService:
         template_roots: Iterable[Path] = (),
     ) -> None:
         self.prefs_path = Path(prefs_path)
+        self.prefs_lock = threading.RLock()
         self.receipts_dir = Path(receipts_dir)
         self.template_roots = tuple(Path(path) for path in template_roots)
 
@@ -268,7 +270,7 @@ class ProjectLifecycleService:
             cleanup_errors: list[str] = []
             if registration and registration.get("changed"):
                 try:
-                    self._write_prefs(registration["prefsBefore"])
+                    self._remove_failed_registration(registration["entry"])
                 except Exception as cleanup_exc:  # noqa: BLE001
                     cleanup_errors.append(f"catalog restore failed: {cleanup_exc}")
             cleanup_target = target if published else staging
@@ -344,7 +346,12 @@ class ProjectLifecycleService:
                 }
             )
         except Exception as exc:  # noqa: BLE001
-            self._write_prefs(registration["prefsBefore"])
+            try:
+                self._remove_failed_registration(registration["entry"])
+            except Exception as cleanup_exc:  # noqa: BLE001
+                raise ProjectLifecycleError(
+                    f"Registration receipt failed: {exc}; catalogue compensation failed: {cleanup_exc}"
+                ) from exc
             raise ProjectLifecycleError(f"Registration receipt failed: {exc}") from exc
         return {
             "ok": True,
@@ -490,34 +497,49 @@ class ProjectLifecycleService:
         }
 
     def _register_project(self, project_path: Path) -> dict[str, Any]:
-        before = self._load_prefs()
         normalized = str(project_path.resolve(strict=True))
-        existing = {
-            str(item.get("path") or "").casefold()
-            for item in before["customProjects"]
-            if isinstance(item, dict)
-        }
-        changed = normalized.casefold() not in existing
-        after = json.loads(json.dumps(before))
-        if changed:
-            after["customProjects"].append({"path": normalized, "projectType": "unity"})
-            prefs_existed = self.prefs_path.is_file()
-            self._write_prefs(after)
-            try:
-                if self._read_json(self.prefs_path) != after:
-                    raise ProjectLifecycleError("Project catalogue registration readback did not match.")
-            except ProjectLifecycleError:
-                if prefs_existed:
-                    self._write_prefs(before)
-                else:
-                    self.prefs_path.unlink(missing_ok=True)
-                raise
+        entry = {"path": normalized, "projectType": "unity"}
+        with self.prefs_lock:
+            before = self._load_prefs()
+            changed = all(
+                str(item.get("path") or "").casefold() != normalized.casefold()
+                for item in before["customProjects"]
+            )
+            after = before
+            if changed:
+                after = {**before, "customProjects": [*before["customProjects"], entry]}
+                self._write_prefs(after)
+                try:
+                    registered = self._load_prefs()["customProjects"]
+                except ProjectLifecycleError as exc:
+                    try:
+                        self._remove_failed_registration(entry)
+                    except (OSError, ProjectLifecycleError) as cleanup_exc:
+                        raise ProjectLifecycleError(
+                            f"Registration readback failed: {exc}; catalogue compensation failed: {cleanup_exc}"
+                        ) from exc
+                    raise
+                if entry not in registered:
+                    raise ProjectLifecycleError("Project catalogue registration entry was not saved.")
         return {
             "changed": changed,
+            "entry": entry,
             "prefsBefore": before,
             "prefsBeforeSha256": _sha256_bytes(_canonical_json_bytes(before)),
             "prefsAfterSha256": _sha256_bytes(_canonical_json_bytes(after)),
         }
+
+    def _remove_failed_registration(self, entry: dict[str, str]) -> None:
+        with self.prefs_lock:
+            if not self.prefs_path.exists():
+                return
+            current = self._read_json(self.prefs_path)
+            projects = current.get("customProjects")
+            if not isinstance(projects, list):
+                raise ProjectLifecycleError("VRCForge project catalogue is invalid.")
+            if entry in projects:
+                projects.remove(entry)
+                self._write_prefs(current)
 
     def _write_prefs(self, payload: Any) -> None:
         if not isinstance(payload, dict):

@@ -128,6 +128,60 @@ def test_register_project_is_idempotent_and_has_exact_rollback(tmp_path: Path) -
     assert prefs["customProjects"] == []
 
 
+def test_registration_readback_ignores_a_later_unrelated_registration(tmp_path: Path, monkeypatch) -> None:
+    first = _unity_project(tmp_path / "projects" / "First")
+    later = _unity_project(tmp_path / "projects" / "Later")
+    service = _service(tmp_path)
+    other = _service(tmp_path)
+    write = service._write_prefs
+
+    def write_then_add_unrelated(payload):
+        write(payload)
+        assert other.register_project({"projectPath": str(later)})["readbackVerified"]
+
+    monkeypatch.setattr(service, "_write_prefs", write_then_add_unrelated)
+    receipt = service.register_project({"projectPath": str(first)})
+    assert receipt["readbackVerified"]
+    assert [item["path"] for item in service._load_prefs()["customProjects"]] == [str(first), str(later)]
+    with pytest.raises(ProjectLifecycleError, match="changed after this operation"):
+        service.rollback({"receiptId": receipt["rollback"]["receiptId"]})
+
+
+def test_registration_receipt_failure_compensates_only_its_own_entry(tmp_path: Path, monkeypatch) -> None:
+    first = _unity_project(tmp_path / "projects" / "First")
+    later = _unity_project(tmp_path / "projects" / "Later")
+    service = _service(tmp_path)
+    other = _service(tmp_path)
+
+    def fail_receipt(_receipt):
+        assert other.register_project({"projectPath": str(later)})["readbackVerified"]
+        raise OSError("injected receipt failure")
+
+    monkeypatch.setattr(service, "_write_receipt", fail_receipt)
+    with pytest.raises(ProjectLifecycleError, match="injected receipt failure"):
+        service.register_project({"projectPath": str(first)})
+    assert service._load_prefs()["customProjects"] == [{"path": str(later), "projectType": "unity"}]
+
+
+def test_registration_read_error_compensates_only_its_own_entry(tmp_path: Path, monkeypatch) -> None:
+    first = _unity_project(tmp_path / "projects" / "First")
+    later = _unity_project(tmp_path / "projects" / "Later")
+    service, other = _service(tmp_path), _service(tmp_path)
+    read = service._read_json
+    failures = iter([True])
+
+    def fail_first_readback(path):
+        if next(failures, False):
+            other.register_project({"projectPath": str(later)})
+            raise ProjectLifecycleError("injected readback failure")
+        return read(path)
+
+    monkeypatch.setattr(service, "_read_json", fail_first_readback)
+    with pytest.raises(ProjectLifecycleError, match="injected readback failure"):
+        service.register_project({"projectPath": str(first)})
+    assert service._load_prefs()["customProjects"] == [{"path": str(later), "projectType": "unity"}]
+
+
 def test_rollback_refuses_created_project_after_user_changes(tmp_path: Path) -> None:
     template = _unity_project(tmp_path / "templates" / "Avatar")
     service = _service(tmp_path)
