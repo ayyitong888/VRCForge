@@ -116,6 +116,7 @@ def test_resume_reuses_child_history_with_new_turn_and_does_not_redeliver_parent
     assert final_resumed["canResume"] is True
     assert len(parent_events) == 1
     assert parent_events[0]["subAgentTaskId"] == source_id
+    assert parent_events[0]["canResume"] is True
 
     # Reopening the registry restores the lineage and same child ID; another
     # explicit resume starts one more unique host-owned turn in that session.

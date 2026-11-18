@@ -105,13 +105,13 @@ export async function createSubAgent(
   });
 }
 
-export async function fetchSubAgent(endpoint: string, taskId: string): Promise<{ ok: boolean; task: SubAgentTask }> {
+export async function fetchSubAgent(endpoint: string, taskId: string, signal?: AbortSignal): Promise<{ ok: boolean; task: SubAgentTask }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("fetch_sub_agent", {
       request: { id: taskId, body: {}, timeoutMs: 30000 },
-    });
+    }, signal);
   }
-  return requestJson(`${endpoint}/api/app/sub-agents/${encodeURIComponent(taskId)}`);
+  return requestJson(`${endpoint}/api/app/sub-agents/${encodeURIComponent(taskId)}`, { signal });
 }
 
 export async function cancelSubAgent(endpoint: string, taskId: string): Promise<{ ok: boolean; task: SubAgentTask }> {

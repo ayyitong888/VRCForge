@@ -32,7 +32,7 @@ export type UserAttachmentSource = {
   attachment?: ChatAttachment;
 };
 
-type ProjectSectionState = Record<"todo" | "subAgents" | "environment" | "attachments", boolean>;
+type ProjectSectionState = Record<"todo" | "desktopActions" | "environment" | "attachments", boolean>;
 
 const PROJECT_WORKBENCH_SECTIONS_KEY_PREFIX = "vrcforge_project_workbench_sections_collapsed_v1";
 const PROJECT_WORKBENCH_SECTIONS_KEY_GENERAL = `${PROJECT_WORKBENCH_SECTIONS_KEY_PREFIX}_general`;
@@ -41,13 +41,13 @@ const MAX_WORKSPACE_FILE_LIST = 6;
 const MAX_WORKSPACE_ATTACHMENT_LIST = 6;
 const INITIAL_PROJECT_SECTIONS_UNITY: ProjectSectionState = {
   todo: false,
-  subAgents: false,
+  desktopActions: false,
   environment: false,
   attachments: false,
 };
 const INITIAL_PROJECT_SECTIONS_GENERAL: ProjectSectionState = {
   todo: true,
-  subAgents: true,
+  desktopActions: true,
   environment: true,
   attachments: false,
 };
@@ -129,9 +129,6 @@ export function ProjectWorkbenchSections({
   localizeHealthMessage,
   agentProgress,
   subAgentPanel,
-  subAgentTaskCount,
-  subAgentRunningTaskCount,
-  subAgentCompletedTaskCount,
   userAttachmentSources,
   onLocateUserAttachmentSource,
   onOpenUserAttachmentSource,
@@ -159,9 +156,6 @@ export function ProjectWorkbenchSections({
   localizeHealthMessage: (message?: string) => string;
   agentProgress: AgentProgress[];
   subAgentPanel?: ReactNode;
-  subAgentTaskCount: number;
-  subAgentRunningTaskCount: number;
-  subAgentCompletedTaskCount: number;
   userAttachmentSources: UserAttachmentSource[];
   onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
@@ -226,8 +220,6 @@ export function ProjectWorkbenchSections({
     ? workspaceOutputFiles.slice(0, MAX_WORKSPACE_FILE_LIST)
     : workspaceOutputFiles;
 
-  const subAgentPanelHasDetails = Boolean(subAgentPanel);
-
   useEffect(() => {
     const key = workspaceSectionsKey(isUnityProject);
     const initial = isUnityProject ? INITIAL_PROJECT_SECTIONS_UNITY : INITIAL_PROJECT_SECTIONS_GENERAL;
@@ -286,24 +278,18 @@ export function ProjectWorkbenchSections({
         </div>
       </RuntimeSection>
 
-      <RuntimeSection
-        title={t("workspace.subAgents")}
-        compact={isUnityProject && subAgentTaskCount === 0}
-        collapsed={Boolean(collapsedSections.subAgents)}
-        onToggle={() => toggleSection("subAgents")}
-        count={<span className="text-xs tabular-nums text-muted-foreground">{formatCount(subAgentTaskCount)}</span>}
-      >
-        <div className="px-1" data-vrcforge-project-sub-agents>
-          {subAgentPanel}
-        </div>
-        {isUnityProject ? null : (
-          <div className="mt-2 space-y-2 px-1 text-xs">
+      {subAgentPanel ? <div data-vrcforge-project-sub-agents>{subAgentPanel}</div> : null}
+      {!isUnityProject ? (
+        <RuntimeSection
+          title={t("workspace.desktopActions")}
+          collapsed={Boolean(collapsedSections.desktopActions)}
+          onToggle={() => toggleSection("desktopActions")}
+          count={runningDesktopActions.length > 0 ? <span className="text-xs tabular-nums text-muted-foreground">{formatCount(runningDesktopActions.length)}</span> : null}
+        >
+          <div className="px-1 text-xs" data-vrcforge-project-desktop-actions>
             <div className="rounded-md border border-border bg-background/65 px-2 py-1.5">
-              <div className="truncate text-xs text-muted-foreground">
-                {t("workspace.desktopActions")}
-              </div>
               {runningDesktopActions.length ? (
-                <div className="mt-1 space-y-1">
+                <div className="space-y-1">
                   {runningDesktopActions.slice(0, 4).map((action) => (
                     <div
                       key={action.actionId || action.id || `${action.action || action.provider || "desktop-action"}-${action.createdAt || ""}`}
@@ -323,14 +309,9 @@ export function ProjectWorkbenchSections({
                 <div className="mt-0.5 text-[11px] text-muted-foreground">{t("workspace.noBackgroundActions")}</div>
               )}
             </div>
-            {subAgentPanelHasDetails ? null : (
-              <div className="rounded-md border border-border bg-background/65 px-2 py-1.5 text-[11px] text-muted-foreground">
-                {`${formatCount(Math.max(0, subAgentRunningTaskCount))} ${t("workspace.runStatusRunning")} / ${formatCount(Math.max(0, subAgentCompletedTaskCount))} ${t("workspace.runStatusCompleted")}`}
-              </div>
-            )}
           </div>
-        )}
-      </RuntimeSection>
+        </RuntimeSection>
+      ) : null}
 
       <RuntimeSection
         title={workspaceSectionTitle}

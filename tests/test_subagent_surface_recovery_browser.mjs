@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, resolve, sep } from "node:path";
 import { chromium } from "playwright";
@@ -19,8 +19,20 @@ const date = "2026-10-28T10:00:00Z";
 const chatA = { id: "surface-A", sessionId: "surface-session-A", title: "Surface A", projectPath: "", projectType: "general", createdAt: date, updatedAt: date, revision: 0, items: [] };
 const chatB = { ...chatA, id: "surface-B", sessionId: "surface-session-B", title: "Surface B" };
 const chatC = { ...chatB, id: "surface-C", sessionId: "surface-session-C", title: "Surface C", projectPath: "E:/fixtures/other-project", projectType: "unity" };
+if (issue === "sidebar") {
+  chatA.projectPath = "E:/fixtures/sidebar-workbench";
+  chatA.items = [{ id: "parent-message", type: "user", text: "Original parent transcript", createdAt: date }];
+}
 const userLink = "vrcforge://chat/surface-B";
+const composerTargetLink = "vrcforge://chat/cross-project-fixture-20260101-1234567890";
+const composerTargetTitle = "另一个工程中的测试对话";
 const externalChatLink = "codex://threads/019f052c-5b66-7ad3-829b-825371654321";
+if (issue === "parent-activity") {
+  chatA.items = [{ id: "parent-delegation", type: "agent", createdAt: date, response: {
+    sessionId: chatA.sessionId, turnId: "delegating-turn", clientTurnId: "delegating-request", ok: true,
+    plan: { reply: "Checking the materials.", nextStep: "waiting_for_tool", reason: "sub_agent_pending" },
+  } }];
+}
 if (issue === "external-chat-link") {
   chatA.items = [{ id: "codex-link", type: "user", createdAt: date, text: [
     `详见：${externalChatLink}。`,
@@ -31,6 +43,13 @@ if (issue === "external-chat-link") {
     "[自动化](codex://automations)",
     `[图片](https://example.com/image.png)`,
   ].join("\n\n") }];
+}
+if (issue === "chat-composer-link") {
+  chatB.id = composerTargetLink.split("/").at(-1);
+  chatB.title = composerTargetTitle;
+  chatB.projectPath = chatC.projectPath;
+  chatB.projectType = chatC.projectType;
+  chatB.items = [{ id: "original-cross-project-transcript", type: "user", createdAt: date, text: "Original project transcript" }];
 }
 if (issue === "chat-links") {
   const tool = "vrcforge_send_message";
@@ -190,22 +209,24 @@ try {
   const origin = `http://127.0.0.1:${ui.address().port}`;
   browser = await chromium.launch({ channel: process.platform === "win32" ? "msedge" : undefined, headless: true });
 
-  const open = async (desktop = false, startupUrl = "") => {
-    const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+  const open = async (desktop = false, startupUrl = "", options = {}) => {
+    const page = await browser.newPage({ viewport: options.viewport || { width: 1600, height: 1000 } });
     currentPage = page;
     page.setDefaultTimeout(8000);
     page.on("pageerror", (error) => console.error("App fixture:", error.message));
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Failed to load resource")) console.error(message.text());
     });
-    await page.addInitScript(({ desktop, base, startupUrl, linkProjectPath }) => {
+    await page.addInitScript(({ desktop, base, startupUrl, linkProjectPath, composerLinkFixture, theme }) => {
       localStorage.setItem("vrcforge_onboarded", "true");
       localStorage.setItem("vrcforge-locale", "en-US");
       localStorage.setItem("vrcforge_startup_animation", "false");
+      if (theme) localStorage.setItem("vrcforge_theme", theme);
       if (!desktop) return;
       const callbacks = new Map();
       const listeners = new Map();
       window.codexOpenUrls = [];
+      window.sentChatMessages = [];
       let nextId = 0;
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_event, id) => listeners.delete(id) };
       window.subAgentEvent = (event, payload) => {
@@ -225,6 +246,15 @@ try {
           if (command === "open_codex_chat_url") { window.codexOpenUrls.push(args.url); return; }
           if (command === "fetch_project_prefs" && linkProjectPath) return { ok: true, customPaths: [linkProjectPath] };
           const request = args?.request || {};
+          if (composerLinkFixture && command === "save_chat_record") {
+            const { chatId } = request.body;
+            return { ok: true, chatDigests: { [chatId]: "0".repeat(64) }, chatMetadataShapes: { [chatId]: { id: true } } };
+          }
+          if (composerLinkFixture && command === "send_agent_message") {
+            window.sentChatMessages.push(request.message);
+            return { ok: true, status: "completed", sessionId: request.sessionId, turnId: request.clientTurnId, clientTurnId: request.clientTurnId,
+              plan: { reply: `Assistant mention: ${request.message.split(" ").find(word => word.startsWith("vrcforge://"))}`, nextStep: "done" } };
+          }
           if (command === "select_unity_project") return { ok: true, selectedProjectPath: request.projectPath };
           if (command === "refresh_unity_readiness") return { ok: true, health: { ok: true, components: {} } };
           let path;
@@ -249,7 +279,9 @@ try {
           return (await fetch(base + path)).json();
         },
       };
-    }, { desktop, base, startupUrl, linkProjectPath: issue === "chat-links" ? chatC.projectPath : issue === "handoff-catalog" ? chatA.projectPath : "" });
+    }, { desktop, base, startupUrl, composerLinkFixture: issue === "chat-composer-link",
+      linkProjectPath: ["chat-links", "chat-composer-link"].includes(issue) ? chatC.projectPath : ["handoff-catalog", "sidebar"].includes(issue) ? chatA.projectPath : "",
+      theme: options.theme });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin === origin || url.origin === base) return route.continue();
@@ -263,10 +295,94 @@ try {
     return page;
   };
 
+  const openList = async (page) => {
+    const list = page.locator("[data-vrcforge-subagent-sidebar-list]");
+    if (!await list.isVisible()) await page.locator("[data-vrcforge-open-subagent-surface]").click();
+    await list.waitFor();
+    return list;
+  };
   const openThread = async (page) => {
-    await page.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).first().click();
+    const list = await openList(page);
+    await list.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).click();
     return page.locator("[data-vrcforge-subagent-workspace-surface]");
   };
+
+  if (issue === "sidebar") {
+    const startedAt = new Date(Date.now() - 70_000).toISOString();
+    tasks = [
+      { ...taskA, summary: "Read the project configuration\nChecking the last referenced asset", startedAt },
+      { ...taskA, id: "surface-task-C", displayName: "Package reviewer", startedAt },
+      { ...taskA, id: "surface-task-D", displayName: "Dependency reviewer", status: "queued" },
+      { ...done, id: "surface-task-E", displayName: "Build report reviewer", startedAt: date, stoppedAt: new Date(Date.parse(date) + 65_000).toISOString() },
+      { ...done, id: "surface-task-F", displayName: "Documentation reviewer", status: "cancelled" },
+    ];
+    detail = tasks[0];
+    const artifactDir = resolve(root, ".tmp", "subagent-sidebar-replay");
+    await mkdir(artifactDir, { recursive: true });
+    for (const [theme, width] of [["light", 1480], ["dark", 1000]]) {
+      const page = await open(true, "vrcforge://chat/surface-A", { theme, viewport: { width, height: 860 } });
+      const workbench = page.locator("[data-vrcforge-project-workbench]");
+      const entrance = workbench.locator("[data-vrcforge-project-sub-agents]");
+      const composer = page.locator("[data-chat-composer-dock] textarea:not([disabled])");
+      await entrance.getByText("3 running", { exact: true }).waitFor();
+      assert.equal(await page.locator("html").evaluate(node => node.classList.contains("dark")), theme === "dark");
+      await composer.fill("Draft survives right sidebar navigation");
+      assert.equal(await entrance.getByRole("heading", { name: "Sub agents" }).count(), 1);
+      assert.equal(await entrance.getByText("3 running", { exact: true }).count(), 1);
+      assert.equal(await entrance.getByRole("button").count(), 1);
+      assert.equal(await entrance.locator("svg.lucide-bot").count(), 3);
+      await workbench.getByRole("button", { name: "Desktop actions" }).click();
+      await workbench.locator("[data-vrcforge-project-desktop-actions]").waitFor();
+      if (theme === "light") await page.screenshot({ path: resolve(artifactDir, "entry-light.png") });
+      await entrance.getByRole("button").focus();
+      await page.keyboard.press("Enter");
+      const list = page.locator("[data-vrcforge-subagent-sidebar-list]");
+      await list.waitFor();
+      const sidebar = page.locator("[data-vrcforge-subagent-sidebar]");
+      assert.equal(await sidebar.getByRole("heading", { name: "Sub agents" }).count(), 1);
+      assert.equal(await sidebar.getByRole("heading", { name: "Sub agents" }).evaluate(node => document.activeElement === node), true);
+      assert.equal(await list.locator('[data-vrcforge-subagent-section="active"] [data-vrcforge-subagent-thread-row]').count(), 3);
+      assert.equal(await list.locator('[data-vrcforge-subagent-section="done"] [data-vrcforge-subagent-thread-row]').count(), 2);
+      await list.getByText("Checking the last referenced asset", { exact: true }).waitFor();
+      await list.getByText("1m 5s", { exact: true }).waitFor();
+      await page.getByText("Original parent transcript", { exact: true }).waitFor();
+      assert.equal(await composer.inputValue(), "Draft survives right sidebar navigation");
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+      await page.screenshot({ path: resolve(artifactDir, `list-${theme}.png`) });
+      const detailPanel = await openThread(page);
+      await detailPanel.waitFor();
+      await detailPanel.getByText("Surface worker A", { exact: true }).first().waitFor();
+      assert.equal(await sidebar.getByRole("heading", { name: "Sub agents" }).count(), 0);
+      assert.equal(await list.isVisible(), false);
+      await page.getByText("Original parent transcript", { exact: true }).waitFor();
+      assert.equal(await composer.inputValue(), "Draft survives right sidebar navigation");
+      if (theme === "light") await page.screenshot({ path: resolve(artifactDir, "detail-light.png") });
+      await detailPanel.locator("[data-vrcforge-subagent-back]").click();
+      await list.waitFor();
+      await sidebar.locator("[data-vrcforge-close-subagent-sidebar]").click();
+      await entrance.getByRole("button").waitFor();
+      assert.equal(await composer.inputValue(), "Draft survives right sidebar navigation");
+      await page.close();
+    }
+  }
+
+  if (issue === "parent-activity") {
+    detail = { ...done, parentTurnId: "delegating-turn", parentClientTurnId: "delegating-request" };
+    tasks = [detail, { ...taskA, id: "other-turn", parentClientTurnId: "another-request" }];
+    const page = await open();
+    const composer = page.locator("[data-chat-composer-dock] textarea:not([disabled])").first();
+    await composer.fill("Draft kept in the parent chat");
+    const row = page.locator("[data-subagent-activity]");
+    await row.getByText("Completed", { exact: true }).waitFor();
+    assert.equal(await row.count(), 1);
+    assert.match(await row.innerText(), /Surface worker A/);
+    assert.equal(await page.locator("[data-agent-waiting-for-subagent]").count(), 0);
+    await row.click();
+    const panel = page.locator("[data-vrcforge-subagent-workspace-surface]");
+    await panel.getByText("Surface worker A", { exact: true }).first().waitFor();
+    assert.equal(await composer.inputValue(), "Draft kept in the parent chat");
+    await page.close();
+  }
 
   if (issue === "handoff-catalog") {
     const page = await open(true, "vrcforge://chat/surface-A");
@@ -313,24 +429,63 @@ try {
     console.log("PASS external Codex chat links: no auto-open, only existing-chat UUID URLs reach the desktop opener on click");
   }
 
+  if (issue === "chat-composer-link") {
+    const page = await open(true, "vrcforge://chat/surface-A");
+    const composer = page.locator("[data-chat-composer-dock] textarea").first();
+    const raw = `Original draft: ${composerTargetLink} and more text.`;
+    const rendered = `Original draft: ${composerTargetTitle} and more text.`;
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await composer.fill("Original draft: ");
+    await composer.press("End");
+    await page.evaluate(link => navigator.clipboard.writeText(link), composerTargetLink);
+    await composer.press("Control+v");
+    const draftLink = page.locator("[data-chat-composer-dock]").getByRole("link", { name: composerTargetTitle, exact: true });
+    await draftLink.waitFor({ timeout: 3000 });
+    assert.equal(await draftLink.getAttribute("href"), composerTargetLink);
+    assert.equal(await composer.evaluate(node => node === document.activeElement), true);
+    await composer.press("End");
+    await page.keyboard.insertText(" and more text.");
+    assert.equal(await composer.inputValue(), rendered);
+    await composer.press("Control+a");
+    await composer.press("Control+c");
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), raw);
+    await composer.press("End");
+    await draftLink.click();
+    await page.getByText("Original project transcript", { exact: true }).waitFor();
+    await page.locator('[data-vrcforge-chat-id="surface-A"]').click();
+    await draftLink.waitFor();
+    assert.equal(await composer.inputValue(), rendered);
+    await composer.press("Enter");
+    await page.waitForFunction(() => window.sentChatMessages.length > 0);
+    assert.deepEqual(await page.evaluate(() => window.sentChatMessages), [raw]);
+    const userLinkInHistory = page.locator("[data-user-message-bubble]").getByRole("link", { name: composerTargetTitle, exact: true });
+    const assistantLink = page.getByText("Assistant mention:", { exact: false }).getByRole("link", { name: composerTargetTitle, exact: true });
+    await userLinkInHistory.waitFor();
+    await assistantLink.waitFor();
+    assert.equal(await userLinkInHistory.getAttribute("href"), composerTargetLink);
+    assert.equal(await assistantLink.getAttribute("href"), composerTargetLink);
+    await assistantLink.click();
+    await page.getByText("Original project transcript", { exact: true }).waitFor();
+  }
+
   if (issue === "chat-links") {
     const page = await open(true, "vrcforge://chat/surface-A");
-    await page.getByRole("link", { name: userLink, exact: true }).waitFor();
+    await page.getByRole("link", { name: chatB.title, exact: true }).waitFor();
     assert.equal(await page.getByRole("link", { name: /command=write/ }).count(), 0);
     await page.locator('[data-vrcforge-chat-id="surface-A"]').click({ button: "right" });
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     await page.getByRole("menuitem", { name: "Copy Chat Link" }).click();
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "vrcforge://chat/surface-A");
-    await page.getByRole("link", { name: userLink, exact: true }).click();
+    await page.getByRole("link", { name: chatB.title, exact: true }).click();
     await page.getByRole("link", { name: "Missing chat" }).click();
     await page.getByText("Chat not found.").waitFor();
-    const projectLink = page.getByRole("link", { name: "另一个项目" });
+    const projectLink = page.getByRole("link", { name: chatC.title });
     assert.equal(await projectLink.getAttribute("href"), "vrcforge://chat/surface-C");
     assert.equal(await projectLink.getAttribute("title"), "中文标题");
     await projectLink.click();
     await page.getByText("Other project transcript", { exact: true }).waitFor();
     await page.locator('[data-open-conversation="surface-A"]').click();
-    await page.getByRole("link", { name: userLink, exact: true }).click();
+    await page.getByRole("link", { name: chatB.title, exact: true }).click();
     const processGroup = page.locator("[data-agent-turn-process-group] > div > button[aria-expanded]");
     if (await processGroup.first().getAttribute("aria-expanded") === "false") await processGroup.first().click();
     const toolGroup = page.locator("[data-agent-tool-call-group] > div > button[aria-expanded]");
@@ -339,7 +494,7 @@ try {
     await page.locator('[data-open-conversation="surface-C"]').click();
     await page.getByText("Other project transcript", { exact: true }).waitFor();
     await page.evaluate(() => window.subAgentEvent("deep-link://new-url", ["vrcforge://chat/surface-A"]));
-    await page.getByRole("link", { name: userLink, exact: true }).waitFor();
+    await page.getByRole("link", { name: chatB.title, exact: true }).waitFor();
     assert.equal(posts.length, 0);
     console.log("PASS real app chat links: copy, Chinese prose and Markdown, cross-project navigation, missing chat, existing source and receipt buttons, cold and warm delivery");
   }
@@ -385,11 +540,11 @@ try {
     tasks = [...Array.from({ length: 50 }, (_, index) => ({ ...taskB, id: `B-${index}` })), taskA];
     detail = taskA;
     const page = await open();
-    await page.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).first().waitFor();
+    await (await openList(page)).locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).waitFor();
     holdNextParent = chatA.id;
     await waitFor(() => pending.length === 1, "A refresh must be pending");
     await page.getByText("Surface B", { exact: true }).first().click();
-    await page.getByText("Surface worker B", { exact: true }).first().waitFor();
+    await (await openList(page)).getByText("Surface worker B", { exact: true }).first().waitFor();
     const lateA = page.waitForResponse((response) => new URL(response.url()).searchParams.get("parentChatId") === chatA.id);
     pending.shift()();
     await lateA;
@@ -397,7 +552,7 @@ try {
     assert.equal(await page.getByText("Surface worker B", { exact: true }).first().isVisible(), true);
     assert.equal(await page.getByText("Surface worker A", { exact: true }).count(), 0);
     await page.getByText("Surface A", { exact: true }).first().click();
-    await page.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).first().waitFor();
+    await (await openList(page)).locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).waitFor();
     await page.close();
     catalogOnly = false;
   }

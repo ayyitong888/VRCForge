@@ -20,7 +20,9 @@ assert.doesNotMatch(panel, /onMerge|onRetry|onCancel/);
 
 const sidebar = await readFile(resolve(root, "src/components/subagents/sub-agent-sidebar.tsx"), "utf8");
 assert.match(sidebar, /data-vrcforge-subagent-sidebar-list/);
-assert.match(surface, /overflow-y-auto/);
+assert.match(sidebar, /data-vrcforge-open-subagent-thread/);
+assert.doesNotMatch(panel, /data-vrcforge-open-subagent-thread/);
+assert.match(surface, /\boverflow-(?:y-)?auto\b/);
 assert.match(surface, /sticky bottom-0/);
 assert.match(surface, /onCancel\(activeTask\.id\)/);
 assert.match(surface, /onRetry\(activeTask\.id\)/);

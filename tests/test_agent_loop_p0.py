@@ -5822,8 +5822,10 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_visible_timeline_is_durable_before_callback(self) -> None:
         observed_durable = []
+        emitted = []
 
         def observe(payload):
+            emitted.append(payload)
             event_id = payload["timelineEvent"]["id"]
             observed_durable.append(any(
                 entry.get("timelineEvent", {}).get("id") == event_id
@@ -5834,13 +5836,21 @@ class AgentLoopP0Tests(unittest.TestCase):
             "planner": "llm", "reply": "Visible before an abrupt exit.",
             "summary": "Finished.", "continueLoop": False, "nextStep": "done",
         }), patch.object(self.gateway, "_runtime_timeline_changed", observe):
-            self.gateway.runtime_message({
+            self.gateway._runtime_message_impl({
                 "message": "Record this reply while the conversation is running.",
                 "session_id": "durable-visible-timeline",
                 "clientTurnId": "durable-visible-client",
-            })
+            }, task_continuation={"source": "sub_agent_finished", "context": {
+                "sessionId": "durable-visible-timeline",
+                "turnId": "parent-runtime-turn",
+                "clientTurnId": "parent-client-turn",
+            }})
         self.assertTrue(observed_durable)
         self.assertTrue(all(observed_durable), "every visible event must already exist on disk")
+        for event in emitted:
+            self.assertEqual(event["continuationSource"], "sub_agent_finished")
+            self.assertEqual(event["parentTurnId"], "parent-runtime-turn")
+            self.assertEqual(event["parentClientTurnId"], "parent-client-turn")
 
     def test_final_assistant_timeline_preserves_markdown_in_recorded_turn(self) -> None:
         reply = (

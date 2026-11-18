@@ -14,6 +14,7 @@ from runtime_planner_service import PlannerModelResult, PlannerTurnMetadata, Run
 from sub_agent_delegate import run_readonly_llm_agent
 from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntimePlannerDesktop
 from tests.test_native_runtime_gateway import call
+from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 
 
 REPORT_MARKER = "CHILD_REPORT_FINDING_AFTER_MULTIPLE_PAGES"
@@ -27,6 +28,35 @@ DELEGATE_ARGUMENTS = {
 DELEGATE_ACTION_ID = canonical_action_id(
     "skill", "vrcforge_delegate_subagent", DELEGATE_ARGUMENTS,
 )
+
+
+def test_one_shot_inspection_reports_resume_capability_to_parent(tmp_path):
+    gateway, _ = _gateway_case(tmp_path, native=True)
+    delivered = []
+    finished = threading.Event()
+
+    def deliver(event):
+        delivered.append(event)
+        finished.set()
+
+    role = SubAgentRole(id="outfit_package_inspection", title="Inspect package",
+                        description="Read package structure", handler="outfit_package_inspection")
+    registry = SubAgentTaskRegistry(tmp_path / "tasks", roles=[role],
+                                    handlers={role.id: lambda _p, _c: {"ok": True, "summaryText": "14 packages"}},
+                                    task_finished=deliver)
+    try:
+        gateway.runtime_message({"message": "Inspect the materials.", "sessionId": "inspection-session",
+                                 "clientTurnId": "inspection-turn", "projectRoot": str(tmp_path)})
+        seed = gateway._parent_report_seed["seed"]
+        registry.create_task(role=role.id, task="Inspect package structure", display_name="Inspection",
+                             parent_session_id=seed["sessionId"],
+                             params={"_taskSeed": seed})
+        assert finished.wait(3)
+        observation = gateway._prepare_subagent_parent_result(delivered[0])["taskContinuation"]["plannerObservation"]
+        assert observation["result"]["canResume"] is False
+        assert "canResume" in gateway.runtime_planner.complete_model_information(observation, native_contract=True)
+    finally:
+        gateway.shutdown_runtime_continuations(0)
 
 
 def _embedded_json(text: str):

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 type TextField = HTMLInputElement | HTMLTextAreaElement;
 
@@ -119,13 +120,23 @@ export function TextEditContextMenu() {
   const hasSelection = end > start;
   const mutable = !target.disabled && !target.readOnly;
   const close = () => setMenu(null);
+  const useWebViewEditing = isTauri() && /Windows/.test(navigator.userAgent);
+  const editWebView = async (action: "cut" | "copy" | "paste") => {
+    target.focus();
+    close();
+    await invoke("edit_focused_webview", { action }).catch((error) => {
+      console.error("WebView clipboard editing failed", error);
+    });
+  };
 
   const copy = async () => {
+    if (useWebViewEditing) return editWebView("copy");
     target.setSelectionRange(start, end);
     await writeClipboard(target, target.value.slice(start, end));
     close();
   };
   const cut = async () => {
+    if (useWebViewEditing) return editWebView("cut");
     target.setSelectionRange(start, end);
     if (await writeClipboard(target, target.value.slice(start, end))) {
       replaceSelection(target, "", "deleteByCut");
@@ -133,6 +144,7 @@ export function TextEditContextMenu() {
     close();
   };
   const paste = async () => {
+    if (useWebViewEditing) return editWebView("paste");
     try {
       if (navigator.clipboard?.readText) {
         replaceSelection(target, await navigator.clipboard.readText(), "insertFromPaste");

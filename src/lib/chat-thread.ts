@@ -2,6 +2,7 @@ import { chatStorageValuesEqual } from "./chat-storage-reconcile";
 import type { AgentContextUsage } from "./api";
 import type { ChatThread, ConversationItem } from "./chat-types";
 import { latestContextWindowUsage } from "./context-compaction";
+import { isExternalRuntimeStream } from "./runtime-stream-owner";
 export {
   materializeRuntimeTimeline,
   mergeConversationTimelineItems,
@@ -129,8 +130,8 @@ export function stripSupersededStreamingItems(items: ConversationItem[]): Conver
     const item = items[index];
     // Queued and same-turn steering inputs belong to the current response.
     // Only a delivered new turn may supersede an earlier live response.
-    if (item?.type !== "streaming" && !(item?.type === "user"
-      && (item.composerQueued === true || item.queuedFrom === true || item.deliveryMode === "queue_only"))) {
+    if (item.type === "agent" || (item.type === "user"
+      && !(item.composerQueued === true || item.queuedFrom === true || item.deliveryMode === "queue_only"))) {
       lastDurableIndex = index;
       break;
     }
@@ -138,7 +139,10 @@ export function stripSupersededStreamingItems(items: ConversationItem[]): Conver
   if (lastDurableIndex < 0) {
     return items;
   }
-  const reconciled = items.filter((item, index) => item.type !== "streaming" || index > lastDurableIndex);
+  // Async runs can start before an earlier foreground receipt reaches the chat.
+  // Their observers settle streams using the exact run identity.
+  const reconciled = items.filter((item, index) => item.type !== "streaming"
+    || index > lastDurableIndex || isExternalRuntimeStream(item));
   return reconciled.length === items.length ? items : reconciled;
 }
 

@@ -15,6 +15,7 @@ import type { AgentGoal, PermissionState, ExecutionMode } from "../../lib/api";
 import { Button } from "../ui/button";
 import { hasTauriInternals } from "../../lib/api/http";
 import { ChatGptOAuthComposerReasoningControl } from "../../features/chatgpt-oauth/composer-reasoning-control";
+import { ComposerLinkInput } from "./composer-link-input";
 
 function composerActionIcon(action: ComposerActionId): ReactNode {
   switch (action) {
@@ -141,14 +142,6 @@ export function Composer({
   useEffect(() => {
     onAttachFilesRef.current = onAttachFiles;
   }, [onAttachFiles]);
-  useEffect(() => {
-    const textarea = inputRef.current;
-    if (!textarea) return;
-    textarea.style.height = "28px";
-    const contentHeight = textarea.scrollHeight;
-    textarea.style.height = `${Math.min(128, Math.max(28, contentHeight))}px`;
-    textarea.style.overflowY = contentHeight > 128 ? "auto" : "hidden";
-  }, [input, questionPromptVisible]);
   useEffect(() => {
     if (focusInput) {
       composerRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
@@ -375,13 +368,13 @@ export function Composer({
             />
           </div>
         ) : null}
-        <textarea
-          ref={inputRef}
+        <ComposerLinkInput
+          inputRef={inputRef}
           value={input}
-          onChange={(event) => { setPaletteDismissed(false); setInput(event.target.value); }}
+          onChange={(value) => { setPaletteDismissed(false); setInput(value); }}
           className={cn(
-            "app-scrollbar w-full resize-none bg-transparent px-1 outline-none placeholder:text-muted-foreground",
-            questionPromptVisible ? "col-start-2 row-start-1 min-h-[28px] max-h-32 min-w-0 flex-1 py-1 text-sm" : "min-h-7 max-h-32 py-1 text-sm",
+            "w-full min-w-0 text-sm",
+            questionPromptVisible && "col-start-2 row-start-1",
           )}
           rows={1}
           placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}

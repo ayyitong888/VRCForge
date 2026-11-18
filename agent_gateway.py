@@ -5726,6 +5726,8 @@ class AgentGateway:
             },
             "outcome": ensure_dict(ensure_dict(continuation.get("completion")).get("outcome")),
         }
+        if isinstance(event.get("canResume"), bool):
+            continuation["plannerObservation"]["result"]["canResume"] = event["canResume"]
         planner_evidence = result.get("plannerEvidence")
         if isinstance(planner_evidence, dict):
             continuation["plannerObservation"]["result"]["plannerEvidence"] = planner_evidence
@@ -7077,6 +7079,7 @@ class AgentGateway:
                 try:
                     self._runtime_timeline_changed(
                         {
+                            **identity,
                             "sessionId": session_id,
                             "turnId": turn_id,
                             "clientTurnId": client_turn_id,

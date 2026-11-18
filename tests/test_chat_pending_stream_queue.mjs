@@ -49,4 +49,15 @@ assert.deepEqual(
   "a queued input converted by runSingleTurn to an ordinary delivered user row still clears stale streams",
 );
 
+const workerCompleted = { id: "worker-completed", type: "timeline_event",
+  event: { kind: "subagent", clientTurnId: streaming.clientTurnId, payload: { status: "completed" } } };
+const resumed = { ...streaming, id: "runtime-activity:resumed-turn", clientTurnId: "resumed-turn",
+  parentClientTurnId: streaming.clientTurnId, continuationSource: "sub_agent_finished" };
+const parked = { type: "agent", id: "parent-receipt", response: { clientTurnId: streaming.clientTurnId,
+  plan: { nextStep: "waiting_for_tool", reason: "sub_agent_pending" } } };
+assert.deepEqual(stripSupersededStreamingItems([user, streaming, workerCompleted]), [user, streaming, workerCompleted],
+  "an appended worker lifecycle receipt must preserve the foreground parent until its runtime receipt");
+assert.deepEqual(stripSupersededStreamingItems([user, workerCompleted, resumed, parked]), [user, workerCompleted, resumed, parked],
+  "a parent receipt settling the first dispatch must preserve the live continuation");
+
 console.log("pending queue row preserves active streaming response");

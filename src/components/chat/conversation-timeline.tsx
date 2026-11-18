@@ -71,6 +71,7 @@ export function buildAgentTimelineRows({
   awaitingApproval,
   elapsedSeconds,
   sharedProcess,
+  hasSubAgentActivity,
   interleavedUserMessages = [],
   interleavedUsersExpanded = false,
   onInterleavedUsersExpandedChange,
@@ -93,6 +94,7 @@ export function buildAgentTimelineRows({
   awaitingApproval: boolean;
   elapsedSeconds?: number;
   sharedProcess?: SharedTurnProcess;
+  hasSubAgentActivity?: boolean;
   interleavedUserMessages?: InterleavedUserMessage[];
   interleavedUsersExpanded?: boolean;
   onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
@@ -141,7 +143,7 @@ export function buildAgentTimelineRows({
       <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t(response.unityWriteMayHaveExecuted ? "chat.stoppedUnityWriteUnconfirmed" : "chat.cancelled")}</span>
     </div>,
-  ] : (waitingForChild || backgroundWait) && (!sharedProcess || sharedProcess.last) ? [...rows,
+  ] : (waitingForChild ? !hasSubAgentActivity : backgroundWait) && (!sharedProcess || sharedProcess.last) ? [...rows,
     <div key="waiting-for-tool" data-agent-waiting-for-subagent={waitingForChild || undefined} role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <Clock className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t(waitingForChild ? "subagent.parentWaiting" : "chat.runtimePhase.toolInBackground")}</span>

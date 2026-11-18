@@ -47,6 +47,7 @@ import {
 } from "../lib/chat-thread";
 import type { ChatThread, ConversationItem, ProjectType } from "../lib/chat-types";
 import { normalizeProjectPathKey } from "../lib/project-path";
+import { isExternalRuntimeStream } from "../lib/runtime-stream-owner";
 import { chatSidebarActivity, type SidebarChatActivity } from "../lib/sidebar-view";
 import { latestChatReplyMarker } from "../lib/chat-unread";
 import { useChatHistoryPages } from "./use-chat-history-pages";
@@ -1371,17 +1372,18 @@ export function useChatSessions({
 }
 
 function restoreLiveChatStreams(chat: ChatThread, local: ChatThread | undefined): ChatThread {
-  if (!local || local === chat) return chat;
+  if (!local || local === chat || local.sessionId !== chat.sessionId) return chat;
   const liveStreams = local.items.filter((item) => item.type === "streaming");
   if (!liveStreams.length) return chat;
   const items = [...chat.items];
   for (const stream of liveStreams) {
     if (items.some((item) => item.id === stream.id)) continue;
-    // Keep a live response anchored to its preceding durable conversation
-    // item. A later completed response or new turn may supersede it.
+    // Keep a live response anchored to its preceding conversation item.
+    // A foreground receipt may replace that anchor while an async run remains active.
     const anchor = local.items[local.items.indexOf(stream) - 1];
     const anchorIndex = anchor ? items.findIndex((item) => item.id === anchor.id) : -1;
     if (!anchor || anchorIndex >= 0) items.splice(anchorIndex + 1, 0, stream);
+    else if (isExternalRuntimeStream(stream)) items.push(stream);
   }
   return { ...chat, items: stripSupersededStreamingItems(items) };
 }

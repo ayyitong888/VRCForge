@@ -30,6 +30,12 @@ window.localEdit=()=>sessions.updateChat('chat',chat=>({...chat,title:'local-dir
 window.localAppend=()=>sessions.appendToChat('chat',{id:'local-extra',type:'user',text:'local-added'});
 window.openChat=()=>sessions.openChat(sessions.sidebarChats.find(chat=>chat.id==='chat'));
 window.startStreaming=()=>sessions.appendToChat('chat',{id:'active-stream',type:'streaming',clientTurnId:'active-turn',text:'in-progress response'});
+window.startSubAgentContinuation=()=>sessions.updateChat('chat',chat=>({...chat,items:[
+  ...chat.items.filter(item=>item.type!=='streaming'),
+  {id:'parent-still-live',type:'streaming',clientTurnId:'parent-cid',text:''},
+  {id:'runtime-activity:resumed-parent',type:'streaming',clientTurnId:'resumed-parent',sessionId:chat.sessionId,
+    parentClientTurnId:'parent-cid',parentTurnId:'parent-turn',continuationSource:'sub_agent_finished',text:'parent tools in progress'},
+]}));
 return <pre id="state">{JSON.stringify({ready:sessions.chatStorageReady,chats:sessions.chats,display:sessions.displayChat,blocked:sessions.chatPersistenceBlocked})}</pre>}
 const root=createRoot(document.getElementById('root'));root.render(<Fixture/>);window.unmount=()=>root.unmount();
 `},bundle:true,write:false,format:"esm",jsx:"automatic",define:{"process.env.NODE_ENV":'"test"'},plugins:(process.env.VRCFORGE_TEST_LEGACY_CHAT_ECHO==="1"||process.env.VRCFORGE_TEST_LEGACY_CHAT_RELOAD_QUEUE==="1")?[{
@@ -186,6 +192,15 @@ assert.ok(await page.evaluate(()=>window.sessions.displayChat.items.some(item=>i
 await page.evaluate(()=>window.persist());
 assert.ok(chats[0].items.some(item=>item.id==='visible-while-streaming' && item.forwardedFrom.sourceChatId==='agent-source'),
   'local persistence preserves the incoming relay attribution');
+await page.evaluate(()=>window.startSubAgentContinuation());
+chats=[{...chats[0],items:[...chats[0].items,{id:'parent-parked',type:'agent',response:{
+  sessionId:'session',clientTurnId:'parent-cid',turnId:'parent-turn',
+  plan:{nextStep:'waiting_for_tool',reason:'sub_agent_pending'},
+}}]}];
+await page.evaluate(()=>window.notify('other-webview'));
+await page.waitForFunction(()=>window.sessions.displayChat?.items.some(item=>item.id==='parent-parked'));
+assert.ok(await page.evaluate(()=>window.sessions.displayChat.items.some(item=>item.id==='runtime-activity:resumed-parent')),
+  'remote parent receipt preserves the already live continuation');
 await page.evaluate(()=>window.localEdit());
 chats=[{...chats[0],title:'remote-dirty'}];
 await page.evaluate(()=>window.notify());

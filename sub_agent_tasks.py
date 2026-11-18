@@ -824,13 +824,19 @@ class SubAgentTaskRegistry:
                 siblings[call_id] = sibling
         return [siblings[call_id] for call_id in call_ids if call_id in siblings]
 
-    @staticmethod
-    def _parent_terminal_event(task: SubAgentTask) -> dict[str, Any]:
+    def _can_resume(self, task: SubAgentTask) -> bool:
+        with self._lock:
+            return bool(task.handler == "llm_readonly" and task.child_session_id and task.resumable
+                        and task.status in _RETRYABLE_STATUSES
+                        and task.child_session_id not in self._active_child_sessions)
+
+    def _parent_terminal_event(self, task: SubAgentTask) -> dict[str, Any]:
         seed = task.params.get("_taskSeed")
         cancelled = task.cancel_requested or task.status == "cancelled"
         return {
             "schema": "vrcforge.sub_agent_terminal.v1",
             "subAgentTaskId": task.id,
+            "canResume": self._can_resume(task),
             "status": "cancelled" if cancelled else task.status,
             "parentSessionId": task.parent_session_id,
             "taskSeed": copy.deepcopy(seed) if isinstance(seed, dict) else None,
@@ -1191,14 +1197,7 @@ class SubAgentTaskRegistry:
         payload["paramsSummary"] = summarize_params(public_runtime_payload(task.params))
         payload.pop("params", None)
         payload.pop("generalReadRoots", None)
-        with self._lock:
-            payload["canResume"] = bool(
-                task.handler == "llm_readonly"
-                and task.child_session_id
-                and task.resumable
-                and task.status in _RETRYABLE_STATUSES
-                and task.child_session_id not in self._active_child_sessions
-            )
+        payload["canResume"] = self._can_resume(task)
         if include_events:
             payload["events"] = [event for event in self.recent_events(limit=500) if event.get("taskId") == task.id]
         return payload

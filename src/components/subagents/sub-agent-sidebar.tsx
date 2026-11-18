@@ -1,4 +1,13 @@
-import { AlertCircle, CheckCircle2, Dot, Loader2, Square, X } from "lucide-react";
+import { AlertCircle, Loader2, Square, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useTranslation } from "react-i18next";
+import { elapsedSecondsSince } from "../../lib/chat-streaming";
+import { canCancelSubAgentTask } from "../../lib/subagent-merge";
+import { groupSubAgentThreads } from "../../lib/subagent-threads";
+import { displaySubAgentStatus, isActiveSubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
+import { SubAgentMark } from "./sub-agent-panel";
+import { SubAgentWorkspaceSurface } from "./sub-agent-workspace-surface";
+import { Button } from "../ui/button";
 
 function subAgentTaskErrorText(task: { error?: string; errorCode?: string }, t: (key: string) => string): string {
   const code = task.errorCode?.trim() || "";
@@ -8,18 +17,10 @@ function subAgentTaskErrorText(task: { error?: string; errorCode?: string }, t: 
   }
   return task.error?.trim() ? task.error.trim().slice(0, 500) : "";
 }
-import { useMemo, useState, type ComponentProps } from "react";
-import { useTranslation } from "react-i18next";
-import { canCancelSubAgentTask } from "../../lib/subagent-merge";
-import { groupSubAgentThreads } from "../../lib/subagent-threads";
-import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
-import { formatMessageDateSeparator } from "../../lib/message-time";
-import { SubAgentWorkspaceSurface } from "./sub-agent-workspace-surface";
-import { Button } from "../ui/button";
 
 type SurfaceProps = ComponentProps<typeof SubAgentWorkspaceSurface>;
 
-export type SubAgentSidebarProps = Omit<SurfaceProps, "onClose"> & {
+export type SubAgentSidebarProps = Omit<SurfaceProps, "onClose" | "onCloseSidebar"> & {
   onSelect: (taskId: string) => void;
   openThread: boolean;
   onBack: () => void;
@@ -28,7 +29,14 @@ export type SubAgentSidebarProps = Omit<SurfaceProps, "onClose"> & {
   error: string;
 };
 
-const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
+function compactDuration(seconds: number | undefined, language: string): string {
+  if (seconds === undefined) return "";
+  const format = (value: number, unit: Intl.NumberFormatOptions["unit"]) =>
+    new Intl.NumberFormat(language, { style: "unit", unit, unitDisplay: "narrow" }).format(value);
+  if (seconds < 60) return format(seconds, "second");
+  if (seconds < 3600) return [format(Math.floor(seconds / 60), "minute"), format(seconds % 60, "second")].join(" ");
+  return [format(Math.floor(seconds / 3600), "hour"), format(Math.floor(seconds % 3600 / 60), "minute")].join(" ");
+}
 
 function ThreadListRow({
   thread,
@@ -36,12 +44,14 @@ function ThreadListRow({
   onCancel,
   busy,
   roles,
+  now,
 }: {
   thread: ReturnType<typeof groupSubAgentThreads>[number];
   onSelect: (taskId: string) => void;
   onCancel: (taskId: string) => void;
   busy: boolean;
   roles: NonNullable<SurfaceProps["roles"]>;
+  now: number;
 }) {
   const { t, i18n } = useTranslation();
   const task = thread.task;
@@ -53,40 +63,34 @@ function ThreadListRow({
       : tone === "danger"
         ? "text-destructive"
         : "text-muted-foreground";
-  const timeLabel = formatMessageDateSeparator(task.createdAt, i18n.language)
-    || formatMessageDateSeparator(task.startedAt, i18n.language);
+  const active = isActiveSubAgentStatus(task.status);
+  const end = active ? now : Date.parse(task.stoppedAt || task.updatedAt || "");
+  const elapsed = Number.isFinite(end) ? elapsedSecondsSince(task.startedAt, end) : undefined;
+  const timeLabel = compactDuration(elapsed, i18n.language);
+  const name = task.displayName || subAgentRoleLabel(task.role, roles) || task.id;
+  const errorText = subAgentTaskErrorText(task, t);
+  const summary = (errorText || task.summary || task.task || "").trim().split(/\r?\n/).filter((line) => line.trim()).at(-1)?.trim();
 
   return (
     <div className="flex min-w-0 items-stretch gap-1" data-vrcforge-subagent-thread-row={thread.id}>
       <Button
         type="button"
         variant="ghost"
-        className="h-auto min-h-12 min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left"
+        className="h-auto min-h-12 min-w-0 flex-1 justify-start gap-2.5 px-2 py-1.5 text-left"
         onClick={() => onSelect(task.id)}
-        title={task.displayName || task.task || task.id}
+        title={summary || name}
         data-vrcforge-open-subagent-thread={thread.id}
       >
-        <span
-          className={`mt-0.5 inline-flex h-2 w-2 shrink-0 rounded-full ${tone === "ok" ? "bg-emerald-500" : tone === "warn" ? "bg-amber-500" : tone === "danger" ? "bg-destructive" : "bg-muted-foreground"}`}
-          aria-hidden="true"
-        />
+        <SubAgentMark threadId={thread.id} />
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-xs font-medium text-foreground">
-              {task.displayName || subAgentRoleLabel(task.role, roles) || task.id}
-            </span>
-            <span className={`shrink-0 text-[10px] ${statusClass}`}>{displaySubAgentStatus(task.status)}</span>
-            {timeLabel ? <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{timeLabel}</span> : null}
+            <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{name}</span>
+            {timeLabel ? <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{timeLabel}</span> : null}
           </span>
-          <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
-            {task.task || subAgentRoleLabel(task.role, roles)}
+          <span className="mt-0.5 flex min-w-0 items-center gap-2 text-xs">
+            <span className={`shrink-0 ${statusClass}`}>{displaySubAgentStatus(task.status)}</span>
+            {summary ? <span className="min-w-0 truncate text-muted-foreground">{summary}</span> : null}
           </span>
-          {task.error?.trim() || task.errorCode?.trim() ? (
-            <span className="mt-1 flex items-start gap-1 text-[11px] text-destructive" title={subAgentTaskErrorText(task, t)}>
-              <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
-              <span className="line-clamp-2 break-words">{subAgentTaskErrorText(task, t)}</span>
-            </span>
-          ) : null}
         </span>
       </Button>
       {canCancelSubAgentTask(task) ? (
@@ -108,6 +112,7 @@ function ThreadSection({
   busyTaskIds,
   roles,
   done = false,
+  now,
 }: {
   title: string;
   threads: ReturnType<typeof groupSubAgentThreads>;
@@ -116,24 +121,24 @@ function ThreadSection({
   busyTaskIds: ReadonlySet<string>;
   roles: NonNullable<SurfaceProps["roles"]>;
   done?: boolean;
+  now: number;
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const visibleThreads = expanded ? threads : threads.slice(0, 10);
   const remaining = threads.length - visibleThreads.length;
+  if (!threads.length) return null;
 
   return (
     <section className="min-w-0" data-vrcforge-subagent-section={done ? "done" : "active"}>
-      <h2 className="mb-1 flex shrink-0 items-center gap-1.5 px-1 text-[11px] font-medium text-muted-foreground">
-        {done ? <CheckCircle2 className="h-3 w-3 text-emerald-500" aria-hidden="true" /> : <Dot className="h-4 w-4 text-amber-500" aria-hidden="true" />}
+      <h2 className="mb-1 flex shrink-0 items-center gap-1.5 px-2 text-xs font-medium text-muted-foreground">
         <span>{title}</span>
         <span className="ml-auto">{threads.length}</span>
       </h2>
       <div className="space-y-1">
-        {threads.length === 0 ? <p className="px-1 py-2 text-xs text-muted-foreground">{t("subagent.noTasks")}</p> : null}
         <div className="space-y-1">
           {visibleThreads.map((thread) => <ThreadListRow key={thread.id} thread={thread} onSelect={onSelect}
-            onCancel={onCancel} busy={busyTaskIds.has(thread.task.id)} roles={roles} />)}
+            onCancel={onCancel} busy={busyTaskIds.has(thread.task.id)} roles={roles} now={now} />)}
         </div>
         {remaining > 0 ? <Button type="button" variant="ghost" className="mt-1 h-8 w-full justify-start px-2 text-xs text-muted-foreground"
           onClick={() => setExpanded(true)} data-vrcforge-subagent-show-more={done ? "done" : "active"}>
@@ -157,18 +162,30 @@ export function SubAgentSidebar({
 }: SubAgentSidebarProps) {
   const { t } = useTranslation();
   const threads = useMemo(() => groupSubAgentThreads(tasks), [tasks]);
-  const active = threads.filter((thread) => ACTIVE_STATUSES.has(thread.task.status));
-  const done = threads.filter((thread) => !ACTIVE_STATUSES.has(thread.task.status));
+  const active = threads.filter(({ task }) => isActiveSubAgentStatus(task.status));
+  const done = threads.filter(({ task }) => !isActiveSubAgentStatus(task.status));
+  const listTitleRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (!openThread) listTitleRef.current?.focus({ preventScroll: true });
+  }, [openThread]);
+  const [now, setNow] = useState(Date.now);
+  const hasLiveElapsed = active.some(({ task }) => task.startedAt);
+  useEffect(() => {
+    if (openThread || !hasLiveElapsed) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [openThread, hasLiveElapsed]);
 
   return (
-    <aside className="flex h-full min-h-0 min-w-0 flex-col border-l border-border bg-transparent" data-vrcforge-subagent-sidebar>
-      <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
-        <span className="truncate text-sm font-medium text-foreground">{t("workspace.subAgents")}</span>
+    <aside className="flex h-full min-h-0 min-w-0 flex-col border-l border-border bg-transparent" aria-label={t("workspace.subAgents")} data-vrcforge-subagent-sidebar>
+      {!openThread ? <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
+        <h2 ref={listTitleRef} tabIndex={-1} className="truncate text-sm font-medium text-foreground outline-none">{t("workspace.subAgents")}</h2>
         <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" onClick={onClose}
           title={t("common.close")} aria-label={t("common.close")} data-vrcforge-close-subagent-sidebar>
           <X className="h-4 w-4" />
         </Button>
-      </header>
+      </header> : null}
 
       {error ? <div className="flex shrink-0 items-start gap-1.5 px-3 py-2 text-xs text-destructive" role="alert">
         <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -177,7 +194,7 @@ export function SubAgentSidebar({
       {openThread ? (
         <div className="min-h-0 flex-1 overflow-hidden" data-vrcforge-subagent-sidebar-thread>
           <SubAgentWorkspaceSurface {...surfaceProps} tasks={tasks} roles={roles} selected={surfaceProps.selected}
-            onClose={onBack} />
+            onClose={onBack} onCloseSidebar={onClose} />
         </div>
       ) : null}
         <div style={{ display: openThread ? "none" : undefined }} className="app-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto p-3" data-vrcforge-subagent-sidebar-list>
@@ -186,9 +203,10 @@ export function SubAgentSidebar({
             <span>{t("common.loading")}</span>
           </div> : null}
           <ThreadSection title={t("subagent.active")} threads={active} onSelect={onSelect} onCancel={surfaceProps.onCancel}
-            busyTaskIds={surfaceProps.busyTaskIds} roles={roles} />
+            busyTaskIds={surfaceProps.busyTaskIds} roles={roles} now={now} />
           <ThreadSection title={t("subagent.done")} threads={done} onSelect={onSelect} onCancel={surfaceProps.onCancel}
-            busyTaskIds={surfaceProps.busyTaskIds} roles={roles} done />
+            busyTaskIds={surfaceProps.busyTaskIds} roles={roles} now={now} done />
+          {!loading && !threads.length ? <p className="px-2 py-2 text-xs text-muted-foreground">{t("subagent.noTasks")}</p> : null}
         </div>
     </aside>
   );

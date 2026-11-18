@@ -1899,6 +1899,7 @@ export function useChatRunController({
           items: [
             ...durableItems,
             { id: responseItemId, type: "agent", response: responseForChat, timeline: mergedTimeline, compactionRecovery: responseRecovery, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, ...(response.completedAt ? { completedAt: response.completedAt } : {}) },
+            ...current.items.filter((item) => item.type === "streaming" && item.clientTurnId !== turn.id),
           ],
         };
       }
@@ -2008,7 +2009,7 @@ export function useChatRunController({
         }
         updateChat(chatId, (current) => ({
           ...touchChat(current),
-          items: stripTransientConversationItems(current.items),
+          items: current.items.filter((item) => item.type !== "streaming" || item.clientTurnId !== turn.id),
         }));
       }
       if (sessionFailure) handleRuntimeSessionFailure(text);

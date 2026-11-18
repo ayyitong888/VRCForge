@@ -38,9 +38,6 @@ export function RightRuntimeSidebar({
   agentProgress,
   projectWorkspace,
   subAgentPanel,
-  subAgentTaskCount,
-  subAgentRunningTaskCount,
-  subAgentCompletedTaskCount,
   userAttachmentSources,
   onLocateUserAttachmentSource,
   onOpenUserAttachmentSource,
@@ -76,9 +73,6 @@ export function RightRuntimeSidebar({
   agentProgress: AgentProgress[];
   projectWorkspace: boolean;
   subAgentPanel?: ReactNode;
-  subAgentTaskCount: number;
-  subAgentRunningTaskCount: number;
-  subAgentCompletedTaskCount: number;
   userAttachmentSources: UserAttachmentSource[];
   onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
@@ -180,9 +174,6 @@ export function RightRuntimeSidebar({
             localizeHealthMessage={localizeHealthMessage}
             agentProgress={agentProgress}
             subAgentPanel={subAgentPanel}
-            subAgentTaskCount={subAgentTaskCount}
-            subAgentRunningTaskCount={subAgentRunningTaskCount}
-            subAgentCompletedTaskCount={subAgentCompletedTaskCount}
             userAttachmentSources={userAttachmentSources}
             onLocateUserAttachmentSource={onLocateUserAttachmentSource}
             onOpenUserAttachmentSource={onOpenUserAttachmentSource}

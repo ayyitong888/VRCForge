@@ -28506,8 +28506,8 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_resume_subagent",
-        "When to use: continue an idle resumable sub-agent with an explicit new question and its exact taskId, retaining that child's history. "
-        "When NOT to use: start a new task, retry the original task, resume a running child, or request writes. Negative example: do not call without a new question.",
+        "When to use: the child's result reports canResume=true and you have a new question. Supply its exact taskId to continue its retained conversation. "
+        "When NOT to use: start a new task, retry the original task, resume a running child, or request writes. Negative example: a single-run inspection with canResume=false has no conversation to continue.",
         "plan/preview", resume_sub_agent_runtime,
     )
     AGENT_GATEWAY.register_tool(

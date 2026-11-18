@@ -20,7 +20,9 @@ test("sub-agent panel props and surface wiring use open action flow", async () =
   assert.equal(/<AsyncSubAgentSidebar/.test(app), true);
   assert.equal(/const AsyncSubAgentSidebar = lazy/.test(app), true);
   assert.equal(/onSelect=\{\(taskId\) => void inspectSubAgentTask\(taskId\)\}/.test(app), true);
-  assert.equal(/onOpen=\{\(taskId\) => void \(taskId \? inspectSubAgentTask\(taskId\) : openSubAgentWorkspace\(\)\)\}/.test(app), true);
+  assert.equal(/<SubAgentPanel[^>]*onOpen=\{openSubAgentWorkspace\}/.test(app), true);
+  assert.equal(panel.includes("data-vrcforge-open-subagent-thread"), false);
+  assert.equal(panel.includes('t("subagent.inspect")'), false);
   assert.equal(surface.includes("sticky bottom-0"), true);
 });
 

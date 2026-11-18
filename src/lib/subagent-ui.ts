@@ -43,10 +43,14 @@ export function subAgentStatusTone(status: string): "ok" | "warn" | "danger" | "
   if (status === "failed") {
     return "danger";
   }
-  if (status === "queued" || status === "running" || status === "cancelling") {
+  if (isActiveSubAgentStatus(status)) {
     return "warn";
   }
   return "muted";
+}
+
+export function isActiveSubAgentStatus(status: string): boolean {
+  return status === "queued" || status === "running" || status === "cancelling";
 }
 
 export function displaySubAgentStatus(status: string): string {

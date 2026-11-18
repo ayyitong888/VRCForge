@@ -484,8 +484,10 @@ def build_sub_agent_input_schema(roles: list[SubAgentRole] | None = None) -> dic
                 "type": "string",
                 "enum": role_ids,
                 "description": f"Optional; omit for {DEFAULT_SUB_AGENT_ROLE} for general read-only research. "
-                "Choose a role ID from the catalogue for specialist work: " + "; ".join(
-                    f"{role.id} ({role.title}): {role.description}" for role in roles
+                "Choose a conversational agent for interpretation or follow-up questions. "
+                "Single-run inspectors return the results of their predefined operation. " + "; ".join(
+                    f"{role.id} ({'conversational agent' if role.handler == 'llm_readonly' else 'single-run inspector'}, "
+                    f"{role.title}): {role.description}" for role in roles
                 ),
             },
             "task": {"type": "string", "description": "Bounded task for the selected role."},

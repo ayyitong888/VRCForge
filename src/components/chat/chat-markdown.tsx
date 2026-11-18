@@ -14,7 +14,8 @@ import { useTranslation } from "react-i18next";
 import { isInternalRuntimeUrl } from "../../lib/runtime-url";
 import { cn } from "../../lib/utils";
 import { chatFileHref, localChatFilePath, openChatFile } from "../../lib/chat-file-link";
-import { chatIdFromDeepLink, isCodexChatDeepLink, OpenChatLinkContext } from "../../lib/chat-deep-link";
+import { chatIdFromDeepLink, isCodexChatDeepLink } from "../../lib/chat-deep-link";
+import { ChatDeepLink } from "./chat-deep-link";
 import { hasTauriInternals, invokeTauriWithAbort } from "../../lib/api/http";
 import { MarkdownCodeBlock } from "./markdown-code-block";
 import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
@@ -114,7 +115,7 @@ function buildChatMarkdownComponents(inverted: boolean, allowImages: boolean): C
     p: ({ node: _node, ...props }) => <p className={cn("my-3 first:mt-0 last:mb-0", inverted && "whitespace-pre-wrap")} {...props} />,
     a: ({ node: _node, href, ...props }) => {
       const chatId = chatIdFromDeepLink(href || "");
-      if (chatId) return <ChatDeepLink chatId={chatId} href={href} className={linkClass} {...props} />;
+      if (chatId) return <ChatDeepLink chatId={chatId} href={href} {...props} />;
       if (href && isCodexChatDeepLink(href)) return <CodexChatDeepLink href={href} className={linkClass} {...props} />;
       const filePath = localChatFilePath(String(href || ""));
       if (filePath) return <ChatFileLink path={filePath} className={linkClass} {...props} />;
@@ -183,15 +184,6 @@ function remarkChatDeepLinks() {
       return punctuation ? [link, { type: "text", value: punctuation }] : link;
     }], { ignore: ["link", "linkReference"] });
   };
-}
-
-function ChatDeepLink({ chatId, children, className, href, title }: ComponentPropsWithoutRef<"a"> & { chatId: string }) {
-  const open = useContext(OpenChatLinkContext);
-  if (!open) return <span>{children}</span>;
-  return <a className={className} href={href} title={title} onClick={event => {
-    event.preventDefault();
-    open(chatId);
-  }}>{children}</a>;
 }
 
 function CodexChatDeepLink({ children, className, href, title }: ComponentPropsWithoutRef<"a"> & { href: string }) {

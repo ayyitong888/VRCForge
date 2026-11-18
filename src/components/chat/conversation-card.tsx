@@ -45,6 +45,7 @@ export function ConversationCard({
   steeringRevealSequence,
   initialUserContent,
   sharedProcess,
+  subAgentActivity,
   chatResourceImageContext,
   attachmentPayloads,
   approval,
@@ -80,6 +81,7 @@ export function ConversationCard({
   steeringRevealSequence?: number;
   initialUserContent?: ReactNode;
   sharedProcess?: SharedTurnProcess;
+  subAgentActivity?: ReactNode[];
   chatResourceImageContext?: Pick<ChatResourceImageContextValue, "endpoint" | "chatId" | "projectPath">;
   attachmentPayloads?: AttachmentPayloadVault;
   approval?: AgentApproval | null;
@@ -399,6 +401,7 @@ export function ConversationCard({
           {sharedProcess?.first && <SharedTurnProcessHeader process={sharedProcess} />}
           {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
           {liveQuestionActions ? <div>{liveReply}{liveQuestionActions}</div> : liveReply}
+          {subAgentActivity}
           {[...unplacedQuestions].map((question) => renderQuestionEntry?.(question, true))}
         </div>
       </div>
@@ -516,6 +519,7 @@ export function ConversationCard({
     awaitingApproval,
     elapsedSeconds: item.elapsedSeconds,
     sharedProcess,
+    hasSubAgentActivity: Boolean(subAgentActivity?.length),
     interleavedUserMessages,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
@@ -533,6 +537,7 @@ export function ConversationCard({
           {initialUserContent}
           {sharedProcess?.first && <SharedTurnProcessHeader process={sharedProcess} />}
           {timelineRows}
+          {subAgentActivity}
           {[...unplacedQuestions].map((question) => renderQuestionEntry?.(question, true))}
           {visionFailure ? (
             <p className="flex items-start gap-1.5 text-xs text-muted-foreground" data-chat-vision-error>

@@ -1,6 +1,6 @@
 import { projectDiscoveryState } from "./lib/project-discovery-state";
 import { useChatDeepLinks } from "./hooks/use-chat-deep-links";
-import { chatDeepLink, OpenChatLinkContext } from "./lib/chat-deep-link";
+import { chatDeepLink, ChatLinkTitlesContext, OpenChatLinkContext } from "./lib/chat-deep-link";
 import { agentRelaySource } from "./lib/chat-relay-presentation";
 import { conversationQuoteFromSelection, dismissConversationQuoteOnOutsidePointerDown } from "./lib/chat-selection-quote";
 import { hasRecentConnectorSelfTest } from "./lib/connector-verification";
@@ -66,7 +66,6 @@ import type { ChatThread, ProjectType } from "./lib/chat-types";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { VskOpenDialog } from "./components/skills/vsk-open-dialog";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
-import { groupSubAgentThreads } from "./lib/subagent-threads";
 import { type UserAttachmentSource } from "./components/runtime/project-workbench-sections";
 import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useAppUpdate } from "./hooks/use-app-update";
@@ -420,7 +419,7 @@ export default function App() {
   const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(() => initialSubAgentTask);
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
   const [subAgentSidebarOpen, setSubAgentSidebarOpen] = useState(() => Boolean(initialSubAgentTask));
-  const [subAgentPaneWidth, setSubAgentPaneWidth] = useState(() => Math.min(1000, Math.max(520, window.innerWidth * 0.6)));
+  const [subAgentPaneWidth, setSubAgentPaneWidth] = useState(() => Math.min(680, Math.max(440, window.innerWidth * 0.43)));
   const [subAgentActionBusyTaskIds, setSubAgentActionBusyTaskIds] = useState<Set<string>>(() => new Set());
   const [pendingReplyQuestionId, setPendingReplyQuestionId] = useState("");
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
@@ -905,6 +904,10 @@ export default function App() {
     }
   };
   useChatDeepLinks(chatStorageReady, openChatLink);
+  const chatLinkTitles = useMemo(
+    () => new Map(sidebarChats.flatMap(chat => chat.title?.trim() ? [[chat.id, chat.title]] : [])),
+    [sidebarChats],
+  );
   const sessionHandoff = useSessionHandoff(endpoint, activeChatId);
   const handoffTargetChats = useMemo(() => {
     const sourceScope = normalizeProjectPathKey(displayChat?.projectPath || "");
@@ -1891,15 +1894,6 @@ export default function App() {
   const activeSubAgentTasks = useMemo(() => {
     return subAgentParentChatId ? subAgentTasks.filter((task) => task.parentChatId === subAgentParentChatId) : [];
   }, [subAgentParentChatId, subAgentTasks]);
-  const activeSubAgentThreads = useMemo(() => groupSubAgentThreads(activeSubAgentTasks), [activeSubAgentTasks]);
-  const runningSubAgentTaskCount = useMemo(
-    () => activeSubAgentThreads.filter(({ task }) => ["queued", "running", "cancelling"].includes(task.status)).length,
-    [activeSubAgentThreads],
-  );
-  const completedSubAgentTaskCount = useMemo(
-    () => activeSubAgentThreads.filter(({ task }) => !["queued", "running", "cancelling"].includes(task.status)).length,
-    [activeSubAgentThreads],
-  );
   useEffect(() => {
     subAgentSelectionIntentRef.current = selectedSubAgent?.id || "";
   }, [selectedSubAgent?.id]);
@@ -4357,8 +4351,7 @@ export default function App() {
       tasks={activeSubAgentTasks}
       loading={loadingSubAgents}
       error={subAgentError || subAgentListError}
-      roles={subAgentList?.roles || []}
-      onOpen={(taskId) => void (taskId ? inspectSubAgentTask(taskId) : openSubAgentWorkspace())}
+      onOpen={openSubAgentWorkspace}
     />
   );
   const subAgentWorkspaceSurface = subAgentSidebarActive ? (
@@ -4381,6 +4374,8 @@ export default function App() {
           onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
           onIgnoreNotification={ignoreSubAgentReviewNotification}
           onAdoptNextAction={adoptSubAgentNextAction}
+          onCopyItem={copyConversationItem}
+          onOpenChatById={openChatById}
           busyTaskIds={subAgentActionBusyTaskIds}
           onClose={() => { setSubAgentSidebarOpen(false); setSelectedSubAgentPanelOpen(false); }}
         />
@@ -4402,6 +4397,7 @@ export default function App() {
 
   return (
     <OpenChatLinkContext.Provider value={openChatLink}>
+    <ChatLinkTitlesContext.Provider value={chatLinkTitles}>
     <main className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground" data-desktop-window={desktopWindow || undefined}>
       <DesktopTitlebar theme={theme} onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")} />
       <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)]" style={{ gridTemplateColumns: workspaceGridColumns }}>
@@ -4739,6 +4735,8 @@ export default function App() {
           ) : (
             <ChatWorkspace
               projectPromptTitle={projectPromptTitle}
+              subAgentTasks={activeSubAgentTasks}
+              onOpenSubAgent={(taskId) => void inspectSubAgentTask(taskId)}
               conversationPending={activeChatPending}
               conversationPendingMessage={t("common.loading")}
               input={input}
@@ -4924,9 +4922,6 @@ export default function App() {
               agentProgress={agentProgress}
               projectWorkspace={projectChatWorkspace}
               subAgentPanel={activeView === "chat" ? subAgentActivityPanel : undefined}
-              subAgentTaskCount={activeSubAgentThreads.length}
-              subAgentRunningTaskCount={runningSubAgentTaskCount}
-              subAgentCompletedTaskCount={completedSubAgentTaskCount}
               userAttachmentSources={userAttachmentSources}
               onLocateUserAttachmentSource={locateUserAttachmentSource}
               onOpenUserAttachmentSource={openUserAttachmentSource}
@@ -5163,6 +5158,7 @@ export default function App() {
       <VskOpenDialog ready={runtimeConnected} onPreflight={preflightVskPackage} onImport={importVskPackage} onManage={() => void openSkills()} />
 
     </main>
+    </ChatLinkTitlesContext.Provider>
     </OpenChatLinkContext.Provider>
   );
 }

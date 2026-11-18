@@ -1,8 +1,9 @@
 import { formatPayload } from "../../lib/conversation-utils";
-import { Ban, BellOff, Check, CornerDownRight, Loader2, RefreshCw, ArrowLeft, ArrowUp } from "lucide-react";
+import { Ban, BellOff, Check, CornerDownRight, Loader2, RefreshCw, ArrowLeft, ArrowUp, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { SubAgentRole, SubAgentTask } from "../../lib/api";
+import type { ConversationItem } from "../../lib/chat-types";
 import { canAdoptSubAgentResult, canCancelSubAgentTask, canDismissSubAgentResult, canResumeSubAgentTask,
   canRetrySubAgentTask, isAwaitingMergeReview, subAgentProposedNextAction } from "../../lib/subagent-merge";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
@@ -10,11 +11,12 @@ import { groupSubAgentThreads } from "../../lib/subagent-threads";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { OutputBlock } from "../ui/output-block";
-import { SubAgentConversation } from "./sub-agent-conversation";
+import { SubAgentConversation, subAgentConversationModel } from "./sub-agent-conversation";
+import { SubAgentMark } from "./sub-agent-panel";
 import { useConversationScroll } from "../../hooks/use-conversation-scroll";
 
 export function SubAgentWorkspaceSurface({ tasks, roles = [], selected, endpoint = "", developerOptionsEnabled = false,
-  onCancel, onRetry, onResume, onMerge, onIgnoreNotification, onAdoptNextAction, busyTaskIds, onClose }: {
+  onCancel, onRetry, onResume, onMerge, onIgnoreNotification, onAdoptNextAction, busyTaskIds, onClose, onCloseSidebar, onCopyItem, onOpenChatById }: {
   tasks: SubAgentTask[];
   roles?: SubAgentRole[];
   selected: SubAgentTask | null;
@@ -28,6 +30,9 @@ export function SubAgentWorkspaceSurface({ tasks, roles = [], selected, endpoint
   onAdoptNextAction: (task: SubAgentTask) => void;
   busyTaskIds: ReadonlySet<string>;
   onClose: () => void;
+  onCloseSidebar?: () => void;
+  onCopyItem?: (item: ConversationItem) => void;
+  onOpenChatById?: (chatId: string) => void;
 }) {
   const { t } = useTranslation();
   const [resumeQuestion, setResumeQuestion] = useState("");
@@ -35,6 +40,8 @@ export function SubAgentWorkspaceSurface({ tasks, roles = [], selected, endpoint
   const threads = useMemo(() => groupSubAgentThreads(tasks), [tasks]);
   const activeThread = threads.find((thread) => thread.turns.some((turn) => turn.id === selected?.id)) || threads[0];
   const activeTask = activeThread ? selected?.id === activeThread.task.id ? selected : activeThread.task : null;
+  const activeModel = activeTask ? subAgentConversationModel(activeTask) : "";
+  const roleLabel = activeTask ? subAgentRoleLabel(activeTask.role, roles).trim() : "";
   const conversationEndRef = useRef<HTMLDivElement>(null);
   const { onScroll } = useConversationScroll({ chatKey: activeThread?.id || "", endRef: conversationEndRef });
   const activeTaskNextAction = activeTask ? subAgentProposedNextAction(activeTask) : "";
@@ -63,19 +70,26 @@ export function SubAgentWorkspaceSurface({ tasks, roles = [], selected, endpoint
           title={t("subagent.backToList")} aria-label={t("subagent.backToList")} data-vrcforge-subagent-back>
           <ArrowLeft className="h-3.5 w-3.5" />
         </Button>
+        {activeThread ? <SubAgentMark threadId={activeThread.id} /> : null}
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{activeTask?.displayName || t("subagent.conversation")}</span>
-        {activeTask ? <span className="truncate text-xs text-muted-foreground">{subAgentRoleLabel(activeTask.role, roles)}</span> : null}
+        {activeModel ? <span className="max-w-[35%] truncate text-xs text-muted-foreground" title={activeModel} data-subagent-model>{activeModel}</span> : null}
+        {!activeModel && roleLabel.length > 1 && roleLabel !== activeTask?.role
+          ? <span className="max-w-[35%] truncate text-xs text-muted-foreground" title={roleLabel}>{roleLabel}</span> : null}
         {activeTask ? <Badge tone={subAgentStatusTone(activeTask.status)}>{displaySubAgentStatus(activeTask.status)}</Badge> : null}
+        {onCloseSidebar ? <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0" onClick={onCloseSidebar}
+          aria-label={t("common.close")} title={t("common.close")} data-vrcforge-close-subagent-sidebar>
+          <X className="h-3.5 w-3.5" />
+        </Button> : null}
       </header>
 
       {activeTask && activeThread ? <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        {activeTask.mergeDecision || activeTask.parentContinuationStatus ? <div className="flex items-center gap-2 px-5 py-2 text-xs">
+        {activeTask.mergeDecision || (developerOptionsEnabled && activeTask.parentContinuationStatus) ? <div className="flex items-center gap-2 px-5 py-2 text-xs">
           {activeTask.mergeDecision ? <Badge tone="muted">{t(activeTask.mergeDecision === "adopted" ? "subagent.mergedBadge" : "subagent.dismissedBadge")}</Badge> : null}
-          {activeTask.parentContinuationStatus ? <span className="text-muted-foreground">{t("subagent.parentContinuation")}: {activeTask.parentContinuationStatus}</span> : null}
+          {developerOptionsEnabled && activeTask.parentContinuationStatus ? <span className="text-muted-foreground">{t("subagent.parentContinuation")}: {activeTask.parentContinuationStatus}</span> : null}
         </div> : null}
-        <div className="app-scrollbar min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-6" data-vrcforge-subagent-conversation-scroll data-chat-history-scroll onScroll={(event) => onScroll(event.currentTarget)}>
-          <div className="mx-auto w-full max-w-3xl space-y-4">
-          <SubAgentConversation key={activeThread.id} endpoint={endpoint}
+        <div className="app-scrollbar min-h-0 flex-1 overflow-auto pl-7 pr-4 py-5 md:pl-8 md:pr-6 md:py-6" data-vrcforge-subagent-conversation-scroll data-chat-history-scroll onScroll={(event) => onScroll(event.currentTarget)}>
+          <div className="mx-auto max-w-3xl space-y-6">
+          <SubAgentConversation key={activeThread.id} endpoint={endpoint} onCopyItem={onCopyItem} onOpenChatById={onOpenChatById}
             turns={activeThread.turns.map((turn) => turn.id === activeTask.id ? activeTask : turn)} />
           {activeTask.resultUnavailable ? <OutputBlock label={t("subagent.result")} value={t("subagent.resultUnavailable")} danger /> : null}
           {!activeTask.childSessionId && activeTask.result ? <details className="text-xs">
@@ -97,7 +111,7 @@ export function SubAgentWorkspaceSurface({ tasks, roles = [], selected, endpoint
                 </label>
                 <textarea
                   id="subagent-resume-question"
-                  className="app-scrollbar min-h-20 w-full resize-none bg-transparent px-1 text-base leading-relaxed outline-none placeholder:text-muted-foreground"
+                  className="app-scrollbar min-h-20 w-full resize-none bg-transparent px-1 text-sm outline-none placeholder:text-muted-foreground"
                   value={resumeQuestion}
                   onChange={(event) => setResumeQuestion(event.target.value)}
                   placeholder={t("subagent.resumeQuestionPlaceholder")}

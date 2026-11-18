@@ -16,17 +16,38 @@ const tasks = [
   { id: "second", resumeOf: "first", childSessionId: "child-a", role: "llm_readonly", displayName: "Wardrobe review", task: "Compare the second outfit.", status: "completed", summary: "Short second summary.", createdAt: "2026-10-28T10:01:00Z", canResume: true },
   { id: "failed", childSessionId: "child-b", role: "llm_readonly", displayName: "Failed inspection", task: "Read the unavailable file.", status: "failed", error: "Fixture file is unavailable.", createdAt: "2026-10-28T10:02:00Z" },
   { id: "live", childSessionId: "child-c", role: "llm_readonly", displayName: "Live inspection", task: "Inspect the remaining sleeve.", status: "running", createdAt: "2026-10-28T10:03:00Z" },
+  { id: "fixed", role: "outfit_package_inspection", displayName: "Package inspection", task: "Check the package type.",
+    status: "completed", summary: "Recorded package summary.", result: { packageKind: "unitypackage" }, createdAt: "2026-10-28T10:04:00Z" },
 ];
 const event = (sequence, kind, summary, extra = {}) => ({ id: `event-${sequence}`, sequence,
   timestamp: "2026-10-28T10:00:00Z", kind, payload: { summary, ...extra } });
 const first = [
-  event(0, "assistant", "Inspecting the original wardrobe."),
+  event(0, "assistant", "Inspecting the original wardrobe.", { phase: "commentary", status: "done" }),
   event(1, "tool_call", "Inspect FX layers", { tool: "vrc_get_animator_layers", actionId: "inspect-1", status: "running" }),
   event(2, "tool_result", "Found three wardrobe layers.", { tool: "vrc_get_animator_layers", actionId: "inspect-1", status: "success" }),
-  ...Array.from({ length: 201 }, (_, i) => event(i + 3, "phase", "Working", { phase: "executing" })),
-  event(204, "assistant", "Full original report beyond page 200.", { phase: "final_answer", status: "completed" }),
+  event(3, "assistant", "Checking the command output.", { phase: "commentary", status: "done" }),
+  event(4, "command", "Get-Content layers.txt", { label: "Get-Content layers.txt", actionId: "shell-1", status: "running" }),
+  event(5, "tool_result", "Shell command exited.", { actionId: "shell-1", status: "ok" }),
+  ...Array.from({ length: 201 }, (_, i) => event(i + 6, "phase", "Working", { phase: "executing" })),
+  event(207, "assistant", "Full original report beyond page 200.", { phase: "final_answer", status: "completed" }),
 ];
+const firstResult = {
+  ok: true, sessionId: "child-a", session_id: "child-a", clientTurnId: "first", turnId: "runtime-first", turn_id: "runtime-first",
+  startedAt: "2026-10-28T10:00:00Z", completedAt: "2026-10-28T10:00:12Z", status: "completed", model: "fixture-reported-model",
+  plan: { reply: "Full original report beyond page 200.", summary: "", planner: "llm", shellNeeded: false, nextStep: "done" },
+  observe: {},
+  steps: [
+    { actionId: "inspect-1", result: { layers: 3 } },
+    { actionId: "shell-1", result: { command: "Get-Content layers.txt", stdout: "SHELL-OUTPUT-FIXTURE", exitCode: 0 } },
+  ],
+};
+const firstDetails = { ...tasks[0], result: { rawResult: firstResult } };
+tasks[1].result = { rawResult: { ...firstResult, clientTurnId: "second", turnId: "runtime-second", turn_id: "runtime-second",
+  startedAt: "2026-10-28T10:01:00Z", completedAt: "2026-10-28T10:01:01Z",
+  plan: { ...firstResult.plan, reply: "Full second-turn report." }, steps: [] }, providerRoute: { model: "fixture-requested-model" } };
 let liveReads = 0;
+let failFirstTimeline = false;
+let failFirstDetail = false;
 const requests = [];
 const plugins = baseline ? [{ name: "baseline-panel", setup(b) {
   b.onLoad({ filter: /sub-agent-panel\.tsx$/ }, () => ({
@@ -39,9 +60,12 @@ const bundled = await build({ stdin: { resolveDir: root, loader: "tsx", contents
   import messages from './src/locales/en-US.json'; import chinese from './src/locales/zh-CN.json';
   import {SubAgentPanel} from './src/components/subagents/sub-agent-panel';
   import {Composer} from './src/components/chat/composer';
+  import {ConversationCard} from './src/components/chat/conversation-card';
   import {SubAgentSidebar} from './src/components/subagents/sub-agent-sidebar';
   import {resumeSubAgent} from './src/lib/api/sub-agents';
   const initial=${JSON.stringify(tasks)},Sidebar=${baseline ? 'SubAgentPanel' : 'SubAgentSidebar'};
+  const parentUser={id:"parent-initial",type:"user",text:initial[0].task,createdAt:initial[0].createdAt};
+  const parentTurn={id:"parent-turn",type:"agent",response:{...${JSON.stringify(firstResult)},timeline:${JSON.stringify(first)}},elapsedSeconds:12};
   function Fixture(){ const [tasks,setTasks]=useState(initial),[selected,setSelected]=useState(null),[open,setOpen]=useState(false),[visible,setVisible]=useState(true),[draft,setDraft]=useState('');
     window.onlyFailed=()=>setTasks([initial[2]]);window.resetTasks=()=>setTasks(initial);window.setLanguage=lng=>i18n.changeLanguage(lng);window.manyDone=()=>setTasks(Array.from({length:24},(_,n)=>({...initial[1],id:"history-"+n,childSessionId:"history-child-"+n,displayName:"Completed review "+n,resumeOf:undefined})));window.cancelled=[];
     const noop=()=>{};const choose=id=>{setSelected(tasks.find(t=>t.id===(id||tasks[0]?.id)));setOpen(true);setVisible(true)};
@@ -49,8 +73,9 @@ const bundled = await build({ stdin: { resolveDir: root, loader: "tsx", contents
     return <main className="grid h-screen bg-background text-foreground" style={{gridTemplateColumns:"minmax(340px,0.6fr) minmax(0,1.4fr)"}}>
       <section className="flex min-h-0 flex-col border-r border-border bg-workspace" data-parent-conversation>
         <header className="h-12 shrink-0 border-b border-border px-4 py-3 text-sm font-medium">Main conversation</header>
-        <div className="flex-1 space-y-5 overflow-auto p-5 text-sm"><div className="rounded-2xl bg-muted p-3">Review the three outfits with subagents.</div>
-          <p>I'll inspect the wardrobe layers and compare the outfits.</p><p className="text-xs text-muted-foreground">UI preview · sample conversation</p></div>
+        <div className="flex-1 space-y-6 overflow-auto p-5" data-parent-parity>
+          <ConversationCard item={parentTurn} initialUserContent={<ConversationCard item={parentUser} />} />
+        </div>
         <div className="p-4" data-main-composer><Composer input={draft} setInput={setDraft} sending={false} onSubmit={event=>event?.preventDefault()} onSwitchMode={noop} compact /></div>
       </section>
       <div className="min-h-0 overflow-hidden bg-workspace">{visible?<Sidebar endpoint={location.origin} tasks={tasks} selected={selected} roles={[{id:"llm_readonly",title:"Reviewer"}]}
@@ -69,8 +94,13 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   if (url.pathname === "/") { res.writeHead(200,{"Content-Type":"text/html; charset=utf-8"});res.end(`<style>${css}</style><div id="root"></div><script>${bundled.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script>`);return; }
   requests.push({ method: req.method, path: url.pathname, session: url.searchParams.get("sessionId"), turn: url.searchParams.get("clientTurnId"), after: Number(url.searchParams.get("afterSequence") || 0) });
+  if (req.method === "GET" && url.pathname === "/api/app/sub-agents/first") {
+    if (failFirstDetail) { failFirstDetail = false; res.writeHead(503); res.end(); return; }
+    res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({ok:true,task:firstDetails}));return;
+  }
   if (url.pathname === "/api/app/agent/runs/timeline") {
     const turn = url.searchParams.get("clientTurnId");
+    if (turn === "first" && failFirstTimeline) { failFirstTimeline = false; res.writeHead(503); res.end(); return; }
     let events = turn === "first" ? first : turn === "second" ? [event(0,"assistant","Full second-turn report.",{phase:"final_answer",status:"completed"})] : [];
     if (turn === "live") { liveReads++;events = [event(0,"assistant","Inspecting the sleeve."),...(liveReads>1?[event(1,"assistant","Fresh running update arrived.",{phase:"final_answer",status:"completed"})]:[])]; }
     if (turn === "third") events = [event(0,"assistant","Third turn retains the same child context.",{phase:"final_answer",status:"completed"})];
@@ -79,6 +109,7 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === "POST" && url.pathname === "/api/app/sub-agents/second/resume") {
     let body="";for await(const chunk of req)body+=chunk;
+    failFirstTimeline = failFirstDetail = true;
     const data=JSON.parse(body);res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({ok:true,task:{...tasks[1],id:"third",resumeOf:"second",task:data.task,status:"running",canResume:false,createdAt:"2026-10-28T10:04:00Z"}}));return;
   }
   res.writeHead(404);res.end();
@@ -113,10 +144,46 @@ try {
   await page.locator('[data-vrcforge-subagent-sidebar-list]').waitFor();
   assert.equal(await page.locator("[data-main-composer] textarea").inputValue(),"Keep this parent draft","back must preserve parent draft");
   await page.evaluate(()=>window.resetTasks());
+  await page.locator('[data-vrcforge-open-subagent-thread="fixed"]').click();
+  await surface.getByText("Recorded package summary.", { exact: true }).waitFor();
+  assert.equal(await surface.getByRole("button", { name: "Ask a follow-up", exact: true }).count(), 0);
+  assert.equal(await surface.locator("[data-subagent-model]").count(), 0);
+  assert.equal(requests.some(request => request.turn === "fixed"), false);
+  await surface.locator('[data-vrcforge-subagent-back]').click();
   assert.equal(await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').count(),1,"resume turns must share one sidebar row");
   await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').click();
   await surface.getByText("Full original report beyond page 200.",{exact:true}).waitFor();
   await surface.getByText("Full second-turn report.",{exact:true}).waitFor();
+  const parentCard = page.locator("[data-parent-parity] [data-vrcforge-agent-client-turn]");
+  const childCard = surface.locator('[data-vrcforge-agent-client-turn="first"]');
+  const openButton = root => root.locator(":scope > div > button[aria-expanded]").first();
+  const getProcessButton = card => openButton(card.locator("[data-agent-turn-process-group]"));
+  assert.equal(await childCard.locator("[data-user-message-bubble]").innerText(), await parentCard.locator("[data-user-message-bubble]").innerText());
+  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "fixture-reported-model");
+  for (const card of [parentCard, childCard]) {
+    const group = getProcessButton(card);
+    assert.equal(await group.getAttribute("aria-expanded"), "false");
+    await group.click();
+    assert.equal(await group.getAttribute("aria-expanded"), "true");
+    const toolGroups = card.locator("[data-agent-tool-call-group]");
+    assert.equal(await toolGroups.count(), 2);
+    for (const toolGroup of await toolGroups.all()) {
+      await openButton(toolGroup).click();
+      await toolGroup.locator('button[aria-expanded="false"]').last().click();
+      await toolGroup.locator("[data-agent-invocation-output-card]").waitFor();
+    }
+  }
+  function contentOrder(text) {
+    const expected = ["Inspecting the original wardrobe.", '"layers": 3', "Checking the command output.",
+      "Get-Content layers.txt", "SHELL-OUTPUT-FIXTURE", "Full original report beyond page 200."];
+    const order = expected.map(token => text.indexOf(token));
+    assert(order.every((index, i) => index >= 0 && (i === 0 || index > order[i - 1])), JSON.stringify({ expected, order, text }));
+  }
+  const parentText = await parentCard.innerText();
+  const childText = await childCard.innerText();
+  contentOrder(parentText);
+  assert.equal(childText, parentText);
+  assert(requests.some(request => request.path === "/api/app/sub-agents/first"), "prior turn details are read when the list omits its result");
   for(const mode of ['light','dark','wallpaper']) {
     await page.evaluate(mode=>{
       document.documentElement.dataset.theme=mode==='dark'?'dark':'light';
@@ -144,6 +211,9 @@ try {
   await surface.getByRole("button",{name:"Ask a follow-up",exact:true}).click();
   await surface.getByText("Third turn retains the same child context.",{exact:true}).waitFor();
   assert.equal(await surface.locator('[data-subagent-user-message]').count(),3);
+  await surface.getByText("Full original report beyond page 200.", { exact: true }).waitFor();
+  assert(requests.slice(requests.findIndex(request => request.method === "POST")).filter(request => request.path === "/api/app/sub-agents/first").length >= 2,
+    "the existing live poll retries failed older timeline and result reads without dropping the successful new turn");
   await surface.locator('[data-vrcforge-subagent-back]').click();
   await page.locator('[data-vrcforge-subagent-sidebar-list]').waitFor();
   assert.equal(await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').count(),1);
@@ -164,5 +234,5 @@ try {
   await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').click();
   await surface.getByText("Full second-turn report.",{exact:true}).waitFor();
   if (evidence) await page.screenshot({path:resolve(evidence,"subagent-conversation-light.png"),fullPage:true});
-  console.log("PASS: right-pane list/conversation/back/close preserve parent chat and draft; failed-only entry, grouped resume, durable paging, tool conversation, readonly opening, live refresh, follow-up and return to parent; light/dark/wallpaper composer parity.");
+  console.log("PASS: main and child share ordered conversation cards, expandable tool and shell output, elapsed and final reply; parent draft, fixed role, older sidecar, durable paging and follow-up remain available.");
 } finally {await browser?.close();server.closeAllConnections();await new Promise(done=>server.close(done));}

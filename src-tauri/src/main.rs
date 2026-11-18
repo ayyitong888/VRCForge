@@ -32,6 +32,7 @@ mod chat_file_open;
 mod chatgpt_oauth;
 mod commands;
 mod event_bridge;
+mod focused_webview_edit;
 #[cfg(windows)]
 #[allow(dead_code)]
 mod primitive_evidence_authority_client;
@@ -218,6 +219,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            focused_webview_edit::edit_focused_webview,
             take_pending_vsk_paths,
             acknowledge_sub_agent_handoff,
             acknowledge_agent_goal_background_state,

@@ -380,7 +380,7 @@ export function useRuntimeTurnActivity(params: Params) {
     if (snapshot?.dispatchStopped || (snapshot?.turnId && delta.turnId && snapshot.turnId !== delta.turnId)) return;
     const activity = activities.current.get(key);
     if (activity?.turnId && delta.turnId && activity.turnId !== delta.turnId) return;
-    if (!activity) observe({ ...identity, status: "running" });
+    if (!activity) observe({ ...identity, status: "running", startedAt: delta.startedAt });
     // The question observer applies its own live delta once; this observer
     // still owns history catch-up and the terminal receipt for that same row.
     const stream = owner.items.find((item) => item.type === "streaming" && item.clientTurnId === identity.clientTurnId);
