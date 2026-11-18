@@ -26,9 +26,6 @@ namespace VRCForge.Editor
     {
         internal string PackageName = string.Empty;
         internal string PackageVersion = string.Empty;
-        internal int PackageFileCount;
-        internal long PackageTotalBytes;
-        internal string PackageTreeDigest = string.Empty;
         internal string ApiAssemblyName = string.Empty;
         internal string ApiAssemblyVersion = string.Empty;
         internal string ApiAssemblyPublicKeyToken = string.Empty;
@@ -54,9 +51,6 @@ namespace VRCForge.Editor
             {
                 ["packageName"] = PackageName,
                 ["packageVersion"] = PackageVersion,
-                ["packageFileCount"] = PackageFileCount,
-                ["packageTotalBytes"] = PackageTotalBytes,
-                ["packageTreeDigest"] = PackageTreeDigest,
                 ["apiAssemblyName"] = ApiAssemblyName,
                 ["apiAssemblyVersion"] = ApiAssemblyVersion,
                 ["apiAssemblyPublicKeyToken"] = ApiAssemblyPublicKeyToken,
@@ -205,7 +199,6 @@ namespace VRCForge.Editor
         internal const string FeatureDigestSchema = "vrcforge.component_feature_state.v1";
         internal const string PreviewDigestSchema = "vrcforge.component_feature_preview.v1";
         internal const string CompatibilityDigestSchema = "vrcforge.component_feature_compatibility.v1";
-        internal const string PackageTreeDigestSchema = "vrcforge.component_feature.package_tree.v1";
         internal const string ApiSignatureDigestSchema = "vrcforge.component_feature.api_signature.v1";
         internal const string ToggleKind = "toggle";
         internal const string ArmatureLinkKind = "armature_link";
@@ -348,7 +341,6 @@ namespace VRCForge.Editor
                 throw new ComponentFeatureWriteException(
                     "dependency_incompatible: VRCFury package.json identity does not match Unity Package Manager metadata; no Unity mutation started.");
             }
-            var packageEvidence = ComputePackageTreeEvidence(packageRoot);
 
             var componentsType = RequireType(apiAssembly, "com.vrcfury.api.FuryComponents");
             var toggleType = RequireType(apiAssembly, "com.vrcfury.api.Components.FuryToggle");
@@ -373,9 +365,6 @@ namespace VRCForge.Editor
             {
                 PackageName = package.name,
                 PackageVersion = package.version,
-                PackageFileCount = packageEvidence.FileCount,
-                PackageTotalBytes = packageEvidence.TotalBytes,
-                PackageTreeDigest = packageEvidence.Digest,
                 ApiAssemblyName = ApiAssemblyName,
                 ApiAssemblyVersion = ApiAssemblyVersion,
                 ApiAssemblyPublicKeyToken = ApiAssemblyToken,
@@ -824,8 +813,7 @@ namespace VRCForge.Editor
         {
             var keys = new[]
             {
-                "packageName", "packageVersion", "packageFileCount", "packageTotalBytes",
-                "packageTreeDigest", "apiAssemblyName", "apiAssemblyVersion",
+                "packageName", "packageVersion", "apiAssemblyName", "apiAssemblyVersion",
                 "apiAssemblyPublicKeyToken", "apiAssemblySignatureState", "apiAssemblyDigest",
                 "runtimeAssemblyName", "runtimeAssemblyVersion", "runtimeAssemblyPublicKeyToken",
                 "runtimeAssemblySignatureState", "runtimeAssemblyDigest", "apiSignatureDigest"
@@ -1463,50 +1451,6 @@ namespace VRCForge.Editor
             return ComputeFileSha256(assemblyPath);
         }
 
-        private static PackageTreeEvidence ComputePackageTreeEvidence(string root)
-        {
-            if (!Directory.Exists(root)
-                || (File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new ComponentFeatureWriteException("The component feature package root is unavailable.");
-            }
-            foreach (var directory in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories))
-            {
-                if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
-                {
-                    throw new ComponentFeatureWriteException("The component feature package contains a linked directory.");
-                }
-            }
-            var files = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-                .Select(path => new
-                {
-                    FullPath = path,
-                    Relative = path.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                        .Replace('\\', '/')
-                })
-                .OrderBy(item => item.Relative, StringComparer.Ordinal)
-                .ToList();
-            var value = new StringBuilder();
-            AppendDigestField(value, PackageTreeDigestSchema);
-            AppendDigestField(value, files.Count.ToString(CultureInfo.InvariantCulture));
-            long totalBytes = 0;
-            foreach (var file in files)
-            {
-                EnsureOrdinaryFile(file.FullPath, "package file");
-                var length = new FileInfo(file.FullPath).Length;
-                totalBytes = checked(totalBytes + length);
-                AppendDigestField(value, file.Relative);
-                AppendDigestField(value, length.ToString(CultureInfo.InvariantCulture));
-                AppendDigestField(value, ComputeFileSha256(file.FullPath));
-            }
-            return new PackageTreeEvidence
-            {
-                FileCount = files.Count,
-                TotalBytes = totalBytes,
-                Digest = Sha256Text(value.ToString())
-            };
-        }
-
         private static string NormalizeScenePath(string value)
         {
             var normalized = (value ?? string.Empty).Trim().Replace('\\', '/');
@@ -1621,11 +1565,5 @@ namespace VRCForge.Editor
             return value ? "true" : "false";
         }
 
-        private sealed class PackageTreeEvidence
-        {
-            internal int FileCount;
-            internal long TotalBytes;
-            internal string Digest = string.Empty;
-        }
     }
 }

@@ -19,9 +19,6 @@ TOOL_NAME = "vrc_create_component_feature"
 EXPECTED_COMPATIBILITY = {
     "packageName": "com.vrcfury.vrcfury",
     "packageVersion": "1.1334.0",
-    "packageFileCount": 1255,
-    "packageTotalBytes": 1_999_565,
-    "packageTreeDigest": "d58d5db6083852bb0f5b495248794026b753b494dd88c8f6523e0019ff1a0f59",
     "apiAssemblyName": "com.vrcfury.api",
     "apiAssemblyVersion": "0.0.0.0",
     "apiAssemblyPublicKeyToken": "",
@@ -37,9 +34,6 @@ _ASSEMBLY_DIGEST_KEYS = {"apiAssemblyDigest", "runtimeAssemblyDigest"}
 _COMPATIBILITY_KEYS = (
     "packageName",
     "packageVersion",
-    "packageFileCount",
-    "packageTotalBytes",
-    "packageTreeDigest",
     "apiAssemblyName",
     "apiAssemblyVersion",
     "apiAssemblyPublicKeyToken",
@@ -529,17 +523,6 @@ def _canonical_compatibility(value: Any) -> dict[str, Any]:
             continue
         if key == "packageVersion":
             canonical[key] = _bounded_text(actual, label=key, max_length=128)
-            continue
-        if key in {"packageFileCount", "packageTotalBytes"}:
-            canonical[key] = _bounded_int(
-                actual,
-                label=key,
-                minimum=1,
-                maximum=10_000_000_000,
-            )
-            continue
-        if key == "packageTreeDigest":
-            canonical[key] = _lower_hex(actual, label=key, pattern=_DIGEST_PATTERN)
             continue
         expected = EXPECTED_COMPATIBILITY[key]
         if isinstance(expected, int):

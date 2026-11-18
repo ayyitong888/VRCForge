@@ -1,3 +1,4 @@
+using VRCForge.Core.MCP;
 using System;
 using System.IO;
 using System.Linq;
@@ -32,7 +33,6 @@ public static class ComponentFeatureFixtureProbe
             BaselineSceneBytes = File.ReadAllBytes(AbsoluteAssetPath(ScenePath));
 
             VerifyMissingPackageFailsClosed();
-            VerifyCompatiblePackageTreeDriftAccepted();
             VerifyMethodSignatureDriftFailsClosed();
             ComponentFeatureWriteCore.ValidateCompatibility();
             VerifyUnknownFieldFailsClosed(baselineDigest, baselineMetaDigest);
@@ -117,26 +117,6 @@ public static class ComponentFeatureFixtureProbe
         Require(File.Exists(packageJson) && !File.Exists(backup), "package manifest restore");
     }
 
-    private static void VerifyCompatiblePackageTreeDriftAccepted()
-    {
-        var publicApiSource = Path.Combine(PackageRoot(), "PublicApi", "FuryComponents.cs");
-        Require(File.Exists(publicApiSource), "package source precondition");
-        var before = File.ReadAllBytes(publicApiSource);
-        var beforeWriteTime = File.GetLastWriteTimeUtc(publicApiSource);
-        try
-        {
-            File.WriteAllBytes(publicApiSource, before.Concat(new byte[] { 0x20 }).ToArray());
-            var drifted = ComponentFeatureWriteCore.ValidateCompatibility();
-            Require(drifted.PackageTreeDigest != string.Empty, "package tree drift evidence");
-        }
-        finally
-        {
-            File.WriteAllBytes(publicApiSource, before);
-            File.SetLastWriteTimeUtc(publicApiSource, beforeWriteTime);
-        }
-        Require(File.ReadAllBytes(publicApiSource).SequenceEqual(before), "package source restore");
-    }
-
     private static void VerifyMethodSignatureDriftFailsClosed()
     {
         var failed = false;
@@ -217,9 +197,7 @@ public static class ComponentFeatureFixtureProbe
     {
         var request = ToggleRequest(true);
         var preview = RequireSuccess(ComponentFeatureWriterTool.HandleCommand(request));
-        var apply = RequireSuccess(ComponentFeatureWriterTool.HandleCommand(
-            ApprovedRequest(request, preview)
-        ));
+        var apply = ApplyAfterUnrelatedPackageDocumentationChange(ApprovedRequest(request, preview));
         Evidence["toggle"] = new JObject
         {
             ["request"] = request.DeepClone(),
@@ -246,6 +224,21 @@ public static class ComponentFeatureFixtureProbe
             "toggle undo component residue");
         VerifyBaseline(baselineDigest, baselineMetaDigest, "toggle undo restore");
         Undo.ClearAll();
+    }
+
+    private static JObject ApplyAfterUnrelatedPackageDocumentationChange(JObject request)
+    {
+        var readme = Path.Combine(PackageRoot(), "vrcforge-disposable-fixture-readme.txt");
+        Require(!File.Exists(readme), "temporary package documentation already exists");
+        try
+        {
+            File.WriteAllText(readme, "Unrelated documentation change");
+            return RequireSuccess(ComponentFeatureWriterTool.HandleCommand(request));
+        }
+        finally
+        {
+            File.Delete(readme);
+        }
     }
 
     private static void VerifyDuplicateFeatureFailsClosed(JObject request, string appliedDigest)
@@ -345,9 +338,9 @@ public static class ComponentFeatureFixtureProbe
 
     private static void VerifyMutationFailureSignals()
     {
-        var required = JObject.FromObject(ComponentFeatureWriteCore.BuildMutationFailure(false));
-        Require(!required.Value<bool>("success"), "restore-required success");
-        var requiredData = required["data"] as JObject;
+        var required = (VRCForgeToolResult)ComponentFeatureWriteCore.BuildMutationFailure(false);
+        Require(!required.IsSuccessful, "restore-required success");
+        var requiredData = JObject.FromObject(required.Payload);
         Require(requiredData != null, "restore-required data");
         Require(requiredData.Value<bool>("mutationStarted"), "mutationStarted");
         Require(requiredData.Value<bool>("checkpointRestoreRequired"),
@@ -356,8 +349,9 @@ public static class ComponentFeatureFixtureProbe
         Require(requiredData.Value<string>("operationState") == "checkpoint_restore_required",
             "restore-required operation state");
 
-        var restored = JObject.FromObject(ComponentFeatureWriteCore.BuildMutationFailure(true));
-        var restoredData = restored["data"] as JObject;
+        var restored = (VRCForgeToolResult)ComponentFeatureWriteCore.BuildMutationFailure(true);
+        Require(!restored.IsSuccessful, "restored success");
+        var restoredData = JObject.FromObject(restored.Payload);
         Require(restoredData != null && restoredData.Value<bool>("restored"), "restored flag");
         Require(!restoredData.Value<bool>("checkpointRestoreRequired"),
             "restored checkpointRestoreRequired");
@@ -532,20 +526,15 @@ public static class ComponentFeatureFixtureProbe
 
     private static JObject RequireSuccess(object response)
     {
-        var value = JObject.FromObject(response);
-        Require(
-            value.Value<bool>("success"),
-            "tool returned an error response: " + value.ToString(Newtonsoft.Json.Formatting.None)
-        );
-        var data = value["data"] as JObject;
-        Require(data != null, "success response data");
-        return data;
+        var result = (VRCForgeToolResult)response;
+        Require(result.IsSuccessful, "tool returned an error response: " + result.Message);
+        return JObject.FromObject(result.Payload);
     }
 
     private static void RequireFailure(JObject request, string label)
     {
-        var value = JObject.FromObject(ComponentFeatureWriterTool.HandleCommand(request));
-        Require(!value.Value<bool>("success"), label);
+        var result = (VRCForgeToolResult)ComponentFeatureWriterTool.HandleCommand(request);
+        Require(!result.IsSuccessful, label);
     }
 
     private static GameObject AddChild(GameObject parent, string name)
