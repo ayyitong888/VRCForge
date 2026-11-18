@@ -2984,13 +2984,23 @@ class SkillPackageService:
         self._atomic_write_json(self.registry_path, next_registry)
         expected_enabled = registry_entry["enabled"]
         observed = self._read_registry_document()["skills"].get(skill_id)
-        if observed != registry_entry or observed["enabled"] is not expected_enabled:
+        if (
+            not isinstance(observed, dict)
+            or observed.get("enabled") is not expected_enabled
+            or observed.get("id") != skill_id
+            or observed.get("version") != registry_entry["version"]
+        ):
             raise PackageIntegrityError(f"Skill package registry enablement readback failed: {skill_id}.")
         if has_installed_tree:
             if _is_symlink_like(installed_path):
                 raise PackageIntegrityError(f"Installed skill metadata changed during readback: {skill_id}.")
             metadata = _load_json_bytes(installed_path.read_bytes(), f"{skill_id}/installed.json")
-            if metadata != installed_entry or metadata["enabled"] is not expected_enabled:
+            if (
+                not isinstance(metadata, dict)
+                or metadata.get("enabled") is not expected_enabled
+                or metadata.get("id") != skill_id
+                or metadata.get("version") != registry_entry["version"]
+            ):
                 raise PackageIntegrityError(f"Installed skill metadata enablement readback failed: {skill_id}.")
         return observed
 

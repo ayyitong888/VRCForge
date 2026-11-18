@@ -851,12 +851,13 @@ class SkillPackageProjectionService:
         if len(raw_state) > self._ports.state_max_bytes:
             raise RuntimeError(f"Projected skill enablement readback failed: {target_name}")
         observed = json.loads(raw_state)
-        if observed != {
-            "enabled": bool(enabled),
-            "packageId": package_id,
-            "projectionDigest": projection_digest,
-            "schema": self._ports.state_schema,
-        } or observed["enabled"] is not bool(enabled):
+        if (
+            not isinstance(observed, dict)
+            or observed.get("enabled") is not bool(enabled)
+            or observed.get("packageId") != package_id
+            or observed.get("projectionDigest") != projection_digest
+            or observed.get("schema") != self._ports.state_schema
+        ):
             raise RuntimeError(f"Projected skill enablement readback failed: {target_name}")
         return {
             "ok": True,

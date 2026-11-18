@@ -498,6 +498,57 @@ def test_package_enable_projection_failure_restores_registry_and_projection_stat
     assert _runtime_snapshot(gateway, "projection-toggle-rollback").skill["enabled"] is True
 
 
+@pytest.mark.parametrize("document", ["registry", "installed", "projection"])
+def test_skill_enablement_readback_accepts_unrelated_metadata(tmp_path, monkeypatch, document):
+    skill_id = "community.tests.projection-toggle-extension"
+    skill_name = "projection-toggle-extension"
+    source = _write_package_source(tmp_path, package_id=skill_id, skill_name=skill_name)
+    service = SkillPackageService(tmp_path / "skill-packages", vrcforge_version="0.0.0")
+    package = service.export_dev(source, tmp_path / "toggle.vsk").package_path
+    gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
+    projection = _projection(gateway)
+    controller = _controller(service, projection)
+    imported = controller.import_package({"packagePath": str(package)})
+    skill = Path(imported["projectedSkill"]["path"])
+    path = {
+        "registry": service.registry_path,
+        "installed": service.skill_store / skill_id / "installed.json",
+        "projection": skill.parent / PROJECTED_SKILL_STATE_NAME,
+    }[document]
+
+    def add_metadata():
+        value = json.loads(path.read_bytes())
+        entry = value["skills"][skill_id] if document == "registry" else value
+        entry["label"] = "local display metadata"
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    if document == "projection":
+        write_state = SkillPackageProjectionService._write_state
+
+        def write_state_with_metadata(*args):
+            result = write_state(*args)
+            add_metadata()
+            return result
+
+        monkeypatch.setattr(SkillPackageProjectionService, "_write_state", write_state_with_metadata)
+    else:
+        write_json = service._atomic_write_json
+
+        def write_json_with_metadata(target, value):
+            write_json(target, value)
+            if target == path:
+                add_metadata()
+
+        monkeypatch.setattr(service, "_atomic_write_json", write_json_with_metadata)
+
+    for enabled in (True, False, True):
+        controller.set_enabled({"skillPackageId": skill_id, "enabled": enabled})
+        value = json.loads(path.read_bytes())
+        entry = value["skills"][skill_id] if document == "registry" else value
+        assert entry["enabled"] is enabled
+        assert entry["label"] == "local display metadata"
+
+
 def test_safe_mode_projection_failure_restores_all_registry_and_projection_states(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
