@@ -38,6 +38,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Verified project path from preview; required for apply (allowed for preview receipt binding).", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
             [VRCForgeInput("Verified scene GUID from preview; required for apply.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
             [VRCForgeInput("Verified scene handle from preview; required for apply.", IsRequired = false)] public int? expectedSceneHandle { get; set; }
+            [VRCForgeInput("Scene disk version captured by preview.", IsRequired = false)] public string expectedSceneFileVersion { get; set; }
             [VRCForgeInput("Verified scene file digest from preview; required for apply.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = "";
             [VRCForgeInput("Verified scene file identity from preview; required for apply.", IsRequired = false)] public string expectedSceneFileIdentity { get; set; } = "";
             [VRCForgeInput("Verified scene metadata digest from preview; required for apply.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; } = "";
@@ -105,7 +106,7 @@ namespace VRCForge.Editor
                     throw new ComponentFeatureWriteException("saveScene must be true for component feature apply.");
                 }
 
-                var snapshot = ComponentFeatureWriteCore.BuildPreview(request);
+                var snapshot = ComponentFeatureWriteCore.BuildPreview(request, preview ? null : parameters);
                 if (preview)
                 {
                     return ComponentFeatureWriteCore.Success(
@@ -140,23 +141,16 @@ namespace VRCForge.Editor
                     throw new ComponentFeatureWriteException("The component feature component was not created.");
                 }
                 Undo.RegisterCreatedObjectUndo(created, "Create VRCForge component feature");
-                var inMemoryReadback = ComponentFeatureWriteCore.ReadExactFeature(
-                    created,
-                    snapshot.Request.FeatureKind);
-                ComponentFeatureWriteCore.VerifyReadback(snapshot, created, inMemoryReadback);
-
                 EditorSceneManager.MarkSceneDirty(snapshot.Scene.Scene);
                 if (!EditorSceneManager.SaveScene(snapshot.Scene.Scene))
                 {
                     throw new ComponentFeatureWriteException("The component feature scene could not be saved.");
                 }
-                var after = ComponentFeatureWriteCore.ResolveSavedScene(snapshot.Request.ScenePath);
+                var after = ComponentFeatureWriteCore.ResolveSavedScene(snapshot.Request.ScenePath, priorScene: snapshot.Scene);
                 if (after.Dirty
                     || after.Guid != snapshot.Scene.Guid
                     || after.Handle != snapshot.Scene.Handle
-                    || after.FileDigest == snapshot.Scene.FileDigest
-                    || after.MetaDigest != snapshot.Scene.MetaDigest
-                    || after.MetaIdentity != snapshot.Scene.MetaIdentity)
+                    || after.FileDigest == snapshot.Scene.FileDigest)
                 {
                     throw new ComponentFeatureWriteException("The component feature saved scene evidence is invalid.");
                 }
@@ -263,6 +257,7 @@ namespace VRCForge.Editor
             else
             {
                 allowed.UnionWith(ExpectedKeys);
+                allowed.Add("expectedSceneFileVersion");
             }
             if (parameters.Properties().Any(property => !allowed.Contains(property.Name)))
             {

@@ -75,11 +75,11 @@ public static class SceneObjectCopyFixtureProbe
 
     private static void VerifyStructuredMutationFailureSignals()
     {
-        var restoreRequired = JObject.FromObject(SceneObjectCopyCore.BuildMutationFailure(
+        var restoreRequired = (VRCForgeToolResult)SceneObjectCopyCore.BuildMutationFailure(
             SceneObjectCopyCore.DuplicateOperation,
-            false));
-        Require(!restoreRequired.Value<bool>("success"), "restore-required success flag");
-        var restoreRequiredData = (JObject)restoreRequired["data"];
+            false);
+        Require(!restoreRequired.IsSuccessful, "restore-required success flag");
+        var restoreRequiredData = JObject.FromObject(restoreRequired.Payload);
         Require(restoreRequiredData.Value<bool>("mutationStarted"), "restore-required mutation flag");
         Require(!restoreRequiredData.Value<bool>("restored"), "restore-required restored flag");
         Require(!restoreRequiredData.Value<bool>("cleanupVerified"), "restore-required cleanup proof");
@@ -91,11 +91,11 @@ public static class SceneObjectCopyFixtureProbe
             restoreRequiredData.Value<string>("operationState") == "checkpoint_restore_required",
             "restore-required operation state");
 
-        var restored = JObject.FromObject(SceneObjectCopyCore.BuildMutationFailure(
+        var restored = (VRCForgeToolResult)SceneObjectCopyCore.BuildMutationFailure(
             SceneObjectCopyCore.PrefabOperation,
-            true));
-        Require(!restored.Value<bool>("success"), "restored success flag");
-        var restoredData = (JObject)restored["data"];
+            true);
+        Require(!restored.IsSuccessful, "restored success flag");
+        var restoredData = JObject.FromObject(restored.Payload);
         Require(restoredData.Value<bool>("mutationStarted"), "restored mutation flag");
         Require(restoredData.Value<bool>("restored"), "restored state flag");
         Require(restoredData.Value<bool>("cleanupVerified"), "restored cleanup proof");
@@ -103,11 +103,11 @@ public static class SceneObjectCopyFixtureProbe
         Require(!restoredData.Value<bool>("checkpointRestoreRequired"), "restored checkpoint flag");
         Require(restoredData.Value<string>("operationState") == "restored", "restored operation state");
 
-        var preMutation = JObject.FromObject(SceneObjectCopyCore.Failure(
-            new SceneObjectCopyException("pre-mutation rejection")));
-        var preMutationData = preMutation["data"] as JObject;
+        var preMutation = (VRCForgeToolResult)SceneObjectCopyCore.Failure(
+            new SceneObjectCopyException("pre-mutation rejection"));
+        var preMutationData = JObject.FromObject(preMutation.Payload);
         Require(
-            preMutationData == null || preMutationData["mutationStarted"] == null,
+            !preMutation.IsSuccessful && preMutationData.Value<bool?>("mutationStarted") == false,
             "pre-mutation failure claimed a mutation");
     }
 
@@ -301,6 +301,7 @@ public static class SceneObjectCopyFixtureProbe
             ["expectedTargetSceneHandle"] = target.Value<int>("sceneHandle"),
             ["expectedTargetParentObjectId"] = target.Value<string>("parentObjectId"),
             ["expectedTargetParentHierarchyDigest"] = target.Value<string>("parentHierarchyDigest"),
+            ["expectedTargetSceneFileVersion"] = target.Value<string>("sceneFileVersion"),
             ["expectedTargetSceneFileDigest"] = target.Value<string>("sceneFileDigest"),
             ["expectedTargetSceneFileIdentity"] = target.Value<string>("sceneFileIdentity"),
             ["expectedTargetSceneMetaDigest"] = target.Value<string>("sceneMetaDigest"),
@@ -377,6 +378,7 @@ public static class SceneObjectCopyFixtureProbe
             ["expectedTargetSceneHandle"] = target.Value<int>("sceneHandle"),
             ["expectedTargetParentObjectId"] = target.Value<string>("parentObjectId"),
             ["expectedTargetParentHierarchyDigest"] = target.Value<string>("parentHierarchyDigest"),
+            ["expectedTargetSceneFileVersion"] = target.Value<string>("sceneFileVersion"),
             ["expectedTargetSceneFileDigest"] = target.Value<string>("sceneFileDigest"),
             ["expectedTargetSceneFileIdentity"] = target.Value<string>("sceneFileIdentity"),
             ["expectedTargetSceneMetaDigest"] = target.Value<string>("sceneMetaDigest"),

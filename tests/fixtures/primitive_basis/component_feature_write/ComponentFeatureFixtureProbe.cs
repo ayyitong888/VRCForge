@@ -39,6 +39,7 @@ public static class ComponentFeatureFixtureProbe
             VerifyPreviewZeroWrite(baselineDigest, baselineMetaDigest);
             VerifyStaleExpectedBeforeFailsClosed(baselineDigest, baselineMetaDigest);
             VerifyPartialFailureRestore(baselineDigest, baselineMetaDigest);
+            VerifyChangedBytesWithRestoredTimestampReject(baselineDigest, baselineMetaDigest);
             RunToggleLifecycle(baselineDigest, baselineMetaDigest);
             RunArmatureLinkLifecycle(baselineDigest, baselineMetaDigest);
 
@@ -193,10 +194,38 @@ public static class ComponentFeatureFixtureProbe
         VerifyBaseline(baselineDigest, baselineMetaDigest, "stale restore");
     }
 
+    private static void VerifyChangedBytesWithRestoredTimestampReject(string baselineDigest, string baselineMetaDigest)
+    {
+        var request = ToggleRequest(true);
+        var preview = RequireSuccess(ComponentFeatureWriterTool.HandleCommand(request));
+        var path = AbsoluteAssetPath(ScenePath);
+        var original = File.ReadAllBytes(path);
+        var timestamp = File.GetLastWriteTimeUtc(path);
+        var updated = (byte[])original.Clone();
+        updated[updated.Length - 1] ^= 1;
+        try
+        {
+            File.WriteAllBytes(path, updated);
+            File.SetLastWriteTimeUtc(path, timestamp);
+            var result = (VRCForgeToolResult)ComponentFeatureWriterTool.HandleCommand(ApprovedRequest(request, preview));
+            Require(!result.IsSuccessful && result.Message == "该文件在预览后被修改",
+                "content drift with restored mtime was not rejected as scene modification");
+            Require(File.ReadAllBytes(path).SequenceEqual(updated), "rejected write replaced the modified scene");
+        }
+        finally
+        {
+            File.WriteAllBytes(path, original);
+            File.SetLastWriteTimeUtc(path, timestamp);
+        }
+        VerifyBaseline(baselineDigest, baselineMetaDigest, "content drift read-only");
+    }
+
     private static void RunToggleLifecycle(string baselineDigest, string baselineMetaDigest)
     {
         var request = ToggleRequest(true);
         var preview = RequireSuccess(ComponentFeatureWriterTool.HandleCommand(request));
+        var path = AbsoluteAssetPath(ScenePath);
+        File.SetLastWriteTimeUtc(path, File.GetLastWriteTimeUtc(path).AddSeconds(-5));
         var apply = ApplyAfterUnrelatedPackageDocumentationChange(ApprovedRequest(request, preview));
         Evidence["toggle"] = new JObject
         {
@@ -425,6 +454,7 @@ public static class ComponentFeatureFixtureProbe
         approved["expectedProjectPath"] = preview["projectPath"];
         approved["expectedSceneGuid"] = scene["guid"];
         approved["expectedSceneHandle"] = scene["handle"];
+        approved["expectedSceneFileVersion"] = scene["fileVersion"];
         approved["expectedSceneFileDigest"] = scene["fileDigestBefore"];
         approved["expectedSceneFileIdentity"] = scene["fileIdentity"];
         approved["expectedSceneMetaDigest"] = scene["metaDigestBefore"];

@@ -308,6 +308,15 @@ def test_assembly_or_method_signature_drift_fails_closed(key: str, value: object
         bind_authoritative_preview(wrapper(request), payload)
 
 
+def test_approval_forwards_scene_file_version_from_preview() -> None:
+    request = toggle_request()
+    preview = preview_payload(request)
+    preview["scene"]["fileVersion"] = "123:456:789:42"
+    preview["previewDigest"] = compute_preview_digest(preview)
+    arguments, _ = bind_authoritative_preview(wrapper(request), preview)
+    assert arguments["arguments"]["expectedSceneFileVersion"] == "123:456:789:42"
+
+
 def test_package_release_evidence_is_committed_but_not_version_pinned() -> None:
     key, value = "packageVersion", "1.2000.0"
     request = toggle_request()

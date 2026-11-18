@@ -184,6 +184,7 @@ def compute_preview_digest(payload: dict[str, Any]) -> str:
                 target.get("parentPath"),
                 target.get("parentObjectId"),
                 target.get("parentHierarchyDigest"),
+                *([target["sceneFileVersion"]] if target.get("sceneFileVersion") else []),
                 target.get("sceneFileDigest"),
                 target.get("sceneFileIdentity"),
                 target.get("sceneMetaDigest"),
@@ -288,6 +289,8 @@ def _bind_duplicate(
         "expectedDestinationPath": target["objectPath"],
         "expectedPreviewDigest": preview_digest,
     }
+    if target.get("sceneFileVersion"):
+        canonical_arguments["expectedTargetSceneFileVersion"] = target["sceneFileVersion"]
     canonical = _canonical_wrapper(wrapper, DUPLICATE_TOOL_NAME, canonical_arguments)
     approval = {
         "schema": APPROVAL_SCHEMA,
@@ -395,7 +398,7 @@ def _canonical_duplicate_target(value: Any) -> dict[str, Any]:
     ):
         if target.get(key) is not expected:
             raise SceneObjectCopyError(f"Duplicate target {key} is invalid.")
-    return {
+    normalized = {
         "scenePath": _scene_asset_path(target.get("scenePath"), label="target.scenePath"),
         "sceneGuid": _nonzero_hex(
             target.get("sceneGuid"),
@@ -441,6 +444,11 @@ def _canonical_duplicate_target(value: Any) -> dict[str, Any]:
         "sameDestination": False,
         "targetWithinSource": False,
     }
+    if target.get("sceneFileVersion"):
+        normalized["sceneFileVersion"] = _bounded_text(
+            target["sceneFileVersion"], label="sceneFileVersion", max_length=100
+        )
+    return normalized
 
 
 def _canonical_prefab_target(value: Any) -> dict[str, Any]:

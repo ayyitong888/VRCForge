@@ -42,6 +42,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected saved scene path.", IsRequired = false)] public string expectedScenePath { get; set; } = "";
             [VRCForgeInput("Expected scene GUID.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
             [VRCForgeInput("Expected scene handle.", IsRequired = false)] public int? expectedSceneHandle { get; set; }
+            [VRCForgeInput("Scene disk version captured by preview.", IsRequired = false)] public string expectedSceneFileVersion { get; set; }
             [VRCForgeInput("Expected scene file digest.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = "";
             [VRCForgeInput("Expected scene file identity.", IsRequired = false)] public string expectedSceneFileIdentity { get; set; } = "";
             [VRCForgeInput("Expected scene meta digest.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; } = "";
@@ -81,6 +82,7 @@ namespace VRCForge.Editor
                 "expectedScenePath",
                 "expectedSceneGuid",
                 "expectedSceneHandle",
+                "expectedSceneFileVersion",
                 "expectedSceneFileDigest",
                 "expectedSceneFileIdentity",
                 "expectedSceneMetaDigest",
@@ -129,7 +131,9 @@ namespace VRCForge.Editor
                     gameObjectPath,
                     constraintKind,
                     componentIndex,
-                    sources
+                    sources,
+                    captureVersion: true,
+                    approval: preview ? null : parameters
                 );
                 if (preview)
                 {
@@ -177,12 +181,11 @@ namespace VRCForge.Editor
                     snapshot.GameObjectPath,
                     snapshot.ConstraintKind,
                     snapshot.ComponentIndex,
-                    requestedSources
+                    requestedSources,
+                    priorScene: snapshot.Scene
                 );
                 if (readback.Scene.Guid != snapshot.Scene.Guid
                     || readback.Scene.Handle != snapshot.Scene.Handle
-                    || readback.Scene.MetaDigest != snapshot.Scene.MetaDigest
-                    || readback.Scene.MetaIdentity != snapshot.Scene.MetaIdentity
                     || readback.ComponentId != snapshot.ComponentId
                     || readback.ComponentGlobalId != snapshot.ComponentGlobalId
                     || readback.BeforeSourcesDigest != snapshot.TargetSourcesDigest
@@ -273,9 +276,16 @@ namespace VRCForge.Editor
             string gameObjectPath,
             string constraintKind,
             int componentIndex,
-            JArray requestedSources)
+            JArray requestedSources,
+            bool captureVersion = false,
+            JObject approval = null,
+            SavedSceneSnapshot priorScene = null)
         {
-            var scene = SceneObjectCopyCore.ResolveSavedScene(scenePath, "constraint scene");
+            var scene = captureVersion
+                ? SceneObjectCopyCore.ResolveSceneForWrite(scenePath, "constraint scene", approval)
+                : priorScene == null
+                    ? SceneObjectCopyCore.ResolveSavedScene(scenePath, "constraint scene")
+                    : SceneObjectCopyCore.ReadSavedScene(priorScene, "constraint scene");
             var normalizedHostPath = NormalizeHierarchyPath(gameObjectPath, "gameObjectPath");
             var host = SceneObjectCopyCore.ResolveUniqueGameObject(
                 scene.Scene,
@@ -397,6 +407,7 @@ namespace VRCForge.Editor
                     scenePath = before.Scene.Path,
                     sceneGuid = before.Scene.Guid,
                     sceneHandle = before.Scene.Handle,
+                    sceneFileVersion = before.Scene.FileVersion,
                     sceneFileDigestBefore = before.Scene.FileDigest,
                     sceneFileDigestAfter = after.Scene.FileDigest,
                     sceneFileIdentity = before.Scene.FileIdentity,

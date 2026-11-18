@@ -495,7 +495,7 @@ def test_disposable_fixture_covers_atomic_snapshot_and_structured_failures() -> 
 def test_same_scene_copy_reuses_scene_evidence_in_preview_and_readback() -> None:
     core = Path("Assets/VRCForge/Editor/SceneObjectCopyCore.cs").read_text(encoding="utf-8")
     duplicate = Path("Assets/VRCForge/Editor/DuplicateSceneObjectTool.cs").read_text(encoding="utf-8")
-    assert "? sourceSnapshot.Scene\n                : ResolveSavedScene" in core
+    assert "? targetScene\n                : ResolveDuplicateSourceScene" in core
     assert "sameScene ? readback.Scene : null" in duplicate
 
 

@@ -17,6 +17,7 @@ namespace VRCForge.Editor
 {
     internal static class SceneObjectCopyCore
     {
+        internal const string SceneChangedAfterPreview = "该文件在预览后被修改";
         internal const string ResultSchema = "vrcforge.scene_object_copy.v1";
         internal const string ApprovalSchema = "vrcforge.scene_object_copy_approval.v1";
         internal const string DuplicateOperation = "duplicate_scene_object";
@@ -81,13 +82,15 @@ namespace VRCForge.Editor
             string targetScenePath,
             string targetParentPath,
             string targetName,
-            bool preserveWorldTransform)
+            bool preserveWorldTransform,
+            JObject approval = null)
         {
-            var sourceSnapshot = BuildSourceSnapshot(sourceScenePath, sourceObjectPath);
-            var normalizedTargetScenePath = NormalizeSceneAssetPath(targetScenePath, "target scene");
-            var targetScene = sourceSnapshot.Scene.Path == normalizedTargetScenePath
-                ? sourceSnapshot.Scene
-                : ResolveSavedScene(normalizedTargetScenePath, "target scene");
+            var normalizedSourceScenePath = NormalizeSceneAssetPath(sourceScenePath, "source scene");
+            var targetScene = ResolveSceneForWrite(targetScenePath, "target scene", approval, "expectedTargetScene");
+            var sourceScene = targetScene.Path == normalizedSourceScenePath
+                ? targetScene
+                : ResolveDuplicateSourceScene(normalizedSourceScenePath, approval);
+            var sourceSnapshot = BuildSourceSnapshot(sourceScene, sourceObjectPath);
             var targetParent = ResolveUniqueGameObject(targetScene.Scene, targetParentPath, "target parent");
             var source = sourceSnapshot.GameObject;
             var normalizedName = NormalizeObjectName(targetName, "targetName");
@@ -133,6 +136,19 @@ namespace VRCForge.Editor
             };
             snapshot.PreviewDigest = ComputePreviewDigest(snapshot);
             return snapshot;
+        }
+
+        private static SavedSceneSnapshot ResolveDuplicateSourceScene(string path, JObject approval)
+        {
+            if (approval == null)
+                return ResolveSavedScene(path, "source scene");
+
+            var source = ResolveLoadedSceneIdentity(path, "source scene");
+            source.FileDigest = approval.Value<string>("expectedSourceSceneFileDigest");
+            source.FileIdentity = approval.Value<string>("expectedSourceSceneFileIdentity");
+            source.MetaDigest = approval.Value<string>("expectedSourceSceneMetaDigest");
+            source.MetaIdentity = approval.Value<string>("expectedSourceSceneMetaIdentity");
+            return source;
         }
 
         internal static PrefabPreviewSnapshot BuildPrefabPreview(
@@ -261,7 +277,10 @@ namespace VRCForge.Editor
             bool requireSceneFileUnchanged,
             SavedSceneSnapshot scene = null)
         {
-            var after = BuildSourceSnapshot(scene ?? ResolveSavedScene(before.Scene.Path, "source scene"), before.ObjectPath);
+            var current = scene ?? (requireSceneFileUnchanged
+                ? ResolveSavedScene(before.Scene.Path, "source scene")
+                : ResolveLoadedSceneIdentity(before.Scene.Path, "source scene"));
+            var after = BuildSourceSnapshot(current, before.ObjectPath);
             if (after.Scene.Guid != before.Scene.Guid
                 || after.Scene.Handle != before.Scene.Handle
                 || after.ObjectId != before.ObjectId
@@ -283,7 +302,7 @@ namespace VRCForge.Editor
             return BuildSourceSnapshot(ResolveSavedScene(scenePath, "source scene"), objectPath);
         }
 
-        private static SourceObjectSnapshot BuildSourceSnapshot(SavedSceneSnapshot scene, string objectPath)
+        internal static SourceObjectSnapshot BuildSourceSnapshot(SavedSceneSnapshot scene, string objectPath)
         {
             var normalizedPath = NormalizeHierarchyPath(objectPath, "sourceObjectPath");
             var source = ResolveUniqueGameObject(scene.Scene, normalizedPath, "source object");
@@ -297,9 +316,41 @@ namespace VRCForge.Editor
             };
         }
 
+        internal static SavedSceneSnapshot ResolveSceneForWrite(
+            string rawPath, string label, JObject approval, string expectedPrefix = "expectedScene")
+        {
+            var version = approval?[expectedPrefix + "FileVersion"]?.Value<string>();
+            return ResolveSavedScene(rawPath, label, false, true, true, version,
+                approval?[expectedPrefix + "FileDigest"]?.Value<string>(),
+                string.IsNullOrEmpty(version) ? null : SceneMetadataFromApproval(approval, expectedPrefix));
+        }
+
         internal static SavedSceneSnapshot ResolveSavedScene(string rawPath, string label)
         {
             return ResolveSavedScene(rawPath, label, false, true);
+        }
+
+        internal static SavedSceneSnapshot ReadSavedScene(SavedSceneSnapshot before, string label)
+        {
+            return ResolveSavedScene(before.Path, label, false, true,
+                approvedMetadata: SceneMetadata(before.Guid, before.MetaDigest, before.MetaIdentity));
+        }
+
+        internal static StableAssetEvidence SceneMetadataFromApproval(JObject approval, string prefix = "expectedScene")
+        {
+            return SceneMetadata(approval?[prefix + "Guid"]?.Value<string>(),
+                approval?[prefix + "MetaDigest"]?.Value<string>(), approval?[prefix + "MetaIdentity"]?.Value<string>());
+        }
+
+        internal static StableAssetEvidence SceneMetadata(string guid, string digest, string identity)
+        {
+            if (string.IsNullOrEmpty(guid) || string.IsNullOrEmpty(digest) || string.IsNullOrEmpty(identity))
+                return null;
+            return new StableAssetEvidence
+            {
+                Guid = guid,
+                Meta = new StableFileEvidence { Digest = digest, Identity = identity }
+            };
         }
 
         internal static SavedSceneSnapshot ResolveSavedSceneOwner(string rawPath, string label)
@@ -319,17 +370,25 @@ namespace VRCForge.Editor
             return ResolveSavedScene(gameObject.scene.path, "prefab unpack target scene", true, true);
         }
 
-        private static SavedSceneSnapshot ResolveSavedScene(string rawPath, string label, bool allowDirtyScene, bool includeContentDigests)
+        private static SavedSceneSnapshot ResolveSavedScene(
+            string rawPath, string label, bool allowDirtyScene, bool includeContentDigests,
+            bool captureFileVersion = false, string expectedFileVersion = null, string expectedFileDigest = null,
+            StableAssetEvidence approvedMetadata = null)
         {
             var path = NormalizeSceneAssetPath(rawPath, label);
-            var sceneMatch = ResolveLoadedSavedScene(path, allowDirtyScene);
-            var evidence = ReadStableAssetEvidence(path, label, includeContentDigests: includeContentDigests);
+            var sceneMatch = ResolveLoadedSavedScene(path, allowDirtyScene || !string.IsNullOrEmpty(expectedFileDigest));
+            if (!allowDirtyScene && sceneMatch.isDirty)
+                throw new SceneObjectCopyException(SceneChangedAfterPreview);
+            var evidence = ReadStableAssetEvidence(path, label, includeContentDigests: includeContentDigests,
+                captureFileVersion: captureFileVersion, expectedFileVersion: expectedFileVersion, expectedFileDigest: expectedFileDigest,
+                approvedMetadata: approvedMetadata);
             return new SavedSceneSnapshot
             {
                 Scene = sceneMatch,
                 Path = path,
                 Guid = evidence.Guid,
                 Handle = sceneMatch.handle,
+                FileVersion = evidence.FileVersion,
                 FileDigest = evidence.File.Digest,
                 FileIdentity = evidence.File.Identity,
                 MetaDigest = evidence.Meta.Digest,
@@ -423,7 +482,11 @@ namespace VRCForge.Editor
             Action<string, string> whileHandlesHeldProbe = null,
             bool includeContentDigests = true,
             int? maxFileBytes = null,
-            Action<byte[]> captureFileBytes = null)
+            Action<byte[]> captureFileBytes = null,
+            bool captureFileVersion = false,
+            string expectedFileVersion = null,
+            string expectedFileDigest = null,
+            StableAssetEvidence approvedMetadata = null)
         {
             var absolutePath = ToAbsoluteAssetPath(assetPath);
             var metaPath = absolutePath + ".meta";
@@ -439,7 +502,7 @@ namespace VRCForge.Editor
                     FileMode.Open,
                     FileAccess.Read,
                     FileShare.Read))
-                using (var metaStream = new FileStream(
+                using (var metaStream = approvedMetadata != null ? null : new FileStream(
                     metaPath,
                     FileMode.Open,
                     FileAccess.Read,
@@ -450,39 +513,51 @@ namespace VRCForge.Editor
                     var fileBefore = ReadFileHandleEvidence(fileStream, absolutePath, label);
                     if (maxFileBytes.HasValue && fileBefore.Length > (ulong)maxFileBytes.Value)
                         throw new SceneObjectCopyException(label + " exceeds the remaining batch size.");
-                    var metaBefore = ReadFileHandleEvidence(metaStream, metaPath, label + " metadata");
+                    var metaBefore = metaStream == null ? null : ReadFileHandleEvidence(metaStream, metaPath, label + " metadata");
                     whileHandlesHeldProbe?.Invoke(absolutePath, metaPath);
 
+                    var fileVersion = captureFileVersion ? PreviewAssetFileVersion.Read(fileStream) : string.Empty;
+                    var versionMatches = !string.IsNullOrEmpty(expectedFileDigest)
+                        && !string.IsNullOrEmpty(fileVersion) && fileVersion == expectedFileVersion;
                     fileStream.Position = 0;
                     string fileDigest = string.Empty;
                     var fileBytes = captureFileBytes == null ? null : ReadBoundedStream(fileStream, maxFileBytes.Value, label);
-                    if (includeContentDigests)
+                    if (versionMatches)
+                        fileDigest = expectedFileDigest;
+                    else if (includeContentDigests)
                     {
                         using (var sha256 = SHA256.Create())
                             fileDigest = Hex(fileBytes == null ? sha256.ComputeHash(fileStream) : sha256.ComputeHash(fileBytes));
                     }
-                    metaStream.Position = 0;
-                    var metaBytes = ReadBoundedStream(metaStream, 1024 * 1024, label + " metadata");
-                    string metaDigest = string.Empty;
-                    if (includeContentDigests)
-                    {
-                        using (var sha256 = SHA256.Create())
-                            metaDigest = Hex(sha256.ComputeHash(metaBytes));
-                    }
-                    var metaText = Encoding.UTF8.GetString(metaBytes);
-                    var metaGuid = ParseMetaGuid(metaText, label);
-                    var databaseGuid = ReadAssetGuid(assetPath, label);
-                    if (metaGuid != databaseGuid)
-                    {
-                        throw new SceneObjectCopyException("A required project asset GUID is inconsistent.");
-                    }
+                    if (!string.IsNullOrEmpty(expectedFileDigest) && fileDigest != expectedFileDigest)
+                        throw new SceneObjectCopyException(SceneChangedAfterPreview);
 
-                    var fileAfter = ReadFileHandleEvidence(fileStream, absolutePath, label);
-                    var metaAfter = ReadFileHandleEvidence(metaStream, metaPath, label + " metadata");
+                    var databaseGuid = ReadAssetGuid(assetPath, label);
+                    string metaDigest = string.Empty;
+                    string metaGuid;
+                    if (metaStream == null)
+                    {
+                        metaGuid = approvedMetadata.Guid;
+                    }
+                    else
+                    {
+                        var metaBytes = ReadBoundedStream(metaStream, 1024 * 1024, label + " metadata");
+                        if (includeContentDigests)
+                        {
+                            using (var sha256 = SHA256.Create())
+                                metaDigest = Hex(sha256.ComputeHash(metaBytes));
+                        }
+                        metaGuid = ParseMetaGuid(Encoding.UTF8.GetString(metaBytes), label);
+                    }
+                    if (metaGuid != databaseGuid)
+                        throw new SceneObjectCopyException("A required project asset GUID is inconsistent.");
+
+                    var fileAfter = captureFileVersion ? fileBefore : ReadFileHandleEvidence(fileStream, absolutePath, label);
+                    var metaAfter = metaStream == null ? null : ReadFileHandleEvidence(metaStream, metaPath, label + " metadata");
                     RejectProjectPathReparsePoints(absolutePath);
                     RejectProjectPathReparsePoints(metaPath);
                     if (!FileHandleEvidenceMatches(fileBefore, fileAfter)
-                        || !FileHandleEvidenceMatches(metaBefore, metaAfter))
+                        || (metaStream != null && !FileHandleEvidenceMatches(metaBefore, metaAfter)))
                     {
                         throw new SceneObjectCopyException(
                             "A required project asset changed while its evidence was read.");
@@ -490,9 +565,10 @@ namespace VRCForge.Editor
                     captureFileBytes?.Invoke(fileBytes);
                     return new StableAssetEvidence
                     {
+                        FileVersion = expectedFileVersion ?? fileVersion,
                         Guid = databaseGuid,
                         File = BuildStableFileEvidence(fileAfter, fileDigest),
-                        Meta = BuildStableFileEvidence(metaAfter, metaDigest)
+                        Meta = approvedMetadata?.Meta ?? BuildStableFileEvidence(metaAfter, metaDigest)
                     };
                 }
             }
@@ -933,6 +1009,8 @@ namespace VRCForge.Editor
             AppendDigestField(value, snapshot.Target.ParentPath);
             AppendDigestField(value, snapshot.Target.ParentObjectId);
             AppendDigestField(value, snapshot.Target.ParentHierarchyDigest);
+            if (!string.IsNullOrEmpty(snapshot.Target.Scene.FileVersion))
+                AppendDigestField(value, snapshot.Target.Scene.FileVersion);
             AppendDigestField(value, snapshot.Target.Scene.FileDigest);
             AppendDigestField(value, snapshot.Target.Scene.FileIdentity);
             AppendDigestField(value, snapshot.Target.Scene.MetaDigest);
@@ -1478,6 +1556,7 @@ namespace VRCForge.Editor
 
     internal sealed class SavedSceneSnapshot
     {
+        internal string FileVersion = string.Empty;
         internal Scene Scene;
         internal string Path = string.Empty;
         internal string Guid = string.Empty;
@@ -1538,6 +1617,7 @@ namespace VRCForge.Editor
                 parentPath = ParentPath,
                 parentObjectId = ParentObjectId,
                 parentHierarchyDigest = ParentHierarchyDigest,
+                sceneFileVersion = Scene.FileVersion,
                 sceneFileDigest = Scene.FileDigest,
                 sceneFileIdentity = Scene.FileIdentity,
                 sceneMetaDigest = Scene.MetaDigest,
@@ -1671,6 +1751,7 @@ namespace VRCForge.Editor
 
     internal sealed class StableAssetEvidence
     {
+        internal string FileVersion;
         internal string Guid = string.Empty;
         internal StableFileEvidence File;
         internal StableFileEvidence Meta;

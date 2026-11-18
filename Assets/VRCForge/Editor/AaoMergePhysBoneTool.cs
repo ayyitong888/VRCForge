@@ -63,6 +63,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Verified project path from preview; required for apply.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
             [VRCForgeInput("Verified scene GUID from preview; required for apply.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
             [VRCForgeInput("Verified scene handle from preview; required for apply.", IsRequired = false)] public int? expectedSceneHandle { get; set; }
+            [VRCForgeInput("Scene disk version captured by preview.", IsRequired = false)] public string expectedSceneFileVersion { get; set; }
             [VRCForgeInput("Verified scene file digest from preview; required for apply.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = "";
             [VRCForgeInput("Verified scene file identity from preview; required for apply.", IsRequired = false)] public string expectedSceneFileIdentity { get; set; } = "";
             [VRCForgeInput("Verified scene metadata digest from preview; required for apply.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; } = "";
@@ -91,7 +92,7 @@ namespace VRCForge.Editor
                 }
                 ValidateKeys(parameters, preview);
                 var request = ParseRequest(parameters);
-                var snapshot = BuildPreview(request);
+                var snapshot = BuildPreview(request, preview ? null : parameters);
                 if (preview)
                 {
                     return Success(snapshot.PreviewPayload);
@@ -132,10 +133,10 @@ namespace VRCForge.Editor
             };
         }
 
-        private static MergeSnapshot BuildPreview(MergeRequest request)
+        private static MergeSnapshot BuildPreview(MergeRequest request, JObject approval)
         {
             var compatibility = ValidateCompatibility();
-            var scene = ComponentFeatureWriteCore.ResolveSavedScene(request.ScenePath);
+            var scene = ComponentFeatureWriteCore.ResolveSavedScene(request.ScenePath, captureVersion: true, approval: approval);
             if (scene.Dirty)
             {
                 throw new InvalidOperationException("AAO Merge PhysBone requires a clean saved scene.");
@@ -211,13 +212,11 @@ namespace VRCForge.Editor
                 {
                     throw new InvalidOperationException("AAO Merge PhysBone scene save failed.");
                 }
-                var after = ComponentFeatureWriteCore.ResolveSavedScene(snapshot.Request.ScenePath);
+                var after = ComponentFeatureWriteCore.ResolveSavedScene(snapshot.Request.ScenePath, priorScene: snapshot.Scene);
                 if (after.Dirty
                     || after.Guid != snapshot.Scene.Guid
                     || after.Handle != snapshot.Scene.Handle
-                    || after.FileDigest == snapshot.Scene.FileDigest
-                    || after.MetaDigest != snapshot.Scene.MetaDigest
-                    || after.MetaIdentity != snapshot.Scene.MetaIdentity)
+                    || after.FileDigest == snapshot.Scene.FileDigest)
                 {
                     throw new InvalidOperationException("AAO Merge PhysBone saved scene evidence is invalid.");
                 }
@@ -435,6 +434,7 @@ namespace VRCForge.Editor
             else
             {
                 allowed.UnionWith(ExpectedKeys);
+                allowed.Add("expectedSceneFileVersion");
             }
             if (parameters.Properties().Any(property => !allowed.Contains(property.Name)))
             {

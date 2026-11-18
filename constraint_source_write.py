@@ -292,6 +292,10 @@ def bind_authoritative_preview(
             "expectedTargetSourcesDigest": target_digest,
         }
     )
+    if result.get("sceneFileVersion"):
+        canonical_nested["expectedSceneFileVersion"] = _bounded_text(
+            result["sceneFileVersion"], label="sceneFileVersion", max_length=100
+        )
     canonical_wrapper = deepcopy(wrapper_arguments)
     canonical_wrapper.pop("params", None)
     canonical_wrapper.pop("tool_name", None)

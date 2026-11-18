@@ -72,6 +72,7 @@ namespace VRCForge.Editor
         internal string Path = string.Empty;
         internal string Guid = string.Empty;
         internal int Handle;
+        internal string FileVersion = string.Empty;
         internal string FileDigest = string.Empty;
         internal string FileIdentity = string.Empty;
         internal string MetaDigest = string.Empty;
@@ -80,7 +81,7 @@ namespace VRCForge.Editor
 
         internal JObject ToPreviewPayload(ComponentFeatureSceneEvidence after)
         {
-            return new JObject
+            var scene = new JObject
             {
                 ["path"] = Path,
                 ["guid"] = Guid,
@@ -94,6 +95,9 @@ namespace VRCForge.Editor
                 ["dirtyBefore"] = Dirty,
                 ["dirtyAfter"] = after.Dirty
             };
+            if (!string.IsNullOrEmpty(FileVersion))
+                scene["fileVersion"] = FileVersion;
+            return scene;
         }
     }
 
@@ -399,14 +403,14 @@ namespace VRCForge.Editor
                 typeof(string));
         }
 
-        internal static ComponentFeaturePreviewSnapshot BuildPreview(ComponentFeatureRequest request)
+        internal static ComponentFeaturePreviewSnapshot BuildPreview(ComponentFeatureRequest request, JObject approval = null)
         {
             if (request == null)
             {
                 throw new ComponentFeatureWriteException("Component feature request is unavailable.");
             }
             var compatibility = ValidateCompatibility();
-            var scene = ResolveSavedScene(request.ScenePath);
+            var scene = ResolveSavedScene(request.ScenePath, captureVersion: true, approval: approval);
             if (scene.Dirty)
             {
                 throw new ComponentFeatureWriteException("Component feature writes require a clean saved scene.");
@@ -461,14 +465,7 @@ namespace VRCForge.Editor
                 BeforeDigest = ComputeFeatureDigest(before),
                 TargetDigest = targetDigest
             };
-            var after = ResolveSavedScene(request.ScenePath);
-            if (!SceneEvidenceMatches(scene, after)
-                || after.Dirty
-                || GetRootComponents(host, compatibility.RootComponentType).Count != rootComponents.Count)
-            {
-                throw new ComponentFeatureWriteException("Component feature preview changed project state.");
-            }
-            var payload = snapshot.ToPayload(after);
+            var payload = snapshot.ToPayload(scene);
             snapshot.PreviewDigest = payload.Value<string>("previewDigest") ?? string.Empty;
             return snapshot;
         }
@@ -665,7 +662,8 @@ namespace VRCForge.Editor
             };
         }
 
-        internal static ComponentFeatureSceneEvidence ResolveSavedScene(string assetPath)
+        internal static ComponentFeatureSceneEvidence ResolveSavedScene(
+            string assetPath, bool captureVersion = false, JObject approval = null, ComponentFeatureSceneEvidence priorScene = null)
         {
             var normalized = NormalizeScenePath(assetPath);
             var matches = Enumerable.Range(0, SceneManager.sceneCount)
@@ -682,30 +680,30 @@ namespace VRCForge.Editor
                 throw new ComponentFeatureWriteException("The selected saved scene is not loaded exactly once.");
             }
             var scene = matches[0];
-            var guid = (AssetDatabase.AssetPathToGUID(normalized, AssetPathToGUIDOptions.OnlyExistingAssets)
-                ?? string.Empty).Trim().ToLowerInvariant();
-            if (guid.Length != 32 || guid.Any(character => !Uri.IsHexDigit(character)))
-            {
-                throw new ComponentFeatureWriteException("The selected scene GUID is unavailable.");
-            }
+            if (approval != null && scene.isDirty)
+                throw new ComponentFeatureWriteException(SceneObjectCopyCore.SceneChangedAfterPreview);
             StableAssetEvidence stable;
             try
             {
                 stable = SceneObjectCopyCore.ReadStableAssetEvidence(
                     normalized,
-                    "component feature scene");
+                    "component feature scene",
+                    captureFileVersion: captureVersion,
+                    expectedFileVersion: approval?["expectedSceneFileVersion"]?.Value<string>(),
+                    expectedFileDigest: approval?["expectedSceneFileDigest"]?.Value<string>(),
+                    approvedMetadata: priorScene == null
+                        ? SceneObjectCopyCore.SceneMetadataFromApproval(approval)
+                        : SceneObjectCopyCore.SceneMetadata(priorScene.Guid, priorScene.MetaDigest, priorScene.MetaIdentity));
             }
-            catch (SceneObjectCopyException)
+            catch (SceneObjectCopyException exception)
             {
-                throw new ComponentFeatureWriteException(
-                    "The selected scene could not be bound to stable file evidence.");
+                throw new ComponentFeatureWriteException(exception.Message);
             }
             if (stable == null
                 || stable.File == null
                 || stable.Meta == null
-                || stable.Guid != guid
                 || stable.File.LinkCount != 1
-                || stable.Meta.LinkCount != 1)
+                || (approval == null && priorScene == null && stable.Meta.LinkCount != 1))
             {
                 throw new ComponentFeatureWriteException(
                     "The selected scene stable file evidence is invalid.");
@@ -714,8 +712,9 @@ namespace VRCForge.Editor
             {
                 Scene = scene,
                 Path = normalized,
-                Guid = guid,
+                Guid = stable.Guid,
                 Handle = scene.handle,
+                FileVersion = stable.FileVersion,
                 FileDigest = stable.File.Digest,
                 FileIdentity = stable.File.Identity,
                 MetaDigest = stable.Meta.Digest,

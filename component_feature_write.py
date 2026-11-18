@@ -389,6 +389,8 @@ def bind_authoritative_preview(
             "expectedPreviewDigest": preview_digest,
         }
     )
+    if scene.get("fileVersion"):
+        canonical_nested["expectedSceneFileVersion"] = scene["fileVersion"]
     canonical_wrapper = {
         key: deepcopy(value)
         for key, value in wrapper_arguments.items()
@@ -552,7 +554,7 @@ def _canonical_scene(value: Any) -> dict[str, Any]:
         "dirtyBefore",
         "dirtyAfter",
     }
-    if set(raw) != required:
+    if set(raw) - {"fileVersion"} != required:
         raise ComponentFeatureWriteError("Component feature scene evidence is incomplete.")
     handle = _bounded_int(
         raw.get("handle"),
@@ -562,7 +564,7 @@ def _canonical_scene(value: Any) -> dict[str, Any]:
     )
     if handle == 0:
         raise ComponentFeatureWriteError("sceneHandle is out of range.")
-    return {
+    scene = {
         "path": _safe_scene_path(raw.get("path")),
         "guid": _lower_hex(raw.get("guid"), label="sceneGuid", pattern=_GUID_PATTERN),
         "handle": handle,
@@ -575,6 +577,9 @@ def _canonical_scene(value: Any) -> dict[str, Any]:
         "dirtyBefore": _strict_bool(raw.get("dirtyBefore"), label="dirtyBefore"),
         "dirtyAfter": _strict_bool(raw.get("dirtyAfter"), label="dirtyAfter"),
     }
+    if "fileVersion" in raw:
+        scene["fileVersion"] = _bounded_text(raw["fileVersion"], label="fileVersion", max_length=100)
+    return scene
 
 
 def _canonical_host(value: Any) -> dict[str, Any]:

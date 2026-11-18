@@ -1,3 +1,4 @@
+using VRCForge.Core.MCP;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -270,6 +271,8 @@ public static class ConstraintSourceFixtureProbe
         string baselineDigest)
     {
         var stale = ApprovedRequest(target, preview);
+        // A direct caller without the authoritative scene snapshot still uses byte validation.
+        stale.Remove("expectedSceneFileVersion");
         stale["expectedSceneFileDigest"] = new string('a', 64);
         RequireFailure(stale, "stale precondition accepted");
         Require(
@@ -290,7 +293,7 @@ public static class ConstraintSourceFixtureProbe
         Require(capture != null && restore != null, "partial failure helpers");
         var snapshot = capture.Invoke(
             null,
-            new object[] { ScenePath, HostPath, "position", 0, target }
+            new object[] { ScenePath, HostPath, "position", 0, target, false, null, null }
         );
         Require(snapshot != null, "partial failure snapshot");
         var snapshotType = snapshot.GetType();
@@ -329,7 +332,7 @@ public static class ConstraintSourceFixtureProbe
         try
         {
             Require(
-                capture.Invoke(null, new object[] { ScenePath, HostPath, "position", 0, target })
+                capture.Invoke(null, new object[] { ScenePath, HostPath, "position", 0, target, false, null, null })
                     != null,
                 "capture result"
             );
@@ -347,17 +350,17 @@ public static class ConstraintSourceFixtureProbe
             BindingFlags.NonPublic | BindingFlags.Static
         );
         Require(builder != null, "mutation failure builder");
-        var required = JObject.FromObject(builder.Invoke(null, new object[] { false }));
-        Require(!required.Value<bool>("success"), "restore-required success");
-        var requiredData = (JObject)required["data"];
+        var required = (VRCForgeToolResult)builder.Invoke(null, new object[] { false, null });
+        Require(!required.IsSuccessful, "restore-required success");
+        var requiredData = JObject.FromObject(required.Payload);
         Require(requiredData.Value<bool>("mutationStarted"), "mutationStarted");
         Require(requiredData.Value<bool>("checkpointRestoreRequired"), "checkpointRestoreRequired");
         Require(requiredData.Value<bool>("cleanupRequired"), "cleanupRequired");
         Require(requiredData.Value<string>("operationState") == "checkpoint_restore_required",
             "restore-required operation state");
 
-        var restored = JObject.FromObject(builder.Invoke(null, new object[] { true }));
-        var restoredData = (JObject)restored["data"];
+        var restored = (VRCForgeToolResult)builder.Invoke(null, new object[] { true, null });
+        var restoredData = JObject.FromObject(restored.Payload);
         Require(restoredData.Value<bool>("restored"), "restored flag");
         Require(!restoredData.Value<bool>("checkpointRestoreRequired"),
             "restored checkpointRestoreRequired");
@@ -419,6 +422,7 @@ public static class ConstraintSourceFixtureProbe
         request["expectedScenePath"] = preview["scenePath"];
         request["expectedSceneGuid"] = preview["sceneGuid"];
         request["expectedSceneHandle"] = preview["sceneHandle"];
+        request["expectedSceneFileVersion"] = preview["sceneFileVersion"];
         request["expectedSceneFileDigest"] = preview["sceneFileDigestBefore"];
         request["expectedSceneFileIdentity"] = preview["sceneFileIdentity"];
         request["expectedSceneMetaDigest"] = preview["sceneMetaDigestBefore"];
@@ -450,18 +454,15 @@ public static class ConstraintSourceFixtureProbe
 
     private static JObject RequireSuccess(object response)
     {
-        var value = JObject.FromObject(response);
-        Require(
-            value.Value<bool>("success"),
-            "tool returned an error response: " + value.ToString(Newtonsoft.Json.Formatting.None)
-        );
-        return (JObject)value["data"];
+        var result = (VRCForgeToolResult)response;
+        Require(result.IsSuccessful, "tool returned an error response: " + result.Message);
+        return JObject.FromObject(result.Payload);
     }
 
     private static void RequireFailure(JObject request, string label)
     {
-        var value = JObject.FromObject(ConstraintSourceTool.HandleCommand(request));
-        Require(!value.Value<bool>("success"), label);
+        var result = (VRCForgeToolResult)ConstraintSourceTool.HandleCommand(request);
+        Require(!result.IsSuccessful, label);
     }
 
     private static Type ResolveExactType(string fullName)

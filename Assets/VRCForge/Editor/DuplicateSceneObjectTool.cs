@@ -41,6 +41,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected target scene handle.", IsRequired = false)] public int? expectedTargetSceneHandle { get; set; }
             [VRCForgeInput("Expected target parent object identity.", IsRequired = false)] public string expectedTargetParentObjectId { get; set; } = "";
             [VRCForgeInput("Expected target parent hierarchy digest.", IsRequired = false)] public string expectedTargetParentHierarchyDigest { get; set; } = "";
+            [VRCForgeInput("Target scene disk version captured by preview.", IsRequired = false)] public string expectedTargetSceneFileVersion { get; set; }
             [VRCForgeInput("Expected target scene file digest.", IsRequired = false)] public string expectedTargetSceneFileDigest { get; set; } = "";
             [VRCForgeInput("Expected target scene file identity.", IsRequired = false)] public string expectedTargetSceneFileIdentity { get; set; } = "";
             [VRCForgeInput("Expected target scene meta digest.", IsRequired = false)] public string expectedTargetSceneMetaDigest { get; set; } = "";
@@ -78,7 +79,8 @@ namespace VRCForge.Editor
                     targetParentScenePath,
                     targetParentPath,
                     targetName,
-                    preserveWorldTransform);
+                    preserveWorldTransform,
+                    preview ? null : parameters);
                 if (preview)
                 {
                     return SceneObjectCopyCore.Success(
@@ -159,7 +161,7 @@ namespace VRCForge.Editor
                 }
 
                 var readback = SceneObjectCopyCore.BuildSourceSnapshot(
-                    snapshot.Target.Scene.Path,
+                    SceneObjectCopyCore.ReadSavedScene(snapshot.Target.Scene, "duplicate target scene"),
                     snapshot.Target.ObjectPath);
                 if (readback.Scene.Guid != snapshot.Target.Scene.Guid
                     || readback.Scene.Handle != snapshot.Target.Scene.Handle
@@ -181,7 +183,7 @@ namespace VRCForge.Editor
                     throw new SceneObjectCopyException("The duplicate target scene did not persist a change.");
                 }
                 var sameScene = snapshot.Source.Scene.Path == snapshot.Target.Scene.Path;
-                SceneObjectCopyCore.VerifySourceUnchanged(snapshot.Source, !sameScene,
+                SceneObjectCopyCore.VerifySourceUnchanged(snapshot.Source, false,
                     sameScene ? readback.Scene : null);
                 Undo.CollapseUndoOperations(undoGroup);
 

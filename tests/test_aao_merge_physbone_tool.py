@@ -44,6 +44,7 @@ def test_aao_merge_physbone_preview_is_zero_write_and_apply_is_receipt_bound() -
     assert preview_branch < first_mutation
     prepare = text[text.index("private static MergeSnapshot BuildPreview("):first_mutation]
     assert prepare.count("ResolveSavedScene(") == 1
+    assert "captureVersion: true, approval: approval" in prepare
     assert "BuildPreview(snapshot.Request)" not in prepare
     assert "ResolveSavedScene(" not in text[text.index("internal JObject BuildPreviewPayload()"):]
 
