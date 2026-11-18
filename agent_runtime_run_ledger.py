@@ -148,11 +148,11 @@ def _public_event(value: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
-def _restore_private_native_snapshot(
+def _restore_private_shell_seed_fields(
     projected: dict[str, Any],
     source: dict[str, Any],
 ) -> dict[str, Any]:
-    """Keep only the validated native continuation snapshot in private storage."""
+    """Keep native conversation state and read-only action semantics on private resume."""
 
     if source.get("shellContinuationState") not in {
         "pending",
@@ -162,14 +162,23 @@ def _restore_private_native_snapshot(
     }:
         return projected
     seed = source.get("continuationTaskSeed")
-    snapshot = seed.get("_nativeConversation") if isinstance(seed, dict) else None
-    if not isinstance(snapshot, dict):
+    if not isinstance(seed, dict):
         return projected
     stored_seed = projected.get("continuationTaskSeed")
     if not isinstance(stored_seed, dict):
         stored_seed = {}
         projected["continuationTaskSeed"] = stored_seed
-    stored_seed["_nativeConversation"] = copy.deepcopy(snapshot)
+    snapshot = seed.get("_nativeConversation")
+    if isinstance(snapshot, dict):
+        stored_seed["_nativeConversation"] = copy.deepcopy(snapshot)
+    actions, stored_actions = seed.get("actions"), stored_seed.get("actions")
+    if isinstance(actions, list) and isinstance(stored_actions, list):
+        # Redaction preserves list positions. Only the task loop's own action
+        # flag is private resume state; fields inside tool results stay redacted.
+        for action, stored in zip(actions, stored_actions):
+            if (isinstance(action, dict) and isinstance(stored, dict)
+                    and action.get("kind") == "skill" and action.get("_nativeReadObservation") is True):
+                stored["_nativeReadObservation"] = True
     return projected
 
 
@@ -244,7 +253,7 @@ class AgentRuntimeRunLedger:
         continuation = _terminal_continuation(source_entry)
         if continuation is not None:
             source_entry["continuationEvent"] = continuation
-        safe_entry = _restore_private_native_snapshot(
+        safe_entry = _restore_private_shell_seed_fields(
             self._ports.redact(source_entry), source_entry
         )
         path = self.log_path

@@ -17,7 +17,7 @@ import pytest
 import agent_runtime_run_ledger as ledger_module
 from agent_gateway import AgentGateway
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
-from agent_task_loop import AgentTaskLoop
+from agent_task_loop import AgentTaskLoop, prepare_shell_task_continuation
 from runtime_planner_service import PlannerCatalogSnapshot, PlannerTurnMetadata, RuntimePlannerService
 
 
@@ -907,6 +907,52 @@ def test_shell_continuation_cas_is_durable_private_and_session_idempotent(tmp_pa
         task_seed=seed,
         terminal_event=terminal,
     ) is False
+
+
+@pytest.mark.parametrize("failure", ["optional_read", "required_read", "write"])
+def test_shell_resume_preserves_which_prior_failures_block_completion(tmp_path: Path, failure: str) -> None:
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    loop = AgentTaskLoop("connect the project", session_id="session", turn_id="turn",
+                         client_turn_id="client", project_root=str(tmp_path))
+    kind = "write" if failure == "write" else "skill"
+    tool = "vrcforge_install_unity_core" if kind == "write" else "vrcforge_get_compile_errors"
+    arguments = {"projectPath": str(tmp_path)}
+    if failure == "required_read":
+        loop.require_action(kind=kind, tool=tool, arguments=arguments)
+    loop.record_action(
+        kind=kind, tool=tool, arguments=arguments, raw_result={"ok": False},
+        outcome={"status": "failed", "summary": "Core descriptor is not available yet."},
+        native_read_observation=kind == "skill",
+    )
+    seed = loop.approval_seed(requested_tool="shell", requested_kind="shell", requested_arguments={"command": "wait"})
+    assert gateway.runtime_runs.stage_shell_continuation(
+        shell_session_id="shell-test", task_seed=seed,
+        terminal_event={"shellSessionId": "shell-test", "status": "finished", "exitCode": 0},
+    )
+    restarted = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    claimed = restarted.runtime_runs.claim_shell_continuation("shell-test")
+    prepared = prepare_shell_task_continuation(claimed["taskSeed"], claimed["terminalEvent"])["taskContinuation"]
+    resumed = AgentTaskLoop.from_approval_context(
+        prepared["context"], prepared["completion"], execution=prepared["execution"],
+    )
+    readback = resumed.record_action(
+        kind="skill", tool="vrcforge_core_upgrade_status", arguments=arguments,
+        raw_result={"ok": True, "ready": True}, outcome={"status": "ok", "summary": "Core is ready."},
+        native_read_observation=True,
+    )
+    plan = resumed.gate_terminal({
+        "planner": "llm", "nextStep": "done", "reply": "Core is ready.",
+        "completionClaim": {"satisfied": True, "evidence_action_ids": [readback["actionId"]]},
+    })
+    assert plan["task"]["actions"][0]["status"] == "failed"
+    assert "_nativeReadObservation" not in plan["task"]["actions"][0]
+    assert "_nativeReadObservation" not in json.dumps(restarted.runtime_runs.list_runs(limit=20))
+    if failure == "optional_read":
+        assert plan["nextStep"] == "done"
+        assert plan["taskCompletion"]["evidenceActionIds"] == [readback["actionId"]]
+        assert plan["reply"] == "Core is ready."
+    else:
+        assert plan["nextStep"] == "tool_failed"
 
 
 def test_recovery_reuses_shell_state_from_the_required_ledger_scan(tmp_path: Path, monkeypatch) -> None:
