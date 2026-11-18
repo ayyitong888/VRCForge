@@ -234,10 +234,11 @@ def test_native_approved_prewrite_failure_resumes_planner_without_replaying_writ
         "mutationStarted": False, "saved": False, "safeToRetry": True,
         "committed": False, "commitState": "not_started",
     }
+    decision = "The write was rejected before mutation; I can explain the next step."
     gateway, model, invoked = _write_gateway_for_mode(tmp_path, [
         call("phase-1", "vrcforge_runtime_action", {"action": "enter_execution"}),
         call("write-1", "fixture_write", {"projectRoot": str(tmp_path / "UnityProject"), "value": "retry"}),
-        {"role": "assistant", "content": "The write was rejected before mutation; I can explain the next step."},
+        {"role": "assistant", "content": decision},
     ], handler_result=failure)
     _set_mode(gateway, "approval")
 
@@ -248,15 +249,22 @@ def test_native_approved_prewrite_failure_resumes_planner_without_replaying_writ
     gateway.approval_transactions.approve(approval_id)
     applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
     assert applied["status"] == "failed"
+    assert applied["error"] == failure["error"]
     assert applied["writeFailure"]["safeToRetry"] is True
     assert applied["writeFailure"]["checkpointRecoveryRequired"] is False
     resumed = gateway.resume_runtime_task_after_approval(approval, applied)
 
     assert len(model.requests) == 3
     assert invoked == [{"projectRoot": str(tmp_path / "UnityProject"), "value": "retry"}]
-    # No claim is fabricated for the natural final, so the failed write's
-    # canonical receipt stays the reply; prose cannot retell a failed write.
-    assert resumed["plan"]["reply"] == "fixture preflight failure"
+    write_messages = [
+        row for row in model.requests[-1]["messages"]
+        if row["role"] == "tool" and row["tool_call_id"] == "write-1"
+    ]
+    assert len(write_messages) == 1
+    write_observation = json.loads(write_messages[0]["content"])
+    assert write_observation["status"] == "failed"
+    assert any(failure["error"] in item["observation"] for item in write_observation["observations"])
+    assert resumed["plan"]["reply"] == decision
     assert resumed["plan"].get("completionClaim", {}).get("satisfied") is not True
 
 
