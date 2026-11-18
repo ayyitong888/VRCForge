@@ -110,8 +110,13 @@ VRCForge App agent loop. Enable external access manually in the app before
 connecting. Connected agents follow the same three Permission Modes as the
 built-in agent. VRCForge owns the approval decision and checkpoint. In Auto
 Approve, requests without a user objective recorded by VRCForge need manual
-confirmation. For a read-only stdio connection, set `--exposure-layer planning` or
-`VRCFORGE_MCP_EXPOSURE_LAYER=planning` at launch.
+confirmation.
+
+After an upgrade, an enabled connector inherits the App's Permission Mode even
+if you previously disabled external write requests. Under **Full Permission**,
+eligible writes can proceed without per-action confirmation. If a stdio
+connection relied on the old read-only default, set `--exposure-layer planning`
+or `VRCFORGE_MCP_EXPOSURE_LAYER=planning` at launch to keep it read-only.
 
 Developers and release testers can run:
 
