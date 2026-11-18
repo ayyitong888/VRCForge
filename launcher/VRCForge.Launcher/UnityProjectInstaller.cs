@@ -8,10 +8,7 @@ internal sealed record ProjectInspection(
     bool IsValid,
     string Message,
     bool HasLegacyFolder,
-    bool HasVrcForgePlugin,
-    string InstallState,
-    bool IsSameVersionInstalled,
-    string PayloadChecksum);
+    bool HasVrcForgePlugin);
 
 internal sealed record InstallResult(bool Success, string Message, string Detail);
 
@@ -28,27 +25,19 @@ internal sealed class UnityProjectInstaller
     {
         try
         {
-            DirectoryInfo project = ValidateProjectRoot(projectPath);
-            string payloadChecksum = ComputePayloadChecksum(paths.UnityPluginDir);
-            JsonObject state = ReadInstallState(project);
-            bool sameVersion = string.Equals((string?)state["version"], paths.Version, StringComparison.OrdinalIgnoreCase)
-                && string.Equals((string?)state["payloadChecksum"], payloadChecksum, StringComparison.OrdinalIgnoreCase)
-                && string.Equals((string?)state["status"], "installed", StringComparison.OrdinalIgnoreCase);
-
-            return new ProjectInspection(
-                true,
-                "Unity project root is valid.",
-                Directory.Exists(Path.Combine(project.FullName, "Assets", "VRCAutoRig")),
-                Directory.Exists(Path.Combine(project.FullName, "Assets", "VRCForge", "Editor")),
-                (string?)state["status"] ?? "unknown",
-                sameVersion,
-                payloadChecksum);
+            return InspectProjectStructure(ValidateProjectRoot(projectPath));
         }
         catch (Exception ex)
         {
-            return new ProjectInspection(false, ex.Message, false, false, "invalid", false, "");
+            return new ProjectInspection(false, ex.Message, false, false);
         }
     }
+
+    private static ProjectInspection InspectProjectStructure(DirectoryInfo project) => new(
+        true,
+        "Unity project root is valid.",
+        Directory.Exists(Path.Combine(project.FullName, "Assets", "VRCAutoRig")),
+        Directory.Exists(Path.Combine(project.FullName, "Assets", "VRCForge", "Editor")));
 
     public bool RedetectManualInstall(string projectPath, out string message)
     {
@@ -71,29 +60,35 @@ internal sealed class UnityProjectInstaller
 
     public InstallResult InstallOrUpdate(string projectPath)
     {
+        DirectoryInfo? project = null;
+        string? payloadChecksum = null;
         string? vrcForgeBackup = null;
         string? targetVrcForge = null;
 
         try
         {
-            DirectoryInfo project = ValidateProjectRoot(projectPath);
-            ProjectInspection inspection = Inspect(projectPath);
-            if (inspection.IsSameVersionInstalled
-                && inspection.HasVrcForgePlugin
-                && !inspection.HasLegacyFolder)
-            {
-                return new InstallResult(true, "Unity plugin already installed.", "Same VRCForge version and payload checksum detected; no files were changed.");
-            }
-
-            DirectoryInfo backupRoot = new(Path.Combine(project.FullName, ".vrcforge", "backups"));
-            backupRoot.Create();
-
+            project = ValidateProjectRoot(projectPath);
             DirectoryInfo sourceAssets = new(Path.Combine(paths.UnityPluginDir.FullName, "Assets", "VRCForge"));
             if (!sourceAssets.Exists)
             {
                 throw new InvalidOperationException($"Release payload is missing {sourceAssets.FullName}");
             }
-            WriteInstallState(project, "partial", "Install started.", inspection.PayloadChecksum);
+            payloadChecksum = ComputePayloadChecksum(paths.UnityPluginDir);
+            ProjectInspection inspection = InspectProjectStructure(project);
+            if (inspection.HasVrcForgePlugin && !inspection.HasLegacyFolder)
+            {
+                JsonObject state = ReadInstallState(project);
+                if (string.Equals((string?)state["version"], paths.Version, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals((string?)state["payloadChecksum"], payloadChecksum, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals((string?)state["status"], "installed", StringComparison.OrdinalIgnoreCase))
+                {
+                    return new InstallResult(true, "Unity plugin already installed.", "Same VRCForge version and payload checksum detected; no files were changed.");
+                }
+            }
+
+            DirectoryInfo backupRoot = new(Path.Combine(project.FullName, ".vrcforge", "backups"));
+            backupRoot.Create();
+            WriteInstallState(project, "partial", "Install started.", payloadChecksum);
 
             string legacyPath = Path.Combine(project.FullName, "Assets", "VRCAutoRig");
             if (Directory.Exists(legacyPath))
@@ -115,7 +110,7 @@ internal sealed class UnityProjectInstaller
 
             CopyDirectory(sourceAssets.FullName, targetVrcForge);
 
-            WriteInstallState(project, "installed", "Install completed.", inspection.PayloadChecksum);
+            WriteInstallState(project, "installed", "Install completed.", payloadChecksum);
             return new InstallResult(true, "Unity plugin installed.", $"Backups: {backupRoot.FullName}");
         }
         catch (Exception ex)
@@ -123,8 +118,10 @@ internal sealed class UnityProjectInstaller
             RestoreDirectory(vrcForgeBackup, targetVrcForge);
             try
             {
-                DirectoryInfo project = ValidateProjectRoot(projectPath);
-                WriteInstallState(project, "failed", ex.Message, ComputePayloadChecksum(paths.UnityPluginDir));
+                if (project is not null && payloadChecksum is not null)
+                {
+                    WriteInstallState(project, "failed", ex.Message, payloadChecksum);
+                }
             }
             catch
             {
@@ -148,7 +145,7 @@ internal sealed class UnityProjectInstaller
                 Directory.Move(targetVrcForge, NewBackupPath(backupRoot, "VRCForge_uninstalled"));
             }
 
-            WriteInstallState(project, "uninstalled", "Unity plugin uninstalled by Launcher.", ComputePayloadChecksum(paths.UnityPluginDir));
+            WriteInstallState(project, "uninstalled", "Unity plugin uninstalled by Launcher.", string.Empty);
             return new InstallResult(true, "Unity plugin uninstalled.", $"Backups: {backupRoot.FullName}");
         }
         catch (Exception ex)
