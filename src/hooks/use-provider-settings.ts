@@ -477,6 +477,15 @@ export function useProviderSettings({
     }
   }
 
+  const persistedProviderTestPassed = providerTestPassed
+    && runtimeConnected
+    && persistedProviderConfigured
+    && !apiKey.trim()
+    && providerTestFingerprint === persistedProviderFingerprint
+    && providerTestEndpoint === endpoint
+    && apiConfig?.credentialFingerprint !== undefined
+    && providerTestCredentialFingerprint === apiConfig.credentialFingerprint;
+
   return {
     apiProvider,
     setApiProvider,
@@ -507,22 +516,8 @@ export function useProviderSettings({
     providerRuntimeConnectedAt: runtimeProviderEvidence?.scope === runtimeProviderScope ? runtimeProviderEvidence.connectedAt : 0,
     bindRuntimeProviderConnection,
     providerTestPassed: providerTestPassed && providerTestFingerprint === providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }) && providerTestEndpoint === endpoint,
-    providerTestPassedForPersistedConfig: providerTestPassed
-      && runtimeConnected
-      && persistedProviderConfigured
-      && !apiKey.trim()
-      && providerTestFingerprint === persistedProviderFingerprint
-      && providerTestEndpoint === endpoint
-      && apiConfig?.credentialFingerprint !== undefined
-      && providerTestCredentialFingerprint === apiConfig.credentialFingerprint,
-    providerReadyForOnboarding: providerTestPassed
-      && runtimeConnected
-      && persistedProviderConfigured
-      && !apiKey.trim()
-      && providerTestFingerprint === persistedProviderFingerprint
-      && providerTestEndpoint === endpoint
-      && apiConfig?.credentialFingerprint !== undefined
-      && providerTestCredentialFingerprint === apiConfig.credentialFingerprint,
+    providerTestPassedForPersistedConfig: persistedProviderTestPassed,
+    providerReadyForOnboarding: persistedProviderTestPassed,
     visionProvider,
     setVisionProvider,
     visionApiKey,

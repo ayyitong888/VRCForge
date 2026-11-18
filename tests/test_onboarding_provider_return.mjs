@@ -19,10 +19,8 @@ assert.doesNotMatch(effect, /setShowOnboarding|setOnboardingStep|setOnboardingCo
 
 assert.match(app, /const \{[\s\S]*?providerReadyForOnboarding[\s\S]*?\} = useProviderSettings\(/);
 assert.match(app, /providerReadyForOnboarding\}\s*\/\/|providerReadyForOnboarding\s*[,}]/);
-assert.match(
-  providerHook,
-  /providerReadyForOnboarding:\s*providerTestPassed && persistedProviderConfigured && !apiKey\.trim\(\) && providerTestFingerprint === persistedProviderFingerprint/,
-);
+assert.match(providerHook, /providerTestPassedForPersistedConfig: persistedProviderTestPassed/);
+assert.match(providerHook, /providerReadyForOnboarding: persistedProviderTestPassed/);
 
 const runEffect = (overrides = {}) => {
   const state = {
