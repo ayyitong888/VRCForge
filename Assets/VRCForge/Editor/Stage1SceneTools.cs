@@ -223,11 +223,34 @@ namespace VRCForge.Editor
                     throw new SceneObjectCopyException("The save_as destination or its metadata exists; overwrite is unsupported.");
                 if (action == "save_as") Stage1SceneToolCore.RequireDestinationParentExists(destination, action);
                 var savesExistingScene = action == "save";
-                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scenePath, "scene asset",
-                    captureFileVersion: savesExistingScene,
-                    expectedFileVersion: savesExistingScene && !preview ? parameters["expectedSceneFileVersion"]?.Value<string>() : null,
-                    expectedFileDigest: savesExistingScene && !preview ? parameters["expectedSceneFileDigest"]?.Value<string>() : null,
-                    approvedMetadata: savesExistingScene && !preview ? SceneObjectCopyCore.SceneMetadataFromApproval(parameters) : null);
+                StableAssetEvidence evidence;
+                if (!savesExistingScene && !preview)
+                {
+                    // Save As serializes the loaded source into a new asset. Reuse the
+                    // approved source file facts and resolve the current live scene GUID.
+                    evidence = new StableAssetEvidence
+                    {
+                        Guid = AssetDatabase.AssetPathToGUID(scenePath, AssetPathToGUIDOptions.OnlyExistingAssets),
+                        File = new StableFileEvidence
+                        {
+                            Digest = parameters["expectedSceneFileDigest"]?.Value<string>(),
+                            Identity = parameters["expectedSceneFileIdentity"]?.Value<string>()
+                        },
+                        Meta = new StableFileEvidence
+                        {
+                            Digest = parameters["expectedSceneMetaDigest"]?.Value<string>(),
+                            Identity = parameters["expectedSceneMetaIdentity"]?.Value<string>()
+                        }
+                    };
+                }
+                else
+                {
+                    evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scenePath, "scene asset",
+                        captureFileVersion: savesExistingScene,
+                        expectedFileVersion: savesExistingScene && !preview ? parameters["expectedSceneFileVersion"]?.Value<string>() : null,
+                        expectedFileDigest: savesExistingScene && !preview ? parameters["expectedSceneFileDigest"]?.Value<string>() : null,
+                        approvedMetadata: savesExistingScene && !preview ? SceneObjectCopyCore.SceneMetadataFromApproval(parameters) : null);
+                }
                 var hierarchy = Stage1SceneToolCore.HierarchyDigest(scene);
                 if (savesExistingScene && !preview
                     && ((parameters["expectedSceneDirty"]?.Value<bool?>() is bool expectedDirty && expectedDirty != scene.isDirty)

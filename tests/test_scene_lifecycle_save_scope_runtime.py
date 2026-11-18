@@ -104,6 +104,17 @@ def test_scene_only_save_scope_is_default_and_digest_bound():
     assert 'action == "save" && !scene.isDirty && dirtyAssets.Length == 0' in block
 
 
+def test_save_as_reuses_approved_source_file_facts() -> None:
+    source = _source("Stage1SceneTools")
+    block = source[source.index("public static class SceneSaveTool"):source.index("public static class SceneTransitionTool")]
+    reuse = block.split("if (!savesExistingScene && !preview)", 1)[1].split("else", 1)[0]
+    assert "AssetDatabase.AssetPathToGUID(scenePath" in reuse
+    assert "expectedSceneFileDigest" in reuse
+    assert "expectedSceneMetaDigest" in reuse
+    assert "ReadStableAssetEvidence(" not in reuse
+    assert 'action == "save_as" ? destination : scenePath, "saved scene asset"' in block
+
+
 def test_scene_save_public_schema_exposes_explicit_project_save_scope():
     import unity_write_input_schemas
     schemas = [v for v in vars(unity_write_input_schemas).values() if isinstance(v, dict) and "vrcforge_scene_save" in v]
