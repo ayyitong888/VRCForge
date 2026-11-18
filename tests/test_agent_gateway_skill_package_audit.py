@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import threading
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -84,24 +85,45 @@ def _read_runtime_package_events(gateway: AgentGateway) -> list[dict[str, object
     ]
 
 
-def test_signed_package_runtime_audit_includes_locked_identity_and_signer_context(tmp_path: Path) -> None:
+def test_signed_package_runtime_audit_includes_locked_identity_and_signer_context(tmp_path: Path, monkeypatch) -> None:
+    from tests.test_skill_package_projection_transactions import _projection
+
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
     gateway.register_tool("vrcforge_health", "Read runtime health.", "read/debug", lambda _params: {"ok": True})
     service = SkillPackageService(tmp_path / "skill-packages", vrcforge_version="0.0.0")
     key_pair = service.generate_signing_keypair()
+    source = _write_signed_skill_source(tmp_path)
+    (source / "unused.txt").write_text("Unused documentation", encoding="utf-8")
     package = service.export_release(
-        _write_signed_skill_source(tmp_path),
+        source,
         tmp_path / "runtime-audit.vsk",
         key_pair.private_key_pem,
     ).package_path
     service.trust_signer(key_pair.fingerprint, reason="focused runtime audit test")
     installed = service.install(package)
 
-    projected = _project_signed_skill(gateway, installed.installed_path)
+    _projection(gateway).project_installed(installed.installed_path, installed.preview.manifest)
+    projected_root = gateway.skills.user_skills_dir / "runtime-audit-fixture"
+    (installed.installed_path / "unused.txt").write_text("Edited unused documentation", encoding="utf-8")
+    reads = Counter()
+    original_open = Path.open
+
+    def track_reads(path, mode="r", *args, **kwargs):
+        if mode == "rb":
+            for label, root in [("installed", installed.installed_path), ("projected", projected_root)]:
+                if path.is_relative_to(root):
+                    reads[(label, path.relative_to(root).as_posix())] += 1
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", track_reads)
 
     result = gateway.runtime_skills.execute("runtime-audit-fixture", {}, "test-agent")
 
     assert result["status"] == "executed"
+    assert reads[("installed", "unused.txt")] == 0
+    for relative in ("SKILL.md", "workflows/runtime-audit.json"):
+        assert reads[("installed", relative)] == reads[("projected", relative)] == 1
+    assert reads[("installed", "manifest.json")] == 1
     assert result["result"]["supportFiles"] == [
         {
             "path": "workflows/runtime-audit.json",

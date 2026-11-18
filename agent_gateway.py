@@ -11267,6 +11267,8 @@ class AgentGateway:
                 skill_name,
                 storage_resolved,
                 ensure_string_list(skill.get("supportFiles")),
+                package_id=str(skill.get("packageId") or ""),
+                projected_digests=ensure_dict(skill.get("_capturedProjectedDigests")),
             )
         except Exception:  # noqa: BLE001 - enrichment must not break legacy skill execution.
             return {}
@@ -12163,7 +12165,9 @@ def normalize_exposure_layer(value: Any) -> str:
     return layer
 
 
-def parse_skill_markdown(path: Path, *, max_bytes: int | None = None) -> dict[str, Any]:
+def parse_skill_markdown(
+    path: Path, *, max_bytes: int | None = None, on_read: Callable[[bytes], None] | None = None,
+) -> dict[str, Any]:
     if max_bytes is None:
         text = path.read_text(encoding="utf-8-sig")
     else:
@@ -12175,6 +12179,8 @@ def parse_skill_markdown(path: Path, *, max_bytes: int | None = None) -> dict[st
                 status_code=400,
             )
         text = data.decode("utf-8-sig")
+        if on_read is not None:
+            on_read(data)
     metadata: dict[str, Any] = {}
     body = text
     if text.startswith("---"):

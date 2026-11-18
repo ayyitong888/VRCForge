@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from atomic_file_replace import replace_with_retry
@@ -8,7 +9,7 @@ import shutil
 import tempfile
 from copy import deepcopy
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
@@ -88,6 +89,13 @@ class RuntimeSkillSnapshot:
     support_files: tuple[dict[str, str], ...]
     package_audit_context: dict[str, Any]
     loaded: bool
+
+
+@dataclass(slots=True)
+class _RuntimeSkillCapture:
+    skill_id: str
+    projected_digests: dict[str, str] = field(default_factory=dict)
+    support_files: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,12 +385,13 @@ class AgentSkillRegistryService:
                 raise AgentGatewayError("User skill manifest exceeds its size limit.", status_code=400)
             return data
 
-    def _load_user_skills(self) -> list[dict[str, Any]]:
+    def _load_user_skills(self, capture: _RuntimeSkillCapture | None = None) -> list[dict[str, Any]]:
         skills_dir = self._validated_user_skills_root(create=False)
         if skills_dir is None:
             return []
         skills: list[dict[str, Any]] = []
-        for skill_dir in sorted(skills_dir.iterdir()):
+        skill_dirs = [skills_dir / capture.skill_id] if capture and capture.skill_id else sorted(skills_dir.iterdir())
+        for skill_dir in skill_dirs:
             skill_file = skill_dir / "SKILL.md"
             if _path_is_link_like(skill_dir):
                 skills.append(
@@ -412,9 +421,14 @@ class AgentSkillRegistryService:
                         "User skill manifest exceeds its size limit.",
                         status_code=400,
                     )
+                def retain_digest(data: bytes) -> None:
+                    if capture is not None:
+                        capture.projected_digests["SKILL.md"] = hashlib.sha256(data).hexdigest()
+
                 parsed = parse_skill_markdown(
                     skill_file,
                     max_bytes=USER_SKILL_MANIFEST_MAX_BYTES,
+                    on_read=retain_digest if capture is not None and skill_dir.name == capture.skill_id else None,
                 )
                 normalized = self._normalize_user_skill(parsed, existing_id=str(parsed.get("name") or skill_file.parent.name))
                 directory_skill_id = normalize_skill_id(skill_file.parent.name)
@@ -750,9 +764,10 @@ class AgentSkillRegistryService:
 
     def _decorate_skill_validation(
         self, skill: dict[str, Any], config: AgentGatewayConfig, inputs: _SkillRegistryInputs | None = None,
+        *, captured_support: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         next_skill = dict(skill)
-        validation = self._validate_skill(next_skill, config, inputs)
+        validation = self._validate_skill(next_skill, config, inputs, captured_support=captured_support)
         next_skill["validation"] = validation
         next_skill["availabilityReasons"] = ensure_string_list(validation.get("reasons"))
         if validation.get("status") == "error":
@@ -765,6 +780,7 @@ class AgentSkillRegistryService:
 
     def _validate_skill(
         self, skill: dict[str, Any], config: AgentGatewayConfig, inputs: _SkillRegistryInputs | None = None,
+        *, captured_support: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         status = "ok"
         reasons: list[str] = []
@@ -822,7 +838,9 @@ class AgentSkillRegistryService:
             reasons.append(f"unsupported os: {current_os_key()}")
 
         try:
-            self._load_runtime_skill_support_files(skill)
+            support = self._load_runtime_skill_support_files(skill)
+            if captured_support is not None:
+                captured_support.extend(support)
         except AgentGatewayError as exc:
             status = "error"
             reasons.append(str(exc))
@@ -845,11 +863,12 @@ class AgentSkillRegistryService:
         """Capture one runtime package view while the user-skill lock is held."""
 
         normalized_id = normalize_skill_id(skill_id)
+        capture = _RuntimeSkillCapture(normalized_id)
         with self.write_lock:
             matches = [
                 item
                 for item in ensure_list(
-                    self._build_skill_registry(config).get("skills")
+                    self._build_skill_registry(config, capture=capture).get("skills")
                 )
                 if isinstance(item, dict)
                 and normalize_skill_id(str(item.get("name") or ""))
@@ -863,19 +882,14 @@ class AgentSkillRegistryService:
             skill = matches[0] if matches else None
             if skill is None:
                 return None
-            audit_context = package_audit_context(skill)
-            validation = ensure_dict(skill.get("validation")) or self._validate_skill(
-                skill,
-                config,
-            )
+            validation = ensure_dict(skill.get("validation"))
             loaded = bool(skill.get("enabled", True)) and validation.get("status") != "error"
-            support_files: list[dict[str, str]] = []
-            if loaded:
-                try:
-                    support_files = self._load_runtime_skill_support_files(skill)
-                except AgentGatewayError as exc:
-                    loaded = False
-                    validation = {"status": "error", "reasons": [str(exc)]}
+            support_files = capture.support_files if loaded else []
+            capture.projected_digests.update({
+                item["path"]: hashlib.sha256(item["content"].encode("utf-8")).hexdigest()
+                for item in support_files
+            })
+            audit_context = package_audit_context({**skill, "_capturedProjectedDigests": capture.projected_digests})
             return RuntimeSkillSnapshot(
                 skill=dict(skill),
                 validation=dict(validation),
@@ -1101,13 +1115,14 @@ class AgentSkillRegistryService:
         self,
         config: AgentGatewayConfig | None = None,
         exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+        *, capture: _RuntimeSkillCapture | None = None,
     ) -> dict[str, Any]:
         exposure_layer = normalize_exposure_layer(exposure_layer)
         config = config or self._ports.ensure_config()
         inputs = self._registry_inputs()
         builtin_skills = self._builtin_skill_definitions(config, inputs)
         application_skills = self._load_application_skills()
-        user_skills = self._load_user_skills()
+        user_skills = self._load_user_skills(capture)
         official_ids = {normalize_skill_id(str(item.get("name") or "")) for item in [*builtin_skills, *application_skills]}
         conflicts: dict[str, list[str]] = {}
         source_conflicts: list[dict[str, Any]] = []
@@ -1132,7 +1147,12 @@ class AgentSkillRegistryService:
                 skill["sourceConflict"] = {"status": "rename_required", "userPaths": paths}
                 skill["availabilityReasons"] = [f"A user Skill has the same name; rename the user Skill: {Path(paths[0]).parent.name}"]
         skills = [*builtin_skills, *application_skills, *visible_user_skills]
-        skills = [self._decorate_skill_validation(skill, config, inputs) for skill in skills]
+        skills = [
+            self._decorate_skill_validation(skill, config, inputs, captured_support=(
+                capture.support_files if capture is not None and skill.get("name") == capture.skill_id else None
+            ))
+            for skill in skills
+        ]
         if exposure_layer == EXPOSURE_LAYER_PLANNING:
             skills = [skill for skill in skills if not bool(skill.get("write"))]
         available_count = sum(1 for skill in skills if skill.get("available") and skill.get("enabled", True))

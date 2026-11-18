@@ -1428,14 +1428,11 @@ class SkillPackageService:
         projected_skill_name: str,
         projected_skill_path: str | os.PathLike[str],
         projected_support_files: Sequence[str] | None = None,
+        *,
+        package_id: str = "",
+        projected_digests: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Return verified package identity for an unchanged projected skill.
-
-        Installed manifests, complete lock contents, and release signatures are
-        revalidated before the signer is attributed to a runtime execution. An
-        edited projection or ambiguous projected name deliberately returns no
-        package context so callers can preserve their legacy audit shape.
-        """
+        """Verify the installed identity and content this Skill execution uses."""
 
         target_name = str(projected_skill_name or "").strip().lower()
         projected_input = Path(projected_skill_path).expanduser()
@@ -1448,8 +1445,11 @@ class SkillPackageService:
             return {}
 
         matches: list[dict[str, Any]] = []
-        for skill_id in sorted(registry["skills"]):
+        skill_ids = [package_id] if package_id else sorted(registry["skills"])
+        for skill_id in skill_ids:
             try:
+                if skill_id not in registry["skills"]:
+                    continue
                 entry = self._find_installed_entry(skill_id, registry)
                 if entry is None:
                     continue
@@ -1464,6 +1464,8 @@ class SkillPackageService:
                 ):
                     continue
                 resolved_root = version_root.resolve(strict=True)
+                if _path_contains_symlink_like(version_root, self.skill_store):
+                    continue
                 resolved_root.relative_to(self.skill_store)
                 manifest_path = resolved_root / MANIFEST_NAME
                 lock_path = resolved_root / LOCK_NAME
@@ -1480,7 +1482,7 @@ class SkillPackageService:
                     label=f"{skill_id}/{version}/{MANIFEST_NAME}",
                 )
                 manifest_value = _load_json_bytes(manifest_bytes, f"{skill_id}/{version}/{MANIFEST_NAME}")
-                manifest = self.validate_manifest(manifest_value, package_root=resolved_root)
+                manifest = self.validate_manifest(manifest_value)
                 projected_name = re.sub(
                     r"[^a-z0-9_.-]+",
                     "-",
@@ -1489,11 +1491,12 @@ class SkillPackageService:
                 if projected_name != target_name:
                     continue
                 skill_entrypoint = str(manifest.get("entrypoints", {}).get("skill") or "").strip()
+                plan_relative = manifest["entrypoints"].get("executionPlan") if self._manifest_execution(manifest) == "deterministic" else None
                 if not skill_entrypoint:
                     continue
                 installed_skill = (resolved_root / skill_entrypoint).resolve(strict=True)
                 installed_skill.relative_to(resolved_root)
-                if not installed_skill.is_file() or _is_symlink_like(installed_skill):
+                if _path_contains_symlink_like(resolved_root / skill_entrypoint, resolved_root):
                     continue
 
                 lock_bytes = _read_regular_file_bounded(
@@ -1509,6 +1512,7 @@ class SkillPackageService:
                     or lock_value.get("algorithm") != "sha256"
                     or canonical_json_bytes(lock_value) != lock_bytes
                     or not isinstance(locked_files, dict)
+                    or len(locked_files) > self.max_file_count
                 ):
                     continue
                 expected_files: dict[str, str] = {}
@@ -1531,48 +1535,6 @@ class SkillPackageService:
                 if not lock_valid or not expected_files:
                     continue
 
-                actual_files: set[str] = set()
-                installed_tree_valid = True
-                installed_total_size = 0
-                for path in resolved_root.rglob("*"):
-                    if _is_symlink_like(path):
-                        installed_tree_valid = False
-                        break
-                    if path.is_dir():
-                        continue
-                    if not path.is_file():
-                        installed_tree_valid = False
-                        break
-                    relative = path.relative_to(resolved_root).as_posix()
-                    if relative not in RESERVED_PACKAGE_FILES:
-                        metadata = path.stat(follow_symlinks=False)
-                        if (
-                            not stat.S_ISREG(metadata.st_mode)
-                            or metadata.st_size > self.max_file_size
-                        ):
-                            installed_tree_valid = False
-                            break
-                        installed_total_size += metadata.st_size
-                        if installed_total_size > self.max_total_size:
-                            installed_tree_valid = False
-                            break
-                        actual_files.add(relative)
-                        if len(actual_files) > self.max_file_count:
-                            installed_tree_valid = False
-                            break
-                if not installed_tree_valid or actual_files != set(expected_files):
-                    continue
-                if any(
-                    _sha256_regular_file_bounded(
-                        resolved_root / relative,
-                        self.max_file_size,
-                        label=f"{skill_id}/{version}/{relative}",
-                    )
-                    != digest
-                    for relative, digest in expected_files.items()
-                ):
-                    continue
-
                 expected_manifest_sha = expected_files.get(MANIFEST_NAME)
                 expected_skill_sha = expected_files.get(skill_entrypoint)
                 if not expected_manifest_sha or not expected_skill_sha:
@@ -1588,19 +1550,15 @@ class SkillPackageService:
                     != expected_skill_sha
                 ):
                     continue
-                if (
-                    _sha256_regular_file_bounded(
-                        projected,
-                        self.max_file_size,
-                        label=f"projected skill {target_name}",
-                    )
-                    != expected_skill_sha
-                ):
+                projected_skill_sha = (projected_digests or {}).get("SKILL.md") or _sha256_regular_file_bounded(
+                    projected, self.max_file_size, label=f"projected skill {target_name}",
+                )
+                if projected_skill_sha != expected_skill_sha:
                     continue
 
                 projected_root = projected.parent
                 projection_valid = True
-                projected_relatives = set(manifest.get("entrypoints", {}).values())
+                projected_relatives: set[str] = set()
                 for raw_relative in projected_support_files or ():
                     try:
                         projected_relatives.add(
@@ -1616,7 +1574,7 @@ class SkillPackageService:
                     if not relative or relative == skill_entrypoint:
                         continue
                     expected_digest = expected_files.get(relative)
-                    if not expected_digest:
+                    if not expected_digest or relative not in manifest["entrypoints"].values():
                         projection_valid = False
                         break
                     relative_path = PurePosixPath(relative)
@@ -1630,15 +1588,23 @@ class SkillPackageService:
                     if (
                         _path_contains_symlink_like(projected_support_input, projected_root)
                         or not projected_support.is_file()
-                        or _sha256_regular_file_bounded(
-                            projected_support,
-                            self.max_file_size,
-                            label=f"projected support {relative}",
-                        )
-                        != expected_digest
                     ):
                         projection_valid = False
                         break
+                    projected_sha = (projected_digests or {}).get(relative) or _sha256_regular_file_bounded(
+                        projected_support, self.max_file_size, label=f"projected support {relative}",
+                    )
+                    if projected_sha != expected_digest:
+                        projection_valid = False
+                        break
+                    if relative != plan_relative:
+                        installed_support = resolved_root / relative
+                        if (_path_contains_symlink_like(installed_support, resolved_root)
+                                or _sha256_regular_file_bounded(
+                                    installed_support, self.max_file_size, label=f"installed support {relative}",
+                                ) != expected_digest):
+                            projection_valid = False
+                            break
                 if not projection_valid:
                     continue
 
@@ -1695,14 +1661,19 @@ class SkillPackageService:
                     != str(entry.get("execution") or entry.get("executionMode") or "agentic")
                 ):
                     continue
-                execution = self._execution_descriptor(manifest, resolved_root)
-                if execution["execution"] == "deterministic" and (
-                    signature_status != "signed"
-                    or execution["workflowDigest"] != entry.get("workflowDigest")
-                    or execution["workflowSteps"] != entry.get("workflowSteps")
-                ):
-                    continue
-                decorated = self._decorate_installed_entry(dict(entry), registry)
+                execution = {"execution": "agentic", "executionMode": "agentic"}
+                if plan_relative:
+                    workflow_path = resolved_root / plan_relative
+                    if signature_status != "signed" or _path_contains_symlink_like(workflow_path, resolved_root):
+                        continue
+                    workflow_bytes = _read_regular_file_bounded(workflow_path, self.max_file_size, label=plan_relative)
+                    if sha256_bytes(workflow_bytes) != expected_files.get(plan_relative):
+                        continue
+                    execution = self._validate_deterministic_workflow(workflow_bytes)
+                    if (execution["workflowDigest"] != entry.get("workflowDigest")
+                            or execution["workflowSteps"] != entry.get("workflowSteps")):
+                        continue
+                governance = self._evaluate_installed_governance(entry, registry)
                 matches.append(
                     {
                         "packageId": skill_id,
@@ -1712,7 +1683,7 @@ class SkillPackageService:
                         "lockSha256": lock_sha256,
                         "signatureStatus": signature_status,
                         "signerFingerprint": verified_signer,
-                        "signerTrustStatus": decorated.get("signer_trust_status"),
+                        "signerTrustStatus": governance["signerTrustStatus"],
                         **execution,
                     }
                 )
