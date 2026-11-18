@@ -189,7 +189,7 @@ def test_fast_child_keeps_delivery_pending_until_parent_releases_owner(tmp_path,
     registry = SubAgentTaskRegistry(
         tmp_path / "children", roles=[SubAgentRole("fast", "Fast", "Fixture")],
         handlers={"fast": lambda *_: {"ok": True, "summaryText": "done"}},
-        task_finished=lambda event: delivered.append(not state.session_busy("s")),
+        task_finished=lambda event: delivered.append((not state.session_busy("s"), event["status"])),
         wait_parent_idle=gateway.wait_runtime_session_idle,
     )
     created = registry.create_task(role="fast", task="read", display_name="fast", parent_session_id="s", params={
@@ -206,8 +206,8 @@ def test_fast_child_keeps_delivery_pending_until_parent_releases_owner(tmp_path,
         state.record_final_response(session_id="s", client_turn_id="ca", status="completed", response={})
         gateway._runtime_continuation_condition.notify_all()
     registry._threads[task_id].join(3)
-    assert delivered == ([] if stop_pending else [True])
-    assert registry.get_task(task_id)["task"]["parentContinuationStatus"] == ("interrupted" if stop_pending else "delivered")
+    assert delivered == [(True, "cancelled" if stop_pending else "completed")]
+    assert registry.get_task(task_id)["task"]["parentContinuationStatus"] == "delivered"
 
 
 @pytest.mark.parametrize("stop_pending", [False, True])

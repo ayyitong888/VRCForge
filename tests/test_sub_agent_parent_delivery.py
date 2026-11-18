@@ -335,6 +335,8 @@ def test_fastapi_stop_during_dispatching_suppresses_parent_resume(tmp_path, monk
         worker_thread.join(5)
         assert len(model.requests) == 1
         assert results[0]["plan"]["nextStep"] == "cancelled"
+        assert results[0]["parentClientTurnId"] == parent["clientTurnId"]
+        assert results[0]["parentTurnId"] == parent["turnId"]
         assert "Durable child finding." in json.dumps(registry.get_task(task_id))
         other = gateway.runtime_message({
             "sessionId": "parent", "clientTurnId": "other", "message": "New turn.",
