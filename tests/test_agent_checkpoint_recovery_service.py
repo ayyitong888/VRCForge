@@ -7,6 +7,7 @@ import re
 import tempfile
 import threading
 import zipfile
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -749,13 +750,25 @@ def test_local_state_approved_restore_rejects_each_root_drift_after_preview(
         assert _restore_workspaces(roots) == []
 
 
-def test_local_state_restore_with_matching_preview_digest_restores_checkpoint() -> None:
+def test_local_state_restore_with_matching_preview_digest_restores_checkpoint(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway, checkpoint, roots, _live = _local_state_restore_fixture(
             Path(temp_dir),
             "matching-preview-digest",
         )
+        live_reads = Counter()
+        open_path = Path.open
+
+        def track_live_reads(path, mode="r", *args, **kwargs):
+            if mode == "rb" and any(path.is_relative_to(root) for root in roots.values()):
+                live_reads[path] += 1
+            return open_path(path, mode, *args, **kwargs)
+
+        live_paths = {path for root in roots.values() for path in root.rglob("*") if path.is_file()}
+        monkeypatch.setattr(Path, "open", track_live_reads)
         digest = _preview_local_state_digest(gateway, checkpoint)
+        assert live_reads == Counter(dict.fromkeys(live_paths, 1))
+        live_reads.clear()
 
         result = gateway.checkpoint_recovery.restore_checkpoint(
             {
@@ -766,6 +779,7 @@ def test_local_state_restore_with_matching_preview_digest_restores_checkpoint() 
         )
 
         assert result["ok"] is True
+        assert live_reads == Counter(dict.fromkeys(live_paths, 1))
         assert _tree_bytes(roots["skill-packages"]) == {
             "sample/installed.json": b'{"version": "checkpoint"}\n',
         }

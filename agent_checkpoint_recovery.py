@@ -2555,8 +2555,7 @@ class AgentCheckpointRecoveryService:
                 }
                 for name in archived:
                     self._validate_local_state_archive_member(name)
-            current = self._local_state_archive_contents()
-            current_state_digest = self._local_state_current_digest()
+            current_state_digest, current = self._inspect_current_local_state(include_crc=True)
             changed = [f"M\t{name}" for name in sorted(archived.keys() & current.keys()) if archived[name] != current[name]]
             changed.extend(f"D\t{name}" for name in sorted(archived.keys() - current.keys()))
             changed.extend(f"A\t{name}" for name in sorted(current.keys() - archived.keys()))
@@ -3136,7 +3135,7 @@ class AgentCheckpointRecoveryService:
                 "error": "currentStateDigest from the restore preview is required.",
             }
         try:
-            current_state_digest = self._local_state_current_digest()
+            current_state_digest, current = self._inspect_current_local_state()
         except Exception as exc:  # noqa: BLE001 - validation must fail before staging.
             return {
                 "ok": False,
@@ -3167,7 +3166,6 @@ class AgentCheckpointRecoveryService:
                     roots,
                     state_roots,
                 )
-                current = self._local_state_archive_contents()
                 app_state_root = self._ports.user_constraints_path().parent.resolve()
                 for scope, root in roots.items():
                     if os.path.lexists(root) and (_path_is_link_like(root) or not root.is_dir()):
@@ -3606,32 +3604,15 @@ class AgentCheckpointRecoveryService:
             "skills": self._ports.skills.user_skills_dir(),
         }
 
-    def _local_state_archive_contents(self) -> dict[str, tuple[int, int]]:
-        result: dict[str, tuple[int, int]] = {}
-        for scope, root in self._local_state_checkpoint_roots().items():
-            if os.path.lexists(root) and (_path_is_link_like(root) or not root.is_dir()):
-                raise ValueError(f"Local state root is not a regular directory: {root}")
-            if not root.is_dir():
-                continue
-            for source in sorted(root.rglob("*")):
-                if _path_is_link_like(source):
-                    raise ValueError(f"Local state contains a linked path: {source}")
-                if not source.is_file():
-                    continue
-                crc = 0
-                with source.open("rb") as handle:
-                    while chunk := handle.read(1024 * 1024):
-                        crc = zlib.crc32(chunk, crc)
-                relative = f"{scope}/{source.relative_to(root).as_posix()}"
-                result[relative] = (source.stat().st_size, crc & 0xFFFFFFFF)
-        return result
-
-    def _local_state_current_digest(self) -> str:
-        """Bind a restore approval to the exact current local-state trees."""
+    def _inspect_current_local_state(
+        self, *, include_crc: bool = False,
+    ) -> tuple[str, dict[str, tuple[int, int | None]]]:
+        """Bind restore to the current trees and collect ZIP comparison data for preview."""
 
         roots = self._local_state_checkpoint_roots()
         root_rows: list[list[Any]] = []
         entry_rows: list[list[Any]] = []
+        files: dict[str, tuple[int, int | None]] = {}
         for scope, root in sorted(roots.items()):
             exists = os.path.lexists(root)
             if exists and (_path_is_link_like(root) or not root.is_dir()):
@@ -3672,10 +3653,13 @@ class AgentCheckpointRecoveryService:
                     before = child.stat(follow_symlinks=False)
                     file_digest = hashlib.sha256()
                     consumed = 0
+                    crc = 0 if include_crc else None
                     with child.open("rb") as stream:
                         while chunk := stream.read(1024 * 1024):
                             consumed += len(chunk)
                             file_digest.update(chunk)
+                            if crc is not None:
+                                crc = zlib.crc32(chunk, crc)
                     after = child.stat(follow_symlinks=False)
                     if (
                         consumed != before.st_size
@@ -3685,6 +3669,7 @@ class AgentCheckpointRecoveryService:
                         raise ValueError(
                             f"Local state changed while being verified: {child}"
                         )
+                    files[f"{scope}/{relative_text}"] = (consumed, crc)
                     entry_rows.append(
                         [
                             scope,
@@ -3706,7 +3691,7 @@ class AgentCheckpointRecoveryService:
                 ),
             ),
         }
-        return hashlib.sha256(
+        state_digest = hashlib.sha256(
             json.dumps(
                 payload,
                 ensure_ascii=False,
@@ -3714,6 +3699,7 @@ class AgentCheckpointRecoveryService:
                 sort_keys=True,
             ).encode("utf-8")
         ).hexdigest()
+        return state_digest, files
 
     def _validate_local_state_archive_member(self, name: str) -> None:
         text = str(name or "").replace("\\", "/")
