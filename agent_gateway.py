@@ -10463,13 +10463,14 @@ class AgentGateway:
             "items": normalized_items,
         }
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
-        snapshot = self.list_agent_progress(limit=50, project_root=project_root, session_id=session_id)
+        projected = list(self._project_agent_progress().values())
+        snapshot = self._agent_progress_page(projected, limit=50, project_root=project_root, session_id=session_id)
         expected = {row["progressId"]: redact_sensitive(row) for row in normalized_items}
         observed = {
-            row["progressId"]: row for row in snapshot["items"]
-            if row.get("sessionId") == session_id and (project_root or not row.get("projectRoot"))
+            row["progressId"]: redact_sensitive(row)
+            for row in self._scoped_runtime_todos(session_id, project_root, projected=projected)
         }
-        if (len(snapshot["items"]) < 50 and len(expected) == len(normalized_items)
+        if (len(expected) == len(normalized_items)
                 and observed.keys() == expected.keys()
                 and all(all(observed[item_id].get(key) == value for key, value in row.items())
                         for item_id, row in expected.items())):
@@ -10563,13 +10564,15 @@ class AgentGateway:
         if entry["status"] == "completed" and len(evidence) < len(checks):
             entry["status"] = "in_progress"
 
-    def _scoped_runtime_todos(self, session_id: str, project_root: str) -> list[dict[str, Any]]:
+    def _scoped_runtime_todos(
+        self, session_id: str, project_root: str, *, projected: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         def project_key(path: str) -> str:
             return command_safety.normalize_filesystem_path(path) if path else ""
 
         normalized_root = project_key(project_root)
         return [
-            item for item in self._project_agent_progress().values()
+            item for item in (self._project_agent_progress().values() if projected is None else projected)
             if item.get("sessionId") == session_id
             and project_key(str(item.get("projectRoot") or "")) == normalized_root
         ]
@@ -10656,6 +10659,12 @@ class AgentGateway:
 
     def list_agent_progress(self, *, limit: int = 50, project_root: str = "", session_id: str = "") -> dict[str, Any]:
         progress = list(self._project_agent_progress().values())
+        return self._agent_progress_page(progress, limit=limit, project_root=project_root, session_id=session_id)
+
+    @staticmethod
+    def _agent_progress_page(
+        progress: list[dict[str, Any]], *, limit: int, project_root: str, session_id: str,
+    ) -> dict[str, Any]:
         if project_root:
             normalized_project_root = command_safety.normalize_filesystem_path(project_root)
             progress = [
@@ -10666,9 +10675,9 @@ class AgentGateway:
             ]
         if session_id:
             progress = [item for item in progress if str(item.get("sessionId") or "") == session_id]
-        progress.sort(key=lambda item: (int(item.get("order") or 0), str(item.get("createdAt") or "")))
-        progress = progress[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
-        return {"ok": True, "schema": "vrcforge.agent_progress.v1", "items": [redact_sensitive(item) for item in progress], "count": len(progress)}
+        page = sorted(progress, key=lambda item: (int(item.get("order") or 0), str(item.get("createdAt") or "")))
+        page = page[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
+        return {"ok": True, "schema": "vrcforge.agent_progress.v1", "items": [redact_sensitive(item) for item in page], "count": len(page)}
 
     def create_agent_memory(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         preferences = self.memory_preferences()

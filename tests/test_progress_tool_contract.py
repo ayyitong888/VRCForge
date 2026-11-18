@@ -50,6 +50,33 @@ def test_replace_keeps_alias_precedence_and_scoped_items(tmp_path):
     assert gateway.list_agent_progress(session_id="other")["items"][0]["title"] == "Other"
 
 
+@pytest.mark.parametrize("count", [49, 50, 51])
+@pytest.mark.parametrize("app_scope", [True, False])
+def test_replace_verifies_full_scoped_snapshot_beyond_the_response_page(tmp_path, count, app_scope):
+    config, audit = tmp_path / "config.json", tmp_path / "audit"
+    gateway = AgentGateway(config, audit)
+    project = str(tmp_path / "Project")
+    scope = {"sessionId": "owner", "projectRoot": "" if app_scope else project}
+    other_scopes = [
+        {**scope, "sessionId": "other"},
+        {**scope, "projectRoot": project if app_scope else ""},
+    ]
+    for other_scope in other_scopes:
+        gateway.replace_agent_progress({**other_scope, "items": [{"id": "task-0", "title": "Do not touch", "order": -1}]})
+    items = [{"id": f"task-{n}", "title": f"Task {n}", "order": n} for n in reversed(range(count))]
+    result = gateway.replace_agent_progress({**scope, "items": items})
+    reopened = AgentGateway(config, audit)
+    saved = reopened._scoped_runtime_todos(scope["sessionId"], scope["projectRoot"])
+    assert {item["progressId"] for item in saved} == {item["id"] for item in items}
+    for other_scope in other_scopes:
+        assert reopened._scoped_runtime_todos(other_scope["sessionId"], other_scope["projectRoot"])[0]["title"] == "Do not touch"
+    assert result["items"] == reopened.list_agent_progress(
+        limit=50, session_id=scope["sessionId"], project_root=scope["projectRoot"],
+    )["items"]
+    assert [item["order"] for item in result["items"]] == sorted(item["order"] for item in result["items"])
+    assert result.get("readbackVerified") is True
+
+
 @pytest.mark.parametrize("layer", ["planning", "execution"])
 @pytest.mark.parametrize("project", [False, True])
 def test_native_catalog_contains_complete_progress_schemas(layer, project):
