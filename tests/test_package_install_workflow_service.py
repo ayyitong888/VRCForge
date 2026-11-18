@@ -565,4 +565,13 @@ def test_package_plan_honors_explicit_cli_preference_over_detected_vcc(tmp_path:
         assert plan["preferredManager"]["name"] == "vrc-get"
         assert plan["canExecuteCommandInstall"] and plan["canCreateInstallRequest"]
         assert "handoff first" not in plan["message"]
+    args = {"projectPath": str(tmp_path), "packageId": "com.vrcfury.vrcfury"}
+    automatic = service.plan_install(args)
+    assert automatic["executionStrategy"] == "command" and automatic["canCreateInstallRequest"]
+    manual = service.request_install({**args, "preferredManager": "vcc", "allowAgentManagedDownload": True})
+    assert manual["installPlan"]["executionStrategy"] == "ui_handoff" and not manual["installPlan"]["canCreateInstallRequest"]
+    assert "selected vcc" in manual["error"]
+    absent = service.plan_install({**args, "preferredManager": "alcom"})
+    assert absent["strategy"] == "manual_handoff" and not absent["canExecuteCommandInstall"]
+    assert "alcom" in absent["message"]
     assert not any(call[0] == "approval" for call in calls)

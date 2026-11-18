@@ -165,7 +165,6 @@ def test_missing_dependency_queues_only_supported_install_request() -> None:
     assert request["arguments"] == {
         "projectPath": "P",
         "packageId": "dev.limitex.avatar-compressor",
-        "repository": "https://repo.invalid/index.json",
         "includePrerelease": True,
     }
     assert request["requires_explicit_approval"] is True

@@ -123,10 +123,7 @@ class OptimizationWorkflowService:
                 return {
                     "ok": False,
                     "status": "blocked",
-                    "error": (
-                        "Dependency is missing and no supported package-manager CLI "
-                        "is available for a supervised install request."
-                    ),
+                    "error": install_plan.get("message") or "No supervised package install is ready for this dependency.",
                     "preview": preview,
                     "installPlan": install_plan,
                 }
@@ -136,9 +133,6 @@ class OptimizationWorkflowService:
                     "arguments": {
                         "projectPath": _ensure_dict(preview.get("applyArguments")).get("projectPath"),
                         "packageId": package_ids[0],
-                        "repository": install_plan.get("repository")
-                        or dependency.get("vpmRepository")
-                        or "",
                         "includePrerelease": bool(
                             normalized.get("includePrerelease")
                             or normalized.get("include_prerelease")

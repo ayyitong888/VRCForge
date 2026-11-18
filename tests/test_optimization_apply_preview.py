@@ -167,6 +167,7 @@ def test_missing_dependency_builds_read_only_install_plan_and_stays_blocked(
     assert len(plans) == 1
     assert plans[0]["packageId"] == "dev.limitex.avatar-compressor"
     assert plans[0]["allowAgentManagedDownload"] is True
+    assert "repository" not in plans[0]
 
 
 def test_ttt_and_meshia_keep_exact_user_selection_gates(tmp_path: Path) -> None:

@@ -525,15 +525,25 @@ class PackageInstallWorkflowService:
             ui_handoff.sort(key=lambda item: 0 if item.get("name") == preferred else 1)
         selected_cli = command_installers[0] if command_installers else None
         selected_handoff = ui_handoff[0] if ui_handoff else None
-        execution_strategy = (
-            "command"
-            if selected_cli
-            else "agent_download"
-            if allow_agent and not selected_handoff
-            else "manual_handoff"
-        )
-        prefer_command = selected_cli is not None and preferred == selected_cli.get("name")
-        strategy = "command" if prefer_command else "ui_handoff" if selected_handoff else execution_strategy
+        if preferred in {"vcc", "alcom"}:
+            if selected_handoff and selected_handoff["name"] == preferred:
+                strategy = "ui_handoff"
+                message = f"The user selected {preferred}. Use that manager for this package."
+            else:
+                strategy = "agent_download" if allow_agent else "manual_handoff"
+                message = f"The selected {preferred} manager was not detected. Check host tools for authorized setup of that manager."
+        elif selected_cli:
+            strategy = "command"
+            message = "Use vrc-get through the current permission policy and checkpoint flow. Package availability is checked while preparing the request."
+        elif allow_agent:
+            strategy = "agent_download"
+            message = "Check for an authorized host tool to install vrc-get from its official distribution. After installing it, repeat this package plan."
+        elif selected_handoff:
+            strategy = "ui_handoff"
+            message = f"No supported CLI was detected. Use an available desktop tool to operate {selected_handoff['name']}. Ask for a user action only if the host cannot perform it."
+        else:
+            strategy = "manual_handoff"
+            message = "No supported package manager was detected. Check for an authorized host installation tool before requesting manual setup."
         return {
             "schema": "vrcforge.package_install_plan.v1",
             "packageId": package_id,
@@ -550,8 +560,8 @@ class PackageInstallWorkflowService:
                 or params.get("prerelease")
             ),
             "strategy": strategy,
-            "executionStrategy": execution_strategy,
-            "preferredManager": selected_cli if prefer_command else selected_handoff or selected_cli,
+            "executionStrategy": strategy,
+            "preferredManager": selected_cli if strategy == "command" else selected_handoff if strategy == "ui_handoff" else None,
             "commandInstaller": selected_cli,
             "uiHandoff": selected_handoff,
             "managers": managers,
@@ -559,31 +569,11 @@ class PackageInstallWorkflowService:
             "directManifestEditing": False,
             "requiresApproval": True,
             "requiresCheckpoint": True,
-            "message": (
-                "Use the requested vrc-get CLI through the current permission policy and checkpoint flow."
-                if prefer_command
-                else "Use the selected ALCOM/VCC handoff first; supervised command install is also available after approval."
-                if selected_handoff and selected_cli
-                else "Use the selected ALCOM/VCC handoff first."
-                if selected_handoff
-                else "Use the selected vrc-get CLI through checkpoint safety."
-                if selected_cli
-                else "No VPM package manager is available; let an external agent prepare a supervised package-manager download/install plan."
-            ),
+            "message": message,
             "agentManagedDownload": {
-                "available": allow_agent and selected_cli is None and selected_handoff is None,
-                "allowedTargets": [
-                    "install ALCOM or VCC",
-                    "install VCC/vpm CLI",
-                    "install vrc-get",
-                    "download package manager from official source",
-                ],
-                "disallowedTargets": [
-                    "directly edit Packages/manifest.json",
-                    "copy optimizer source into VRCForge",
-                    "bypass approval/checkpoint",
-                ],
-                "nextTool": "vrcforge_request_apply",
+                "available": None if strategy == "agent_download" else False,
+                "requiresCallerHostTool": strategy == "agent_download",
+                "afterSetupTool": "vrcforge_package_install_plan",
             },
         }
 
@@ -624,14 +614,14 @@ class PackageInstallWorkflowService:
             "preferredCommandInstaller": usable[0] if usable else None,
             "preferredUiHandoff": ui_handoff[0] if ui_handoff else None,
             "canInstall": bool(usable) and bool(project_value),
-            "canRequestInstall": bool(project_value),
+            "canRequestInstall": bool(usable) and bool(project_value),
             "packages": packages,
             "knownOptimizationPackages": self._optimizer_package_catalog(),
             "installPolicy": {
                 "managerPriority": [
                     "vrc-get CLI for user-requested installs under the current App permission policy",
-                    "ALCOM/VCC UI handoff only when the user requests it or the package plan requires it",
-                    "agent-managed download/install plan when no package manager is available",
+                    "agent-managed CLI setup with an authorized host tool if the CLI is missing",
+                    "selected graphical manager through available desktop tools, or a necessary user interaction",
                 ],
                 "directManifestEditing": False,
                 "requiresApprovalCheckpoint": True,
@@ -644,7 +634,7 @@ class PackageInstallWorkflowService:
                 "The request applies the current App permission policy and checkpoint flow; external MCP Gateway "
                 "enablement is not required for the built-in Agent. A previously rejected request is historical "
                 "evidence: use the current plan/receipt to decide whether installation is blocked. "
-                "Use ALCOM/VCC handoff only if the user asks for manual installation or the current plan requires UI. "
+                "If the CLI is missing, check host installation or desktop tools and continue with any available authorized route. "
                 "Manager detection alone is neither installation permission nor proof that a package was installed."
             ),
         }
@@ -757,9 +747,9 @@ class PackageInstallWorkflowService:
             "legacyBaselineVerification": baseline_report,
             "legacyPreservationRequired": preservation_ready,
             "compatibilityAction": action,
-            "canExecuteCommandInstall": bool(strategy.get("commandInstaller"))
+            "canExecuteCommandInstall": strategy["executionStrategy"] == "command"
             and bool(project_value) and action in {"restore_locked", "upgrade", "install_missing"} and not blocker,
-            "canCreateInstallRequest": bool(project_value) and (not installed or upgrade_available)
+            "canCreateInstallRequest": strategy["executionStrategy"] == "command" and bool(project_value) and (not installed or upgrade_available)
             and not assets_migration_required and not unreadable_state and not blocker,
             "canPrepareUpgradeRequest": upgrade_available and not assets_migration_required
             and not unreadable_state and not blocker,
@@ -905,8 +895,7 @@ class PackageInstallWorkflowService:
                     "code": "no_vpm_cli",
                     "title": "No command-line VPM installer detected",
                     "suggestion": (
-                        "Use the package manager UI, or install vrc-get/VCC CLI before "
-                        "command-line package installs."
+                        "Check available host tools for installing vrc-get or operating the detected graphical manager."
                     ),
                 }
             )
@@ -1028,10 +1017,7 @@ class PackageInstallWorkflowService:
             blocked: dict[str, Any] = {
                 "ok": False,
                 "status": "blocked",
-                "error": (
-                    "No supported non-interactive VPM CLI is available for package install. "
-                    "Use the UI handoff or prepare an agent-managed package-manager install first."
-                ),
+                "error": plan["message"],
                 "installPlan": plan,
             }
             return blocked

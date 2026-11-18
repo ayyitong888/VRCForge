@@ -272,7 +272,6 @@ class OptimizationApplyPreviewService:
                 {
                     "projectPath": project_value,
                     "packageId": package_ids[0],
-                    "repository": dependency.get("vpmRepository") or "",
                     "allowAgentManagedDownload": bool(params.get("installMissingDependencies") or params.get("allowAgentManagedDownload")),
                 }
             )

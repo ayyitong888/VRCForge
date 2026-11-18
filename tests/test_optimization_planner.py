@@ -1599,7 +1599,7 @@ def test_optimizer_profile_diff_requires_before_after_and_rollback_snapshots(tmp
     assert "profile.rollback" in missing["result"]["hardGate"]["blockingIds"]
 
 
-def test_package_install_plan_prefers_vcc_alcom_handoff_before_agent_download(monkeypatch, tmp_path: Path) -> None:
+def test_package_install_plan_checks_authorized_host_setup_before_graphical_handoff(monkeypatch, tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
     workflow = package_workflow_for_test(
@@ -1625,11 +1625,13 @@ def test_package_install_plan_prefers_vcc_alcom_handoff_before_agent_download(mo
     )
 
     assert plan["ok"] is True
-    assert plan["strategy"] == "ui_handoff"
-    assert plan["preferredManager"]["name"] == "vcc"
-    assert plan["agentManagedDownload"]["available"] is False
+    assert plan["strategy"] == "agent_download"
+    assert plan["preferredManager"] is None
+    assert plan["uiHandoff"]["name"] == "vcc"
+    assert plan["agentManagedDownload"]["requiresCallerHostTool"] is True
+    assert plan["agentManagedDownload"]["available"] is None
     assert plan["canExecuteCommandInstall"] is False
-    assert plan["canCreateInstallRequest"] is True
+    assert plan["canCreateInstallRequest"] is False
 
 
 def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypatch, tmp_path: Path) -> None:

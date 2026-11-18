@@ -685,7 +685,7 @@ def build_dependency_doctor(params: dict[str, Any]) -> dict[str, Any]:
         "installPolicy": {
             "automaticInstall": False,
             "supervisedInstallRequestAvailable": True,
-            "preferredManagers": ["ALCOM/VCC UI handoff", "VCC vpm CLI", "vrc-get CLI", "agent-managed download plan"],
+            "preferredManagers": ["vrc-get CLI", "agent-managed CLI setup", "selected graphical manager"],
             "message": "Dependency installs are request-only: VRCForge plans package-manager use first, then any project write still requires approval and checkpoint.",
         },
         "compatibilityPolicy": {
