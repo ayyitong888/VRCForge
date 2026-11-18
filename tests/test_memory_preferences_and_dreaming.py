@@ -118,7 +118,7 @@ def test_dreaming_requires_second_model_review_before_deduplicating_saved_memory
         "kind": "preference",
         "text": "Use concise release notes.",
     })
-    run_at = datetime(2026, 8, 18, 6, 0, tzinfo=timezone.utc)
+    run_at = datetime.now(timezone.utc)
 
     prepared = service.prepare_dreaming(run_at)
     assert prepared["prepared"] is True
@@ -149,12 +149,6 @@ def test_dreaming_requires_second_model_review_before_deduplicating_saved_memory
     }
     result = service.commit_dreaming(prepared, reviewed, run_at)
 
-    assert result["reason"] == "awaiting_user_approval"
-    assert len(service.accepted_store.list_active()) == 8
-    result = service.decide_dreaming(
-        result["proposalId"], "accept", expected_revision=result["revision"],
-    )
-
     assert result["reason"] == "completed"
     assert result["deduplicatedCount"] == 2
     active_ids = {str(row["memoryId"]) for row in service.accepted_store.list_active()}
@@ -170,11 +164,23 @@ def test_dreaming_requires_second_model_review_before_deduplicating_saved_memory
     assert cadence["due"] is False
     assert cadence["reason"] == "cadence"
 
+    # A later scan with no duplicates leaves the last real consolidation undoable.
+    later = run_at + timedelta(days=2)
+    for index in range(5):
+        service.accepted_store.create({
+            "scope": "user", "kind": "fact", "text": f"New unique memory {index}.",
+        })
+    assert service.commit_dreaming(
+        service.prepare_dreaming(later),
+        {"reviewed": True, "duplicateGroups": []},
+        later,
+    )["deduplicatedCount"] == 0
+
     rollback = service.rollback_last_dreaming()
     assert rollback["rolledBack"] is True
     assert rollback["restoredCount"] == 2
     restored_ids = {str(row["memoryId"]) for row in service.accepted_store.list_active()}
-    assert restored_ids == {
+    assert {
         str(first["memoryId"]),
         str(duplicate["memoryId"]),
         str(false_positive_keep["memoryId"]),
@@ -183,7 +189,7 @@ def test_dreaming_requires_second_model_review_before_deduplicating_saved_memory
         str(missed_remove["memoryId"]),
         str(extra_one["memoryId"]),
         str(extra_two["memoryId"]),
-    }
+    } <= restored_ids
 
 
 def test_dreaming_uses_saved_memory_even_when_cross_session_recall_is_disabled(

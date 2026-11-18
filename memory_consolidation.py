@@ -2516,12 +2516,12 @@ class MemoryReviewStore:
                 state["dreamingProposal"] = None
             config = dict(state.get("config") or {})
             config["lastDreamingAt"] = normalized_completed_at
-            config["lastDreamingRunId"] = (
-                "" if rolled_back or normalized_failure else normalized_run_id
-            )
-            config["lastDreamingDeletedMemoryIds"] = (
-                [] if rolled_back or normalized_failure else normalized_ids
-            )
+            if rolled_back:
+                config["lastDreamingRunId"] = ""
+                config["lastDreamingDeletedMemoryIds"] = []
+            elif normalized_ids and not normalized_failure:
+                config["lastDreamingRunId"] = normalized_run_id
+                config["lastDreamingDeletedMemoryIds"] = normalized_ids
             state["config"] = config
             state["revision"] = int(state.get("revision") or 0) + 1
             self._commit_with_audit(
@@ -4978,8 +4978,6 @@ class MemoryConsolidationService:
         preferences = self.memory_preferences()
         if not preferences["memoryEnabled"]:
             return {"due": False, "reason": "memory_disabled", "revision": snapshot["revision"]}
-        if snapshot.get("dreamingProposal"):
-            return {"due": False, "reason": "awaiting_user_approval", "revision": snapshot["revision"]}
         current = now or datetime.now(timezone.utc)
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
@@ -5046,6 +5044,15 @@ class MemoryConsolidationService:
         return "project:" + hashlib.sha256(project_root.encode("utf-8")).hexdigest()[:24]
 
     @classmethod
+    def _dreaming_provider_memory(cls, memory: Mapping[str, Any]) -> dict[str, str]:
+        return {
+            "memoryId": str(memory.get("memoryId") or memory.get("id") or ""),
+            "scopeKey": cls._dreaming_scope_key(memory),
+            "kind": str(memory.get("kind") or "preference")[:80],
+            "text": str(memory.get("text") or ""),
+        }
+
+    @classmethod
     def _dreaming_duplicate_groups(
         cls,
         active: Sequence[Mapping[str, Any]],
@@ -5104,12 +5111,7 @@ class MemoryConsolidationService:
             selected: list[dict[str, Any]] = []
             serialized_chars = 0
             for memory in active:
-                item = {
-                    "memoryId": str(memory.get("memoryId") or memory.get("id") or ""),
-                    "scopeKey": self._dreaming_scope_key(memory),
-                    "kind": str(memory.get("kind") or "preference")[:80],
-                    "text": str(memory.get("text") or ""),
-                }
+                item = self._dreaming_provider_memory(memory)
                 item_chars = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
                 if selected and serialized_chars + item_chars > DREAMING_INPUT_CHAR_CAP:
                     break
@@ -5137,7 +5139,7 @@ class MemoryConsolidationService:
                 **due,
                 "prepared": True,
                 "runId": run_id,
-                "snapshotDigest": self._dreaming_snapshot_digest(active),
+                "maxRemovals": max(1, int(len(active) * DREAMING_MAX_REMOVAL_FRACTION)),
                 "memories": selected,
                 "request": {
                     "schema": "vrcforge.memory_dreaming_plan_request.v1",
@@ -5231,34 +5233,15 @@ class MemoryConsolidationService:
         reviewed_result: Mapping[str, Any],
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Stage a reviewed proposal; model review never authorizes Memory changes."""
+        """Apply the reviewed same-scope duplicate groups and supersede any old proposal."""
 
-        with self._transaction_lock:
-            if not self.memory_preferences()["memoryEnabled"]:
-                raise MemoryConsolidationError("Memory is disabled.")
-            if reviewed_result.get("reviewed") is not True:
-                raise MemoryConsolidationError("Dreaming requires a second model review.")
-            current = self.accepted_store.list_active()
-            if self._dreaming_snapshot_digest(current) != str(prepared.get("snapshotDigest") or ""):
-                raise MemoryConsolidationError("Memory changed before Dreaming proposal.")
-            groups = self._validated_dreaming_groups(prepared, reviewed_result)
-            if sum(len(group["removeIds"]) for group in groups) > max(1, int(len(current) * DREAMING_MAX_REMOVAL_FRACTION)):
-                raise MemoryConsolidationError("Dreaming result exceeds the prior-Memory loss limit.")
-            completed = now or datetime.now(timezone.utc)
-            if not groups:
-                snapshot = self.review_store.record_dreaming_result(run_id=str(prepared["runId"]), completed_at=completed.isoformat(), deleted_memory_ids=[])
-                return {"due": True, "reason": "completed", "runId": prepared["runId"], "deduplicatedCount": 0, "revision": snapshot["revision"]}
-            by_id = {row["memoryId"]: row for row in current}
-            first = by_id[groups[0]["keepId"]]
-            scope, root = str(first.get("scope") or "user"), str(first.get("projectRoot") or "")
-            # One scope per approval: never ask a project page to approve hidden changes elsewhere.
-            groups = [group for group in groups if self._dreaming_scope_key(by_id[group["keepId"]]) == self._dreaming_scope_key(first)]
+        with self._transaction_lock, self.accepted_store._lock:
             state = self.review_store.snapshot(include_internal=True)
-            if state.get("dreamingProposal"):
-                raise MemoryConsolidationError("A Dreaming proposal is already awaiting approval.")
-            proposal = {"proposalId": prepared["runId"], "snapshotDigest": prepared["snapshotDigest"], "scope": scope, "projectRoot": root, "duplicateGroups": groups, "createdAt": completed.isoformat()}
-            snapshot = self.review_store.set_dreaming_proposal(proposal, expected_revision=state["revision"])
-            return {"due": True, "reason": "awaiting_user_approval", "runId": prepared["runId"], "proposalId": prepared["runId"], "deduplicatedCount": 0, "revision": snapshot["revision"]}
+            prior_proposal = state.get("dreamingProposal") or {}
+            return self._apply_reviewed_dreaming(
+                prepared, reviewed_result, self.accepted_store.list_active(), now,
+                decided_proposal_id=str(prior_proposal.get("proposalId") or ""),
+            )
 
     def dreaming_proposal(self, project_root: str = "") -> dict[str, Any] | None:
         """Return a scoped, safe preview; pending records never enter recall."""
@@ -5287,57 +5270,82 @@ class MemoryConsolidationService:
                 return {"reason": "rejected", "deduplicatedCount": 0, "revision": snapshot["revision"]}
             if action != "accept":
                 raise MemoryConsolidationError("Dreaming decision must be accept or reject.")
-            if not self.memory_preferences()["memoryEnabled"]:
-                raise MemoryConsolidationError("Memory is disabled.")
             current = self.accepted_store.list_active()
-            prepared = {"runId": proposal_id, "snapshotDigest": proposal["snapshotDigest"], "memories": [{"memoryId": row["memoryId"], "scopeKey": self._dreaming_scope_key(row), "kind": row.get("kind")} for row in current]}
-            return self._apply_approved_dreaming(prepared, {"reviewed": True, "duplicateGroups": proposal["duplicateGroups"]})
-
-    def _apply_approved_dreaming(self, prepared: Mapping[str, Any], reviewed_result: Mapping[str, Any], now: datetime | None = None) -> dict[str, Any]:
-
-        with self._transaction_lock:
-            if reviewed_result.get("reviewed") is not True:
-                raise MemoryConsolidationError("Dreaming requires a second model review.")
-            current = self.accepted_store.list_active()
-            if self._dreaming_snapshot_digest(current) != str(prepared.get("snapshotDigest") or ""):
+            if self._dreaming_snapshot_digest(current) != proposal["snapshotDigest"]:
                 raise MemoryConsolidationError("Memory changed before Dreaming commit.")
-            groups = self._validated_dreaming_groups(prepared, reviewed_result)
-            remove_ids = sorted({
-                memory_id
-                for group in groups
-                for memory_id in group["removeIds"]
-            })
-            max_removals = max(1, int(len(current) * DREAMING_MAX_REMOVAL_FRACTION))
-            if len(remove_ids) > max_removals:
-                raise MemoryConsolidationError("Dreaming result exceeds the prior-Memory loss limit.")
-            run_id = str(prepared.get("runId") or "")
-            if not run_id:
-                raise MemoryConsolidationError("Dreaming run identity is missing.")
-            deleted: list[str] = []
-            try:
-                for memory_id in remove_ids:
-                    self.accepted_store.delete(memory_id, {"reason": f"dreaming:{run_id}"})
-                    deleted.append(memory_id)
-                completed = now or datetime.now(timezone.utc)
-                if completed.tzinfo is None:
-                    completed = completed.replace(tzinfo=timezone.utc)
-                snapshot = self.review_store.record_dreaming_result(
-                    run_id=run_id,
-                    completed_at=completed.astimezone(timezone.utc).isoformat(),
-                    deleted_memory_ids=deleted,
-                    decided_proposal_id=run_id,
-                )
-            except BaseException:
-                for memory_id in reversed(deleted):
-                    self.accepted_store.restore(memory_id, {"reason": f"dreaming_rollback:{run_id}"})
-                raise
-            return {
-                "due": True,
-                "reason": "completed",
-                "runId": run_id,
-                "deduplicatedCount": len(deleted),
-                "revision": int(snapshot.get("revision") or 0),
+            prepared = {
+                "runId": proposal_id,
+                "maxRemovals": max(1, int(len(current) * DREAMING_MAX_REMOVAL_FRACTION)),
+                "memories": [self._dreaming_provider_memory(row) for row in current],
             }
+            return self._apply_reviewed_dreaming(
+                prepared, {"reviewed": True, "duplicateGroups": proposal["duplicateGroups"]},
+                current,
+                decided_proposal_id=proposal_id,
+            )
+
+    def _apply_reviewed_dreaming(
+        self,
+        prepared: Mapping[str, Any],
+        reviewed_result: Mapping[str, Any],
+        current: Sequence[Mapping[str, Any]],
+        now: datetime | None = None,
+        *,
+        decided_proposal_id: str,
+    ) -> dict[str, Any]:
+        """Apply under the service transaction and accepted-store locks."""
+        if not self.memory_preferences()["memoryEnabled"]:
+            raise MemoryConsolidationError("Memory is disabled.")
+        if reviewed_result.get("reviewed") is not True:
+            raise MemoryConsolidationError("Dreaming requires a second model review.")
+        groups = self._validated_dreaming_groups(prepared, reviewed_result)
+        reviewed_ids = {
+            memory_id for group in groups for memory_id in (group["keepId"], *group["removeIds"])
+        }
+        reviewed_rows = {row["memoryId"]: row for row in prepared["memories"] if row["memoryId"] in reviewed_ids}
+        current_rows = {
+            row["memoryId"]: self._dreaming_provider_memory(row)
+            for row in current
+            if row["memoryId"] in reviewed_ids
+        }
+        if current_rows != reviewed_rows:
+            raise MemoryConsolidationError("Reviewed Memory changed before Dreaming commit.")
+        remove_ids = sorted({
+            memory_id
+            for group in groups
+            for memory_id in group["removeIds"]
+        })
+        max_removals = int(prepared["maxRemovals"])
+        if len(remove_ids) > max_removals:
+            raise MemoryConsolidationError("Dreaming result exceeds the prior-Memory loss limit.")
+        run_id = str(prepared.get("runId") or "")
+        if not run_id:
+            raise MemoryConsolidationError("Dreaming run identity is missing.")
+        deleted: list[str] = []
+        try:
+            for memory_id in remove_ids:
+                self.accepted_store.delete(memory_id, {"reason": f"dreaming:{run_id}"})
+                deleted.append(memory_id)
+            completed = now or datetime.now(timezone.utc)
+            if completed.tzinfo is None:
+                completed = completed.replace(tzinfo=timezone.utc)
+            snapshot = self.review_store.record_dreaming_result(
+                run_id=run_id,
+                completed_at=completed.astimezone(timezone.utc).isoformat(),
+                deleted_memory_ids=deleted,
+                decided_proposal_id=decided_proposal_id,
+            )
+        except BaseException:
+            for memory_id in reversed(deleted):
+                self.accepted_store.restore(memory_id, {"reason": f"dreaming_rollback:{run_id}"})
+            raise
+        return {
+            "due": True,
+            "reason": "completed",
+            "runId": run_id,
+            "deduplicatedCount": len(deleted),
+            "revision": int(snapshot.get("revision") or 0),
+        }
 
     def record_dreaming_failure(
         self,

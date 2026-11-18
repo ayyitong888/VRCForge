@@ -2076,19 +2076,27 @@ def test_simple_memory_preferences_are_global_and_ignore_stale_project_scope(
     assert updated["mode"] == "off"
 
 
+@pytest.mark.parametrize("scenario", ["fresh", "old_proposal", "unrelated_change", "target_change"])
 def test_dreaming_rechecks_the_same_memory_batch_before_any_merge(
     memory_review_dashboard: DashboardMemoryReviewHarness,
+    tmp_path: Path,
+    scenario: str,
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
     service = env.host.service
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    other_root = tmp_path / "other-project"
+    other_root.mkdir()
     memories = [
         service.accepted_store.create({
-            "scope": "user",
+            "scope": "project" if index in {4, 5, 7} else "user",
+            "projectRoot": str(project_root) if index in {4, 5} else str(other_root) if index == 7 else "",
             "kind": kind,
             "text": text,
         })
-        for kind, text in (
+        for index, (kind, text) in enumerate((
             ("preference", "Keep status updates compact."),
             ("preference", "Status updates should stay compact."),
             ("fact", "The project uses Unity 2022.3."),
@@ -2097,10 +2105,19 @@ def test_dreaming_rechecks_the_same_memory_batch_before_any_merge(
             ("fact", "Include validation results in status reports."),
             ("fact", "The release branch is main."),
             ("preference", "Use concise release notes."),
-        )
+        ))
     ]
     ids = [str(memory["memoryId"]) for memory in memories]
     active_before = set(ids)
+    if scenario == "old_proposal":
+        prepared = service.prepare_dreaming()
+        service.review_store.set_dreaming_proposal({
+            "proposalId": prepared["runId"],
+            "snapshotDigest": service._dreaming_snapshot_digest(service.accepted_store.list_active()),
+            "scope": "user", "projectRoot": "", "createdAt": memories[0]["createdAt"],
+            "duplicateGroups": [{"keepId": ids[2], "removeIds": [ids[3]]}],
+        }, expected_revision=prepared["revision"])
+        assert service.dreaming_proposal() is not None
 
     def dreaming_provider(
         _settings: Settings,
@@ -2126,6 +2143,10 @@ def test_dreaming_rechecks_the_same_memory_batch_before_any_merge(
             {"keepId": ids[0], "removeIds": [ids[1]]},
             {"keepId": ids[2], "removeIds": [ids[3]]},
         ]
+        if scenario == "unrelated_change":
+            service.accepted_store.delete(ids[7])
+        elif scenario == "target_change":
+            service.accepted_store.delete(ids[4])
         # The review removes the false positive and adds a missed duplicate.
         return {
             "duplicateGroups": [
@@ -2150,21 +2171,22 @@ def test_dreaming_rechecks_the_same_memory_batch_before_any_merge(
         "vrcforge.memory_dreaming_plan_request.v1",
         "vrcforge.memory_dreaming_review_request.v1",
     ]
-    assert result["deduplicatedCount"] == 0
-    assert result["reason"] == "awaiting_user_approval"
-    assert len(service.accepted_store.list_active()) == len(active_before)
-    approved = asyncio.run(env.host.decide_dreaming(
-        result["proposalId"], "accept", expected_revision=result["revision"],
-    ))
-    assert approved["dreamingProposal"] is None
+    assert env.host.snapshot()["dreamingProposal"] is None
     active_after = {
         str(memory["memoryId"])
         for memory in service.accepted_store.list_active()
     }
-    assert ids[1] not in active_after
-    assert ids[5] not in active_after
-    assert ids[3] in active_after
-    assert active_after == active_before - {ids[1], ids[5]}
+    if scenario == "target_change":
+        assert result["reason"] == "failed"
+        assert result["deduplicatedCount"] == 0
+        assert active_after == active_before - {ids[4]}
+    else:
+        assert result["reason"] == "completed"
+        assert result["deduplicatedCount"] == 2
+        removed = {ids[1], ids[5]}
+        if scenario == "unrelated_change":
+            removed.add(ids[7])
+        assert active_after == active_before - removed
 
 
 def test_disabling_memory_cancels_dreaming_before_second_provider_pass(
@@ -2229,15 +2251,19 @@ def test_disabling_memory_cancels_dreaming_before_second_provider_pass(
 
 
 @pytest.mark.parametrize("action", ["accept", "reject"])
-def test_dreaming_candidate_prefix_routes_explicit_user_decision(memory_review_dashboard, action):
+def test_dreaming_candidate_prefix_routes_old_explicit_user_decision(memory_review_dashboard, action):
     env = memory_review_dashboard
     service = env.host.service
     rows = [service.accepted_store.create({"scope": "user", "text": f"Preference {index}."}) for index in range(5)]
     prepared = service.prepare_dreaming()
-    proposed = service.commit_dreaming(prepared, {"reviewed": True, "duplicateGroups": [
-        {"keepId": rows[0]["memoryId"], "removeIds": [rows[1]["memoryId"]]},
-    ]})
-    url = f"/api/app/agent/memory/review/candidates/dreaming:{proposed['proposalId']}/{action}"
+    run_id = prepared["runId"]
+    proposed = service.review_store.set_dreaming_proposal({
+        "proposalId": run_id,
+        "snapshotDigest": service._dreaming_snapshot_digest(service.accepted_store.list_active()),
+        "scope": "user", "projectRoot": "", "createdAt": rows[0]["createdAt"],
+        "duplicateGroups": [{"keepId": rows[0]["memoryId"], "removeIds": [rows[1]["memoryId"]]}],
+    }, expected_revision=prepared["revision"])
+    url = f"/api/app/agent/memory/review/candidates/dreaming:{run_id}/{action}"
     stale = env.client.post(url, json={"expectedRevision": proposed["revision"] - 1})
     assert stale.status_code == 409
     assert len(service.accepted_store.list_active()) == 5
