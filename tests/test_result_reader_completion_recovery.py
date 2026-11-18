@@ -102,9 +102,16 @@ def test_native_read_only_negative_observation_can_finish_without_hard_requireme
     assert action["status"] == "failed"
     assert "_nativeReadObservation" not in loop.planner_projection()["actions"][0]
     gated = loop.gate_terminal({"nextStep": "done", "reply": "The object was not found."})
-    assert gated["nextStep"] == "completion_unverified"
-    assert gated["task"]["status"] == "completion_unverified"
+    assert gated["nextStep"] == "done"
+    assert gated["task"]["status"] == "completed"
     assert gated["task"]["actions"][0]["status"] == "failed"
+    assert "taskCompletion" not in gated
+    assert loop.gate_terminal({"nextStep": "done", "reply": "Done.", "completionClaim": {
+        "satisfied": True, "evidenceActionIds": [action["actionId"]],
+    }})["nextStep"] == "completion_unverified"
+    loop.require_action(kind="write", tool="vrcforge_duplicate_scene_object")
+    assert loop.gate_terminal({"nextStep": "done", "reply": "The object was not found."})[
+        "completionGate"]["reason"] == "required_action_missing"
 
 
 def test_native_read_observation_does_not_bypass_explicit_requirement():

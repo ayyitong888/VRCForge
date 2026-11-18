@@ -25,6 +25,7 @@ from agent_tool_result_contract import (
 )
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
 from agent_action_targets import action_target
+from background_goal_runtime import classify_runtime_step_failure
 from agent_runtime_turn_identity import MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, continuation_client_turn_id
 from checkpoint_user_policy import (
     checkpoint_skip_authority_for_context,
@@ -2389,6 +2390,26 @@ class AgentTaskLoop:
                     }
                     gated["task"] = self.snapshot("completed")
                     return gated
+
+        if (next_step == "done" and honest_incomplete_reply and not require_completion_claim
+                and not self._requirements):
+            reported_reads = [
+                action_id for action_id, action in self._actions.items()
+                if action.get("status") == "failed" and not self.action_blocks_completion(action_id)
+                and classify_runtime_step_failure(action) not in {"permission_denied", "timeout", "cancelled"}
+            ]
+            cited = (claim.get("evidenceActionIds") or claim.get("evidence_action_ids")) if isinstance(claim, Mapping) else None
+            if reported_reads and (not claim or (
+                isinstance(claim, Mapping) and claim.get("satisfied") is False
+                and isinstance(cited, list) and cited
+                and all(isinstance(action_id, str) and action_id in reported_reads for action_id in cited)
+            )):
+                gated["completionGate"] = {
+                    "status": "reported", "reason": "read_observation_reported",
+                    "actionIds": cited if claim else reported_reads,
+                }
+                gated["task"] = self.snapshot("completed")
+                return gated
 
         if not completed_ids:
             # An explicit model-authored claim that marks the task done with

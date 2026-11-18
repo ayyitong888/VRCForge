@@ -461,6 +461,30 @@ def test_native_read_failure_is_correctable_without_next_actions():
     assert explicit_corrective_tool_failure(payload, {}, action_kind="skill")
 
 
+def test_native_read_only_missing_result_closes_in_background(tmp_path):
+    from background_goal_delivery import _runtime_failure_outcome
+    from background_goal_runtime import classify_runtime_plan_outcome, reported_read_action_ids
+
+    tool = "vrcforge_read_text_file"
+    reply = "That file was not found."
+    gateway, _, _ = setup_gateway(tmp_path, [
+        call("lookup", tool, {"path": "missing.txt"}), {"role": "assistant", "content": reply},
+    ])
+    gateway.register_tool(tool, "When to use: read. When NOT to use: write.", "plan/preview",
+                          lambda _: {"ok": False, "error": "file_not_found"})
+    turn = run(gateway, tmp_path)
+    plan = turn["plan"]
+    assert plan["reply"] == reply
+    assert plan["nextStep"] == "done"
+    assert "taskCompletion" not in plan
+    assert plan["task"]["actions"][-1]["status"] == "failed"
+    assert classify_runtime_plan_outcome(plan) == ("completed", "done")
+    reported = reported_read_action_ids(plan)
+    assert reported == {turn["skill"]["actionId"]}
+    assert _runtime_failure_outcome(turn, reported_reads=reported) == ("", "")
+    assert _runtime_failure_outcome({**turn, "write": {"status": "failed"}}, reported_reads=reported)[0] == "failed"
+
+
 def test_native_skill_write_unknown_effect_is_not_treated_as_read():
     payload = {
         "status": "failed",

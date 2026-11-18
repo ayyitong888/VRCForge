@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, NamedTuple
 
-from background_goal_runtime import classify_runtime_plan_outcome, classify_runtime_step_failure
+from background_goal_runtime import classify_runtime_plan_outcome, classify_runtime_step_failure, reported_read_action_ids
 from runtime_planner_service import public_runtime_payload
 from agent_runtime_event_projection import project_runtime_turn_event, capture_timeline_from_steps
 
@@ -1312,10 +1312,13 @@ class AgentRuntimeRunLedger:
             and bool(completion.get("actionId"))
             and completion["actionId"] == question_payload.get("actionId")
         )
+        reported_reads = reported_read_action_ids(top_plan)
         payloads = [
             _ensure_dict(payload)
             for payload in (shell_payload, skill_payload, write_payload)
-            if isinstance(payload, dict) and not (reported_preview and payload is skill_payload)
+            if isinstance(payload, dict) and not (payload is skill_payload and (
+                reported_preview or str(payload.get("actionId") or "") in reported_reads
+            ))
         ]
         statuses = {
             str(payload.get("status") or "").strip().lower().replace("-", "_")

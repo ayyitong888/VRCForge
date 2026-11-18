@@ -152,6 +152,17 @@ def classify_runtime_step_failure(payload: Any) -> str:
     return "tool_error"
 
 
+def reported_read_action_ids(plan: Any) -> frozenset[str]:
+    if not isinstance(plan, dict) or plan.get("nextStep") != "done":
+        return frozenset()
+    gate = plan.get("completionGate")
+    if (not isinstance(gate, dict) or gate.get("status") != "reported"
+            or gate.get("reason") != "read_observation_reported"):
+        return frozenset()
+    action_ids = gate.get("actionIds")
+    return frozenset(item for item in action_ids if isinstance(item, str) and item) if isinstance(action_ids, list) else frozenset()
+
+
 def classify_runtime_plan_outcome(plan: Any) -> tuple[str, str]:
     """Classify explicit plan terminal states without inferring from prose."""
 

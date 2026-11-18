@@ -15,6 +15,7 @@ from background_goal_runtime import (
     classify_provider_failure,
     classify_runtime_plan_outcome,
     classify_runtime_step_failure,
+    reported_read_action_ids,
 )
 
 
@@ -357,7 +358,9 @@ class BackgroundGoalDeliveryCoordinator:
             question_id = _find_question_id(payload)
             next_step = str((payload.get("plan") or {}).get("nextStep") or "").strip().lower()
             plan_outcome, plan_label = classify_runtime_plan_outcome(payload.get("plan"))
-            outcome, outcome_label = _runtime_failure_outcome(payload)
+            outcome, outcome_label = _runtime_failure_outcome(
+                payload, reported_reads=reported_read_action_ids(payload.get("plan")),
+            )
 
             def persist_outcome() -> dict[str, Any]:
                 if approval_id:
@@ -942,7 +945,9 @@ def _find_question_id(value: Any, *, depth: int = 0) -> str:
     return ""
 
 
-def _runtime_failure_outcome(value: Any, *, depth: int = 0) -> tuple[str, str]:
+def _runtime_failure_outcome(
+    value: Any, *, depth: int = 0, reported_reads: frozenset[str] = frozenset(),
+) -> tuple[str, str]:
     """Return a fail-closed durable outcome for bounded runtime result fields."""
 
     if depth > 5 or not isinstance(value, dict):
@@ -970,11 +975,17 @@ def _runtime_failure_outcome(value: Any, *, depth: int = 0) -> tuple[str, str]:
             return "denied", "runtime_permission_denied"
         return "failed", "runtime_ok_false"
     for key in ("shell", "skill", "write", "result", "entrypoint", "response"):
-        outcome = _runtime_failure_outcome(value.get(key), depth=depth + 1)
+        child = value.get(key)
+        if key == "skill" and isinstance(child, dict) and str(child.get("actionId") or "") in reported_reads:
+            continue
+        outcome = _runtime_failure_outcome(child, depth=depth + 1, reported_reads=reported_reads)
         if outcome[0]:
             return outcome
     for item in list(value.get("steps") or [])[:16]:
-        outcome = _runtime_failure_outcome(item, depth=depth + 1)
+        if (isinstance(item, dict) and item.get("kind") == "skill"
+                and str(item.get("actionId") or "") in reported_reads):
+            continue
+        outcome = _runtime_failure_outcome(item, depth=depth + 1, reported_reads=reported_reads)
         if outcome[0]:
             return outcome
     if classify_runtime_step_failure(value) == "permission_denied":
