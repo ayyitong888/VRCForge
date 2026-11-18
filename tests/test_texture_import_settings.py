@@ -414,7 +414,7 @@ def test_csharp_domain_module_keeps_preview_zero_write_and_apply_exact() -> None
     assert "GetFileInformationByHandle" in source
     assert "CreateFile(" in source
     assert "desiredAccess: 0" in source
-    assert "VerifyPathMatchesLease" in source
+    assert "HoldMetaIdentity" in source
     assert "FileAccess.Read, FileShare.Read" in source
     assert "LeaseFileObjectMatches(metaLease)" in source
     assert "numberOfLinks != 1" in source
@@ -434,15 +434,17 @@ def test_csharp_domain_module_keeps_preview_zero_write_and_apply_exact() -> None
     assert "AssetDatabase.SaveAssets" not in source
     assert "AssetDatabase.Refresh" not in source
     assert "AssetDatabase.ImportAsset" not in source
-    preview_prefix, after_preview_guard = source.split("if (preview)", 1)
-    preview_branch = after_preview_guard.split("if (!wouldChange)", 1)[0]
+    preview_branch = source.split("if (preview || !wouldChange)", 1)[1].split("var beforeNativeSettings", 1)[0]
     assert "SetPlatformTextureSettings" not in preview_branch
     assert "SaveAndReimport" not in preview_branch
-    assert "sourceFileDigestAfter = ComputeFileSha256" in preview_branch
-    assert "metaFileDigestAfter = ComputeFileSha256" in preview_branch
-    assert "importerSettingsDigestAfter = ComputeSettingsDigest" in preview_branch
-    assert "sourceFileDigestAfter = ComputeFileSha256" not in preview_prefix
-    assert source.index("if (preview)") < source.index("SetPlatformTextureSettings")
+    assert "sourceFileDigestAfter: evidence.sourceFileDigest" in preview_branch
+    assert "metaFileDigestAfter: evidence.metaFileDigest" in preview_branch
+    assert "importerSettingsDigestAfter: beforeSettingsDigest" in preview_branch
+    handler = source.split("public static object HandleCommand", 1)[1].split("private static object BuildSuccessResponse", 1)[0]
+    assert handler.count("ComputeStreamSha256(source)") == 1
+    assert handler.count("ComputeStreamSha256(meta)") == 1
+    assert handler.index("if (preview || !wouldChange)") < handler.index("SetPlatformTextureSettings")
+    assert handler.index(".SaveAndReimport();") < handler.index("ReadMetaDigest(evidence.metaFilePath)")
 
 
 def test_disposable_unity_fixture_covers_the_authoritative_lifecycle() -> None:

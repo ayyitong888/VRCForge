@@ -232,6 +232,14 @@ namespace VRCForge.Editor
                 var format = FormatValues[formatName];
                 var compression = CompressionValues[compressionName];
                 var evidence = InspectTextureAsset(textureAssetPath);
+                using var source = OpenSource(evidence.sourceFilePath);
+                evidence.sourceFileIdentity = ReadSingleLinkIdentity(source.SafeFileHandle);
+                evidence.sourceFileIdentityDigest = ComputeFileIdentityDigest(evidence.sourceFileIdentity);
+                evidence.sourceFileDigest = ComputeStreamSha256(source);
+                using var meta = new FileStream(evidence.metaFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                evidence.metaFileIdentity = ReadSingleLinkIdentity(meta.SafeFileHandle);
+                evidence.metaFileIdentityDigest = ComputeFileIdentityDigest(evidence.metaFileIdentity);
+                evidence.metaFileDigest = ComputeStreamSha256(meta);
                 ValidateFormatForImporter(evidence.importer, platformSpec, format);
 
                 var beforeSettings = ReadSettings(evidence.importer, platformSpec);
@@ -261,24 +269,10 @@ namespace VRCForge.Editor
                     );
                 }
 
-                if (preview)
+                if (preview || !wouldChange)
                 {
-                    var sourceFileDigestAfter = ComputeFileSha256(evidence.sourceFilePath);
-                    var metaFileDigestAfter = ComputeFileSha256(evidence.metaFilePath);
-                    var importerSettingsDigestAfter = ComputeSettingsDigest(
-                        importerType,
-                        ReadSettings(evidence.importer, platformSpec)
-                    );
-                    var importerDirtyAfter = EditorUtility.IsDirty(evidence.importer);
-                    if (sourceFileDigestAfter != evidence.sourceFileDigest
-                        || metaFileDigestAfter != evidence.metaFileDigest
-                        || importerSettingsDigestAfter != beforeSettingsDigest
-                        || importerDirtyAfter)
-                    {
-                        throw new InvalidOperationException("Preview changed texture importer state.");
-                    }
                     return BuildSuccessResponse(
-                        preview: true,
+                        preview: preview,
                         changed: false,
                         wouldChange: wouldChange,
                         saved: false,
@@ -288,42 +282,10 @@ namespace VRCForge.Editor
                         beforeSettings: beforeSettings,
                         targetSettings: targetSettings,
                         beforeSettingsDigest: beforeSettingsDigest,
-                        importerSettingsDigestAfter: importerSettingsDigestAfter,
+                        importerSettingsDigestAfter: beforeSettingsDigest,
                         targetSettingsDigest: targetSettingsDigest,
-                        sourceFileDigestAfter: sourceFileDigestAfter,
-                        metaFileDigestAfter: metaFileDigestAfter,
-                        importerDirtyAfter: importerDirtyAfter
-                    );
-                }
-
-                if (!wouldChange)
-                {
-                    var unchangedEvidence = InspectTextureAsset(textureAssetPath);
-                    var unchangedSettings = ReadSettings(unchangedEvidence.importer, platformSpec);
-                    var unchangedSettingsDigest = ComputeSettingsDigest(importerType, unchangedSettings);
-                    if (unchangedEvidence.assetGuid != evidence.assetGuid
-                        || unchangedEvidence.sourceFileDigest != evidence.sourceFileDigest
-                        || unchangedEvidence.metaFileDigest != evidence.metaFileDigest
-                        || unchangedSettingsDigest != beforeSettingsDigest
-                        || EditorUtility.IsDirty(unchangedEvidence.importer))
-                    {
-                        throw new InvalidOperationException("Texture importer changed during no-op verification.");
-                    }
-                    return BuildSuccessResponse(
-                        preview: false,
-                        changed: false,
-                        wouldChange: false,
-                        saved: false,
-                        reimported: false,
-                        evidence: evidence,
-                        importerType: importerType,
-                        beforeSettings: beforeSettings,
-                        targetSettings: targetSettings,
-                        beforeSettingsDigest: beforeSettingsDigest,
-                        importerSettingsDigestAfter: unchangedSettingsDigest,
-                        targetSettingsDigest: targetSettingsDigest,
-                        sourceFileDigestAfter: unchangedEvidence.sourceFileDigest,
-                        metaFileDigestAfter: unchangedEvidence.metaFileDigest,
+                        sourceFileDigestAfter: evidence.sourceFileDigest,
+                        metaFileDigestAfter: evidence.metaFileDigest,
                         importerDirtyAfter: false
                     );
                 }
@@ -331,41 +293,14 @@ namespace VRCForge.Editor
                 var beforeNativeSettings = platformSpec.isDefault
                     ? evidence.importer.GetDefaultPlatformTextureSettings()
                     : evidence.importer.GetPlatformTextureSettings(platformSpec.platformName);
-                using (
-                    var sourceLease = HoldStableFile(
-                        evidence.sourceFilePath,
-                        evidence.sourceFileIdentity,
-                        evidence.sourceFileDigest,
-                        allowReplacement: false
-                    )
-                )
-                using (
-                    var metaLease = HoldStableFile(
-                        evidence.metaFilePath,
-                        evidence.metaFileIdentity,
-                        evidence.metaFileDigest,
-                        allowReplacement: true
-                    )
-                )
+                using (var metaLease = HoldMetaIdentity(evidence.metaFilePath, evidence.metaFileIdentity))
                 {
-                    VerifyPathMatchesLease(
-                        evidence.sourceFilePath,
-                        sourceLease,
-                        evidence.sourceFileDigest
-                    );
-                    VerifyPathMatchesLease(
-                        evidence.metaFilePath,
-                        metaLease,
-                        evidence.metaFileDigest
-                    );
-                    if (ComputeSettingsDigest(importerType, ReadSettings(evidence.importer, platformSpec)) != beforeSettingsDigest)
-                    {
-                        return VRCForgeToolResult.Failed("Texture importer state changed after the verified preview.");
-                    }
-
+                    meta.Dispose(); // Unity needs to replace the metadata during SaveAndReimport.
                     var mutationStarted = false;
                     try
                     {
+                        // Unity returns a mutable settings copy. Fetch the writable copy separately
+                        // from the value kept for rollback.
                         var nativeSettings = platformSpec.isDefault
                             ? evidence.importer.GetDefaultPlatformTextureSettings()
                             : evidence.importer.GetPlatformTextureSettings(platformSpec.platformName);
@@ -382,19 +317,15 @@ namespace VRCForge.Editor
                         evidence.importer.SetPlatformTextureSettings(nativeSettings);
                         evidence.importer.SaveAndReimport();
 
-                        var readbackEvidence = InspectTextureAsset(textureAssetPath);
-                        var readbackImporterType = CanonicalImporterType(readbackEvidence.importer.textureType);
-                        var readbackSettings = ReadSettings(readbackEvidence.importer, platformSpec);
+                        var readbackImporter = TextureImporter.GetAtPath(textureAssetPath) as TextureImporter;
+                        if (!MatchesImporterIdentity(readbackImporter, evidence))
+                            throw new InvalidOperationException("Texture importer identity changed during reimport.");
+                        var readbackImporterType = CanonicalImporterType(readbackImporter.textureType);
+                        var readbackSettings = ReadSettings(readbackImporter, platformSpec);
                         var readbackSettingsDigest = ComputeSettingsDigest(readbackImporterType, readbackSettings);
-                        if (readbackEvidence.assetPath != evidence.assetPath
-                            || readbackEvidence.assetGuid != evidence.assetGuid
-                            || readbackEvidence.sourceFileDigest != evidence.sourceFileDigest
-                            || !FileIdentityEquals(readbackEvidence.sourceFileIdentity, sourceLease.identity)
-                            || readbackEvidence.metaFileDigest == evidence.metaFileDigest
-                            || readbackImporterType != importerType
-                            || readbackSettingsDigest != targetSettingsDigest
-                            || !SettingsEqual(readbackSettings, targetSettings)
-                            || EditorUtility.IsDirty(readbackEvidence.importer))
+                        var metaFileDigestAfter = ReadMetaDigest(evidence.metaFilePath);
+                        if (readbackImporterType != importerType || !SettingsEqual(readbackSettings, targetSettings)
+                            || metaFileDigestAfter == evidence.metaFileDigest)
                         {
                             throw new InvalidOperationException("Texture importer readback did not match the approved settings.");
                         }
@@ -412,8 +343,8 @@ namespace VRCForge.Editor
                             beforeSettingsDigest: beforeSettingsDigest,
                             importerSettingsDigestAfter: readbackSettingsDigest,
                             targetSettingsDigest: targetSettingsDigest,
-                            sourceFileDigestAfter: readbackEvidence.sourceFileDigest,
-                            metaFileDigestAfter: readbackEvidence.metaFileDigest,
+                            sourceFileDigestAfter: evidence.sourceFileDigest,
+                            metaFileDigestAfter: metaFileDigestAfter,
                             importerDirtyAfter: false
                         );
                     }
@@ -426,8 +357,7 @@ namespace VRCForge.Editor
                             evidence,
                             importerType,
                             beforeSettings,
-                            beforeSettingsDigest,
-                            sourceLease,
+                            source,
                             metaLease
                         );
                         return BuildMutationFailure(restored);
@@ -524,17 +454,16 @@ namespace VRCForge.Editor
             TextureAssetEvidence beforeEvidence,
             string importerType,
             ImportSettingsEvidence beforeSettings,
-            string beforeSettingsDigest,
-            StableFileLease sourceLease,
+            FileStream source,
             StableFileLease metaLease
         )
         {
             try
             {
                 var importer = AssetImporter.GetAtPath(textureAssetPath) as TextureImporter;
-                if (importer == null
+                if (!MatchesImporterIdentity(importer, beforeEvidence, requireClean: false)
                     || beforeNativeSettings == null
-                    || !LeaseFileObjectMatches(sourceLease)
+                    || !FileIdentityEquals(ReadSingleLinkIdentity(source.SafeFileHandle), beforeEvidence.sourceFileIdentity)
                     || !LeaseFileObjectMatches(metaLease))
                 {
                     return false;
@@ -550,19 +479,11 @@ namespace VRCForge.Editor
                 importer.streamingMipmaps = beforeSettings.streamingMipmaps;
                 importer.SaveAndReimport();
 
-                var restoredEvidence = InspectTextureAsset(textureAssetPath);
-                var restoredImporterType = CanonicalImporterType(restoredEvidence.importer.textureType);
-                var restoredSettings = ReadSettings(restoredEvidence.importer, platform);
-                var restoredSettingsDigest = ComputeSettingsDigest(restoredImporterType, restoredSettings);
-                return restoredEvidence.assetPath == beforeEvidence.assetPath
-                    && restoredEvidence.assetGuid == beforeEvidence.assetGuid
-                    && restoredEvidence.sourceFileDigest == beforeEvidence.sourceFileDigest
-                    && restoredEvidence.metaFileDigest == beforeEvidence.metaFileDigest
-                    && FileIdentityEquals(restoredEvidence.sourceFileIdentity, sourceLease.identity)
-                    && restoredImporterType == importerType
-                    && restoredSettingsDigest == beforeSettingsDigest
-                    && SettingsEqual(restoredSettings, beforeSettings)
-                    && !EditorUtility.IsDirty(restoredEvidence.importer);
+                var restoredImporter = TextureImporter.GetAtPath(textureAssetPath) as TextureImporter;
+                return MatchesImporterIdentity(restoredImporter, beforeEvidence)
+                    && CanonicalImporterType(restoredImporter.textureType) == importerType
+                    && SettingsEqual(ReadSettings(restoredImporter, platform), beforeSettings)
+                    && ReadMetaDigest(beforeEvidence.metaFilePath) == beforeEvidence.metaFileDigest;
             }
             catch (Exception)
             {
@@ -733,22 +654,21 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("Texture files are read-only or cross a reparse boundary.");
             }
 
-            var sourceFileIdentity = CaptureFileIdentity(sourceFilePath);
-            var metaFileIdentity = CaptureFileIdentity(metaFilePath);
             return new TextureAssetEvidence
             {
                 importer = importer,
                 assetPath = resolvedAssetPath,
                 assetGuid = NormalizeHex(AssetDatabase.AssetPathToGUID(resolvedAssetPath), 32),
                 sourceFilePath = sourceFilePath,
-                metaFilePath = metaFilePath,
-                sourceFileDigest = ComputeFileSha256(sourceFilePath),
-                metaFileDigest = ComputeFileSha256(metaFilePath),
-                sourceFileIdentity = sourceFileIdentity,
-                sourceFileIdentityDigest = ComputeFileIdentityDigest(sourceFileIdentity),
-                metaFileIdentity = metaFileIdentity,
-                metaFileIdentityDigest = ComputeFileIdentityDigest(metaFileIdentity)
+                metaFilePath = metaFilePath
             };
+        }
+
+        private static bool MatchesImporterIdentity(TextureImporter importer, TextureAssetEvidence expected, bool requireClean = true)
+        {
+            return importer != null && importer.assetPath == expected.assetPath
+                && AssetDatabase.AssetPathToGUID(importer.assetPath) == expected.assetGuid
+                && (!requireClean || !EditorUtility.IsDirty(importer));
         }
 
         private static ImportSettingsEvidence ReadSettings(TextureImporter importer, PlatformSpec platform)
@@ -984,56 +904,21 @@ namespace VRCForge.Editor
             return normalized;
         }
 
-        private static FileIdentity CaptureFileIdentity(string filePath)
+        private static FileStream OpenSource(string filePath)
         {
-            using (
-                var stream = new FileStream(
-                    filePath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete
-                )
-            )
-            {
-                var identity = ReadFileIdentity(stream.SafeFileHandle);
-                if (identity.numberOfLinks != 1)
-                {
-                    throw new InvalidOperationException("Texture files must have exactly one filesystem link.");
-                }
-                return identity;
-            }
+            return new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         }
 
-        private static StableFileLease HoldStableFile(
-            string filePath,
-            FileIdentity expectedIdentity,
-            string expectedDigest,
-            bool allowReplacement
-        )
+        private static FileIdentity ReadSingleLinkIdentity(SafeFileHandle handle)
         {
-            if (!allowReplacement)
-            {
-                var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                try
-                {
-                    var identity = ReadFileIdentity(stream.SafeFileHandle);
-                    if (identity.numberOfLinks != 1 || !FileIdentityEquals(identity, expectedIdentity))
-                    {
-                        throw new InvalidOperationException("Texture file identity changed after the verified preview.");
-                    }
-                    if (ComputeStreamSha256(stream) != expectedDigest)
-                    {
-                        throw new InvalidOperationException("Texture file content changed after the verified preview.");
-                    }
-                    return new StableFileLease(stream, identity);
-                }
-                catch
-                {
-                    stream.Dispose();
-                    throw;
-                }
-            }
+            var identity = ReadFileIdentity(handle);
+            if (identity.numberOfLinks != 1)
+                throw new InvalidOperationException("Texture files must have exactly one filesystem link.");
+            return identity;
+        }
 
+        private static StableFileLease HoldMetaIdentity(string filePath, FileIdentity expectedIdentity)
+        {
             var identityHandle = CreateFile(
                 filePath,
                 desiredAccess: 0,
@@ -1055,41 +940,12 @@ namespace VRCForge.Editor
                 {
                     throw new InvalidOperationException("Texture file identity changed after the verified preview.");
                 }
-                var lease = new StableFileLease(identityHandle, identity);
-                VerifyPathMatchesLease(filePath, lease, expectedDigest);
-                return lease;
+                return new StableFileLease(identityHandle, identity);
             }
             catch
             {
                 identityHandle.Dispose();
                 throw;
-            }
-        }
-
-        private static void VerifyPathMatchesLease(
-            string filePath,
-            StableFileLease lease,
-            string expectedDigest
-        )
-        {
-            using (
-                var stream = new FileStream(
-                    filePath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete
-                )
-            )
-            {
-                var pathIdentity = ReadFileIdentity(stream.SafeFileHandle);
-                if (pathIdentity.numberOfLinks != 1 || !FileIdentityEquals(pathIdentity, lease.identity))
-                {
-                    throw new InvalidOperationException("Texture file path changed after the verified preview.");
-                }
-                if (ComputeStreamSha256(stream) != expectedDigest)
-                {
-                    throw new InvalidOperationException("Texture file content changed after the verified preview.");
-                }
             }
         }
 
@@ -1156,22 +1012,19 @@ namespace VRCForge.Editor
 
         private static string ComputeStreamSha256(FileStream stream)
         {
-            stream.Position = 0;
             using (var sha256 = SHA256.Create())
-            {
-                var digest = BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
-                stream.Position = 0;
-                return digest;
-            }
-        }
-
-        private static string ComputeFileSha256(string filePath)
-        {
-            using (var sha256 = SHA256.Create())
-            using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
                 return BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
             }
+        }
+
+        private static string ReadMetaDigest(string filePath)
+        {
+            if ((File.GetAttributes(filePath) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("Texture metadata crossed a reparse boundary.");
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            ReadSingleLinkIdentity(stream.SafeFileHandle);
+            return ComputeStreamSha256(stream);
         }
 
         private static void EnsureNoReparseBoundary(string assetsRoot, string filePath)
@@ -1330,13 +1183,6 @@ namespace VRCForge.Editor
             private readonly IDisposable owner;
             public readonly SafeFileHandle handle;
             public readonly FileIdentity identity;
-
-            public StableFileLease(FileStream stream, FileIdentity identity)
-            {
-                owner = stream;
-                handle = stream.SafeFileHandle;
-                this.identity = identity;
-            }
 
             public StableFileLease(SafeFileHandle handle, FileIdentity identity)
             {

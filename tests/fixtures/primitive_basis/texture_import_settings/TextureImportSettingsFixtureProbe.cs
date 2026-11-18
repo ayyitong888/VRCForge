@@ -70,7 +70,7 @@ public static class TextureImportSettingsFixtureProbe
             var staleRequest = ApprovedRequest(projectPath, noOpPreview);
             staleRequest["expectedMetaFileDigest"] = new string('d', 64);
             var stale = JObject.FromObject(TextureImportSettingsTool.HandleCommand(staleRequest));
-            Require(!(bool)stale["success"], "stale precondition accepted");
+            Require(!(bool)stale["IsSuccessful"], "stale precondition accepted");
             Require(Sha256(sourcePath) == sourceBefore, "stale source bytes");
             Require(Sha256(metaPath) == metaAfterApply, "stale meta bytes");
             VerifyImporterReadback();
@@ -126,8 +126,8 @@ public static class TextureImportSettingsFixtureProbe
     private static JObject RequireSuccess(object response)
     {
         var serialized = JObject.FromObject(response);
-        Require((bool)serialized["success"], "tool returned an error response");
-        return (JObject)serialized["data"];
+        Require((bool)serialized["IsSuccessful"], "tool returned an error response");
+        return (JObject)serialized["Payload"];
     }
 
     private static void VerifyImporterReadback()
@@ -152,16 +152,9 @@ public static class TextureImportSettingsFixtureProbe
     private static void VerifySourceWriteDeniedByApplyLease(string sourcePath, string sourceDigest)
     {
         var flags = BindingFlags.NonPublic | BindingFlags.Static;
-        var captureIdentity = typeof(TextureImportSettingsTool).GetMethod("CaptureFileIdentity", flags);
-        var holdStableFile = typeof(TextureImportSettingsTool).GetMethod("HoldStableFile", flags);
-        Require(captureIdentity != null, "source identity helper");
-        Require(holdStableFile != null, "source lease helper");
-
-        var identity = captureIdentity.Invoke(null, new object[] { sourcePath });
-        var lease = holdStableFile.Invoke(
-            null,
-            new object[] { sourcePath, identity, sourceDigest, false }
-        ) as IDisposable;
+        var openSource = typeof(TextureImportSettingsTool).GetMethod("OpenSource", flags);
+        Require(openSource != null, "source lease helper");
+        var lease = openSource.Invoke(null, new object[] { sourcePath }) as IDisposable;
         Require(lease != null, "source lease acquisition");
         var writeDenied = false;
         try
@@ -215,7 +208,7 @@ public static class TextureImportSettingsFixtureProbe
             var linked = JObject.FromObject(
                 TextureImportSettingsTool.HandleCommand(Request(projectPath, true))
             );
-            Require(!(bool)linked["success"], "metadata hardlink accepted");
+            Require(!(bool)linked["IsSuccessful"], "metadata hardlink accepted");
             Require(Sha256(sourcePath) == sourceDigest, "hardlink source bytes");
             Require(Sha256(metaPath) == metaDigest, "hardlink meta bytes");
         }
@@ -234,8 +227,8 @@ public static class TextureImportSettingsFixtureProbe
         Require(builder != null, "mutation failure builder");
 
         var restoreRequired = JObject.FromObject(builder.Invoke(null, new object[] { false }));
-        Require(!(bool)restoreRequired["success"], "restore-required success flag");
-        var restoreRequiredData = (JObject)restoreRequired["data"];
+        Require(!(bool)restoreRequired["IsSuccessful"], "restore-required success flag");
+        var restoreRequiredData = (JObject)restoreRequired["Payload"];
         Require((bool)restoreRequiredData["mutationStarted"], "restore-required mutation flag");
         Require(!(bool)restoreRequiredData["restored"], "restore-required restored flag");
         Require((bool)restoreRequiredData["cleanupRequired"], "restore-required cleanup flag");
@@ -249,8 +242,8 @@ public static class TextureImportSettingsFixtureProbe
         );
 
         var restored = JObject.FromObject(builder.Invoke(null, new object[] { true }));
-        Require(!(bool)restored["success"], "restored success flag");
-        var restoredData = (JObject)restored["data"];
+        Require(!(bool)restored["IsSuccessful"], "restored success flag");
+        var restoredData = (JObject)restored["Payload"];
         Require((bool)restoredData["mutationStarted"], "restored mutation flag");
         Require((bool)restoredData["restored"], "restored state flag");
         Require(!(bool)restoredData["cleanupRequired"], "restored cleanup flag");
