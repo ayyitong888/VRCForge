@@ -20782,7 +20782,7 @@ def is_unity_project_path(path: Path) -> bool:
 
 def parse_editor_version(version_file: Path) -> str:
     try:
-        for line in version_file.read_text(encoding="utf-8").splitlines():
+        for line in version_file.read_text(encoding="utf-8-sig").splitlines():
             if line.startswith("m_EditorVersion:"):
                 return line.split(":", 1)[1].strip()
     except Exception:
