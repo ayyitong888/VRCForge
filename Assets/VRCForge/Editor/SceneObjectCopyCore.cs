@@ -140,7 +140,7 @@ namespace VRCForge.Editor
             string sourceObjectPath,
             string prefabAssetPath)
         {
-            var source = BuildSourceSnapshot(sourceScenePath, sourceObjectPath);
+            var source = BuildSourceSnapshot(ResolveLoadedSceneIdentity(sourceScenePath, "source scene"), sourceObjectPath);
             var assetPath = NormalizeGeneratedPrefabPath(prefabAssetPath, "prefabAssetPath", false);
             var parentFolder = assetPath.Substring(0, assetPath.LastIndexOf('/'));
             if (!AssetDatabase.IsValidFolder(parentFolder))
@@ -234,10 +234,6 @@ namespace VRCForge.Editor
             RequireExpected(parameters, "expectedSourceSceneHandle", snapshot.Source.Scene.Handle);
             RequireExpected(parameters, "expectedSourceObjectId", snapshot.Source.ObjectId);
             RequireExpected(parameters, "expectedSourceHierarchyDigest", snapshot.Source.HierarchyDigest);
-            RequireExpected(parameters, "expectedSourceSceneFileDigest", snapshot.Source.Scene.FileDigest);
-            RequireExpected(parameters, "expectedSourceSceneFileIdentity", snapshot.Source.Scene.FileIdentity);
-            RequireExpected(parameters, "expectedSourceSceneMetaDigest", snapshot.Source.Scene.MetaDigest);
-            RequireExpected(parameters, "expectedSourceSceneMetaIdentity", snapshot.Source.Scene.MetaIdentity);
             RequireExpected(
                 parameters,
                 "expectedPrefabParentFolderGuid",
@@ -253,6 +249,11 @@ namespace VRCForge.Editor
                 snapshot.Target.StagingRootIdentity);
             RequireExpected(parameters, "expectedStagingPolicy", snapshot.Target.StagingPolicy);
             RequireExpected(parameters, "expectedPreviewDigest", snapshot.PreviewDigest);
+        }
+
+        internal static void VerifyPrefabSourceUnchanged(SourceObjectSnapshot before)
+        {
+            VerifySourceUnchanged(before, false, ResolveLoadedSceneIdentity(before.Scene.Path, "source scene"));
         }
 
         internal static void VerifySourceUnchanged(
@@ -321,6 +322,36 @@ namespace VRCForge.Editor
         private static SavedSceneSnapshot ResolveSavedScene(string rawPath, string label, bool allowDirtyScene, bool includeContentDigests)
         {
             var path = NormalizeSceneAssetPath(rawPath, label);
+            var sceneMatch = ResolveLoadedSavedScene(path, allowDirtyScene);
+            var evidence = ReadStableAssetEvidence(path, label, includeContentDigests: includeContentDigests);
+            return new SavedSceneSnapshot
+            {
+                Scene = sceneMatch,
+                Path = path,
+                Guid = evidence.Guid,
+                Handle = sceneMatch.handle,
+                FileDigest = evidence.File.Digest,
+                FileIdentity = evidence.File.Identity,
+                MetaDigest = evidence.Meta.Digest,
+                MetaIdentity = evidence.Meta.Identity
+            };
+        }
+
+        private static SavedSceneSnapshot ResolveLoadedSceneIdentity(string rawPath, string label)
+        {
+            var path = NormalizeSceneAssetPath(rawPath, label);
+            var scene = ResolveLoadedSavedScene(path, false);
+            return new SavedSceneSnapshot
+            {
+                Scene = scene,
+                Path = path,
+                Guid = NormalizeGuid(AssetDatabase.AssetPathToGUID(path, AssetPathToGUIDOptions.OnlyExistingAssets), label),
+                Handle = scene.handle
+            };
+        }
+
+        private static Scene ResolveLoadedSavedScene(string path, bool allowDirtyScene)
+        {
             var matches = new List<Scene>();
             for (var index = 0; index < SceneManager.sceneCount; index++)
             {
@@ -341,18 +372,7 @@ namespace VRCForge.Editor
             {
                 throw new SceneObjectCopyException("The selected scene has unsaved changes.");
             }
-            var evidence = ReadStableAssetEvidence(path, label, includeContentDigests: includeContentDigests);
-            return new SavedSceneSnapshot
-            {
-                Scene = sceneMatch,
-                Path = path,
-                Guid = evidence.Guid,
-                Handle = sceneMatch.handle,
-                FileDigest = evidence.File.Digest,
-                FileIdentity = evidence.File.Identity,
-                MetaDigest = evidence.Meta.Digest,
-                MetaIdentity = evidence.Meta.Identity
-            };
+            return sceneMatch;
         }
 
         internal static GameObject ResolveUniqueGameObject(Scene scene, string rawPath, string label)
@@ -979,10 +999,13 @@ namespace VRCForge.Editor
             AppendDigestField(value, source.ObjectPath);
             AppendDigestField(value, source.ObjectId);
             AppendDigestField(value, source.HierarchyDigest);
-            AppendDigestField(value, source.Scene.FileDigest);
-            AppendDigestField(value, source.Scene.FileIdentity);
-            AppendDigestField(value, source.Scene.MetaDigest);
-            AppendDigestField(value, source.Scene.MetaIdentity);
+            if (operation == DuplicateOperation)
+            {
+                AppendDigestField(value, source.Scene.FileDigest);
+                AppendDigestField(value, source.Scene.FileIdentity);
+                AppendDigestField(value, source.Scene.MetaDigest);
+                AppendDigestField(value, source.Scene.MetaIdentity);
+            }
             AppendDigestField(value, "true");
             return value;
         }
@@ -1606,7 +1629,16 @@ namespace VRCForge.Editor
                 changed = false,
                 saved = false,
                 mutationCount = 0,
-                source = Source.ToPayload(),
+                source = new
+                {
+                    scenePath = Source.Scene.Path,
+                    sceneGuid = Source.Scene.Guid,
+                    sceneHandle = Source.Scene.Handle,
+                    objectPath = Source.ObjectPath,
+                    objectId = Source.ObjectId,
+                    hierarchyDigest = Source.HierarchyDigest,
+                    pathUnique = true
+                },
                 target = Target.ToPayload(),
                 previewDigest = PreviewDigest
             };

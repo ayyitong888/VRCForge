@@ -110,7 +110,7 @@ def bind_authoritative_preview(
     if _bounded_int(result.get("mutationCount"), label="mutationCount", minimum=0, maximum=0) != 0:
         raise SceneObjectCopyError("Scene object copy preview mutationCount is invalid.")
 
-    source = _canonical_source(result.get("source"))
+    source = _canonical_source(result.get("source"), persisted=tool_name == DUPLICATE_TOOL_NAME)
     preview_digest = _lower_hex(
         result.get("previewDigest"),
         label="previewDigest",
@@ -171,12 +171,10 @@ def compute_preview_digest(payload: dict[str, Any]) -> str:
         source.get("objectPath"),
         source.get("objectId"),
         source.get("hierarchyDigest"),
-        source.get("sceneFileDigest"),
-        source.get("sceneFileIdentity"),
-        source.get("sceneMetaDigest"),
-        source.get("sceneMetaIdentity"),
-        source.get("pathUnique"),
     ]
+    if value.get("operation") == _DUPLICATE_OPERATION:
+        fields.extend(source.get(key) for key in ("sceneFileDigest", "sceneFileIdentity", "sceneMetaDigest", "sceneMetaIdentity"))
+    fields.append(source.get("pathUnique"))
     if value.get("operation") == _DUPLICATE_OPERATION:
         fields.extend(
             [
@@ -334,10 +332,6 @@ def _bind_prefab(
         "expectedSourceSceneHandle": source["sceneHandle"],
         "expectedSourceObjectId": source["objectId"],
         "expectedSourceHierarchyDigest": source["hierarchyDigest"],
-        "expectedSourceSceneFileDigest": source["sceneFileDigest"],
-        "expectedSourceSceneFileIdentity": source["sceneFileIdentity"],
-        "expectedSourceSceneMetaDigest": source["sceneMetaDigest"],
-        "expectedSourceSceneMetaIdentity": source["sceneMetaIdentity"],
         "expectedPrefabParentFolderGuid": target["parentFolderGuid"],
         "expectedPrefabParentFolderIdentity": target["parentFolderIdentity"],
         "expectedStagingRootGuid": target["stagingRootGuid"],
@@ -360,11 +354,11 @@ def _bind_prefab(
     return canonical, approval
 
 
-def _canonical_source(value: Any) -> dict[str, Any]:
+def _canonical_source(value: Any, *, persisted: bool) -> dict[str, Any]:
     source = _require_dict(value, "source")
     if source.get("pathUnique") is not True:
         raise SceneObjectCopyError("Source hierarchy path is not unique.")
-    return {
+    normalized = {
         "scenePath": _scene_asset_path(source.get("scenePath"), label="source.scenePath"),
         "sceneGuid": _nonzero_hex(
             source.get("sceneGuid"),
@@ -383,28 +377,12 @@ def _canonical_source(value: Any) -> dict[str, Any]:
             label="source.hierarchyDigest",
             pattern=_DIGEST_PATTERN,
         ),
-        "sceneFileDigest": _nonzero_hex(
-            source.get("sceneFileDigest"),
-            label="source.sceneFileDigest",
-            pattern=_DIGEST_PATTERN,
-        ),
-        "sceneFileIdentity": _nonzero_hex(
-            source.get("sceneFileIdentity"),
-            label="source.sceneFileIdentity",
-            pattern=_DIGEST_PATTERN,
-        ),
-        "sceneMetaDigest": _nonzero_hex(
-            source.get("sceneMetaDigest"),
-            label="source.sceneMetaDigest",
-            pattern=_DIGEST_PATTERN,
-        ),
-        "sceneMetaIdentity": _nonzero_hex(
-            source.get("sceneMetaIdentity"),
-            label="source.sceneMetaIdentity",
-            pattern=_DIGEST_PATTERN,
-        ),
         "pathUnique": True,
     }
+    if persisted:
+        for key in ("sceneFileDigest", "sceneFileIdentity", "sceneMetaDigest", "sceneMetaIdentity"):
+            normalized[key] = _nonzero_hex(source.get(key), label=f"source.{key}", pattern=_DIGEST_PATTERN)
+    return normalized
 
 
 def _canonical_duplicate_target(value: Any) -> dict[str, Any]:

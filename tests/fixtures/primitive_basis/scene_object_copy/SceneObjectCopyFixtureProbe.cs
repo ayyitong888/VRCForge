@@ -429,6 +429,8 @@ public static class SceneObjectCopyFixtureProbe
         Require(preview.Value<int>("mutationCount") == 0, "prefab preview reported a mutation");
 
         var source = (JObject)preview["source"];
+        Require(source["sceneFileDigest"] == null && source["sceneMetaDigest"] == null,
+            "prefab preview read unrelated source scene bytes");
         var target = (JObject)preview["target"];
         var apply = RequireSuccess(SaveSceneObjectAsPrefabTool.HandleCommand(new JObject
         {
@@ -443,10 +445,6 @@ public static class SceneObjectCopyFixtureProbe
             ["expectedSourceSceneHandle"] = source.Value<int>("sceneHandle"),
             ["expectedSourceObjectId"] = source.Value<string>("objectId"),
             ["expectedSourceHierarchyDigest"] = source.Value<string>("hierarchyDigest"),
-            ["expectedSourceSceneFileDigest"] = source.Value<string>("sceneFileDigest"),
-            ["expectedSourceSceneFileIdentity"] = source.Value<string>("sceneFileIdentity"),
-            ["expectedSourceSceneMetaDigest"] = source.Value<string>("sceneMetaDigest"),
-            ["expectedSourceSceneMetaIdentity"] = source.Value<string>("sceneMetaIdentity"),
             ["expectedPrefabParentFolderGuid"] = target.Value<string>("parentFolderGuid"),
             ["expectedPrefabParentFolderIdentity"] = target.Value<string>("parentFolderIdentity"),
             ["expectedStagingRootGuid"] = target.Value<string>("stagingRootGuid"),

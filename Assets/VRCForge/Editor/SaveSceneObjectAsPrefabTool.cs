@@ -27,10 +27,6 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected source scene handle.", IsRequired = false)] public int? expectedSourceSceneHandle { get; set; }
             [VRCForgeInput("Expected source object identity.", IsRequired = false)] public string expectedSourceObjectId { get; set; } = "";
             [VRCForgeInput("Expected source hierarchy digest.", IsRequired = false)] public string expectedSourceHierarchyDigest { get; set; } = "";
-            [VRCForgeInput("Expected source scene file digest.", IsRequired = false)] public string expectedSourceSceneFileDigest { get; set; } = "";
-            [VRCForgeInput("Expected source scene file identity.", IsRequired = false)] public string expectedSourceSceneFileIdentity { get; set; } = "";
-            [VRCForgeInput("Expected source scene meta digest.", IsRequired = false)] public string expectedSourceSceneMetaDigest { get; set; } = "";
-            [VRCForgeInput("Expected source scene meta identity.", IsRequired = false)] public string expectedSourceSceneMetaIdentity { get; set; } = "";
             [VRCForgeInput("Expected prefab parent-folder GUID.", IsRequired = false)] public string expectedPrefabParentFolderGuid { get; set; } = "";
             [VRCForgeInput("Expected prefab parent-folder identity.", IsRequired = false)] public string expectedPrefabParentFolderIdentity { get; set; } = "";
             [VRCForgeInput("Expected staging-root GUID.", IsRequired = false)] public string expectedStagingRootGuid { get; set; } = "";
@@ -135,7 +131,6 @@ namespace VRCForge.Editor
                     throw new SceneObjectCopyException("The staged prefab readback is unavailable.");
                 }
                 var stagingHierarchyDigest = SceneObjectCopyCore.ComputeHierarchyDigest(stagingReadback);
-                SceneObjectCopyCore.VerifySourceUnchanged(snapshot.Source, true);
                 SceneObjectCopyCore.VerifyOwnedStagingFolder(staging);
 
                 if (SceneObjectCopyCore.AssetOrMetaExists(snapshot.Target.AssetPath))
@@ -196,7 +191,7 @@ namespace VRCForge.Editor
                     snapshot.Target.StagingRootGuid,
                     snapshot.Target.StagingRootIdentity,
                     "generated staging root");
-                SceneObjectCopyCore.VerifySourceUnchanged(snapshot.Source, true);
+                SceneObjectCopyCore.VerifyPrefabSourceUnchanged(snapshot.Source);
                 if (!SceneObjectCopyCore.DeleteOwnedStagingFolder(staging))
                 {
                     throw new SceneObjectCopyException("The prefab staging folder cleanup was not exact.");
@@ -222,12 +217,6 @@ namespace VRCForge.Editor
                         objectId = snapshot.Source.ObjectId,
                         hierarchyDigestBefore = snapshot.Source.HierarchyDigest,
                         hierarchyDigestAfter = snapshot.Source.HierarchyDigest,
-                        sceneFileDigestBefore = snapshot.Source.Scene.FileDigest,
-                        sceneFileDigestAfter = snapshot.Source.Scene.FileDigest,
-                        sceneFileIdentityBefore = snapshot.Source.Scene.FileIdentity,
-                        sceneFileIdentityAfter = snapshot.Source.Scene.FileIdentity,
-                        sceneMetaDigest = snapshot.Source.Scene.MetaDigest,
-                        sceneMetaIdentity = snapshot.Source.Scene.MetaIdentity,
                         unchanged = true
                     },
                     target = new
@@ -306,7 +295,7 @@ namespace VRCForge.Editor
                 {
                     return false;
                 }
-                SceneObjectCopyCore.VerifySourceUnchanged(snapshot.Source, true);
+                SceneObjectCopyCore.VerifyPrefabSourceUnchanged(snapshot.Source);
                 return true;
             }
             catch

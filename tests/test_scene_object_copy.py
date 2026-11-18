@@ -94,6 +94,8 @@ def _prefab_payload() -> dict:
             "createNew": True,
         },
     }
+    for key in ("sceneFileDigest", "sceneFileIdentity", "sceneMetaDigest", "sceneMetaIdentity"):
+        payload["source"].pop(key)
     payload["previewDigest"] = compute_preview_digest(payload)
     return payload
 
@@ -282,10 +284,10 @@ def test_prefab_preview_binds_create_new_destination_and_source() -> None:
     assert arguments["expectedProjectPath"] == "D:/DisposableUnityProject"
     assert arguments["expectedSourceObjectId"] == "b" * 64
     assert arguments["expectedSourceHierarchyDigest"] == "c" * 64
-    assert arguments["expectedSourceSceneFileDigest"] == "d" * 64
-    assert arguments["expectedSourceSceneFileIdentity"] == "9" * 64
-    assert arguments["expectedSourceSceneMetaDigest"] == "8" * 64
-    assert arguments["expectedSourceSceneMetaIdentity"] == "7" * 64
+    assert not arguments.keys() & {
+        "expectedSourceSceneFileDigest", "expectedSourceSceneFileIdentity",
+        "expectedSourceSceneMetaDigest", "expectedSourceSceneMetaIdentity",
+    }
     assert arguments["expectedPrefabParentFolderGuid"] == "1" * 32
     assert arguments["expectedPrefabParentFolderIdentity"] == "2" * 64
     assert arguments["expectedStagingRootGuid"] == "3" * 32
