@@ -14,18 +14,18 @@
     },
     {
       "id": "select_project",
-      "instruction": "Ask only when the exact existing project is unknown; use registered supervised selection tools."
+      "instruction": "Use the selected root. Register or select the intended existing project if needed; ask for a choice when ambiguous."
     },
     {
       "id": "open_project",
-      "requiresUserAction": true,
-      "capabilityGap": "No MCP open-existing-Unity-project tool; guide the App/Hub/VCC/ALCOM action and verify it."
+      "writeTool": "vrcforge_open_unity_project",
+      "instruction": "Open the selected project if closed, then follow its Editor through package resolution and compilation. Reuse a starting instance."
     },
     {
       "id": "install_core",
       "writeTool": "vrcforge_install_unity_core",
       "requiresApproval": true,
-      "manualAlternative": "Import matching VRCForge.unitypackage in the selected Unity window; Import All."
+      "manualAlternative": "Only when this client has no tool that can install Core, import the matching VRCForge.unitypackage in the selected Unity window."
     },
     {
       "id": "verify_core",
@@ -39,6 +39,7 @@
     },
     {
       "id": "read_avatar",
+      "when": "The original request requires an Avatar.",
       "readTool": "vrcforge_list_avatars",
       "instruction": "Require matching project/instance, complete tools and settled compilation before resuming the user's edit request."
     }
@@ -57,8 +58,7 @@
     "exact_project",
     "matching_editor_and_core",
     "required_tools",
-    "settled_compile",
-    "successful_avatar_read"
+    "settled_compile"
   ],
   "never": [
     "invent_tool",

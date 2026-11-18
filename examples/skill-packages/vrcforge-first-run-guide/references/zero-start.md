@@ -1,6 +1,6 @@
 # 从只下载了 exe 开始
 
-用于用户明确表示“刚下载，Unity、工程、SDK、模型都还没有”的情况。目标是教用户正确准备 Avatar 工程，再连接 VRCForge；不是让普通用户拉 VRCForge 源码、装 Git/Python/Rust 或编译应用。不要开始反复扫描不存在的工程。
+适用于刚下载 App、还没有 Unity 工程的用户。用户问用法时讲解，用户说“帮我配置”时就用工具准备工程并连上 VRCForge。
 
 ## 权威来源
 
@@ -26,16 +26,16 @@ Hub 路线不可用时，可从该官方版本详情页手动安装编辑器，�
 
 1. **先确认 exe 是什么。** 如果是 VRCForge 官方 Web/Offline Installer，运行安装器并保留完整安装目录；如果只是从完整程序目录单独拿出的 `VRCForge.exe`，回到相应 Release 获取完整安装器/程序包，不把单个可执行文件当作全部依赖。用户已经能打开 App 就直接继续。
 2. **准备能协助的 Agent。** 内置 AI 需要在 App 中配置并测试所选模型；已有外部 AI 则按 App 连接器生成的配置连接，不要求额外配置 App 模型。没有可用 Agent 时，用明确的界面步骤引导，不声称尚未工作的 Agent 能自修。
-3. **选择管理器，准备 Unity。** 已用 VCC 或 ALCOM 就沿用；全新用户简述两者并让其选择一个，不要求两个都装。VCC 来自 [VRChat 官方下载入口](https://vrchat.com/download/vcc)，ALCOM 来自上面的作者官网；不要把 ALCOM 的包名、便携 exe 和 VRCForge exe 混为一谈。按所选工具的实际界面准备 Unity Hub、兼容编辑器及必要的账户/许可证；所有用户均遵循上面的 Unity 路线及产品核验，避开团结引擎。登录和系统安装确认由用户完成。
-4. **创建或添加 Avatar 工程。** VCC：Create New Project / New → Avatar → 名称和用户选择的保存目录 → Create Project。ALCOM：按实际版本的 Create New Project / 创建工程入口，选择 Avatar 模板、准确 Unity 版本、名称和保存位置再创建；核对界面，不照搬 VCC 按钮。已有完整工程则在所选管理器中添加现有工程，选择含 `Assets`、`Packages`、`ProjectSettings` 的根目录。不要把模型文件夹或 `.unitypackage` 当成工程，也不选 World/UdonSharp/URP/HDRP 模板。
-5. **打开并等待就绪。** 用所选 VCC / ALCOM 的 Open Project / 打开 Unity 动作打开精确工程，等待首次导入和编译。区分正在处理与实际 Console 错误。此阶段不用“VRCForge 连不上”来判断工程创建失败，也不把打开文件夹说成启动 Unity。
+3. **准备管理器和 Unity。** 沿用已有的 VCC 或 ALCOM。确实需要安装管理器且用户没有偏好时，走 [VRChat 官方 VCC 安装路径](https://vrchat.com/download/vcc)。用现有工具准备兼容的 Unity Editor。需要本人登录、接受许可或确认系统授权时，只请用户处理这一步。
+4. **创建或添加 Avatar 工程。** 用户需要新建时，使用项目工具返回的已安装 Avatar 模板、名称和目标位置，通过 `vrcforge_create_project` 创建。已有工程就选包含 `Assets`、`Packages`、`ProjectSettings` 的工程根目录。需要在管理器操作时，参考当前版本 VCC 或 ALCOM 的创建／添加工程页。
+5. **打开并等待就绪。** 用 `vrcforge_open_unity_project` 打开选中的工程。若已启动，等待这次首次导入和编译，按实际解析或编译错误继续处理。
 6. **准备用户的模型。** 引导从已购买/获授权的模型下载中获取 Unity 资产包，按模型作者要求先装实际依赖，再导入包、打开作者场景或将正确 prefab 放入场景。不要让用户下载“所有常见插件”。尚未选模型时，可询问是否先用官方示例学习；须明确它是演示模型，不声称用户自己的 Avatar 已准备好。导入、保存或修改 Unity 资产仍需相应审批。
 7. **接入 VRCForge。** 在 App 添加/选择这个精确工程，优先使用实际可用的监督 Core 安装流程；否则获取同版本 `VRCForge.unitypackage`，在正确 Unity 窗口完整导入。不要额外安装第三方 MCP Server。此时再按 repair guide 验证匹配工程/实例、Core、工具和编译状态。
-8. **确认可用。** 实际读取场景内目标 Avatar，才报告“已连接，可开始改模”。空工程没有 Avatar 要继续完成模型准备；安装成功、端口开启或项目已登记都不能替代目标读取。上传另由用户决定，不纳入本次连接验收。
+8. **确认可用。** 对于连接请求，确认选中工程的 Core 已响应。用户还要求改模时，再读取其目标 Avatar 并继续。上传由用户决定。
 
 Avatar 模板装好 SDK，不等于用户模型已有 `VRC Avatar Descriptor`。已有空 Unity 工程也不必重建：先按 `references/repair-guide.md` 读包状态，缺 SDK 才通过现有规划/确认安装；SDK 已在、模型无 Descriptor 则处理模型组件。普通 Unity 任务不要求补 VRChat SDK。Core 因缺包无法编译时，用 App/backend 包管理与文件诊断，别循环调用依赖 Core 的场景工具。
 
-先简述整体顺序，再只给当前可操作的一步：去哪里下载、点哪个按钮、完成后应看到什么。已获授权且工具可做的步骤由 Agent 执行；需要账户、系统安装、选择付费模型或实际打开软件时，让用户完成并读回结果。不要一次要求用户理解全部 MCP/SDK/Core 术语。
+能用现有工具完成的步骤由 Agent 执行。遇到用户才掌握的选择、账户登录或系统授权，给出当前这一步和原因，完成后继续。
 
 ## Agent 代下载安装包
 

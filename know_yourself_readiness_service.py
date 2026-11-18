@@ -160,23 +160,23 @@ def project_discovery_guidance(snapshot: dict[str, Any]) -> dict[str, Any]:
     status = str(scan.get("status") or "unknown")
     if scan.get("refreshing") or status == "refreshing":
         state = "scanning"
-        instruction = "Project discovery is running. Read its result after completion, or manually add an existing Unity project folder. Do not report an empty cache as no projects found."
+        instruction = "Read the project scan when it finishes. If the requested root is already known, register it with vrcforge_register_project."
     elif scan.get("error") or status == "error":
         state = "error"
-        instruction = "Project discovery failed. Inspect the project scan error in VRCForge diagnostics and retry; an empty result here does not prove there are no projects. You can manually add an existing Unity project folder."
+        instruction = "Inspect the scan error and retry discovery, or register the known project root with vrcforge_register_project."
     elif status == "ready" and failed_sources:
         state = "partial" if count else "error"
-        instruction = "Some project sources could not be scanned: " + ", ".join(failed_sources) + ". Inspect source diagnostics and retry; keep any discovered projects usable. Do not describe this as a verified empty list. Manual addition remains available."
+        instruction = "Some project sources could not be scanned: " + ", ".join(failed_sources) + ". Use a matching discovered project, register the known root, or retry the failed source."
     elif status == "ready":
         state = "found" if count else "empty"
         instruction = (
-            "Select the intended Unity project in VRCForge."
+            "Use vrcforge_select_project for the intended project. Ask which one only if the target is ambiguous."
             if count else
-            "No Unity projects were found by the completed scan. Open the project picker and add your existing project folder manually. If you have no project yet, create a VRChat project in VCC or ALCOM first; do not claim that an existing project was found."
+            "The completed scan found no Unity projects. Register an existing root with vrcforge_register_project, or use vrcforge_create_project when the user wants a new one."
         )
     else:
         state = "not_checked"
-        instruction = "Project discovery has not completed. Refresh the project list or manually add an existing Unity project folder."
+        instruction = "Refresh project discovery, or register the known root with vrcforge_register_project."
     return {
         "state": state,
         "observedUnityProjectCount": count,
@@ -187,11 +187,11 @@ def project_discovery_guidance(snapshot: dict[str, Any]) -> dict[str, Any]:
         "entrypoint": "VRCForge project picker",
         "supportedSources": ["Unity Hub", "VCC", "ALCOM", "running Unity", "manual"],
         "normalWorkflow": [
-            "Find or manually add the existing project root containing Assets, Packages and ProjectSettings; select it in VRCForge.",
-            "Open that exact project in its supported Unity editor. A Hub/VCC/ALCOM catalogue entry does not prove the editor is running.",
-            "Import the matching VRCForge Unity package and wait for compilation. Recheck exact project/instance, Core connection, required tools and compile errors.",
+            "Use the matching project from discovery, or register and select its exact root.",
+            "Use vrcforge_open_unity_project for the selected root and its matching Editor.",
+            "Use vrcforge_install_unity_core if its files are confirmed missing or incomplete. Follow this project's compilation and Core handshake.",
             "Configure a provider for the built-in Agent, or connect an external MCP client using its own model provider. A key saved in VRCForge is not proof that a provider request succeeds.",
-            "Run know-yourself again, then the recommended read-only avatar baseline. Only proceed to edits when the live checks pass, using the chosen permission mode.",
+            "For a connection request, confirm that the selected project's Core responds. Inspect an Avatar only for tasks that need one.",
         ],
         "projectListOperations": "Add or select a project, refresh discovery, edit its recorded path, or remove it from the VRCForge list. Removing a list entry must not delete project files.",
         "discoveryNeverProvesUnityReady": True,

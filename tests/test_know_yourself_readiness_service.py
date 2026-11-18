@@ -175,3 +175,5 @@ def test_shared_work_start_report_exposes_project_discovery_without_claiming_rea
     report = service.know_yourself_sync({})
     assert report["projectDiscovery"]["state"] == "empty"
     assert report["readyForUnityWork"] is False
+    assert "vrcforge_register_project" in report["projectDiscovery"]["instruction"]
+    assert "vrcforge_create_project" in report["projectDiscovery"]["instruction"]

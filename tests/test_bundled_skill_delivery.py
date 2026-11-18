@@ -232,18 +232,20 @@ def test_reviewed_guide_version_import_updates_prior_immutable_version(app_profi
     shutil.copytree(delivery.bundled_source_dir(), old_source)
     old_manifest_path = old_source / "manifest.json"
     old_manifest = json.loads(old_manifest_path.read_text(encoding="utf-8"))
-    old_manifest["version"] = "1.0.2"
+    current_version = old_manifest["version"]
+    old_manifest["version"] = "1.0.5"
     old_manifest_path.write_text(json.dumps(old_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     service = SkillPackageService(gateway.user_constraints_path.parent / "skill-packages", vrcforge_version="1.8.5")
-    old_archive = service.export_dev(old_source, tmp_path / "guide-1.0.2.vsk").package_path
+    old_archive = service.export_dev(old_source, tmp_path / "old-guide.vsk").package_path
     old_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(old_archive), "devMode": True, "projectToUserSkills": False})
     assert old_result["ok"]
 
-    current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide-1.0.5.vsk").package_path
+    current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "current-guide.vsk").package_path
     current_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(current_archive), "devMode": True, "projectToUserSkills": False})
     assert current_result["ok"]
     installed = service.load_registry()["skills"][delivery.PACKAGE_ID]
-    assert installed["version"] == "1.0.5"
+    assert installed["version"] == current_version
+    assert installed["version"] != old_manifest["version"]
     assert not (gateway.skills.user_skills_dir / delivery.SKILL_NAME).exists()
 
 

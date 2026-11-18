@@ -93,6 +93,23 @@ def test_exe_only_route_is_available_as_an_exact_declared_reference(docs_profile
                    for item in gateway.skills.build_skill_registry()["skills"])
 
 
+def test_connection_guide_can_open_the_selected_project_and_complete_a_repair(docs_profile):
+    app, gateway, _root = docs_profile
+    guide = gateway.runtime_skills.execute(delivery.SKILL_NAME, {}, "connect-project")["result"]
+    loop = AgentTaskLoop("Connect this project")
+    loop.activate_skill_policy(name=delivery.SKILL_NAME, allowed_tools=guide["allowedTools"], disallowed_tools=[])
+    workflow = app.EXTERNAL_INSTALLED_SKILL_REGISTRY.read_installed_skill({
+        "name": delivery.SKILL_NAME, "file": "workflows/first-run.json",
+    })
+    flow = json.loads(workflow["content"])
+    opening = next(step for step in flow["steps"] if step["id"] == "open_project")
+    assert opening.get("writeTool") == "vrcforge_open_unity_project"
+    assert not opening.get("requiresUserAction")
+    for tool in (opening["writeTool"], "vrcforge_read_text_file", "vrcforge_package_install_request"):
+        assert loop.skill_policy_block_reason(tool) == ""
+    assert "successful_avatar_read" not in flow["completionRequires"]
+
+
 def test_existing_disabled_docs_and_old_guide_are_preserved(docs_profile):
     app, gateway, _root = docs_profile
     target = gateway.skills.user_skills_dir / delivery.DOCS_SKILL_NAME
