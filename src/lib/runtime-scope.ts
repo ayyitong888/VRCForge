@@ -101,7 +101,8 @@ export function pendingQuestionReviewTargets(chats: ChatThread[], questions: Age
     if (!chat || chat.archived || chat.items.some((item) => item.type === "question_answer" && item.questionId === question.questionId)) return [];
     return [{ chat, question }];
   });
-  return { count: targets.length, target: targets.find(({ chat }) => chat.id === activeChatId) || targets[0] };
+  const questionIds = new Set(targets.map(({ question }) => question.questionId));
+  return { questionIds, target: targets.find(({ chat }) => chat.id === activeChatId) || targets[0] };
 }
 
 export function runtimeReviewItemForChat(

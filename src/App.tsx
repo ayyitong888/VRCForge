@@ -1183,8 +1183,8 @@ export default function App() {
   const scopedAgentQuestions = hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : [];
   const dismissedAgentQuestion = scopedAgentQuestions.find((question) => question.status === "pending" && dismissedQuestionIds.has(question.questionId));
   const questionReview = useMemo(
-    () => pendingQuestionReviewTargets(chats, runtimeConnected ? agentQuestions : [], activeChatId),
-    [chats, runtimeConnected, agentQuestions, activeChatId],
+    () => pendingQuestionReviewTargets(sidebarChats, runtimeConnected ? agentQuestions : [], activeChatId),
+    [sidebarChats, runtimeConnected, agentQuestions, activeChatId],
   );
   const reviewQuestionTarget = questionReview.target;
   const runtimeReviewItem = runtimeReviewItemForChat(activeChat || undefined, runtimeAttention, scopedAgentQuestions);
@@ -1346,7 +1346,7 @@ export default function App() {
     deliveries: backgroundGoalState?.unread,
     approvals: runtimeConnected && bootstrap?.approvalsState?.ok !== false ? bootstrap?.approvals : undefined,
     externalConfirmationCount: externalMcpApprovalItems.length,
-    questions: runtimeConnected ? agentQuestions : undefined,
+    pendingQuestionIds: questionReview.questionIds,
   });
   useEffect(() => {
     if (!editingMessage || editingMessage.chatId === activeChatId) {
@@ -4944,7 +4944,7 @@ export default function App() {
                 />
               ) : undefined}
               pendingQuestions={reviewQuestionTarget ? {
-                count: questionReview.count,
+                count: questionReview.questionIds.size,
                 onOpen: () => {
                   openChat(reviewQuestionTarget.chat);
                   reopenAgentQuestion(reviewQuestionTarget.question.questionId);

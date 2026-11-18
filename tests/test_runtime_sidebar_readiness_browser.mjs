@@ -42,7 +42,7 @@ const bundle = await build({
         subAgentTaskCount={0} subAgentRunningTaskCount={0} subAgentCompletedTaskCount={0}
         userAttachmentSources={[]} approvalsLoaded pendingApprovals={pendingApprovals} workspaceSummary={null}
         hasExternalPendingApprovals={hasExternalPendingApprovals}
-        pendingQuestions={review.target && { count: review.count, onOpen: () => {
+        pendingQuestions={review.target && { count: review.questionIds.size, onOpen: () => {
           setActive(review.target.chat.id);
           setReveal({ questionId: review.target.question.questionId });
         } }}

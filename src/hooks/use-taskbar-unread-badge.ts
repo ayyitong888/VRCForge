@@ -23,13 +23,13 @@ function drawBadge(label: string): ImageData {
   return context.getImageData(0, 0, 32, 32);
 }
 
-export function useTaskbarUnreadBadge({ chats, deliveries, approvals, questions, runs, externalConfirmationCount }: TaskbarAttention) {
+export function useTaskbarUnreadBadge({ chats, deliveries, approvals, pendingQuestionIds, runs, externalConfirmationCount }: TaskbarAttention) {
   const supported = isTauriRuntime() && navigator.userAgent.includes("Windows");
   const label = useMemo(() => {
     if (!supported) return "";
-    const count = countTaskbarAttention({ chats, deliveries, approvals, questions, runs, externalConfirmationCount });
+    const count = countTaskbarAttention({ chats, deliveries, approvals, pendingQuestionIds, runs, externalConfirmationCount });
     return count > 99 ? "99+" : count ? String(count) : "";
-  }, [chats, deliveries, approvals, questions, runs, externalConfirmationCount, supported]);
+  }, [chats, deliveries, approvals, pendingQuestionIds, runs, externalConfirmationCount, supported]);
   const pending = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {

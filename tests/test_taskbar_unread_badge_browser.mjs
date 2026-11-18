@@ -11,6 +11,7 @@ import i18n from 'i18next';
 import {initReactI18next} from 'react-i18next';
 import {useChatSessions} from './src/hooks/use-chat-sessions';
 import {useTaskbarUnreadBadge} from './src/hooks/use-taskbar-unread-badge';
+import {pendingQuestionReviewTargets} from './src/lib/runtime-scope';
 await i18n.use(initReactI18next).init({lng:'en',resources:{en:{translation:{}}}});
 let label, rid = 0;
 const icons = new Map();
@@ -21,6 +22,14 @@ CanvasRenderingContext2D.prototype.fillText = function(value, ...args) {
 };
 mockWindows('main');
 mockIPC((command, args) => {
+  if (command === 'save_chat_record') {
+    const {chatId} = args.request.body;
+    return {ok:true, chatDigests:{[chatId]:'0'.repeat(64)}, chatMetadataShapes:{[chatId]:{}}};
+  }
+  if (command === 'delete_chat_permanently') {
+    window.deletedSession = args.request.chatId;
+    return {ok:true, removed:true};
+  }
   if (command === 'plugin:image|new') {
     if (args.rgba.length !== 32*32*4 || args.width !== 32 || args.height !== 32) throw Error('Invalid overlay bitmap');
     icons.set(++rid, label);
@@ -48,7 +57,8 @@ function Fixture() {
     projectPrefsReady:true, projectPaths:paths, customProjectPaths:paths, activeProjectPath:'',
     setActiveProjectPath:noop, setActiveView, setError:noop, expandProjectGroup:noop,
     initialChatState:{chats:[chat('a'),chat('b')],activeChatId:'a'}});
-  useTaskbarUnreadBadge({ chats:sessions.chats, deliveries, approvals, questions, externalConfirmationCount });
+  const {questionIds} = pendingQuestionReviewTargets(sessions.sidebarChats, questions, sessions.activeChatId);
+  useTaskbarUnreadBadge({ chats:sessions.chats, deliveries, approvals, pendingQuestionIds:questionIds, externalConfirmationCount });
   window.fixture = {sessions, setActiveView, setDeliveries, setApprovals, setQuestions, setExternalConfirmationCount, reply};
   return null;
 }
@@ -111,6 +121,20 @@ try {
   await page.evaluate(() => window.fixture.setExternalConfirmationCount(1));
   await expectBadge('1');
   await page.evaluate(() => window.fixture.setExternalConfirmationCount(0));
+  await expectBadge('');
+
+  // A different chat is open and its snapshot still holds the deleted chat's question.
+  await page.evaluate(() => window.fixture.setQuestions([
+    { questionId:'old-question', sessionId:'b', status:'pending', needsUserAction:true },
+    { questionId:'surviving-question', sessionId:'a', status:'pending', needsUserAction:true },
+  ]));
+  await expectBadge('2');
+  await page.evaluate(() => window.fixture.sessions.deleteChatPermanently('b'));
+  assert.equal(await page.evaluate(() => window.deletedSession), 'b');
+  await expectBadge('1');
+  await page.evaluate(() => window.fixture.setQuestions([
+    { questionId:'old-question', sessionId:'b', status:'pending', needsUserAction:true },
+  ]));
   await expectBadge('');
 } finally {
   await browser.close();
