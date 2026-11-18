@@ -131,3 +131,34 @@ def test_fixed_control_schema_cannot_leave_explicit_plan(tmp_path, action):
     assert result["exposureLayer"] == "planning"
     assert model.requests[0]["tools"] == model.requests[1]["tools"]
     assert any("plan_mode_read_only" in m.get("content", "") for m in model.requests[1]["messages"] if m["role"] == "tool")
+
+
+@pytest.mark.parametrize("explicit_plan", [True, False])
+def test_create_conversation_runs_only_in_execute_and_plan_can_delegate(tmp_path, explicit_plan):
+    from tests.test_cross_session_conversation_service import Harness
+    from tests.test_native_runtime_gateway import call as runtime_call, run, runtime_state, setup_gateway
+
+    create = "vrcforge_create_conversation"
+    delegate = "vrcforge_delegate_subagent"
+    gateway, model, _ = setup_gateway(tmp_path, [
+        runtime_call("delegate", delegate, {"role": "fixture", "task": "Read the fixture."}),
+        runtime_call("create", create, {"title": "Research follow-up"}),
+        {"role": "assistant", "content": "Completed the read-only inspection."},
+    ])
+    # Use the gateway's internal visibility rule, as the dashboard planner
+    # does. The test adapter normally shares the external MCP visibility rule.
+    gateway._tool_visible = gateway._tool_runtime_visible
+    harness = Harness()
+    gateway.register_tool(create, "When to use: create a chat. When NOT to use: read a chat.",
+                          "plan/preview", harness.service().create_conversation)
+    delegated = []
+    gateway.register_tool(delegate, "When to use: delegate a read. When NOT to use: write.",
+                          "plan/preview", lambda params: delegated.append(params) or {"ok": True})
+    options = {"planMode": True} if explicit_plan else {}
+    result = run(gateway, tmp_path, chatId="source", **options)
+    available = runtime_state(model.requests[0])["availableToolNames"]
+    assert delegate in available
+    assert len(delegated) == 1
+    assert (create in available) is not explicit_plan
+    assert any(chat["title"] == "Research follow-up" for chat in harness.chats.values()) is not explicit_plan
+    assert result["exposureLayer"] == ("planning" if explicit_plan else "execution")
