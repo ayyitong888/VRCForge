@@ -95,7 +95,7 @@ from general_agent_tools import (
     web_fetch as general_web_fetch,
     web_search as general_web_search,
 )
-from pdf_document_reader import pdf_options, read_pdf_path, set_pdf_next_request
+from pdf_document_reader import pdf_options, read_pdf_document, read_pdf_path, set_pdf_next_request
 from local_image_reader import (
     TOOL_DESCRIPTION as LOCAL_IMAGE_READER_DESCRIPTION,
     TOOL_NAME as LOCAL_IMAGE_READER_TOOL_NAME,
@@ -3295,6 +3295,11 @@ async def _execute_app_agent_runtime_message(
     browser_available: bool = False,
 ) -> dict[str, Any]:
     runtime_params = agent_runtime_request_payload(runtime_request)
+    # Composer uploads use the chat ID. Replies to an active question can
+    # use that chat's runtime session ID. This scope is owned by the App runner.
+    runtime_params["_attachmentInspectionOwners"] = tuple(
+        value for value in ((runtime_request.chat_id or "").strip(), (runtime_request.session_id or "").strip()) if value
+    )
     browser_requested = False
     browser_adult_confirmed = False
     agent_relay = str(runtime_request.client_turn_id or "").startswith(AGENT_RELAY_INPUT_PREFIX)
@@ -6887,7 +6892,7 @@ def inspect_chat_attachment_sync(params: dict[str, Any]) -> dict[str, Any]:
     if not payload_hash:
         raise AgentGatewayError("payloadHash is required.", status_code=400)
     try:
-        resolved = chat_attachment_vault_store().resolve(payload_hash)
+        resolved = chat_attachment_vault_store().resolve_for_inspection(payload_hash)
     except ChatAttachmentVaultError as exc:
         raise AgentGatewayError(f"{exc} (reason: {exc.reason})", status_code=exc.status_code) from exc
     if resolved is None:
@@ -6902,8 +6907,8 @@ def inspect_chat_attachment_sync(params: dict[str, Any]) -> dict[str, Any]:
     try:
         if resolved["category"] == "document":
             try:
-                document = read_pdf_path(
-                    path, source=str(resolved["name"]), image_source_id=payload_hash, **pdf_options(params),
+                document = read_pdf_document(
+                    resolved["documentBytes"], source=str(resolved["name"]), image_source_id=payload_hash, **pdf_options(params),
                 )
             except ValueError as exc:
                 raise AgentGatewayError(str(exc), status_code=400) from exc
@@ -28555,7 +28560,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.inspect_outfit_package)
     AGENT_GATEWAY.register_tool(
         "vrcforge_inspect_chat_attachment",
-        "when-to-use: inspect a vault-stored chat attachment by its exact payloadHash. Read physical PDF pages with startPage/maxPages, optionally render low-text pages with renderScannedPages, and follow nextRequest. Also supports guarded archive listings, single-entry text via entryPath, and image header metadata. when-NOT-to-use: do not use for direct paths, URLs, or writing attachments into Unity. Negative example: use web_fetch for a linked PDF URL.",
+        "when-to-use: inspect an attachment uploaded to the current chat by its exact payloadHash. Read physical PDF pages with startPage/maxPages, optionally render low-text pages with renderScannedPages, and follow nextRequest. Also supports guarded archive listings, single-entry text via entryPath, and image header metadata. when-NOT-to-use: do not use for direct paths, URLs, attachments from other chats, or writing into Unity. Negative example: use web_fetch for a linked PDF URL.",
         "read/debug",
         inspect_chat_attachment_sync,
     )

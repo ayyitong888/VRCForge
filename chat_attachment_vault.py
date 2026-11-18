@@ -24,13 +24,25 @@ import tarfile
 import threading
 import time
 import zipfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from pdf_document_reader import PDF_MAGIC, PDF_MAX_BYTES
 
 VAULT_SCHEMA = "vrcforge.chat_attachment_vault.v1"
 INSPECTION_SCHEMA = "vrcforge.chat_attachment_inspection.v1"
+_INSPECTION_OWNERS: ContextVar[tuple[str, ...]] = ContextVar("attachment_inspection_owners", default=())
+
+
+@contextmanager
+def bind_attachment_inspection_chat(owners: tuple[str, ...]) -> Iterator[None]:
+    token = _INSPECTION_OWNERS.set(owners)
+    try:
+        yield
+    finally:
+        _INSPECTION_OWNERS.reset(token)
 
 ARCHIVE_MAX_BYTES = 512 * 1024 * 1024
 IMAGE_MAX_BYTES = 64 * 1024 * 1024
@@ -423,13 +435,20 @@ class ChatAttachmentVault:
         with self._lock:
             return self._resolve_locked(payload_hash)
 
-    def _resolve_locked(self, payload_hash: str) -> dict[str, Any] | None:
+    def resolve_for_inspection(self, payload_hash: str) -> dict[str, Any] | None:
+        owners = _INSPECTION_OWNERS.get()
+        if not owners:
+            return None
+        with self._lock:
+            return self._resolve_locked(payload_hash, owners=owners)
+
+    def _resolve_locked(self, payload_hash: str, *, owners: tuple[str, ...] | None = None) -> dict[str, Any] | None:
         """Return entry metadata + on-disk path, or None if unknown/missing."""
 
         self._load()
         key = str(payload_hash or "").strip().lower()
         entry = self._index.get(key)
-        if entry is None:
+        if entry is None or (owners is not None and not any(owner in entry["chats"] for owner in owners)):
             return None
         path = self._file_path(key, entry["extension"])
         if not path.is_file():
@@ -438,18 +457,25 @@ class ChatAttachmentVault:
             return None
         digest = hashlib.sha256()
         size = 0
+        read_verified_document = owners is not None and entry["category"] == "document"
+        document = None
         try:
             with path.open("rb") as handle:
-                while chunk := handle.read(1024 * 1024):
-                    size += len(chunk)
-                    digest.update(chunk)
+                if read_verified_document:
+                    document = handle.read(PDF_MAX_BYTES + 1)
+                    size = len(document)
+                    digest.update(document)
+                else:
+                    while chunk := handle.read(1024 * 1024):
+                        size += len(chunk)
+                        digest.update(chunk)
         except OSError as exc:
             raise ChatAttachmentVaultError(
                 "Chat attachment could not be verified.",
                 reason="integrity_unreadable",
                 status_code=409,
             ) from exc
-        if size != int(entry["size"]) or digest.hexdigest() != key:
+        if size != int(entry["size"]) or digest.hexdigest() != key or (document is not None and size > PDF_MAX_BYTES):
             self._delete_entry(key, entry)
             self._save()
             raise ChatAttachmentVaultError(
@@ -458,7 +484,10 @@ class ChatAttachmentVault:
                 status_code=409,
             )
         entry["lastAccessAt"] = time.time()
-        return {**self.describe(key), "path": str(path)}
+        resolved = {**self.describe(key), "path": str(path)}
+        if document is not None:
+            resolved["documentBytes"] = document
+        return resolved
 
     def describe(self, payload_hash: str) -> dict[str, Any]:
         entry = self._index[payload_hash]

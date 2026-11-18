@@ -968,6 +968,8 @@ def approval_task_context(
         native_names = seed.get("_nativeAdmittedToolNames")
         if isinstance(native_names, list):
             context["_nativeAdmittedToolNames"] = copy.deepcopy(native_names)
+    if seed.get("_attachmentInspectionAllowed") is True:
+        context["_attachmentInspectionAllowed"] = True
     return context
 
 

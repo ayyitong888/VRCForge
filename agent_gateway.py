@@ -58,6 +58,7 @@ from memory_consolidation_sources import MemoryScope, project_scope_key
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS, bind_memory_tool_context, safe_memory_record, requested_memory_tool
 from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, is_scan_tool, read_tool_result, result_continuation, retain_model_information
 from agent_scan_result_store import ScanResultStore
+from chat_attachment_vault import bind_attachment_inspection_chat
 from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
@@ -6235,6 +6236,12 @@ class AgentGateway:
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
         self._mcp_resource_context.set(f"runtime:{session_id}")
         chat_id = str(params.get("chat_id") or params.get("chatId") or "").strip()
+        attachment_owners = tuple(params.get("_attachmentInspectionOwners") or ())
+        if (not attachment_owners and continuation_completion
+                and continuation_context.get("sessionId") == session_id
+                and continuation_context.get("_attachmentInspectionAllowed") is True):
+            parent_chat = str(continuation_context.get("parentChatId") or "")
+            attachment_owners = tuple(value for value in (parent_chat, session_id) if value)
         self._desktop.bind_runtime_identity(
             session_id=session_id,
             turn_id=turn_id,
@@ -6618,6 +6625,8 @@ class AgentGateway:
             seed["clientTurnId"] = client_turn_id
             if chat_id:
                 seed["parentChatId"] = chat_id
+            if attachment_owners:
+                seed["_attachmentInspectionAllowed"] = True
             seed["followupLaneId"] = str(params.get("followupLaneId") or chat_id or continuation_context.get("followupLaneId") or session_id)
             if checkpoint_user_policy:
                 seed["checkpointUserPolicy"] = dict(checkpoint_user_policy)
@@ -8607,7 +8616,7 @@ class AgentGateway:
                         task_loop, subagent_read_roots=scoped_general_roots if step_tool in SUB_AGENT_TASK_TOOLS else (),
                     ), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
                         bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps], snapshot_lookup=self._scan_results.lookup if project_root else None) if step_tool == RESULT_READER_TOOL else nullcontext()
-                    ):
+                    ), (bind_attachment_inspection_chat(attachment_owners) if step_tool == "vrcforge_inspect_chat_attachment" else nullcontext()):
                         step_payload = self._runtime_skill_executor.execute(
                             step_tool,
                             step_params,

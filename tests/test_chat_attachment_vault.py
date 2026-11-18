@@ -27,6 +27,7 @@ from runtime_planner_service import planner_safe_tool_result_fields
 from chat_attachment_vault import (
     ChatAttachmentVault,
     ChatAttachmentVaultError,
+    bind_attachment_inspection_chat,
     classify_upload,
     extract_archive_entry_text,
     guard_archive_listing,
@@ -554,13 +555,28 @@ class ChatAttachmentEndpointTests(unittest.TestCase):
     def test_archive_inspection_exposes_only_bounded_semantic_fields_to_planner(self) -> None:
         data = make_zip_bytes({"Assets/example.prefab": b"prefab"})
         stored = self.vault.ingest(data=data, name="pack.zip", declared_type="application/zip", chat_id="chat-1")
-        result = dashboard_server.inspect_chat_attachment_sync({"payloadHash": stored["payloadHash"]})
+        with bind_attachment_inspection_chat(("chat-1",)):
+            result = dashboard_server.inspect_chat_attachment_sync({"payloadHash": stored["payloadHash"]})
+            entry = dashboard_server.inspect_chat_attachment_sync({
+                "payloadHash": stored["payloadHash"], "entryPath": "Assets/example.prefab",
+            })
+        self.assertEqual(entry["entry"]["text"], "prefab")
         projected = planner_safe_tool_result_fields(result)
         self.assertIn("summary", projected)
         self.assertIn("summaryText", projected)
         self.assertEqual(projected["entryCount"], 1)
         self.assertNotIn("listing", projected)
         self.assertNotIn("archiveGuard", projected)
+
+    def test_chat_image_inspection_resolves_owned_upload(self) -> None:
+        from PIL import Image
+
+        image = io.BytesIO()
+        Image.new("RGB", (8, 12)).save(image, "PNG")
+        stored = self.vault.ingest(data=image.getvalue(), name="sample.png", declared_type="image/png", chat_id="chat-1")
+        with bind_attachment_inspection_chat(("chat-1",)):
+            result = dashboard_server.inspect_chat_attachment_sync({"payloadHash": stored["payloadHash"]})
+        self.assertEqual((result["image"]["width"], result["image"]["height"]), (8, 12))
 
 
 if __name__ == "__main__":

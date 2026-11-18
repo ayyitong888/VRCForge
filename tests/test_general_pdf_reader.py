@@ -10,9 +10,10 @@ import pypdfium2
 import pytest
 
 import dashboard_server as dashboard
-from chat_attachment_vault import ChatAttachmentVault
+from chat_attachment_vault import ChatAttachmentVault, bind_attachment_inspection_chat
 from native_tool_images import collect_tool_images
 from runtime_planner_service import EXPOSURE_LAYER_PLANNING, planner_read_output_evidence
+from tests.test_native_runtime_gateway import call, finish as finish_native_turn, setup_gateway
 
 
 def _text_pdf():
@@ -131,15 +132,50 @@ def test_chat_pdf_uses_existing_vault_attachment_reference(tmp_path, monkeypatch
         assert finish.status_code == 200, finish.text
         attachment = finish.json()["attachment"]
     handler = dashboard.AGENT_GATEWAY._tools["vrcforge_inspect_chat_attachment"].handler
-    result = handler({"payloadHash": attachment["payloadHash"], "renderScannedPages": True})
+    with bind_attachment_inspection_chat(("pdf-chat",)):
+        result = handler({"payloadHash": attachment["payloadHash"], "renderScannedPages": True})
     assert result["source"] == "manual.pdf"
     assert result["attachment"]["payloadHash"] == attachment["payloadHash"]
     assert "VRCForge PDF manual" in result["pages"][0]["text"]
     assert result["pages"][1]["needsVisual"] is True
     assert result["pages"][1]["imageUri"] == result["content"][0]["uri"]
     assert f"/{attachment['payloadHash']}/page/2" in result["content"][0]["uri"]
-    with pytest.raises(dashboard.AgentGatewayError, match="not found"):
-        handler({"payloadHash": "f" * 64})
+    with bind_attachment_inspection_chat(("pdf-chat",)):
+        with pytest.raises(dashboard.AgentGatewayError, match="not found"):
+            handler({"payloadHash": "f" * 64})
+
+    name = "vrcforge_inspect_chat_attachment"
+    gateway, model, _ = setup_gateway(tmp_path, [
+        call("read-owned-pdf", name, {"payloadHash": attachment["payloadHash"], "maxPages": 1}),
+        call("read-next-pdf-page", name, {"payloadHash": attachment["payloadHash"], "startPage": 2}),
+        finish_native_turn,
+    ])
+    gateway.register_tool(name, "When to use: inspect a chat attachment. When NOT to use: read other files.",
+                          "plan/preview", handler)
+    monkeypatch.setattr(dashboard, "AGENT_GATEWAY", gateway)
+    with TestClient(dashboard.app) as client:
+        response = client.post("/api/app/agent/message", json={
+            "message": "Read the uploaded PDF.", "chatId": "pdf-chat", "clientTurnId": "read-owned-pdf",
+            "attachments": [attachment], "maxAgenticTurns": 4,
+        })
+    assert response.status_code == 200, response.text
+    evidence = next(message for message in model.requests[1]["messages"] if message.get("tool_call_id") == "read-owned-pdf")
+    assert "VRCForge PDF manual" in evidence["content"]
+    tail = next(message for message in model.requests[2]["messages"] if message.get("tool_call_id") == "read-next-pdf-page")
+    assert r'\"page\":2' in tail["content"].replace(" ", "")
+
+
+def test_scoped_vault_lookup_preserves_shared_uploads(tmp_path, mixed_pdf):
+    vault = ChatAttachmentVault(tmp_path / "vault")
+    info = vault.ingest(data=mixed_pdf, name="manual.pdf", declared_type="application/pdf", chat_id="chat-alpha")
+    payload_hash = info["payloadHash"]
+    assert vault.resolve_for_inspection(payload_hash) is None
+    with bind_attachment_inspection_chat(("chat-alpha",)):
+        assert vault.resolve_for_inspection(payload_hash)["documentBytes"] == mixed_pdf
+    vault.ingest(data=mixed_pdf, name="manual.pdf", declared_type="application/pdf", chat_id="chat-beta")
+    with bind_attachment_inspection_chat(("chat-beta",)):
+        assert vault.resolve_for_inspection(payload_hash)["documentBytes"] == mixed_pdf
+    assert vault.resolve_for_inspection(payload_hash) is None
 
 
 def test_invalid_pdfs_and_pdf_parameters_fail_explicitly(tmp_path, mixed_pdf):
