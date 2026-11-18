@@ -4,7 +4,12 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
+
+from session_store_integrity import path_has_link_like_segment
+
+
+_UNITY_INTERNAL_FOLDERS = {"assets", "packages", "projectsettings", "library", "temp", "logs", "usersettings", "obj"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +42,51 @@ class ProjectCatalogDiscovery:
             self._ports.appdata_path() / "VRChatCreatorCompanion" / "vrc-get-settings.json",
         ]
         return self.discover_projects_from_settings_files(candidates)
+
+    def discover_vcc_project_roots(self) -> list[Path]:
+        roots = []
+        for base in (self._ports.local_appdata_path(), self._ports.appdata_path()):
+            for filename in ("settings_v2.json", "settings.json"):
+                path = base / "VRChatCreatorCompanion" / filename
+                try:
+                    payload = json.loads(self._ports.read_text(path, "utf-8-sig", None))
+                except (OSError, ValueError):
+                    continue
+                location = payload.get("defaultProjectPath") if isinstance(payload, dict) else None
+                if isinstance(location, str) and location.strip():
+                    roots.append(Path(self._ports.normalize_path_string(location)))
+        return roots
+
+    def scan_project_folders(
+        self, roots: Iterable[Path], *, configured_roots: bool = False
+    ) -> list[Path]:
+        """Find projects directly under a project location or inside a grouping folder."""
+        projects: list[Path] = []
+        for root in dict.fromkeys(path.absolute() for path in roots):
+            if path_has_link_like_segment(root, Path(root.anchor)):
+                continue
+            pending = [(root, 0)]
+            while pending:
+                folder, depth = pending.pop()
+                try:
+                    is_project = depth > 0 and self._ports.is_unity_project_path(folder)
+                    if is_project or (
+                        configured_roots and depth == 1
+                        and self._ports.path_exists(folder / "ProjectSettings" / "ProjectVersion.txt")
+                    ):
+                        projects.append(folder)
+                    if depth < 2 and not is_project:
+                        children = sorted(self._ports.list_children(folder), key=lambda child: child.name.casefold(), reverse=True)
+                        for child in children:
+                            if (
+                                child.name.startswith(".") or child.name.casefold() in _UNITY_INTERNAL_FOLDERS
+                                or not self._ports.path_is_dir(child) or path_has_link_like_segment(child)
+                            ):
+                                continue
+                            pending.append((child, depth + 1))
+                except OSError:
+                    continue
+        return projects
 
     def discover_alcom_projects(self) -> list[str]:
         candidates = [

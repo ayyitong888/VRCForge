@@ -51,6 +51,34 @@ def _project(path: Path, version: str = "2022.3.22f1") -> Path:
     return path
 
 
+def test_refresh_discovers_nested_project_under_manager_project_folder(tmp_path, monkeypatch) -> None:
+    appdata = tmp_path / "appdata"
+    settings = appdata / "VRChatCreatorCompanion" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    library = tmp_path / "Unity projects"
+    nested = _project(library / "Benchmark batch" / "zcode test")
+    existing = _project(library / "My project")
+    _project(library / "Library" / "Cached project")
+    _project(existing / "Assets" / "Template project")
+    # An old version file in a parent folder must not prevent finding its projects.
+    (library / "ProjectSettings").mkdir()
+    (library / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n")
+    settings.write_text(json.dumps({"defaultProjectPath": str(library), "userProjects": [str(existing)]}))
+    monkeypatch.setenv("LOCALAPPDATA", str(appdata))
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "project_roots", [])
+    monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "selected_project_path", "")
+    monkeypatch.setattr(dashboard_server, "CURRENT_UNITY_STATUS", {"instances": []})
+    monkeypatch.setattr(dashboard_server, "discover_running_unity_projects", lambda: [])
+    monkeypatch.setattr(dashboard_server, "load_project_prefs", lambda: {"customProjects": []})
+
+    snapshot = dashboard_server.build_project_snapshot_payload()
+    paths = {Path(project["path"]): project for project in snapshot["projects"]}
+    assert set(paths) == {existing, nested}
+    assert paths[existing]["source"] == "vcc"
+    assert paths[nested]["source"] == "project-folder"
+
+
 def test_project_catalog_is_typed_read_owner_without_host_proxy() -> None:
     service_source = (ROOT / "project_catalog_discovery.py").read_text(encoding="utf-8")
     dashboard_source = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")

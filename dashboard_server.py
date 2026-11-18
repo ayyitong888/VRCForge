@@ -20761,19 +20761,8 @@ def discover_projects(
             project["unityVersion"] = active_instance.get("unityVersion") or project.get("editorVersion") or ""
             project["editorVersion"] = project["unityVersion"] or project["editorVersion"]
 
-    for root in project_roots:
-        if not root.exists():
-            continue
-
-        for child in sorted(root.iterdir(), key=lambda item: item.name.casefold()):
-            if not child.is_dir():
-                continue
-
-            version_file = child / "ProjectSettings" / "ProjectVersion.txt"
-            if not version_file.exists():
-                continue
-
-            upsert_project(name=child.name, path=str(child), editor_version=parse_editor_version(version_file), source="configured-root")
+    for project in PROJECT_CATALOG_DISCOVERY.scan_project_folders(project_roots, configured_roots=True):
+        upsert_project(name=project.name, path=str(project), source="configured-root")
 
     if include_external:
         sources = (catalogue_scan or {}).get("sources") if isinstance(catalogue_scan, dict) else None
@@ -20819,6 +20808,16 @@ def discover_projects(
                     source="custom",
                     project_type="unity",
                 )
+
+        manager_roots = [
+            *PROJECT_CATALOG_DISCOVERY.discover_vcc_project_roots(),
+            *PROJECT_CATALOG_DISCOVERY.discover_unity_hub_project_roots(),
+        ]
+        for folder in PROJECT_CATALOG_DISCOVERY.scan_project_folders(
+            root for root in manager_roots if root.is_absolute() and root.parent != root
+        ):
+            if project_key(str(folder), folder.name) not in projects_by_key:
+                upsert_project(name=folder.name, path=str(folder), source="project-folder")
 
         status = CURRENT_UNITY_STATUS
         if status is None:
