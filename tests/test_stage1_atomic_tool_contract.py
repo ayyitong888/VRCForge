@@ -171,6 +171,16 @@ def test_stage1_preview_receipt_binds_only_expected_fields(tmp_path: Path) -> No
         assert approval["requiresExplicitUserApproval"] is True
 
 
+def test_loaded_scene_transition_scopes_evidence_to_editor_state() -> None:
+    scene = (ROOT / "Assets/VRCForge/Editor/Stage1SceneTools.cs").read_text(encoding="utf-8-sig")
+    transition = scene.split("public static class SceneTransitionTool", 1)[1]
+    assert 'var loadedSceneOnly = action == "set_active" || action == "unload";' in transition
+    assert 'if (action != "new_saved" && !loadedSceneOnly)\n                    targetEvidence' in transition
+    assert 'if (!loadedSceneOnly)\n                    AssetDatabase.Refresh' in transition
+    assert 'var readbackEvidence = loadedSceneOnly\n                    ? null' in transition
+    assert 'SceneManager.GetActiveScene().handle != readbackScene.handle' in transition
+
+
 def test_stage1_core_sources_keep_preview_nonmutating_and_identity_fail_closed() -> None:
     core_server = (
         ROOT / "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs"

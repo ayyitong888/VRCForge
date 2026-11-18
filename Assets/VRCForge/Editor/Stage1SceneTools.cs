@@ -128,7 +128,7 @@ namespace VRCForge.Editor
             return values.ToDictionary(item => item.Key, item => item.Value);
         }
 
-        internal static object Readback(Scene scene)
+        internal static object Readback(Scene scene, bool includeHierarchy = true)
         {
             return new
             {
@@ -139,7 +139,7 @@ namespace VRCForge.Editor
                 active = scene.IsValid() && scene.isLoaded && SceneManager.GetActiveScene().handle == scene.handle,
                 dirty = scene.IsValid() && scene.isLoaded && scene.isDirty,
                 rootObjectCount = scene.IsValid() && scene.isLoaded ? scene.rootCount : 0,
-                hierarchyDigest = scene.IsValid() && scene.isLoaded ? HierarchyDigest(scene) : string.Empty
+                hierarchyDigest = includeHierarchy && scene.IsValid() && scene.isLoaded ? HierarchyDigest(scene) : string.Empty
             };
         }
 
@@ -348,8 +348,9 @@ namespace VRCForge.Editor
                 {
                     Stage1SceneToolCore.RequireDestinationParentExists(destination, action);
                 }
+                var loadedSceneOnly = action == "set_active" || action == "unload";
                 StableAssetEvidence targetEvidence = null;
-                if (action != "new_saved")
+                if (action != "new_saved" && !loadedSceneOnly)
                     targetEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "transition scene asset");
                 var setup = Stage1SceneToolCore.SetupDigest();
                 var open = Stage1SceneToolCore.OpenStateDigest();
@@ -404,13 +405,13 @@ namespace VRCForge.Editor
                     {
                         if (!target.IsValid() || !target.isLoaded) throw new SceneObjectCopyException("The requested scene is not loaded.");
                         if (SceneManager.GetActiveScene().handle == target.handle)
-                            return VRCForgeToolResult.Completed("The requested scene is already active.", TransitionPayload(action, project, path, destination, digest, binding, setup, open, false, Stage1SceneToolCore.Readback(target), true));
+                            return VRCForgeToolResult.Completed("The requested scene is already active.", TransitionPayload(action, project, path, destination, digest, binding, setup, open, false, Stage1SceneToolCore.Readback(target, includeHierarchy: false), true));
                         mutationStarted = true;
                         if (!SceneManager.SetActiveScene(target)) throw new SceneObjectCopyException("Could not set the requested scene active.");
                     }
                     else if (action == "unload")
                     {
-                        if (!target.IsValid() || !target.isLoaded || target.isDirty || SceneManager.sceneCount <= 1)
+                        if (!target.IsValid() || !target.isLoaded || target.isDirty || CheckpointPrepareTool.LoadedScenes().Count(scene => !scene.isSubScene && !EditorSceneManager.IsPreviewScene(scene)) <= 1)
                             throw new SceneObjectCopyException("The requested scene cannot be safely unloaded as the last or a dirty scene.");
                         mutationStarted = true;
                         if (!EditorSceneManager.CloseScene(target, true)) throw new SceneObjectCopyException("Could not safely unload the requested scene.");
@@ -429,20 +430,25 @@ namespace VRCForge.Editor
                             throw new SceneObjectCopyException("Reloaded the scene but could not restore its active identity.");
                     }
                 }
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                if (!loadedSceneOnly)
+                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                 var readbackPath = action == "new_saved" ? destination : path;
                 var readbackScene = SceneManager.GetSceneByPath(readbackPath);
-                var readbackEvidence = action == "unload" ? null : SceneObjectCopyCore.ReadStableAssetEvidence(readbackPath, "transition readback scene");
+                var readbackEvidence = loadedSceneOnly
+                    ? null
+                    : SceneObjectCopyCore.ReadStableAssetEvidence(readbackPath, "transition readback scene");
                 if (action == "unload" && readbackScene.IsValid() && readbackScene.isLoaded)
                     throw new SceneObjectCopyException("The unloaded scene is still loaded in fresh readback.");
-                if (action != "unload" && (!readbackScene.IsValid() || !readbackScene.isLoaded || readbackEvidence == null))
+                if (action != "unload" && (!readbackScene.IsValid() || !readbackScene.isLoaded || (!loadedSceneOnly && readbackEvidence == null)))
                     throw new SceneObjectCopyException("The transitioned scene is missing from fresh readback.");
+                if (action == "set_active" && SceneManager.GetActiveScene().handle != readbackScene.handle)
+                    throw new SceneObjectCopyException("The requested scene is not active in fresh readback.");
                 return VRCForgeToolResult.Completed("Scene transition committed and verified.", TransitionPayload(
                     action, project, path, destination, digest, binding,
                     Stage1SceneToolCore.SetupDigest(), Stage1SceneToolCore.OpenStateDigest(), true,
                     new
                     {
-                        scene = action == "unload" ? null : Stage1SceneToolCore.Readback(readbackScene),
+                        scene = action == "unload" ? null : Stage1SceneToolCore.Readback(readbackScene, includeHierarchy: !loadedSceneOnly),
                         path = readbackPath,
                         guid = readbackEvidence == null ? "" : readbackEvidence.Guid,
                         fileDigest = readbackEvidence == null ? "" : readbackEvidence.File.Digest,
