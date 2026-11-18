@@ -1451,6 +1451,26 @@ def test_foreground_completion_replay_is_idempotent_by_session_and_client_turn(t
     ) == "completed"
 
 
+@pytest.mark.parametrize("reason,shell_status,expected", [
+    ("action_not_terminal", "running", "parked"),
+    ("", "running", "parked"),  # Older shell receipts omitted the reason.
+    ("sub_agent_pending", "none", "parked"),
+    ("tool_poll_timeout", "running", "blocked"),
+    ("action_not_terminal", "none", "blocked"),
+])
+def test_waiting_receipt_status_in_live_history_and_notifications(tmp_path, reason, shell_status, expected):
+    ledger, _lock = make_ledger(tmp_path)
+    plan = {"nextStep": "waiting_for_tool", "reason": reason}
+    shell = {"status": shell_status} if shell_status != "none" else None
+    assert ledger.turn_run_status(top_plan=plan, shell_payload=shell,
+                                  skill_payload=None, write_payload=None, approval_id="") == expected
+    # RC4 stored automatic tool waits as blocked. A resumed desktop reads these rows.
+    ledger.append({"event": "runtime_turn_completed", "status": "blocked", "sessionId": "s", "turnId": "t",
+                   "clientTurnId": "c", "shellStatus": shell_status, **plan})
+    for compact in (True, False):
+        assert ledger.list_runs(session_id="s", notification_only=compact)["runs"][0]["status"] == expected
+
+
 def test_shell_terminal_event_after_append_recovers_once_after_gateway_rebuild(tmp_path: Path) -> None:
     """A terminal event must retain a recoverable continuation across an interruption."""
 

@@ -599,8 +599,8 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         result["_conversationFollowup"] = dict(value["_conversationFollowup"])
     if isinstance(value.get("_runtimeObservation"), Mapping):
         result["_runtimeObservation"] = dict(value["_runtimeObservation"])
-        if value.get("runtimeStatus") == "polling":
-            result["runtimeStatus"] = "polling"
+    if value.get("runtimeStatus") == "polling":
+        result["runtimeStatus"] = "polling"
     transaction = _bounded_write_transaction(value.get("writeTransaction"))
     if transaction is not None:
         result["writeTransaction"] = transaction
@@ -1271,6 +1271,20 @@ def prepare_approval_task_continuation(
     }
 
 
+def _shell_exit_receipt(event: Mapping[str, Any]) -> dict[str, Any]:
+    cancelled = event.get("cancelled") is True or event.get("killed") is True
+    success = (
+        _status(event.get("status")) == "finished" and type(event.get("exitCode")) is int
+        and event["exitCode"] == 0 and not cancelled
+        and event.get("timedOut") is not True and event.get("terminationFailed") is not True
+    )
+    return {
+        "ok": success, "status": "executed" if success else "failed", "exitCode": event.get("exitCode"),
+        "timedOut": event.get("timedOut") is True, "cancelled": cancelled,
+        "terminationFailed": event.get("terminationFailed") is True,
+    }
+
+
 def prepare_shell_task_continuation(
     seed: Mapping[str, Any] | None,
     event: Mapping[str, Any] | None,
@@ -1289,22 +1303,8 @@ def prepare_shell_task_continuation(
     )
     if context is None:
         return None
-    success = bool(
-        _status(event.get("status")) == "finished"
-        and type(event.get("exitCode")) is int
-        and event.get("exitCode") == 0
-        and event.get("timedOut") is not True
-        and event.get("cancelled") is not True
-        and event.get("terminationFailed") is not True
-    )
-    raw_result = {
-        "ok": success,
-        "status": "executed" if success else "failed",
-        "exitCode": event.get("exitCode"),
-        "timedOut": event.get("timedOut") is True,
-        "cancelled": event.get("cancelled") is True,
-        "terminationFailed": event.get("terminationFailed") is True,
-    }
+    raw_result = _shell_exit_receipt(event)
+    success = raw_result["ok"]
     outcome = normalize_agent_tool_result(
         raw_result,
         fallback_summary=(
@@ -1828,8 +1828,13 @@ class AgentTaskLoop:
             verification_profile=requirement_profile,
         )
         outcome_status = _status(effective.get("status"))
-        # The process can still be running after its poll or log read has settled.
-        running_state = "" if is_shell_process_observation(tool, arguments) else _running_state(raw_result)
+        # Process controls return a snapshot of the target process. Its lifetime
+        # belongs to the original launch, including after stdin is delivered.
+        running_state = "" if tool == "vrcforge_shell_process" else _running_state(raw_result)
+        shell_poll = raw_result.get("pollTarget") if kind == "shell" and isinstance(raw_result, Mapping) else None
+        if shell_poll and running_state:
+            running_state = "polling"
+            effective.update(nextAction=shell_poll, status="pending", success=False)
         observation = runtime_observation_receipt(raw_result)
         job = job_receipt(raw_result)
         if outcome_status == "pending" and job:
@@ -1877,6 +1882,21 @@ class AgentTaskLoop:
             record["_nativeReadObservation"] = True
         if running_state:
             record["runtimeStatus"] = running_state
+        if outcome_status == "ok" and is_shell_process_observation(tool, arguments):
+            session = next((view["session"] for view in _mapping_views(raw_result)
+                            if isinstance(view.get("session"), Mapping) and view["session"].get("sessionId")), {})
+            if session.get("status") in {"finished", "timed_out", "killed", "termination_failed"}:
+                for prior in self._actions.values():
+                    if prior.get("kind") == "shell" and prior.get("status") == "running" and (
+                        prior["outcome"].get("nextAction") == {"tool": tool, "arguments": {
+                            "action": "poll", "sessionId": session["sessionId"]}}
+                    ):
+                        exit_receipt = _shell_exit_receipt(session)
+                        prior.update(status="completed" if exit_receipt["ok"] else "failed",
+                                     outcome=normalize_agent_tool_result(exit_receipt, write=False,
+                                     fallback_summary=f"Shell exited with code {session.get('exitCode')}."),
+                                     completionReadActionId=action_id)
+                        prior.pop("runtimeStatus", None)
         if tool in {"vrcforge_followup_task", "vrcforge_read_conversation"}:
             receipt = next((view for view in _mapping_views(raw_result)
                             if view.get("chatId") and view.get("clientTurnId")), None)
@@ -2305,6 +2325,18 @@ class AgentTaskLoop:
                     return replacement
 
         if running:
+            if all(action.get("runtimeStatus") == "polling" for action in running):
+                action = running[0]
+                target = action["outcome"].get("jobId") or action.get("_conversationFollowup") or action["outcome"].get("nextAction")
+                if target:
+                    # No completion callback owns these jobs. Give the planner its
+                    # handle back before accepting a final answer or yielding.
+                    return {
+                        **gated, "summary": "", "reply": "尚未取得已启动任务的最终结果。",
+                        "continueLoop": False, "nextStep": "paused", "reason": "tool_poll_required",
+                        "completionGate": {"status": "pending", "reason": "tool_poll_required",
+                                           "pollTarget": target}, "task": self.snapshot("paused"),
+                    }
             child_pending = any(str(action.get("tool") or "") in SUB_AGENT_TASK_TOOLS for action in running)
             reason = "sub_agent_pending" if child_pending else "action_not_terminal"
             return {

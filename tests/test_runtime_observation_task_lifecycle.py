@@ -36,7 +36,8 @@ def test_pending_approval_still_requires_user():
     value={'status':'pending','ok':True,'approval':{'id':'approval'}}
     assert normalize_agent_tool_result(value,fallback_summary='approval',write=True)['status']=='needs_user_action'
 
-def test_native_pending_start_returns_to_planner_for_same_job_poll(tmp_path):
+@pytest.mark.parametrize("premature_replies", [0, 1, 2])
+def test_native_pending_start_returns_to_planner_for_same_job_poll(tmp_path, premature_replies):
     from tests.test_native_runtime_gateway import setup_gateway, call, finish
     from tests.test_native_permission_modes import _set_mode
     from tests.test_native_approval_success import _project
@@ -44,6 +45,7 @@ def test_native_pending_start_returns_to_planner_for_same_job_poll(tmp_path):
     start, poll = 'vrcforge_start_runtime_observation', 'vrcforge_get_runtime_observation'
     gateway, model, _ = setup_gateway(tmp_path, [
         call('start', start, {'projectPath':str(project), 'avatarPath':'Avatar'}),
+        *([{"role": "assistant", "content": "The job is complete."}] * premature_replies),
         call('poll', poll, {'jobId':'a'*32}), finish])
     _set_mode(gateway, 'roslyn_full_auto')
     calls=[]
@@ -54,9 +56,15 @@ def test_native_pending_start_returns_to_planner_for_same_job_poll(tmp_path):
     gateway.register_tool(poll,'When to use: poll observation. When NOT to use: start.','plan/preview',read)
     result=gateway.runtime_message({'message':'Observe once and inspect the result','sessionId':'observation-session','clientTurnId':'observation-turn',
         'projectRoot':str(project),'maxAgenticTurns':5})
+    if premature_replies == 2:
+        assert calls == ['start'] and len(model.requests) == 3
+        assert result['plan']['nextStep'] == 'paused'
+        assert result['plan']['reason'] == 'tool_poll_required'
+        assert result['plan']['completionGate']['pollTarget'] == 'a'*32
+        return
     assert calls==['start','poll'], str({k: result['plan'].get(k) for k in ('summary','reply','plannerFailure')})
     assert result['plan']['nextStep']=='done', str((result['plan'].get('completionGate'), result['task']['actions'], result['task']['requirements']))
-    assert len(model.requests)==3
+    assert len(model.requests)==3 + premature_replies
 
 
 

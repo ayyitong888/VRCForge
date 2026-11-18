@@ -159,7 +159,7 @@ def test_child_result_then_second_delegation_preserves_wait_without_fabricating_
         assert "model_turn_budget_exhausted" in json.dumps(model.requests[1], default=str)
         assert "Read back the unverified binding" in json.dumps(model.requests[1], default=str)
     run = gateway.runtime_runs.list_runs(session_id="parent", client_turn_id=resumed["clientTurnId"])["runs"][0]
-    assert run["status"] == "blocked"
+    assert run["status"] == "parked"
     assert run["writeStatus"] == "none"
     assert run["reason"] == "sub_agent_pending"
 

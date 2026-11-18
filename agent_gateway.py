@@ -7855,21 +7855,24 @@ class AgentGateway:
             command = str(plan.get("shellCommand") or "").strip()
             if not command and step_index == 0 and plan.get("shellNeeded") is True:
                 command = param_command
-            needs_completion_claim_correction = bool(
+            final_candidate = (
                 not command
                 and not (plan.get("writeNeeded") and plan.get("writeTool"))
                 and not (plan.get("skillNeeded") and plan.get("skillTool"))
-                and not completion_claim_correction_attempted
-                and not (ensure_dict(plan.get("completionClaim")).get("satisfied") is False and planner_reply)
                 and str(plan.get("planner") or "").strip().casefold() == "llm"
-                and task_loop.completed_action_ids()
-                and ensure_dict(
-                    assess_task_terminal(plan).get("completionGate")
-                ).get("reason") in {
+            )
+            completion_gate = ensure_dict(assess_task_terminal(plan).get("completionGate")) if final_candidate else {}
+            poll_target = completion_gate.get("pollTarget") if completion_gate.get("reason") == "tool_poll_required" else None
+            needs_completion_claim_correction = bool(
+                final_candidate
+                and not completion_claim_correction_attempted
+                and (poll_target or (
+                    not (ensure_dict(plan.get("completionClaim")).get("satisfied") is False and planner_reply)
+                    and task_loop.completed_action_ids() and completion_gate.get("reason") in {
                     "completion_claim_unbound",
                     "required_action_missing",
                     "completion_evidence_missing",
-                }
+                }))
             )
             honest_failed_final = (
                 ensure_dict(plan.get("completionClaim")).get("satisfied") is False
@@ -7881,7 +7884,7 @@ class AgentGateway:
                     "assistant", label="Assistant", summary=public_message["text"],
                     status=("progress" if message_phase == "commentary" else
                             "failed" if message_phase == "final_answer" and honest_failed_final else
-                            "completion_unverified" if message_phase == "final_answer" and needs_completion_claim_correction else "done"),
+                            "completion_unverified" if message_phase == "final_answer" and (needs_completion_claim_correction or poll_target) else "done"),
                     phase=message_phase, message_id=public_message["id"],
                 )
             if not public_messages and planner_reply and any(
@@ -7983,6 +7986,11 @@ class AgentGateway:
                     "Otherwise continue the remaining work or report the concrete blocker. "
                     "action=correct retries failed tools only. Host binds IDs."
                 )
+                if poll_target:
+                    correction_summary = (
+                        "Poll the existing operation with its status tool. Do not restart it. Target: "
+                        + json.dumps(poll_target, ensure_ascii=False)
+                    )
                 loop_state.append(
                     {
                         "tool": "runtime_completion_gate",
@@ -7991,7 +7999,7 @@ class AgentGateway:
                         "outcome": {
                             "status": "needs_correction",
                             "summary": correction_summary,
-                            "nextAction": {
+                            "nextAction": {"kind": "poll", "target": poll_target} if poll_target else {
                                 "kind": "reply_completion_claim",
                                 "requiredEvidenceActionIds": completed_action_ids,
                             },
@@ -8343,6 +8351,10 @@ class AgentGateway:
                         continue_after_approval=bool(plan.get("continueLoop")),
                     ),
                     unity_project_access=step_tool == "unity_shell",
+                    poll_on_yield=bool(native_binding and not shell_step_params.get("background")
+                                       and "vrcforge_shell_process" in self._tools
+                                       and self.runtime_planner.role_tool_allowed("vrcforge_shell_process")
+                                       and not task_loop.skill_policy_block_reason("vrcforge_shell_process")),
                 )
                 # Runtime turns already have a trusted owner; external control
                 # capability must not enter model context or durable projections.
@@ -8368,6 +8380,7 @@ class AgentGateway:
                         "status": step_payload.get("status"),
                         "sessionId": step_payload.get("sessionId"),
                         "session": ensure_dict(step_payload.get("session")),
+                        **({"pollTarget": step_payload["pollTarget"]} if step_payload.get("pollTarget") else {}),
                     }
                 )
                 if isinstance(step_payload.get("result"), dict):
@@ -9233,12 +9246,6 @@ class AgentGateway:
                 # Background Shell and sub-agent tasks own the next decision
                 # after their durable terminal event.  Never continue against
                 # a seed that predates later tool calls.
-                break
-            if action_kind == "shell" and str(step_payload.get("status") or "") == "running":
-                # A task-linked background process owns every subsequent
-                # decision.  Continuing here would execute tools after the
-                # frozen task seed and could replay them when the process
-                # later resumes the task.
                 break
             if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL, "vrcforge_browser"}:
                 pending = find_current_pending_question(steps, self.questions)

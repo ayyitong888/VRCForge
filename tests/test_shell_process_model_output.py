@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import time
 from types import SimpleNamespace
@@ -106,7 +107,9 @@ def test_running_process_reads_settle_without_reusing_a_write_receipt(tmp_path, 
             time.sleep(0.02)
         waits = []
         monkeypatch.setattr(gateway, "_wait_for_provider_retry", lambda seconds, **_: waits.append(seconds) or True)
-        model = NativeModel([call("poll-1", tool, poll), call("poll-2", tool, poll), call("log", tool, log), finish])
+        submit = {"action": "submit", "sessionId": started["sessionId"], "data": "continue"}
+        model = NativeModel([call("submit", tool, submit), call("poll-1", tool, poll),
+                             call("poll-2", tool, poll), call("log", tool, log), finish])
         gateway.bind_runtime_planner(RuntimePlannerService(
             catalog=_TestRuntimePlannerCatalog(gateway), desktop=_TestRuntimePlannerDesktop(gateway),
             model=model, turn=NativeTurn(),
@@ -117,10 +120,50 @@ def test_running_process_reads_settle_without_reusing_a_write_receipt(tmp_path, 
             "_projectContextActive": False, "maxAgenticTurns": 5,
         })
         observations = [step for step in response["steps"] if step.get("tool") == tool]
-        assert [step["result"]["action"] for step in observations] == ["poll", "poll", "log"]
+        assert [step["result"]["action"] for step in observations] == ["submit", "poll", "poll", "log"]
         assert all(step["result"]["session"]["status"] == "running" for step in observations)
         assert waits and all(0 < delay <= 1 for delay in waits)
         assert {message["tool_call_id"] for message in model.requests[-1]["messages"]
                 if message.get("role") == "tool" and marker in message["content"]} >= {"poll-1", "poll-2", "log"}
+    finally:
+        assert gateway.shell.shutdown().pending_count == 0
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_yielded_foreground_shell_can_do_independent_work_and_poll_in_one_turn(tmp_path, exit_code):
+    from tests.test_native_permission_modes import _set_mode
+    from tests.test_native_runtime_gateway import call, finish, setup_gateway
+
+    def poll(request):
+        feedback = request["messages"][-2]["content"]
+        handle = re.search(r"shell-[a-f0-9]{32}", feedback)
+        assert handle, feedback
+        return call("poll", "vrcforge_shell_process", {"action": "poll", "sessionId": handle[0], "timeoutMs": 4000})
+
+    gateway, model, reads = setup_gateway(tmp_path, [
+        call("shell", "vrcforge_runtime_action", {"action": "shell",
+                                                  "shell_command": f"Start-Sleep -Milliseconds 400; exit {exit_code}",
+                                                  "shell_params": {"yieldMs": 10}}),
+        call("read", "vrcforge_read_text_file", {"path": "fixture.txt"}),
+        {"role": "assistant", "content": "The work is complete."}, poll, finish,
+    ])
+    _set_mode(gateway, "roslyn_full_auto")
+    tool = "vrcforge_shell_process"
+    gateway.register_tool(tool, "When to use: control an existing process. When NOT to use: start one.",
+                          "supervised-write", gateway.control_shell_tool, write=True)
+    try:
+        response = gateway.runtime_message({"message": "Run the check, read the file, and wait for completion.",
+            "sessionId": "shell-inline", "clientTurnId": "single-turn", "projectRoot": str(tmp_path),
+            "projectType": "general", "_projectContextActive": False, "maxAgenticTurns": 7})
+        assert response["plan"]["nextStep"] == ("tool_failed" if exit_code else "done"), response["plan"]
+        assert len(model.requests) == 5 and len(reads) == 1
+        launched = next(message["content"] for message in model.requests[1]["messages"]
+                        if message.get("tool_call_id") == "shell")
+        assert "vrcforge_shell_process" in launched and re.search(r"shell-[a-f0-9]{32}", launched)
+        actions = response["task"]["actions"]
+        launch = next(action for action in actions if action["kind"] == "shell")
+        assert launch["status"] == ("failed" if exit_code else "completed")
+        assert launch["completionReadActionId"] == next(a["actionId"] for a in actions if a["tool"] == tool)
+        assert not gateway.runtime_runs.shell_continuation_states()
     finally:
         assert gateway.shell.shutdown().pending_count == 0

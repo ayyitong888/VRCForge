@@ -458,6 +458,7 @@ class AgentShellService:
         *,
         task_context: dict[str, Any] | None = None,
         unity_project_access: bool = False,
+        poll_on_yield: bool = False,
     ) -> dict[str, Any]:
         with self._execution_admission() as admission_id:
             classification = self.classify(
@@ -574,6 +575,7 @@ class AgentShellService:
                 admission_id=admission_id,
                 owner_id=self._session_owner(params, agent_name),
                 task_context=task_context,
+                poll_on_yield=poll_on_yield,
             )
             result = execution.get("result")
             self._ports.append_audit(
@@ -786,6 +788,7 @@ class AgentShellService:
         admission_id: int,
         owner_id: str,
         task_context: dict[str, Any] | None,
+        poll_on_yield: bool = False,
     ) -> dict[str, Any]:
         command = str(classification["command"])
         cwd = Path(classification["cwd"])
@@ -860,17 +863,18 @@ class AgentShellService:
                         "clientTurnId": str(
                             params.get("client_turn_id") or params.get("clientTurnId") or ""
                         ),
-                        "taskSeed": dict(task_context or {}),
+                        **({} if poll_on_yield else {"taskSeed": dict(task_context or {})}),
                     },
                     on_finished=session_finished,
                 )
                 with completion_lock:
-                    completion_owner = (
-                        "async" if str(execution.get("status") or "") == "running" else "inline"
-                    )
+                    running = execution.get("status") == "running"
+                    completion_owner = "inline"
+                    if running:
+                        completion_owner = "poll" if poll_on_yield else "async"
                     buffered = pending_completion
                     pending_completion = None
-                if completion_owner == "async" and buffered is not None:
+                if running and buffered is not None:
                     # The process finished before the caller received the
                     # supervisor's provisional ``running`` payload.  Treat it
                     # as an inline terminal result: this keeps one owner, one
@@ -903,6 +907,9 @@ class AgentShellService:
                         "session": terminal_session,
                         "result": terminal_result,
                     }
+                elif completion_owner == "poll":
+                    execution["pollTarget"] = {"tool": "vrcforge_shell_process", "arguments": {
+                        "action": "poll", "sessionId": execution["sessionId"]}}
                 return execution
             except ShellSessionError as exc:
                 if worker_state["scan_spawn_attempted"]:

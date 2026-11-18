@@ -313,6 +313,7 @@ function runtimeRunStatusLabel(status: string) {
   if (normalized === "queued") return i18n.t("chat.queued");
   if (normalized === "waiting_for_model") return i18n.t("chat.runtimePhase.waitingForModel");
   if (normalized === "waiting_for_tool") return i18n.t("chat.runtimePhase.runningTool");
+  if (normalized === "parked") return i18n.t("chat.runtimePhase.toolInBackground");
   if (["starting", "claimed", "dispatching"].includes(normalized)) return i18n.t("chat.runtimePhase.preparing");
   if (normalized === "cancelling") return i18n.t("workspace.runStatusCancelRequested");
   const labels: Record<string, string> = {

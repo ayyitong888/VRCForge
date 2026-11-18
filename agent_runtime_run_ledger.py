@@ -24,6 +24,13 @@ _RUN_NOTIFICATION_FIELDS = (
 _RUN_NOTIFICATION_FLAGS = ("dispatchStopped", "unityWriteMayHaveExecuted")
 
 
+def _awaits_tool_callback(plan: dict[str, Any], shell_status: Any) -> bool:
+    return plan.get("nextStep") == "waiting_for_tool" and (
+        plan.get("reason") == "sub_agent_pending"
+        or (shell_status == "running" and plan.get("reason") in (None, "", "action_not_terminal"))
+    )
+
+
 def _terminal_continuation(event: dict[str, Any]) -> dict[str, Any] | None:
     continuation = event.get("continuationEvent")
     if not isinstance(continuation, dict):
@@ -816,6 +823,9 @@ class AgentRuntimeRunLedger:
             reverse=True,
         )[: max(1, min(limit, 200))]
         for run in runs:
+            if run.get("status") == "blocked" and _awaits_tool_callback(run, run.get("shellStatus")):
+                # Older receipts stored every suspended invocation as blocked.
+                run["status"] = "parked"
             started_at = start_times.get((str(run.get("sessionId") or ""), str(run.get("turnId") or "")))
             if started_at:
                 run["startedAt"] = started_at
@@ -1301,8 +1311,8 @@ class AgentRuntimeRunLedger:
         plan_outcome, _plan_label = classify_runtime_plan_outcome(top_plan)
         if plan_outcome == "cancelled":
             return "cancelled"
-        if top_plan.get("nextStep") == "waiting_for_tool" and top_plan.get("reason") == "sub_agent_pending":
-            return "blocked"
+        if _awaits_tool_callback(top_plan, _ensure_dict(shell_payload).get("status")):
+            return "parked"
         # A live ask-user boundary is the current turn terminal even when an
         # earlier diagnostic/write step in the same turn failed.  Keep this
         # narrow: only the explicit question_pending plan reason and a real

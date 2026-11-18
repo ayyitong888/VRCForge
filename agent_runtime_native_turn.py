@@ -501,6 +501,8 @@ class NativeRuntimeTurn:
                     # before it can inspect or poll the existing operation.
                     return False
                 result = item.get("result")
+                if item.get("kind") == "shell" and isinstance(result, Mapping) and result.get("pollTarget"):
+                    return False
                 if (
                     item.get("tool") == "vrcforge_read_conversation"
                     and isinstance(result, Mapping)
