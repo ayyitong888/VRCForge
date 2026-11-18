@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from project_memory_index import scan_project_memory
@@ -66,3 +67,38 @@ def test_project_memory_reports_modified_deleted_guid_and_package_deltas(tmp_pat
     assert "Assets/Avatar/Body.mat" in {item["path"] for item in result["changes"]["deleted"]}
     assert "fedcba9876543210fedcba9876543210" in rendered
     assert "%YAML prefab changed" not in rendered
+
+
+def test_same_size_and_mtime_metadata_replacement_refreshes_hash_and_guid(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "UnityProject"
+    index_root = tmp_path / "indexes"
+    make_unity_project(project)
+    scan_project_memory(project, index_root)
+
+    meta = project / "Assets" / "Avatar" / "Hero.prefab.meta"
+    stamp = meta.stat()
+    original = meta.read_bytes()
+    old_guid = "0123456789abcdef0123456789abcdef"
+    new_guid = "fedcba9876543210fedcba9876543210"
+    replacement = tmp_path / "replacement.meta"
+    replacement.write_bytes(original.replace(old_guid.encode(), new_guid.encode()))
+    os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    replacement.replace(meta)
+
+    meta_reads = []
+    open_path = Path.open
+
+    def observe_open(path, *args, **kwargs):
+        if path == meta:
+            meta_reads.append(path)
+        return open_path(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observe_open)
+    changed = scan_project_memory(project, index_root)
+    assert changed["summary"]["hashesComputed"] == 1
+    assert changed["changes"]["guidChanges"] == [
+        {"path": "Assets/Avatar/Hero.prefab.meta", "oldGuid": old_guid, "newGuid": new_guid}
+    ]
+    unchanged = scan_project_memory(project, index_root)
+    assert unchanged["summary"]["hashesComputed"] == 0
+    assert meta_reads == [meta]

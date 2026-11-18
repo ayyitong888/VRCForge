@@ -60,19 +60,29 @@ def scan_project_memory(project_path: str | Path, index_root: str | Path, max_fi
             break
         stat = file_path.stat()
         previous_entry = ensure_dict(previous_files.get(rel_path))
-        size = int(stat.st_size)
-        mtime_ns = int(stat.st_mtime_ns)
-        if previous_entry.get("size") == size and previous_entry.get("mtimeNs") == mtime_ns and previous_entry.get("sha256"):
-            digest = str(previous_entry.get("sha256"))
+        stamp = {
+            "device": stat.st_dev,
+            "inode": stat.st_ino,
+            "size": stat.st_size,
+            "mtimeNs": stat.st_mtime_ns,
+            "ctimeNs": stat.st_ctime_ns,
+        }
+        if previous_entry.get("sha256") and all(previous_entry.get(key) == value for key, value in stamp.items()):
+            digest = str(previous_entry["sha256"])
+            guid = str(previous_entry.get("guid") or "")
             hashes_reused += 1
         else:
-            digest = sha256_file(file_path)
+            if rel_path.endswith(".meta"):
+                content = file_path.read_bytes()
+                digest = hashlib.sha256(content).hexdigest()
+                guid = _meta_guid(content.decode("utf-8-sig", errors="ignore"))
+            else:
+                digest = sha256_file(file_path)
+                guid = ""
             hashes_computed += 1
-        guid = read_meta_guid(file_path) if rel_path.endswith(".meta") else ""
         entry = {
             "path": rel_path,
-            "size": size,
-            "mtimeNs": mtime_ns,
+            **stamp,
             "sha256": digest,
             "category": classify_path(rel_path),
             "guid": guid,
@@ -255,8 +265,11 @@ def build_package_fingerprints(entries: dict[str, dict[str, Any]]) -> dict[str, 
 
 
 def read_meta_guid(path: Path) -> str:
-    text = path.read_text(encoding="utf-8-sig", errors="ignore")
-    match = GUID_RE.search(text)
+    return _meta_guid(path.read_text(encoding="utf-8-sig", errors="ignore"))
+
+
+def _meta_guid(text: str) -> str:
+    match = GUID_RE.search(text.replace("\r\n", "\n").replace("\r", "\n"))
     return match.group(1).lower() if match else ""
 
 
