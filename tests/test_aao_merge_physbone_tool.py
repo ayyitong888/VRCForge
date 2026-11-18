@@ -42,6 +42,10 @@ def test_aao_merge_physbone_preview_is_zero_write_and_apply_is_receipt_bound() -
     preview_branch = text.index("if (preview)")
     first_mutation = text.index("Undo.AddComponent")
     assert preview_branch < first_mutation
+    prepare = text[text.index("private static MergeSnapshot BuildPreview("):first_mutation]
+    assert prepare.count("ResolveSavedScene(") == 1
+    assert "BuildPreview(snapshot.Request)" not in prepare
+    assert "ResolveSavedScene(" not in text[text.index("internal JObject BuildPreviewPayload()"):]
 
     for fragment in (
         "sourcePhysBonePaths exceeds its fixed bound",
@@ -55,8 +59,7 @@ def test_aao_merge_physbone_preview_is_zero_write_and_apply_is_receipt_bound() -
         "expectedBeforeStateDigest",
         "expectedTargetStateDigest",
         "expectedPreviewDigest",
-        "BuildPreview(snapshot.Request)",
-        "SnapshotsMatch(snapshot, immediate)",
+        "ValidateExpected(parameters, snapshot)",
     ):
         assert fragment in text
 

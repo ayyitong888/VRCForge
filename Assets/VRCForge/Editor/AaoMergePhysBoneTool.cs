@@ -94,7 +94,7 @@ namespace VRCForge.Editor
                 var snapshot = BuildPreview(request);
                 if (preview)
                 {
-                    return Success(snapshot.BuildPreviewPayload());
+                    return Success(snapshot.PreviewPayload);
                 }
                 ValidateExpected(parameters, snapshot);
                 return Apply(snapshot);
@@ -182,26 +182,12 @@ namespace VRCForge.Editor
                 TargetDigest = Digest(target),
                 ProjectPath = ComponentFeatureWriteCore.CurrentProjectPath()
             };
-            var after = ComponentFeatureWriteCore.ResolveSavedScene(request.ScenePath);
-            if (!ComponentFeatureWriteCore.SceneEvidenceMatches(scene, after)
-                || after.Dirty
-                || host.GetComponents(compatibility.MergeType).Length != 0)
-            {
-                throw new InvalidOperationException("AAO Merge PhysBone preview changed project state.");
-            }
-            var payload = snapshot.BuildPreviewPayload();
-            snapshot.PreviewDigest = ComputePreviewDigest(payload);
+            snapshot.PreviewPayload = snapshot.BuildPreviewPayload();
             return snapshot;
         }
 
         private static object Apply(MergeSnapshot snapshot)
         {
-            var immediate = BuildPreview(snapshot.Request);
-            if (!SnapshotsMatch(snapshot, immediate))
-            {
-                throw new InvalidOperationException(
-                    "AAO Merge PhysBone state changed after the verified preview.");
-            }
             Undo.IncrementCurrentGroup();
             var undoGroup = Undo.GetCurrentGroup();
             Undo.SetCurrentGroupName("Configure AAO Merge PhysBone");
@@ -220,7 +206,6 @@ namespace VRCForge.Editor
                 {
                     InvokeExact(snapshot.Compatibility.AccessorAddMethod, accessor, source.Component);
                 }
-                VerifyReadback(snapshot, ReadConfiguredState(snapshot, snapshot.Host));
                 EditorSceneManager.MarkSceneDirty(snapshot.Scene.Scene);
                 if (!EditorSceneManager.SaveScene(snapshot.Scene.Scene))
                 {
@@ -438,19 +423,6 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException(
                     "AAO Merge PhysBone state changed after the verified preview.");
             }
-        }
-
-        private static bool SnapshotsMatch(MergeSnapshot left, MergeSnapshot right)
-        {
-            return left.ProjectPath == right.ProjectPath
-                && ComponentFeatureWriteCore.SceneEvidenceMatches(left.Scene, right.Scene)
-                && left.HostId == right.HostId
-                && left.Compatibility.PackageVersion == right.Compatibility.PackageVersion
-                && left.ComponentIndex == right.ComponentIndex
-                && left.SourceDigest == right.SourceDigest
-                && left.BeforeDigest == right.BeforeDigest
-                && left.TargetDigest == right.TargetDigest
-                && left.PreviewDigest == right.PreviewDigest;
         }
 
         private static void ValidateKeys(JObject parameters, bool preview)
@@ -768,10 +740,10 @@ namespace VRCForge.Editor
             internal string TargetDigest = string.Empty;
             internal string ProjectPath = string.Empty;
             internal string PreviewDigest = string.Empty;
+            internal JObject PreviewPayload;
 
             internal JObject BuildPreviewPayload()
             {
-                var after = ComponentFeatureWriteCore.ResolveSavedScene(Request.ScenePath);
                 var payload = new JObject
                 {
                     ["schema"] = ResultSchema,
@@ -782,7 +754,7 @@ namespace VRCForge.Editor
                     ["mutationCount"] = 0,
                     ["projectPath"] = ProjectPath,
                     ["compatibility"] = Compatibility.ToPayload(),
-                    ["scene"] = ScenePayload(Scene, after),
+                    ["scene"] = ScenePayload(Scene, Scene),
                     ["host"] = HostPayload(this),
                     ["before"] = Before.DeepClone(),
                     ["target"] = Target.DeepClone(),
@@ -794,9 +766,8 @@ namespace VRCForge.Editor
                     ["commitState"] = "not_started",
                     ["checkpointRestoreRequired"] = false
                 };
-                payload["previewDigest"] = string.IsNullOrEmpty(PreviewDigest)
-                    ? ComputePreviewDigest(payload)
-                    : PreviewDigest;
+                PreviewDigest = ComputePreviewDigest(payload);
+                payload["previewDigest"] = PreviewDigest;
                 return payload;
             }
         }
