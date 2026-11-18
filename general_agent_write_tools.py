@@ -116,7 +116,7 @@ def _atomic_write(path: Path, data: bytes, *, overwrite: bool) -> bool:
             raise FileExistsError(str(path))
         os.replace(temporary, path)
         try:
-            if not os.path.samestat(written, path.lstat()):
+            if path.is_symlink():
                 return False
             with path.open("rb") as handle:
                 return os.path.samestat(written, os.fstat(handle.fileno())) and handle.read(len(data) + 1) == data

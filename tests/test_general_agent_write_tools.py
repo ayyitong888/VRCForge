@@ -127,6 +127,52 @@ def test_write_does_not_verify_if_published_bytes_change(tmp_path, monkeypatch):
     assert path.read_text(encoding="utf-8") == "competing writer"
 
 
+@pytest.mark.parametrize("linked_original", [False, True])
+def test_write_does_not_verify_if_path_is_replaced_with_matching_bytes(tmp_path, monkeypatch, linked_original):
+    import general_agent_write_tools as writes
+
+    _, guard = guard_calls()
+    publish = writes.os.replace
+    path = tmp_path / "target.txt"
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_bytes(b"expected")
+    relocated = tmp_path / "relocated.txt"
+    if linked_original:
+        link = tmp_path / "link.txt"
+        try:
+            link.symlink_to(relocated)
+        except OSError as error:
+            pytest.skip(f"Creating symlinks is unavailable: {error}")
+
+    def replace_then_swap(source, destination):
+        publish(source, destination)
+        if linked_original:
+            publish(destination, relocated)
+            publish(link, destination)
+        else:
+            publish(replacement, destination)
+
+    monkeypatch.setattr(writes.os, "replace", replace_then_swap)
+    assert write_file(path, b"expected", path_guard=guard)["readbackVerified"] is False
+    assert path.read_bytes() == b"expected"
+
+
+def test_readback_compares_identity_once(tmp_path, monkeypatch):
+    import general_agent_write_tools as writes
+
+    _, guard = guard_calls()
+    real_samestat = writes.os.path.samestat
+    comparisons = []
+
+    def compare(left, right):
+        comparisons.append((left.st_ino, right.st_ino))
+        return real_samestat(left, right)
+
+    monkeypatch.setattr(writes.os.path, "samestat", compare)
+    assert write_file(tmp_path / "target.txt", b"expected", path_guard=guard)["readbackVerified"]
+    assert len(comparisons) == 1
+
+
 def test_registry_metadata_has_negative_use_guidance():
     assert set(GENERAL_AGENT_WRITE_TOOL_NAMES) == {
         "edit_file", "write_file", "delete_path", "move_path", "apply_patch"
