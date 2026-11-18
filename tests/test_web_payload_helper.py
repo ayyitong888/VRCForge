@@ -163,7 +163,7 @@ def _run_extract(tmp_path: Path, payload: Path, *, expected_hash: str | None = N
     )
 
 
-def _run_layout_validation(payload: Path) -> subprocess.CompletedProcess[str]:
+def _run_layout_validation(payload: Path, *, open_verified: bool = False) -> subprocess.CompletedProcess[str]:
     command = r"""
 & {
   $source = [IO.File]::ReadAllText($env:VRCFORGE_TEST_HELPER_PATH)
@@ -171,8 +171,27 @@ def _run_layout_validation(payload: Path) -> subprocess.CompletedProcess[str]:
   if ($cut -lt 0) { throw 'helper dispatch marker missing' }
   $body = $source.Substring(0, $cut)
   $contract = [scriptblock]::Create($body)
-  . $contract -Action Extract -Version '1.4.0' -PayloadUrl 'https://github.com/ayyitong888/VRCForge/releases/download/v1.4.0/VRCForge_Windows_x64_1.4.0.zip' -ExpectedSha256 ('0' * 64) -ExpectedLength 1
+  $path = $env:VRCFORGE_TEST_ZIP_PATH
+  . $contract -Action Extract -Version '1.4.0' -PayloadUrl 'https://github.com/ayyitong888/VRCForge/releases/download/v1.4.0/VRCForge_Windows_x64_1.4.0.zip' -ExpectedSha256 $env:VRCFORGE_TEST_ZIP_SHA256 -ExpectedLength $env:VRCFORGE_TEST_ZIP_LENGTH
   Add-Type -AssemblyName System.IO.Compression
+  if ($env:VRCFORGE_TEST_OPEN_VERIFIED -eq '1') {
+    $verified = Open-VerifiedArchive $path
+    try {
+      if ($verified -isnot [IO.Compression.ZipArchive]) { throw 'verified archive was reopened for extraction' }
+      $reader = [IO.StreamReader]::new($verified.Entries[0].Open())
+      try {
+        if ($reader.ReadToEnd() -ne 'desktop') { throw 'wrong verified member' }
+      } finally { $reader.Dispose() }
+      try {
+        $unexpected = [IO.File]::OpenRead($path)
+        $unexpected.Dispose()
+        throw 'verified archive lost its exclusive file handle'
+      } catch [IO.IOException] {}
+    } finally { $verified.Dispose() }
+    $released = [IO.File]::OpenRead($path)
+    $released.Dispose()
+    return
+  }
   $stream = [IO.File]::OpenRead($env:VRCFORGE_TEST_ZIP_PATH)
   try {
     $archive = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read, $true)
@@ -183,6 +202,9 @@ def _run_layout_validation(payload: Path) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["VRCFORGE_TEST_HELPER_PATH"] = str(HELPER)
     environment["VRCFORGE_TEST_ZIP_PATH"] = str(payload)
+    environment["VRCFORGE_TEST_OPEN_VERIFIED"] = "1" if open_verified else "0"
+    environment["VRCFORGE_TEST_ZIP_SHA256"] = hashlib.sha256(payload.read_bytes()).hexdigest()
+    environment["VRCFORGE_TEST_ZIP_LENGTH"] = str(payload.stat().st_size)
     return subprocess.run(
         [
             SHELL,
@@ -224,7 +246,8 @@ def test_web_payload_helper_has_closed_bootstrap_contract() -> None:
     assert "Normalize([Text.NormalizationForm]::FormC)" in source
     assert "Remove-ValidatedStageRoot" in source
     extract = source[source.index("function Invoke-Extract") :]
-    assert extract.index("$stream = Open-VerifiedArchive $payloadPath") < extract.index(
+    assert "Test-ZipLayout" not in extract
+    assert extract.index("$archive = Open-VerifiedArchive $payloadPath") < extract.index(
         "$destination = Assert-SafeProgramFilesDestination $DestinationRoot"
     )
     assert '[Text.Encoding]::UTF8.GetBytes((Get-FullPath $Root))' in source
@@ -235,6 +258,14 @@ def test_web_payload_helper_has_closed_bootstrap_contract() -> None:
     assert "[System.Security.AccessControl.FileSystemRights]::FullControl\n" not in source
     for forbidden in ("certutil", "tar.exe", "cmd /", "taskkill", "Invoke-Expression", "Start-Process"):
         assert forbidden not in source
+
+
+@pytest.mark.skipif(not SHELL, reason="PowerShell is required")
+def test_verified_zip_retains_the_checked_exclusive_archive_for_extraction(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.zip"
+    _write_zip(payload, {"VRCForge.exe": b"desktop"})
+    result = _run_layout_validation(payload, open_verified=True)
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 @pytest.mark.skipif(not SHELL, reason="PowerShell is required")

@@ -577,10 +577,11 @@ function Open-VerifiedArchive([string]$PayloadPath) {
         $hash = Get-Sha256 $stream
         if (-not [string]::Equals($hash, $ExpectedSha256.ToLowerInvariant(), [StringComparison]::Ordinal)) { Fail "Payload SHA-256 does not match the release manifest." }
         $stream.Position = 0
-        $archive = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read, $true)
-        try { Test-ZipLayout $archive } finally { $archive.Dispose() }
-        $stream.Position = 0
-        return $stream
+        $archive = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read, $false)
+        try {
+            Test-ZipLayout $archive
+            return $archive
+        } catch { $archive.Dispose(); throw }
     } catch { $stream.Dispose(); throw }
 }
 
@@ -705,7 +706,7 @@ function Invoke-Extract {
         $downloadRoot = Assert-ValidatedStageRoot $StageRoot
         $payloadPath = Assert-ContainedPath $downloadRoot (Join-Path $downloadRoot $script:PayloadFileName)
     }
-    $stream = Open-VerifiedArchive $payloadPath
+    $archive = Open-VerifiedArchive $payloadPath
     $installStage = $null
     $backup = $null
     $oldMoved = $false
@@ -718,31 +719,27 @@ function Invoke-Extract {
         $destination = Assert-SafeProgramFilesDestination $DestinationRoot
         $installStage = Get-InstallSiblingPath "Stage"
         New-InstallSiblingDirectory $installStage "Stage"
-        $archive = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read, $true)
-        try {
-            Test-ZipLayout $archive
-            foreach ($entry in $archive.Entries) {
-                $logicalName = $entry.FullName.Replace('\', '/')
-                $isDirectory = $logicalName.EndsWith('/')
-                $name = if ($isDirectory) { $logicalName.Substring(0, $logicalName.Length - 1) } else { $logicalName }
-                $parts = @(Get-ValidatedEntryParts $name)
-                $target = $installStage
-                foreach ($part in $parts) { $target = Join-Path $target $part }
-                $target = Assert-ContainedPath $installStage $target
-                if ($isDirectory) {
-                    if (-not [IO.Directory]::Exists($target)) { [void][IO.Directory]::CreateDirectory($target) }
-                    Assert-NoReparsePath $target | Out-Null
-                    continue
-                }
-                $targetParent = [IO.Path]::GetDirectoryName($target)
-                if (-not [IO.Directory]::Exists($targetParent)) { [void][IO.Directory]::CreateDirectory($targetParent) }
-                Assert-NoReparsePath $targetParent | Out-Null
-                if ([IO.File]::Exists($target)) { Fail "Refusing to overwrite an existing extraction target." }
-                $entryStream = $entry.Open()
-                $output = New-Object IO.FileStream($target, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-                try { $entryStream.CopyTo($output); $output.Flush($true) } finally { $output.Dispose(); $entryStream.Dispose() }
+        foreach ($entry in $archive.Entries) {
+            $logicalName = $entry.FullName.Replace('\', '/')
+            $isDirectory = $logicalName.EndsWith('/')
+            $name = if ($isDirectory) { $logicalName.Substring(0, $logicalName.Length - 1) } else { $logicalName }
+            $parts = $name.Split('/')
+            $target = $installStage
+            foreach ($part in $parts) { $target = Join-Path $target $part }
+            $target = Assert-ContainedPath $installStage $target
+            if ($isDirectory) {
+                if (-not [IO.Directory]::Exists($target)) { [void][IO.Directory]::CreateDirectory($target) }
+                Assert-NoReparsePath $target | Out-Null
+                continue
             }
-        } finally { $archive.Dispose() }
+            $targetParent = [IO.Path]::GetDirectoryName($target)
+            if (-not [IO.Directory]::Exists($targetParent)) { [void][IO.Directory]::CreateDirectory($targetParent) }
+            Assert-NoReparsePath $targetParent | Out-Null
+            if ([IO.File]::Exists($target)) { Fail "Refusing to overwrite an existing extraction target." }
+            $entryStream = $entry.Open()
+            $output = New-Object IO.FileStream($target, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try { $entryStream.CopyTo($output); $output.Flush($true) } finally { $output.Dispose(); $entryStream.Dispose() }
+        }
         Assert-InstalledPayload $installStage
 
         # Keep the current app usable while a web payload downloads and while
@@ -790,7 +787,7 @@ function Invoke-Extract {
         }
         throw $failure
     } finally {
-        $stream.Dispose()
+        $archive.Dispose()
         if ($null -ne $installStage -and [IO.Directory]::Exists($installStage)) {
             try { Remove-InstallSibling $installStage "Stage" } catch { }
         }
