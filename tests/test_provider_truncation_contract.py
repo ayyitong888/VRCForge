@@ -132,6 +132,24 @@ def test_gemini_camel_case_finish_reason_normalizes_max_tokens():
     assert result.assistant_message["gemini_parts"] == [{"text": "partial"}]
 
 
+def test_google_native_incomplete_function_is_discarded_with_its_id():
+    from google.genai import types
+
+    response = types.GenerateContentResponse.model_validate({
+        "candidates": [{
+            "finishReason": "MAX_TOKENS",
+            "content": {"parts": [{
+                "functionCall": {"id": "open-call", "name": "read_file", "willContinue": True},
+            }]},
+        }],
+    })
+    result = _native_gemini_response(settings(), response, source="vertexai")
+    assert result.finish_reason == "length"
+    assert result.assistant_message["tool_calls"] == []
+    assert result.truncation["discardedToolCalls"][0]["id"] == "open-call"
+    assert result.truncation["discardedToolCalls"][0]["reason"] == "tool_call_truncated"
+
+
 def test_messages_stream_executes_only_calls_with_content_block_stop(monkeypatch):
     events = []
     final_blocks = []

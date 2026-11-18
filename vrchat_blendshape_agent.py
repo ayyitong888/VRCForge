@@ -362,7 +362,7 @@ def _native_messages_to_gemini(
 ) -> tuple[list[dict[str, Any]], str]:
     contents: list[dict[str, Any]] = []
     system_parts: list[str] = []
-    call_names: dict[str, str] = {}
+    call_bindings: dict[str, tuple[str, str]] = {}
     for message in messages:
         role = str(message.get("role") or "")
         if role == "system":
@@ -371,13 +371,28 @@ def _native_messages_to_gemini(
             continue
         if role == "assistant":
             parts: list[dict[str, Any]] = []
-            if message.get("content"):
+            retained_parts = message.get("gemini_parts")
+            replaying = isinstance(retained_parts, list)
+            if replaying:
+                parts = [dict(part) for part in retained_parts if isinstance(part, Mapping)]
+            elif message.get("content"):
                 parts.append({"text": str(message["content"])})
+            # The normalized calls and retained function parts are recorded in the
+            # same order. Only the retained parts contain provider-issued IDs.
+            native_calls = iter(filter(None, (
+                get_value(part, "function_call") or get_value(part, "functionCall")
+                for part in parts
+            )))
             for call in as_list(message.get("tool_calls")):
                 function = get_value(call, "function") or {}
                 name = str(get_value(function, "name") or "")
                 call_id = str(get_value(call, "id") or uuid.uuid4().hex)
                 if not name or not call_id:
+                    continue
+                native_call = next(native_calls, None)
+                provider_id = str(get_value(native_call, "id") or "") if native_call else ""
+                call_bindings[call_id] = name, provider_id
+                if replaying:
                     continue
                 try:
                     args = json.loads(str(get_value(function, "arguments") or "{}"))
@@ -385,21 +400,13 @@ def _native_messages_to_gemini(
                     args = {}
                 if not isinstance(args, dict):
                     args = {}
-                call_names[call_id] = name
                 parts.append({"functionCall": {"name": name, "args": args}})
-            if isinstance(message.get("gemini_parts"), list):
-                parts = [dict(part) for part in message["gemini_parts"] if isinstance(part, Mapping)]
-                call_names.update({
-                    str(call.get("id") or ""): str(get_value(call.get("function"), "name") or "")
-                    for call in as_list(message.get("tool_calls"))
-                    if get_value(call.get("function"), "name")
-                })
             if parts:
                 contents.append({"role": "model", "parts": parts})
             continue
         if role == "tool":
             call_id = str(message.get("tool_call_id") or "")
-            name = call_names.get(call_id)
+            name, provider_id = call_bindings.get(call_id, ("", ""))
             if not name:
                 continue
             raw = str(message.get("content") or "")
@@ -407,7 +414,10 @@ def _native_messages_to_gemini(
                 result = json.loads(raw)
             except (TypeError, ValueError):
                 result = {"text": raw}
-            response_part = {"functionResponse": {"name": name, "response": {"result": result}}}
+            response = {"name": name, "response": {"result": result}}
+            if provider_id:
+                response["id"] = provider_id
+            response_part = {"functionResponse": response}
             if contents and contents[-1]["role"] == "user":
                 contents[-1]["parts"].append(response_part)
             else:
@@ -476,13 +486,18 @@ def _native_gemini_response(settings: Settings, response: Any, *, source: str = 
         if function_call is not None:
             name = str(get_value(function_call, "name") or "")
             args = get_value(function_call, "args") or {}
-            if name and isinstance(args, Mapping):
+            partial = (
+                get_value(function_call, "will_continue") or get_value(function_call, "willContinue")
+                or get_value(function_call, "partial_args") or get_value(function_call, "partialArgs")
+            )
+            if name and isinstance(args, Mapping) and not partial:
                 calls.append({"id": uuid.uuid4().hex, "type": "function", "function": {
                     "name": name, "arguments": json.dumps(dict(args), ensure_ascii=False, separators=(",", ":")),
                 }})
                 replay_parts.append(dict(part) if isinstance(part, Mapping) else part.model_dump(mode="json", exclude_none=True))
             else:
-                discarded_calls.append({"id": "", "name": name, "arguments": str(args),
+                discarded_calls.append({"id": str(get_value(function_call, "id") or ""),
+                                        "name": name, "arguments": str(args),
                                         "reason": "tool_call_truncated",
                                         "suggestion": "Split the operation into smaller tool calls and send them again."})
             continue
@@ -2285,8 +2300,8 @@ def _request_google_native_plan(
             model=settings.llm_model, contents=contents, config=generate_config,
         )
     else:
-        text_parts: list[str] = []
-        structured_parts: dict[int, Any] = {}
+        final_parts: list[Any] = []
+        finish_reason: Any = None
         last_chunk: Any = None
         for chunk in client.models.generate_content_stream(
             model=settings.llm_model, contents=contents, config=generate_config,
@@ -2297,28 +2312,19 @@ def _request_google_native_plan(
             candidates = as_list(get_value(chunk, "candidates"))
             candidate = candidates[0] if candidates else {}
             parts = as_list(get_value(get_value(candidate, "content") or {}, "parts"))
-            for index, part in enumerate(parts):
-                function_call = get_value(part, "function_call") or get_value(part, "functionCall")
+            # Each chunk contains more parts, starting at its own local index zero.
+            final_parts.extend(parts)
+            finish_reason = (get_value(candidate, "finish_reason") or get_value(candidate, "finishReason")
+                             or finish_reason)
+            for part in parts:
                 text_delta = str(get_value(part, "text") or "")
-                if function_call is not None or get_value(part, "thought_signature") or get_value(part, "thoughtSignature"):
-                    # Gemini stream completion is the protocol boundary. Keep the latest
-                    # typed part at its position; never infer call completeness from JSON.
-                    structured_parts[index] = part
-                elif text_delta:
-                    if get_value(part, "thought") is not True:
-                        text_parts.append(text_delta)
-                        stream_callback(text_delta)
+                if text_delta and get_value(part, "thought") is not True:
+                    stream_callback(text_delta)
         if last_chunk is None:
             raise RuntimeError("Gemini stream ended without a response chunk.")
-        candidates = as_list(get_value(last_chunk, "candidates"))
-        last_candidate = candidates[0] if candidates else {}
-        final_parts: list[Any] = []
-        if text_parts:
-            final_parts.append({"text": "".join(text_parts), "thought": False})
-        final_parts.extend(structured_parts[index] for index in sorted(structured_parts))
         response = SimpleNamespace(
             candidates=[SimpleNamespace(
-                finish_reason=get_value(last_candidate, "finish_reason") or get_value(last_candidate, "finishReason"),
+                finish_reason=finish_reason,
                 content=SimpleNamespace(role="model", parts=final_parts),
             )],
             usage_metadata=get_value(last_chunk, "usage_metadata") or get_value(last_chunk, "usageMetadata") or {},
