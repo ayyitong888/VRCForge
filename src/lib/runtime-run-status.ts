@@ -12,6 +12,11 @@ export function isWaitingForSubAgent(state: { nextStep?: string; reason?: string
   return state.nextStep === "waiting_for_tool" && state.reason === "sub_agent_pending";
 }
 
+export function isAutomaticToolWait(state: { nextStep?: string; reason?: string }, shellStatus?: string): boolean {
+  return isWaitingForSubAgent(state) || (state.nextStep === "waiting_for_tool"
+    && (!state.reason || state.reason === "action_not_terminal") && shellStatus === "running");
+}
+
 /** Resolve activity only when this session/CID identifies one ledger run. */
 export function runtimeTurnActivityStatus(
   runs: ReadonlyArray<{ sessionId?: string; clientTurnId?: string; status?: string }>,

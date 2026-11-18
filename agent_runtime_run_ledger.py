@@ -1279,8 +1279,8 @@ class AgentRuntimeRunLedger:
             record["contextUsage"] = context_usage
         if cancellation_reason:
             record["cancellationReason"] = cancellation_reason
-        if top_plan.get("reason") == "sub_agent_pending":
-            record["reason"] = "sub_agent_pending"
+        if top_plan.get("nextStep") == "waiting_for_tool" and top_plan.get("reason"):
+            record["reason"] = top_plan["reason"]
         if usage_reconciliation:
             record["usageReconciliation"] = usage_reconciliation
         if context_compaction:

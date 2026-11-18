@@ -2305,35 +2305,18 @@ class AgentTaskLoop:
                     return replacement
 
         if running:
-            if any(str(action.get("tool") or "") in SUB_AGENT_TASK_TOOLS for action in running):
-                return {
-                    **gated,
-                    "summary": "",
-                    "reply": "",
-                    "continueLoop": False,
-                    "nextStep": "waiting_for_tool",
-                    "reason": "sub_agent_pending",
-                    "completionGate": {"status": "running", "reason": "sub_agent_pending"},
-                    "task": self.snapshot(),
-                }
-            label = _bounded_text(running[0].get("tool"), 160) or "background action"
-            gated.update(
-                {
-                    "summary": f"{label} is still running.",
-                    "reply": (
-                        f"{label} is still running, so this task is not complete yet. "
-                        "Poll or inspect the active process before claiming completion."
-                    ),
-                    "continueLoop": False,
-                    "nextStep": "waiting_for_tool",
-                    "completionGate": {
-                        "status": "running",
-                        "reason": "action_not_terminal",
-                    },
-                }
-            )
-            gated["task"] = self.snapshot()
-            return gated
+            child_pending = any(str(action.get("tool") or "") in SUB_AGENT_TASK_TOOLS for action in running)
+            reason = "sub_agent_pending" if child_pending else "action_not_terminal"
+            return {
+                **gated,
+                "summary": "",
+                "reply": "",
+                "continueLoop": False,
+                "nextStep": "waiting_for_tool",
+                "reason": reason,
+                "completionGate": {"status": "running", "reason": reason},
+                "task": self.snapshot(),
+            }
 
         claim = gated.get("completionClaim")
         # The model's own text stays the reply for honest incompletes and for

@@ -2099,6 +2099,10 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(calls[0]["timeout"], 30 * 60)
         self.assertEqual(calls[0]["projectRoot"], "")
         self.assertEqual(initial["shell"]["sessionId"], "shell-fixture")
+        self.assertEqual(initial["plan"]["nextStep"], "waiting_for_tool")
+        self.assertEqual((initial["plan"]["reply"], initial["plan"]["summary"]), ("", ""))
+        self.assertFalse(any(event["kind"] == "assistant" and event["payload"].get("phase") == "final_answer"
+                             for event in initial["timeline"]))
         self.assertIsNotNone(continuation)
         self.assertEqual(continuation["plan"]["nextStep"], "done")
         self.assertEqual(

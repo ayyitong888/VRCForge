@@ -91,6 +91,8 @@ export function buildAgentTimelineRows({
   t: typeof i18n.t;
 }): ReactNode[] {
   const cancelled = isCancelledRuntimeResponse(response);
+  const waitingForChild = isWaitingForSubAgent(response.plan);
+  const backgroundWait = response.plan.nextStep === "waiting_for_tool" && response.plan.completionGate?.reason === "action_not_terminal";
   const interrupted = response.continuationSource === "foreground_interrupted";
   const interruptedPartial = interrupted ? response.plan.reply?.trim() || "" : "";
   if (interrupted) {
@@ -127,10 +129,10 @@ export function buildAgentTimelineRows({
       <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t(response.unityWriteMayHaveExecuted ? "chat.stoppedUnityWriteUnconfirmed" : "chat.cancelled")}</span>
     </div>,
-  ] : isWaitingForSubAgent(response.plan) ? [...rows,
-    <div key="waiting-for-subagent" data-agent-waiting-for-subagent role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+  ] : waitingForChild || backgroundWait ? [...rows,
+    <div key="waiting-for-tool" data-agent-waiting-for-subagent={waitingForChild || undefined} role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <Clock className="h-3.5 w-3.5" aria-hidden="true" />
-      <span>{t("subagent.parentWaiting")}</span>
+      <span>{t(waitingForChild ? "subagent.parentWaiting" : "chat.runtimePhase.toolInBackground")}</span>
     </div>,
   ] : rows;
   const durableTimeline = (response.timeline || []) as ChatTimelineEvent[];

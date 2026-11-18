@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentRuntimeResponse, AgentRuntimeRun, AgentTurnResponseRecovery } from "./api/types";
 import { playNotificationSoundOnce } from "./notification-sound-delivery";
-import { isWaitingForSubAgent } from "./runtime-run-status";
+import { isAutomaticToolWait } from "./runtime-run-status";
 
 export type RuntimeAttentionStatus = "completed" | "blocked" | "failed" | "cancelled" | "stopped";
 export type RuntimeAttention = { sessionId: string; clientTurnId: string; turnId: string; status: RuntimeAttentionStatus };
@@ -24,7 +24,8 @@ function attentionStatus(status: string | undefined): RuntimeAttentionStatus | n
 const STORAGE_KEY = "vrcforge.runtime-attention.notifications.v1";
 
 function runAttentionStatus(run: AgentRuntimeRun): RuntimeAttentionStatus | null {
-  if (isWaitingForSubAgent(run) || (run.agent === "sub-agent" && run.nextStep === "paused")) return null;
+  if ((run.status === "blocked" && isAutomaticToolWait(run, run.shellStatus))
+    || (run.agent === "sub-agent" && run.nextStep === "paused")) return null;
   const status = attentionStatus(run.status);
   const cancellationReason = run.cancellationReason || run.reason;
   if ((status === "cancelled" || status === "stopped")
@@ -61,7 +62,7 @@ export function runtimeAttentionFromRun(run: AgentRuntimeRun): RuntimeAttention 
 export function runtimeAttentionFromResponse(run: AgentRuntimeRun, response: AgentRuntimeResponse): RuntimeAttention | null {
   const status = runAttentionStatus(run);
   if (!status || !run.sessionId || !run.clientTurnId || !run.turnId
-    || isWaitingForSubAgent(response.plan)
+    || (status === "blocked" && isAutomaticToolWait(response.plan, response.shell?.status))
     || (response.sessionId || response.session_id) !== run.sessionId
     || response.clientTurnId !== run.clientTurnId
     || (response.turnId || response.turn_id) !== run.turnId) return null;

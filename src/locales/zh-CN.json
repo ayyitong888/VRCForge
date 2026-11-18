@@ -867,6 +867,7 @@
       "waitingForModelTimeout": "已等待至限定响应窗口。这不是重试尝试，仍可使用停止。",
       "receivingResponse": "正在接收回复",
       "runningTool": "正在调用工具",
+      "toolInBackground": "已转入后台处理",
       "callingTool": "正在调用 {{tool}}",
       "waitingForApproval": "正在等待审批",
       "verifying": "正在验证结果"

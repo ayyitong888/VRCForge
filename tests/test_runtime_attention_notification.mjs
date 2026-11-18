@@ -35,6 +35,13 @@ try {
   const childWait = { ...run, nextStep: 'waiting_for_tool', reason: 'sub_agent_pending' };
   assert.deepEqual(api.latestRuntimeAttentionCandidates([childWait]), []);
   assert.equal(api.runtimeAttentionFromRun(childWait), null, 'automatic child waits never notify the user');
+  const shellWait = { ...run, status: 'blocked', nextStep: 'waiting_for_tool', shellStatus: 'running' };
+  assert.deepEqual(api.runtimeAttentionCandidates([shellWait]), [], 'a background tool already owns continuation');
+  assert.equal(api.runtimeAttentionFromResponse(run, {...response, shell:{status:'running'}, plan:{nextStep:'waiting_for_tool'}}), null);
+  assert.ok(api.runtimeAttentionFromRun({...shellWait, reason:'tool_poll_timeout'}), 'a poll timeout still needs attention');
+  for (const status of ['failed', 'cancelled']) {
+    assert.equal(api.runtimeAttentionFromRun({...shellWait, status})?.status, status);
+  }
   assert.equal(api.runtimeAttentionFromResponse(run, {...response, plan:{nextStep: childWait.nextStep, reason: childWait.reason}}), null);
   assert.ok(api.runtimeAttentionFromRun({...run, nextStep:'needs_user_action', reason:'question_pending'}),
     'a human question still requires attention');

@@ -867,6 +867,7 @@
       "waitingForModelTimeout": "限定された応答待機時間に達しました。これは再試行ではありません。停止は引き続き有効です。",
       "receivingResponse": "応答を受信中",
       "runningTool": "ツールを呼び出し中",
+      "toolInBackground": "バックグラウンド処理に移行",
       "callingTool": "{{tool}} を呼び出し中",
       "waitingForApproval": "承認を待機中",
       "verifying": "結果を検証中"

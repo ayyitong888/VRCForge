@@ -869,6 +869,7 @@
       "waitingForModelTimeout": "Still waiting after the bounded response window. This is not a retry attempt; Stop remains available.",
       "receivingResponse": "Receiving response",
       "runningTool": "Calling tool",
+      "toolInBackground": "Continued in the background",
       "callingTool": "Calling {{tool}}",
       "waitingForApproval": "Waiting for approval",
       "verifying": "Verifying result"

@@ -243,6 +243,15 @@ export function projectRuntimeResponseForDisplay(
   response: AgentRuntimeResponse,
   translate: RuntimePresentationTranslator,
 ): AgentRuntimeResponse {
+  // Older turns persisted the automatic wait as a final assistant event.
+  if (response.plan.nextStep === "waiting_for_tool" && response.plan.completionGate?.reason === "action_not_terminal") {
+    return {
+      ...response,
+      plan: { ...response.plan, reply: "", summary: "" },
+      timeline: response.timeline?.filter(event => !(event.kind === "assistant"
+        && event.payload?.phase === "final_answer" && event.payload.status === "waiting_for_tool")),
+    };
+  }
   const failureCode = String(response.plan.plannerFailure?.code || "");
   const interruptedQuestion = response.continuationSource === "question_answered"
     && (response.turnId || response.turn_id)?.startsWith("interrupted:question:");
