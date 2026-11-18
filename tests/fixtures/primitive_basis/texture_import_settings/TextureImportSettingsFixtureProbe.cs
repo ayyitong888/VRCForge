@@ -15,6 +15,7 @@ public static class TextureImportSettingsFixtureProbe
 
     public static void Run()
     {
+        Debug.Log("VRCFORGE_COMPATIBILITY_UNITY " + Application.unityVersion);
         try
         {
             Require(Application.platform == RuntimePlatform.WindowsEditor, "fixture requires Windows editor");
