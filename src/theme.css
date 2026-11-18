@@ -300,7 +300,7 @@
     --scrollbar-thumb: color-mix(in srgb, hsl(var(--primary)) 55%, transparent);
   }
 
-  :where(html, textarea, .overflow-auto, .overflow-y-auto, .overflow-scroll, .overflow-y-scroll) {
+  :where(textarea, .overflow-auto, .overflow-y-auto, .overflow-scroll, .overflow-y-scroll) {
     scrollbar-gutter: stable;
   }
 

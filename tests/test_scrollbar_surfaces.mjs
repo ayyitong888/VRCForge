@@ -24,7 +24,7 @@ const html = `
   <div id="root"><main><div id="surface-root">
     <div id="generic" class="surface overflow-auto" data-surface="generic"><div class="content"></div></div>
     <div id="app" class="app-scrollbar surface" data-surface="app"><div class="content"></div></div>
-    <div id="sidebar" class="sidebar-scrollbar surface bg-sidebar" data-surface="sidebar"><div class="content"></div></div>
+    <div id="sidebar" class="sidebar-scrollbar surface overflow-y-auto bg-sidebar" data-surface="sidebar"><div class="content"></div></div>
     <div id="quote" class="surface" data-surface="quote"><div class="content"></div></div>
     <pre id="code" class="surface"><code class="content"></code></pre>
     <textarea id="input" class="surface">line one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\nline nine\nline ten</textarea>
@@ -60,12 +60,19 @@ try {
   const page = await browser.newPage({ viewport: { width: 720, height: 640 } });
   await page.setContent(html);
   await page.addStyleTag({ content: `
+    html { overflow: hidden; }
     body { margin: 0; }
     #surface-root { display: grid; grid-template-columns: repeat(2, 260px); gap: 12px; padding: 12px; }
     .surface { width: 260px; height: 150px; overflow: auto; background: hsl(var(--card)); }
     .content { display: block; width: 520px; height: 420px; background: hsl(var(--card)); }
     #sidebar { background: hsl(var(--sidebar)); }
   ` });
+  const gutters = await page.evaluate(() => ({
+    viewport: window.innerWidth - document.querySelector("main").clientWidth,
+    sidebar: getComputedStyle(document.getElementById("sidebar")).scrollbarGutter,
+  }));
+  assert.equal(gutters.viewport, 0, "the desktop shell fills the viewport without a root scrollbar gutter");
+  assert.equal(gutters.sidebar, "stable", "the sidebar still reserves its own scrollbar gutter");
   const check = async (mode) => {
     if (mode.endsWith("dark")) {
       await page.evaluate(() => { document.documentElement.classList.add("dark"); document.documentElement.dataset.theme = "dark"; });
