@@ -24,6 +24,7 @@ import { isSelectedTextAttachment } from "../../lib/chat-types";
 import { elapsedSecondsSince, providerWaitingWindow, type AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText, includesQuestionText } from "../../lib/conversation-utils";
 import { projectVisionFailureNotice } from "../../lib/vision-failure-notice";
+import { isInterruptedRuntimeTurn } from "../../lib/runtime-run-status";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { cn, formatCount } from "../../lib/utils";
 import { assistantReplyTimestamp, formatLocalMessageTime, formatMessageDateSeparator, parseMessageTimestamp } from "../../lib/message-time";
@@ -35,7 +36,7 @@ import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
 import type { ChatResourceImageContext as ChatResourceImageContextValue } from "../../lib/api/chat-resource-image";
 import { AttachmentStrip } from "./composer";
-import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, formatPayload, formatRuntimeModelLine } from "./conversation-timeline";
+import { RunRow, SharedTurnProcessHeader, buildAgentTimelineRows, buildDurableTimelineRows, formatPayload, formatRuntimeModelLine, type SharedTurnProcess } from "./conversation-timeline";
 
 export function ConversationCard({
   item,
@@ -43,6 +44,7 @@ export function ConversationCard({
   steeringNavAnchorKeys,
   steeringRevealSequence,
   initialUserContent,
+  sharedProcess,
   chatResourceImageContext,
   attachmentPayloads,
   approval,
@@ -77,6 +79,7 @@ export function ConversationCard({
   steeringNavAnchorKeys?: ReadonlyMap<string, string>;
   steeringRevealSequence?: number;
   initialUserContent?: ReactNode;
+  sharedProcess?: SharedTurnProcess;
   chatResourceImageContext?: Pick<ChatResourceImageContextValue, "endpoint" | "chatId" | "projectPath">;
   attachmentPayloads?: AttachmentPayloadVault;
   approval?: AgentApproval | null;
@@ -377,6 +380,7 @@ export function ConversationCard({
       live: runtimeActive ?? true,
       renderElapsed: false,
       processTitleElapsed: streamingElapsed,
+      sharedProcess,
       providerLine: "",
       interleavedUserMessages,
       interleavedUsersExpanded,
@@ -392,6 +396,7 @@ export function ConversationCard({
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative flex w-full flex-col gap-2.5 text-sm leading-relaxed">
           {initialUserContent}
+          {sharedProcess?.first && <SharedTurnProcessHeader process={sharedProcess} />}
           {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
           {liveQuestionActions ? <div>{liveReply}{liveQuestionActions}</div> : liveReply}
           {[...unplacedQuestions].map((question) => renderQuestionEntry?.(question, true))}
@@ -495,6 +500,7 @@ export function ConversationCard({
   // backend does not report an actual model.
   const providerLine = formatRuntimeModelLine("", response.model);
   const replySource = providerLine;
+  const showReplyActions = !sharedProcess || sharedProcess.last;
   const awaitingApproval = shell?.status === "pending_approval";
   const timelineRows = buildAgentTimelineRows({
     response,
@@ -509,6 +515,7 @@ export function ConversationCard({
     providerLine,
     awaitingApproval,
     elapsedSeconds: item.elapsedSeconds,
+    sharedProcess,
     interleavedUserMessages,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
@@ -524,6 +531,7 @@ export function ConversationCard({
       <div className="group flex justify-start" data-vrcforge-agent-client-turn={response.clientTurnId || undefined}>
         <div className="relative flex w-full flex-col gap-2.5 text-sm leading-relaxed">
           {initialUserContent}
+          {sharedProcess?.first && <SharedTurnProcessHeader process={sharedProcess} />}
           {timelineRows}
           {[...unplacedQuestions].map((question) => renderQuestionEntry?.(question, true))}
           {visionFailure ? (
@@ -533,11 +541,11 @@ export function ConversationCard({
             </p>
           ) : null}
           <MessageActions
-            createdAt={assistantReplyTimestamp(item)}
+            createdAt={showReplyActions ? assistantReplyTimestamp(item) : undefined}
             memoryUsage={response.memoryUsage}
-            onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
-            onRetry={canRetry && response.continuationSource !== "foreground_interrupted" ? () => onRetryItem?.(item.id) : undefined}
-            onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
+            onCopy={showReplyActions && copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
+            onRetry={showReplyActions && canRetry && !isInterruptedRuntimeTurn(response) ? () => onRetryItem?.(item.id) : undefined}
+            onEdit={showReplyActions && canEdit ? () => onEditItem?.(item.id) : undefined}
             onSaveAsSkill={saveOperationSummary ? () => onSaveOperationAsSkill?.(saveOperationSummary) : undefined}
             saveOperationTool={saveOperationTool}
             saveOperationClientTurnId={response.clientTurnId}

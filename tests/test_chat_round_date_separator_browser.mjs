@@ -122,6 +122,49 @@ try {
     await page.waitForTimeout(80);
   };
   await page.waitForFunction(() => typeof window.setConversation === "function");
+  const event = (id, kind, payload) => ({ id, kind, sequence: 1, timestamp: start, payload });
+  const parked = agent("parked", start, "waiting_for_tool", "root");
+  parked.response.plan.completionGate = { reason: "action_not_terminal" };
+  parked.response.timeline = [event("progress-1", "assistant", { phase: "commentary", summary: "Before tool wait" })];
+  const resumed = agent("Verified result", later, "done", "opaque-receipt");
+  resumed.response.parentClientTurnId = "root";
+  resumed.response.timeline = [
+    event("progress-2", "assistant", { phase: "commentary", summary: "After tool wait" }),
+    { ...event("reply", "assistant", { phase: "final_answer", summary: "Verified result" }), sequence: 2 },
+  ];
+  const secondUser = user("intervening request", firstCompleted);
+  await render([user("root", start), parked, secondUser, resumed]);
+  const workTitle = page.locator("[data-agent-turn-process-title]");
+  assert.equal(await workTitle.count(), 1, "an automatic continuation has a single work disclosure across dispatches");
+  await workTitle.click();
+  assert.equal(await page.getByText("Before tool wait", {exact:true}).count(), 1);
+  assert.equal(await page.getByText("After tool wait", {exact:true}).count(), 1);
+  const rows = await page.locator("[data-conversation-item-id]").evaluateAll(nodes => nodes.map(n => n.dataset.conversationItemId));
+  assert.ok(rows.indexOf(parked.id) < rows.indexOf(secondUser.id) && rows.indexOf(secondUser.id) < rows.indexOf(resumed.id));
+  await workTitle.click();
+  assert.equal(await page.getByText("After tool wait", {exact:true}).count(), 0);
+  assert.equal(await page.getByText("Verified result", {exact:true}).count(), 1, "the final answer stays outside the shared disclosure");
+  const liveResume = { ...stream("live receipt", later, "opaque-receipt"), parentClientTurnId: "root",
+    timeline: resumed.response.timeline.slice(0, 1) };
+  await render([user("root", start), parked, liveResume]);
+  assert.equal(await workTitle.count(), 1);
+  assert.ok(await page.getByText("After tool wait", {exact:true}).isVisible(), "live continuation expands the same work disclosure");
+  await render([user("root", start), resumed, secondUser, parked]);
+  assert.equal(await workTitle.count(), 1, "recovered child arriving before parent still renders in one round");
+  const recoveredOrder = await page.locator("[data-conversation-item-id]").evaluateAll(nodes => nodes.map(n => n.dataset.conversationItemId));
+  assert.ok(recoveredOrder.indexOf(parked.id) < recoveredOrder.indexOf(secondUser.id) && recoveredOrder.indexOf(secondUser.id) < recoveredOrder.indexOf(resumed.id));
+  const shellReplayPath = process.env.VRCFORGE_PROCESS_ROUND_REPLAY_PATH;
+  if (shellReplayPath) {
+    const history = JSON.parse(readFileSync(shellReplayPath, "utf8"));
+    await render(history);
+    assert.equal(await workTitle.count(), 1, "original archived wait and resumed shell receipt share one round");
+    assert.equal(await page.locator("[data-vrcforge-agent-client-turn]").count(), 2, "both physical run identities remain inspectable");
+    assert.doesNotMatch(await page.locator("main").innerText(), /shell is still running|已转入后台处理|Continued in the background/i);
+    await workTitle.click();
+    for (const card of await page.locator("[data-vrcforge-agent-client-turn]").all()) {
+      assert.ok(await card.locator("[data-agent-tool-call-group]").count() > 0, "original tool calls remain available on both sides of the wait");
+    }
+  }
   const browserPrompt = "The website asks you to confirm your age.";
   const browserTurn = agent(browserPrompt, later, "needs_user_action", "original:question:open-website");
   const questionOwner = questionOwnerReplay || {

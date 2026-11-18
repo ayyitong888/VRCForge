@@ -1,15 +1,38 @@
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 import {createRequire} from 'node:module';
-const bundle=await build({entryPoints:['src/lib/chat-task-projection.ts','src/hooks/use-runtime-turn-continuation.ts'],bundle:true,write:false,platform:'node',format:'cjs',outdir:'unused',external:['react']});
+const bundle=await build({entryPoints:['src/lib/chat-task-projection.ts','src/lib/chat-process-rounds.ts','src/hooks/use-runtime-turn-continuation.ts'],bundle:true,write:false,platform:'node',format:'cjs',outdir:'unused',external:['react']});
 const require=createRequire(import.meta.url);
 const modules=bundle.outputFiles.map(file=>{const m={exports:{}};new Function('require','module','exports',file.text)(require,m,m.exports);return m.exports;});
 const {projectConversationTasks:project}=modules.find(m=>m.projectConversationTasks);
+const {projectProcessRounds}=modules.find(m=>m.projectProcessRounds);
 const {projectAgentQuestionContinuation:questionProjection,questionContinuationDisplay}=modules.find(m=>m.projectAgentQuestionContinuation);
 const user=(id)=>({id,type:'user',text:id,clientTurnId:id});
 const agent=(id,nextStep='needs_user_action',extra={})=>({id:'reply-'+id,type:'agent',response:{clientTurnId:id,turnId:'backend-'+id,sessionId:'s',plan:{nextStep},...extra}});
 const answer=(qid)=>({id:'answer-'+qid,type:'question_answer',questionId:qid,text:'answered'});
 const ask=(tool,qid,blocking=true)=>({tool,result:{ok:true,question:{questionId:qid,status:'pending',blocking}}});
+const parked=agent('cid','waiting_for_tool',{turnId:'original'});
+const retry=agent('cid','waiting_for_tool',{turnId:'retry'}), next=agent('next','done');
+const child=agent('opaque-child','waiting_for_tool',{parentClientTurnId:'cid', parentTurnId:'original'});
+const grandchild=agent('opaque-grandchild','done',{parentTurnId:child.response.turnId});
+const otherSession=agent('foreign','done',{parentTurnId:'original',sessionId:'different'});
+const lateQuestion=agent('cid:question:late','done',{continuationSource:'question_answered'});
+const wrongParent=agent('wrong','done',{parentTurnId:'missing',parentClientTurnId:'cid'});
+const lineage=projectProcessRounds([grandchild,retry,next,child,parked,otherSession,lateQuestion,wrongParent]);
+assert.deepEqual(lineage.items,[parked,retry,next,child,grandchild,otherSession,lateQuestion,wrongParent]);
+assert.equal(lineage.rounds.size,3,'exact backend retry, same-session, explicit blocking-question policy');
+assert.equal(lineage.rounds.get(grandchild).first,parked);
+assert.equal(lineage.rounds.get(child).last,grandchild);
+const waiting=agent('waiting','needs_user_action');
+const answerDispatch=agent('opaque-answer','done',{continuationSource:'question_answered'});
+assert.equal(projectProcessRounds([waiting,answer('q'),answerDispatch],'s').rounds.size,0,
+  'an answer that starts fresh work has no explicit parent even if the old transcript recorded a wait');
+answerDispatch.response.parentTurnId=waiting.response.turnId;
+assert.equal(projectProcessRounds([waiting,answer('q'),answerDispatch],'s').rounds.get(answerDispatch).first,waiting);
+for (const source of ['shell_process_finished','sub_agent_finished','approval_finished','approval_revision_requested']) {
+  const continued=agent('opaque-'+source,'done',{parentClientTurnId:'cid',continuationSource:source});
+  assert.equal(projectProcessRounds([parked,user('separate-input'),continued]).rounds.get(continued).first,parked);
+}
 const first=user('first'), pending=agent('first','done',{steps:[ask('vrcforge_call_user','q')]});
 assert.equal(project([first,pending,user('after-pending')],new Map()).startsAfter.size,0,'blocking call_user question prevents a false done boundary');
 const partial=agent('first','interrupted',{continuationSource:'foreground_interrupted',status:'interrupted'});

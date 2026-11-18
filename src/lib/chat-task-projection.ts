@@ -1,5 +1,7 @@
 import type { AgentQuestion } from "./api/types";
 import type { ConversationItem } from "./chat-types";
+import { projectProcessRounds, type ChatProcessRound } from "./chat-process-rounds";
+import { isInterruptedRuntimeTurn } from "./runtime-run-status";
 
 type AgentItem = Extract<ConversationItem, { type: "agent" }>;
 type UserItem = Extract<ConversationItem, { type: "user" }>;
@@ -14,11 +16,12 @@ function createdQuestions(item: AgentItem): Array<Pick<AgentQuestion, "questionI
   });
 }
 
-/** Logical user tasks retain separate runtime identities, timelines and clocks. */
+/** A task can span related user input and several causally linked dispatches. */
 export function projectConversationTasks(
   items: ConversationItem[],
   initialUsersByTurnId: ReadonlyMap<string, UserItem>,
   questions: AgentQuestion[] = [],
+  rounds: ReadonlyMap<ConversationItem, ChatProcessRound> = projectProcessRounds(items).rounds,
 ): {
   taskIdByItem: Map<ConversationItem, string>;
   startsAfter: Map<ConversationItem, AgentItem>;
@@ -26,6 +29,7 @@ export function projectConversationTasks(
   const taskIdByItem = new Map<ConversationItem, string>();
   const startsAfter = new Map<ConversationItem, AgentItem>();
   const tasksByRun = new Map<string, Task>();
+  const tasksByItem = new Map<ConversationItem, Task>();
   const tasksByQuestion = new Map<string, Task>();
   const seenInputs = new Set<string>();
   let current: Task | undefined;
@@ -54,9 +58,11 @@ export function projectConversationTasks(
     const relatedTask = (questionId ? tasksByQuestion.get(questionId) : undefined)
       || (origin ? tasksByRun.get(origin) : undefined);
     const knownRun = (cid ? tasksByRun.get(cid) : undefined) || (backendTurn ? tasksByRun.get(backendTurn) : undefined);
-    const continuation = Boolean(relatedQuestion || item.type === "question_answer"
+    const round = rounds.get(item);
+    const resumedTask = round && round.first !== item ? tasksByItem.get(round.first) : undefined;
+    const continuation = Boolean(resumedTask || relatedQuestion || item.type === "question_answer"
       || response?.continuationSource === "question_answered");
-    let task = relatedTask || knownRun;
+    let task = resumedTask || relatedTask || knownRun;
     if (!task) {
       if (!current || (freshInput && current.closedBy && !continuation)) {
         if (current?.closedBy && input) startsAfter.set(item, current.closedBy);
@@ -65,6 +71,7 @@ export function projectConversationTasks(
       task = current;
     }
     taskIdByItem.set(item, task.id);
+    tasksByItem.set(item, task);
     if (cid) tasksByRun.set(cid, task);
     if (backendTurn) tasksByRun.set(backendTurn, task);
     if (questionId) tasksByQuestion.set(questionId, task);
@@ -76,7 +83,7 @@ export function projectConversationTasks(
     if (item.type === "agent") {
       for (const created of createdQuestions(item)) bindQuestion(created, task);
       const nextStep = item.response.plan.nextStep;
-      const localInterruption = item.response.continuationSource === "foreground_interrupted"
+      const localInterruption = isInterruptedRuntimeTurn(item.response)
         || (item.response.status === "cancelled" && backendTurn === cid);
       if (!localInterruption && ((nextStep === "done" && !task.pendingQuestions.size) || nextStep === "cancelled")) task.closedBy = item;
     }

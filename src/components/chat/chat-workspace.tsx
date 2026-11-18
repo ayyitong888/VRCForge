@@ -30,6 +30,7 @@ import { agentReplyPreviewText, conversationItemRenderKey, copyableAgentDialogue
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { conversationRoundDateSeparators } from "../../lib/message-time";
 import { projectConversationTasks } from "../../lib/chat-task-projection";
+import { projectProcessRounds } from "../../lib/chat-process-rounds";
 import { capturePreviewsForQuestion } from "../../lib/chat-timeline-presentation";
 import { ChatPositionRail, type ChatPositionMarker } from "./chat-position-rail";
 import { isExternalRuntimeStream } from "../../lib/runtime-stream-owner";
@@ -388,7 +389,7 @@ export function ChatWorkspace({
         || item.queueStatus === "paused" || item.queueStatus === "cancelled")
     )),
   )));
-  const conversationItems = steeringProjection.items.map((item) => {
+  const { items: conversationItems, rounds: processRounds } = projectProcessRounds(steeringProjection.items.map((item) => {
     if (item.type !== "question_answer") return item;
     if (item.question !== undefined && item.selectedOptionId !== undefined) return item;
     const receipt = projectedAgentQuestions.find((candidate) => candidate.questionId === item.questionId);
@@ -399,7 +400,7 @@ export function ChatWorkspace({
     return question !== item.question || selectedOptionId !== item.selectedOptionId
       ? { ...item, question, selectedOptionId }
       : item;
-  });
+  }), runtimeSessionId);
   const questionOrigins = new Map<string, ConversationItem>();
   for (const item of conversationItems) {
     if (item.type === "agent") {
@@ -441,6 +442,7 @@ export function ChatWorkspace({
   );
   const unboundQuestionEntries = pendingQuestionsByOrigin.get(undefined)?.map((question) => renderQuestionEntry(question, true));
   const conversationRenderScope = sessionHandoffSourceChatId || "chat";
+  const [expandedProcesses, setExpandedProcesses] = useState<Record<string, boolean>>({});
   const historyInteraction = readOnlyHistory ? { inert: "" } : undefined;
   const conversationItemKeyOccurrences = new Map<string, number>();
   const [steeringReveal, setSteeringReveal] = useState<{ ownerKey: string; sequence: number }>();
@@ -451,7 +453,10 @@ export function ChatWorkspace({
     const steeringAnchorsByOwner = new Map<string, Map<string, string>>();
     const responsesByTurn = new Map<string, Extract<ConversationItem, { type: "agent" }>["response"]>();
     for (const item of conversationItems) {
-      if (item.type === "agent" && item.response.clientTurnId) responsesByTurn.set(item.response.clientTurnId, item.response);
+      if (item.type === "agent" && item.response.clientTurnId) {
+        const last = processRounds.get(item)?.last;
+        responsesByTurn.set(item.response.clientTurnId, last?.type === "agent" ? last.response : item.response);
+      }
     }
     const addUser = (user: Extract<ConversationItem, { type: "user" | "question_answer" }>, key: string, reveal?: () => void) => {
       if (user.text.trim() === "<task-notification-trigger/>") return;
@@ -481,7 +486,11 @@ export function ChatWorkspace({
       const steers = turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined;
       if (steers?.length) {
         const anchors = new Map<string, string>();
-        const reveal = () => setSteeringReveal((current) => ({ ownerKey: renderKey, sequence: (current?.sequence ?? 0) + 1 }));
+        const reveal = () => {
+          const round = processRounds.get(item);
+          if (round) setExpandedProcesses((current) => ({ ...current, [round.first.id]: true }));
+          setSteeringReveal((current) => ({ ownerKey: renderKey, sequence: (current?.sequence ?? 0) + 1 }));
+        };
         for (const message of steers) {
           const key = `${renderKey}:steer:${message.id}`;
           anchors.set(message.id, key);
@@ -491,7 +500,7 @@ export function ChatWorkspace({
       }
     }
     return { navigationMarkers: markers, steeringAnchorsByOwner };
-  }, [conversationItems, conversationRenderScope, steeringProjection.initialUsersByTurnId, steeringProjection.messagesByTurnId]);
+  }, [conversationItems, conversationRenderScope, steeringProjection.initialUsersByTurnId, steeringProjection.messagesByTurnId, processRounds]);
   const historyScrollRef = useRef<HTMLDivElement>(null);
   const questionCapturePreviews = (question: AgentQuestion) => readOnlyHistory ? [] : capturePreviewsForQuestion(question, conversationItems);
   const questionResourceImageContext = (question: AgentQuestion) => {
@@ -518,8 +527,8 @@ export function ChatWorkspace({
       resourceImageContextForQuestion={questionResourceImageContext}
     />
   ) : null;
-  const taskProjection = projectConversationTasks(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions);
-  const roundDateSeparators = conversationRoundDateSeparators(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions);
+  const taskProjection = projectConversationTasks(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions, processRounds);
+  const roundDateSeparators = conversationRoundDateSeparators(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions, taskProjection);
   const activeStreamingItems = conversationItems.filter((item): item is Extract<ConversationItem, { type: "streaming" }> => item.type === "streaming");
   const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -782,6 +791,7 @@ export function ChatWorkspace({
             );
             if (item.type === "question_answer" && item.question && item.selectedOptionId !== "skip") shownQuestionIds.add(item.questionId);
             const roundStartedAt = roundDateSeparators.get(item);
+            const round = processRounds.get(item);
             const taskId = taskProjection.taskIdByItem.get(item);
             const previous = conversationItems[itemIndex - 1];
             const taskContinuation = previous && taskProjection.taskIdByItem.get(previous) === taskId;
@@ -824,6 +834,15 @@ export function ChatWorkspace({
               : undefined;
             const itemRuntimeActive = item.type === "streaming" && !isExternalRuntimeStream(item) ? undefined
               : runtimeActive ?? (questionRuntime && questionContinuationDisplay(questionRuntime) === "active");
+            const roundLive = round?.last.type === "streaming" && runtimeTurnActivityStatus(runtimeRuns,
+              round.last.sessionId || runtimeSessionId, round.last.clientTurnId) !== false;
+            const sharedProcess = round ? {
+              first: round.first === item, last: round.last === item, failures: round.failures, live: roundLive,
+              open: roundLive || Boolean(expandedProcesses[round.first.id]),
+              elapsedSeconds: roundLive && round.liveStartedAt
+                ? (round.elapsedSeconds || 0) + Math.max(0, (activityNowMs - round.liveStartedAt) / 1000) : round.elapsedSeconds,
+              onOpenChange: (open: boolean) => setExpandedProcesses((current) => ({ ...current, [round.first.id]: open })),
+            } : undefined;
             const questionPreparing = questionRuntime
               && (runtimeActive === undefined || questionRuntime.runtimeContinuation?.status === "queued");
             const initialUser = turnId ? steeringProjection.initialUsersByTurnId.get(turnId) : undefined;
@@ -838,6 +857,7 @@ export function ChatWorkspace({
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <ConversationCard
                 item={item}
+                sharedProcess={sharedProcess}
                 runtimeActive={itemRuntimeActive}
                 questionAlreadyShown={questionAlreadyShown}
                 pendingQuestions={pendingQuestionsByOrigin.get(item)}

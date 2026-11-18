@@ -88,9 +88,9 @@ export function conversationRoundDateSeparators(
   items: ConversationItem[],
   initialUsersByTurnId: ReadonlyMap<string, Extract<ConversationItem, { type: "user" }>>,
   questions: AgentQuestion[] = [],
+  projection = projectConversationTasks(items, initialUsersByTurnId, questions),
 ): Map<ConversationItem, number> {
   const separators = new Map<ConversationItem, number>();
-  const projection = projectConversationTasks(items, initialUsersByTurnId, questions);
   for (const [item, previous] of projection.startsAfter) {
     const turnId = item.type === "agent" ? item.response.clientTurnId
       : item.type === "streaming" ? item.clientTurnId : undefined;

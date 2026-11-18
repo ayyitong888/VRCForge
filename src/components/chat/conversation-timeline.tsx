@@ -21,7 +21,7 @@ import {
 import type { ApprovalActionState, ChatTimelineEvent, ConversationItem } from "../../lib/chat-types";
 import { cancelledAgentReplyText, isCancelledRuntimeResponse } from "../../lib/conversation-utils";
 import { isAgentShellResult } from "../../lib/runtime-parsing";
-import { isWaitingForSubAgent } from "../../lib/runtime-run-status";
+import { isInterruptedRuntimeTurn, isWaitingForSubAgent } from "../../lib/runtime-run-status";
 import { formatLocalMessageTime } from "../../lib/message-time";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -42,6 +42,16 @@ type AgentTimelineStep = NonNullable<AgentRuntimeResponse["steps"]>[number] & {
 
 type InterleavedUserMessage = Extract<ConversationItem, { type: "user" }>;
 
+export type SharedTurnProcess = {
+  first: boolean;
+  last: boolean;
+  live: boolean;
+  open: boolean;
+  failures: number;
+  elapsedSeconds?: number;
+  onOpenChange: (open: boolean) => void;
+};
+
 export type OrderedAgentStep = {
   step: AgentTimelineStep;
   sourceIndex: number;
@@ -60,6 +70,7 @@ export function buildAgentTimelineRows({
   providerLine,
   awaitingApproval,
   elapsedSeconds,
+  sharedProcess,
   interleavedUserMessages = [],
   interleavedUsersExpanded = false,
   onInterleavedUsersExpandedChange,
@@ -81,6 +92,7 @@ export function buildAgentTimelineRows({
   providerLine: string;
   awaitingApproval: boolean;
   elapsedSeconds?: number;
+  sharedProcess?: SharedTurnProcess;
   interleavedUserMessages?: InterleavedUserMessage[];
   interleavedUsersExpanded?: boolean;
   onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
@@ -93,7 +105,7 @@ export function buildAgentTimelineRows({
   const cancelled = isCancelledRuntimeResponse(response);
   const waitingForChild = isWaitingForSubAgent(response.plan);
   const backgroundWait = response.plan.nextStep === "waiting_for_tool" && response.plan.completionGate?.reason === "action_not_terminal";
-  const interrupted = response.continuationSource === "foreground_interrupted";
+  const interrupted = isInterruptedRuntimeTurn(response);
   const interruptedPartial = interrupted ? response.plan.reply?.trim() || "" : "";
   if (interrupted) {
     // A retained partial is public model text, not a confirmed final receipt.
@@ -129,7 +141,7 @@ export function buildAgentTimelineRows({
       <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t(response.unityWriteMayHaveExecuted ? "chat.stoppedUnityWriteUnconfirmed" : "chat.cancelled")}</span>
     </div>,
-  ] : waitingForChild || backgroundWait ? [...rows,
+  ] : (waitingForChild || backgroundWait) && (!sharedProcess || sharedProcess.last) ? [...rows,
     <div key="waiting-for-tool" data-agent-waiting-for-subagent={waitingForChild || undefined} role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <Clock className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t(waitingForChild ? "subagent.parentWaiting" : "chat.runtimePhase.toolInBackground")}</span>
@@ -147,6 +159,7 @@ export function buildAgentTimelineRows({
     response.steps,
     {
       live,
+      sharedProcess,
       providerLine,
       renderElapsed: true,
       dropCancellationMarkers: cancelled,
@@ -229,7 +242,7 @@ export function buildAgentTimelineRows({
       renderQuestionActions,
       t,
     });
-    if (Number.isFinite(elapsedSeconds) || providerLine) legacyRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
+    if (!sharedProcess && (Number.isFinite(elapsedSeconds) || providerLine)) legacyRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
     if (missingFinalAnswer) legacyRows.push(renderMissingFinalAnswerNotice(t));
     return finishRows(legacyRows);
   }
@@ -254,6 +267,7 @@ export function buildAgentTimelineRows({
   if (cancelled && rows.length) {
     const processRows = rows.splice(0);
     rows.push(
+      sharedProcess ? sharedProcess.open && <div key="agent-turn-process" data-agent-process-content>{processRows}</div> :
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, t)} statusLabel="" statusTone="muted" processHeader>
           {processRows}
@@ -295,7 +309,7 @@ export function buildAgentTimelineRows({
     renderQuestionActions,
     t,
   });
-  if (Number.isFinite(elapsedSeconds) && !fallbackRows.some((row) => row && typeof row === "object" && "key" in row && (row as { key?: string }).key === "agent-turn-metadata")) {
+  if (!sharedProcess && Number.isFinite(elapsedSeconds) && !fallbackRows.some((row) => row && typeof row === "object" && "key" in row && (row as { key?: string }).key === "agent-turn-metadata")) {
     fallbackRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
   }
   return finishRows(fallbackRows);
@@ -421,6 +435,7 @@ export function buildDurableTimelineRows(
     live?: boolean;
     renderElapsed?: boolean;
     processTitleElapsed?: number;
+    sharedProcess?: SharedTurnProcess;
     providerLine?: string;
     dropCancellationMarkers?: boolean;
     interleavedUserMessages?: InterleavedUserMessage[];
@@ -559,7 +574,9 @@ export function buildDurableTimelineRows(
     ));
   }
   if (processRows.length) {
-    const group = (
+    const group = options.sharedProcess ? (
+      options.sharedProcess.open ? <div key="agent-turn-process" className="space-y-1.5" data-agent-process-content>{processRows}</div> : null
+    ) : (
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow
           kind="process"
@@ -732,6 +749,15 @@ function turnProcessDisplayTitle(
   t: typeof i18n.t,
 ): string {
   return t("agent.turnDuration", { duration: Number.isFinite(elapsedSeconds) ? formatDuration(elapsedSeconds || 0) : "—" });
+}
+
+export function SharedTurnProcessHeader({ process }: { process: SharedTurnProcess }) {
+  return <div data-agent-turn-process-group>
+    <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(process.elapsedSeconds, i18n.t)}
+      statusLabel={i18n.t("agent.timeline.failureRecords", {count: process.failures})} showStatus={process.failures > 0}
+      statusTone="muted" processHeader forceOpen={process.live}
+      controlledOpen={process.open} onOpenChange={process.onOpenChange} />
+  </div>;
 }
 
 function renderTurnMetadataRow(elapsedSeconds?: number, providerLine?: string): ReactNode {
@@ -1382,7 +1408,7 @@ function WorkSegmentRow({
   onOpenChange?: (open: boolean) => void;
   processHeader?: boolean;
   scrollable?: boolean;
-  children: ReactNode;
+  children?: ReactNode;
 }) {
   const [localOpen, setLocalOpen] = useState(openByDefault);
   const open = forceOpen || (controlledOpen ?? localOpen);
@@ -1424,7 +1450,7 @@ function WorkSegmentRow({
           </>
         )}
       </button>
-      {open ? (
+      {open && children ? (
         <div
           className={cn(
             kind === "tool" ? "relative mt-1 pl-6 before:pointer-events-none before:absolute before:inset-y-0 before:left-[11px] before:border-l before:border-border/70 before:content-['']" : "mt-1.5 space-y-1.5",

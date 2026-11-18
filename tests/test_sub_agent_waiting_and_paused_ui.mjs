@@ -30,6 +30,10 @@ const bundle = await build({
         events: projectRuntimeResponseForDisplay(merged.response, key => key).timeline };
     });
     export const humanWait = card({ ...plan, reply: "Which avatar should I inspect?", nextStep: "needs_user_action", reason: "question_pending" });
+    export const restoredQuestion = renderToStaticMarkup(<ConversationCard item={{
+      id: "restored", type: "agent", response: { status: "blocked", continuationSource: "foreground_interrupted",
+        plan: { ...plan, nextStep: "needs_user_action", reply: "Choose an avatar", taskCompletion: {status:"waiting_user"} } },
+    }} />);
     export const paused = renderToStaticMarkup(<SubAgentConversation endpoint="" turns={[{
       id: "child", childSessionId: "session", status: "paused", reason: "model_turn_budget_exhausted",
       task: "Inspect project", summary: "Short preview", result: { finalReport: "Verified two bindings. Check remaining outfit." },
@@ -42,7 +46,7 @@ const filename = fileURLToPath(new URL("./sub-agent-waiting-fixture.cjs", import
 const compiled = new Module(filename);
 compiled.paths = Module._nodeModulePaths(process.cwd());
 compiled._compile(bundle.outputFiles[0].text, filename);
-const { childWait, shellWait, humanWait, paused } = compiled.exports;
+const { childWait, shellWait, humanWait, paused, restoredQuestion } = compiled.exports;
 for (const {card, events} of shellWait) {
   assert.doesNotMatch(card, /internal process polling instruction|internal shell summary/);
   assert.deepEqual(events.map(e => e.payload.summary), ["Waiting for Unity to reload."]);
@@ -51,6 +55,8 @@ for (const {card, events} of shellWait) {
 assert.match(childWait, /data-agent-waiting-for-subagent/);
 assert.doesNotMatch(humanWait, /data-agent-waiting-for-subagent/);
 assert.match(humanWait, /Which avatar should I inspect/);
+assert.match(restoredQuestion, /Choose an avatar/);
+assert.doesNotMatch(restoredQuestion, /data-agent-transport-interrupted/);
 assert.match(paused, /data-subagent-paused-report/);
 assert.match(paused, /Verified two bindings\. Check remaining outfit\./);
 assert.doesNotMatch(paused, /Short preview/);
