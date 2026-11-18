@@ -191,6 +191,18 @@ def test_completion_prompt_stops_when_a_complete_canonical_read_answers_the_ques
         assert "completion_claim" in instructions
 
 
+def test_action_requests_keep_tool_supported_work_with_the_agent():
+    planner = service()
+    legacy = planner._build_llm_plan_prompt("帮我把工程连上", [])
+    native, _ = planner._build_native_plan_request(
+        [], observe={}, exposure_layer="execution", project_context_active=True,
+        project_path="", internal_tool_blocks=None, global_instructions="", project_instructions="",
+    )
+    for instructions in (legacy, native["instructions"]):
+        assert "Never hand a tool-supported step back as manual instructions" in instructions
+        assert "If it needs approval, submit the tool request" in instructions
+
+
 def test_model_receipts_expose_verified_write_readback_without_requesting_result_pages():
     from agent_tool_result_contract import normalize_agent_tool_result
 

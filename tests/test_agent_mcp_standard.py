@@ -44,8 +44,10 @@ def test_deepseek_harness_sdk_initialize_list_and_call() -> None:
         "protocolVersion": LATEST_PROTOCOL_VERSION,
         "capabilities": {"tools": {}},
         "serverInfo": {"name": "VRCForge", "version": "1.5.1"},
-        "instructions": "Use VRCForge tools for supervised avatar work. Project writes remain subject to VRCForge approval and checkpoint policy.",
+        "instructions": router.server_instructions,
     }
+    assert "carry out each step supported by your available tools" in initialized["result"]["instructions"]
+    assert "active permission and checkpoint policy" in initialized["result"]["instructions"]
 
     listed = router.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     assert [tool["name"] for tool in listed["result"]["tools"]] == ["echo", "status"]

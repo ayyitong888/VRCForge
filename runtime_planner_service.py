@@ -85,7 +85,8 @@ RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
 RUNTIME_USER_INTERACTION_INSTRUCTION = (
     "Use ask_user for a missing decision only the user can supply. Set blocking=false and continue independent work; "
     "use blocking=true when further progress depends on the answer. Wait before dependent actions. "
-    "Use call_user for a necessary human action or judgment after checking available tools. "
+    "For an action request, do every step an available tool can perform. If it needs approval, submit the tool request. "
+    "Never hand a tool-supported step back as manual instructions. Use call_user only for the specific action or judgment that requires the user. "
     "Keep questions short, specific and in the user's language. Reuse existing question and approval cards. "
     "Honor answered or skippedQuestions receipts; ask again only for a distinct new decision or when the user reopens it. "
     "For appearance or motion edits, show the actual result and use a visual_checkpoint; only resolution=pass grants acceptance. "

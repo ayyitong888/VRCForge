@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence, TextIO
 
 from agent_mcp_2026 import (
     PROTOCOL_VERSION as VRCFORGE_2026_PROTOCOL_VERSION,
+    TOOL_EXECUTION_GUIDANCE,
     Mcp2026Router,
     McpWriteReceiptUnavailable,
     WRITE_RECEIPT_READBACK_GUIDANCE,
@@ -121,10 +122,7 @@ class McpStandardRouter:
         *,
         server_name: str = "VRCForge",
         server_version: str = read_vrcforge_version(),
-        server_instructions: str = (
-            "Use VRCForge tools for supervised avatar work. Project writes remain "
-            "subject to VRCForge approval and checkpoint policy."
-        ),
+        server_instructions: str = TOOL_EXECUTION_GUIDANCE,
         tool_list_revision: ToolListRevisionCallback | None = None,
         tool_name_resolver: ToolNameResolver | None = None,
         tool_call_catalogue: ToolCallCatalogueCallback | None = None,

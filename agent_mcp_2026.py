@@ -46,6 +46,11 @@ MCP_NAME_FIELDS = {"tools/call": "name", "resources/read": "uri", "prompts/get":
 _BASE64_HEADER_PREFIX = "=?base64?"
 _BASE64_HEADER_SUFFIX = "?="
 _WRITE_RECEIPT_ALIAS = re.compile(r"vrcforge://operation/[A-Za-z0-9_-]+/receipt")
+TOOL_EXECUTION_GUIDANCE = (
+    "For an action request, carry out each step supported by your available tools. "
+    "Follow the active permission and checkpoint policy. Submit required approvals and continue when approved. "
+    "Ask the user only for the specific step that requires them."
+)
 WRITE_RECEIPT_READBACK_GUIDANCE = {
     "recoveryAction": "read_live_target",
     "safeToRetry": False,
@@ -533,11 +538,7 @@ class Mcp2026Router:
         *,
         server_name: str = "VRCForge",
         server_version: str = read_vrcforge_version(),
-        server_instructions: str = (
-            "Use VRCForge as a tool server for avatar work; the external client owns "
-            "its Agent loop. Low/medium writes execute through checkpoint safety, while "
-            "high-risk or destructive calls first return user_confirmation_required."
-        ),
+        server_instructions: str = TOOL_EXECUTION_GUIDANCE,
         tool_list_revision: ToolListRevisionCallback | None = None,
         tool_name_resolver: ToolNameResolver | None = None,
         tool_call_catalogue: ToolCallCatalogueCallback | None = None,

@@ -26,7 +26,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from dashboard_foundation import read_vrcforge_version
 from agent_mcp_2026 import (
-    HTTP_SESSION_IDLE_SECONDS, MCP_NAME_FIELDS, PROTOCOL_VERSION, WRITE_RECEIPT_READBACK_GUIDANCE,
+    HTTP_SESSION_IDLE_SECONDS, MCP_NAME_FIELDS, PROTOCOL_VERSION, TOOL_EXECUTION_GUIDANCE, WRITE_RECEIPT_READBACK_GUIDANCE,
     Mcp2026Router, McpWriteReceiptUnavailable, encode_mcp_name, is_write_receipt_alias,
     run_stdio_loop, _host_is_loopback,
 )
@@ -54,7 +54,7 @@ STDIO_SERVER_INSTRUCTIONS = (
     "for the relevant leaf and reuse already loaded definitions. A load returns selected schemas and "
     "an activationHandle for hosts that cannot refresh tools/list. Use the read bridge for previews. "
     "Supply the exact projectPath for Unity calls. Before a write, read current state and preview the "
-    "exact change. Follow the returned approval or checkpoint guidance and verify the result."
+    "exact change. Verify the result from the write receipt. " + TOOL_EXECUTION_GUIDANCE
 )
 DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 360.0
 DEFAULT_DISCOVERY_TOOLS = frozenset({
