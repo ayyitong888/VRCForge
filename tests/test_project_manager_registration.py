@@ -14,12 +14,36 @@ def _result(stdout: str = "", *, returncode: int = 0) -> BoundedProcessResult:
     return BoundedProcessResult(returncode, stdout, "", False, False)
 
 
+def test_skips_uninstalled_managers_even_when_their_tools_are_available(tmp_path, monkeypatch):
+    (tmp_path / "UnityHub").mkdir()  # Settings can outlive the app.
+    executables = {}
+    for name in ("unity", "vpm", "vrc-get"):
+        path = tmp_path / f"{name}.exe"
+        path.touch()
+        executables[name] = str(path)
+    monkeypatch.setattr(registration, "_which", executables.get)
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path))
+    monkeypatch.setattr(registration, "_hub_windows_install_location", lambda: None)
+
+    def run(executable, *args):
+        assert executable.stem == "vpm", args
+        return _result(f"│ {tmp_path} │ 22 │ date │")
+
+    monkeypatch.setattr(registration, "_run", run)
+    assert registration.register_project_managers(tmp_path, package_managers=({"name": "vcc"},)) == [
+        {"catalog": "vcc", "status": "registered"},
+    ]
+
+
 def test_registers_using_official_commands_and_compares_each_full_path(tmp_path, monkeypatch):
     project = tmp_path / "Avatar Project"
     project.mkdir()
     project = project.resolve()
     executables = {}
-    for name in ("unity", "vpm", "vrc-get"):
+    for name in ("Unity Hub", "unity", "vpm", "vrc-get"):
         path = tmp_path / f"{name}.exe"
         path.touch()
         executables[name] = str(path)
@@ -31,7 +55,7 @@ def test_registers_using_official_commands_and_compares_each_full_path(tmp_path,
         name = executable.stem
         calls.append((name, *args))
         if name == "unity":
-            if args == ("projects", "--all", "--format", "json", "--no-banner"):
+            if args == ("projects", "--all", "--format", "json", "--no-banner", "--non-interactive"):
                 return _result(json.dumps({"data": {"items": [{"path": path} for path in installed[name]]}}))
             if args[:2] == ("projects", "add") and args[2] != "--help":
                 installed[name].append(args[2])
@@ -49,12 +73,12 @@ def test_registers_using_official_commands_and_compares_each_full_path(tmp_path,
         return _result()
 
     monkeypatch.setattr(registration, "_run", run)
-    assert registration.register_project_managers(project) == [
+    assert registration.register_project_managers(project, package_managers=({"name": "vcc"}, {"name": "alcom"})) == [
         {"catalog": "unityHub", "status": "registered"},
         {"catalog": "vcc", "status": "registered"},
         {"catalog": "alcom", "status": "registered"},
     ]
-    assert ("unity", "projects", "add", str(project), "--format", "json", "--no-banner") in calls
+    assert ("unity", "projects", "add", str(project), "--format", "json", "--no-banner", "--non-interactive") in calls
     assert ("vpm", "add", "project", str(project)) in calls
     assert ("vrc-get", "vcc", "project", "add", str(project)) in calls
 
@@ -64,7 +88,10 @@ def test_missing_cli_and_disabled_vrc_get_have_manual_handoffs(tmp_path, monkeyp
     project.mkdir()
     executable = tmp_path / "vrc-get.exe"
     executable.touch()
-    (tmp_path / "UnityHub").mkdir()
+    hub = tmp_path / "Custom Hub"
+    hub.mkdir()
+    (hub / "Unity Hub.exe").touch()
+    monkeypatch.setattr(registration, "_hub_windows_install_location", lambda: hub)
     monkeypatch.setenv("APPDATA", str(tmp_path))
     monkeypatch.setenv("UNITY_CLI_HOME", str(tmp_path))
     monkeypatch.setattr(registration, "_which", lambda name: None)
@@ -93,6 +120,7 @@ def test_timeout_and_false_success_are_reported_without_blocking_next_manager(tm
     monkeypatch.setattr(registration, "_which", lambda name: str(tmp_path / f"{name}.exe"))
     monkeypatch.setenv("UNITY_CLI_HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(registration, "_unity_hub_installed", lambda _: False)
 
     def run(executable, *args):
         if executable.stem == "vpm":
@@ -102,7 +130,7 @@ def test_timeout_and_false_success_are_reported_without_blocking_next_manager(tm
         return _result(f"  Path: {project}-different\n")
 
     monkeypatch.setattr(registration, "_run", run)
-    assert registration.register_project_managers(project)[1:] == [
+    assert registration.register_project_managers(project, package_managers=({"name": "vcc"}, {"name": "alcom"})) == [
         {"catalog": "vcc", "status": "failed", "reason": "command_timeout"},
         {"catalog": "alcom", "status": "failed", "reason": "readback_failed"},
     ]

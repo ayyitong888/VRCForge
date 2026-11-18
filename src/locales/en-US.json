@@ -1264,27 +1264,7 @@
       "chooseFolder": "Choose Folder",
       "submit": "Create Project",
       "creating": "Creating project…",
-      "created": "Project created",
-      "unconfirmed": "VRCForge could not confirm that the project was created.",
-      "registrationUnconfirmed": "VRCForge could not confirm the registration results.",
-      "retryRegistration": "Retry registration",
-      "copyPath": "Copy project path",
-      "copied": "Path copied",
-      "copyFailed": "Could not copy the path. Select the path above and copy it.",
-      "guide": "Official guide",
-      "guideFor": "{{manager}} official guide",
-      "status": {
-        "registered": "Registered",
-        "already_registered": "Already listed",
-        "manual_required": "Add in this manager",
-        "unavailable": "Registration unavailable",
-        "failed": "Registration failed"
-      },
-      "handoff": {
-        "unityHub": "In Projects, choose Add → Add project from disk, then select this folder.",
-        "vcc": "In Projects, choose Add and select this folder.",
-        "alcom": "Open the project list, choose Add Existing Project, then select this folder."
-      }
+      "unconfirmed": "VRCForge could not confirm that the project was created."
     },
     "generalProject": "General project",
     "unityProject": "Unity project",

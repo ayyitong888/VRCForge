@@ -47,6 +47,31 @@ def _vrc_get_executable(managers: Iterable[Mapping[str, Any]]) -> Path | None:
     return _executable(_which("vrc-get"), *(entry.get("path") for entry in managers if entry.get("name") == "vrc-get"))
 
 
+def _hub_windows_install_location() -> Path | None:
+    if os.name != "nt":
+        return None
+    import winreg
+
+    registry_path = r"SOFTWARE\Unity Technologies\Hub"
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, registry_path) as key:
+            value, _ = winreg.QueryValueEx(key, "InstallLocation")
+            return Path(value) if isinstance(value, str) and value else None
+    except OSError:
+        return None
+
+
+def _unity_hub_installed(local_appdata: Path) -> bool:
+    install_location = _hub_windows_install_location()
+    return _executable(
+        _which("Unity Hub"),
+        install_location / "Unity Hub.exe" if install_location else None,
+        local_appdata / "Programs" / "Unity Hub" / "Unity Hub.exe",
+        *(Path(path) / "Unity Hub" / "Unity Hub.exe"
+          for name in ("ProgramFiles", "ProgramFiles(x86)") if (path := os.environ.get(name))),
+    ) is not None
+
+
 def _missing_vpm_packages(project: Path) -> list[str]:
     manifest_path = project / "Packages" / "vpm-manifest.json"
     if not manifest_path.is_file():
@@ -91,7 +116,7 @@ def _path_key(path: str | Path) -> str:
 
 
 def _unity_list_membership(executable: Path, project: Path) -> bool | None:
-    result = _run(executable, "projects", "--all", "--format", "json", "--no-banner")
+    result = _run(executable, "projects", "--all", "--format", "json", "--no-banner", "--non-interactive")
     if result.returncode or result.stdout_truncated:
         return None
     try:
@@ -167,7 +192,7 @@ def _register_unity_hub(executable: Path, project: Path) -> tuple[str, str]:
         return "failed", "readback_failed"
     if before:
         return "already_registered", ""
-    if _run(executable, "projects", "add", str(project), "--format", "json", "--no-banner").returncode:
+    if _run(executable, "projects", "add", str(project), "--format", "json", "--no-banner", "--non-interactive").returncode:
         return "failed", "command_failed"
     return ("registered", "") if _unity_list_membership(executable, project) else ("failed", "readback_failed")
 
@@ -211,13 +236,12 @@ def register_project_managers(
     """Register the approved project path and report the result for each manager."""
     manager_entries = tuple(package_managers)
     local_appdata = Path(os.environ.get("LOCALAPPDATA") or Path.home())
-    roaming_appdata = Path(os.environ.get("APPDATA") or Path.home())
     unity_cli_home = Path(os.environ.get("UNITY_CLI_HOME") or local_appdata / "Unity")
     specs = (
         (
             "unityHub", _register_unity_hub,
             _executable(_which("unity"), unity_cli_home / "bin" / "unity.exe", Path.home() / ".local" / "bin" / "unity"),
-            (roaming_appdata / "UnityHub").is_dir() or (local_appdata / "UnityHub").is_dir(),
+            _unity_hub_installed(local_appdata),
         ),
         (
             "vcc", _register_vcc,
@@ -232,8 +256,10 @@ def register_project_managers(
     )
     results: list[dict[str, str]] = []
     for catalog, register, executable, app_present in specs:
+        if not app_present:
+            continue
         if executable is None:
-            status, reason = ("manual_required", "official_cli_missing") if app_present else ("unavailable", "manager_not_found")
+            status, reason = "manual_required", "official_cli_missing"
         else:
             try:
                 status, reason = register(executable, project)
@@ -241,8 +267,6 @@ def register_project_managers(
                 status, reason = "failed", "command_timeout"
             except OSError:
                 status, reason = "failed", "command_failed"
-            if not app_present and reason == "official_cli_unsupported":
-                status, reason = "unavailable", "manager_not_found"
         row = {"catalog": catalog, "status": status}
         if reason:
             row["reason"] = reason

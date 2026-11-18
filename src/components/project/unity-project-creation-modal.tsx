@@ -1,8 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, Copy, Folder, FolderPlus, Loader2, X } from "lucide-react";
+import { ArrowLeft, Folder, FolderPlus, Loader2, X } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { registerUnityProjectManagers } from "../../lib/api";
 import type { UnityProjectCreateRequest, UnityProjectCreateResult, UnityProjectTemplate } from "../../lib/api";
 import { Button } from "../ui/button";
 import { defaultUnityProjectTemplate, UnityProjectTemplatePicker } from "./unity-project-template-picker";
@@ -14,12 +13,6 @@ export type UnityProjectCreation = {
   select: (path: string) => void;
 };
 
-const managerLabels = { unityHub: "Unity Hub", vcc: "VCC", alcom: "ALCOM" };
-const managerGuides = {
-  unityHub: "https://docs.unity.com/en-us/hub/project-manage",
-  vcc: "https://vcc.docs.vrchat.com/guides/getting-started/#updating-existing-projects",
-  alcom: "https://vrc-get.anatawa12.com/alcom/",
-};
 const fieldClass = "h-9 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:opacity-60";
 
 export function UnityProjectCreationModal({ creation, onBack, onClose }: {
@@ -34,13 +27,10 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
   const [templatePath, setTemplatePath] = useState("");
   const [pickingFolder, setPickingFolder] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<UnityProjectCreateResult | null>(null);
   const [error, setError] = useState("");
-  const [copied, setCopied] = useState(false);
   const selectedTemplate = templates.find((template) => template.path === templatePath)
     ?? defaultUnityProjectTemplate(templates);
   const destination = parentPath && name.trim() ? `${parentPath.replace(/[\\/]+$/, "")}\\${name.trim()}` : "";
-  const needsRetry = result?.catalogs.some(({ status }) => status !== "registered" && status !== "already_registered");
 
   async function chooseFolder() {
     setPickingFolder(true);
@@ -60,34 +50,12 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
     setSubmitting(true);
     setError("");
     try {
-      setResult(await creation.create({ name: name.trim(), parentPath, templatePath: selectedTemplate.path }));
+      const { projectPath } = await creation.create({ name: name.trim(), parentPath, templatePath: selectedTemplate.path });
+      creation.select(projectPath);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setSubmitting(false);
-    }
-  }
-
-  async function retryRegistration(projectPath: string) {
-    setSubmitting(true);
-    setError("");
-    try {
-      const registration = await registerUnityProjectManagers(projectPath);
-      if (!registration.ok) throw new Error(t("project.creation.registrationUnconfirmed"));
-      setResult(registration);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function copyPath(projectPath: string) {
-    try {
-      await navigator.clipboard.writeText(projectPath);
-      setCopied(true);
-    } catch {
-      setError(t("project.creation.copyFailed"));
     }
   }
 
@@ -100,100 +68,58 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
           </Button>
           <FolderPlus className="h-5 w-5 shrink-0 text-primary" />
           <h2 id="unity-project-create-title" className="min-w-0 flex-1 truncate text-lg font-semibold">
-            {t(result ? "project.creation.created" : "project.creation.open")}
+            {t("project.creation.open")}
           </h2>
           <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("common.close")} disabled={submitting || pickingFolder} onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </div>
         <div className="app-scrollbar mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
-          {result ? (
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="min-w-0 flex-1 select-text break-all text-sm text-muted-foreground">{result.projectPath}</p>
-                <Button type="button" variant="outline" className="h-8 shrink-0 px-2 text-xs" onClick={() => void copyPath(result.projectPath)}>
-                  <Copy className="h-3.5 w-3.5" />
-                  {t(copied ? "project.creation.copied" : "project.creation.copyPath")}
-                </Button>
-              </div>
-              <dl className="divide-y divide-border border-y border-border text-sm">
-                {result.catalogs.map(({ catalog, status }) => (
-                  <div key={catalog} className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-3 py-2">
-                    <dt className="font-medium">{managerLabels[catalog]}</dt>
-                    <dd>
-                      <p>{t(`project.creation.status.${status}`)}</p>
-                      {(status === "manual_required" || status === "failed") && (
-                        <p className="mt-1 text-xs text-muted-foreground">{t(`project.creation.handoff.${catalog}`)}</p>
-                      )}
-                      {status !== "registered" && status !== "already_registered" && (
-                        <a className="mt-1 inline-block text-xs text-primary underline" href={managerGuides[catalog]} target="_blank" rel="noreferrer" aria-label={t("project.creation.guideFor", { manager: managerLabels[catalog] })}>
-                          {t("project.creation.guide")}
-                        </a>
-                      )}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-              {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-              <div className="flex flex-wrap justify-end gap-2">
-                {needsRetry && (
-                  <Button type="button" variant="outline" disabled={submitting} onClick={() => void retryRegistration(result.projectPath)}>
-                    {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                    {t("project.creation.retryRegistration")}
-                  </Button>
-                )}
-                <Button type="button" disabled={submitting} onClick={() => creation.select(result.projectPath)}>
-                  {t("project.selectProjectTitle")}
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-              {selectedTemplate ? (
-                <UnityProjectTemplatePicker
-                  templates={templates}
-                  selected={selectedTemplate}
-                  disabled={submitting || loading}
-                  onSelect={setTemplatePath}
-                />
-              ) : (
-                <div className="space-y-1.5">
-                  <p className="text-sm font-medium">{t("project.creation.template")}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {t(loading ? "common.loading" : "project.creation.noTemplates")}
-                  </p>
-                </div>
-              )}
-              {optionsError && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <p role="alert" className="min-w-0 flex-1 break-words text-sm text-destructive">{optionsError}</p>
-                  <Button type="button" variant="outline" className="h-8 px-2 text-xs" onClick={creation.loadOptions}>
-                    {t("startupSplash.retry")}
-                  </Button>
-                </div>
-              )}
-              <label className="block space-y-1.5 text-sm font-medium">
-                <span>{t("project.creation.name")}</span>
-                <input autoFocus className={fieldClass} value={name} disabled={submitting} onChange={(event) => setName(event.target.value)} required />
-              </label>
+          <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+            {selectedTemplate ? (
+              <UnityProjectTemplatePicker
+                templates={templates}
+                selected={selectedTemplate}
+                disabled={submitting || loading}
+                onSelect={setTemplatePath}
+              />
+            ) : (
               <div className="space-y-1.5">
-                <p className="text-sm font-medium">{t("project.creation.parentFolder")}</p>
-                <Button type="button" variant="outline" className="h-9 w-full justify-start gap-2 px-3" disabled={submitting || pickingFolder} onClick={() => void chooseFolder()}>
-                  {pickingFolder ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <Folder className="h-4 w-4 shrink-0" />}
-                  {parentPath && <span className="min-w-0 flex-1 truncate text-left text-muted-foreground" title={parentPath}>{parentPath}</span>}
-                  <span className="shrink-0">{t("project.creation.chooseFolder")}</span>
-                </Button>
-                {destination && <p className="select-text break-all text-xs text-muted-foreground">{t("project.creation.destination", { path: destination })}</p>}
+                <p className="text-sm font-medium">{t("project.creation.template")}</p>
+                <p className="text-sm text-muted-foreground">
+                  {t(loading ? "common.loading" : "project.creation.noTemplates")}
+                </p>
               </div>
-              {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
-              <div className="flex justify-end">
-                <Button type="submit" disabled={submitting || pickingFolder || loading || !destination || !selectedTemplate}>
-                  {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                  {t(submitting ? "project.creation.creating" : "project.creation.submit")}
+            )}
+            {optionsError && (
+              <div className="flex flex-wrap items-center gap-2">
+                <p role="alert" className="min-w-0 flex-1 break-words text-sm text-destructive">{optionsError}</p>
+                <Button type="button" variant="outline" className="h-8 px-2 text-xs" onClick={creation.loadOptions}>
+                  {t("startupSplash.retry")}
                 </Button>
               </div>
-            </form>
-          )}
+            )}
+            <label className="block space-y-1.5 text-sm font-medium">
+              <span>{t("project.creation.name")}</span>
+              <input autoFocus className={fieldClass} value={name} disabled={submitting} onChange={(event) => setName(event.target.value)} required />
+            </label>
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium">{t("project.creation.parentFolder")}</p>
+              <Button type="button" variant="outline" className="h-9 w-full justify-start gap-2 px-3" disabled={submitting || pickingFolder} onClick={() => void chooseFolder()}>
+                {pickingFolder ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <Folder className="h-4 w-4 shrink-0" />}
+                {parentPath && <span className="min-w-0 flex-1 truncate text-left text-muted-foreground" title={parentPath}>{parentPath}</span>}
+                <span className="shrink-0">{t("project.creation.chooseFolder")}</span>
+              </Button>
+              {destination && <p className="select-text break-all text-xs text-muted-foreground">{t("project.creation.destination", { path: destination })}</p>}
+            </div>
+            {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
+            <div className="flex justify-end">
+              <Button type="submit" disabled={submitting || pickingFolder || loading || !destination || !selectedTemplate}>
+                {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+                {t(submitting ? "project.creation.creating" : "project.creation.submit")}
+              </Button>
+            </div>
+          </form>
         </div>
       </section>
     </div>

@@ -40,12 +40,6 @@ export function createUnityProject(request: UnityProjectCreateRequest): Promise<
   });
 }
 
-export function registerUnityProjectManagers(projectPath: string): Promise<UnityProjectCreateResult> {
-  return invokeTauriWithAbort<UnityProjectCreateResult>("register_unity_project_managers", {
-    request: { projectPath, timeoutMs: 120000 },
-  });
-}
-
 export type ProjectRecycleResult = {
   ok: boolean;
   path: string;

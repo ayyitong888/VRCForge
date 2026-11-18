@@ -1262,27 +1262,7 @@
       "chooseFolder": "选择文件夹",
       "submit": "创建工程",
       "creating": "正在创建工程…",
-      "created": "工程已创建",
-      "unconfirmed": "无法确认工程是否已创建。",
-      "registrationUnconfirmed": "无法确认项目登记结果。",
-      "retryRegistration": "重试登记",
-      "copyPath": "复制工程路径",
-      "copied": "已复制路径",
-      "copyFailed": "无法自动复制。请选中上方路径并复制。",
-      "guide": "官方指南",
-      "guideFor": "{{manager}} 官方指南",
-      "status": {
-        "registered": "已登记",
-        "already_registered": "已在列表中",
-        "manual_required": "请在此管理器中添加",
-        "unavailable": "暂不可登记",
-        "failed": "登记失败"
-      },
-      "handoff": {
-        "unityHub": "进入项目列表，选择 Add → Add project from disk，再选择此文件夹。",
-        "vcc": "进入项目列表，点 Add，再选择此文件夹。",
-        "alcom": "进入项目列表，点添加已有项目，再选择此文件夹。"
-      }
+      "unconfirmed": "无法确认工程是否已创建。"
     },
     "generalProject": "普通项目",
     "unityProject": "Unity 项目",

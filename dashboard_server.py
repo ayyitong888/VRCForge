@@ -10823,7 +10823,9 @@ async def desktop_create_unity_project(request: Request, body: DesktopCreateProj
     project = Path(result["projectPath"])
     result["catalogs"] = await asyncio.to_thread(register_desktop_project_managers, project)
     result.pop("managerRegistration", None)
-    await emit_log_async("info", "project", "Unity project created.", {"projectPath": str(project)})
+    await emit_log_async("info", "project", "Unity project created.", {
+        "projectPath": str(project), "catalogs": result["catalogs"],
+    })
     return refresh_projects_after_lifecycle(result)
 
 
