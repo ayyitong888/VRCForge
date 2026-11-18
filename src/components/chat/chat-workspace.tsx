@@ -749,7 +749,7 @@ export function ChatWorkspace({
         />
         <div
           ref={historyScrollRef}
-          className="app-scrollbar h-full overflow-auto pl-7 pr-4 py-6 md:pl-8 md:pr-6 md:py-8"
+          className="app-scrollbar h-full overflow-auto pl-7 pr-4 py-5 md:pl-8 md:pr-6 md:py-6"
           data-chat-history-scroll
           onMouseUp={readOnlyHistory ? undefined : onConversationMouseUp}
           onScroll={(event) => onConversationScroll(event.currentTarget)}
@@ -757,7 +757,7 @@ export function ChatWorkspace({
             if (event.deltaY < 0 && event.currentTarget.scrollTop === 0) onConversationScroll(event.currentTarget, true);
           }}
         >
-          <div className="mx-auto max-w-3xl space-y-7">
+          <div className="mx-auto max-w-3xl space-y-6">
           <BackgroundGoalCatchUpCard
             deliveries={backgroundGoalDeliveries}
             providerWarnings={backgroundGoalProviderWarnings}

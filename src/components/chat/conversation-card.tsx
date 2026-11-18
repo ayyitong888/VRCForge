@@ -174,7 +174,7 @@ export function ConversationCard({
     if (hasEditingState) {
       return (
         <div className="group flex min-w-0 justify-end">
-          <div className="relative flex min-w-0 w-full max-w-[78%] flex-col items-end gap-2">
+          <div className="relative flex min-w-0 w-full max-w-[78%] flex-col items-end gap-1.5">
             <textarea
               value={displayedText}
               onChange={(event) => onEditTextChange?.(event.target.value)}
@@ -247,12 +247,12 @@ export function ConversationCard({
     const text = displayedUserMessageText(item);
     return (
       <div className="group flex min-w-0 justify-end" data-forwarded-by-agent={sourceChatId !== undefined ? "true" : undefined}>
-        <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
+        <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-1.5">
           <AgentRelayAttribution sourceChatId={sourceChatId} lookupChatTitle={lookupChatTitle} onOpenChatById={onOpenChatById} />
           {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} /> : null}
           <UserSelectedTextAttachments attachments={otherAttachments} />
           {text ? (
-            <div className="min-w-0 max-w-full rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
+            <div className="min-w-0 max-w-full rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
               <UserMessageText text={text} />
             </div>
           ) : null}
@@ -302,13 +302,13 @@ export function ConversationCard({
     return (
       <div className="min-w-0 space-y-3" data-question-answer={item.questionId} data-question-continuation-input>
         {item.question && !questionAlreadyShown ? (
-          <div className="text-sm [&_.chat-markdown]:[overflow-wrap:anywhere]" data-chat-question-prompt={item.questionId} data-chat-quote-content>
+          <div className="text-chat-body [&_.chat-markdown]:[overflow-wrap:anywhere]" data-chat-question-prompt={item.questionId} data-chat-quote-content>
             <ChatMarkdown text={item.question} />
           </div>
         ) : null}
-        <div className="ml-auto flex w-fit min-w-0 max-w-[min(92%,42rem)] flex-col items-end gap-2">
+        <div className="ml-auto flex w-fit min-w-0 max-w-[min(92%,42rem)] flex-col items-end gap-1.5">
           {item.question || item.text ? (
-            <div className="min-w-0 max-w-full space-y-1 rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble>
+            <div className="min-w-0 max-w-full space-y-1 rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble>
               {item.question ? (
                 <div className="text-muted-foreground" data-question-answer-quote>
                   <div className="text-xs">{t("questionCard.title")}</div>
@@ -385,12 +385,12 @@ export function ConversationCard({
       onOpenChatById,
       renderQuestionActions,
     });
-    const liveReply = showLiveText ? <div className="leading-relaxed" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null;
+    const liveReply = showLiveText ? <div className="text-chat-body" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null;
     const liveQuestionActions = showLiveText ? renderQuestionActions?.(item.text) : null;
     return (
       <ChatResourceImageContext.Provider value={liveImageContext}>
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
-        <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
+        <div className="relative flex w-full flex-col gap-2.5 text-sm leading-relaxed">
           {initialUserContent}
           {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
           {liveQuestionActions ? <div>{liveReply}{liveQuestionActions}</div> : liveReply}
@@ -522,7 +522,7 @@ export function ConversationCard({
   return (
     <ChatResourceImageContext.Provider value={resourceImageContext}>
       <div className="group flex justify-start" data-vrcforge-agent-client-turn={response.clientTurnId || undefined}>
-        <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
+        <div className="relative flex w-full flex-col gap-2.5 text-sm leading-relaxed">
           {initialUserContent}
           {timelineRows}
           {[...unplacedQuestions].map((question) => renderQuestionEntry?.(question, true))}
@@ -591,12 +591,12 @@ function InterleavedUserMessage({ message, attachmentPayloads, navigationAnchor,
   const files = otherAttachments.filter((attachment) => !isSelectedTextAttachment(attachment));
   return (
     <div className="group flex min-w-0 justify-end" data-chat-steering-message={message.id} data-chat-nav-anchor={navigationAnchor} data-forwarded-by-agent={sourceChatId !== undefined ? "true" : undefined}>
-      <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
+      <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-1.5">
         <AgentRelayAttribution sourceChatId={sourceChatId} lookupChatTitle={lookupChatTitle} onOpenChatById={onOpenChatById} />
         {images.length ? <UserImageAttachments messageId={message.id} attachments={images} /> : null}
         <UserSelectedTextAttachments attachments={otherAttachments} />
         {text ? (
-          <div className="min-w-0 max-w-full rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
+          <div className="min-w-0 max-w-full rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
             <UserMessageText text={text} />
           </div>
         ) : null}
@@ -675,7 +675,7 @@ export function UserImageAttachments({
 export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed: boolean; runtimeActive?: boolean }) {
   const { t } = useTranslation();
   if (item.stopRequested) {
-    return <div className="mt-5 text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase="stopping" role="status">{t("chat.stopping")}</div>;
+    return <div className="mt-3 px-1 text-chat-detail text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase="stopping" role="status">{t("chat.stopping")}</div>;
   }
   if (runtimeActive === false) return null;
   const elapsedSeconds = elapsedSecondsSince(item.createdAt, nowMs);
@@ -704,7 +704,7 @@ export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }
         : t("chat.runtimePhase.waitingForModelDetail")
       : t("chat.runtimePhase.reconnectingDetail");
   return (
-    <div className="chat-current-activity mt-5 text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase={item.phase || "unknown"} role="status" aria-live="polite" aria-atomic="true">
+    <div className="chat-current-activity mt-3 px-1 text-chat-detail text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase={item.phase || "unknown"} role="status" aria-live="polite" aria-atomic="true">
       {reconnecting || waiting ? (
         <details className="group">
           <summary className="group flex cursor-pointer list-none items-center gap-2 text-left [&::-webkit-details-marker]:hidden">
@@ -822,7 +822,7 @@ function MessageActions({
     <div
       data-chat-message-actions
       className={cn(
-        "order-last mt-1 flex items-center gap-1 px-1 text-muted-foreground",
+        "order-last flex items-center gap-1 px-1 text-muted-foreground",
         align === "right" ? "justify-end" : "justify-start",
         memoryExpanded && "flex-wrap",
       )}

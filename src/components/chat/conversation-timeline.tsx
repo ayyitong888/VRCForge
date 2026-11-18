@@ -113,7 +113,7 @@ export function buildAgentTimelineRows({
   }
   const finishStatusRows = (rows: ReactNode[]): ReactNode[] => interrupted ? [...rows,
     ...(interruptedPartial && !response.timeline?.some((event) => event.kind === "assistant" && event.payload?.summary?.trim() === interruptedPartial) ? [
-      <div key="interrupted-partial" data-agent-partial-reply className="space-y-1 px-1 text-sm leading-relaxed" data-chat-quote-content>
+      <div key="interrupted-partial" data-agent-partial-reply className="space-y-1 px-1 text-chat-body" data-chat-quote-content>
         <ChatMarkdown text={interruptedPartial} />
       </div>,
     ] : []),
@@ -441,7 +441,7 @@ export function buildDurableTimelineRows(
   if (!presentation.entries.length) {
     return (options.interleavedUserMessages || []).map((message) => options.renderInterleavedUserMessage?.(message) || (
       <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-        <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20">{message.text}</div>
+        <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20">{message.text}</div>
       </div>
     ));
   }
@@ -468,7 +468,7 @@ export function buildDurableTimelineRows(
       flushToolCalls();
       processRows.push(options.renderInterleavedUserMessage?.(message) || (
         <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-          <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20">{message.text}</div>
+          <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20">{message.text}</div>
         </div>
       ));
       nextInterleavedMessage += 1;
@@ -522,7 +522,7 @@ export function buildDurableTimelineRows(
         rows.push(renderFinalAssistantRow(entry, terminalFailureCode, options.renderQuestionActions?.(entry.text)));
       } else {
         processRows.push(
-          <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed" data-chat-quote-content>
+          <div key={entry.id} className="space-y-1 px-1 text-chat-body" data-chat-quote-content>
             <ChatMarkdown text={entry.text} />
           </div>,
         );
@@ -552,7 +552,7 @@ export function buildDurableTimelineRows(
     const message = interleavedMessages[nextInterleavedMessage++];
     processRows.push(options.renderInterleavedUserMessage?.(message) || (
       <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-        <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2.5 text-sm text-foreground dark:bg-primary/20">{message.text}</div>
+        <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20">{message.text}</div>
       </div>
     ));
   }
@@ -601,12 +601,12 @@ function renderFinalAssistantRow(entry: Extract<TimelinePresentationEntry, { typ
       {questionActions}
     </div>
   ) : questionActions ? (
-    <div key={entry.id} className="px-1 text-sm leading-relaxed">
+    <div key={entry.id} className="px-1 text-chat-body">
       <div data-chat-quote-content><ChatMarkdown text={entry.text} /></div>
       {questionActions}
     </div>
   ) : (
-    <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed" data-chat-quote-content>
+    <div key={entry.id} className="space-y-1 px-1 text-chat-body" data-chat-quote-content>
       <ChatMarkdown text={entry.text} />
     </div>
   );
@@ -638,7 +638,7 @@ function renderDirectTimelineInvocation(
       <div
         key={invocation.id}
         data-agent-timeline-invocation="process"
-        className="px-1 text-sm leading-relaxed text-muted-foreground"
+        className="px-1 text-chat-body text-muted-foreground"
       >
         <ChatMarkdown text={commentary} />
       </div>
@@ -1262,7 +1262,7 @@ function renderPlanReplyRow(
   key = "plan-reply",
 ) {
   return (
-    <div key={key} className="px-1 text-sm">
+    <div key={key} className="px-1 text-chat-body">
       <div data-chat-quote-content><ChatMarkdown text={answer} /></div>
       {questionActions}
       {planLabel ? <div className="mt-2 text-[10px] leading-relaxed text-muted-foreground/75">{planLabel}</div> : null}
@@ -1333,10 +1333,10 @@ export function RunRow({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="group/run flex min-h-8 w-full min-w-0 items-center gap-2.5 rounded-md px-1 py-[5px] text-left transition-colors hover:text-foreground focus-visible:text-foreground"
+        className="group/run flex min-h-8 w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:text-foreground focus-visible:text-foreground"
       >
         <Icon className="h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 truncate text-sm leading-[22px]" title={title}>{title}</span>
+        <span className="min-w-0 truncate text-chat-detail" title={title}>{title}</span>
         {!compactExecution || showCompactStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
           {statusLabel}
         </span> : null}
@@ -1399,12 +1399,12 @@ function WorkSegmentRow({
         }}
         className={cn(
           "group/work-segment flex w-full min-w-0 items-center gap-y-0.5 px-1 text-left transition-colors hover:text-foreground focus-visible:text-foreground",
-          kind === "tool" ? "min-h-8 gap-x-2.5 py-[5px]" : "flex-wrap gap-x-2 py-2",
+          kind === "tool" ? "min-h-8 gap-x-2 py-1" : "min-h-8 flex-wrap gap-x-2 py-1",
         )}
       >
         {processHeader ? (
           <>
-            <span className="inline-flex min-w-0 items-center gap-1.5 text-sm leading-relaxed">
+            <span className="inline-flex min-w-0 items-center gap-1.5 text-chat-detail">
               <span className="truncate" data-agent-turn-process-title>{title}</span>
               {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
             </span>
@@ -1413,7 +1413,7 @@ function WorkSegmentRow({
         ) : (
           <>
             {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
-            <span className="min-w-0 truncate text-sm leading-[22px]" data-agent-tool-group-title>{title}</span>
+            <span className="min-w-0 truncate text-chat-detail" data-agent-tool-group-title>{title}</span>
             {summaryMeta ? <span className="shrink-0 text-xs opacity-70">{summaryMeta}</span> : null}
             {showStatus ? <span data-agent-operation-summary-status className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
             <span className="shrink-0">
@@ -1425,7 +1425,7 @@ function WorkSegmentRow({
       {open ? (
         <div
           className={cn(
-            kind === "tool" ? "relative mt-1 pl-6 before:pointer-events-none before:absolute before:inset-y-0 before:left-[11px] before:border-l before:border-border/70 before:content-['']" : "mt-3 space-y-3 py-1",
+            kind === "tool" ? "relative mt-1 pl-6 before:pointer-events-none before:absolute before:inset-y-0 before:left-[11px] before:border-l before:border-border/70 before:content-['']" : "mt-1.5 space-y-1.5",
             scrollable && "app-scrollbar max-h-[8.5rem] overflow-y-auto overscroll-y-contain pr-1",
           )}
           role={scrollable ? "region" : undefined}

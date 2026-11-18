@@ -5,6 +5,10 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      fontSize: {
+        "chat-body": ["0.9375rem", { lineHeight: "1.625" }],
+        "chat-detail": ["0.8125rem", { lineHeight: "1.25rem" }],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
