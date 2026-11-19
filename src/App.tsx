@@ -889,7 +889,7 @@ export default function App() {
     expandProjectGroup,
     initialChatState,
   });
-  const { input, setInput, attachments, setAttachments, beginSubmission, beginRetainedSubmission } = useComposerDraft(
+  const { input, setInput, attachments, setAttachments, prefillTemporaryDraft, beginSubmission, beginRetainedSubmission } = useComposerDraft(
     activeChatId,
     activeProjectPath,
     !activeChat || !isUnstartedChat(activeChat),
@@ -4959,6 +4959,11 @@ export default function App() {
           setOnboardingMinimized(true);
           setProjectModalError("");
           setShowProjectModal(true);
+        }}
+        onAskSetupAgent={() => {
+          prefillTemporaryDraft(t("onboarding.firstProjectPrompt"));
+          openTemporaryChat();
+          setOnboardingMinimized(true);
         }}
         onResume={returnFromOnboardingSettings}
         onFinish={finishOnboarding}

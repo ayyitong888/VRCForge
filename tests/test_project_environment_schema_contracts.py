@@ -54,3 +54,40 @@ def test_application_project_writes_preserve_registered_identity_policy(catalog)
         assert tools[name]['requiredIdentity']['writeBinding'] == 'handler_managed'
     Draft202012Validator(tools['vrcforge_create_project']['inputSchema']).validate({'projectRoot':'D:/NotCreated','template':'Avatar'})
     Draft202012Validator(tools['vrcforge_select_project']['inputSchema']).validate({'project_root':'D:/Existing'})
+
+
+def test_projectless_setup_block_exposes_only_host_lifecycle_tools():
+    import dashboard_server as dashboard
+
+    block = "project_environment/assets_packages"
+    params = {
+        "sessionId": "projectless-setup-block-test",
+        "projectContextActive": False,
+        "block": block,
+    }
+    reads = {"unity_project_lifecycle_status", "unity_project_create_plan"}
+    writes = {"unity_create_project", "unity_register_project", "unity_select_project"}
+
+    def leaf_names(layer):
+        return {
+            leaf["name"]
+            for leaf in dashboard._internal_tool_block_leaves(layer, project_context_active=False)
+            if leaf["block"] == block and leaf["name"].startswith("unity_")
+        }
+
+    assert leaf_names("planning") == reads
+    assert leaf_names("execution") == reads | writes
+    assert not dashboard.load_internal_tool_block({
+        **params, "exposureLayer": "planning", "tools": ["unity_create_project"],
+    })["ok"]
+    assert not dashboard.load_internal_tool_block({
+        **params, "exposureLayer": "execution", "tools": ["unity_open_project"],
+    })["ok"]
+    try:
+        result = dashboard.load_internal_tool_block({
+            **params, "exposureLayer": "execution", "tools": sorted(reads | writes),
+        })
+        assert result["status"] == "loaded"
+        assert set(result["selectedTools"]) == reads | writes
+    finally:
+        dashboard.unload_internal_tool_block(params)

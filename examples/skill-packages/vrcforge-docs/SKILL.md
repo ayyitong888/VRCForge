@@ -1,6 +1,6 @@
 ---
 name: vrcforge-docs
-description: Answer questions about the installed VRCForge App, Agent and MCP tools using current documentation and local evidence. Route setup and repair requests to the first-run guide.
+description: Answer questions about the installed VRCForge App and its tools. Route requests to install Unity and connect a first project, even on an empty Windows PC, to the first-run guide.
 metadata:
   short-description: "VRCForge documentation, self-knowledge, setup and verified repair"
 title: VRCForge Docs
@@ -33,6 +33,7 @@ allowed-tools:
   - vrcforge_unity_status
   - vrcforge_unity_tools
   - vrcforge_project_lifecycle_status
+  - vrcforge_project_create_plan
   - vrcforge_project_catalog_registration_status
   - vrcforge_register_project
   - vrcforge_create_project
@@ -68,4 +69,6 @@ For “can I do this here?”, check this client's tools, enabled Skills and set
 
 For a local failure, inspect the affected project, provider, or Core. Use a narrow status or log tool if the failing layer is known. Use `vrcforge_know_yourself` when several layers are unknown. An external MCP client uses its own model configuration.
 
-For “connect it” or “fix it,” carry out the authorized work. Discover the installed `vrcforge-first-run-guide` and read the relevant file with `vrcforge_read_installed_skill(name, file)`. Its `references/repair-guide.md` covers existing projects, `references/zero-start.md` covers a first installation, and `references/user-tool-author-guide.md` covers custom Unity tools. The exact-file reader lets you fetch just that reference. Keep using the tools provided by the current client and its permission mode. Report the result for the requested project or the specific action that still requires the user.
+For “帮我装好并连上工程” or “connect it,” use the installed `vrcforge-first-run-guide`. If Unity or the matching Editor is missing, or there is no project yet, read `vrcforge_read_installed_skill({"name":"vrcforge-first-run-guide","file":"references/zero-start.md"})` even in a projectless chat. It covers installing the international Unity Hub, the required Editor and VCC or ALCOM, then connecting the chosen project. For an existing connection failure read `references/repair-guide.md`; for custom Unity tools read `references/user-tool-author-guide.md`. Carry out the requested steps using the current client's tools and permissions, and report the result for the intended project.
+
+For a download-only request, use the same zero-start reference and deliver the verified installer file.

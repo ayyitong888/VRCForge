@@ -25,6 +25,7 @@ export function OnboardingOverlay({
   onOpenSettings,
   onOpenExternalSettings,
   onOpenProjectPicker,
+  onAskSetupAgent,
   onResume,
   onFinish,
   onPreviousStep,
@@ -48,6 +49,7 @@ export function OnboardingOverlay({
   onOpenSettings: () => void;
   onOpenExternalSettings: () => void;
   onOpenProjectPicker: () => void;
+  onAskSetupAgent: () => void;
   onResume: () => void;
   onFinish: () => void;
   onPreviousStep: () => void;
@@ -64,10 +66,18 @@ export function OnboardingOverlay({
       doneDesc: t("onboarding.step3DoneDesc"),
       todoDesc: t("onboarding.step3TodoDesc"),
       action: (
-        <Button variant="outline" onClick={onOpenProjectPicker}>
-          <FolderPlus className="mr-1 h-4 w-4" />
-          {t("onboarding.selectProject")}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={onOpenProjectPicker}>
+            <FolderPlus className="mr-1 h-4 w-4" />
+            {t("onboarding.selectProject")}
+          </Button>
+          {runtimeConnected && providerVerified ? (
+            <Button variant="outline" onClick={onAskSetupAgent}>
+              <Sparkles className="mr-1 h-4 w-4" />
+              {t("onboarding.askSetupAgent")}
+            </Button>
+          ) : null}
+        </div>
       ),
     };
   const unityStep = {

@@ -1,48 +1,29 @@
-# 从只下载了 exe 开始
+# 从空白 Windows 电脑连到 Unity 工程
 
-适用于刚下载 App、还没有 Unity 工程的用户。用户问用法时讲解，用户说“帮我配置”时就用工具准备工程并连上 VRCForge。
+用户说“帮我装好并连上”时，在当前对话完成下载、安装和连接。用户只问用法就讲解，只要安装包就交付文件。用用户的语言说明当前正在装什么、哪里需要他们操作。
 
-## 权威来源
+## 确认起点与目标版本
 
-- VRCForge 的安装器、配套 Core 与使用方式：查看[当前 Release](https://github.com/ayyitong888/VRCForge/releases)及对应版本的 [README](https://github.com/ayyitong888/VRCForge/blob/main/README.md)。main 可能超前于安装版。
-- VCC、Unity 安装：[VRChat Creator Companion 官方入门](https://vcc.docs.vrchat.com/guides/getting-started/)。
-- ALCOM：使用[作者官网](https://vrc-get.anatawa12.com/en/alcom/)及其链接的 [vrc-get/vrc-get 仓库](https://github.com/vrc-get/vrc-get)。这是社区维护的 VCC 替代工具，不称为 VRChat 官方产品；无需为使用它卸载 VCC。
-- 创建、添加和打开工程：[VRChat SDK 官方入门](https://creators.vrchat.com/sdk/)。
-- 模型准备、导入与放入场景：[VRChat 首个 Avatar 官方指南](https://creators.vrchat.com/avatars/creating-your-first-avatar/)。
+1. 已能聊天就沿用当前 Agent。若尚未安装 VRCForge，或只有一个脱离程序目录的 `VRCForge.exe`，先从[对应 Release](https://github.com/ayyitong888/VRCForge/releases)取得完整程序包，完成安装或完整解压后启动 App。外部 Agent 若还没接入，在 App 的连接器页按对应客户端配置 MCP，重新加载后验证能读取 VRCForge 工具。它使用自己的模型；内置 Agent 使用 App 里已配置并通过连接测试的模型。
+2. 文件夹中有 `Assets`、`Packages`、`ProjectSettings` 时，读取 `ProjectSettings/ProjectVersion.txt` 的完整 `m_EditorVersion`，有 `m_EditorVersionWithRevision` 时一并保留。已有工程用这个精确版本。如果全球归档查不到该版本，或 SDK 支持版本与其不一致，说明差异，让用户决定是否另做迁移或升级。新 VRChat 工程从 [VRChat 当前支持版本](https://creators.vrchat.com/sdk/upgrade/current-unity-version/)或用户指定的官方测试渠道确定精确版本。
+3. 检查已安装应用、Editor 的实际位置以及 VRCForge 的工程与模板列表。Hub 可能安装在自选目录或以 MSIX 注册，可用 `Get-AppxPackage UnityTechnologies.UnityHub` 检查后者。已有工程和合适 Editor 时直接连接，已有 VCC 或 ALCOM 时沿用用户选择。需要新建 VRChat 工程且两者都没有时，默认装 VCC；用户点名 ALCOM 就装 ALCOM。普通 Unity 工程可跳过 VRChat 管理器。
 
-仅打开当前步骤需要的页面，确认实际按钮和下载项；不要仅凭搜索摘要操作。Unity 版本随官方支持变化，跟随 VCC 当前兼容版本，不让用户随意装 Unity Hub 推荐的最新编辑器。
+## 安装缺少的软件
 
-## 所有用户：使用准确的 Unity 产品和版本，避开团结引擎
+**国际版 Unity Hub。** 通过 [Unity 全球安装说明](https://docs.unity.com/en-us/hub/install-hub-win-mac)进入对应架构的 Windows 下载项。有 WinGet 时可先执行 `winget show --id Unity.UnityHub --exact --source winget`，检查返回的名称、发布者及 Unity 全球发行地址。确认后可用 `winget install --id Unity.UnityHub --exact --source winget --version <刚核对的版本> --interactive`。网页被引到团结 Hub、Unity 中国版或 Tuanjie Editor 时，舍弃该下载路线，转用核实过的全球来源；两条路都拿不到国际版就说明阻塞。中文界面的国际版可以使用。已有团结产品可保留，单独定位国际版。
 
-无论用户所在地区，本流程统一引导 Unity Hub 与 VRChat 支持的 Unity Editor，避开团结 Hub / Tuanjie Hub 或团结引擎 / Tuanjie Editor。不要只说“去 Unity 官网下载”而不核对实际产品，也不要把中文界面当作产品身份：Unity 的中文语言包与团结引擎不是一回事。
+**Unity Editor。** 读取已安装的 Unity 官方 CLI 帮助。新版支持 `unity editors --installed` 和 `unity install <精确版本>`。较旧的国际版 Hub 3 提供 `& $hubExe -- --headless install --version <精确版本>`。归档版本如需 `--changeset`，使用项目记录或对应全球发行页给出的值。等待安装完成，再从已安装列表或实际 Editor 核对精确版本与路径。命令不可用时，从目标版本的官方归档选择 Hub 安装或 Windows 手动安装，用相同版本继续。只安装目标平台所需模块。[新版 CLI](https://docs.unity.com/en-us/unity-cli/reference/editor-project-commands) · [Hub 3 CLI](https://docs.unity.com/en-us/hub/use-hub-cli) · [全球 Editor 归档](https://unity.com/releases/editor/archive)
 
-先读 [VRChat 当前支持版本](https://creators.vrchat.com/sdk/upgrade/current-unity-version/)，再使用 [Unity 全球下载入口](https://unity.com/download)及[全球编辑器归档](https://unity.com/releases/editor/archive)。如果页面重定向到团结产品，停止该下载路线；从 VRChat 支持版本页面进入对应 Unity 全球版本详情，检查官方 Manual installs → Windows 或 Download Assistant 链接，不从搜索广告、网盘或未知镜像找替代包。不要凭记忆拼 CDN 下载地址或版本 hash。
+**VRChat 工程管理器。** VCC 使用官方 Windows 安装程序。ALCOM 从作者页面选对应架构的 Windows 安装包，若为 ZIP，解压后运行其中的安装程序；用户选择独立版时，保存并启动其可执行文件。安装后确认所选管理器能找到刚核对的 Editor。自定义安装目录按实际 `Unity.exe` 指定。[VCC 安装说明](https://vcc.docs.vrchat.com/guides/getting-started/) · [VCC 安装包](https://vrchat.com/download/vcc) · [ALCOM 官方下载](https://vrc-get.anatawa12.com/alcom/)
 
-Hub 路线不可用时，可从该官方版本详情页手动安装编辑器，再在 Unity Hub / VCC 设置中定位实际 `Unity.exe`。Unity 的[官方安装说明](https://docs.unity.com/en-us/hub/add-editor)介绍归档版本与定位已有安装；VCC 入门说明也允许手动指定编辑器。
+内置 Agent 通过普通主机 Shell 执行安装；无工程时使用实际存在且可写的主机工作目录。外部 Agent 用自己已有的主机工具。VRCForge 的外部 MCP 提供工程工具，`vrcforge_web_fetch` 只读取文本。下载二进制用主机下载器（例如 `Invoke-WebRequest -OutFile`），保存到本次独有的位置，避免覆盖用户的旧包。检查最终来源、文件类型和官方校验值或签名，报告保存位置、大小和 SHA-256。哈希只用于标识文件；下载结果是网页或身份不符时不能运行。
 
-继续前检查安装程序的产品名、实际编辑器 About/version 和 VCC 选定的编辑器路径，精确对应当时 VRChat 官方支持版本；只看到“2022 LTS”或“安装成功”不够。发现 Tuanjie 标识或版本不符时先纠正选择，不让用户用它创建目标工程。不要为此自动卸载已有软件或转换已有工程。官方来源暂不可达时，说明卡在下载并给出已验证页面，不声称地区重定向或安装问题已经解决。
+已授权安装时，用当前客户端的安装或进程工具启动已核实的安装包。下载与启动分步执行；发起成功只代表安装开始。长下载和安装返回进程句柄时跟随同一进程，结束后读回安装状态。碰到 Windows 授权、账户登录、许可证或当前客户端权限限制时，告诉用户具体的窗口和操作；完成后接着检查下一步。用外部客户端且它没有主机能力时，只交接当前缺少的安装动作，之后仍由 Agent 完成可用的工程步骤。
 
-## 带用户走完准备流程
+## 创建或打开工程，验证连接
 
-1. **先确认 exe 是什么。** 如果是 VRCForge 官方 Web/Offline Installer，运行安装器并保留完整安装目录；如果只是从完整程序目录单独拿出的 `VRCForge.exe`，回到相应 Release 获取完整安装器/程序包，不把单个可执行文件当作全部依赖。用户已经能打开 App 就直接继续。
-2. **准备能协助的 Agent。** 内置 AI 需要在 App 中配置并测试所选模型；已有外部 AI 则按 App 连接器生成的配置连接，不要求额外配置 App 模型。没有可用 Agent 时，用明确的界面步骤引导，不声称尚未工作的 Agent 能自修。
-3. **准备管理器和 Unity。** 沿用已有的 VCC 或 ALCOM。确实需要安装管理器且用户没有偏好时，走 [VRChat 官方 VCC 安装路径](https://vrchat.com/download/vcc)。用现有工具准备兼容的 Unity Editor。需要本人登录、接受许可或确认系统授权时，只请用户处理这一步。
-4. **创建或添加 Avatar 工程。** 用户需要新建时，使用项目工具返回的已安装 Avatar 模板、名称和目标位置，通过 `vrcforge_create_project` 创建。已有工程就选包含 `Assets`、`Packages`、`ProjectSettings` 的工程根目录。需要在管理器操作时，参考当前版本 VCC 或 ALCOM 的创建／添加工程页。
-5. **打开并等待就绪。** 用 `vrcforge_open_unity_project` 打开选中的工程。若已启动，等待这次首次导入和编译，按实际解析或编译错误继续处理。
-6. **准备用户的模型。** 引导从已购买/获授权的模型下载中获取 Unity 资产包，按模型作者要求先装实际依赖，再导入包、打开作者场景或将正确 prefab 放入场景。不要让用户下载“所有常见插件”。尚未选模型时，可询问是否先用官方示例学习；须明确它是演示模型，不声称用户自己的 Avatar 已准备好。导入、保存或修改 Unity 资产仍需相应审批。
-7. **接入 VRCForge。** 在 App 添加/选择这个精确工程，优先使用实际可用的监督 Core 安装流程；否则获取同版本 `VRCForge.unitypackage`，在正确 Unity 窗口完整导入。不要额外安装第三方 MCP Server。此时再按 repair guide 验证匹配工程/实例、Core、工具和编译状态。
-8. **确认可用。** 对于连接请求，确认选中工程的 Core 已响应。用户还要求改模时，再读取其目标 Avatar 并继续。上传由用户决定。
-
-Avatar 模板装好 SDK，不等于用户模型已有 `VRC Avatar Descriptor`。已有空 Unity 工程也不必重建：先按 `references/repair-guide.md` 读包状态，缺 SDK 才通过现有规划/确认安装；SDK 已在、模型无 Descriptor 则处理模型组件。普通 Unity 任务不要求补 VRChat SDK。Core 因缺包无法编译时，用 App/backend 包管理与文件诊断，别循环调用依赖 Core 的场景工具。
-
-能用现有工具完成的步骤由 Agent 执行。遇到用户才掌握的选择、账户登录或系统授权，给出当前这一步和原因，完成后继续。
-
-## Agent 代下载安装包
-
-当用户请求从零配置或明确同意代下载，Agent 可以代取 Unity Hub、所需 Unity 编辑器以及用户选定的 VCC / ALCOM 安装包。先从上面的官方/作者页面取得当前 Windows 架构对应的真实下载链接；检查重定向终点和产品身份，避免团结或非作者再分发包。不要凭记忆拼 CDN 地址。
-
-先确认能力归属：VRCForge 内置 Agent 可走其普通主机 Shell；Codex 可用 Codex 自己的 Shell；其他外部 Agent 必须已有自己的二进制下载/主机执行能力。VRCForge 外部 MCP 不开放内部 host Shell，不能靠加载工具块或本 Skill 的 allowed-tools 把它开放出来。外部 Agent 自身也不能下载时，才给用户精确手动步骤。
-
-优先使用已曝光、支持二进制落盘的下载工具。现有 `vrcforge_web_fetch` 只读取有上限的文本，不能把大型 exe 当网页读取。如果没有专用下载器，可通过已授权的普通主机 Shell 下载到用户选定或现有下载目录，例如使用有超时的 `Invoke-WebRequest -OutFile`；先发现实际 Shell 契约并保留原有权限检查。这是普通主机文件下载，不是绕过 Unity 写入路径。下载到本次独有的临时文件，完成后确认结果再给出最终文件；不覆盖旧安装包。若返回进程会话，保留并轮询该会话，不重复启动下载。
-
-报告最终来源 URL、保存路径、大小与 SHA-256，结合官方公布的校验值或 Windows Authenticode 签名/产品信息核对身份；本地 hash 只绑定文件，不单独证明官方真实性。未完成、拿到 HTML 错误页、产品不符或校验失败时，不称为下载成功或继续运行。不要把下载和启动安装器串成一个命令；安装、UAC、登录和许可证按已有授权及用户交互继续，不能把“代下载”当作提权或静默安装授权。仅下载失败时才转为精确手动下载步骤，不预先把 Agent 能完成的下载全部交回用户。
+- **已有工程**：从用户给的准确根目录登记、选中并打开。工具报告已在启动时，跟踪同一个 Editor。
+- **需要新工程**：确认用户要建的类型、名称与位置；从 `vrcforge_project_lifecycle_status` 返回的模板里确认类型，再用 `vrcforge_create_project`。如果没有合适模板，用选定管理器的创建工程流程取得正确模板（VRChat Avatar 选 Avatars，World 选 Worlds），再登记并选中生成的根目录。工具无法操作管理器界面时，只交接这一处。保留已有目录和工程。[VRChat SDK 入门](https://creators.vrchat.com/sdk/)
+- 如果内置 Agent 仍在临时对话里，登记成功后请用户从左栏打开刚登记的工程对话。给出实际工程名和接续语句，例如“连接这个工程并检查状态”。外部客户端使用已明确选定的工程路径。用 `vrcforge_open_unity_project` 打开该工程，等待首次包解析和编译。
+- 需要 Core 时，在这个工程按现有审批流程执行 `vrcforge_install_unity_core`，然后读取安装和连接状态。若该版本没有安装工具，再在对应 Editor 导入同版 `VRCForge.unitypackage`。具体排障见同一 Skill 的 `references/repair-guide.md`。
+- **交付**：核对目标工程路径、实际 Editor 版本与实例，确认这个工程的 Core 已响应、编译已结束，并且该任务需要的工具可用。告诉用户连上了哪个工程。若仍在编译或等待许可，给出实际进度。仅在用户还要求处理 Avatar 时，再读目标模型和作者依赖，按资产审批流程继续。[首个 Avatar 指南](https://creators.vrchat.com/avatars/creating-your-first-avatar/)

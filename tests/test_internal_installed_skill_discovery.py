@@ -52,7 +52,7 @@ def test_general_planning_provider_receives_compact_guide_metadata(installed_gui
     assert all(not tool.write for tool in snapshot.visible_tools)
 
 
-@pytest.mark.parametrize("file", [None, "references/repair-guide.md"])
+@pytest.mark.parametrize("file", [None, "references/repair-guide.md", "references/zero-start.md"])
 def test_actual_skill_reader_content_reaches_next_provider_turn(installed_guide, file):
     app, gateway = installed_guide
     params = {"name": SKILL_NAME, **({"file": file} if file else {})}

@@ -9,6 +9,7 @@ import pytest
 import dashboard_server
 from agent_gateway import AgentGatewayConfig, render_skill_markdown
 from agent_mcp_2026 import PROTOCOL_VERSION
+from bundled_skill_delivery import SKILL_NAME, bundled_source_dir, deliver_bundled_guide
 from tools import vrcforge_agent_mcp_stdio as stdio
 
 
@@ -26,6 +27,11 @@ def isolated_gateway(root: Path) -> Iterator[None]:
         )
     )
     try:
+        with dashboard_server.SKILL_PACKAGE_WRITE_LOCK, gateway.skills.write_lock:
+            delivered = deliver_bundled_guide(
+                dashboard_server.SKILL_PACKAGE_PROJECTION, gateway.skills.user_skills_dir, version="1.9.1"
+            )
+        assert delivered["status"] == "application-owned"
         skill_dir = root / "skills" / "installed-stdio-skill"
         support_file = skill_dir / "references" / "workflow.md"
         support_file.parent.mkdir(parents=True)
@@ -104,7 +110,7 @@ def test_installed_skill_stdio_branch_loads_only_when_requested(
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "method": method,
-                    "params": {"_meta": meta, **params},
+                    "params": {**params, "_meta": {**meta, **params.get("_meta", {})}},
                 }
             )
             assert status == 200
@@ -134,35 +140,38 @@ def test_installed_skill_stdio_branch_loads_only_when_requested(
         assert legacy["loadedBlocks"] == ["core", "project_environment/files"]
         assert legacy["activation"]["blocks"] == ["project_environment/files"]
         assert legacy["activation"]["exposureLayer"] == exposure_layer
-        visible_after_alias_load = {
-            item["name"] for item in rpc(4, "tools/list", {})["tools"]
-        }
-        assert installed_tools <= visible_after_alias_load
+        assert {item["name"] for item in legacy["selectedTools"]} == installed_tools
+        assert {item["name"] for item in rpc(4, "tools/list", {})["tools"]} == before
+        selected = rpc(5, "tools/list", {"_meta": {"io.vrcforge/toolNames": sorted(installed_tools)}})
+        assert {item["name"] for item in selected["tools"]} == installed_tools
 
-        loaded = call(5, "vrcforge_load_tool_block", {"block": "skills", "toolNames": sorted(installed_tools)})
-        assert loaded["block"] == "project_environment/files"
-        assert loaded["loadedBlocks"] == ["core", "project_environment/files"]
-        after = {item["name"] for item in rpc(6, "tools/list", {})["tools"]}
-        assert installed_tools <= after
+        invocations = {item["arguments"]["toolName"]: item for item in legacy["invocationTemplates"]}
 
-        listing = call(7, "vrcforge_list_installed_skills", {})
+        def invoke(request_id: int, tool: str, arguments: dict[str, object]) -> dict[str, object]:
+            template = invocations[tool]
+            return call(request_id, template["name"], {**template["arguments"], "arguments": arguments})
+
+        listing = invoke(7, "vrcforge_list_installed_skills", {})
         assert listing["ok"] is True
-        assert [item["name"] for item in listing["result"]["skills"]] == [
-            "installed-stdio-skill"
-        ]
-        assert "instructions" not in listing["result"]["skills"][0]
+        entries = {item["name"]: item for item in listing["result"]["skills"]}
+        assert {"installed-stdio-skill", SKILL_NAME} <= entries.keys()
+        assert entries[SKILL_NAME]["source"] == "builtin"
+        assert "instructions" not in entries["installed-stdio-skill"]
 
-        skill = call(8, "vrcforge_read_installed_skill", {"name": "installed-stdio-skill"})
+        skill = invoke(8, "vrcforge_read_installed_skill", {"name": "installed-stdio-skill"})
         assert skill["result"]["instructions"] == "Inspect before requesting supervised writes."
-        document = call(
+        document = invoke(
             9,
             "vrcforge_read_installed_skill",
             {"name": "installed-stdio-skill", "file": "references/workflow.md"},
         )
         assert document["result"]["content"] == "Read this declared workflow only."
+        reference = "references/zero-start.md"
+        guide = invoke(12, "vrcforge_read_installed_skill", {"name": SKILL_NAME, "file": reference})
+        assert guide["result"]["content"] == (bundled_source_dir() / reference).read_text(encoding="utf-8")
 
         unloaded = call(10, "vrcforge_unload_tool_block", {"block": "skills/installed"})
         assert unloaded["block"] == "project_environment/files"
         assert unloaded["loadedBlocks"] == ["core"]
-        hidden_again = {item["name"] for item in rpc(11, "tools/list", {})["tools"]}
-        assert installed_tools.isdisjoint(hidden_again)
+        stale = invoke(11, "vrcforge_list_installed_skills", {})
+        assert stale["status"] == "invalid_activation_handle"

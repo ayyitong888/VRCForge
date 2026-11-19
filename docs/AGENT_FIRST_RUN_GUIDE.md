@@ -1,14 +1,14 @@
 # 第一次使用：让 Agent 帮你把 VRCForge 和 Unity 连起来
 
-适用：VRCForge 1.8.1。本文说明现有能力，不代表安装本文后就增加了新工具。
+第一次用 VRCForge，即使电脑上还没有 Unity 或工程，也可以请 Agent 帮你配置。内置 AI 通过连接测试后，在首次引导的工程选择步骤点「请 Agent 帮我配置」，检查草稿并发送。你也可以直接在临时对话里说：
 
-你可以直接对 Agent 说：
+> 我什么都没装。请帮我安装国际版 Unity Hub、VRChat 需要的 Unity 编辑器，用 VCC 新建一个 Avatar 工程，然后把 VRCForge 连上去。
 
-> 我第一次用，不知道怎么连接。请先检查环境，帮我找到要改的工程，装好 VRCForge 的 Unity 插件，确认能读到模型再开始。需要我操作时，一次告诉我一步。
+想用 ALCOM，就把 VCC 换成 ALCOM。已有工程就给出它的文件夹，Agent 会检查它记录的 Unity 版本，复用电脑上已有的软件。下载、启动安装和检查连接由有相应权限的 Agent 执行。遇到需要你登录、接受许可或确认 Windows 弹窗时，它会告诉你点哪里，之后继续。
 
 ## 先选一种聊天方式
 
-**用 VRCForge 内置 Agent：**在设置的模型页面填写服务地址、模型和 Key，执行连接测试。Key 保存成功不等于能调用模型。测试失败时，先核对地址、模型名、额度和错误提示；不要把 Key 发到聊天或截图里。模型完全无法回复时，由设置页和体检页面帮助排障，不能期待一个尚未连通的模型自己修好自己。
+**用 VRCForge 内置 Agent**，在设置里选择模型并测试连接。使用 ChatGPT 登录方式时，按提示登录；使用 API 服务时，在设置里填写它要求的地址、模型和密钥。如果测试失败，先看设置页的具体提示。密钥留在设置里。
 
 **用外部 Agent：**在 VRCForge 的连接器页面开启 Agent Gateway，按客户端支持的方式连接 MCP，随后让 Agent 检查能否列出 VRCForge 工具。外部 Agent 使用自己配置的模型，不需要再给 VRCForge 填一份模型 Key。VRCForge 仍需运行。不要把 Gateway 连接凭据当成模型 Key，也不要在聊天里粘贴它。
 
@@ -19,7 +19,7 @@
 工程通常来自 Unity Hub、VCC、ALCOM，或者你手动打开的位置。工程文件夹应包含 `Assets`、`Packages` 和 `ProjectSettings`。
 
 - 找到多个工程时，让你选一个，不能猜测。若工具没有返回工程名称，Agent 应带你打开 App 的工程列表选择，不能只凭数量编出选项。
-- 列表确实为空时，就报告没找到，再让你选已有文件夹。
+- 列表为空时，用你给的工程文件夹继续；请它新建工程时，它会从对应的模板创建。
 - 扫描失败时，应说明哪一处读取失败，不能说“没有工程”。
 - 没有工程时，再引导创建 VRChat 工程；不应为了修连接擅自新建示例工程。
 - 从 VRCForge 列表移除工程只移除登记，不删除工程文件。
@@ -28,7 +28,7 @@ Agent 应记住这次选择，后续检查、安装和读模型都使用同一�
 
 ## 打开 Unity，安装 VRCForge 插件
 
-目前没有“打开现有 Unity 工程”的 MCP 工具。Agent 应让你在 Unity Hub、VCC 或 ALCOM 中打开刚才选择的工程；随后由 Agent 检查实际运行的工程是否匹配。VRCForge 的“打开文件夹”只打开文件夹，不会启动 Unity。
+Agent 可以打开选定的工程。它会先找到该工程需要的 Unity 编辑器；缺少时用国际版 Unity Hub 或全球编辑器归档安装。Unity 第一次打开工程要导入包和编译，这期间 Agent 会跟进同一个窗口。若全球下载页跳转到团结引擎，改用可验证的国际版下载来源。[Unity Hub 安装](https://docs.unity.com/en-us/hub/install-hub-win-mac) · [VRChat 支持的 Unity 版本](https://creators.vrchat.com/sdk/upgrade/current-unity-version/)
 
 安装插件有两条路径，选一条完成，不要反复叠加安装：
 
@@ -44,7 +44,7 @@ Agent 应确认以下事实，而不是只说“安装成功”：
 1. 运行的是你选定的工程，编辑器版本符合当前支持范围。
 2. Unity 编译结束，没有阻断连接的编译错误。
 3. Core 已连接，连接对应同一工程、同一编辑器实例。
-4. 所需工具完整可用，可以读取场景中的 Avatar。
+4. 这次任务需要的工具可用。若你还要求改模，它会再确认读到的是你指定的 Avatar。空场景也可以完成连接。
 
 Unity 正在编译或刷新时需要等待。必要时 Agent 会请你点击一下正确的 Unity 窗口；点击只是操作，不是连接成功的证据。仍失败时，Agent 应读取错误后再决定下一步。
 
@@ -66,7 +66,7 @@ Unity 正在编译或刷新时需要等待。必要时 Agent 会请你点击一�
 
 Agent 应先读到正确的工程和 Avatar，给出简短确认，再继续你原本的改模要求。进入修改前仍按你选择的权限模式执行，保留验证和恢复能力。
 
-1.8.1 随 App 提供本文配套的 [Agent Skill](../examples/skill-packages/vrcforge-first-run-guide/SKILL.md)，无需另行下载。可在能力库中查找“连接引导与日常排障”；外部 Agent 也能从 MCP 的技能与 Prompt 列表发现它。已有的同名自定义内容或停用设置会保留，不会被启动过程覆盖。
+App 自带「连接引导与日常排障」，可以在能力库中找到。外部 Agent 接入 VRCForge 后，也可以从 MCP 的技能与 Prompt 列表读取同一份指引。[从空白 Windows 电脑开始](../examples/skill-packages/vrcforge-first-run-guide/references/zero-start.md)
 
 ## 平时突然用不了，也用这份引导
 

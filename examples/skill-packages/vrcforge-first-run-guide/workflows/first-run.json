@@ -10,11 +10,16 @@
     },
     {
       "id": "diagnose",
-      "instruction": "For exe-only beginners read references/zero-start.md, preserve/choose VCC or ALCOM, and guide the official Unity/Avatar-project route. Agent downloads may use available host tools with verified official sources, not the text-only web reader. Otherwise choose narrow current diagnostics; vrcforge_know_yourself is optional when multiple readiness layers remain unknown."
+      "instruction": "If there is no project yet or the matching Editor is missing, read references/zero-start.md in the current chat. Inspect the host, any requested project version, and available templates. For an existing connection problem, diagnose the affected layer."
+    },
+    {
+      "id": "install_missing_prerequisites",
+      "when": "The requested setup needs missing host software.",
+      "instruction": "Use the permitted host tools to download and install the international Unity Hub, exact global Unity Editor, and VCC or ALCOM if a manager is needed. Verify each installed product and follow existing installer processes. Resume after any required personal interaction. A download-only request ends at the verified file."
     },
     {
       "id": "select_project",
-      "instruction": "Use the selected root. Register or select the intended existing project if needed; ask for a choice when ambiguous."
+      "instruction": "Register or select the intended existing project. For a requested first project, create it in the agreed location with a matching installed template. If none is available, use the chosen manager's project creation flow and register the resulting project root."
     },
     {
       "id": "open_project",
@@ -54,6 +59,7 @@
       "installedSha256"
     ]
   },
+  "completionScope": "For a connection request, verify the items below. For a download-only request, finish at delivery of the verified installer file.",
   "completionRequires": [
     "exact_project",
     "matching_editor_and_core",

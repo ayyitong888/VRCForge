@@ -17571,6 +17571,22 @@ def _build_runtime_profiled_tool_registry() -> ProfiledToolRegistry:
             metadata={"source": "write"},
         )
     registry.add_unity_shell("vrcforge_execute_shell")
+    # These host-side operations take an explicit template or project path.
+    # They allow setup before a Unity conversation exists.
+    setup_tools = {
+        "vrcforge_project_lifecycle_status",
+        "vrcforge_project_create_plan",
+        "vrcforge_create_project",
+        "vrcforge_register_project",
+        "vrcforge_select_project",
+    }
+    for projection in registry.project(CapabilityProfile.UNITY_PROJECT):
+        if projection.internal_name in setup_tools:
+            registry.add_projection(
+                projection.internal_name,
+                profile=CapabilityProfile.GENERAL,
+                model_name=projection.model_name,
+            )
     return registry
 
 

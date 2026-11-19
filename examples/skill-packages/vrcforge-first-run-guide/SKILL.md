@@ -1,7 +1,7 @@
 ---
 name: vrcforge-first-run-guide
 title: 连接引导与日常排障
-description: Connect or repair VRCForge and a selected Unity project using available tools. Use for first-time setup, provider or Core connection failures, and Unity user-tool setup.
+description: Set up VRCForge on a Windows PC even with no project, Unity Hub, Editor, VCC or ALCOM installed. Install the missing prerequisites and connect the intended Unity project. Also diagnose existing connections and set up Unity user tools.
 permission-mode: approval_required
 risk-level: high
 workflow-domain: diagnostics
@@ -30,6 +30,7 @@ allowed-tools:
   - vrcforge_unity_status
   - vrcforge_unity_tools
   - vrcforge_project_lifecycle_status
+  - vrcforge_project_create_plan
   - vrcforge_project_catalog_registration_status
   - vrcforge_register_project
   - vrcforge_create_project
@@ -65,7 +66,9 @@ when-to-use: Set up an internal or external Agent, connect a Unity project, diag
 
 when-NOT-to-use: For questions about how the App works, use `vrcforge-docs`. Continue ordinary avatar work with its own tools once connected.
 
-For “connect this project,” use the selected project and the tools available in this session. A working external Agent already supplies its own model. Call the narrowest status tool for the failing layer. When several layers are unknown, `vrcforge_know_yourself` provides a broader snapshot. If the user asked for a diagnosis alone, explain what you found.
+For “什么都没装，帮我连上工程” start in the current chat, even without a selected project. Read `references/zero-start.md` with `vrcforge_read_installed_skill` before trying Unity tools. Inspect the host, install missing software, then create or open the intended project. Use the international Unity Hub and global Editor. In a projectless App chat, discover host project setup in `project_environment/assets_packages`. Start with `unity_project_lifecycle_status`, then load only the tool needed for the user's choice. A working external Agent already supplies its own model.
+
+For “connect this project,” start with that project. Call the narrowest status tool for the failing layer, or use `vrcforge_know_yourself` if several layers are unknown. If the user only asked for a diagnosis or a download, stop at that outcome.
 
 When Unity is closed, discover `vrcforge_open_unity_project` (internal `unity_open_project`) and open the selected project in its matching Editor. If it is already open or starting, follow that instance through dependency resolution, compilation and the Core handshake. A new project's first import can take time. Use the actual package or compile error to decide whether a repair is needed.
 
