@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "../ui/button";
 
@@ -17,17 +17,40 @@ export function ApprovalAllowSplitButton({
   onApprove,
 }: ApprovalAllowSplitButtonProps) {
   const { t } = useTranslation();
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<{ button: HTMLButtonElement; rect: DOMRect } | null>(null);
+  const closeMenu = () => setMenuAnchor(null);
+
+  useEffect(() => {
+    if (!menuAnchor) return;
+    const closeOnScroll = () => {
+      const rect = menuAnchor.button.getBoundingClientRect();
+      if (rect.top !== menuAnchor.rect.top || rect.right !== menuAnchor.rect.right) closeMenu();
+    };
+    window.addEventListener("scroll", closeOnScroll, true);
+    window.addEventListener("resize", closeMenu);
+    return () => {
+      window.removeEventListener("scroll", closeOnScroll, true);
+      window.removeEventListener("resize", closeMenu);
+    };
+  }, [menuAnchor]);
+
+  const rect = menuAnchor?.rect;
+  const above = rect ? rect.top >= 96 : false;
+  const menuPosition = rect ? {
+    right: `clamp(0.5rem, ${window.innerWidth - rect.right}px, max(0.5rem, 100vw - 13.5rem))`,
+    ...(above ? { bottom: window.innerHeight - rect.top + 4 } : { top: rect.bottom + 4 }),
+    maxHeight: Math.max(0, (above ? rect.top : window.innerHeight - rect.bottom) - 12),
+  } : undefined;
 
   return (
-    <div className="relative inline-flex">
+    <div className="inline-flex shrink-0">
       <Button
         variant="primary"
-        className={allowFutureEligible ? "rounded-r-none" : undefined}
+        className={allowFutureEligible ? "whitespace-nowrap rounded-r-none" : "whitespace-nowrap"}
         disabled={disabled}
         onClick={() => onApprove(approvalId)}
       >
-        <Check className="h-4 w-4" />
+        <Check className="h-4 w-4 shrink-0" />
         {t("approval.approveOnce")}
       </Button>
       {allowFutureEligible ? (
@@ -38,27 +61,34 @@ export function ApprovalAllowSplitButton({
             disabled={disabled}
             aria-label={t("approval.allowFuture")}
             aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((open) => !open)}
+            aria-expanded={Boolean(menuPosition)}
+            onClick={(event) => {
+              const button = event.currentTarget;
+              setMenuAnchor(menuAnchor ? null : { button, rect: button.getBoundingClientRect() });
+            }}
           >
-            <ChevronDown className="h-4 w-4" />
+            <ChevronDown className="h-4 w-4 shrink-0" />
           </Button>
-          {menuOpen ? <button type="button" className="fixed inset-0 z-10 cursor-default" aria-label={t("approval.allowFuture")} onClick={() => setMenuOpen(false)} /> : null}
-          {menuOpen ? (
-            <div className="absolute bottom-full right-0 z-20 mb-1 min-w-52 rounded-md border border-border bg-popover p-1 shadow-panel" role="menu">
+          {menuPosition ? <button type="button" className="fixed inset-0 z-10 cursor-default" aria-label={t("approval.allowFuture")} onClick={closeMenu} /> : null}
+          {menuPosition ? (
+            <div
+              className="fixed z-20 w-52 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-panel"
+              style={menuPosition}
+              role="menu"
+            >
               <Button
                 type="button"
                 variant="ghost"
-                className="w-full justify-start"
+                className="h-auto min-h-10 w-full justify-start py-2 text-left"
                 role="menuitem"
                 disabled={disabled}
                 onClick={() => {
-                  setMenuOpen(false);
+                  closeMenu();
                   onApprove(approvalId, true);
                 }}
               >
-                <ShieldCheck className="h-4 w-4" />
-                {t("approval.allowFuture")}
+                <ShieldCheck className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 break-words">{t("approval.allowFuture")}</span>
               </Button>
             </div>
           ) : null}

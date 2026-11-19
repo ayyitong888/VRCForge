@@ -5,7 +5,6 @@ import { presentApproval } from "../../lib/approval-presentation";
 import type { AgentApproval } from "../../lib/api";
 import type { ApprovalActionState } from "../../lib/chat-types";
 import { Button } from "../ui/button";
-import { DataLine } from "../ui/data-line";
 import { ApprovalAllowSplitButton } from "./approval-allow-split-button";
 
 type PendingApprovalsStripProps = {
@@ -33,18 +32,16 @@ export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, 
     return null;
   }
   if (collapsed && !hasPendingExternalApproval) {
-    return <div className="shrink-0 border-t border-amber-500/20 bg-amber-500/5 px-6 py-2"><div className="mx-auto max-w-4xl"><Button variant="ghost" onClick={() => setCollapsed(false)} data-approval-reopen>{t("approval.requestTitle")} · {visibleApprovals.length}</Button></div></div>;
+    return <div className="shrink-0 border-t border-amber-500/20 bg-amber-500/5 py-2"><Button variant="ghost" onClick={() => setCollapsed(false)} data-approval-reopen>{t("approval.requestTitle")} · {visibleApprovals.length}</Button></div>;
   }
 
   return (
-    <div className="max-h-[40vh] shrink-0 overflow-auto border-t border-amber-500/20 bg-amber-500/5 px-6 py-3">
-      <div className="mx-auto max-w-4xl space-y-3">
-        {onClose ? <div className="flex justify-end"><Button variant="ghost" onClick={onClose}>{t("common.close")}</Button></div> : null}
-        <div className="text-sm font-semibold text-foreground">{t("approval.requestTitle")}</div>
-        {visibleApprovals.map((approval) => (
-          <ApprovalCard key={approval.id} approval={approval} loading={loading || Boolean(actions[approval.id])} onApprove={onApprove} onReject={onReject} />
-        ))}
-      </div>
+    <div className="max-h-[40vh] shrink-0 space-y-3 overflow-auto border-t border-amber-500/20 bg-amber-500/5 py-3">
+      {onClose ? <div className="flex justify-end"><Button variant="ghost" onClick={onClose}>{t("common.close")}</Button></div> : null}
+      <div className="text-sm font-semibold text-foreground">{t("approval.requestTitle")}</div>
+      {visibleApprovals.map((approval) => (
+        <ApprovalCard key={approval.id} approval={approval} loading={loading || Boolean(actions[approval.id])} onApprove={onApprove} onReject={onReject} />
+      ))}
     </div>
   );
 }
@@ -64,7 +61,7 @@ function ApprovalCard({
   const presentation = presentApproval(approval, t);
 
   return (
-    <section className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 shadow-panel">
+    <section className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 shadow-panel">
       <div className="flex min-w-0 items-center gap-2">
         <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
         <div className="truncate text-sm font-semibold">{presentation.title}</div>
@@ -80,21 +77,25 @@ function ApprovalCard({
             {approval.taskContext.objective.trim()}
           </p>
         ) : null}
-        <DataLine label={t("approval.presentation.project")} value={presentation.project} />
-        <DataLine label={t("approval.presentation.rollback")} value={presentation.rollback} />
+        <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm">
+          <dt className="text-muted-foreground">{t("approval.presentation.project")}</dt>
+          <dd className="min-w-0 break-words font-medium">{presentation.project}</dd>
+          <dt className="text-muted-foreground">{t("approval.presentation.rollback")}</dt>
+          <dd className="min-w-0 break-words font-medium">{presentation.rollback}</dd>
+        </dl>
       </div>
       <details className="mt-3 rounded-lg border border-border bg-background/70 px-3 py-2 text-xs">
         <summary className="flex cursor-pointer list-none items-center gap-2 text-muted-foreground">
-          <ChevronDown className="h-3.5 w-3.5" />
+          <ChevronDown className="h-3.5 w-3.5 shrink-0" />
           {t("approval.contextDetails")}
         </summary>
         <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-foreground">
           {formatApprovalDetails(presentation.technicalDetails)}
         </pre>
       </details>
-      <div className="mt-4 flex justify-end gap-2">
-        <Button variant="outline" disabled={loading} onClick={() => onReject(approval.id)}>
-          <X className="h-4 w-4" />
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        <Button variant="outline" className="shrink-0 whitespace-nowrap" disabled={loading} onClick={() => onReject(approval.id)}>
+          <X className="h-4 w-4 shrink-0" />
           {t("approval.reject")}
         </Button>
         <ApprovalAllowSplitButton
