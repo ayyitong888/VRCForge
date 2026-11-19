@@ -71,6 +71,7 @@ export function Composer({
   onAction,
   compact = false,
   disabledReason = "",
+  submissionBlocked = false,
   attachments = [],
   onAttachFiles,
   onRemoveAttachment,
@@ -109,6 +110,7 @@ export function Composer({
   onAction?: (action: ComposerActionId) => void | Promise<void>;
   compact?: boolean;
   disabledReason?: string;
+  submissionBlocked?: boolean;
   attachments?: ChatAttachment[];
   onAttachFiles?: (files: ComposerFileInput) => void;
   onRemoveAttachment?: (id: string) => void;
@@ -157,7 +159,7 @@ export function Composer({
   }, [focusInput, onCancelReply]);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   const currentModeVisual = permissionVisualState(permission, currentMode);
-  const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
+  const canSubmit = !disabledReason && !submissionBlocked && (input.trim().length > 0 || attachments.length > 0);
   const primaryAction = sending ? (queueAllowed && canSubmit ? "queue" : "stop") : "send";
   const primaryActionLabel = primaryAction === "queue"
     ? t("chat.queue")
@@ -293,7 +295,11 @@ export function Composer({
   return (
     <form
       ref={composerRef}
-      onSubmit={primaryAction === "send" ? onSubmit : (event) => {
+      onSubmit={(event) => {
+        if (!submissionBlocked && primaryAction === "send") {
+          onSubmit(event);
+          return;
+        }
         event.preventDefault();
         if (primaryAction === "queue") onQueue?.();
       }}
@@ -405,6 +411,7 @@ export function Composer({
             }
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
+              if (submissionBlocked) return;
               if (!sending) {
                 onSubmit();
               } else if (queueAllowed) {

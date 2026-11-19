@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from "react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ActiveView } from "../lib/app-view";
 import type { AgentApproval, AgentRuntimeResponse } from "../lib/api";
@@ -46,6 +46,14 @@ export function useApprovalExecution({
 }: UseApprovalExecutionParams) {
   const { t } = useTranslation();
   const [approvalActions, setApprovalActions] = useState<Record<string, ApprovalActionState>>({});
+  const activeApprovalActions = useRef(new Set<string>());
+
+  function beginApprovalAction(approvalId: string, action: ApprovalActionState) {
+    if (activeApprovalActions.current.has(approvalId)) return false;
+    activeApprovalActions.current.add(approvalId);
+    setApprovalActions((current) => ({ ...current, [approvalId]: action }));
+    return true;
+  }
 
   function appendContinuation(response: AgentRuntimeResponse | undefined): boolean {
     if (!response) {
@@ -96,7 +104,7 @@ export function useApprovalExecution({
     const target = approval.targetTool || t("approval.thisApproval");
     const reason = revisionReasonText.trim() || t("approval.revisionReason");
     const note = t("approval.revisionNote", { id: approval.id, target });
-    setApprovalActions((current) => ({ ...current, [approval.id]: "modify" }));
+    if (!beginApprovalAction(approval.id, "modify")) return;
     setError("");
     const approvalScope = scopeForApproval(approval.id);
     try {
@@ -143,7 +151,7 @@ export function useApprovalExecution({
   }
 
   async function approveShell(approvalId: string, allowFutureCategory = false) {
-    setApprovalActions((current) => ({ ...current, [approvalId]: "approve" }));
+    if (!beginApprovalAction(approvalId, "approve")) return;
     setError("");
     const approvalScope = scopeForApproval(approvalId, allowFutureCategory);
     const pendingApproval = pendingApprovalItems.find((approval) => approval.id === approvalId);
@@ -210,7 +218,7 @@ export function useApprovalExecution({
   }
 
   async function rejectShell(approvalId: string) {
-    setApprovalActions((current) => ({ ...current, [approvalId]: "reject" }));
+    if (!beginApprovalAction(approvalId, "reject")) return;
     setError("");
     const approvalScope = scopeForApproval(approvalId);
     try {
@@ -248,6 +256,7 @@ export function useApprovalExecution({
   }
 
   function clearApprovalAction(approvalId: string) {
+    activeApprovalActions.current.delete(approvalId);
     setApprovalActions((current) => {
       const next = { ...current };
       delete next[approvalId];

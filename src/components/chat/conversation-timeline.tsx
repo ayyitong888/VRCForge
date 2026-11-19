@@ -3,7 +3,7 @@ import { createContext, Fragment, ReactNode, useContext, useState } from "react"
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { presentApproval } from "../../lib/approval-presentation";
-import type { AgentApproval, AgentRuntimeResponse, AgentShellResult, AgentSkillResult } from "../../lib/api";
+import type { AgentApproval, AgentRuntimeResponse, AgentRuntimeRun, AgentShellResult, AgentSkillResult } from "../../lib/api";
 import {
   buildRuntimeStepResultQueues,
   buildTimelinePresentation,
@@ -13,6 +13,7 @@ import {
   isCancellationMarkerAssistantText,
   isFinalAssistantTimelineEvent,
   isFinalAssistantPresentationEntry,
+  pendingApprovalFromReceipt,
   runtimeTerminalStatusKey,
   subAgentTimelineTaskId,
   timelineInvocationDisplayLabel,
@@ -71,6 +72,7 @@ export function buildAgentTimelineRows({
   write,
   approval,
   approvalAction,
+  approvalRuns,
   onModifyApproval,
   planLabel,
   providerLine,
@@ -97,6 +99,7 @@ export function buildAgentTimelineRows({
   write?: AgentRuntimeResponse["write"];
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
+  approvalRuns?: readonly AgentRuntimeRun[];
   onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
   planLabel: string;
   providerLine: string;
@@ -190,6 +193,8 @@ export function buildAgentTimelineRows({
       live,
       sharedProcess,
       providerLine,
+      activeApprovalId: approval?.id,
+      approvalRuns,
       renderElapsed: true,
       processSupplement,
       dropCancellationMarkers: cancelled,
@@ -472,6 +477,8 @@ export function buildDurableTimelineRows(
     processSupplement?: ReactNode;
     sharedProcess?: SharedTurnProcess;
     providerLine?: string;
+    activeApprovalId?: string;
+    approvalRuns?: readonly AgentRuntimeRun[];
     dropCancellationMarkers?: boolean;
     interleavedUserMessages?: InterleavedUserMessage[];
     interleavedUsersExpanded?: boolean;
@@ -542,7 +549,7 @@ export function buildDurableTimelineRows(
           statusTone="muted"
           scrollable={calls.length > 5}
         >
-          {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail, options.onOpenChatById))}
+          {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail, options))}
         </WorkSegmentRow>
       </div>,
     );
@@ -609,9 +616,10 @@ export function buildDurableTimelineRows(
         : storedInvocation;
       processInvocations.push(invocation);
       const detail = takeFullResult(invocation);
-      if (invocation.kind === "process") {
+      if (invocation.kind === "process"
+        || (invocation.status === "needs_user_action" && pendingApprovalFromReceipt(detail))) {
         flushToolCalls();
-        processRows.push(renderDirectTimelineInvocation(invocation, detail, options.onOpenChatById));
+        processRows.push(renderDirectTimelineInvocation(invocation, detail, options));
       } else {
         pendingCalls.push({ invocation, detail });
       }
@@ -730,8 +738,12 @@ function conversationResultChatId(detail: unknown): string {
 
 function renderDirectTimelineInvocation(
   invocation: TimelineInvocation,
-  detail?: unknown,
-  onOpenChatById?: (chatId: string) => void,
+  detail: unknown,
+  { activeApprovalId, approvalRuns, onOpenChatById }: {
+    activeApprovalId?: string;
+    approvalRuns?: readonly AgentRuntimeRun[];
+    onOpenChatById?: (chatId: string) => void;
+  },
 ): ReactNode {
   if (invocation.kind === "process") {
     const commentary = invocation.summary || invocation.label;
@@ -743,6 +755,37 @@ function renderDirectTimelineInvocation(
       >
         <ChatMarkdown text={commentary} />
       </div>
+    );
+  }
+  const pendingApproval = invocation.status === "needs_user_action" ? pendingApprovalFromReceipt(detail) : undefined;
+  if (pendingApproval) {
+    const presentation = presentApproval(pendingApproval, i18n.t);
+    const matchingRuns = approvalRuns?.filter(run => run.approvalId === pendingApproval.id);
+    const applied = matchingRuns?.find(run => run.event === "approval_applied");
+    const failed = matchingRuns?.some(run => run.event === "approval_failed");
+    const rejected = matchingRuns?.some(run => run.status === "denied" || run.status === "rejected");
+    const approved = matchingRuns?.some(run => run.event === "approval_approved");
+    const pending = !applied && !failed && !rejected && !approved && activeApprovalId === pendingApproval.id;
+    const statusKey = failed ? "skillStatus.failed"
+      : rejected ? "agent.rejected"
+      : applied?.completionStatus === "ok" ? "approval.receiptApplied"
+      : approved ? "approval.receiptApproved"
+      : pending ? "approval.needsApproval" : "approval.requestTitle";
+    return (
+      <RunRow
+        key={invocation.id}
+        icon={workBatchIcon(invocation.kind)}
+        title={presentation.title}
+        statusTone={failed ? "danger" : statusKey === "approval.receiptApplied" ? "ok" : pending ? "warn" : "muted"}
+        statusLabel={i18n.t(statusKey)}
+        showCompactStatus
+        detailCard
+      >
+        <div className="space-y-1 px-2 py-1.5" data-agent-approval-receipt={pendingApproval.id}>
+          <p className="text-muted-foreground">{pending ? presentation.summary : invocationOperationTitle(invocation, i18n.t)}</p>
+          <ToolDiagnostics value={detail} />
+        </div>
+      </RunRow>
     );
   }
   const danger = ["failed", "error"].includes(invocation.status.toLowerCase());

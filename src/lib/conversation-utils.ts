@@ -21,7 +21,7 @@ import {
 import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
 import type { CompactionRecoveryEntry } from "./api/types";
-import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry, timelineInvocationDisplayLabel, isCancellationMarkerAssistantText } from "./chat-timeline-presentation";
+import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry, timelineInvocationDisplayLabel, isCancellationMarkerAssistantText, projectApprovalWaitDialogue } from "./chat-timeline-presentation";
 
 const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
 export const MAX_FILES_PER_MESSAGE = 10;
@@ -269,6 +269,7 @@ export function includesQuestionText(reply: string, question: string): boolean {
 }
 
 export function agentReplyPreviewText(response: AgentRuntimeResponse): string {
+  response = projectApprovalWaitDialogue(response);
   const assistantEntries = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries
     .filter((entry) => entry.type === "assistant");
   const spoken = assistantEntries.filter((entry) => (
@@ -295,6 +296,7 @@ export function agentReplyPreviewText(response: AgentRuntimeResponse): string {
 }
 
 export function visibleAgentDialogueText(response: AgentRuntimeResponse): string {
+  response = projectApprovalWaitDialogue(response);
   const assistantEntries = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries.filter(
     (entry) => entry.type === "assistant",
   );
@@ -455,6 +457,7 @@ export function cloneChatAttachments(attachments: ChatAttachment[]): ChatAttachm
 }
 
 export function copyableAgentDialogueText(response: AgentRuntimeResponse): string {
+  response = projectApprovalWaitDialogue(response);
   if (isCancelledRuntimeResponse(response)) {
     const spoken = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries
       .filter((entry) => entry.type === "assistant"

@@ -1128,6 +1128,8 @@
     },
     "requestTitle": "審批請求",
     "needsApproval": "需要審批",
+    "receiptApproved": "已核准",
+    "receiptApplied": "已執行",
     "viewParameters": "查看參數",
     "modify": "修改",
     "modifying": "標記中",

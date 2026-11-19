@@ -14,9 +14,9 @@ import {
 import { useEffect, useId, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
-import type { AgentApproval, AgentQuestion, AgentRuntimeResponse } from "../../lib/api";
+import type { AgentApproval, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun } from "../../lib/api";
 import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
-import { chatRunErrorKey, projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
+import { chatRunErrorKey, isFinalAssistantTimelineEvent, projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import { agentRelaySource, displayedUserMessageText } from "../../lib/chat-relay-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
 import { isSelectedTextAttachment } from "../../lib/chat-types";
@@ -54,6 +54,7 @@ export function ConversationCard({
   attachmentPayloads,
   approval,
   approvalAction,
+  approvalRuns,
   canRetry,
   canEdit,
   editing,
@@ -94,6 +95,7 @@ export function ConversationCard({
   attachmentPayloads?: AttachmentPayloadVault;
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
+  approvalRuns?: readonly AgentRuntimeRun[];
   editing?: boolean;
   editingText?: string;
   editSaveDisabledReason?: string;
@@ -506,7 +508,9 @@ export function ConversationCard({
   // The requested turn model is not proof of the model that answered. Keep
   // historical labels tied to response metadata and omit them when the
   // backend does not report an actual model.
-  const providerLine = compactAgentReply ? "" : formatRuntimeModelLine("", response.model);
+  const approvalWaitWithoutReply = response.plan.completionGate?.reason === "approval_pending"
+    && !response.plan.reply?.trim() && !response.timeline?.some(isFinalAssistantTimelineEvent);
+  const providerLine = compactAgentReply || approvalWaitWithoutReply ? "" : formatRuntimeModelLine("", response.model);
   const replySource = providerLine;
   const showReplyActions = !sharedProcess || sharedProcess.last;
   const awaitingApproval = shell?.status === "pending_approval";
@@ -518,6 +522,7 @@ export function ConversationCard({
     write,
     approval,
     approvalAction,
+    approvalRuns,
     onModifyApproval,
     planLabel: replySource,
     providerLine,
@@ -554,7 +559,7 @@ export function ConversationCard({
           ) : null}
           {!compactAgentReply ? <MessageActions
             preferTooltipBelow
-            createdAt={showReplyActions ? assistantReplyTimestamp(item) : undefined}
+            createdAt={showReplyActions && !approvalWaitWithoutReply ? assistantReplyTimestamp(item) : undefined}
             memoryUsage={response.memoryUsage}
             onCopy={showReplyActions && copyableReply && onCopyItem ? () => onCopyItem({ ...item, response }) : undefined}
             onRetry={showReplyActions && canRetry && !isInterruptedRuntimeTurn(response) ? () => onRetryItem?.(item.id) : undefined}

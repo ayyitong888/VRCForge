@@ -47,15 +47,14 @@ export function ScopedPendingApprovalCard({ approvals, actions, disabled, reveal
     return null;
   }
   if (collapsed) {
-    return <button type="button" className="w-full rounded-xl border border-border bg-card px-4 py-3 text-left text-sm hover:bg-muted/50" onClick={() => setCollapsed(false)} data-approval-reopen>{t("approval.blockingTitle")} · {visibleApprovals.length}</button>;
+    return <button type="button" className="mb-2 w-full rounded-xl border border-border bg-card px-4 py-3 text-left text-sm hover:bg-muted/50" onClick={() => setCollapsed(false)} data-approval-reopen>{t("approval.blockingTitle")} · {visibleApprovals.length}</button>;
   }
 
   return (
     <section
       ref={sectionRef}
-      className="overflow-hidden rounded-2xl border border-border bg-card shadow-panel"
+      className="mb-2 overflow-hidden rounded-2xl border border-border bg-card shadow-panel"
       data-scoped-pending-approval
-      data-approval-composer-replacement
       aria-labelledby="scoped-pending-approval-title"
       aria-live="polite"
     >

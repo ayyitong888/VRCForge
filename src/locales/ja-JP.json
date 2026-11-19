@@ -1128,6 +1128,8 @@
     },
     "requestTitle": "承認リクエスト",
     "needsApproval": "承認が必要",
+    "receiptApproved": "承認済み",
+    "receiptApplied": "実行済み",
     "viewParameters": "パラメータを表示",
     "modify": "修正",
     "modifying": "マーク中",

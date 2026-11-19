@@ -1,5 +1,5 @@
 import type { SubAgentTask } from "./api/sub-agents";
-import type { AgentQuestion, AgentRuntimeResponse } from "./api/types";
+import type { AgentApproval, AgentQuestion, AgentRuntimeResponse } from "./api/types";
 import type { ChatTimelineEvent, ConversationItem } from "./chat-types";
 import { normalizeTimelineCaptures } from "./chat-streaming";
 
@@ -262,6 +262,37 @@ export function runtimeTerminalStatusKey(failureCode = ""): string | undefined {
   return undefined;
 }
 
+export function pendingApprovalFromReceipt(receipt: unknown): AgentApproval | undefined {
+  if (!receipt || typeof receipt !== "object" || !("status" in receipt) || receipt.status !== "pending"
+    || !("approval" in receipt)) return undefined;
+  const approval = receipt.approval as Partial<AgentApproval> | undefined;
+  return approval?.status === "pending" && typeof approval.id === "string" && approval.id
+    ? approval as AgentApproval : undefined;
+}
+
+export function projectApprovalWaitDialogue(response: AgentRuntimeResponse): AgentRuntimeResponse {
+  if (response.plan?.completionGate?.reason !== "approval_pending" || !response.plan.summary) return response;
+  // Older multi-step plans promoted the approval receipt's summary to reply.
+  // Correlate that copy to its own pending action before suppressing it. Model
+  // messages can also end at an approval boundary.
+  const summary = response.plan.summary.trim();
+  const copiedFromReceipt = [response.result, response.write?.result, response.shell?.result, response.skill?.result]
+    .some(value => value && typeof value === "object" && "message" in value
+      && typeof value.message === "string" && value.message.trim() === summary && pendingApprovalFromReceipt(value));
+  if (!copiedFromReceipt) return response;
+  return {
+    ...response,
+    plan: {
+      ...response.plan,
+      reply: summary && response.plan.reply?.trim() === summary ? "" : response.plan.reply,
+      summary: "",
+    },
+    timeline: response.timeline?.filter(event => !(summary
+      && isFinalAssistantTimelineEvent(event) && event.payload?.status === "needs_user_action"
+      && !event.payload.messageId && event.payload.summary?.trim() === summary)),
+  };
+}
+
 /**
  * Replace app-owned terminal prose using the structured failure code. The final
  * assistant event is the visible/copyable projection; earlier execution evidence
@@ -271,6 +302,7 @@ export function projectRuntimeResponseForDisplay(
   response: AgentRuntimeResponse,
   translate: RuntimePresentationTranslator,
 ): AgentRuntimeResponse {
+  response = projectApprovalWaitDialogue(response);
   // Older turns persisted the automatic wait as a final assistant event.
   if (response.plan.nextStep === "waiting_for_tool" && response.plan.completionGate?.reason === "action_not_terminal") {
     return {

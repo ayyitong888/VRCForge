@@ -18,7 +18,7 @@ const output = path.join(temp, "render.mjs");
 const mocks = {
   "./composer": 'export const Composer=(props)=>{globalThis.__questionDockComposerProps=props; return React.createElement(React.Fragment,null,React.createElement("textarea",{"data-ordinary-composer":true,defaultValue:props.input}),React.createElement("input",{type:"file","data-composer-attachment":true,onChange:()=>{}}),props.sending?React.createElement("button",{"data-composer-stop":true,disabled:props.stopDisabled,onClick:props.onStop},"Stop"):null);};',
   "./background-goal-catch-up-card": "export const BackgroundGoalCatchUpCard=()=>null;",
-  "./conversation-card": 'export const ConversationCard=()=>React.createElement("p",null,"Earlier conversation"); export const MessageDateSeparator=()=>null;',
+  "./conversation-card": 'export const ConversationCard=()=>React.createElement("p",null,"Earlier conversation"); export const MessageDateSeparator=()=>null; export const StreamingPhaseStatus=()=>null;',
   "./session-handoff-card": "export const SessionHandoffCard=()=>null;",
   "./session-handoff-send": "export const SessionHandoffSend=()=>null;",
   "../approvals/scoped-pending-approval-card": 'export const ScopedPendingApprovalCard=()=>React.createElement("section",{"data-approval-card":true},"Approve or reject");',
@@ -45,23 +45,19 @@ export function render(questions=[],approvals=[],hasHistory=true,sending=false,p
 `;
 try {
   await build({ stdin: { contents: entry, resolveDir: root, sourcefile: "question-dock-entry.mjs" },
-    outfile: output, bundle: true, format: "esm", platform: "node", external: ["react", "react-dom/server"],
+    outfile: output, bundle: true, format: "esm", platform: "node", external: ["react", "react-dom", "react-dom/server", "lucide-react"],
     plugins: [{ name: "dock-ports", setup(plugin) {
       plugin.onResolve({ filter: /^react-i18next$/ }, () => ({ path: "translation", namespace: "dock" }));
-      plugin.onResolve({ filter: /^lucide-react$/ }, () => ({ path: "icons", namespace: "dock" }));
       plugin.onResolve({ filter: /.*/ }, args => args.importer.endsWith("chat-workspace.tsx") && mocks[args.path]
         ? { path: args.path, namespace: "dock" } : undefined);
       plugin.onLoad({ filter: /.*/, namespace: "dock" }, args => ({ contents: args.path === "translation"
         ? 'export const useTranslation=()=>({t:(key,fallback)=>typeof fallback==="string"?fallback:key});'
-        : args.path === "icons"
-          ? 'export const AlertTriangle=()=>null,ArrowDown=()=>null,ArrowUp=()=>null,Loader2=()=>null,MoreHorizontal=()=>null,Pause=()=>null,Play=()=>null,X=()=>null,ChevronLeft=()=>null,ChevronRight=()=>null,HelpCircle=()=>null,Pencil=()=>null;'
-          : `import React from 'react';${mocks[args.path]}`, resolveDir: root }));
+        : `import React from 'react';${mocks[args.path]}`, resolveDir: root }));
       if (process.env.QUESTION_DOCK_COUNTERFACTUAL === "1") {
         plugin.onLoad({ filter: /chat-workspace\.tsx$/ }, async args => ({
           contents: (await fs.readFile(args.path, "utf8"))
             .replaceAll('questionContinuationDisplay(question) !== "settled"', 'Boolean(question.runtimeContinuation) || question.status === "pending"')
-            .replaceAll('approvalComposer || composer(false)', 'approvalComposer || (pendingQuestionPrompts.length ? null : composer(false))')
-            .replaceAll('approvalComposer || composer(true)', 'approvalComposer || (pendingQuestionPrompts.length ? null : composer(true))'), loader: "tsx",
+            .replace('{composer(hasHistory)}', '{pendingQuestionPrompts.length ? null : composer(hasHistory)}'), loader: "tsx",
         }));
       }
     } }],
@@ -72,8 +68,8 @@ try {
     { id: "later", label: "Later", description: "Leave the project unchanged." },
   ] };
   for (const hasHistory of [false, true]) {
-    const {html, composer} = render([pending], [], hasHistory);
-    assert.equal(composer.questionPromptVisible, true, "pending ask uses the single-row chat composer");
+    // The compact layout starts after the mounted question card reports visibility.
+    const {html} = render([pending], [], hasHistory);
     assert.match(html, /data-ordinary-composer/, "pending Question must retain the ordinary composer");
     assert.match(html, /data-composer-attachment/, "normal chat attachments remain available below ask");
     assert.equal((html.match(/data-ordinary-composer/g) || []).length, 1);
@@ -85,8 +81,10 @@ try {
     assert.ok(!settled.includes("Choose a repair"), "answered historical cards must leave the dock");
     assert.match(settled, /data-ordinary-composer/); assert.match(settled, /Keep my draft/);
     assert.equal(render([], [], hasHistory).composer.questionPromptVisible, false, "without ask the ordinary composer height is restored");
-    const approval = render([], [{ id: "a", status: "pending" }], hasHistory).html;
-    assert.match(approval, /data-approval-card/); assert.ok(!approval.includes("data-ordinary-composer"));
+    const approval = render([], [{ id: "a", status: "pending" }], hasHistory);
+    assert.match(approval.html, /data-approval-card/);
+    assert.match(approval.html, /data-ordinary-composer/);
+    assert.equal(approval.composer.submissionBlocked, true);
   }
   const running = render([{ ...pending, status: "answered", runtimeContinuation: { status: "running", turnId: "t" } }]);
   assert.ok(!running.html.includes("data-question-continuation-status"), "active continuation must not leave a question-specific dock bar");
@@ -100,16 +98,19 @@ try {
   await concurrent.composer.onStop();
   assert.equal(concurrent.ordinaryStopCount(), 1, "an existing chat run keeps ownership of the shared Stop control");
   assert.equal(concurrent.stoppedQuestionId(), "", "question Stop does not intercept an unrelated active chat run");
-  const queued = render([{ ...pending, status: "answered", runtimeContinuation: { status: "queued" } }]);
+  const queued = render([{ ...pending, status: "answered", runtimeContinuation: { status: "queued", clientTurnId: "queued-turn" } }]);
   assert.equal(queued.composer.sending, true, "queued continuation reaches the shared Composer busy state");
-  assert.equal(queued.composer.stopDisabled, true, "Stop stays disabled until the queued run exposes a cancellable identity");
+  assert.equal(queued.composer.stopDisabled, false, "queued continuation can be stopped by its client turn ID");
+  const unresolved = render([{ ...pending, status: "answered", runtimeContinuation: { status: "queued" } }]);
+  assert.ok(!unresolved.html.includes("data-composer-stop"), "a queued receipt needs a turn identity to own the Composer Stop control");
   const cancelling = render([{ ...pending, status: "answered", runtimeContinuation: { status: "cancelling", turnId: "t" } }]);
   assert.equal(cancelling.composer.sending, true, "cancelling continuation remains in the shared Composer busy state");
   assert.equal(cancelling.composer.stopDisabled, true, "a second stop is disabled while cancellation is pending");
-  const replying = render([pending], [], true, false, "q");
+  const replying = render([pending], [{ id: "a", status: "pending" }], true, false, "q");
   assert.match(replying.html, /data-question-reply-mode/);
   assert.match(replying.html, /data-ordinary-composer/);
   assert.match(replying.html, /data-composer-attachment/);
+  assert.equal(replying.composer.submissionBlocked, false, "a custom answer can still be sent during a concurrent approval");
   assert.ok(!replying.html.includes("Reinstall"), "reply mode hides the option card while retaining the composer");
   const restored = render([pending], [], true, false, "");
   assert.match(restored.html, /Reinstall/);

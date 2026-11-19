@@ -1135,6 +1135,8 @@
     },
     "requestTitle": "Approval request",
     "needsApproval": "Approval required",
+    "receiptApproved": "Approved",
+    "receiptApplied": "Applied",
     "viewParameters": "View parameters",
     "modify": "Modify",
     "modifying": "Marking",

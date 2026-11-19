@@ -1133,6 +1133,8 @@
     },
     "requestTitle": "审批请求",
     "needsApproval": "需要审批",
+    "receiptApproved": "已批准",
+    "receiptApplied": "已执行",
     "viewParameters": "查看参数",
     "modify": "修改",
     "modifying": "标记中",

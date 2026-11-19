@@ -378,6 +378,7 @@ export function ChatWorkspace({
     (question) => questionContinuationDisplay(question) === "pending",
   );
   const pendingReplyQuestion = pendingQuestionPrompts.find((question) => question.questionId === pendingReplyQuestionId);
+  const approvalBlocksSubmission = !pendingReplyQuestion && scopedPendingApprovals.some((approval) => approval.status === "pending");
   const dockQuestions = pendingQuestionPrompts.filter((question) => !dismissedQuestionIds?.has(question.questionId));
   const [questionReveal, setQuestionReveal] = useState<{ questionId: string }>();
   useEffect(() => {
@@ -599,6 +600,7 @@ export function ChatWorkspace({
       compact={compact}
       questionPromptVisible={Boolean(questionDock && questionCardVisible)}
       disabledReason={disabledReason}
+      submissionBlocked={approvalBlocksSubmission}
       attachments={attachments}
       onAttachFiles={onAttachFiles}
       onRemoveAttachment={onRemoveAttachment}
@@ -658,7 +660,7 @@ export function ChatWorkspace({
       ) : null}
     </section>
   ) : null;
-  const approvalComposer = scopedPendingApprovals.length ? (
+  const approvalCard = !pendingReplyQuestion && scopedPendingApprovals.length ? (
     <ScopedPendingApprovalCard
       approvals={scopedPendingApprovals}
       actions={approvalActions}
@@ -711,9 +713,10 @@ export function ChatWorkspace({
   ) : null;
 
   const visibleCompaction = chatCompactionStatusForDisplay(compaction, conversation);
-  if (conversation.length === 0) {
-    return (
-      <div className="relative flex min-h-0 flex-1 flex-col">
+  const hasHistory = conversation.length > 0;
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      {!hasHistory ? (
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-5 md:p-8" data-empty-chat-content>
           <div className="w-full max-w-3xl">
             {conversationPending ? (
@@ -745,22 +748,7 @@ export function ChatWorkspace({
             {unboundQuestionEntries}
           </div>
         </div>
-        <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock data-chat-composer-has-queue={queued.length ? "" : undefined}>
-          <div className="mx-auto max-w-3xl">
-            {replyBanner}
-            <CompactionStatus state={visibleCompaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
-            {activeGoalBar}
-            {questionDock}
-            {pendingQueue}
-            {pendingReplyQuestion ? composer(false) : approvalComposer || composer(false)}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
+      ) : (
       <div className="relative min-h-0 flex-1">
         <ChatPositionRail
           markers={navigationMarkers}
@@ -911,6 +899,7 @@ export function ChatWorkspace({
                 attachmentPayloads={attachmentPayloads}
                 approval={approval}
                 approvalAction={approval ? approvalActions[approval.id] : undefined}
+                approvalRuns={runtimeRuns}
                 canRetry={!sending && queued.length === 0 && item.id === latestRetryableItemId}
                 canEdit={item.id === latestEditableUserItemId}
                 editing={editingItemId === item.id}
@@ -945,7 +934,8 @@ export function ChatWorkspace({
           </div>
         </div>
       </div>
-      {showScrollToBottom ? (
+      )}
+      {hasHistory && showScrollToBottom ? (
         <Button
           type="button"
           variant="outline"
@@ -962,7 +952,7 @@ export function ChatWorkspace({
         <div className="mx-auto max-w-3xl">
           {replyBanner}
           <CompactionStatus state={visibleCompaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
-          {handoffSendOpen ? (
+          {hasHistory && handoffSendOpen ? (
             <div className="mb-2">
               <SessionHandoffSend
                 endpoint={sessionHandoffEndpoint}
@@ -976,7 +966,8 @@ export function ChatWorkspace({
           {activeGoalBar}
           {questionDock}
           {pendingQueue}
-          {pendingReplyQuestion ? composer(true) : approvalComposer || composer(true)}
+          {approvalCard}
+          {composer(hasHistory)}
         </div>
       </div>
     </div>
