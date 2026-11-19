@@ -846,9 +846,10 @@ export async function deleteAgentProgress(
 
 export async function fetchAgentQuestions(
   endpoint: string,
-  params: { limit?: number; sessionId?: string; projectRoot?: string; includeAnswered?: boolean; activeOnly?: boolean } = {},
+  params: { limit?: number; questionId?: string; sessionId?: string; projectRoot?: string; includeAnswered?: boolean; activeOnly?: boolean } = {},
 ): Promise<{ ok: boolean; schema?: string; questions: AgentQuestion[]; count: number }> {
   const query = new URLSearchParams();
+  if (params.questionId) query.set("questionId", params.questionId);
   if (params.limit) {
     query.set("limit", String(params.limit));
   }

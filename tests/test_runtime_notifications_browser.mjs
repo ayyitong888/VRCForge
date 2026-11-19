@@ -65,12 +65,29 @@ try {
     ['workspace.notificationCompletedTitle'], 'the main turn alone notifies after the child receipts and a second poll');
   assert.equal(await pending.evaluate(() => window.calls.filter(c => c.sound).length), 1);
   await pending.close();
+  // A parent can ask for a decision while it continues other work.
+  const asyncQuestion = process.env.VRCFORGE_ASYNC_QUESTION_REPLAY
+    ? JSON.parse(await readFile(process.env.VRCFORGE_ASYNC_QUESTION_REPLAY, 'utf8'))
+    : {questionId:'async-decision', sessionId:identity.sessionId, kind:'decision', question:'Keep the existing outfit?',
+      status:'pending', blocking:false, needsUserAction:true, notifyOnCreate:true};
+  const suppressedQuestion = {...asyncQuestion, questionId:'internal', notifyOnCreate:false};
+  const ongoing = await open({sessionId:asyncQuestion.sessionId, chats:{[asyncQuestion.sessionId]:{id:'parent-chat'}},
+    snapshot:{questions:{questions:[asyncQuestion,suppressedQuestion]},
+      runs:{runs:[{...identity, sessionId:asyncQuestion.sessionId, agent:'desktop-agent', status:'running'}]}}});
+  await ongoing.waitForFunction(id => window.state.agentQuestions.some(q => q.questionId === id), asyncQuestion.questionId);
+  await ongoing.evaluate(() => window.state.refreshRuntimeRuns());
+  const actual = await ongoing.evaluate(() => window.calls.filter(c => c.command || c.sound));
+  assert.deepEqual(actual.filter(c => c.command).map(c => [c.command,c.args.request.chatId,c.args.request.questionId]),
+    [['show_agent_question_notification','parent-chat',asyncQuestion.questionId]]);
+  assert.equal(actual.find(c => c.command).args.request.body, asyncQuestion.question.replace(/\s+/g, ' ').trim());
+  assert.deepEqual(actual.filter(c => c.sound).map(c => c.sound[1]), ['ordinary']);
+  await ongoing.close();
   // A pending call_user question and its terminal run arrive through independent observers.
   const questionReplay = process.env.VRCFORGE_BLOCKED_QUESTION_REPLAY
     ? JSON.parse(await readFile(process.env.VRCFORGE_BLOCKED_QUESTION_REPLAY, 'utf8'))
     : { run: {...run, notificationQuestionId:'decision'}, question: {
       sessionId:identity.sessionId, originTurnId:identity.turnId, originClientTurnId:identity.clientTurnId,
-      questionId:'decision', status:'pending', sourceTool:'call_user', needsUserAction:true, question:'Which project?',
+      questionId:'decision', status:'pending', sourceTool:'call_user', notifyOnCreate:true, needsUserAction:true, question:'Which project?',
     }};
   for (const ledgerFirst of [true, false]) {
     const {run:blocked, question} = questionReplay;
@@ -80,12 +97,12 @@ try {
     await both.waitForFunction(() => window.calls.some(c => c.ledger));
     if (ledgerFirst) await both.waitForFunction(() => window.state.runtimeAttention.length === 1);
     else {
-      await both.evaluate(question => window.state.notifyCallUserQuestions([question]), question);
+      await both.evaluate(question => window.state.notifyPendingAgentQuestions([question]), question);
       await both.waitForFunction(() => window.calls.some(c => c.command === 'show_agent_question_notification'));
     }
     await both.evaluate(({blocked, question}) => {
       window.fixture.snapshot.runs.runs = [blocked];
-      window.state.notifyCallUserQuestions([question]);
+      window.state.notifyPendingAgentQuestions([question]);
       window.tick();
     }, {blocked, question});
     await both.waitForFunction(() => window.calls.some(c => c.command === 'show_agent_question_notification')
@@ -98,7 +115,7 @@ try {
     assert.equal(request.questionId, question.questionId);
     assert.equal(request.chatId, 'owner-chat');
     assert.deepEqual(deliveries.filter(c => c.sound).map(c => c.sound[1]), ['blocking']);
-    await both.evaluate(question => window.state.notifyCallUserQuestions([
+    await both.evaluate(question => window.state.notifyPendingAgentQuestions([
       question, {...question, questionId:'second-decision'},
     ]), question);
     await both.waitForFunction(() => window.calls.filter(c => c.command === 'show_agent_question_notification').length === 2);

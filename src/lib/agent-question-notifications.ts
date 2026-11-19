@@ -21,11 +21,6 @@ export type AgentQuestionNotificationActionPayload = {
   action: "open";
 };
 
-export function isCallUserQuestion(question: { kind?: unknown; sourceTool?: unknown; tool?: unknown }): boolean {
-  const sourceTool = String(question.sourceTool || question.tool || "").trim().toLowerCase();
-  return sourceTool === "call_user";
-}
-
 /** The server derives this from the real runtime association; callers cannot mark urgency themselves. */
 export function isBlockingAgentQuestion(question: AgentQuestion): boolean {
   return question.status === "pending"

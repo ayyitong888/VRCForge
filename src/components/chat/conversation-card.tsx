@@ -34,6 +34,7 @@ import { ChatImagePreview } from "./chat-image-preview";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
+import type { TimelineQuestionMessage } from "../../lib/chat-steering-projection";
 import type { ChatResourceImageContext as ChatResourceImageContextValue } from "../../lib/api/chat-resource-image";
 import { AttachmentStrip } from "./composer";
 import { RunRow, SharedTurnProcessHeader, ToolDiagnosticsContext, buildAgentTimelineRows, buildDurableTimelineRows, formatPayload, formatRuntimeModelLine, type SharedTurnProcess } from "./conversation-timeline";
@@ -47,6 +48,7 @@ export function ConversationCard({
   initialUserContent,
   sharedProcess,
   activeSubAgentEvents,
+  timelineQuestions,
   retiredLoopPause,
   userMessageAuthor,
   agentReplySupplement,
@@ -91,6 +93,7 @@ export function ConversationCard({
   initialUserContent?: ReactNode;
   sharedProcess?: SharedTurnProcess;
   activeSubAgentEvents?: ReadonlyMap<string, string>;
+  timelineQuestions?: TimelineQuestionMessage[];
   retiredLoopPause?: boolean;
   userMessageAuthor?: string;
   agentReplySupplement?: ReactNode;
@@ -132,6 +135,27 @@ export function ConversationCard({
   runtimeActive?: boolean;
 }) {
   const { t } = useTranslation();
+  const questionRows = timelineQuestions?.map(({ kind, answer, timestamp }) => {
+    if (kind === "ask") {
+      const prompt = answer.question || "";
+      const timeline = item.type === "agent" ? item.timeline || item.response.timeline
+        : item.type === "streaming" ? item.timeline : undefined;
+      const alreadyInProcess = timeline?.some(event => event.kind === "assistant" && event.payload?.phase !== "final_answer"
+        && Date.parse(event.timestamp || "") <= Date.parse(timestamp) && includesQuestionText(event.payload?.summary || "", prompt));
+      return {
+        id: `ask-${answer.questionId}`, timestamp, alreadyInProcess,
+        row: <div data-chat-question-prompt={answer.questionId} className="px-1 text-chat-body" data-chat-quote-content>
+          <ChatMarkdown text={prompt} />
+        </div>,
+      };
+    }
+    return {
+      id: answer.id, timestamp,
+      row: <div data-chat-nav-anchor={answer.id}>
+        <ConversationCard item={answer} attachmentPayloads={attachmentPayloads} questionAlreadyShown />
+      </div>,
+    };
+  });
   const renderSteeringMessage = (message: Extract<ConversationItem, { type: "user" }>) => (
     <InterleavedUserMessage
       key={message.id}
@@ -398,6 +422,7 @@ export function ConversationCard({
       processTitleElapsed: streamingElapsed,
       sharedProcess,
       activeSubAgentEvents,
+      questionRows,
       providerLine: "",
       interleavedUserMessages,
       interleavedUsersExpanded,
@@ -541,6 +566,7 @@ export function ConversationCard({
     hideTurnMetadata: compactAgentReply,
     sharedProcess,
     activeSubAgentEvents,
+    questionRows,
     interleavedUserMessages,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,

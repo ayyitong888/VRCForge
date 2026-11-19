@@ -20,7 +20,6 @@ import {
 } from "../lib/api";
 import { isTauriRuntime } from "../lib/app-runtime";
 import {
-  isCallUserQuestion,
   isBlockingAgentQuestion,
   loadAgentQuestionNotificationIds,
   markAgentQuestionNotificationDelivered,
@@ -167,7 +166,7 @@ export function useRuntimeWorkspace({
       const item = runtimeAttentionFromRun(run);
       if (!item) continue;
       attention.push(item);
-      // call_user delivers its clickable question and sound through the question observer.
+      // The question observer owns the clickable notification for this blocked turn.
       if (!native || (item.status === "blocked" && run.notificationQuestionId)) continue;
       const kind = item.status === "blocked" ? "Blocked" : item.status === "completed" ? "Completed" : item.status === "failed" ? "Failed" : "Stopped";
       const statusTitle = t(`workspace.notification${kind}Title`);
@@ -186,7 +185,7 @@ export function useRuntimeWorkspace({
     return () => { current = false; };
   }, [endpoint, runtimeConnected, attentionCandidates, t]);
 
-  function notifyCallUserQuestions(questions: AgentQuestion[]) {
+  function notifyPendingAgentQuestions(questions: AgentQuestion[]) {
     if (!isTauriRuntime()) return;
     for (const question of questions) {
       const questionId = String(question.questionId || "").trim();
@@ -197,7 +196,7 @@ export function useRuntimeWorkspace({
       }
     }
     saveAgentQuestionNotificationIds(agentQuestionNotificationIdsRef.current);
-    const pending = questions.filter((question) => question.status === "pending" && isCallUserQuestion(question));
+    const pending = questions.filter((question) => question.status === "pending" && question.notifyOnCreate === true);
     for (const question of pending) {
       const questionId = String(question.questionId || "").trim();
       if (!questionId) continue;
@@ -212,7 +211,7 @@ export function useRuntimeWorkspace({
       const chatId = chat?.id || "";
       const notificationChatId = chatId || `question-${questionId.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 96)}`;
       agentQuestionNotificationInflightRef.current.add(questionId);
-      const blocking = isBlockingAgentQuestion(question);
+      const blocking = question.blocking !== false && isBlockingAgentQuestion(question);
       void playNotificationSoundOnce(`question:${questionId}`, blocking ? "blocking" : "ordinary").then((soundPlayed) => {
         return showAgentQuestionNotification({
           questionId,
@@ -468,7 +467,7 @@ export function useRuntimeWorkspace({
             || (!scopedProjectRoot && questionProjectRoot);
         }),
       ]));
-      notifyCallUserQuestions(nextQuestions);
+      notifyPendingAgentQuestions(nextQuestions);
       setAgentMemory(snapshot.memory?.memories ?? []);
       setMemoryReviewUnreadCount(Math.max(0, Number(snapshot.memoryReview?.unreadCount) || 0));
       setMemoryReviewNeedsAttention(snapshot.memoryReview?.needsAttention === true);
@@ -601,7 +600,7 @@ export function useRuntimeWorkspace({
     upsertAgentGoal,
     upsertAgentProgress,
     upsertAgentQuestion,
-    notifyCallUserQuestions,
+    notifyPendingAgentQuestions,
     updateAgentQuestionContinuation,
     upsertAgentMemory,
   };

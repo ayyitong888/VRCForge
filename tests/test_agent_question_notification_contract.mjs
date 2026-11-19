@@ -21,15 +21,14 @@ test("question notification is display-only and carries exact chat/question iden
   assert.match(source, /show_agent_question_notification/);
   assert.match(source, /payload\.action !== "open"/);
   const workspace = await readFile(path.join(root, "src/hooks/use-runtime-workspace.ts"), "utf8");
-  assert.match(workspace, /isCallUserQuestion\(question\)/);
+  assert.match(workspace, /question\.notifyOnCreate === true/);
   assert.match(workspace, /question\.status === "pending"/);
   assert.match(workspace, /chatForSessionId\?\.\(String\(question\.sessionId/);
   assert.match(workspace, /normalizeAgentQuestionNotificationBody/);
   assert.match(workspace, /const notificationChatId = chatId \|\| `question-/);
   assert.match(workspace, /agentQuestionNotificationInflightRef/);
   assert.match(workspace, /\.finally\(\(\) =>/);
-  assert.match(workspace, /notifyCallUserQuestions/);
-  assert.doesNotMatch(workspace, /isCallUserQuestion\(question\).*ask_user/s);
+  assert.match(workspace, /notifyPendingAgentQuestions/);
   const app = await readFile(path.join(root, "src/App.tsx"), "utf8");
   assert.match(app, /AGENT_QUESTION_NOTIFICATION_ACTION_EVENT/);
   assert.match(app, /questionSessionId !== chatSessionId/);

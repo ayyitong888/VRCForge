@@ -47,6 +47,9 @@ const stream = { id: `question-continuation:${questionTurnId}`, type: "streaming
 for (const [label, items] of [
   ["live", [priorFeedback, previousSteer, answer, stream, consumedSteer, pendingSteer, queuedFollowup, laterAnswer, laterSteer]],
   ["restored live", [priorFeedback, previousSteer, answer, consumedSteer, pendingSteer, queuedFollowup, stream, laterAnswer, laterSteer]],
+  ["settled in place", [answer, {id:"question-reply", type:"agent", response:{
+    clientTurnId:questionTurnId, consumedSteerInputIds:["consumed"], startedAt:time(4), completedAt:time(18),
+  }}, consumedSteer, laterAnswer, laterSteer]],
   ["completed", [priorFeedback, previousSteer, answer, { ...consumedSteer, queuedFrom: false }, pendingSteer, queuedFollowup, {
     id: "question-reply", type: "agent", response: {
       clientTurnId: questionTurnId, continuationSource: "question_answered", consumedSteerInputIds: ["consumed"], startedAt: time(4), completedAt: time(18),

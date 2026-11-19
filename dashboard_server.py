@@ -4196,7 +4196,13 @@ async def app_delete_agent_progress(progress_id: str, sessionId: str = "", proje
 
 @app.get("/api/app/agent/questions")
 def app_agent_questions(limit: int = 50, sessionId: str = "", projectRoot: str = "", includeAnswered: bool = False,
-                        activeOnly: bool = False) -> dict[str, Any]:
+                        activeOnly: bool = False, questionId: str = "") -> dict[str, Any]:
+    if questionId:
+        try:
+            question = AGENT_GATEWAY.questions.get_scoped(questionId, session_id=sessionId, project_root=projectRoot)
+        except AgentQuestionServiceError as exc:
+            raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
+        return {"ok": True, "schema": "vrcforge.agent_questions.v1", "questions": [question], "count": 1}
     return AGENT_GATEWAY.questions.list(limit=0 if activeOnly else limit, session_id=sessionId,
         project_root=projectRoot, include_answered=includeAnswered or activeOnly, keep_active=activeOnly)
 

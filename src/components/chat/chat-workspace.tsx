@@ -28,11 +28,12 @@ import { mergeConversationTimelineItems } from "../../lib/chat-thread";
 import { projectSubAgentRegistry } from "../../lib/subagent-ui";
 import type { SubAgentTask } from "../../lib/api/sub-agents";
 import { projectConversationSteeringMessages } from "../../lib/chat-steering-projection";
+import { useChatQuestionSources } from "../../hooks/use-chat-question-sources";
 import { agentReplyPreviewText, conversationItemRenderKey, copyableAgentDialogueText, includesQuestionText } from "../../lib/conversation-utils";
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { conversationRoundDateSeparators } from "../../lib/message-time";
 import { projectConversationTasks } from "../../lib/chat-task-projection";
-import { projectProcessRounds } from "../../lib/chat-process-rounds";
+import { conversationItemStart, projectProcessRounds } from "../../lib/chat-process-rounds";
 import { capturePreviewsForQuestion } from "../../lib/chat-timeline-presentation";
 import { ChatPositionRail, type ChatPositionMarker } from "./chat-position-rail";
 import { isExternalRuntimeStream } from "../../lib/runtime-stream-owner";
@@ -397,12 +398,14 @@ export function ChatWorkspace({
   const { items: registryLifecycle, activeEvents: activeSubAgentEvents } = projectSubAgentRegistry(
     subAgentTasks || [], t("agent.subagentTask"),
   );
+  const historyQuestions = useChatQuestionSources(conversation, projectedAgentQuestions, resourceImageEndpoint,
+    runtimeSessionId, resourceProjectPath);
   const steeringProjection = projectConversationSteeringMessages(mergeConversationTimelineItems(conversation.filter(
     (item) => item.type !== "user" || !(item.composerQueued || (
       item.queuedFrom && (item.queueStatus === "queued" || item.queueStatus === "waiting_for_resources"
         || item.queueStatus === "paused" || item.queueStatus === "cancelled")
     )),
-  ), registryLifecycle));
+  ), registryLifecycle), historyQuestions);
   const { items: conversationItems, rounds: processRounds } = projectProcessRounds(steeringProjection.items.map((item) => {
     if (item.type !== "question_answer") return item;
     if (item.question !== undefined && item.selectedOptionId !== undefined) return item;
@@ -498,15 +501,22 @@ export function ChatWorkspace({
       if (initialUser) {
         addUser(initialUser, conversationItemRenderKey(initialUser, conversationRenderScope, occurrences));
       }
-      const steers = turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined;
-      if (steers?.length) {
+      const turnMessages = turnId ? [
+        ...(steeringProjection.messagesByTurnId.get(turnId) || []),
+        ...(steeringProjection.questionMessages.get(turnId) || []).filter(message => message.kind === "answer").map(message => message.answer),
+      ].sort((a, b) => conversationItemStart(a) - conversationItemStart(b)) : [];
+      if (turnMessages.length) {
         const anchors = new Map<string, string>();
         const reveal = () => {
           const round = processRounds.get(item);
           if (round) setExpandedProcesses((current) => ({ ...current, [round.first.id]: true }));
           setSteeringReveal((current) => ({ ownerKey: renderKey, sequence: (current?.sequence ?? 0) + 1 }));
         };
-        for (const message of steers) {
+        for (const message of turnMessages) {
+          if (message.type === "question_answer") {
+            addUser(message, message.id);
+            continue;
+          }
           const key = `${renderKey}:steer:${message.id}`;
           anchors.set(message.id, key);
           addUser(message, key, reveal);
@@ -515,7 +525,7 @@ export function ChatWorkspace({
       }
     }
     return { navigationMarkers: markers, steeringAnchorsByOwner };
-  }, [conversationItems, conversationRenderScope, steeringProjection.initialUsersByTurnId, steeringProjection.messagesByTurnId, processRounds]);
+  }, [conversationItems, conversationRenderScope, steeringProjection.initialUsersByTurnId, steeringProjection.messagesByTurnId, steeringProjection.questionMessages, processRounds]);
   const historyScrollRef = useRef<HTMLDivElement>(null);
   const questionCapturePreviews = (question: AgentQuestion) => readOnlyHistory ? [] : capturePreviewsForQuestion(question, conversationItems);
   const questionResourceImageContext = (question: AgentQuestion) => {
@@ -778,7 +788,7 @@ export function ChatWorkspace({
           />
           {(() => {
             let recentAssistantTurns: ConversationItem[] = [];
-            const shownQuestionIds = new Set<string>();
+            const shownQuestionIds = new Set(steeringProjection.placedQuestionIds);
             return conversationItems.map((item, itemIndex) => {
             if (item.type === "user") recentAssistantTurns = [];
             if (item.type === "agent" || item.type === "streaming") recentAssistantTurns.push(item);
@@ -861,6 +871,7 @@ export function ChatWorkspace({
                 item={item}
                 developerOptionsEnabled={developerOptionsEnabled}
                 sharedProcess={sharedProcess}
+                timelineQuestions={turnId ? steeringProjection.questionMessages.get(turnId) : undefined}
                 activeSubAgentEvents={activeSubAgentEvents}
                 retiredLoopPause={item.type === "agent" && Boolean(turnId) && retiredLoopPauses.has(turnId)}
                 onOpenSubAgent={onOpenSubAgent}

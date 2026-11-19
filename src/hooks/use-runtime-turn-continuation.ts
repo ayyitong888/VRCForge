@@ -570,13 +570,15 @@ export function useRuntimeTurnContinuationDelivery({
       if (externalStream && updateChatRef.current) {
         updateChatRef.current(ownerChat.id, (chat) => {
           chat = coalesceRuntimeTurnStreams(chat, event.clientTurnId!);
-          const stream = chat.items.find((item) => item.type === "streaming" && item.id === externalStream.id);
+          const stream = chat.items.find((item) => continuationMatchesStream(event, item));
+          if (!stream && chat.items.some((item) => item.type === "agent" && continuationMatchesResponse(event, item.response))) return chat;
           const timeline = mergeRuntimeTimelines(stream?.type === "streaming" ? stream.timeline || [] : [], materializeRuntimeTimeline(response));
-          return { ...chat, items: [...chat.items.filter((item) => item.id !== externalStream.id), {
+          const receipt: ConversationItem = {
             id: `runtime-reply-${continuationId}`, type: "agent", response, timeline,
             ...(elapsedSeconds === undefined ? {} : { elapsedSeconds }),
             ...(completedAt ? { completedAt } : {}),
-          }] };
+          };
+          return { ...chat, items: stream ? chat.items.map(item => item === stream ? receipt : item) : [...chat.items, receipt] };
         });
         return finish();
       }

@@ -1077,6 +1077,8 @@ export type AgentQuestion = {
   question?: string;
   options?: AgentQuestionOption[];
   status?: "pending" | "answered" | "cancelled" | string;
+  /** Server-owned decision to notify for this pending question. */
+  notifyOnCreate?: boolean;
   /** Server-derived authority that this question currently blocks its agent run. */
   needsUserAction?: boolean;
   retiredLoopPause?: boolean;
@@ -1089,6 +1091,7 @@ export type AgentQuestion = {
   owner?: string;
   createdAt?: string;
   updatedAt?: string;
+  answeredAt?: string;
   runtimeContinuationStatus?: "queued" | "claimed" | "delivered" | "interrupted" | string;
   runtimeContinuationClientTurnId?: string;
   runtimeContinuationTurnId?: string;

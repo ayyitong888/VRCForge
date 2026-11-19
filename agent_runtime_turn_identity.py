@@ -6,18 +6,22 @@ MAX_RUNTIME_SESSION_ID_LENGTH = 180
 MAX_RUNTIME_CLIENT_TURN_ID_LENGTH = 240
 
 
+def dispatch_turn_id(context: Mapping) -> str:
+    """The execution that emitted a tool call, including after task resumption."""
+    turn = context.get("usageParentTurnId") or context.get("turnId")
+    return turn[:180] if isinstance(turn, str) else ""
+
+
 def continuation_identity(source: str, context: Mapping | None) -> dict[str, str]:
     """Attach the actual dispatch owner, independent of the child's bounded id."""
     if not source:
         return {}
     identity = {"continuationSource": source}
     if context:
-        # turnId on older task seeds names the original task. The usage parent
-        # is captured from the current execution when it dispatches this tool.
-        turn = context.get("usageParentTurnId") or context.get("turnId")
+        turn = dispatch_turn_id(context)
         client = context.get("clientTurnId")
-        if isinstance(turn, str) and turn:
-            identity["parentTurnId"] = turn[:180]
+        if turn:
+            identity["parentTurnId"] = turn
         if isinstance(client, str) and client:
             identity["parentClientTurnId"] = client[:MAX_RUNTIME_CLIENT_TURN_ID_LENGTH]
     return identity

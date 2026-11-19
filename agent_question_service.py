@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
+from agent_runtime_turn_identity import dispatch_turn_id
 
 
 AGENT_QUESTION_SCHEMA = "vrcforge.agent_question.v1"
@@ -286,6 +287,12 @@ class AgentQuestionPersistence:
             "createdAt": previous.get("createdAt") or event.get("createdAt"),
             "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
         }
+        if event.get("event") == "question_answered":
+            merged["answeredAt"] = event.get("createdAt") or event.get("updatedAt")
+        seed = event.get("runtimeTaskSeed")
+        if isinstance(seed, Mapping) and seed.get("usageParentTurnId"):
+            # Older event logs recorded the task root on resumed turns.
+            merged["originTurnId"] = dispatch_turn_id(seed)
         for field in ("options", "question", "header"):
             if not event.get(field) and previous.get(field):
                 merged[field] = previous[field]
@@ -405,7 +412,7 @@ class AgentQuestionService:
             event["runtimeClientTurnId"] = str(values.get("_runtimeClientTurnId") or "").strip()
             event["runtimeTaskId"] = str(runtime_seed.get("taskId") or "").strip()
             event["originClientTurnId"] = str(runtime_seed.get("clientTurnId") or "")
-            event["originTurnId"] = str(runtime_seed.get("turnId") or "")
+            event["originTurnId"] = dispatch_turn_id(runtime_seed)
         with _locked(self._persistence.shared_state_lock):
             if source_tool == "call_user":
                 for existing in self._project(include_answered=False).values():
@@ -664,7 +671,7 @@ class AgentQuestionService:
                     continue
                 if session_id and seed.get("sessionId") != session_id:
                     continue
-                if turn_id and seed.get("turnId") != turn_id:
+                if turn_id and dispatch_turn_id(seed) != turn_id:
                     continue
                 if client_turn_id and seed.get("clientTurnId") != client_turn_id:
                     continue
@@ -916,8 +923,12 @@ class AgentQuestionService:
         public = deepcopy({key: item for key, item in source.items() if key not in _PRIVATE_QUESTION_FIELDS})
         redacted = self._persistence.redact(public)
         result = dict(redacted) if isinstance(redacted, Mapping) else {}
-        # Publish only whether this question holds an owned task for a human.
-        # Caller-supplied urgency cannot turn an ordinary question into an alert.
+        seed = source.get("runtimeTaskSeed")
+        runtime = seed if isinstance(seed, Mapping) else {}
+        result["notifyOnCreate"] = runtime.get("agentName") != "sub-agent" and (
+            source.get("sourceTool") == "call_user"
+            or (runtime.get("requestedTool") == "vrcforge_ask_user" and source.get("sourceTool") != RUNTIME_TOOL_LOOP_SOURCE)
+        )
         result["blocking"] = source.get("blocking", True) is not False
         result["needsUserAction"] = bool(
             source.get("status") == "pending"

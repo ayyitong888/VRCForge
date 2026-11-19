@@ -10,6 +10,19 @@ const {projectAgentQuestionContinuation:questionProjection,questionContinuationD
 const user=(id)=>({id,type:'user',text:id,clientTurnId:id});
 const agent=(id,nextStep='needs_user_action',extra={})=>({id:'reply-'+id,type:'agent',response:{clientTurnId:id,turnId:'backend-'+id,sessionId:'s',plan:{nextStep},...extra}});
 const answer=(qid)=>({id:'answer-'+qid,type:'question_answer',questionId:qid,text:'answered'});
+{
+  const at = minute => new Date(Date.UTC(2026, 10, 19, 13, minute)).toISOString();
+  const original = agent('original', 'done', {startedAt: at(10)});
+  const later = agent('later', 'done', {startedAt: at(30)});
+  const response = {...answer('decision'), updatedAt: at(20)};
+  const submitted = {...user('new-message'), createdAt: at(25)};
+  const revision = {id: 'revision', type: 'approval_revision', requestedAt: at(26)};
+  const decision = {id: 'result-approval-' + Date.parse(at(27)), type: 'result', approvalId: 'approval'};
+  const untimed = {id: 'legacy-note', type: 'error', text: 'Historical note'};
+  const recovered = projectProcessRounds([decision, untimed, response, later, submitted, revision, original]);
+  assert.deepEqual(recovered.items, [original, untimed, response, submitted, revision, decision, later],
+    'recovering a delayed receipt preserves the author times of all dated messages');
+}
 const ask=(tool,qid,blocking=true)=>({tool,result:{ok:true,question:{questionId:qid,status:'pending',blocking}}});
 const parked=agent('cid','waiting_for_tool',{turnId:'original'});
 const retry=agent('cid','waiting_for_tool',{turnId:'retry'}), next=agent('next','done');

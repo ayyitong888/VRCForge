@@ -68,6 +68,20 @@ def test_async_question_does_not_end_independent_runtime_work(tmp_path):
     assert question["originTurnId"]
 
 
+def test_chat_can_read_the_exact_historical_question_in_its_own_scope(tmp_path, monkeypatch):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    first = _question(gateway, tmp_path)["question"]
+    _question(gateway, tmp_path, question="A different question")
+    query = {"sessionId": "async-session", "projectRoot": str(tmp_path), "questionId": first["questionId"]}
+    with _question_app(gateway, monkeypatch) as (client, _):
+        path = "/api/app/agent/questions"
+        result = client.get(path, params=query)
+        assert result.status_code == 200
+        assert [q["questionId"] for q in result.json()["questions"]] == [first["questionId"]]
+        assert client.get(path, params={**query, "sessionId": "another-session"}).status_code == 404
+        assert client.get(path, params={**query, "projectRoot": ""}).status_code == 404
+
+
 def test_returned_blocked_question_reply_is_recovered_from_durable_ledger(tmp_path):
     from agent_gateway import AgentGateway
 
@@ -148,20 +162,26 @@ def test_returned_blocked_question_reply_is_recovered_from_durable_ledger(tmp_pa
     assert "response" not in historical_recovery
 
 
-def test_active_answer_steers_exact_turn_without_a_second_provider(tmp_path, monkeypatch):
+@pytest.mark.parametrize("task_turn", ["origin-turn", "earlier-task-root"])
+def test_active_answer_steers_exact_turn_without_a_second_provider(tmp_path, monkeypatch, task_turn):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     gateway.runtime_sessions.begin_turn(session_id="async-session", client_turn_id="origin-cid", turn_id="origin-turn")
-    question = _question(gateway, tmp_path)["question"]
+    question = _question(gateway, tmp_path, _runtimeTaskSeed={
+        "sessionId": "async-session", "clientTurnId": "origin-cid", "turnId": task_turn,
+        "usageParentTurnId": "origin-turn", "projectRoot": str(tmp_path), "objective": "Fit the wardrobe",
+    })["question"]
+    assert question["originTurnId"] == "origin-turn"
     monkeypatch.setattr(gateway, "_dispatch_runtime_task_after_question", lambda *_a: (_ for _ in ()).throw(AssertionError("must not dispatch a second provider")))
     response = gateway.questions.answer(question["questionId"], {"sessionId": "async-session", "answer": "Example Outfit"})
     continuation = response["runtimeContinuation"]
     assert continuation["mode"] == "steer"
     assert continuation["clientTurnId"] == "origin-cid"
+    assert continuation["turnId"] == "origin-turn"
     queued = gateway.runtime_sessions.drain_steer(session_id="async-session", client_turn_id="origin-cid")
     assert len(queued) == 1 and "Example Outfit" in queued[0]["message"]
     saved = gateway.questions.list(session_id="async-session", include_answered=True)["questions"][0]
     assert saved["runtimeContinuationStatus"] == "queued", "accepted hot mailbox is not durable consumption"
-    gateway._settle_async_question_steers([queued[0]["inputId"]], session_id="async-session", client_turn_id="origin-cid")
+    gateway._settle_async_question_steers([queued[0]["inputId"]], session_id="async-session", client_turn_id="origin-cid", turn_id="origin-turn")
     saved = gateway.questions.list(session_id="async-session", include_answered=True)["questions"][0]
     assert saved["runtimeContinuationStatus"] == "delivered"
 
@@ -172,6 +192,31 @@ def test_async_request_cannot_disable_visual_or_goal_gates(tmp_path):
         created = _question(gateway, tmp_path, **extra)
         assert created["question"]["blocking"] is True
         assert created["outcome"]["status"] == "needs_user_action"
+
+
+def test_replayed_answer_time_changes_only_when_a_new_answer_is_recorded(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    questions = gateway.questions
+    question_id = "visual-choice"
+    events = [
+        ("question_created", "pending", "10:00:00", {}),
+        ("question_answered", "answered", "10:01:00", {"questionFeedbackRevision": 1}),
+        ("question_runtime_continuation_delivered", None, "10:03:00", {}),
+        ("question_answered", "answered", "10:05:00", {"questionFeedbackRevision": 2}),
+        ("question_runtime_continuation_queued", None, "10:06:00", {}),
+    ]
+    answer_time = None
+    for kind, status, clock, fields in events:
+        at = "2026-01-01T" + clock + "Z"
+        questions._persistence.append({
+            "event": kind, "questionId": question_id, "sessionId": "owner", "createdAt": at,
+            "updatedAt": at, **({"status": status} if status else {}), **fields,
+        })
+        if kind == "question_answered":
+            answer_time = at
+        current = questions.get_scoped(question_id, session_id="owner", project_root="")
+        assert current.get("answeredAt") == answer_time
+        assert current["updatedAt"] == at
 
 
 def test_async_resume_claim_excludes_other_session_writers_through_finalization(tmp_path):

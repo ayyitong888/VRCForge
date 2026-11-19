@@ -1135,7 +1135,7 @@ export default function App() {
     agentGoals,
     agentProgress,
     agentQuestions,
-    notifyCallUserQuestions,
+    notifyPendingAgentQuestions,
     agentMemory,
     memoryReviewUnreadCount,
     memoryReviewNeedsAttention,
@@ -2152,12 +2152,12 @@ export default function App() {
     }
     initialGlobalQuestionFetchRef.current = true;
     void fetchAgentQuestions(endpoint, { activeOnly: true }).then((result) => {
-      notifyCallUserQuestions(result.questions);
+      notifyPendingAgentQuestions(result.questions);
       result.questions.forEach((question) => upsertAgentQuestion(question, true));
     }).catch(() => {
       // The regular runtime snapshot/event path remains authoritative after startup.
     });
-  }, [endpoint, notifyCallUserQuestions, runtimeConnected, upsertAgentQuestion]);
+  }, [endpoint, notifyPendingAgentQuestions, runtimeConnected, upsertAgentQuestion]);
 
   useEffect(() => {
     if (!runtimeConnected || !isTauriRuntime()) {
@@ -2249,7 +2249,7 @@ export default function App() {
       if (eventType === "agentQuestions") {
         const payload = event.payload as { question?: AgentQuestion; questions?: AgentQuestion[] } | undefined;
         const questions = Array.isArray(payload?.questions) ? payload.questions : payload?.question ? [payload.question] : [];
-        notifyCallUserQuestions(questions);
+        notifyPendingAgentQuestions(questions);
         questions.forEach((question) => upsertAgentQuestion(question, true));
       }
       if (bootstrapEvents.has(eventType)) {

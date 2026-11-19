@@ -850,19 +850,21 @@ class AgentRuntimeRunLedger:
         details = {}
         gate = _ensure_dict(plan.get("completionGate"))
         if run.get("status") == "blocked" and gate.get("reason") == "question_pending":
-            question_sources = {}
+            question_notifications = {}
             for step in run.get("steps") or []:
                 if not isinstance(step, dict) or step.get("historical"):
                     continue
                 question = _ensure_dict(_ensure_dict(step.get("result")).get("question"))
                 candidate_id = question.get("questionId")
                 if isinstance(candidate_id, str) and candidate_id:
-                    question_sources[candidate_id] = step.get("tool")
+                    question_notifications[candidate_id] = question.get(
+                        "notifyOnCreate", step.get("tool") in {"vrcforge_ask_user", "vrcforge_call_user"}
+                    )
             question_id = gate.get("questionId")
             # Older receipts can identify the cause when the turn created only one question.
-            if not question_id and len(question_sources) == 1:
-                question_id = next(iter(question_sources))
-            if question_sources.get(question_id) == "vrcforge_call_user":
+            if not question_id and len(question_notifications) == 1:
+                question_id = next(iter(question_notifications))
+            if question_notifications.get(question_id) is True:
                 details["notificationQuestionId"] = question_id
         for value in (plan.get("reply"), run.get("error"), run.get("planSummary")):
             if isinstance(value, str) and value.strip():

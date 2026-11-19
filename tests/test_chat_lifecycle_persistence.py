@@ -54,6 +54,9 @@ def test_question_answer_item_survives_actual_chat_storage_write(tmp_path, monke
             "text": "blue",
             "revision": 1,
             "updatedAt": "2026-10-23T00:00:00Z",
+            "askedAt": "2026-10-22T23:59:00Z",
+            "originClientTurnId": "question-issuing-client",
+            "originTurnId": "question-issuing-run",
             "displayMetadata": {"source": "question-card", "revision": 1},
             "attachments": [{
                 "id": "answer-attachment",

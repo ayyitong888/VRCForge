@@ -527,6 +527,7 @@ pub(crate) struct DesktopMemoryReviewQueryRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAgentListRequest {
     limit: Option<u64>,
+    question_id: Option<String>,
     session_id: Option<String>,
     project_root: Option<String>,
     client_turn_id: Option<String>,
@@ -2207,6 +2208,7 @@ pub(crate) fn append_query_param(query: &mut Vec<String>, key: &str, value: &Opt
 
 pub(crate) fn agent_list_query(request: &DesktopAgentListRequest) -> String {
     let mut query = Vec::new();
+    append_query_param(&mut query, "questionId", &request.question_id);
     if let Some(value) = request.limit {
         query.push(format!("limit={value}"));
     }

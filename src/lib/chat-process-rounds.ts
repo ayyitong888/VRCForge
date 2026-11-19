@@ -20,9 +20,35 @@ function runOf(item: Segment) {
   return item.type === "agent" ? item.response : item;
 }
 
+export function conversationItemStart(item: ConversationItem): number {
+  if (item.type === "agent") {
+    const firstEventAt = item.timeline?.[0]?.timestamp || item.response.timeline?.[0]?.timestamp;
+    return Date.parse(item.response.startedAt || firstEventAt || item.createdAt || "");
+  }
+  if (item.type === "streaming") return Date.parse(item.createdAt || item.timeline?.[0]?.timestamp || "");
+  if (item.type === "question_answer") return Date.parse(item.updatedAt || "");
+  if (item.type === "approval_revision") return Date.parse(item.requestedAt || item.createdAt || "");
+  if (item.type === "timeline_event") return Date.parse(item.event.timestamp || item.createdAt || "");
+  if (item.type === "subagent") return Date.parse(item.task.createdAt || item.task.startedAt || "");
+  if ((item.type === "result" || item.type === "error") && !item.createdAt) {
+    // The desktop writer stamps these receipts with Date.now() in the last ID component.
+    const stamp = /-(\d{13})$/.exec(item.id);
+    if (stamp) return Number(stamp[1]);
+  }
+  return Date.parse(("createdAt" in item && item.createdAt) || "");
+}
+
 /** Relate dispatches without losing their tool targets or moving intervening user messages. */
 export function projectProcessRounds(items: ConversationItem[], sessionId = "") {
-  const segments = items.filter((item): item is Segment => item.type === "agent" || item.type === "streaming");
+  const orderedItems = [...items];
+  const dated = items.map((item, index) => ({ item, index, time: conversationItemStart(item) }))
+    .filter(entry => Number.isFinite(entry.time));
+  // A receipt can be written after the next run starts. Keep undated history in its saved slots.
+  const chronological = [...dated].sort((a, b) => a.time - b.time);
+  dated.forEach(({ index }, i) => {
+    orderedItems[index] = chronological[i].item;
+  });
+  const segments = orderedItems.filter((item): item is Segment => item.type === "agent" || item.type === "streaming");
   const clients = new Map<string, Segment | null>();
   const turns = new Map<string, Segment | null>();
   const sessionOf = (item: Segment) => runOf(item).sessionId || (item.type === "agent" && item.response.session_id) || sessionId;
@@ -80,8 +106,7 @@ export function projectProcessRounds(items: ConversationItem[], sessionId = "") 
   }
 
   const rounds = new Map<ConversationItem, ChatProcessRound>();
-  const orderedItems = [...items];
-  const positions = new Map(items.map((item, i) => [item, i]));
+  const positions = new Map(orderedItems.map((item, i) => [item, i]));
   for (const [first, members] of membersByRoot) {
     const ordered = [...members];
     const last = ordered[ordered.length - 1];

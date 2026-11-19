@@ -7,13 +7,13 @@ import { pathToFileURL } from 'node:url';
 
 const root = process.cwd();
 const source = await readFile('src/hooks/use-runtime-workspace.ts', 'utf8');
-const start = source.indexOf('  function notifyCallUserQuestions(');
+const start = source.indexOf('  function notifyPendingAgentQuestions(');
 const end = source.indexOf('  function clearScopedRuntimeProjection(', start);
 assert(start > 0 && end > start);
 const directory = await mkdtemp(path.resolve('local-review/notification-failure-test-'));
 const bundle = await build({ stdin: { resolveDir: root, loader: 'ts', contents: `
 import { isTauriRuntime } from './src/lib/app-runtime';
-import { isCallUserQuestion, isBlockingAgentQuestion, saveAgentQuestionNotificationIds, shouldStartAgentQuestionNotification, normalizeAgentQuestionNotificationBody, markAgentQuestionNotificationDelivered, showAgentQuestionNotification } from './src/lib/agent-question-notifications';
+import { isBlockingAgentQuestion, saveAgentQuestionNotificationIds, shouldStartAgentQuestionNotification, normalizeAgentQuestionNotificationBody, markAgentQuestionNotificationDelivered, showAgentQuestionNotification } from './src/lib/agent-question-notifications';
 import { playNotificationSoundOnce } from './src/lib/notification-sound-delivery';
 import { normalizeRuntimeNotificationText } from './src/lib/runtime-attention';
 export { showApprovalNotification } from './src/lib/approval-notifications';
@@ -22,7 +22,7 @@ export function questionFixture() {
  const agentQuestionNotificationIdsRef = {current:new Set<string>()}, agentQuestionNotificationInflightRef = {current:new Set<string>()}, agentQuestionNotificationStatusRef = {current:new Map<string,string>()};
  const chatForSessionId = () => ({id:'chat-stub'}), t = (key:string) => key;
  ${source.slice(start, end)}
- return { notifyCallUserQuestions, agentQuestionNotificationInflightRef };
+ return { notifyPendingAgentQuestions, agentQuestionNotificationInflightRef };
 }
 ` }, bundle: true, write: false, format: 'esm', platform: 'node', plugins: [{ name: 'no-native-notification', setup(builder) {
   builder.onResolve({ filter: /^@tauri-apps\/api\/core$/ }, () => ({path:'core',namespace:'stub'}));
@@ -44,7 +44,7 @@ globalThis.Audio = class {
 const api = await import(pathToFileURL(path.join(directory, 'runtime.mjs')));
 const fixture = api.questionFixture();
 function sendAll(prefix) {
- fixture.notifyCallUserQuestions([{questionId:prefix,sourceTool:'call_user',status:'pending',sessionId:'session-stub',question:'Stub only',needsUserAction:true}]);
+ fixture.notifyPendingAgentQuestions([{questionId:prefix,sourceTool:'call_user', notifyOnCreate:true,status:'pending',sessionId:'session-stub',question:'Stub only',needsUserAction:true}]);
  return Promise.allSettled([
   api.showApprovalNotification({id:prefix},'title','body'),
   api.notifyBackgroundGoal({status:'blocked_question'},true,key=>key,prefix),

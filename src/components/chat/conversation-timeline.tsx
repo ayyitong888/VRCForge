@@ -49,6 +49,7 @@ type AgentTimelineStep = NonNullable<AgentRuntimeResponse["steps"]>[number] & {
 };
 
 type InterleavedUserMessage = Extract<ConversationItem, { type: "user" }>;
+type TimedDialogueRow = { id: string; timestamp: string; row: ReactNode; alreadyInProcess?: boolean };
 
 export type SharedTurnProcess = {
   first: boolean;
@@ -82,6 +83,7 @@ export function buildAgentTimelineRows({
   hideTurnMetadata = false,
   sharedProcess,
   activeSubAgentEvents,
+  questionRows,
   interleavedUserMessages = [],
   interleavedUsersExpanded = false,
   onInterleavedUsersExpandedChange,
@@ -110,6 +112,7 @@ export function buildAgentTimelineRows({
   hideTurnMetadata?: boolean;
   sharedProcess?: SharedTurnProcess;
   activeSubAgentEvents?: ReadonlyMap<string, string>;
+  questionRows?: TimedDialogueRow[];
   interleavedUserMessages?: InterleavedUserMessage[];
   interleavedUsersExpanded?: boolean;
   onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
@@ -198,6 +201,7 @@ export function buildAgentTimelineRows({
       live,
       sharedProcess,
       activeSubAgentEvents,
+      questionRows,
       providerLine,
       activeApprovalId: approval?.id,
       approvalRuns,
@@ -483,6 +487,7 @@ export function buildDurableTimelineRows(
     processSupplement?: ReactNode;
     sharedProcess?: SharedTurnProcess;
     activeSubAgentEvents?: ReadonlyMap<string, string>;
+    questionRows?: TimedDialogueRow[];
     providerLine?: string;
     activeApprovalId?: string;
     approvalRuns?: readonly AgentRuntimeRun[];
@@ -522,20 +527,28 @@ export function buildDurableTimelineRows(
   };
   const rows: ReactNode[] = [];
   const processRows: ReactNode[] = [];
-  const interleavedMessages = [...(options.interleavedUserMessages || [])]
-    .sort((left, right) => parseTimelineTime(left.createdAt) - parseTimelineTime(right.createdAt));
+  const permanentRows = (options.questionRows || []).map(message => ({ ...message, permanent: true }));
+  const steeringRows = (options.interleavedUserMessages || []).map(message => ({
+    id: message.id, timestamp: message.createdAt, permanent: false, alreadyInProcess: false,
+    row: options.renderInterleavedUserMessage?.(message) || (
+      <div data-chat-steering-message={message.id} className="flex justify-end">
+        <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20">{message.text}</div>
+      </div>
+    ),
+  }));
+  const interleavedMessages = [...steeringRows, ...permanentRows]
+    .sort((left, right) => parseTimelineTime(left.timestamp) - parseTimelineTime(right.timestamp));
+  const collapsedRows: ReactNode[] = [];
   let nextInterleavedMessage = 0;
   const appendMessagesBefore = (timestamp: string) => {
     const eventTime = parseTimelineTime(timestamp);
     while (nextInterleavedMessage < interleavedMessages.length) {
       const message = interleavedMessages[nextInterleavedMessage];
-      if (parseTimelineTime(message.createdAt) > eventTime) break;
+      if (parseTimelineTime(message.timestamp) > eventTime) break;
       flushToolCalls();
-      processRows.push(options.renderInterleavedUserMessage?.(message) || (
-        <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-          <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20">{message.text}</div>
-        </div>
-      ));
+      const row = <Fragment key={message.id}>{message.row}</Fragment>;
+      if (!message.alreadyInProcess) processRows.push(row);
+      if (message.permanent) collapsedRows.push(row);
       nextInterleavedMessage += 1;
     }
   };
@@ -583,7 +596,7 @@ export function buildDurableTimelineRows(
           if (next.type !== "subagent" || next.event.payload.status !== "started" || !subAgentTimelineTaskId(next.event)
             || next.event.payload.dispatchBatchId !== start.payload.dispatchBatchId
             || next.event.turnId !== start.turnId || next.event.clientTurnId !== start.clientTurnId || next.event.sessionId !== start.sessionId
-            || (nextUser && parseTimelineTime(nextUser.createdAt) <= parseTimelineTime(next.startedAt))) break;
+            || (nextUser && parseTimelineTime(nextUser.timestamp) <= parseTimelineTime(next.startedAt))) break;
           starts.push(next.event);
         }
         if (starts.length > 1) {
@@ -627,6 +640,7 @@ export function buildDurableTimelineRows(
         processRows.push(
           <div key={entry.id} className="space-y-1 px-1 text-chat-body" data-chat-quote-content>
             <ChatMarkdown text={entry.text} />
+            {options.renderQuestionActions?.(entry.text)}
           </div>,
         );
       }
@@ -652,20 +666,13 @@ export function buildDurableTimelineRows(
     }
   }
   flushToolCalls();
-  while (nextInterleavedMessage < interleavedMessages.length) {
-    const message = interleavedMessages[nextInterleavedMessage++];
-    processRows.push(options.renderInterleavedUserMessage?.(message) || (
-      <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
-        <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20">{message.text}</div>
-      </div>
-    ));
-  }
+  appendMessagesBefore("");
   if (options.processSupplement != null) {
     processRows.push(<Fragment key="agent-process-supplement">{options.processSupplement}</Fragment>);
   }
   if (processRows.length) {
     const group = options.sharedProcess ? (
-      options.sharedProcess.open ? <div key="agent-turn-process" className="space-y-1.5" data-agent-process-content>{processRows}</div> : null
+      options.sharedProcess.open ? <div key="agent-turn-process" className="space-y-1.5" data-agent-process-content>{processRows}</div> : <Fragment key="closed-process">{collapsedRows}</Fragment>
     ) : (
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow
@@ -678,6 +685,7 @@ export function buildDurableTimelineRows(
           forceOpen={Boolean(options.live)}
           controlledOpen={interleavedMessages.length ? options.interleavedUsersExpanded : undefined}
           onOpenChange={options.onInterleavedUsersExpandedChange}
+          collapsedContent={collapsedRows}
           processHeader
         >
           {processRows}
@@ -1581,6 +1589,7 @@ export function WorkSegmentRow({
   processHeader = false,
   scrollable = false,
   children,
+  collapsedContent,
 }: {
   kind: TimelineBatchKind;
   title: string;
@@ -1595,6 +1604,7 @@ export function WorkSegmentRow({
   processHeader?: boolean;
   scrollable?: boolean;
   children?: ReactNode;
+  collapsedContent?: ReactNode;
 }) {
   const [localOpen, setLocalOpen] = useState(openByDefault);
   const open = forceOpen || (controlledOpen ?? localOpen);
@@ -1649,7 +1659,7 @@ export function WorkSegmentRow({
         >
           {children}
         </div>
-      ) : null}
+      ) : collapsedContent}
     </div>
   );
 }

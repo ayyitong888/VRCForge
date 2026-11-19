@@ -108,6 +108,7 @@ from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSe
 from agent_runtime_input import classify_history, classify_steer, resolve_turn_source
 from agent_runtime_turn_identity import (
     MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH, continuation_client_turn_id, continuation_identity,
+    dispatch_turn_id,
 )
 from agent_native_history_store import NativeHistoryStore
 from agent_runtime_native_turn import NativeRuntimeTurn
@@ -1930,7 +1931,7 @@ class AgentGateway:
                     return
                 if not new_turn and self._runtime_session_state.cancel_requested(
                     session_id=session_id,
-                    turn_id=str(task_seed.get("turnId") or ""),
+                    turn_id=dispatch_turn_id(task_seed),
                     client_turn_id=str(task_seed.get("clientTurnId") or ""),
                 ):
                     raise AgentGatewayError("The original task was stopped; the answer was saved.", status_code=409)
@@ -2010,7 +2011,7 @@ class AgentGateway:
 
     def _question_origin_active(self, seed: Mapping[str, Any]) -> bool:
         session_id = str(seed.get("sessionId") or "")
-        turn_id = str(seed.get("turnId") or "")
+        turn_id = dispatch_turn_id(seed)
         client_turn_id = str(seed.get("clientTurnId") or "")
         return bool(session_id and turn_id and client_turn_id) and self._runtime_session_state.owns_turn(
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
@@ -2020,7 +2021,7 @@ class AgentGateway:
         """Only a genuinely suspended turn can reuse its pending tool call."""
         visual = seed.get("_questionKind") == "visual_checkpoint"
         session_id = str(seed.get("sessionId") or "")
-        turn_id = str(seed.get("turnId") or "")
+        turn_id = dispatch_turn_id(seed)
         client_turn_id = str(seed.get("clientTurnId") or "")
         snapshot = ensure_dict(seed.get("_nativeConversation"))
         binding = str(snapshot.get("binding") or "")
@@ -2085,12 +2086,13 @@ class AgentGateway:
         if ((question.get("blocking", True) is False or question.get("kind") == "visual_checkpoint")
                 and question.get("status") == "answered"
                 and seed.get("sessionId") == session_id and seed.get("clientTurnId") == client_turn_id
-                and (not turn_id or seed.get("turnId") == turn_id)):
+                and (not turn_id or dispatch_turn_id(seed) == turn_id)):
             return question
         return None
 
     def _route_async_question_answer(self, question_id: str, seed: Mapping[str, Any], prompt: str) -> dict[str, Any] | None:
         session_id = str(seed.get("sessionId") or "")
+        turn_id = dispatch_turn_id(seed)
         origin = str(seed.get("clientTurnId") or "")
         input_id = "question-answer:" + question_id
         lane = str(seed.get("followupLaneId") or session_id)
@@ -2113,7 +2115,7 @@ class AgentGateway:
             if not self._question_origin_active(seed):
                 return None
             if self._runtime_run_ledger.read_terminal_continuation(
-                session_id=session_id, client_turn_id=origin, turn_id=str(seed.get("turnId") or ""),
+                session_id=session_id, client_turn_id=origin, turn_id=turn_id,
             ):
                 return None
             result = {} if attachments else self._runtime_session_state.submit_steer(
@@ -2127,9 +2129,9 @@ class AgentGateway:
                         self._runtime_session_state, seed, answer_saved=True, settle_following_calls=False,
                     )
                 self.questions.record_runtime_continuation(question_id, "queued",
-                    runtimeContinuationClientTurnId=origin, runtimeContinuationTurnId=str(seed.get("turnId") or ""))
+                    runtimeContinuationClientTurnId=origin, runtimeContinuationTurnId=turn_id)
                 return {"ok": True, "mode": "steer", "status": "steered", "questionId": question_id,
-                        "sessionId": session_id, "clientTurnId": origin, "turnId": seed.get("turnId"), "inputId": input_id}
+                        "sessionId": session_id, "clientTurnId": origin, "turnId": turn_id, "inputId": input_id}
             return None
 
     def _dispatch_runtime_task_after_question(

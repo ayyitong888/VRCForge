@@ -120,6 +120,23 @@ def test_question_projection_only_replays_new_records(tmp_path: Path, monkeypatc
     assert {row["questionId"] for row in reader.list()["questions"]} == {"replacement", "torn"}
 
 
+@pytest.mark.parametrize(("source", "seed", "notify"), [
+    ("", {"requestedTool": "vrcforge_ask_user", "agentName": "desktop-agent"}, True),
+    ("", {"requestedTool": "vrcforge_ask_user", "agentName": "sub-agent"}, False),
+    ("call_user", {"requestedTool": "vrcforge_call_user", "agentName": "sub-agent"}, False),
+    ("call_user", {}, True),
+    ("", {}, False),
+])
+def test_question_notification_uses_the_requesting_agent(tmp_path: Path, source, seed, notify):
+    service = _service(tmp_path, threading.RLock(), [])
+    question = service.create({
+        "question": "Keep the current outfit?", "sessionId": "session",
+        "blocking": False, "sourceTool": source, "_runtimeTaskSeed": seed,
+        "notifyOnCreate": not notify,
+    })["question"]
+    assert question["notifyOnCreate"] is notify
+
+
 def test_question_notification_urgency_comes_from_runtime_wait_not_caller_label(tmp_path: Path) -> None:
     service = _service(tmp_path, threading.RLock(), [])
     ordinary = service.create({

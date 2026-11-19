@@ -620,11 +620,12 @@ def test_notification_runs_preserve_lifecycle_without_history_payload(tmp_path: 
 
 @pytest.mark.parametrize(("gate", "status", "expected"), [
     ({"reason": "question_pending", "questionId": "wake"}, "blocked", "wake"),
-    ({"reason": "question_pending", "questionId": "quiet"}, "blocked", None),
+    ({"reason": "question_pending", "questionId": "ordinary"}, "blocked", "ordinary"),
+    ({"reason": "question_pending", "questionId": "internal"}, "blocked", None),
     ({"reason": "verification_required", "questionId": "wake"}, "blocked", None),
     ({"reason": "question_pending", "questionId": "wake"}, "failed", None),
 ])
-def test_only_the_blocking_call_user_question_owns_the_notification(tmp_path, gate, status, expected):
+def test_pending_question_owns_its_notification(tmp_path, gate, status, expected):
     ledger, _lock = make_ledger(tmp_path)
     ledger.append({
         "sessionId": "session", "clientTurnId": "client", "turnId": "turn",
@@ -632,7 +633,8 @@ def test_only_the_blocking_call_user_question_owns_the_notification(tmp_path, ga
         "continuationEvent": {"plan": {"completionGate": gate}},
         "steps": [
             {"tool": "vrcforge_call_user", "result": {"question": {"questionId": "wake"}}},
-            {"tool": "vrcforge_ask_user", "result": {"question": {"questionId": "quiet"}}},
+            {"tool": "vrcforge_ask_user", "result": {"question": {"questionId": "ordinary"}}},
+            {"tool": "vrcforge_ask_user", "result": {"question": {"questionId": "internal", "notifyOnCreate": False}}},
         ],
     })
     projected = ledger.list_runs(notification_only=True)["runs"][0]
