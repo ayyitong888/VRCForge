@@ -20,7 +20,7 @@ export function LayoutSplitter({ side, value, min, max, title, onPointerDown }: 
       data-layout-splitter={side}
       className="group relative h-full min-h-0 cursor-col-resize touch-none bg-transparent"
       onPointerDown={onPointerDown}
-      title={title}
+      data-app-tooltip={title} aria-label={title}
     >
       <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/80 transition-colors group-hover:bg-primary group-active:bg-primary" />
     </div>

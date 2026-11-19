@@ -1,0 +1,38 @@
+@supports (appearance: base-select) {
+  :where(select:not([multiple]):not([size]), select:not([multiple])[size="1"]),
+  :where(select:not([multiple]):not([size]), select:not([multiple])[size="1"])::picker(select) {
+    appearance: base-select;
+  }
+
+  :where(select:not([multiple]):not([size]), select:not([multiple])[size="1"])::picker(select) {
+    inline-size: max(anchor-size(width), 12rem);
+    min-inline-size: 0;
+    max-inline-size: calc(100dvw - 1rem);
+    max-block-size: min(18rem, 45dvh);
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding: 0.25rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: 8px;
+    background: hsl(var(--card));
+    color: hsl(var(--foreground));
+    box-shadow: 0 8px 24px rgb(0 0 0 / 20%);
+  }
+
+  :where(select:not([multiple]):not([size]), select:not([multiple])[size="1"]) option {
+    min-block-size: 2rem;
+    padding: 0.375rem 0.5rem;
+    border-radius: 4px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  :where(select:not([multiple]):not([size]), select:not([multiple])[size="1"]) option:checked {
+    background: hsl(var(--primary) / 0.12);
+    font-weight: 600;
+  }
+
+  :where(select:not([multiple]):not([size]), select:not([multiple])[size="1"]) option:enabled:is(:hover, :focus-visible) {
+    background: hsl(var(--muted));
+  }
+}

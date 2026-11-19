@@ -50,6 +50,7 @@ import type { SettingsSearchSelection } from "./lib/settings-search";
 import { CheckpointQuotaNotice } from "./components/settings/checkpoint-quota-notice";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { TransientFailureToast } from "./components/ui/transient-failure-toast";
+import { AppTooltipLayer } from "./components/ui/app-tooltip";
 import { TextEditContextMenu } from "./components/common/text-edit-context-menu";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
 import { ExternalSetupTour } from "./components/onboarding/external-setup-tour";
@@ -4843,7 +4844,7 @@ export default function App() {
               type="button"
               className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               onClick={() => setRightSidebarCollapsed(false)}
-              title={t("workspace.showSidebar")}
+              data-app-tooltip={t("workspace.showSidebar")}
               aria-label={t("workspace.showSidebar")}
               data-vrcforge-right-sidebar-restore
             >
@@ -5093,6 +5094,7 @@ export default function App() {
 
       <VskOpenDialog ready={runtimeConnected} onPreflight={preflightVskPackage} onImport={importVskPackage} onManage={() => void openSkills()} />
 
+      <AppTooltipLayer />
     </main>
     </ChatLinkTitlesContext.Provider>
     </OpenChatLinkContext.Provider>

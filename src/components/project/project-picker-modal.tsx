@@ -1,5 +1,5 @@
 import { Edit3, Eye, EyeOff, Folder, FolderPlus, Loader2, RefreshCw, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ProjectSnapshot } from "../../lib/api";
 import type { ProjectType } from "../../lib/chat-types";
@@ -73,29 +73,38 @@ export function ProjectPickerModal({
 }) {
   const { t } = useTranslation();
   const [showCreation, setShowCreation] = useState(false);
+  const pickerRef = useRef<HTMLDialogElement>(null);
+  useLayoutEffect(() => {
+    const picker = pickerRef.current;
+    if (!open || !picker) return;
+    const opener = document.activeElement;
+    picker.showModal();
+    return () => {
+      picker.close();
+      if (document.activeElement === document.body && opener instanceof HTMLElement) opener.focus();
+    };
+  }, [open]);
   if (!open) {
     return null;
   }
-  if (showCreation && creation) {
-    function closeCreation() {
-      setShowCreation(false);
-      onClose();
-    }
-    return <UnityProjectCreationModal
-      creation={{ ...creation, select: (path) => { creation.select(path); closeCreation(); } }}
-      onBack={() => setShowCreation(false)}
-      onClose={closeCreation}
-    />;
+  function closeCreation() {
+    setShowCreation(false);
+    onClose();
   }
+  const creating = showCreation && Boolean(creation);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
-      <section className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-border bg-card p-6 shadow-panel">
+    <>
+    <dialog ref={pickerRef} aria-labelledby="project-picker-title" aria-hidden={creating || undefined}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      className={`m-auto w-[min(32rem,calc(100vw-3rem))] overflow-visible bg-transparent text-foreground ${creating ? "backdrop:bg-transparent" : "backdrop:bg-black/35"}`}>
+      <section className={`flex max-h-[80vh] w-full flex-col rounded-lg border border-border bg-card p-6 shadow-panel ${creating ? "opacity-0" : ""}`}>
         <div className="flex min-w-0 items-center gap-2">
           <FolderPlus className="h-5 w-5 shrink-0 text-primary" />
-          <h2 className="truncate text-lg font-semibold">{t("project.selectProjectTitle")}</h2>
+          <h2 id="project-picker-title" className="truncate text-lg font-semibold">{t("project.selectProjectTitle")}</h2>
           <button
             type="button"
             className="ml-auto shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label={t("common.close")}
             onClick={onClose}
           >
             <X className="h-4 w-4" />
@@ -189,7 +198,7 @@ export function ProjectPickerModal({
                         <>
                         <button
                           type="button"
-                          title={t("project.removeFromList")}
+                          data-app-tooltip={t("project.removeFromList")}
                           aria-label={t("project.removeFromList")}
                           disabled={saving}
                           className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-colors hover:bg-background hover:text-destructive group-hover:opacity-100"
@@ -199,7 +208,7 @@ export function ProjectPickerModal({
                         </button>
                         <button
                           type="button"
-                          title={t("project.editPath")}
+                          data-app-tooltip={t("project.editPath")}
                           aria-label={t("project.editPath")}
                           disabled={saving}
                           className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-colors hover:bg-background hover:text-foreground group-hover:opacity-100"
@@ -244,6 +253,12 @@ export function ProjectPickerModal({
           ) : null}
         </div>
       </section>
-    </div>
+    </dialog>
+    {showCreation && creation ? <UnityProjectCreationModal
+      creation={{ ...creation, select: (path) => { creation.select(path); closeCreation(); } }}
+      onBack={() => setShowCreation(false)}
+      onClose={closeCreation}
+    /> : null}
+    </>
   );
 }

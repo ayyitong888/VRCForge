@@ -176,7 +176,7 @@ export function ConversationCard({
         className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/80"
         data-user-message-status={item.queueStatus}
         role="status"
-        title={deliveryLabel}
+        data-app-tooltip={deliveryLabel}
         aria-label={deliveryLabel}
       >
         {item.queueStatus === "steering" ? <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : null}
@@ -205,7 +205,7 @@ export function ConversationCard({
                     <button
                       type="button"
                       className="block overflow-hidden rounded-lg border border-border bg-muted/70"
-                      title={attachment.name}
+                      data-app-tooltip={attachment.name}
                     >
                       <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-cover" />
                     </button>
@@ -213,7 +213,8 @@ export function ConversationCard({
                       type="button"
                       className="absolute right-1 top-1 rounded-md border border-border bg-background/90 p-1 text-xs text-foreground"
                       onClick={() => onEditAttachmentRemove?.(attachment.id)}
-                      title={t("chat.removeAttachment")}
+                      aria-label={t("chat.removeAttachment")}
+                      data-app-tooltip={t("chat.removeAttachment")}
                     >
                       <X className="h-3.5 w-3.5" />
                     </button>
@@ -246,7 +247,7 @@ export function ConversationCard({
                 className="h-8 px-3"
                 onClick={onEditItemSave}
                 disabled={Boolean(editSaveDisabledReason)}
-                title={editSaveDisabledReason || undefined}
+                data-app-tooltip={editSaveDisabledReason || undefined}
               >
                 {t("chat.saveEdit")}
               </Button>
@@ -552,6 +553,7 @@ export function ConversationCard({
             </p>
           ) : null}
           {!compactAgentReply ? <MessageActions
+            preferTooltipBelow
             createdAt={showReplyActions ? assistantReplyTimestamp(item) : undefined}
             memoryUsage={response.memoryUsage}
             onCopy={showReplyActions && copyableReply && onCopyItem ? () => onCopyItem({ ...item, response }) : undefined}
@@ -584,7 +586,7 @@ function AgentRelayAttribution({ sourceChatId, lookupChatTitle, onOpenChatById }
         <button
           type="button"
           className="inline-flex min-w-0 items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
-          title={t("chat.openSourceConversation")}
+          data-app-tooltip={t("chat.openSourceConversation")}
           data-open-conversation={sourceChatId}
           onClick={() => onOpenChatById(sourceChatId)}
         >
@@ -677,7 +679,7 @@ export function UserImageAttachments({
               onClick={() => setPreview(attachment)}
               aria-haspopup="dialog"
               aria-label={t("chat.imagePreview")}
-              title={attachment.name}
+              data-app-tooltip={attachment.name}
             >
               <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-contain" />
             </button>
@@ -803,6 +805,7 @@ function streamingPhaseLabel(phase: AgentRuntimePhase | undefined, t: typeof i18
 
 function MessageActions({
   align = "left",
+  preferTooltipBelow,
   createdAt,
   metadata,
   memoryUsage,
@@ -814,6 +817,7 @@ function MessageActions({
   saveOperationClientTurnId,
 }: {
   align?: "left" | "right";
+  preferTooltipBelow?: boolean;
   createdAt?: string | number;
   metadata?: ReactNode;
   memoryUsage?: AgentRuntimeResponse["memoryUsage"];
@@ -840,6 +844,7 @@ function MessageActions({
   return (
     <div
       data-chat-message-actions
+      data-app-tooltip-placement={preferTooltipBelow ? "below" : undefined}
       className={cn(
         "order-last flex items-center gap-1 px-1 text-muted-foreground",
         align === "right" ? "justify-end" : "justify-start",
@@ -856,7 +861,7 @@ function MessageActions({
           type="button"
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
           onClick={onSaveAsSkill}
-          title={t("workspace.saveOperationAsSkill")}
+          data-app-tooltip={t("workspace.saveOperationAsSkill")}
           aria-label={t("workspace.saveOperationAsSkill")}
           data-vrcforge-save-operation-as-skill
           data-vrcforge-save-operation-tool={saveOperationTool || ""}
@@ -870,7 +875,7 @@ function MessageActions({
           type="button"
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
           onClick={onRetry}
-          title={t("chat.retryMessage")}
+          data-app-tooltip={t("chat.retryMessage")}
           aria-label={t("chat.retryMessage")}
         >
           <RotateCcw className="h-3.5 w-3.5" />
@@ -881,7 +886,7 @@ function MessageActions({
           type="button"
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
           onClick={onEdit}
-          title={t("chat.editMessage")}
+          data-app-tooltip={t("chat.editMessage")}
           aria-label={t("chat.editMessage")}
         >
           <Pencil className="h-3.5 w-3.5" />
@@ -892,7 +897,7 @@ function MessageActions({
           type="button"
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onClick={() => setMemoryExpanded((expanded) => !expanded)}
-          title={memoryLabel}
+          data-app-tooltip={memoryLabel}
           aria-label={memoryLabel}
           aria-expanded={memoryExpanded}
           aria-controls={memoryPanelId}

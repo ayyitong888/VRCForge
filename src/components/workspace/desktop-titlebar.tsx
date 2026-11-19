@@ -68,16 +68,16 @@ export function DesktopTitlebarFrame({ version, theme, maximized = false, error 
       {children}
       {error ? <span className="desktop-titlebar-error" role="alert">{error}</span> : null}
       {!compact ? <button type="button" className="desktop-titlebar-theme" aria-label={t("window.toggleTheme")}
-        title={t("window.toggleTheme")} onClick={onToggleTheme}>
+        data-app-tooltip={t("window.toggleTheme")} onClick={onToggleTheme}>
         {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
       </button> : null}
-      <button type="button" aria-label={t("window.minimize")} title={t("window.minimize")} onClick={onMinimize}><Minus size={16} /></button>
+      <button type="button" aria-label={t("window.minimize")} data-app-tooltip={t("window.minimize")} onClick={onMinimize}><Minus size={16} /></button>
       {!compact ? <button type="button" aria-label={t(maximized ? "window.restore" : "window.maximize")}
-        title={t(maximized ? "window.restore" : "window.maximize")} onClick={onMaximize}>
+        data-app-tooltip={t(maximized ? "window.restore" : "window.maximize")} onClick={onMaximize}>
         {maximized ? <Copy size={13} /> : <Square size={13} />}
       </button> : null}
       <button type="button" className="desktop-titlebar-close" aria-label={t("common.close")}
-        title={t("common.close")} onClick={onClose}><X size={17} /></button>
+        data-app-tooltip={t("common.close")} onClick={onClose}><X size={17} /></button>
     </header>
   );
 }

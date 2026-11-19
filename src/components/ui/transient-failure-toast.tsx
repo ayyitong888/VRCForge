@@ -34,7 +34,7 @@ export function TransientFailureToast({
         variant="ghost"
         className="h-7 w-7 shrink-0 px-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label={dismissLabel}
-        title={dismissLabel}
+        data-app-tooltip={dismissLabel}
         onClick={onDismiss}
       >
         <X className="h-3.5 w-3.5" />

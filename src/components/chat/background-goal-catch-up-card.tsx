@@ -238,7 +238,7 @@ export function BackgroundGoalCatchUpCard({
             className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             onClick={onDismiss}
             aria-label={t("goal.backgroundDismiss")}
-            title={t("goal.backgroundDismiss")}
+            data-app-tooltip={t("goal.backgroundDismiss")}
           >
             <X className="h-3.5 w-3.5" />
           </button>

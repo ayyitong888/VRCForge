@@ -128,10 +128,10 @@ try {
   const rightProject = page.getByTestId("right").getByRole("button");
   assert.equal(await leftProject.innerText(), "VRCForge");
   assert.equal(await rightProject.innerText(), "VRCForge");
-  assert.match(await leftProject.getAttribute("title"), /left\/VRCForge/);
-  assert.match(await rightProject.getAttribute("title"), /right\/VRCForge/);
+  assert.match(await leftProject.getAttribute("data-app-tooltip"), /left\/VRCForge/);
+  assert.match(await rightProject.getAttribute("data-app-tooltip"), /right\/VRCForge/);
   assert.doesNotMatch(await page.getByTestId("right").innerText(), /6000/);
-  assert.match(await page.getByTestId("right").getByRole("button").getAttribute("title"), /6000/);
+  assert.match(await page.getByTestId("right").getByRole("button").getAttribute("data-app-tooltip"), /6000/);
   assert.equal(await page.locator('[aria-current="page"]').innerText(), "A");
   await page.getByRole("button", { name: "B", exact: true }).click();
   assert.equal(await page.locator('[aria-current="page"]').innerText(), "B");

@@ -41,9 +41,9 @@ assert.match(preference, /recentColors: string\[\]/);
 assert.match(preference, /\.slice\(0, 3\)/);
 assert.match(hook, /recentColors: current\.recentColors/);
 
-// Both custom seeds expose a native palette, editable HEX/RGB/HSL values and
+// Both custom seeds expose the inline RGB controls, editable HEX/RGB/HSL values and
 // the platform eyedropper when available. The stored color remains opaque.
-assert.match(colorEditor, /type="color"/);
+assert.doesNotMatch(colorEditor, /type="color"/);
 assert.match(colorEditor, /const FORMATS: readonly ThemeColorFormat\[\] = \["hex", "rgb", "hsl"\]/);
 assert.match(colorEditor, /window as Window & \{ EyeDropper\?/);
 assert.match(colorEditor, /new eyeDropper\(\)\.open\(\)/);

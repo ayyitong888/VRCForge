@@ -425,24 +425,38 @@ function DeleteChatDialog({
   onConfirm: (chatId: string) => void;
 }) {
   const { t } = useTranslation();
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current!;
+    dialog.showModal();
+    return () => {
+      dialog.close();
+      // Right-click menu items are gone by the time the dialog opens.
+      queueMicrotask(() => {
+        if (document.activeElement === document.body) {
+          document.querySelector<HTMLButtonElement>(`[data-vrcforge-chat-id="${CSS.escape(chatId)}"] button`)?.focus();
+        }
+      });
+    };
+  }, [chatId]);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
-      <section className="w-full max-w-sm rounded-lg border border-border bg-card p-5 shadow-panel">
+    <dialog ref={dialogRef} aria-labelledby="delete-chat-title" aria-describedby="delete-chat-description"
+      onCancel={(event) => { event.preventDefault(); onCancel(); }}
+      className="m-auto w-[min(24rem,calc(100vw-3rem))] rounded-lg border border-border bg-card p-5 text-foreground shadow-panel backdrop:bg-black/35">
         <div className="flex min-w-0 items-center gap-2 text-destructive">
           <Trash2 className="h-4 w-4 shrink-0" />
-          <h2 className="truncate text-base font-semibold">{t("deleteModal.title")}</h2>
+          <h2 id="delete-chat-title" className="truncate text-base font-semibold">{t("deleteModal.title")}</h2>
         </div>
-        <p className="mt-3 text-sm text-muted-foreground">「{title}」将被永久删除，本地记录一并清除，无法恢复。</p>
+        <p id="delete-chat-description" className="mt-3 break-words text-sm text-muted-foreground">「{title}」将被永久删除，本地记录一并清除，无法恢复。</p>
         <div className="mt-5 flex justify-end gap-3">
-          <Button variant="outline" onClick={onCancel}>
+          <Button type="button" variant="outline" onClick={onCancel}>
             {t("deleteModal.cancel")}
           </Button>
-          <Button variant="danger" onClick={() => onConfirm(chatId)}>
+          <Button type="button" variant="danger" onClick={() => onConfirm(chatId)}>
             {t("contextMenu.permanentDelete")}
           </Button>
         </div>
-      </section>
-    </div>
+    </dialog>
   );
 }
 

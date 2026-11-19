@@ -157,7 +157,7 @@ export function CheckpointWorkspace({
                         variant="ghost"
                         className="h-7 px-2 text-xs"
                         aria-label={i18n.t("checkpoint.resolveWrite")}
-                        title={i18n.t("checkpoint.resolveWrite")}
+                        data-app-tooltip={i18n.t("checkpoint.resolveWrite")}
                         onClick={() => setAction({
                           title: i18n.t("checkpoint.resolveWrite"),
                           description: i18n.t("checkpoint.resolveWriteBody", { name: recovery.targetTool || recovery.id }),
@@ -178,7 +178,7 @@ export function CheckpointWorkspace({
           <details open className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel" data-vrcforge-checkpoint-list>
             <summary className="flex cursor-pointer list-none items-center gap-2">
               <History className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold" title={selectedProjectPath || undefined}>
+              <div className="truncate text-sm font-semibold" data-app-tooltip={selectedProjectPath || undefined}>
                 {i18n.t("checkpoint.checkpoints")}
               </div>
               <Badge tone="muted" className="ml-auto shrink-0">
@@ -210,7 +210,7 @@ export function CheckpointWorkspace({
                 <button
                   key={checkpoint.id}
                   type="button"
-                  title={checkpoint.id}
+                  data-app-tooltip={checkpoint.id}
                   aria-pressed={selectedId === checkpoint.id}
                   onClick={() => onPreview(checkpoint.id)}
                   className={cn(
@@ -231,7 +231,7 @@ export function CheckpointWorkspace({
                   <div className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground">
                     <span>{formatCheckpointTime(checkpoint.createdAt)}</span>
                     {checkpoint.projectRoot ? (
-                      <span className="min-w-0 truncate" title={checkpoint.projectRoot}>{pathName(checkpoint.projectRoot)}</span>
+                      <span className="min-w-0 truncate" data-app-tooltip={checkpoint.projectRoot}>{pathName(checkpoint.projectRoot)}</span>
                     ) : null}
                   </div>
                 </button>
@@ -357,7 +357,7 @@ export function CheckpointWorkspace({
                         variant="outline"
                         className="h-7 px-2 text-xs"
                         aria-label={i18n.t("checkpoint.overwrite")}
-                        title={i18n.t("checkpoint.overwrite")}
+                        data-app-tooltip={i18n.t("checkpoint.overwrite")}
                         onClick={() => setAction({
                           title: i18n.t("checkpoint.overwrite"),
                           destructive: true,
@@ -374,7 +374,7 @@ export function CheckpointWorkspace({
                         variant="ghost"
                         className="h-7 px-2 text-xs"
                         aria-label={i18n.t("checkpoint.rename")}
-                        title={i18n.t("checkpoint.rename")}
+                        data-app-tooltip={i18n.t("checkpoint.rename")}
                         onClick={() => setAction({
                           title: i18n.t("checkpoint.rename"), initialValue: checkpoint.label || checkpoint.id,
                           confirmLabel: i18n.t("common.save"), onConfirm: label => onRenameAdjustment(checkpoint, label),
@@ -388,7 +388,7 @@ export function CheckpointWorkspace({
                         variant="ghost"
                         className="h-7 px-2 text-xs text-destructive"
                         aria-label={i18n.t("checkpoint.deleteAdjustment")}
-                        title={i18n.t("checkpoint.deleteAdjustment")}
+                        data-app-tooltip={i18n.t("checkpoint.deleteAdjustment")}
                         onClick={() => setAction({
                           title: i18n.t("checkpoint.deleteAdjustment"),
                           destructive: true,
@@ -485,7 +485,7 @@ export function CheckpointWorkspace({
                   <div>
                     <h2 className="break-words text-base font-semibold">{checkpointTitle(preview.checkpoint)}</h2>
                     {preview.checkpoint.projectRoot ? (
-                      <p className="mt-1 break-words text-xs text-muted-foreground" title={preview.checkpoint.projectRoot}>
+                      <p className="mt-1 break-words text-xs text-muted-foreground" data-app-tooltip={preview.checkpoint.projectRoot}>
                         {i18n.t("recovery.project")} · {pathName(preview.checkpoint.projectRoot)}
                       </p>
                     ) : null}

@@ -360,7 +360,7 @@ export function ChatGptOAuthSettings({
             className="h-10 w-10 shrink-0 px-0"
             data-chatgpt-refresh
             aria-label={t("provider.refreshModels")}
-            title={t("provider.refreshModels")}
+            data-app-tooltip={t("provider.refreshModels")}
             disabled={!runtimeConnected || statusLoading || Boolean(busy)}
             onClick={async () => {
               const next = await reloadStatus();

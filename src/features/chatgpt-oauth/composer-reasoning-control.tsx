@@ -150,7 +150,7 @@ export function ChatGptOAuthComposerReasoningControl({
         onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); openMenu(); }
         }}
-        title={error || t("provider.reasoningNextTurnHint")}
+        data-app-tooltip={error || t("provider.reasoningNextTurnHint")}
       >
         <span>{value ? t(`provider.reasoning_${value}`, value) : t(loadState === "loading" ? "chatgptOAuth.reasoningLoading" : "chatgptOAuth.reasoningSelect")}</span>
         <ChevronDown aria-hidden="true" className="h-3 w-3 text-muted-foreground/75" />

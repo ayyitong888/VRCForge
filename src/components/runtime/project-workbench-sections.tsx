@@ -340,7 +340,7 @@ export function ProjectWorkbenchSections({
                 </div>
                 <div data-vrcforge-status="external-agent">
                   {authorizationStatus.internalConfigured && !providerTestAttempted && authorizationStatus.source !== "external" && authorizationStatus.status === "warning" && onTestAgentConnection ? (
-                    <button type="button" className="w-full text-left" title={t("workspace.testInternalAgentConnection")} onClick={() => void onTestAgentConnection()}>
+                    <button type="button" className="w-full text-left" data-app-tooltip={t("workspace.testInternalAgentConnection")} onClick={() => void onTestAgentConnection()}>
                       <RuntimeInfoRow
                         icon={<Bot className="h-4 w-4" />}
                         label={t(runtimeAuthorizationLabelKey(authorizationStatus))}
@@ -488,7 +488,7 @@ export function ProjectWorkbenchSections({
               <>
                 {visibleAttachmentSources.map((source) => (
                   <div key={source.id} className="rounded-md border border-border bg-background/65 px-2 py-1.5" data-vrcforge-user-attachment-source={source.id}>
-                    <div className="break-words" title={source.name || source.type || source.id}>
+                    <div className="break-words" data-app-tooltip={source.name || source.type || source.id}>
                       {source.name || source.type || source.id}
                     </div>
                     <div className="mt-0.5 text-muted-foreground">

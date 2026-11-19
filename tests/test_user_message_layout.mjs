@@ -110,18 +110,19 @@ try {
   }
   assert.equal(await page.locator("#short details, #token details, #agent [data-user-message-disclosure]").count(), 0);
   assert.equal(await page.locator("#lines details").count(), 1, "many short lines also collapse");
-  await page.locator('#long button[title="Copy"]').click();
+  await page.locator('#long').getByRole('button', { name: 'Copy', exact: true }).click();
   assert.equal(await page.evaluate(() => window.copied === window.original), true, "copy receives the original unabridged item");
-  await page.locator('#long button[title="Edit"]').click();
+  await page.locator('#long').getByRole('button', { name: 'Edit', exact: true }).click();
   assert.equal(await page.locator("#long textarea").inputValue(), await page.evaluate(() => window.original));
-  await page.locator('#long button[title="Cancel"]').click();
+  await page.locator('#long').getByRole('button', { name: 'Cancel', exact: true }).click();
   const live = page.locator('#agent');
-  assert.equal(await live.locator('[data-agent-turn-process-group]').count(), 0, 'running process must be visible without opening a group');
+  const processHeader = live.locator('[data-agent-turn-process-group] > div > button');
+  assert.equal(await processHeader.getAttribute('aria-expanded'), 'true', 'running process is expanded before user interaction');
   assert.equal(await live.getByText('First inspect the exact source.', {exact:true}).isVisible(), true);
   assert.equal(await live.getByText('The source is verified; checking references next.', {exact:true}).isVisible(), true);
   const liveText = await live.innerText();
-  assert.ok(liveText.indexOf('First inspect') < liveText.indexOf('read_text_file'));
-  assert.ok(liveText.indexOf('read_text_file') < liveText.indexOf('The source is verified'));
+  const order = ['First inspect', 'Read a file', 'The source is verified'].map(text => liveText.indexOf(text));
+  assert.ok(order[0] >= 0 && order[0] < order[1] && order[1] < order[2], 'live commentary stays in order around its tool invocation');
   const screenshot = process.env.VRCFORGE_USER_MESSAGE_SCREENSHOT;
   const captureTurn = async name => {
     if (!screenshot) return;
@@ -130,7 +131,9 @@ try {
     await live.screenshot({path:resolve(screenshot,"..",name)});
   };
   await captureTurn('turn-live.png');
-  await live.getByRole('button', {name:'read_text_file',exact:true}).click();
+  const readGroup = live.locator('[data-agent-tool-call-group]').filter({ hasText: 'Read a file' });
+  await readGroup.getByRole('button', {name:/^Read a file/}).click();
+  await readGroup.getByRole('button', {name:'Read a file', exact:true}).click();
   const output = live.locator('pre');
   assert.equal(await output.innerText(), 'SOURCE_CODE_OUTPUT');
   // Actual mouse selection, so the existing history mouseup quote handler can read it.
@@ -142,11 +145,11 @@ try {
   await page.mouse.up();
   assert.ok((await page.evaluate(()=>window.getSelection().toString())).length > 3, 'tool output supports native drag selection');
   await page.locator('#finish').click();
-  assert.equal(await live.locator('[data-agent-turn-process-group]').count(), 1, 'terminal work has one folded process');
+  assert.equal(await processHeader.getAttribute('aria-expanded'), 'false', 'terminal process is collapsed by default');
   assert.equal(await live.getByText('First inspect the exact source.', {exact:true}).count(), 0, 'terminal commentary defaults folded');
   assert.equal(await live.getByText('Final answer stays visible.', {exact:true}).isVisible(), true);
   await captureTurn('turn-completed.png');
-  await live.locator('[data-agent-turn-process-group] > div > button').click();
+  await processHeader.click();
   assert.equal(await live.getByText('First inspect the exact source.', {exact:true}).isVisible(), true);
   assert.equal(await live.getByText('Final answer stays visible.', {exact:true}).isVisible(), true);
   await captureTurn('turn-expanded.png');

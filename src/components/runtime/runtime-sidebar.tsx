@@ -119,7 +119,7 @@ export function RightRuntimeSidebar({
             type="button"
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
             onClick={() => void refreshUnityStatus()}
-            title={t("workspace.refreshStatus")}
+            data-app-tooltip={t("workspace.refreshStatus")} aria-label={t("workspace.refreshStatus")}
             disabled={!runtimeConnected || loadingUnityStatus}
           >
             <RefreshCw className={cn("h-4 w-4", loadingUnityStatus && "animate-spin")} />
@@ -129,7 +129,7 @@ export function RightRuntimeSidebar({
           type="button"
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           onClick={onHideSidebar}
-          title={t("workspace.hideSidebar")}
+          data-app-tooltip={t("workspace.hideSidebar")} aria-label={t("workspace.hideSidebar")}
         >
           <PanelRightClose className="h-4 w-4" />
         </button>
@@ -210,7 +210,7 @@ export function RightRuntimeSidebar({
               </div>
               <div data-vrcforge-status="external-agent">
                 {authorizationStatus.internalConfigured && !providerTestAttempted && authorizationStatus.source !== "external" && authorizationStatus.status === "warning" && onTestAgentConnection ? (
-                  <button type="button" className="w-full text-left" title={t("workspace.testInternalAgentConnection")} onClick={() => void onTestAgentConnection()}>
+                  <button type="button" className="w-full text-left" data-app-tooltip={t("workspace.testInternalAgentConnection")} onClick={() => void onTestAgentConnection()}>
                     <RuntimeInfoRow
                       icon={<Bot className="h-4 w-4" />}
                       label={t(runtimeAuthorizationLabelKey(authorizationStatus))}

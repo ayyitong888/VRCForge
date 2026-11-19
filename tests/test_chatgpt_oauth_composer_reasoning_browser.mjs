@@ -93,7 +93,7 @@ try {
   const trigger = page.locator("[data-chatgpt-composer-reasoning-trigger]");
   await wait(async () => (await trigger.count()) === 1 && !(await trigger.isDisabled()), "server-supported levels loaded");
   assert.equal(await trigger.getAttribute("aria-label"), "Reasoning effort", "accessible name is retained");
-  assert.match(await trigger.getAttribute("title"), /next turn/, "running tasks retain their existing effort while the next turn can be configured");
+  assert.match(await trigger.getAttribute("data-app-tooltip"), /next turn/, "running tasks retain their existing effort while the next turn can be configured");
   assert.match(await trigger.getAttribute("class"), /border-0/);
   assert.match(await trigger.getAttribute("class"), /bg-transparent/);
   assert.equal(await page.locator("select").count(), 0, "reasoning uses the application menu instead of the native select popup");

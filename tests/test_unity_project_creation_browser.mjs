@@ -30,9 +30,11 @@ const fixture = await build({
       };
       const noop = () => {};
       function Fixture() {
-        const [open, setOpen] = useState(true);
+        const [open, setOpen] = useState(false);
         const [selected, setSelected] = useState("");
         return <>
+          <button type="button" onClick={() => setOpen(true)}>Open project picker</button>
+          <button type="button" data-background>Background action</button>
           <output aria-label="Selected project">{selected}</output>
           <ProjectPickerModal
             open={open} projects={[]} hiddenProjects={[]} customPathSet={new Set()} saving={false}
@@ -64,13 +66,30 @@ const server = createServer((request, response) => {
   }
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-const browser = await chromium.launch();
+const browser = await chromium.launch({ headless: true, channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge" });
 try {
   const page = await browser.newPage();
   page.on("pageerror", (error) => console.error(error));
   page.setDefaultTimeout(5000);
   await page.goto(`http://127.0.0.1:${server.address().port}`);
-  await page.getByRole("button", { name: "Create Unity Project" }).click();
+  const launcher = page.getByRole("button", { name: "Open project picker" });
+  await launcher.click();
+  const picker = page.getByRole("dialog");
+  assert.equal(await page.locator("dialog:modal").count(), 1, "project picker makes the background inert");
+  await page.locator("[data-background]").evaluate(el => el.focus());
+  assert.ok(await picker.evaluate(el => el.contains(document.activeElement)), "background cannot take focus");
+  await page.keyboard.press("Escape");
+  await picker.waitFor({ state: "hidden" });
+  assert.ok(await launcher.evaluate(el => el === document.activeElement), "picker restores its opener");
+
+  await launcher.click();
+  const createUnity = page.getByRole("button", { name: "Create Unity Project" });
+  await createUnity.click();
+  assert.equal(await page.locator("dialog:modal").count(), 2, "Unity creation is the top modal");
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("dialog:modal").count(), 1, "Escape returns to picker from creation");
+  assert.ok(await createUnity.evaluate(el => el === document.activeElement), "picker focuses the nested launcher again");
+  await createUnity.click();
   await page.getByRole("textbox", { name: "Project name" }).fill("Avatar demo");
   await page.getByRole("button", { name: "Choose Folder" }).click();
   const create = page.getByRole("button", { name: "Create Project", exact: true });
@@ -81,6 +100,8 @@ try {
 
   await create.click();
   await page.getByRole("button", { name: "Creating project…" }).waitFor();
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("dialog:modal").count(), 2, "busy creation cannot be dismissed");
   await page.evaluate((path) => window.creationResponse.resolve({
     ok: true, projectPath: path, catalogs: [
       { catalog: "unityHub", status: "registered" },
@@ -89,6 +110,7 @@ try {
   }), projectPath);
   await page.getByRole("dialog").waitFor({ state: "hidden" });
   assert.equal(await page.getByLabel("Selected project").textContent(), projectPath);
+  assert.ok(await launcher.evaluate(el => el === document.activeElement), "creation restores the original picker opener");
 } finally {
   await browser.close();
   server.close();

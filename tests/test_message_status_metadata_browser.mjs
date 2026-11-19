@@ -100,7 +100,7 @@ try {
   await page.evaluate(locale=>window.locale(locale),locale);
   const metadata=page.locator('[data-case="unverified"] [data-user-message-status]').first();
   assert.equal(await metadata.innerText(),short);
-  assert.equal(await metadata.getAttribute('title'),full);
+  assert.equal(await metadata.getAttribute('data-app-tooltip'),full);
   assert.equal(await metadata.getAttribute('aria-label'),full);
   assert.ok((await metadata.ariaSnapshot()).includes(full),'full delivery explanation is exposed in the accessibility tree');
  }

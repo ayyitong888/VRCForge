@@ -70,7 +70,7 @@ try {
   assert.equal(await primary.isDisabled(), true, "empty idle composer cannot send");
   await page.locator("textarea").fill("idle message");
   assert.equal(await primary.getAttribute("aria-label"), "Send");
-  assert.equal(await primary.getAttribute("title"), "Send");
+  assert.equal(await primary.getAttribute("data-app-tooltip"), "Send");
   assert.match(await primary.locator("svg").getAttribute("class"), /lucide-arrow-up/);
   await primary.click();
   assert.equal(await page.evaluate(() => window.submitCount), 1, "idle action sends through onSubmit");
@@ -88,7 +88,7 @@ try {
   await page.evaluate(() => window.setComposerState({ input: "follow-up", attachments: [], sending: true, queueAllowed: true }));
   assert.equal(await primary.getAttribute("data-composer-primary-action"), "queue");
   assert.equal(await primary.getAttribute("aria-label"), "Queue");
-  assert.equal(await primary.getAttribute("title"), "Queue");
+  assert.equal(await primary.getAttribute("data-app-tooltip"), "Queue");
   assert.match(await primary.locator("svg").getAttribute("class"), /lucide-arrow-up/);
   assert.equal(await page.locator("[data-composer-send], [data-composer-stop]").count(), 0, "the queue action occupies the primary button");
   assert.equal((await primary.locator("svg").count()), 1);
@@ -116,7 +116,7 @@ try {
   await page.waitForFunction(() => document.querySelector("[data-composer-primary-action]")?.getAttribute("data-composer-primary-action") === "stop");
   assert.equal(await primary.getAttribute("data-composer-primary-action"), "stop");
   assert.equal(await primary.getAttribute("aria-label"), "Stop");
-  assert.equal(await primary.getAttribute("title"), "Stop");
+  assert.equal(await primary.getAttribute("data-app-tooltip"), "Stop");
   assert.equal(await primary.getAttribute("type"), "button");
   assert.match(await primary.locator("svg").getAttribute("class"), /lucide-square/);
   assert.match(await primary.locator("svg").getAttribute("class"), /fill-current/);

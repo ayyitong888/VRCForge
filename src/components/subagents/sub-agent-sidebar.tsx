@@ -71,7 +71,7 @@ function ThreadListRow({
         variant="ghost"
         className="h-auto min-h-12 min-w-0 flex-1 justify-start gap-2.5 px-2 py-1.5 text-left"
         onClick={() => onSelect(task.id)}
-        title={summary || name}
+        data-app-tooltip={summary || name}
         data-vrcforge-open-subagent-thread={thread.id}
       >
         <SubAgentMark threadId={thread.id} />
@@ -89,7 +89,7 @@ function ThreadListRow({
       {canCancelSubAgentTask(task) ? (
         <Button type="button" variant="ghost" className="h-auto min-h-12 w-9 shrink-0 px-0 text-muted-foreground hover:text-destructive"
           onClick={(event) => { event.stopPropagation(); onCancel(task.id); }} disabled={busy}
-          title={t("subagent.cancel")} aria-label={t("subagent.cancel")} data-vrcforge-stop-subagent={thread.id}>
+          data-app-tooltip={t("subagent.cancel")} aria-label={t("subagent.cancel")} data-vrcforge-stop-subagent={thread.id}>
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
         </Button>
       ) : null}
@@ -175,7 +175,7 @@ export function SubAgentSidebar({
       {!openThread ? <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
         <h2 ref={listTitleRef} tabIndex={-1} className="truncate text-sm font-medium text-foreground outline-none">{t("workspace.subAgents")}</h2>
         <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" onClick={onClose}
-          title={t("common.close")} aria-label={t("common.close")} data-vrcforge-close-subagent-sidebar>
+          data-app-tooltip={t("common.close")} aria-label={t("common.close")} data-vrcforge-close-subagent-sidebar>
           <X className="h-4 w-4" />
         </Button>
       </header> : null}

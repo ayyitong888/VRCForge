@@ -101,7 +101,7 @@ export function ComputerUseActivitySurface({
         </div>
         <div className="min-w-0 flex-1 pr-2" role="status" aria-live="polite" aria-atomic="true">
           <div className="text-sm font-semibold leading-4 text-foreground">{title}</div>
-          <div className="truncate text-xs leading-4 text-muted-foreground" title={detail}>
+          <div className="truncate text-xs leading-4 text-muted-foreground" data-app-tooltip={detail}>
             {detail}
           </div>
         </div>
@@ -110,7 +110,7 @@ export function ComputerUseActivitySurface({
           className="computer-use-stop pointer-events-auto inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-xs font-semibold transition-[background-color,border-color,box-shadow,transform] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55"
           onClick={() => void onCancel(actionId)}
           disabled={!actionId || cancelling}
-          title={t("computerUse.cancel")}
+          data-app-tooltip={t("computerUse.cancel")} aria-label={t("computerUse.cancel")}
           data-vrcforge-computer-use-cancel
         >
           <Square className="h-3.5 w-3.5 fill-current" />

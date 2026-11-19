@@ -205,7 +205,7 @@ export function SidebarSection({
           <button
             type="button"
             onClick={onToggleCollapse}
-            title={collapsed ? t("common.expand") : t("common.collapse")}
+            data-app-tooltip={collapsed ? t("common.expand") : t("common.collapse")}
             className="group flex min-w-0 flex-1 items-center gap-1 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
           >
             <span className="truncate">{title}</span>
@@ -294,7 +294,7 @@ export function SidebarProject({
         {...(dragHandle && !dragHandle.disabled ? dragHandle.attributes : {})}
         {...(dragHandle && !dragHandle.disabled ? dragHandle.listeners : {})}
         data-vrcforge-project-drag-row={dragHandle && !dragHandle.disabled ? name : undefined}
-        title={[name, detail, meta].filter(Boolean).join("\n")}
+        data-app-tooltip={[name, detail, meta].filter(Boolean).join("\n")}
         onClick={onClick} disabled={!onClick}
         className="flex min-h-10 min-w-0 flex-1 touch-pan-y select-none items-center gap-2.5 rounded-md px-3 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing"
       >
@@ -306,7 +306,7 @@ export function SidebarProject({
       {onOpenMenu ? (
         <button
           type="button"
-          title={i18n.t("project.menu")}
+          data-app-tooltip={i18n.t("project.menu")} aria-label={i18n.t("project.menu")}
           onClick={onOpenMenu}
           className="shrink-0 rounded p-1 text-muted-foreground opacity-0 hover:bg-background hover:text-foreground group-hover:opacity-100"
         >
@@ -316,7 +316,7 @@ export function SidebarProject({
       {onToggleCollapse && hasChats ? (
         <button
           type="button"
-          title={collapsed ? i18n.t("project.expandChats") : i18n.t("project.collapseChats")}
+          data-app-tooltip={collapsed ? i18n.t("project.expandChats") : i18n.t("project.collapseChats")} aria-label={collapsed ? i18n.t("project.expandChats") : i18n.t("project.collapseChats")}
           onClick={(event) => {
             event.stopPropagation();
             onToggleCollapse();
@@ -411,7 +411,7 @@ export function SidebarChat({
         {...(dragHandle && !dragHandle.disabled ? dragHandle.attributes : {})}
         {...(dragHandle && !dragHandle.disabled ? dragHandle.listeners : {})}
         data-vrcforge-chat-drag-row={dragHandle && !dragHandle.disabled ? chatId : undefined}
-        title={title}
+        data-app-tooltip={title}
         aria-current={active ? "page" : undefined}
         onClick={onClick} className="flex h-full min-w-0 flex-1 touch-pan-y select-none items-center gap-2 rounded-md px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing"
       >
@@ -434,7 +434,7 @@ export function SidebarChat({
       <div className="hidden shrink-0 items-center gap-0.5 pr-1 group-hover:flex">
         <button
           type="button"
-          title={pinned ? t("contextMenu.unpinChat") : t("contextMenu.pinChat")}
+          data-app-tooltip={pinned ? t("contextMenu.unpinChat") : t("contextMenu.pinChat")} aria-label={pinned ? t("contextMenu.unpinChat") : t("contextMenu.pinChat")}
           onClick={(event) => {
             event.stopPropagation();
             onTogglePin?.();
@@ -445,7 +445,7 @@ export function SidebarChat({
         </button>
         <button
           type="button"
-          title={t("contextMenu.permanentDelete")}
+          data-app-tooltip={t("contextMenu.permanentDelete")} aria-label={t("contextMenu.permanentDelete")}
           onClick={(event) => {
             event.stopPropagation();
             onDelete?.();

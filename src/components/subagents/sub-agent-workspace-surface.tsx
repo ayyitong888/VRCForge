@@ -73,7 +73,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
       <header className="shrink-0 border-b border-border px-3 py-2">
         <div className="flex items-center gap-2">
           <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0" onClick={onClose}
-            title={t("subagent.backToList")} aria-label={t("subagent.backToList")} data-vrcforge-subagent-back>
+            data-app-tooltip={t("subagent.backToList")} aria-label={t("subagent.backToList")} data-vrcforge-subagent-back>
             <ArrowLeft className="h-3.5 w-3.5" />
           </Button>
           {activeThread ? <SubAgentMark threadId={activeThread.id} /> : null}
@@ -84,7 +84,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
           {activeTask ? <Badge tone={subAgentStatusTone(activeTask.status)}>{displaySubAgentStatus(activeTask.status)}</Badge> : null}
           {copyItem && onCopyItem ? <MessageCopyButton key={copyItem.id} onCopy={() => onCopyItem(copyItem)} data-subagent-copy-reply /> : null}
           {onCloseSidebar ? <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0" onClick={onCloseSidebar}
-            aria-label={t("common.close")} title={t("common.close")} data-vrcforge-close-subagent-sidebar>
+            aria-label={t("common.close")} data-app-tooltip={t("common.close")} data-vrcforge-close-subagent-sidebar>
             <X className="h-3.5 w-3.5" />
           </Button> : null}
         </div>
@@ -139,7 +139,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
                     type="submit"
                     variant="primary"
                     className="h-8 w-8 shrink-0 rounded-full p-0"
-                    title={t("subagent.resume")}
+                    data-app-tooltip={t("subagent.resume")}
                     aria-label={t("subagent.resume")}
                     disabled={actionBusy || resumeSubmitting || !resumeQuestion.trim()}
                     data-vrcforge-subagent-resume

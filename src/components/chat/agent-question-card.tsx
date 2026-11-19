@@ -144,7 +144,7 @@ export function AgentQuestionCard({
             </button>
           </div>
         ) : null}
-        <button type="button" className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted disabled:opacity-50" aria-label={t("common.close")} title={t("common.close")} onClick={() => onDismissQuestion(question.questionId)} disabled={Boolean(busyChoice)}><X className="h-4 w-4" /></button>
+        <button type="button" className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted disabled:opacity-50" aria-label={t("common.close")} data-app-tooltip={t("common.close")} onClick={() => onDismissQuestion(question.questionId)} disabled={Boolean(busyChoice)}><X className="h-4 w-4" /></button>
       </div>
 
       {!continuationActive && !continuationSettled ? <div className="app-scrollbar mb-2 max-h-[20vh] overflow-y-auto whitespace-pre-wrap break-words px-2 text-sm font-semibold text-foreground">
@@ -215,7 +215,7 @@ export function AgentQuestionCard({
               className="group grid min-w-0 grid-cols-[20px_minmax(0,1fr)_1rem] items-center gap-2 rounded-xl px-2 py-1.5 text-left transition-colors hover:bg-muted focus-visible:bg-muted disabled:opacity-60"
               onClick={() => void answer(option.id, value)}
               disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
-              title={option.description || option.label}
+              data-app-tooltip={option.description || option.label}
             >
               <span className="flex h-5 w-5 items-center justify-center rounded border border-border bg-muted/40 text-xs tabular-nums text-muted-foreground">
                 {formatCount(optionIndex + 1)}
@@ -245,7 +245,7 @@ export function AgentQuestionCard({
                 onClick={() => onReplyInChat(question.questionId)}
                 disabled={Boolean(busyChoice)}
                 data-question-reply-in-chat={question.questionId}
-                aria-label={t("questionCard.replyInChat")} title={t("questionCard.replyInChat")}>
+                aria-label={t("questionCard.replyInChat")} data-app-tooltip={t("questionCard.replyInChat")}>
                 <Pencil className="h-4 w-4" aria-hidden="true" />
               </button>
             ) : <Pencil className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />}

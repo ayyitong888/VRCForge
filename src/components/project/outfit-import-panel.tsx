@@ -98,7 +98,7 @@ export function OutfitImportPanel({
               className="h-9 shrink-0 px-3 text-xs"
               disabled={loading || (!packagePath.trim() && !result)}
               onClick={onReview}
-              title={t("outfit.reviewPlan")}
+              data-app-tooltip={t("outfit.reviewPlan")}
             >
               <Bot className="h-3.5 w-3.5" />
               {t("outfit.review")}

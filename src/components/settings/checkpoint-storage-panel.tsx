@@ -181,7 +181,7 @@ export function CheckpointStoragePanel({
             type="button"
             variant="outline"
             disabled={!directory || !isDesktop}
-            title={!isDesktop ? t("settings.checkpointArchiveOpenFolderDesktopOnly") : undefined}
+            data-app-tooltip={!isDesktop ? t("settings.checkpointArchiveOpenFolderDesktopOnly") : undefined}
             onClick={() => onOpenFolder(directory)}
           >
             <FolderOpen className="h-4 w-4 shrink-0" />
@@ -305,7 +305,7 @@ export function CheckpointStoragePanel({
                   </div>
                   <div className="shrink-0 text-xs text-muted-foreground">{item.sizeBytes === undefined ? t("common.unavailable") : formatStorageSize(item.sizeBytes, undefined, i18n.language)}</div>
                   {(isProtected || isAutoProtected) ? (
-                    <Badge tone="warn" className="shrink-0" title={protectionHint}>
+                    <Badge tone="warn" className="shrink-0" data-app-tooltip={protectionHint}>
                       {protectionLabel}
                     </Badge>
                   ) : null}
@@ -336,7 +336,7 @@ export function CheckpointStoragePanel({
               type="button"
               variant="outline"
               disabled={disabled || !isDesktop}
-              title={!isDesktop ? t("settings.checkpointArchivePickFolderDesktopOnly") : undefined}
+              data-app-tooltip={!isDesktop ? t("settings.checkpointArchivePickFolderDesktopOnly") : undefined}
               onClick={() => void pickDirectory()}
             >
               <FolderOpen className="h-4 w-4 shrink-0" />

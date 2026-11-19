@@ -84,8 +84,8 @@ export function SkillPackageAuditList({ audit }: { audit: Array<Record<string, u
                 className="grid min-w-0 gap-2 rounded-md border border-border/70 bg-card px-3 py-2 text-xs"
               >
                 <div className="grid min-w-0 gap-1 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_auto]">
-                  <span className="truncate font-mono" title={event}>{event}</span>
-                  <span className="truncate text-muted-foreground" title={context}>{context || "-"}</span>
+                  <span className="truncate font-mono" data-app-tooltip={event}>{event}</span>
+                  <span className="truncate text-muted-foreground" data-app-tooltip={context}>{context || "-"}</span>
                   <span className="shrink-0 text-muted-foreground">{formatAuditTime(timestamp)}</span>
                 </div>
                 {governance.length ? (
@@ -95,7 +95,7 @@ export function SkillPackageAuditList({ audit }: { audit: Array<Record<string, u
                         key={key}
                         data-vrcforge-skill-audit-field={key}
                         className="min-w-0 break-all"
-                        title={`${label}: ${value}`}
+                        data-app-tooltip={`${label}: ${value}`}
                       >
                         <span className="font-medium text-foreground/80">{label}:</span>{" "}
                         <span data-vrcforge-skill-audit-field-value>{value}</span>

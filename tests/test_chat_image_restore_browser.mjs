@@ -32,7 +32,7 @@ try {
  await page.locator('#saved').waitFor();
  assert.equal(await page.locator('#saved img').count(),1,'persisted image reference must render a thumbnail');
  assert(await page.locator('#saved img').evaluate(i=>i.complete&&i.naturalWidth>0));
- await page.locator('#saved button[title="saved.png"]').click();
+ await page.locator('#saved button[data-app-tooltip="saved.png"]').click();
  await page.getByRole('dialog').waitFor();
  assert.equal(await page.getByRole('dialog').locator('img').count(),1);
  await page.reload();

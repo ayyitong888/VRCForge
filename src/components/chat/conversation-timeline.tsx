@@ -1481,7 +1481,7 @@ export function RunRow({
         className="group/run flex min-h-8 w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:text-foreground focus-visible:text-foreground"
       >
         <Icon className="h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 truncate text-chat-detail" title={title}>{title}</span>
+        <span className="min-w-0 truncate text-chat-detail" data-app-tooltip={title}>{title}</span>
         {!compactExecution || showCompactStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
           {statusLabel}
         </span> : null}

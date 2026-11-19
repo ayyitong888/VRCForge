@@ -4164,7 +4164,7 @@ pub(crate) fn select_folder_dialog(initial_path: Option<&str>) -> Result<Option<
         // Native folder picker via `rfd` (IFileDialog on Windows): no child
         // process, no script injection surface, and non-ASCII paths survive
         // without encoding tricks.
-        let mut dialog = rfd::FileDialog::new().set_title("Select checkpoint archive directory");
+        let mut dialog = rfd::FileDialog::new();
         if let Some(path) = initial_path {
             let trimmed = path.trim();
             if !trimmed.is_empty() {

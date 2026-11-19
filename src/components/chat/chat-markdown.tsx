@@ -41,7 +41,7 @@ export function ChatMarkdown({ text, variant = "agent", allowImages = true }: { 
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkMath, remarkChatDeepLinks, remarkChatFileLinks]}
         remarkRehypeOptions={{ clobberPrefix: "" }}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], [scopeMarkdownFragments, clobberPrefix], [rehypeKatex, { trust: false }]]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], markdownTooltips, [scopeMarkdownFragments, clobberPrefix], [rehypeKatex, { trust: false }]]}
         components={components}
         urlTransform={(url, key, node) => safeMarkdownUrlTransform(url, key, node?.tagName, resourceContext)}
       >
@@ -208,11 +208,11 @@ function ExternalChatLink({ children, href, codex = false, ...props }: Component
   </a>{failed && <span role="status" className="ml-2 text-sm text-destructive">{t(codex ? "chat.externalLinkOpenFailed" : "chat.webLinkOpenFailed")}</span>}</>;
 }
 
-function ChatFileLink({ path, children, className }: ComponentPropsWithoutRef<"a"> & { path: string }) {
+function ChatFileLink({ path, children, className, "data-app-tooltip": tooltip }: ComponentPropsWithoutRef<"a"> & { path: string; "data-app-tooltip"?: string }) {
   const context = useContext(ChatResourceImageContext);
   const [error, setError] = useState("");
   const [opening, setOpening] = useState(false);
-  if (!context) return <span>{children}</span>;
+  if (!context) return <span data-app-tooltip={tooltip}>{children}</span>;
   const openFile = (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     if (!event.isTrusted || opening) return;
@@ -220,22 +220,22 @@ function ChatFileLink({ path, children, className }: ComponentPropsWithoutRef<"a
     void openChatFile(context, path).catch(cause => setError(String(cause instanceof Error ? cause.message : cause)))
       .finally(() => setOpening(false));
   };
-  return <><a className={className} href={chatFileHref(path) || undefined} aria-busy={opening}
+  return <><a className={className} href={chatFileHref(path) || undefined} aria-busy={opening} data-app-tooltip={tooltip}
     onClick={openFile} onAuxClick={event => { if (event.button === 1) openFile(event); }}>
     {children}
   </a>{error && <span role="status" className="ml-2 text-sm text-destructive">{error}</span>}</>;
 }
 
-function ChatMarkdownImage({ inverted, alt, src, ...props }: ComponentPropsWithoutRef<"img"> & { inverted: boolean }) {
+function ChatMarkdownImage({ inverted, alt, src, "data-app-tooltip": tooltip, ...props }: ComponentPropsWithoutRef<"img"> & { inverted: boolean; "data-app-tooltip"?: string }) {
   const resourceContext = useContext(ChatResourceImageContext);
   const source = String(src || "");
   const className = cn("my-3 max-h-96 max-w-full rounded-md border object-contain", inverted ? "border-primary-foreground/35" : "border-border");
   if (isChatResourceImageUri(source) && resourceContext) {
-    return <AuthenticatedChatResourceImage uri={source} alt={alt || ""} context={resourceContext} className={className} />;
+    return <AuthenticatedChatResourceImage uri={source} alt={alt || ""} context={resourceContext} className={className} tooltip={tooltip} />;
   }
   const safeSrc = safeMarkdownUrlTransform(source);
   if (!safeSrc) return alt ? <span>{alt}</span> : null;
-  return <img className={className} src={safeSrc} alt={alt || ""} {...props} />;
+  return <img className={className} src={safeSrc} alt={alt || ""} data-app-tooltip={tooltip} {...props} />;
 }
 
 function markdownCodeText(value: unknown): string {
@@ -243,6 +243,17 @@ function markdownCodeText(value: unknown): string {
   if (Array.isArray(value)) return value.map(markdownCodeText).join("");
   if (isValidElement(value)) return markdownCodeText((value.props as { children?: unknown }).children);
   return value == null ? "" : String(value);
+}
+
+function markdownTooltips() {
+  return (tree: { children?: Array<Record<string, unknown>> }) => {
+    walkMarkdownTree(tree, (node) => {
+      const properties = node.properties as Record<string, unknown> | undefined;
+      if (typeof properties?.title !== "string") return;
+      properties["data-app-tooltip"] = properties.title;
+      delete properties.title;
+    });
+  };
 }
 
 function scopeMarkdownFragments(prefix: string) {
@@ -337,12 +348,13 @@ export function ChatCaptureResourcePreview({ uri, alt, onClose }: { uri: string;
 }
 
 function AuthenticatedChatResourceImage({
-  uri, alt, context, className, thumbnail, onClosePreview,
+  uri, alt, context, className, tooltip, thumbnail, onClosePreview,
 }: {
   uri: string;
   alt: string;
   context: ChatResourceImageRequestContext;
   className?: string;
+  tooltip?: string;
   thumbnail?: { className: string; onOpen: (image: ChatImageSource) => void };
   onClosePreview?: () => void;
 }) {
@@ -372,7 +384,7 @@ function AuthenticatedChatResourceImage({
     return alt ? <span>{alt}</span> : null;
   }
   if (onClosePreview) return <ChatImagePreview src={src} alt={alt} onClose={onClosePreview} />;
-  const image = <img className={className} src={src} alt={alt} />;
+  const image = <img className={className} src={src} alt={alt} data-app-tooltip={tooltip} />;
   return thumbnail ? (
     <button
       type="button"

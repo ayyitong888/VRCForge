@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowLeft, Folder, FolderPlus, Loader2, X } from "lucide-react";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { UnityProjectCreateRequest, UnityProjectCreateResult, UnityProjectTemplate } from "../../lib/api";
 import { Button } from "../ui/button";
@@ -28,6 +28,14 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
   const [pickingFolder, setPickingFolder] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current!;
+    dialog.showModal();
+    nameRef.current?.focus();
+    return () => dialog.close();
+  }, []);
   const selectedTemplate = templates.find((template) => template.path === templatePath)
     ?? defaultUnityProjectTemplate(templates);
   const destination = parentPath && name.trim() ? `${parentPath.replace(/[\\/]+$/, "")}\\${name.trim()}` : "";
@@ -60,8 +68,13 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
-      <section role="dialog" aria-modal="true" aria-labelledby="unity-project-create-title" className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-border bg-card p-6 shadow-panel">
+    <dialog ref={dialogRef} aria-labelledby="unity-project-create-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!submitting && !pickingFolder) onBack();
+      }}
+      className="m-auto w-[min(32rem,calc(100vw-3rem))] overflow-visible bg-transparent text-foreground backdrop:bg-black/35">
+      <section className="flex max-h-[80vh] w-full flex-col rounded-lg border border-border bg-card p-6 shadow-panel">
         <div className="flex min-w-0 items-center gap-2">
           <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("project.creation.back")} disabled={submitting || pickingFolder} onClick={onBack}>
             <ArrowLeft className="h-4 w-4" />
@@ -101,13 +114,13 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
             )}
             <label className="block space-y-1.5 text-sm font-medium">
               <span>{t("project.creation.name")}</span>
-              <input autoFocus className={fieldClass} value={name} disabled={submitting} onChange={(event) => setName(event.target.value)} required />
+              <input ref={nameRef} className={fieldClass} value={name} disabled={submitting} onChange={(event) => setName(event.target.value)} required />
             </label>
             <div className="space-y-1.5">
               <p className="text-sm font-medium">{t("project.creation.parentFolder")}</p>
               <Button type="button" variant="outline" className="h-9 w-full justify-start gap-2 px-3" disabled={submitting || pickingFolder} onClick={() => void chooseFolder()}>
                 {pickingFolder ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <Folder className="h-4 w-4 shrink-0" />}
-                {parentPath && <span className="min-w-0 flex-1 truncate text-left text-muted-foreground" title={parentPath}>{parentPath}</span>}
+                {parentPath && <span className="min-w-0 flex-1 truncate text-left text-muted-foreground" data-app-tooltip={parentPath}>{parentPath}</span>}
                 <span className="shrink-0">{t("project.creation.chooseFolder")}</span>
               </Button>
               {destination && <p className="select-text break-all text-xs text-muted-foreground">{t("project.creation.destination", { path: destination })}</p>}
@@ -122,6 +135,6 @@ export function UnityProjectCreationModal({ creation, onBack, onClose }: {
           </form>
         </div>
       </section>
-    </div>
+    </dialog>
   );
 }

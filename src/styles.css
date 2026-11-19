@@ -1,6 +1,7 @@
 @import "./theme.css";
 @import "katex/dist/katex.min.css";
 @import "./components/chat/markdown-code-block.css";
+@import "./styles/app-select.css";
 
 @tailwind base;
 @tailwind components;

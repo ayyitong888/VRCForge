@@ -353,10 +353,10 @@ try {
   await holdDrag(chatList("temporary").locator('[data-vrcforge-chat-drag-row="temporary-1"]'), chatList("temporary").locator('[data-vrcforge-chat-drag-row="temporary-0"]'));
   assert.deepEqual(await readChatOrder(), allManualChatIds, "dragging across the pinned boundary cannot silently remove pin priority");
   const temporaryOne = chatList("temporary").locator('[data-vrcforge-chat-id="temporary-1"]');
-  await holdDrag(temporaryOne.getByTitle("Pin Chat", { exact: true }), chatList("temporary").locator('[data-vrcforge-chat-drag-row="temporary-2"]'));
+  await holdDrag(temporaryOne.getByRole("button", { name: "Pin Chat", exact: true }), chatList("temporary").locator('[data-vrcforge-chat-drag-row="temporary-2"]'));
   assert.deepEqual(await readChatOrder(), allManualChatIds, "holding a pin control cannot activate conversation dragging");
-  await temporaryOne.getByTitle("Pin Chat", { exact: true }).click();
-  await temporaryOne.getByTitle("Delete Permanently", { exact: true }).click();
+  await temporaryOne.getByRole("button", { name: "Pin Chat", exact: true }).click();
+  await temporaryOne.getByRole("button", { name: "Delete Permanently", exact: true }).click();
   assert.deepEqual(await page.evaluate(() => window.__pinnedChatClicks || []), ["temporary-1"], "pin control still invokes only its existing action");
   assert.deepEqual(await page.evaluate(() => window.__deleteChatClicks || []), ["temporary-1"], "delete control still invokes only its existing action");
   assert.deepEqual(await page.evaluate(() => window.__openedChats || []), [], "action controls never open a conversation");

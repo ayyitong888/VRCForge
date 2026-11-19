@@ -25,6 +25,15 @@ if (issue === "composer-notification") {
     { id: "copy-other", type: "user", text: "Keep this other message separate.", createdAt: date },
   ];
 }
+if (issue === "app-tooltips") {
+  chatA.items = [
+    { id: "tooltip-user", type: "user", text: "Check this draft.", createdAt: date },
+    { id: "tooltip-agent", type: "agent", createdAt: date, response: {
+      ok: true, sessionId: chatA.sessionId, turnId: "tooltip-turn", status: "completed",
+      plan: { reply: "The draft is ready to send." },
+    } },
+  ];
+}
 if (issue === "sidebar") {
   chatA.projectPath = "E:/fixtures/sidebar-workbench";
   chatA.items = [{ id: "parent-message", type: "user", text: "Original parent transcript", createdAt: date }];
@@ -267,7 +276,9 @@ try {
             models: [{ id: "fixture", supportedReasoningLevels: [{ effort: "low" }, { effort: "high" }] }],
           };
           if (command === "open_codex_chat_url") { window.codexOpenUrls.push(args.url); return; }
-          if (command === "fetch_project_prefs" && linkProjectPath) return { ok: true, customPaths: [linkProjectPath] };
+          if (command === "fetch_project_prefs" && linkProjectPath) return {
+            ok: true, customPaths: [linkProjectPath], customProjects: [{ path: linkProjectPath, projectType: "unity" }],
+          };
           const request = args?.request || {};
           if (composerLinkFixture && command === "save_chat_record") {
             const { chatId } = request.body;
@@ -303,7 +314,7 @@ try {
         },
       };
     }, { desktop, base, startupUrl, composerLinkFixture: issue === "chat-composer-link", noticeFixture: issue === "composer-notification",
-      linkProjectPath: ["chat-links", "chat-composer-link"].includes(issue) ? chatC.projectPath : ["handoff-catalog", "sidebar"].includes(issue) ? chatA.projectPath : "",
+      linkProjectPath: ["chat-links", "chat-composer-link", "app-tooltips"].includes(issue) ? chatC.projectPath : ["handoff-catalog", "sidebar"].includes(issue) ? chatA.projectPath : "",
       theme: options.theme });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
@@ -330,11 +341,21 @@ try {
     return page.locator("[data-vrcforge-subagent-workspace-surface]");
   };
 
+  const tooltipText = (page, label) => page.getByRole("tooltip").filter({ hasText: label });
+  const assertTooltip = async (page, target, label) => {
+    assert.equal(await target.getAttribute("title"), null, `${label} must not use a native title`);
+    await target.hover();
+    const tooltip = tooltipText(page, label);
+    await tooltip.waitFor();
+    assert.equal(await tooltip.innerText(), label);
+    return tooltip;
+  };
+
   if (issue === "composer-notification") {
     async function assertCopyFeedback(button, copied) {
       await button.locator(copied ? "svg.lucide-check" : "svg.lucide-copy").waitFor();
       const label = copied ? "Copied" : "Copy";
-      assert.equal(await button.getAttribute("title"), label);
+      assert.equal(await button.getAttribute("title"), null);
       assert.equal(await button.getAttribute("aria-label"), label);
     }
 
@@ -377,8 +398,10 @@ try {
           window.completedClipboardWrites += 1;
         };
       });
+      await assertTooltip(page, copy, "Copy");
       await copy.click();
       await assertCopyFeedback(copy, true);
+      await tooltipText(page, "Copied").waitFor();
       assert.equal(await notice.count(), 0, "copy success must not create a workspace notification");
       await assertCopyFeedback(otherCopy, false);
       assert.equal(await page.evaluate(() => navigator.clipboard.readText()), chatA.items[0].text);
@@ -395,6 +418,7 @@ try {
       await page.clock.fastForward(2000);
       await assertCopyFeedback(copy, false);
       await assertCopyFeedback(otherCopy, false);
+      await page.getByRole("tooltip").filter({ hasText: /^Copy$/ }).waitFor();
 
       await page.evaluate(() => {
         navigator.clipboard.writeText = async () => { throw new Error("Fixture clipboard rejected"); };
@@ -436,6 +460,49 @@ try {
     await assertCopyFeedback(childCopy, true);
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), done.task);
     assert.equal(await page.locator(".transient-failure-toast").count(), 0);
+    await page.close();
+  }
+
+  if (issue === "app-tooltips") {
+    const page = await open(true, "", { viewport: { width: 900, height: 620 }, theme: "dark" });
+    const left = page.locator('[data-layout-splitter="left"]');
+    const right = page.locator('[data-layout-splitter="right"]');
+    const hideSidebar = page.getByRole("button", { name: "Hide runtime sidebar" });
+    await assertTooltip(page, left, "Resize left pane");
+    await assertTooltip(page, right, "Resize right pane");
+    const tooltip = await assertTooltip(page, hideSidebar, "Hide runtime sidebar");
+    const bounds = await tooltip.boundingBox();
+    assert.ok(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 900 && bounds.y + bounds.height <= 620,
+      "tooltip must fit the viewport next to the rightmost control");
+    assert.equal(await tooltip.evaluate(el => getComputedStyle(el).pointerEvents), "none");
+    assert.ok((await hideSidebar.getAttribute("aria-describedby")).split(" ").includes(await tooltip.getAttribute("id")));
+    await page.keyboard.press("Escape");
+    await tooltip.waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "New Project", exact: true }).hover();
+    await page.keyboard.press("Tab");
+    await hideSidebar.focus();
+    await tooltip.waitFor();
+    await page.keyboard.press("Escape");
+    await tooltip.waitFor({ state: "hidden" });
+    assert.equal(await hideSidebar.evaluate(button => button === document.activeElement), true);
+
+    const userCopy = page.locator('[data-conversation-item-id="tooltip-user"]').getByRole("button", { name: "Copy", exact: true });
+    const agentCopy = page.locator('[data-conversation-item-id="tooltip-agent"]').getByRole("button", { name: "Copy", exact: true }).last();
+    const agentTip = await assertTooltip(page, agentCopy, "Copy");
+    const agentBox = await agentCopy.boundingBox();
+    const agentTipBox = await agentTip.boundingBox();
+    const history = await page.locator("[data-chat-history-scroll]").boundingBox();
+    assert.ok(agentTipBox.y >= agentBox.y + agentBox.height, "assistant actions place the tooltip below to preserve the reply text");
+    assert.ok(agentTipBox.y + agentTipBox.height <= history.y + history.height, "tooltip does not cover the composer");
+    const userTip = await assertTooltip(page, userCopy, "Copy");
+    const userBox = await userCopy.boundingBox();
+    const userTipBox = await userTip.boundingBox();
+    assert.ok(userTipBox.y + userTipBox.height <= userBox.y, "user message actions retain the above placement");
+
+    await page.getByRole("button", { name: "New Project", exact: true }).click();
+    await page.getByRole("heading", { name: "Select Project" }).waitFor();
+    const editPath = page.getByRole("button", { name: "Edit recorded path" });
+    await assertTooltip(page, editPath, "Edit recorded path");
     await page.close();
   }
 
@@ -551,7 +618,7 @@ try {
     await bareLink.waitFor();
     const markdownLink = page.getByRole("link", { name: "原始会话", exact: true });
     assert.equal(await markdownLink.getAttribute("href"), externalChatLink);
-    assert.equal(await markdownLink.getAttribute("title"), "另一个应用");
+    await assertTooltip(page, markdownLink, "另一个应用");
     assert.equal(await page.getByRole("link", { name: /查询参数|片段|新会话|自动化/ }).count(), 0);
     assert.equal(await page.getByRole("link", { name: "图片" }).getAttribute("href"), "https://example.com/image.png");
     await page.evaluate(url => window.subAgentEvent("deep-link://new-url", [url]), externalChatLink);
@@ -617,7 +684,7 @@ try {
     await page.getByText("Chat not found.").waitFor();
     const projectLink = page.getByRole("link", { name: chatC.title });
     assert.equal(await projectLink.getAttribute("href"), "vrcforge://chat/surface-C");
-    assert.equal(await projectLink.getAttribute("title"), "中文标题");
+    await assertTooltip(page, projectLink, "中文标题");
     await projectLink.click();
     await page.getByText("Other project transcript", { exact: true }).waitFor();
     await page.locator('[data-open-conversation="surface-A"]').click();
@@ -784,8 +851,10 @@ try {
     const files = page.locator('[data-chat-composer-dock] input[type="file"]').first();
     await files.setInputFiles({ name: "report.zip", mimeType: "application/zip", buffer: Buffer.from("fixture") });
     await page.getByText("report.zip", { exact: true }).first().waitFor();
-    await page.locator('[title="Couldn\'t save the file because its contents don\'t match a supported format. Add a valid file."]').first().waitFor();
-    assert.equal(await page.locator('[title*="Fixture attachment format rejected"]').count(), 0);
+    const attachmentError = "Couldn't save the file because its contents don't match a supported format. Add a valid file.";
+    const localizedTrigger = page.locator(`[data-app-tooltip="${attachmentError}"]`).first();
+    await assertTooltip(page, localizedTrigger, attachmentError);
+    assert.equal(await page.locator('[data-app-tooltip*="Fixture attachment format rejected"]').count(), 0);
     await page.close();
   }
   console.log(`PASS App browser and fixture HTTP: ${issue}`);

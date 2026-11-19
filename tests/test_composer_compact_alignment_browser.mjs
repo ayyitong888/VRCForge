@@ -52,7 +52,7 @@ try {
     return {
       textCenter, lineHeight, height: element.offsetHeight,
       plusCenter: centerY(form.querySelector("[data-composer-action-menu] svg")),
-      modelCenter: centerY(form.querySelector('[title="ChatGPT · gpt-6.1-sol"]')),
+      modelCenter: centerY(form.querySelector('[data-app-tooltip="ChatGPT · gpt-6.1-sol"]')),
     };
   });
   const assertCentered = async (label) => {
@@ -89,7 +89,7 @@ try {
       document.getElementById("root").style.cssText = "width:370px;margin:440px 0 0 440px";
       window.setComposerLayout({ questionPromptVisible: false, providerLabel, model });
     }, { providerLabel, model });
-    await page.locator(`span[title="${providerLabel} · ${model}"]`).waitFor();
+    await page.locator(`span[data-app-tooltip="${providerLabel} · ${model}"]`).waitFor();
     await input.fill("send from narrow pane");
     const send = page.locator("[data-composer-send]");
     const geometry = await send.evaluate(button => {
@@ -109,7 +109,7 @@ try {
       document.getElementById("root").style.cssText = "width:360px;margin:440px 0 0 440px";
       window.setComposerLayout({ questionPromptVisible: true, providerLabel: "ChatGPT", model: "gpt-6.1-sol" });
     });
-    await page.locator('span[title="ChatGPT · gpt-6.1-sol"]').waitFor();
+    await page.locator('span[data-app-tooltip="ChatGPT · gpt-6.1-sol"]').waitFor();
     const permission = page.locator("button:has(svg.lucide-shield)");
     await permission.click();
     const menu = permission.locator("..").locator("div.absolute");

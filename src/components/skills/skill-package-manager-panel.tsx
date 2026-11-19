@@ -431,7 +431,7 @@ export function SkillPackageManagerPanel({
                     <Copy className="h-3.5 w-3.5" />
                     {i18n.t("package.export")}
                   </Button>
-                  {hasUnityTools ? <Button type="button" variant="outline" className="h-8 px-2 text-xs" disabled={busy || !enabled || !selectedUnityProjectPath || packageActionId === `${id}:unity-tool`} onClick={() => void runUnityToolInstall(pkg)} title={!selectedUnityProjectPath ? i18n.t("package.unityToolNeedsUnity") : i18n.t("package.unityToolCompileHint")}>
+                  {hasUnityTools ? <Button type="button" variant="outline" className="h-8 px-2 text-xs" disabled={busy || !enabled || !selectedUnityProjectPath || packageActionId === `${id}:unity-tool`} onClick={() => void runUnityToolInstall(pkg)} data-app-tooltip={!selectedUnityProjectPath ? i18n.t("package.unityToolNeedsUnity") : i18n.t("package.unityToolCompileHint")}>
                     {packageActionId === `${id}:unity-tool` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
                     {i18n.t("package.installUnityTools")}
                   </Button> : null}
@@ -622,7 +622,7 @@ export function SkillPackageManagerPanel({
             <div className="flex min-w-0 items-center gap-2">
               <span className="min-w-0 flex-1 truncate text-sm font-medium">{skillPackageTitle(preview)}</span>
               {skillPackageLabels(preview).map((label) => (
-                <Badge key={label} title={skillPackageExecutionDescription(preview)} tone={skillPackageLabelTone(label)} className="h-6 shrink-0">
+                <Badge key={label} data-app-tooltip={skillPackageExecutionDescription(preview)} tone={skillPackageLabelTone(label)} className="h-6 shrink-0">
                   {label}
                 </Badge>
               ))}

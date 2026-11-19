@@ -30,7 +30,7 @@ export function MessageCopyButton({ onCopy, className, ...buttonProps }: Pick<Bu
   const label = t(copied ? "chat.copied" : "chat.copyMessage");
   return (
     <Button {...buttonProps} type="button" variant="ghost" className={cn("h-7 w-7 shrink-0 p-0", className)}
-      title={label} aria-label={label} onClick={() => void copyMessage()}>
+      data-app-tooltip={label} aria-label={label} onClick={() => void copyMessage()}>
       <Icon className="h-3.5 w-3.5" aria-hidden="true" />
     </Button>
   );

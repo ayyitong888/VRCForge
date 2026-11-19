@@ -77,9 +77,9 @@ try {
   const section=page.locator(`[data-variant="${variant}"]`);
   const remove=section.getByRole('button',{name:'移除',exact:true});
   await remove.first().hover();
-  assert.equal(await remove.first().getAttribute('title'),null,'selected-text remove does not stack native tooltip over quote preview');
+  assert.equal(await remove.first().getAttribute('data-app-tooltip'),null,'selected-text remove does not stack native tooltip over quote preview');
   assert.equal(await section.locator('span[aria-hidden="true"]:visible').count(),1);
-  assert.equal(await remove.last().getAttribute('title'),'移除','ordinary attachment keeps its only tooltip');
+  assert.equal(await remove.last().getAttribute('data-app-tooltip'),'移除','ordinary attachment keeps its only tooltip');
  }
  console.log('PASS: screenshot usage values, mouse/focus single popup, full and compact selected-text remove, ordinary attachment title');
 } finally {await browser.close();}

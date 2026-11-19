@@ -16,7 +16,7 @@ export function RuntimeToolButton({ icon, label, onClick }: { icon: ReactNode; l
   return (
     <button
       type="button"
-      title={label}
+      data-app-tooltip={label}
       aria-label={label}
       onClick={onClick}
       className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground"
@@ -105,12 +105,12 @@ export function RuntimeInfoRow({
   return (
     <div
       className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 py-1 text-sm"
-      title={value ? `${label}: ${value}` : label}
+      data-app-tooltip={value ? `${label}: ${value}` : label}
     >
       <div className={cn("flex items-center justify-center", muted ? "text-muted-foreground/60" : "text-muted-foreground")}>{icon}</div>
       <div className="min-w-0">
-        <div className="truncate font-medium" title={label}>{label}</div>
-        {value ? <div className={cn("truncate text-xs", muted ? "text-muted-foreground/60" : "text-muted-foreground")} title={value}>{value}</div> : null}
+        <div className="truncate font-medium" data-app-tooltip={label}>{label}</div>
+        {value ? <div className={cn("truncate text-xs", muted ? "text-muted-foreground/60" : "text-muted-foreground")} data-app-tooltip={value}>{value}</div> : null}
       </div>
       {suffix ? <div className="shrink-0 text-xs">{suffix}</div> : null}
     </div>
@@ -147,7 +147,7 @@ export function RuntimeRunRow({
         <span className={cn("block h-3 w-3 rounded-full", runtimeRunStatusClass(status))} />
       </div>
       <div className="min-w-0">
-        <div className="truncate font-medium text-foreground" title={title}>
+        <div className="truncate font-medium text-foreground" data-app-tooltip={title}>
           {title}
         </div>
         <div className="truncate text-muted-foreground">{metaParts.join(" · ") || i18n.t("workspace.runLedgerItem")}</div>
@@ -161,7 +161,7 @@ export function RuntimeRunRow({
         {capturedSummary ? (
           <button
             type="button"
-            title={i18n.t("workspace.saveOperationAsSkill")}
+            data-app-tooltip={i18n.t("workspace.saveOperationAsSkill")}
             aria-label={i18n.t("workspace.saveOperationAsSkill")}
             data-vrcforge-save-operation-as-skill
             data-vrcforge-save-operation-tool={run.skillTool || run.writeTool || run.targetTool || ""}
@@ -193,7 +193,7 @@ export function RuntimeReviewEvidenceRow({ item }: { item: RuntimeReviewEvidence
     <>
       <span className="flex items-center justify-center text-muted-foreground">{icon}</span>
       <span className="min-w-0">
-        <span className="block truncate font-medium text-foreground" title={item.title}>
+        <span className="block truncate font-medium text-foreground" data-app-tooltip={item.title}>
           {item.title}
         </span>
         <span className="block truncate text-muted-foreground">{item.meta}</span>
@@ -243,7 +243,7 @@ export function RuntimeDiffFileRow({ file }: { file: WorkspaceDiffSummary["files
   const statusLabel = workspaceDiffStatusLabel(file.status);
   return (
     <div className="grid min-w-0 grid-cols-[76px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1 text-xs hover:bg-muted/70">
-      <span className="truncate text-muted-foreground" title={file.status || statusLabel}>
+      <span className="truncate text-muted-foreground" data-app-tooltip={file.status || statusLabel}>
         {statusLabel}
       </span>
       <span className="truncate font-mono">{file.path}</span>
@@ -280,7 +280,7 @@ export function RuntimeFileReferenceRow({ file }: { file: RuntimeFileReference }
   return (
     <div className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1 text-xs hover:bg-muted/70">
       <FileText className="h-3.5 w-3.5 text-muted-foreground" />
-      <span className="truncate font-mono" title={file.path}>
+      <span className="truncate font-mono" data-app-tooltip={file.path}>
         {file.path}
       </span>
       <span className="shrink-0 text-muted-foreground">{runtimeFileSourceLabel(file.source)}</span>

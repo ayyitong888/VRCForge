@@ -70,7 +70,7 @@ export function ProjectIndexPanel({
         <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={loading} onClick={onScan}>
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
         </Button>
-        <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={loading} onClick={onReview} title={t("project.reviewChanges")}>
+        <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={loading} onClick={onReview} data-app-tooltip={t("project.reviewChanges")}>
           <Bot className="h-3.5 w-3.5" />
           {t("outfit.review")}
         </Button>

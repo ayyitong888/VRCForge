@@ -1,4 +1,20 @@
 @layer base {
+  .app-tooltip {
+    position: fixed;
+    z-index: 110;
+    max-width: min(24rem, calc(100vw - 16px));
+    padding: 5px 8px;
+    border: 1px solid #ffffff24;
+    border-radius: 6px;
+    background: #27272b;
+    color: #fbfbfd;
+    font-size: 12px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+    box-shadow: 0 2px 8px #0003;
+    pointer-events: none;
+  }
+
   .desktop-titlebar {
     display: flex;
     align-items: center;
@@ -611,4 +627,7 @@
     }
   }
 
+}
+button[data-app-tooltip]:disabled {
+  pointer-events: auto;
 }

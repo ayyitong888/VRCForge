@@ -446,7 +446,8 @@ export function Composer({
                 questionPromptVisible && "col-start-1 row-start-1",
               )}
               onClick={() => setActionMenuOpen((open) => !open)}
-              title={t("composerAction.addContext")}
+              aria-label={t("composerAction.addContext")}
+              data-app-tooltip={t("composerAction.addContext")}
               data-composer-action-menu
             >
               <Plus className="h-4 w-4" />
@@ -457,7 +458,7 @@ export function Composer({
                 type="button"
                 data-composer-plan-mode
                 aria-pressed="true"
-                title={t("composerAction.planDisable")}
+                data-app-tooltip={t("composerAction.planDisable")}
                 className={cn(
                   "flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary/10 px-2 text-sm text-primary",
                   questionPromptVisible && "col-start-3 row-start-1",
@@ -478,7 +479,7 @@ export function Composer({
                   currentModeVisual.hoverClass,
                   questionPromptVisible && "h-8 w-8 justify-center px-0",
                 )}
-                title={executionModeLabel(currentMode)}
+                data-app-tooltip={executionModeLabel(currentMode)}
                 onClick={() => setModeMenuOpen((open) => !open)}
               >
                 {currentModeVisual.tier === "full"
@@ -543,10 +544,10 @@ export function Composer({
             ) : null}
             {editing && !sending ? (
               <>
-                <Button type="button" variant="outline" className="h-9 rounded-md px-3" onClick={onCancelEdit} title={t("chat.cancelEdit")}>
+                <Button type="button" variant="outline" className="h-9 rounded-md px-3" onClick={onCancelEdit} data-app-tooltip={t("chat.cancelEdit")}>
                   {t("chat.cancelEdit")}
                 </Button>
-                <Button className="h-9 rounded-md px-3" disabled={!canSubmit} type="submit" title={t("chat.saveEdit")} aria-label={t("chat.saveEdit")}>
+                <Button className="h-9 rounded-md px-3" disabled={!canSubmit} type="submit" data-app-tooltip={t("chat.saveEdit")} aria-label={t("chat.saveEdit")}>
                   {t("chat.saveEdit")}
                 </Button>
               </>
@@ -556,7 +557,7 @@ export function Composer({
                 disabled={primaryAction === "stop" ? stopDisabled : !canSubmit}
                 type={primaryAction === "stop" ? "button" : "submit"}
                 onClick={primaryAction === "stop" ? onStop : undefined}
-                title={primaryActionLabel}
+                data-app-tooltip={primaryActionLabel}
                 aria-label={primaryActionLabel}
                 data-composer-primary-action={primaryAction}
                 data-composer-stop={primaryAction === "stop" ? true : undefined}
@@ -572,7 +573,7 @@ export function Composer({
               "flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1",
               questionPromptVisible ? "col-start-4 row-start-1 max-w-[min(28vw,16rem)] flex-nowrap whitespace-nowrap" : "col-span-2 col-start-1 row-start-2 xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:flex-nowrap xl:whitespace-nowrap",
             )}>
-              <span className="min-w-0 truncate text-sm text-muted-foreground" title={providerModelLabel} aria-label={providerModelLabel}>
+              <span className="min-w-0 truncate text-sm text-muted-foreground" data-app-tooltip={providerModelLabel} aria-label={providerModelLabel}>
                 {providerModelLabel}
               </span>
               {providerReasoningEndpoint && onProviderReasoningActivated ? (
@@ -686,7 +687,7 @@ function SelectedTextQuoteChip({
           type="button"
           className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           onClick={removeSelectedText}
-          title={t("attachments.remove")}
+          data-app-tooltip={t("attachments.remove")}
           aria-label={t("attachments.remove")}
           data-composer-selected-text-remove
         >
@@ -771,7 +772,7 @@ export function AttachmentStrip({
                 isImage ? "h-28 w-28" : "h-[72px] w-[220px]",
                 isSelectedText && "h-auto min-h-10 w-auto max-w-full rounded-full px-3 py-2",
               )}
-              title={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}${capabilityReason ? ` · ${capabilityReason}` : ""}`}
+              data-app-tooltip={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}${capabilityReason ? ` · ${capabilityReason}` : ""}`}
             >
               {isImage && attachment.dataUrl ? (
                 <img src={attachment.dataUrl} alt={attachment.name} className="h-full w-full object-cover" />
@@ -789,7 +790,7 @@ export function AttachmentStrip({
                     <div className="truncate text-sm font-medium">{attachment.name}</div>
                     <div className="mt-0.5 flex items-center gap-2 text-xs uppercase text-muted-foreground">
                       <span>{extension}</span>
-                      {capabilityReason ? <span data-attachment-capability className="truncate normal-case text-amber-700" title={capabilityReason}>{capabilityReason}</span> : null}
+                      {capabilityReason ? <span data-attachment-capability className="truncate normal-case text-amber-700" data-app-tooltip={capabilityReason}>{capabilityReason}</span> : null}
                       {isVaultFile ? <span className="normal-case text-sky-700">{t("attachments.vaultStored")}</span> : null}
                     </div>
                   </div>
@@ -804,7 +805,7 @@ export function AttachmentStrip({
                     isSelectedText && "static ml-2 inline-flex align-middle",
                   )}
                   onClick={() => onRemove(attachment.id)}
-                  title={isSelectedText ? undefined : t("attachments.remove")}
+                  data-app-tooltip={isSelectedText ? undefined : t("attachments.remove")}
                   aria-label={t("attachments.remove")}
                 >
                   <X className="h-3.5 w-3.5" />
@@ -831,7 +832,7 @@ export function AttachmentStrip({
         const attachmentCard = (
           <div
             className={cn("group relative flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 px-2 py-1 text-xs text-foreground shadow-sm", isSelectedText ? "rounded-full bg-background/75" : "bg-background/75")}
-            title={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}${capabilityReason ? ` · ${capabilityReason}` : ""}`}
+            data-app-tooltip={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}${capabilityReason ? ` · ${capabilityReason}` : ""}`}
           >
             {attachment.dataUrl && attachment.type.startsWith("image/") ? (
               <img src={attachment.dataUrl} alt="" className="h-8 w-8 shrink-0 rounded object-cover" />
@@ -842,14 +843,14 @@ export function AttachmentStrip({
             )}
             <span className="min-w-0 max-w-[220px] truncate">{isSelectedText ? t("attachments.selectedText", { count: 1 }) : attachment.name}</span>
             {!isSelectedText ? <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span> : null}
-            {capabilityReason ? <span data-attachment-capability className="max-w-[260px] truncate text-amber-700" title={capabilityReason}>{capabilityReason}</span> : null}
+            {capabilityReason ? <span data-attachment-capability className="max-w-[260px] truncate text-amber-700" data-app-tooltip={capabilityReason}>{capabilityReason}</span> : null}
             {isVaultFile ? <span className="shrink-0 text-sky-700">{t("attachments.vaultStored")}</span> : null}
             {onRemove ? (
               <button
                 type="button"
                 className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={() => onRemove(attachment.id)}
-                title={isSelectedText ? undefined : t("attachments.remove")}
+                data-app-tooltip={isSelectedText ? undefined : t("attachments.remove")}
                 aria-label={t("attachments.remove")}
               >
                 <X className="h-3.5 w-3.5" />

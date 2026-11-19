@@ -29,7 +29,7 @@ function TodoItems({ progress }: { progress: AgentProgress[] }) {
             data-vrcforge-agent-todo-status={status}
             aria-current={active ? "step" : undefined}
           >
-            <span role="img" aria-label={label} title={label} className={cn(
+            <span role="img" aria-label={label} data-app-tooltip={label} className={cn(
               "flex h-6 w-6 items-center justify-center rounded-full text-xs tabular-nums text-muted-foreground",
               !active && !marker && "border border-primary/30",
               (active || status === "completed") && "bg-primary text-primary-foreground",
@@ -51,7 +51,7 @@ function TodoItems({ progress }: { progress: AgentProgress[] }) {
               active ? "font-medium text-foreground" : "text-muted-foreground",
               status === "completed" && "line-through",
               (status === "blocked" || status === "failed") && "text-foreground",
-            )} title={item.title || item.progressId}>
+            )} data-app-tooltip={item.title || item.progressId}>
               {item.title || item.progressId}
             </span>
           </li>

@@ -94,7 +94,7 @@ function PendingQueuedTurnCard({
     <div className="group flex h-9 items-center gap-2 px-3" data-chat-pending-turn={turn.id}>
       <ListEnd className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden="true" />
       {firstAttachment ? (
-        <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground" title={turn.attachments.map((attachment) => attachment.name).join(", ")} data-chat-pending-turn-attachments>
+        <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground" data-app-tooltip={turn.attachments.map((attachment) => attachment.name).join(", ")} data-chat-pending-turn-attachments>
           {imagePreview ? <img src={imagePreview} alt={firstAttachment.name} className="h-6 w-6 rounded object-contain" /> : <Paperclip className="h-4 w-4" aria-hidden="true" />}
           {turn.attachments.length > 1 ? <span>{turn.attachments.length}</span> : null}
         </span>
@@ -102,13 +102,13 @@ function PendingQueuedTurnCard({
       <p className="min-w-0 flex-1 truncate text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
       <div className="flex shrink-0 items-center gap-0.5 text-muted-foreground/70 group-hover:text-muted-foreground group-focus-within:text-muted-foreground">
         {sending && !turn.staleBranch ? (
-          <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.sendQueuedNow")} aria-label={t("chat.sendQueuedNow")} disabled={busy} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
+          <Button type="button" variant="ghost" className="h-7 w-7 p-0" data-app-tooltip={t("chat.sendQueuedNow")} aria-label={t("chat.sendQueuedNow")} disabled={busy} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
             <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
           </Button>
         ) : null}
-        {!sending && !turn.staleBranch && !turn.queueTransition && onResume ? <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.resumeFollowups")} aria-label={t("chat.resumeFollowups")} onClick={onResume} data-chat-resume-followups><Play className="h-3.5 w-3.5" aria-hidden="true" /></Button> : null}
+        {!sending && !turn.staleBranch && !turn.queueTransition && onResume ? <Button type="button" variant="ghost" className="h-7 w-7 p-0" data-app-tooltip={t("chat.resumeFollowups")} aria-label={t("chat.resumeFollowups")} onClick={onResume} data-chat-resume-followups><Play className="h-3.5 w-3.5" aria-hidden="true" /></Button> : null}
         <Button type="button" variant="ghost" className="h-7 w-7 p-0"
-          aria-label={t("chat.editQueued")} title={t("chat.editQueued")} disabled={busy}
+          aria-label={t("chat.editQueued")} data-app-tooltip={t("chat.editQueued")} disabled={busy}
           onClick={async () => {
             setRestoring(true);
             try {
@@ -121,7 +121,7 @@ function PendingQueuedTurnCard({
         >
           <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
         </Button>
-        <Button type="button" variant="ghost" className="h-7 w-7 p-0" aria-label={t("chat.removeQueued")} title={t("chat.removeQueued")} disabled={busy} onClick={() => onRemove?.(turn.id)} data-chat-pending-turn-remove={turn.id}>
+        <Button type="button" variant="ghost" className="h-7 w-7 p-0" aria-label={t("chat.removeQueued")} data-app-tooltip={t("chat.removeQueued")} disabled={busy} onClick={() => onRemove?.(turn.id)} data-chat-pending-turn-remove={turn.id}>
           <X className="h-3.5 w-3.5" aria-hidden="true" />
         </Button>
       </div>
@@ -648,10 +648,10 @@ export function ChatWorkspace({
       </div>
       {queued.length > 1 && !composerSending && queued.every((turn) => !turn.queueTransition) ? (
         <div className="flex justify-end gap-1 px-2 pb-1 text-muted-foreground" data-chat-followup-controls>
-          <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.resumeFollowups")} aria-label={t("chat.resumeFollowups")} onClick={onResumeQueue} data-chat-resume-followups>
+          <Button type="button" variant="ghost" className="h-7 w-7 p-0" data-app-tooltip={t("chat.resumeFollowups")} aria-label={t("chat.resumeFollowups")} onClick={onResumeQueue} data-chat-resume-followups>
             <Play className="h-3.5 w-3.5" aria-hidden="true" />
           </Button>
-          <Button type="button" variant="ghost" className="h-7 w-7 p-0" title={t("chat.cancelFollowups")} aria-label={t("chat.cancelFollowups")} onClick={onCancelQueue} data-chat-cancel-followups>
+          <Button type="button" variant="ghost" className="h-7 w-7 p-0" data-app-tooltip={t("chat.cancelFollowups")} aria-label={t("chat.cancelFollowups")} onClick={onCancelQueue} data-chat-cancel-followups>
             <X className="h-3.5 w-3.5" aria-hidden="true" />
           </Button>
         </div>
@@ -676,7 +676,7 @@ export function ChatWorkspace({
     >
       <span className="shrink-0 text-muted-foreground" aria-hidden="true">◎</span>
       <span className="shrink-0 font-medium">{t("goal.inProgress")}</span>
-      <span className="min-w-0 flex-1 truncate text-muted-foreground" title={activeGoal.title || activeGoal.summary || activeGoal.goalId}>
+      <span className="min-w-0 flex-1 truncate text-muted-foreground" data-app-tooltip={activeGoal.title || activeGoal.summary || activeGoal.goalId}>
         {activeGoal.title || activeGoal.summary || activeGoal.goalId}
       </span>
       <span className="shrink-0 text-xs text-muted-foreground" data-chat-active-goal-elapsed>
@@ -690,7 +690,7 @@ export function ChatWorkspace({
         disabled={goalActionBusy}
         onClick={() => void setActiveGoalStatus(activeGoal.status === "paused" || activeGoal.status === "blocked" ? "active" : "paused")}
         aria-label={activeGoal.status === "paused" || activeGoal.status === "blocked" ? t("goal.resume") : t("goal.pause")}
-        title={activeGoal.status === "paused" || activeGoal.status === "blocked" ? t("goal.resume") : t("goal.pause")}
+        data-app-tooltip={activeGoal.status === "paused" || activeGoal.status === "blocked" ? t("goal.resume") : t("goal.pause")}
         data-chat-active-goal-toggle
       >
         {activeGoal.status === "paused" || activeGoal.status === "blocked" ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
@@ -702,7 +702,7 @@ export function ChatWorkspace({
         disabled={goalActionBusy}
         onClick={() => void setActiveGoalStatus("cancelled")}
         aria-label={t("goal.cancel")}
-        title={t("goal.cancel")}
+        data-app-tooltip={t("goal.cancel")}
         data-chat-active-goal-cancel
       >
         <X className="h-4 w-4" />
@@ -951,7 +951,7 @@ export function ChatWorkspace({
           variant="outline"
           className="mr-5 mt-1 h-8 w-8 shrink-0 self-end rounded-full bg-workspace p-0 text-muted-foreground md:mr-7"
           aria-label={t("chat.scrollToBottom")}
-          title={t("chat.scrollToBottom")}
+          data-app-tooltip={t("chat.scrollToBottom")}
           onClick={onScrollToBottom}
           data-chat-scroll-to-bottom
         >
