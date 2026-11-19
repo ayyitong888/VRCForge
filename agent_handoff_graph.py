@@ -1,43 +1,58 @@
-"""Typed continuity state and incremental edits shared by native model handoffs."""
+"""Task continuity graph and local, incremental validation for model handoffs."""
 
 from __future__ import annotations
 
+from collections import defaultdict
 import json
+import math
 import re
 from typing import Any, Callable
 
 
-HANDOFF_GRAPH_SCHEMA = "vrcforge.agent_handoff_graph.v1"
-_ATTEMPT_OUTCOMES = ("success", "failure", "partial", "unknown")
-_FIELDS = {
-    "completed": {"action": "text", "result": "text", "evidence": "text"},
-    "attempted": {"action": "text", "outcome": "status", "reason": "text"},
-    "decisions": {"decision": "text"},
-    "blocked": {"blocker": "text", "facts": "text", "evidence": "text"},
-    "nextSteps": {"action": "text", "phase": "integer", "dependsOn": "ids"},
+HANDOFF_GRAPH_SCHEMA = "vrcforge.agent_handoff_graph.v3"
+_V1_SCHEMA = "vrcforge.agent_handoff_graph.v1"
+_PENDING_STATES = {"pending", "in_progress"}
+_STATUSES = {
+    "goal": (),
+    "task": ("pending", "in_progress", "done", "abandoned"),
+    "attempt": ("success", "failure"),
+    "issue": ("open", "closed"),
+    "decision": (),
 }
+_RELATIONS = {
+    "belongs_to": (("task",), ("goal", "task")),
+    "depends_on": (("task",), ("task",)),
+    "attempt_of": (("attempt",), ("task",)),
+    "replaced_by": (("attempt",), ("attempt",)),
+    "blocked_by": (("task",), ("issue",)),
+    "constrains": (("decision",), ("task",)),
+}
+_NODE_CONTROLS = {"kind", "text", "status", "scope", "reason", "facts", "evidence"}
 HANDOFF_EDIT_CONTRACT = (
-    "Return one JSON object with goal (string or null) and operations (array). Set goal only to establish or revise it. "
-    'Return edits, never the full graph. Complete example: {"goal":"Validate the document","operations":'
-    '[{"op":"add","section":"nextSteps","id":"review","fields":{"action":"Review the document","phase":0,"dependsOn":[]}}]}. '
-    "Each operation has op, section, id, and fields: add with all fields, update with only changed fields, or remove with "
-    "no fields. IDs are stable ASCII slugs unique across the graph. Use these actual JSON value shapes for fields by section: "
-    '{"completed":{"action":"Read artifact","result":"Artifact present","evidence":"call-abc"},'
-    '"attempted":{"action":"Read index","outcome":"failure","reason":"Index unavailable"},'
-    '"decisions":{"decision":"Use the selected variant"},'
-    '"blocked":{"blocker":"Approval pending","facts":"Write paused","evidence":"call-def"},'
-    '"nextSteps":{"action":"Review entries","phase":2,"dependsOn":["read-artifact"]}}. '
-    "attempted.outcome must be success, failure, partial, or unknown (exact English values). Record what happened and why "
-    "in reason. Write each text field as a concise fact. phase is an unquoted nonnegative JSON integer, and dependsOn "
-    "is a JSON array of strings ([] when empty). Run all items in the lowest unfinished phase before advancing. "
-    "Use the same phase for parallel items. dependsOn lists IDs of completed items or "
-    "prerequisites in earlier phases. Keep IDs when moving an item by removing it from its old section and adding "
-    "it to the new one. Preserve the order within each phase unless new evidence or a user decision changes it."
+    'Return one compact JSON delta with optional "nodes", "edges", and "removeEdges". '
+    '"nodes" maps stable ASCII slug IDs to changed node fields. New nodes need kind and text. '
+    'A goal copies the user’s actual wording verbatim. Task status: pending, in_progress, done, or abandoned. '
+    'Attempt status: success or failure, with reason explaining the method and outcome. '
+    'Issue status: open or closed, with facts explaining the obstacle. Decisions with scope "graph" apply to the full graph. '
+    'Every new node needs a nonempty evidence array, for example "evidence":[{"type":"receipt","id":"opaque source ID"}]. '
+    'Use exact available message, receipt, or scan IDs. Preserve earlier evidence and failed attempts. '
+    'Use distinct task IDs for distinct targets and acceptance criteria. A confirmed success finishes only its own task. '
+    'Edges are [from,relation,to]. Use task belongs_to goal or parent task; task depends_on prerequisite task; '
+    'attempt attempt_of task; task blocked_by issue; decision constrains task. '
+    'Use [failed-attempt,"replaced_by",new-attempt,"why the approach changed"] for a replacement. '
+    'Example: {"nodes":{"verify":{"kind":"goal","text":"Verify the export","evidence":[{"type":"message","id":"message-example"}]},'
+    '"check-file":{"kind":"task","text":"Verify the exported file","status":"pending",'
+    '"evidence":[{"type":"message","id":"message-example"}]}},'
+    '"edges":[["check-file","belongs_to","verify"]]}. '
+    'Omitted fields, nodes and edges are kept. Added evidence pointers extend existing evidence. '
+    'Use null to explicitly delete an obsolete node, '
+    'and removeEdges triples to remove obsolete relationships. Keep useful issue facts after resolution. '
+    'Include dependencies and open issues only when they affect the respective task. Independent runnable tasks may run in parallel.'
 )
 
 
 class HandoffSchemaError(ValueError):
-    """A schema failure with feedback limited to contract-defined names and indices."""
+    """Report invalid envelopes without echoing sensitive provider output."""
 
     def __init__(self, feedback: str):
         super().__init__("schema_error")
@@ -49,123 +64,326 @@ def _is_id(value: Any) -> bool:
 
 
 def _is_text(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and value.splitlines() == [value]
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        return False
+    return True
 
 
-def _valid_field(kind: str, value: Any) -> bool:
-    if kind == "text":
-        return _is_text(value)
-    if kind == "integer":
-        return type(value) is int and value >= 0
-    if kind == "status":
-        return value in _ATTEMPT_OUTCOMES
-    return isinstance(value, list) and all(_is_id(item) for item in value) and len(set(value)) == len(value)
+def _is_json_value(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _is_json_value(key) and _is_json_value(child) for key, child in value.items())
+    if isinstance(value, list):
+        return all(_is_json_value(child) for child in value)
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            return False
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return value is None or isinstance(value, int)
 
 
-def _validate_graph(graph: Any) -> None:
-    if (not isinstance(graph, dict) or set(graph) != {"schema", "goal", *_FIELDS}
-            or graph["schema"] != HANDOFF_GRAPH_SCHEMA or not _is_text(graph["goal"])):
-        raise HandoffSchemaError("The resulting graph needs a nonempty, single-line goal.")
-    ids = set()
-    for section, fields in _FIELDS.items():
+def _valid_node(node: dict[str, Any]) -> bool:
+    kind = node.get("kind")
+    if not isinstance(kind, str) or kind not in _STATUSES or not _is_text(node.get("text")):
+        return False
+    statuses = _STATUSES[kind]
+    if (statuses and node.get("status") not in statuses) or (not statuses and "status" in node):
+        return False
+    if ("scope" in node and (kind != "decision" or node["scope"] != "graph")
+            or ((kind == "attempt" or "reason" in node) and not _is_text(node.get("reason")))
+            or ((kind == "issue" or "facts" in node) and not _is_text(node.get("facts")))):
+        return False
+    evidence = node.get("evidence", [])
+    if not isinstance(evidence, list) or any(
+        not isinstance(pointer, dict) or not _is_text(pointer.get("type")) or not _is_text(pointer.get("id"))
+        for pointer in evidence
+    ):
+        return False
+    try:
+        return _is_json_value(node)
+    except RecursionError:
+        return False
+
+
+def _edge_key(edge: Any) -> tuple[str, str, str] | None:
+    if not isinstance(edge, list) or len(edge) not in (3, 4):
+        return None
+    source, relation, target = edge[:3]
+    if not _is_id(source) or not isinstance(relation, str) or relation not in _RELATIONS or not _is_id(target):
+        return None
+    return source, relation, target
+
+
+def _cyclic_edge(adjacency: dict[str, set[str]], source: str, target: str) -> bool:
+    pending = [target]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if current == source:
+            return True
+        if current not in seen:
+            seen.add(current)
+            pending.extend(adjacency.get(current, ()))
+    return False
+
+
+def _keep_edges(nodes: dict[str, Any], candidates: list[Any]) -> list[list[str]]:
+    edges = {}
+    ownership = {}
+    acyclic = {relation: defaultdict(set) for relation in ("belongs_to", "depends_on", "replaced_by")}
+
+    def valid(key: tuple[str, str, str]) -> bool:
+        source, relation, target = key
+        source_kinds, target_kinds = _RELATIONS[relation]
+        return (source != target and nodes.get(source, {}).get("kind") in source_kinds
+                and nodes.get(target, {}).get("kind") in target_kinds)
+
+    for edge in candidates:
+        key = _edge_key(edge)
+        if key is None or not valid(key):
+            continue
+        source, relation, target = key
+        if relation != "replaced_by" and len(edge) != 3:
+            continue
+        if relation == "replaced_by" and (len(edge) != 4 or not _is_text(edge[3]) or nodes[source]["status"] != "failure"):
+            continue
+        if relation == "attempt_of":
+            if source in ownership and ownership[source] != target:
+                continue
+            ownership[source] = target
+        if relation in acyclic:
+            adjacency = acyclic[relation]
+            if _cyclic_edge(adjacency, source, target):
+                continue
+            adjacency[source].add(target)
+        edges[key] = list(edge)
+    return [edge for edge in edges.values() if edge[1] != "replaced_by"
+            or (edge[0] in ownership and edge[2] in ownership)]
+
+
+def _apply_nodes(
+    prior: dict[str, Any], edits: dict[str, Any], *, require_new_evidence: bool,
+) -> tuple[dict[str, Any], set[str]]:
+    original = prior.get("nodes", {})
+    nodes = dict(original)
+    linked = defaultdict(list)
+    protected_attempts = set()
+    for source, relation, target, *_ in prior.get("edges", []):
+        if relation in {"belongs_to", "depends_on", "attempt_of", "blocked_by"}:
+            linked[target].append(source)
+        if relation == "attempt_of" and original[source]["status"] == "failure":
+            protected_attempts.add(source)
+    deleted = set()
+    for node_id, edit in edits.items():
+        if not _is_id(node_id):
+            continue
+        old = nodes.get(node_id, {})
+        if edit is None:
+            if (not old or linked[node_id] or node_id in protected_attempts
+                    or (old["kind"] == "task" and old["status"] in _PENDING_STATES)):
+                continue
+            del nodes[node_id]
+            deleted.add(node_id)
+            continue
+        if not isinstance(edit, dict) or (old and old["kind"] != edit.get("kind", old["kind"])):
+            continue
+        if node_id in protected_attempts and edit.get("status", "failure") != "failure":
+            continue
+        node = {**old, **edit}
+        if _valid_node(node) and (old or not require_new_evidence or node.get("evidence")):
+            if "evidence" in edit:
+                evidence = {(pointer["type"], pointer["id"]): pointer
+                            for pointer in [*old.get("evidence", []), *edit["evidence"]]}
+                node["evidence"] = list(evidence.values())
+            nodes[node_id] = node
+    return nodes, deleted
+
+
+def _apply_graph(
+    graph: dict[str, Any] | None, payload: Any, *, require_new_evidence: bool = True,
+) -> dict[str, Any]:
+    if (not isinstance(payload, dict) or payload.keys() - {"nodes", "edges", "removeEdges"}
+            or not isinstance(payload.get("nodes", {}), dict)
+            or not isinstance(payload.get("edges", []), list)
+            or not isinstance(payload.get("removeEdges", []), list)):
+        raise HandoffSchemaError("Use an object with only nodes (object), edges (array), and removeEdges (array).")
+    prior = graph or {}
+    nodes, deleted = _apply_nodes(prior, payload.get("nodes", {}), require_new_evidence=require_new_evidence)
+    removed = {_edge_key(edge) for edge in payload.get("removeEdges", [])}
+    edges = []
+    for edge in prior.get("edges", []):
+        source, relation, target = edge[:3]
+        if source in deleted or target in deleted:
+            continue
+        keep_failed_attempt = relation == "attempt_of" and nodes[source]["status"] == "failure"
+        if keep_failed_attempt or tuple(edge[:3]) not in removed:
+            edges.append(edge)
+    edges.extend(payload.get("edges", []))
+    return {"schema": HANDOFF_GRAPH_SCHEMA, "nodes": nodes, "edges": _keep_edges(nodes, edges)}
+
+
+def fold_handoff_graph(graph: dict[str, Any]) -> dict[str, Any]:
+    from agent_handoff_folding import fold_completed_subtrees
+
+    return fold_completed_subtrees(graph)
+
+
+def apply_handoff_edits(
+    graph: dict[str, Any] | None, payload: Any, *, fold: bool = True,
+) -> dict[str, Any]:
+    updated = _apply_graph(graph, payload)
+    return fold_handoff_graph(updated) if fold else updated
+
+
+def _v1_to_v3(graph: dict[str, Any]) -> dict[str, Any]:
+    sections = {"completed": ("action", "result", "evidence"), "attempted": ("action", "outcome", "reason"),
+                "decisions": ("decision",), "blocked": ("blocker", "facts", "evidence"),
+                "nextSteps": ("action", "phase", "dependsOn")}
+    if set(graph) != {"goal", *sections} or not _is_text(graph["goal"]):
+        raise HandoffSchemaError("Invalid legacy graph sections.")
+    original_ids = {item.get("id") for section in sections if isinstance(graph[section], list)
+                    for item in graph[section] if isinstance(item, dict) and _is_id(item.get("id"))}
+    goal_id = "legacy-goal"
+    while goal_id in original_ids:
+        goal_id += "_"
+    nodes = {goal_id: {"kind": "goal", "text": graph["goal"]}}
+    edges = []
+    phases = defaultdict(list)
+    for section, fields in sections.items():
         if not isinstance(graph[section], list):
-            raise HandoffSchemaError(f"The {section} section must be an array.")
-        for index, node in enumerate(graph[section]):
-            if (not isinstance(node, dict) or set(node) != {"id", *fields}
-                    or not _is_id(node["id"]) or node["id"] in ids):
-                raise HandoffSchemaError(f"Resulting {section}[{index}] needs the section fields and a globally unique slug id.")
-            for field, kind in fields.items():
-                if not _valid_field(kind, node[field]):
-                    raise HandoffSchemaError(f"Resulting {section}[{index}].{field} has an invalid {kind} value.")
-            ids.add(node["id"])
-    completed = {node["id"] for node in graph["completed"]}
-    phases = {node["id"]: node["phase"] for node in graph["nextSteps"]}
-    for index, node in enumerate(graph["nextSteps"]):
-        if any(dependency not in completed and phases.get(dependency, node["phase"]) >= node["phase"]
-               for dependency in node["dependsOn"]):
-            raise HandoffSchemaError(
-                f"Resulting nextSteps[{index}].dependsOn references an item outside completed or an earlier nextSteps phase."
-            )
+            continue
+        for item in graph[section]:
+            if not isinstance(item, dict) or set(item) != {"id", *fields}:
+                continue
+            node_id = item["id"]
+            if not _is_id(node_id) or node_id in nodes:
+                continue
+            if not all(_is_text(item[field]) for field in fields if field not in ("phase", "dependsOn")):
+                continue
+            if section == "completed":
+                node = {"kind": "task", "status": "done", "text": f"{item['action']}. {item['result']}"}
+            elif section == "attempted":
+                text, status, reason = item["action"], item["outcome"], item["reason"]
+                if status in ("success", "failure"):
+                    node = {"kind": "attempt", "status": status, "text": text, "reason": reason}
+                else:
+                    node = {"kind": "issue", "status": "open", "text": text,
+                            "facts": f"Legacy attempt recorded outcome {status}: {reason}"}
+            elif section == "decisions":
+                node = {"kind": "decision", "text": item["decision"]}
+            elif section == "blocked":
+                node = {"kind": "issue", "status": "open", "text": item["blocker"], "facts": item["facts"]}
+            else:
+                phase, prerequisites = item["phase"], item["dependsOn"]
+                if type(phase) is not int or phase < 0 or not isinstance(prerequisites, list):
+                    continue
+                phases[phase].append(node_id)
+                edges.extend([node_id, "depends_on", dep] for dep in prerequisites if _is_id(dep))
+                node = {"kind": "task", "status": "pending", "text": item["action"]}
+            if node["kind"] == "task":
+                edges.append([node_id, "belongs_to", goal_id])
+            if "evidence" in item:
+                node["evidence"] = [{"type": "legacy", "id": item["evidence"]}]
+            nodes[node_id] = node
+    # Each old phase was a barrier even where individual dependencies were omitted.
+    previous = []
+    for phase in sorted(phases):
+        edges.extend([node, "depends_on", dep] for node in phases[phase] for dep in previous)
+        previous = phases[phase]
+    return _apply_graph(None, {"nodes": nodes, "edges": edges}, require_new_evidence=False)
 
 
 def parse_handoff_graph(value: str) -> dict[str, Any] | None:
-    """Read a persisted graph payload without interpreting historical prose as a graph."""
+    """Read v3 and migrate explicitly identified continuity formats."""
     try:
         graph = json.loads(value)
-        _validate_graph(graph)
-    except (TypeError, ValueError):
+        if not isinstance(graph, dict):
+            return None
+        schema = graph.pop("schema", None)
+        if schema == _V1_SCHEMA:
+            return _v1_to_v3(graph)
+        if schema == HANDOFF_GRAPH_SCHEMA and set(graph) == {"nodes", "edges"}:
+            return _apply_graph(None, graph, require_new_evidence=False)
+    except (AttributeError, KeyError, TypeError, ValueError, RecursionError):
         return None
-    return graph
+    return None
 
 
-def apply_handoff_edits(graph: dict[str, Any] | None, payload: Any) -> dict[str, Any]:
-    if (not isinstance(payload, dict) or set(payload) != {"goal", "operations"}
-            or not isinstance(payload["operations"], list)):
-        raise HandoffSchemaError("Return exactly the top-level keys goal and operations, with operations as a JSON array.")
-    goal = payload["goal"] if payload["goal"] is not None else graph["goal"] if graph else None
-    sections = {section: {node["id"]: node for node in graph[section]} if graph else {} for section in _FIELDS}
-    for index, edit in enumerate(payload["operations"]):
-        if not isinstance(edit, dict):
-            raise HandoffSchemaError(f"operations[{index}] must be a JSON object.")
-        operation, section, node_id = edit.get("op"), edit.get("section"), edit.get("id")
-        if not isinstance(section, str) or section not in sections:
-            raise HandoffSchemaError(f"operations[{index}].section must be one of {', '.join(_FIELDS)}.")
-        if not _is_id(node_id):
-            raise HandoffSchemaError(f"operations[{index}].id must be a valid slug.")
-        nodes, rules = sections[section], _FIELDS[section]
-        if operation == "remove":
-            if set(edit) != {"op", "section", "id"} or node_id not in nodes:
-                raise HandoffSchemaError(f"operations[{index}] must remove an existing {section} id and omit fields.")
-            del nodes[node_id]
+def handoff_view(graph: dict[str, Any]) -> dict[str, Any]:
+    """Derive the current task frontier and unresolved issues from typed edges."""
+    nodes = graph["nodes"]
+    waiting = set()
+    ancestors = defaultdict(set)
+    for source, relation, target, *_ in graph["edges"]:
+        if relation == "depends_on" and nodes[target]["status"] != "done":
+            waiting.add(source)
+        elif relation == "blocked_by" and nodes[target]["status"] == "open":
+            waiting.add(source)
+        elif relation == "belongs_to":
+            ancestors[source].add(target)
+    ready = []
+    goals = {node_id for node_id, node in nodes.items() if node["kind"] == "goal"}
+    completed_goals = set()
+    pending = False
+    for node_id, node in nodes.items():
+        if node["kind"] != "task":
             continue
-        fields = edit.get("fields")
-        if (set(edit) != {"op", "section", "id", "fields"} or not isinstance(fields, dict)
-                or not fields or not fields.keys() <= rules.keys()
-                or operation not in ("add", "update")
-                or (operation == "add" and (node_id in nodes or fields.keys() != rules.keys()))
-                or (operation == "update" and node_id not in nodes)):
-            raise HandoffSchemaError(
-                f"operations[{index}] must add a new {section} id with all section fields, "
-                f"or update an existing {section} id with changed fields only. "
-                f"The only allowed fields are {', '.join(rules)}."
-            )
-        node = {**nodes.get(node_id, {}), "id": node_id, **fields}
-        if section == "nextSteps":
-            # The provider may quote typed values. Only project forms with a
-            # unique interpretation and let graph validation check all edges.
-            phase = node["phase"]
-            if isinstance(phase, str) and re.fullmatch(r"[0-9]{1,10}", phase):
-                node["phase"] = int(phase)
-            dependencies = node["dependsOn"]
-            if isinstance(dependencies, str):
-                ids = [item.strip() for item in dependencies.split(",")]
-                if all(_is_id(item) for item in ids):
-                    node["dependsOn"] = ids
-        if section == "attempted" and _is_text(node["outcome"]) and node["outcome"] not in _ATTEMPT_OUTCOMES:
-            if not _is_text(node["reason"]):
-                raise HandoffSchemaError(f"operations[{index}].fields.reason must be nonempty single-line text.")
-            # A narrative outcome cannot establish a status on its own.
-            node["reason"] = f"{node['outcome']} {node['reason']}"
-            node["outcome"] = "unknown"
-        nodes[node_id] = node
-    result = {"schema": HANDOFF_GRAPH_SCHEMA, "goal": goal,
-              **{section: list(nodes.values()) for section, nodes in sections.items()}}
-    _validate_graph(result)
-    result["nextSteps"].sort(key=lambda node: node["phase"])
-    return result
+        if node["status"] == "done":
+            completed_goals.update(ancestors[node_id] & goals)
+        elif node["status"] in _PENDING_STATES:
+            pending = True
+            if node_id not in waiting:
+                ready.append(node_id)
+    incomplete = not goals or pending or bool(goals - completed_goals)
+    return {
+        "readyTaskIds": ready,
+        "openIssueIds": [node_id for node_id, node in nodes.items()
+                         if node["kind"] == "issue" and node["status"] == "open"],
+        "incomplete": incomplete,
+        "anomaly": incomplete and not ready,
+    }
+
+
+def ready_task_ids(graph: dict[str, Any]) -> list[str]:
+    return handoff_view(graph)["readyTaskIds"]
 
 
 def serialize_handoff_graph(graph: dict[str, Any]) -> str:
-    return json.dumps(graph, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(graph, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
-def map_handoff_graph_text(graph: dict[str, Any], transform: Callable[[str], str]) -> dict[str, Any]:
-    projected = {**graph, "goal": transform(graph["goal"])}
-    for section, fields in _FIELDS.items():
-        projected[section] = [
-            {**node, "id": transform(node["id"]),
-             **{field: transform(node[field]) for field, kind in fields.items() if kind == "text"},
-             **({"dependsOn": [transform(item) for item in node["dependsOn"]]} if section == "nextSteps" else {})}
-            for node in graph[section]
-        ]
-    return projected
+def map_handoff_graph_text(
+    graph: dict[str, Any],
+    transform: Callable[[str], str],
+    *,
+    transform_properties: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    ids = {node_id: transform(node_id) for node_id in graph["nodes"]}
+    used = set(ids)
+    for index, (node_id, projected) in enumerate(ids.items()):
+        if projected != node_id:
+            candidate = f"redacted-node-{index}"
+            while candidate in used:
+                candidate += "_"
+            used.add(candidate)
+            ids[node_id] = candidate
+    nodes = {}
+    for node_id, node in graph["nodes"].items():
+        control = {key: value for key, value in node.items() if key in _NODE_CONTROLS}
+        for key in ("text", "reason", "facts"):
+            if isinstance(control.get(key), str):
+                control[key] = transform(control[key])
+        if "evidence" in control:
+            control["evidence"] = transform_properties({"evidence": control["evidence"]})["evidence"]
+        properties = {key: value for key, value in node.items() if key not in _NODE_CONTROLS}
+        nodes[ids[node_id]] = {**transform_properties(properties), **control}
+    edges = [[ids[source], relation, ids[target], *(transform(value) for value in details)]
+             for source, relation, target, *details in graph["edges"]]
+    return {**graph, "nodes": nodes, "edges": edges}

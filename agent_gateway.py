@@ -7662,7 +7662,7 @@ class AgentGateway:
                     history, compaction_result, compaction_blocked = self.runtime_planner.maybe_compact_runtime_history(
                         message=message,
                         params=params,
-                        observe=observe,
+                        observe={**observe, "runtimeInputSource": input_source},
                         history=history,
                         loop_state=loop_state[runtime_compacted_loop_steps:],
                         context_usage=context_usage,

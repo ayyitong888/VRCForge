@@ -8,7 +8,8 @@ from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Callable
-from context_compaction import MODEL_HANDOFF_PREFIX, normalize_compaction_recovery
+from agent_handoff_graph import handoff_view, parse_handoff_graph
+from context_compaction import MODEL_HANDOFF_PREFIX, handoff_text_payload, normalize_compaction_recovery
 from agent_general_no_progress import LOOP_REMINDER
 from agent_native_history_store import NativeHistoryStore
 from agent_output_truncation import CONTINUE_MESSAGE, OUTPUT_FEEDBACK_PREFIX, is_output_continuation_control
@@ -28,9 +29,44 @@ def model_handoff_payload(entry: Mapping[str, object]) -> str | None:
     if entry.get("role") not in {"agent", "assistant"} or entry.get("tool_calls"):
         return None
     text = entry.get("text", entry.get("content"))
-    if isinstance(text, str) and text.startswith(MODEL_HANDOFF_PREFIX):
-        return text.removeprefix(MODEL_HANDOFF_PREFIX).strip() or None
-    return None
+    return handoff_text_payload(text) if isinstance(text, str) else None
+
+
+def model_handoff_continuation(entry: Mapping[str, object]) -> str | None:
+    payload = model_handoff_payload(entry)
+    if payload is None or (graph := parse_handoff_graph(payload)) is None:
+        return None
+    return MODEL_HANDOFF_PREFIX + json.dumps(
+        {**graph, **handoff_view(graph)}, ensure_ascii=False, separators=(",", ":"),
+    )
+
+
+def native_handoff_message_sources(snapshot: Mapping[str, Any]) -> list[dict[str, str]]:
+    humans = set(human_indices(snapshot))
+    revision = len(snapshot.get("compactionRecovery", ()))
+    inputs = []
+    for index, item in enumerate(snapshot["messages"]):
+        if item.get("role") != "user" or item.get("hidden") is True:
+            continue
+        text = item.get("content")
+        source = item.get("runtimeInputSource")
+        if index in humans:
+            source = RuntimeInputSource.USER
+        elif source in {RuntimeInputSource.PARENT_AGENT, RuntimeInputSource.AGENT_RELAY,
+                        RuntimeInputSource.GOAL, RuntimeInputSource.EXTERNAL_AGENT, RuntimeInputSource.RETRY}:
+            try:
+                quoted = json.loads(text.partition(": ")[2])
+            except ValueError:
+                continue
+            if not isinstance(quoted, dict) or quoted.get("source") != source:
+                continue
+            text = quoted.get("text")
+        else:
+            continue
+        if isinstance(text, str) and text.strip():
+            message_id = str(item.get("messageId") or f"native:{snapshot['turnId']}:{revision}:{index}")
+            inputs.append({"id": message_id, "source": RuntimeInputSource(source).value, "text": text})
+    return inputs
 
 
 def _pending_suffix(messages: list[dict[str, Any]]) -> int:
@@ -114,8 +150,10 @@ def native_model_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]
     """Translate saved authorship at the shared provider boundary, including older hidden host notes."""
     projected = []
     for item in messages:
-        record = {key: value for key, value in item.items() if key != "runtimeInputSource"}
+        record = {key: value for key, value in item.items() if key not in {"runtimeInputSource", "messageId"}}
         content = record.get("content")
+        if handoff := model_handoff_continuation(record):
+            record["content"] = handoff
         if record.get("role") == "user" and record.get("hidden") is True and isinstance(content, str):
             if content in (LOOP_REMINDER, CONTINUE_MESSAGE):
                 record = {"role": "system", "content": content}
@@ -529,7 +567,7 @@ class AgentRuntimeSessionState:
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
         required = {"binding", "turnId", "messages", "activeTurnStart"}
-        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition", "humanUserMessageIndices", "activeDispatchCallId", "adoptedSubAgentTaskIds", "relayInputIds"}:
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "handoffMessageSources", "toolBlockIds", "bindingToolDefinition", "humanUserMessageIndices", "activeDispatchCallId", "adoptedSubAgentTaskIds", "relayInputIds"}:
             raise ValueError("native snapshot fields are invalid")
         if "activeDispatchCallId" in snapshot and not isinstance(snapshot["activeDispatchCallId"], str):
             raise ValueError("native dispatch marker must be a string")
@@ -574,11 +612,13 @@ class AgentRuntimeSessionState:
                 raise ValueError("native snapshot message must be an object")
             role = message.get("role")
             if role == "user":
-                if (set(message) - {"role", "content", "hidden", "runtimeInputSource"}
+                if (set(message) - {"role", "content", "hidden", "runtimeInputSource", "messageId"}
                         or not {"role", "content"} <= set(message)
                         or ("hidden" in message and message["hidden"] is not True)
                         or not isinstance(message["content"], str) or not message["content"].strip()):
                     raise ValueError("native user message shape is invalid")
+                if "messageId" in message:
+                    cls._native_required(message["messageId"], "message id")
                 if "runtimeInputSource" in message and (
                     not isinstance(message["runtimeInputSource"], str)
                     or RuntimeInputSource(message["runtimeInputSource"]).is_human
@@ -656,6 +696,14 @@ class AgentRuntimeSessionState:
             normalized["adoptedSubAgentTaskIds"] = list(snapshot["adoptedSubAgentTaskIds"])
         if "compactionRecovery" in snapshot:
             normalized["compactionRecovery"] = cls._merge_native_recoveries([], snapshot["compactionRecovery"])
+        if "handoffMessageSources" in snapshot:
+            sources = snapshot["handoffMessageSources"]
+            if (not isinstance(sources, dict) or any(not isinstance(key, str) or not key
+                    or not isinstance(value, dict) or set(value) != {"id", "source", "text"}
+                    or value["id"] != key or value["source"] not in RuntimeInputSource._value2member_map_
+                    or not isinstance(value["text"], str) for key, value in sources.items())):
+                raise ValueError("native handoff message sources are invalid")
+            normalized["handoffMessageSources"] = copy.deepcopy(sources)
         if "activeDispatchCallId" in snapshot:
             normalized["activeDispatchCallId"] = snapshot["activeDispatchCallId"]
         if normalized_messages[active_turn_start].get("role") != "user":
@@ -872,10 +920,13 @@ class AgentRuntimeSessionState:
             current_messages = existing["messages"]
             incoming_messages = normalized["messages"]
             recoveries = self._merge_native_recoveries(existing.get("compactionRecovery", []), normalized.get("compactionRecovery", []))
+            message_sources = {**normalized.get("handoffMessageSources", {}), **existing.get("handoffMessageSources", {})}
             def restored(candidate: dict[str, Any]) -> dict[str, Any]:
                 candidate = copy.deepcopy(candidate)
                 if recoveries or "compactionRecovery" in candidate:
                     candidate["compactionRecovery"] = copy.deepcopy(recoveries)
+                if message_sources:
+                    candidate["handoffMessageSources"] = copy.deepcopy(message_sources)
                 self._native_size_ok(candidate)
                 self._save_native(session_id, candidate)
                 return copy.deepcopy(candidate)
@@ -1026,6 +1077,14 @@ class AgentRuntimeSessionState:
             if recovery is not None or "compactionRecovery" in current:
                 candidate["compactionRecovery"] = self._merge_native_recoveries(
                     current.get("compactionRecovery", []), [recovery] if recovery is not None else [])
+            if (payload := model_handoff_payload(candidate["messages"][0])) and (graph := parse_handoff_graph(payload)):
+                referenced = {item["id"] for node in graph["nodes"].values() for item in node.get("evidence", ())
+                              if item["type"] == "message"}
+                sources = {**{item["id"]: item for item in native_handoff_message_sources(current)},
+                           **current.get("handoffMessageSources", {})}
+                selected_sources = {key: item for key, item in sources.items() if key in referenced}
+                if selected_sources:
+                    candidate["handoffMessageSources"] = selected_sources
             normalized = self._validate_native_snapshot(candidate, binding=binding)
             if self._native_pending(current) != self._native_pending(normalized):
                 raise ValueError("native compaction would change pending calls")

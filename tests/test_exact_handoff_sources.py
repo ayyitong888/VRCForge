@@ -33,25 +33,22 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
                     digest = re.search(r"recovery sourceDigest ([0-9a-f]{64})", prompt)[1]
                     rows = json.loads(prompt.split("\nREDACTED_ENTRIES=", 1)[1])
                     record = next(row for row in rows if "Long historical detail" in row["text"])
-                    return {"goal": "Continue the selected check", "operations": [
-                        {"op": "add", "section": "completed", "id": "old-inspection", "fields": {
-                            "action": "Read the historical material", "result": "Observation recorded",
-                            "evidence": f"{digest}:{record['recordIndex']}",
-                        }},
-                        {"op": "add", "section": "nextSteps", "id": "inspect", "fields": {
-                            "action": "Inspect the saved observation", "phase": 0, "dependsOn": [],
-                        }},
-                    ]}
-                return {"goal": None, "operations": [
-                    {"op": "update", "section": "nextSteps", "id": "inspect", "fields": {
-                        "action": "Inspect the newer observation",
-                    }},
-                ]}
+                    sources = json.loads(prompt.split("\nTASK_INPUTS=", 1)[1].split("\nPRIOR_HANDOFF=", 1)[0])
+                    return {"nodes": {
+                        "goal": {"kind": "goal", "text": "Model paraphrase of the goal",
+                                 "evidence": [{"type": "message", "id": sources[0]["id"]}]},
+                        "old-inspection": {"kind": "task", "status": "done", "text": "Read the historical material",
+                                           "evidence": [{"type": "archive", "id": f"{digest}:{record['recordIndex']}"}]},
+                        "inspect": {"kind": "task", "status": "pending", "text": "Inspect the saved observation",
+                                    "evidence": [record["sourceRef"]]},
+                    }, "edges": [["inspect", "belongs_to", "goal"], ["inspect", "depends_on", "old-inspection"]]}
+                return {"nodes": {"inspect": {"text": "Inspect the newer observation"}}}
             metadata["_recordUsage"]("fixture", {"exact": True, "inputTokens": 12, "outputTokens": 8})
             return compact_context(history, summarizer=summarize, handoff=True, has_todo=metadata["hasTodo"],
                                    input_mode="native", target_tokens=metadata["targetTokens"],
                                    prior_handoff=metadata["_priorHandoff"], recovery_history=metadata["_recoveryHistory"],
-                                   handoff_archive_indices=metadata["_handoffArchiveIndices"])
+                                   handoff_archive_indices=metadata["_handoffArchiveIndices"],
+                                   task_inputs=metadata["_handoffTaskInputs"])
 
     class Planner(RuntimePlannerService):
         def maybe_compact_native_context(self, request, *args, **kwargs):
@@ -92,6 +89,9 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
     assert reply.json().get("nativeApplied") is True, reply.text[:800]
     assert reply.json()["providerUsage"]["model"] == "requested"
     assert prompts and all("Global scope" not in prompt and "Project scope" not in prompt and "TODO one" not in prompt for prompt in prompts)
+    grounding = json.loads(prompts[0].split("\nTASK_INPUTS=", 1)[1].split("\nPRIOR_HANDOFF=", 1)[0])
+    assert grounding[0]["source"] == first_source.value
+    assert grounding[0]["text"] == "  Exact first request\r\n" and grounding[0]["goalSource"] is True
     request = requests[0]
     for tag, exact in (("global_user_instructions", global_text), ("project_instructions", project_text)):
         original = request["instructions"].split(f"<{tag}>\n", 1)[1].rsplit(f"\n</{tag}>", 1)[0]
@@ -103,7 +103,7 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
     assert state._native_pending(saved) == {"pending-call"}
     assert any(message.get("content") == first_source.model_text("  Exact first request\r\n") for message in saved["messages"])
     original_graph = parse_handoff_graph(saved["messages"][0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
-    assert original_graph["nextSteps"][0]["action"] == "Inspect the saved observation"
+    assert original_graph["nodes"]["inspect"]["text"] == "Inspect the saved observation"
 
     state.settle_native_call("owner", binding=binding, call_id="pending-call", content='{"status":"approved"}')
     for index in range(3):
@@ -114,13 +114,18 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
     assert second.json().get("nativeApplied") is True, second.text[:800]
     saved_again = state.native_conversation("owner", binding=binding)
     graph = parse_handoff_graph(saved_again["messages"][0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
-    assert graph["goal"] == original_graph["goal"]
-    assert graph["nextSteps"] == [{**original_graph["nextSteps"][0], "action": "Inspect the newer observation"}]
+    assert graph["nodes"]["goal"] == original_graph["nodes"]["goal"] == {
+        "kind": "goal", "text": "  Exact first request\r\n",
+        "evidence": [{"type": "message", "id": grounding[0]["id"]}],
+    }
+    assert saved_again["handoffMessageSources"][grounding[0]["id"]]["text"] == "  Exact first request\r\n"
+    assert graph["nodes"]["inspect"] == {**original_graph["nodes"]["inspect"], "text": "Inspect the newer observation"}
     assert json.loads(prompts[1].split("\nPRIOR_HANDOFF=", 1)[1].split("\nRETAINED_STATUS=", 1)[0]) == original_graph
     assert "Inspect the saved observation" not in prompts[1].split("\nREDACTED_ENTRIES=", 1)[1]
     assert saved_again["compactionRecovery"][0] == saved["compactionRecovery"][0]
-    assert graph["completed"] == original_graph["completed"]
-    digest, record_index = graph["completed"][0]["evidence"].split(":")
+    assert graph["nodes"]["old-inspection"] == original_graph["nodes"]["old-inspection"]
+    assert graph["edges"] == original_graph["edges"]
+    digest, record_index = graph["nodes"]["old-inspection"]["evidence"][0]["id"].split(":")
     archive = next(archive for archive in saved_again["compactionRecovery"] if archive["sourceDigest"] == digest)
     assert archive["sourceEntries"][int(record_index)]["text"] == ("Long historical detail " * 850).strip()
 

@@ -2,7 +2,7 @@ import json
 from pathlib import PureWindowsPath
 
 from agent_handoff_graph import HANDOFF_GRAPH_SCHEMA, parse_handoff_graph
-from context_compaction import MODEL_HANDOFF_PREFIX, compact_context
+from context_compaction import LEGACY_HANDOFF_PREFIX, MODEL_HANDOFF_PREFIX, NATIVE_TRANSACTION_PREFIX, compact_context
 from tests.test_native_context_compaction import fixture
 
 
@@ -10,8 +10,15 @@ def _prior_graph(prompt):
     return json.loads(prompt.split("\nPRIOR_HANDOFF=", 1)[1].split("\nRETAINED_STATUS=", 1)[0])
 
 
-def _edit(op, section, node_id, **fields):
-    return {"op": op, "section": section, "id": node_id, **({"fields": fields} if fields else {})}
+def _node(kind, text, status=None, **fields):
+    return {"kind": kind, "text": text, **({"status": status} if status else {}), **fields}
+
+
+def _with_source(prompt, payload):
+    source = json.loads(prompt.split("\nREDACTED_ENTRIES=", 1)[1])[0]["sourceRef"]
+    for node in payload["nodes"].values():
+        node.setdefault("evidence", [source])
+    return payload
 
 
 class ModelHandoff:
@@ -22,18 +29,19 @@ class ModelHandoff:
         def summarize(prompt):
             self.prompts.append(prompt)
             if isinstance(_prior_graph(prompt), dict):
-                return {"goal": None, "operations": []}
-            return {"goal": "Retain the inspection objective.", "operations": [
-                _edit("add", "blocked", "readback", facts="Evidence was partial", blocker="Readback is required",
-                      evidence="Earlier result recorded a limit"),
-                _edit("add", "nextSteps", "inspect", action="Review the next authorized evidence.", phase=1, dependsOn=[]),
-            ]}
+                return {}
+            return _with_source(prompt, {"nodes": {
+                "goal": _node("goal", "Retain the inspection objective."),
+                "readback": _node("issue", "Readback is required", "open", facts="Evidence was partial"),
+                "inspect": _node("task", "Review the next authorized evidence.", "pending"),
+            }, "edges": [["inspect", "blocked_by", "readback"], ["inspect", "belongs_to", "goal"]]})
         return compact_context(entries, handoff=metadata["handoff"], has_todo=metadata["hasTodo"],
                                real_context_limit=metadata["realContextLimit"], target_tokens=metadata["targetTokens"],
                                recovery_history=metadata.get("_recoveryHistory"),
                                handoff_archive_indices=metadata.get("_handoffArchiveIndices"),
                                prior_handoff=metadata.get("_priorHandoff"),
-                               retained_evidence=metadata.get("_retainedEvidence") or (), summarizer=summarize)
+                               retained_evidence=metadata.get("_retainedEvidence") or (),
+                               task_inputs=metadata.get("_handoffTaskInputs") or (), summarizer=summarize)
 
 
 def _pair(state, index, *, wait=False):
@@ -78,20 +86,21 @@ def test_manual_native_handoff_keeps_exact_tail_and_same_pending_approval_after_
     after = turn.snapshot()
     assert after["messages"][0]["content"].startswith(MODEL_HANDOFF_PREFIX)
     graph = parse_handoff_graph(after["messages"][0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
-    assert graph["blocked"][0]["id"] == "readback"
+    assert graph["nodes"]["readback"]["status"] == "open"
     assert after["messages"][after["activeTurnStart"]] == before["messages"][before["activeTurnStart"]]
     assert [item for item in after["messages"] if item.get("role") in {"tool", "assistant"}][1:] == before["messages"][oldest_tail:]
     assert "TODO_EXACT_CONTENT" in json.dumps(after["messages"])
     assert "EXACT_PROJECT_AGENTS" in candidate["instructions"]
     rewritten_prompt, = compactor.prompts
-    for pinned in ("TODO_EXACT_CONTENT", "OLD_TODO_CONTENT", "OLD_PROGRESS_ONLY_LIST", "EXACT_PROJECT_AGENTS", "ORIGINAL_USER_TASK"):
+    for pinned in ("TODO_EXACT_CONTENT", "OLD_TODO_CONTENT", "OLD_PROGRESS_ONLY_LIST", "EXACT_PROJECT_AGENTS"):
         assert pinned not in rewritten_prompt
+    assert "ORIGINAL_USER_TASK" in rewritten_prompt.split("\nTASK_INPUTS=", 1)[1].split("\nPRIOR_HANDOFF=", 1)[0]
     assert "group-4-a" in rewritten_prompt
     assert "group-0-a" in rewritten_prompt and "group-0-b" in rewritten_prompt
     assert any("OLD_TODO_CONTENT" in entry["text"] for entry in after["compactionRecovery"][-1]["sourceEntries"])
     records = json.loads(rewritten_prompt.split("REDACTED_ENTRIES=", 1)[1])
-    assert all("group-5-a" not in item["text"] and approval_call_id not in item["text"] for item in records)
-    next_record = next(record for record in records if "group-1-a" in record["text"])
+    assert "group-5-a" not in json.dumps(records) and approval_call_id not in json.dumps(records)
+    next_record = next(record for record in records if "group-1-a" in json.dumps(record.get("transaction")))
     archive = after["compactionRecovery"][-1]
     assert next_record["recordIndex"] == 2 and archive["sourceDigest"] in rewritten_prompt
     assert "OLD_PROGRESS_ONLY_LIST" in archive["sourceEntries"][1]["text"]
@@ -123,7 +132,7 @@ def test_long_active_turn_preserves_previous_completed_dialogue_and_parallel_rec
     assert turn.compaction["applied"] is True
     after = turn.snapshot()
     assert after["messages"][after["activeTurnStart"] - len(intact_previous):after["activeTurnStart"]] == intact_previous
-    assert "PREVIOUS_EXACT_INPUT_1" not in compactor.prompts[0]
+    assert "PREVIOUS_EXACT_INPUT_1" not in compactor.prompts[0].split("REDACTED_ENTRIES=", 1)[1]
     assert "group-91-a" not in compactor.prompts[0].split("REDACTED_ENTRIES=", 1)[1]
     assert "group-90-a" in compactor.prompts[0] and "group-4-a" in compactor.prompts[0]
 
@@ -132,16 +141,15 @@ def test_no_todo_handoff_has_unresolved_evidence_and_only_handoff_rewrites_for_b
     attempts = []
     def summarize(prompt):
         attempts.append(prompt)
-        return {"goal": "Intent", "operations": [
-            _edit("add", "blocked", "partial", blocker="Unverified", facts="Partial",
-                  evidence="evidence " * 250 if len(attempts) == 1 else "One result"),
-            _edit("add", "nextSteps", "readback", action="Inspect readback.", phase=1, dependsOn=[]),
-        ]}
-    result = compact_context([{"role": "tool", "text": "OLD_TOOL_ROW"}], handoff=True, target_tokens=150, summarizer=summarize)
+        return _with_source(prompt, {"nodes": {
+            "goal": _node("goal", "Intent"),
+            "readback": _node("task", "evidence " * 250 if len(attempts) == 1 else "One result", "pending"),
+        }})
+    result = compact_context([{"role": "tool", "text": "OLD_TOOL_ROW"}], handoff=True, target_tokens=220, summarizer=summarize)
     assert result["ok"] is True and len(attempts) == 2
     assert all("OLD_TOOL_ROW" in prompt for prompt in attempts)
     assert "resulting graph too large" in attempts[1]
-    assert parse_handoff_graph(result["summary"])["blocked"][0]["evidence"] == "One result"
+    assert parse_handoff_graph(result["summary"])["nodes"]["readback"]["text"] == "One result"
 
 
 def test_long_handoff_merges_ordered_pages_and_keeps_earliest_decision_after_provider_size_retry():
@@ -162,19 +170,25 @@ def test_long_handoff_merges_ordered_pages_and_keeps_earliest_decision_after_pro
             raise RuntimeError("HTTP 413 payload too large")
         prior = _prior_graph(prompt)
         if prior is not None:
-            assert prior["decisions"][0]["decision"] == "inspect, apply, validate"
+            assert prior["nodes"]["order"]["text"] == "inspect, apply, validate"
         seen_groups.extend(i for i in range(12) if f"BEGIN_COMPLETE_GROUP_{i} " in text)
-        return {"goal": None, "operations": []} if prior else {
-            "goal": "Follow the agreed order.", "operations": [
-                _edit("add", "decisions", "order", decision="inspect, apply, validate"),
-            ]}
+        return {} if prior else _with_source(prompt, {"nodes": {
+            "goal": _node("goal", "Follow the agreed order."),
+            "order": _node("decision", "inspect, apply, validate", scope="graph"),
+            "inspect": _node("task", "Inspect", "pending"),
+            "apply": _node("task", "Apply", "pending"),
+            "validate": _node("task", "Validate", "pending"),
+        }, "edges": [["apply", "depends_on", "inspect"], ["validate", "depends_on", "apply"],
+                     ["order", "constrains", "inspect"], ["order", "constrains", "apply"], ["order", "constrains", "validate"]]})
 
     result = compact_context(source, handoff=True, real_context_limit=9_000, target_tokens=1200, summarizer=summarize)
     assert result["ok"] is True
     assert result["fidelity"] == "paged" and result["coverage"]["omittedEntries"] == 0
     assert result["coverage"]["complete"] is True
     assert seen_groups == list(range(12))
-    assert parse_handoff_graph(result["summary"])["decisions"] == [{"id": "order", "decision": "inspect, apply, validate"}]
+    from agent_runtime_session_state import model_handoff_continuation
+    projected = model_handoff_continuation({"role": "assistant", "content": MODEL_HANDOFF_PREFIX + result["summary"]})
+    assert json.loads(projected.removeprefix(MODEL_HANDOFF_PREFIX))["readyTaskIds"] == ["inspect"]
 
 
 def test_failed_later_page_cannot_install_partial_handoff():
@@ -185,9 +199,8 @@ def test_failed_later_page_cannot_install_partial_handoff():
         calls += 1
         if calls > 1:
             raise RuntimeError("HTTP 401 unauthorized")
-        return {"goal": "Continue the work.", "operations": [
-            _edit("add", "nextSteps", "validate", action="Validate.", phase=1, dependsOn=[]),
-        ]}
+        return _with_source(_prompt, {"nodes": {"goal": _node("goal", "Continue the work."),
+                                               "validate": _node("task", "Validate.", "pending")}})
     result = compact_context(source, handoff=True, real_context_limit=8_000, target_tokens=1200, summarizer=summarize)
     assert calls == 2 and result["coverage"]["completedPages"] == 1
     assert result["ok"] is False and not result["summary"]
@@ -199,126 +212,127 @@ def test_retained_success_is_evidence_for_handoff_reconciliation_without_quoting
     private_path = str(PureWindowsPath("C:/", "Users", "Private Name", "Material.zip"))
     tail = [
         {"role": "assistant", "tool_calls": [{"id": "recent-callback", "function": {"name": "call_tool", "arguments": json.dumps({
-            "tool": "unity_import_outfit_package", "arguments": {"packagePath": private_path}})}}]},
+            "tool": "unity_import_outfit_package", "arguments": {"packagePath": private_path,
+            "selectedPrefab": "Assets/Material/Prefab.prefab", "dependencyMode": "selected_only"}})}}]},
         {"role": "tool", "tool_call_id": "recent-callback", "content": json.dumps({"observations": [{"runtimeTool": "vrcforge_import_outfit_package",
-          "actionId": "later-exact-action", "outcome": {"status": "ok"}, "observation": "VERBATIM_TAIL_BODY"}]})},
+          "actionId": "later-exact-action", "outcome": {"status": "ok", "readbackState": "verified"},
+          "observation": "VERBATIM_TAIL_BODY"}]})},
     ]
     evidence = native_handoff_retained_evidence(tail)
     prompts = []
     result = compact_context([{"role": "tool", "text": "Material.zip returned an earlier approval failure before the outfit import."}],
-        handoff=True, retained_evidence=evidence, summarizer=lambda prompt: prompts.append(prompt) or {
-            "goal": "Follow ordered imports.", "operations": [
-                _edit("add", "attempted", "first-import", action="Import Material.zip", outcome="failure", reason="Approval failure"),
-                _edit("add", "completed", "import", action="Import Material.zip", result="Later attempt succeeded", evidence="later-exact-action"),
-                _edit("add", "nextSteps", "outfit", action="Continue outfit import", phase=1, dependsOn=["import"]),
-            ],
-        })
+        handoff=True, retained_evidence=evidence, summarizer=lambda prompt: prompts.append(prompt) or _with_source(prompt, {
+            "nodes": {
+                "goal": _node("goal", "Follow ordered imports."),
+                "first-import": _node("attempt", "Import Material.zip", "failure", reason="Approval was denied"),
+                "import": _node("task", "Import Material.zip", "done",
+                                 evidence=[{"type": "receipt", "id": "later-exact-action"}]),
+                "outfit": _node("task", "Continue outfit import", "pending"),
+            }, "edges": [["first-import", "attempt_of", "import"], ["outfit", "depends_on", "import"]],
+        }))
     assert result["ok"] and "Continue outfit import" in result["summary"]
     projection = prompts[0].split("RETAINED_STATUS=", 1)[1].split("\nREDACTED_ENTRIES=", 1)[0]
     facts, = json.loads(projection)
-    assert facts["callId"] == "recent-callback" and facts["selectors"]["packagePath"] == "Material.zip"
-    assert facts["outcomes"] == [{"tool": "vrcforge_import_outfit_package", "actionId": "later-exact-action", "status": "ok"}]
+    assert facts["callId"] == "recent-callback"
+    assert facts["selectors"] == {"packagePath": "Material.zip", "selectedPrefab": "Assets/Material/Prefab.prefab",
+                                  "dependencyMode": "selected_only"}
+    assert facts["outcomes"] == [{"tool": "vrcforge_import_outfit_package", "actionId": "later-exact-action", "status": "ok",
+                                  "readbackState": "verified"}]
     assert "Private Name" not in prompts[0] and "VERBATIM_TAIL_BODY" not in prompts[0]
 
 
-def test_repeated_compaction_moves_resolved_work_without_rewriting_unmentioned_graph_nodes():
-    prior = {"schema": HANDOFF_GRAPH_SCHEMA, "goal": "Finish ordered imports and validate the avatar.",
-             "decisions": [{"id": "variants", "decision": "Use the selected outfit variant."}],
-             "attempted": [{"id": "retry-history", "action": "Import material support", "outcome": "unknown",
-                            "reason": "Timed out when Unity reloaded"}],
-             "completed": [{"id": "face", "action": "Mount face prefab", "result": "Scene readback confirmed",
-                            "evidence": "receipt-1"}],
-             "blocked": [{"id": "outfit-recovery", "blocker": "Write paused", "facts": "Package A recovery pending",
-                          "evidence": "Earlier unknown outcome"},
-                         {"id": "shader-check", "blocker": "Material compatibility", "facts": "Shader unchecked",
-                          "evidence": "Preflight warning"}],
-             "nextSteps": [{"id": "package-a", "action": "Import package A", "phase": 1, "dependsOn": []},
-                           {"id": "readback", "action": "Verify face readback", "phase": 1, "dependsOn": ["face"]},
-                           {"id": "package-b", "action": "Import package B", "phase": 2, "dependsOn": ["package-a"]}]}
-    rows = [{"role": "tool", "text": "receipt-2: Package A import handler reported success."}]
+def test_repeated_compaction_resolves_linked_work_and_keeps_failure_history():
+    prior = {"schema": HANDOFF_GRAPH_SCHEMA, "nodes": {
+                 "goal": _node("goal", "Finish imports and validate the avatar."),
+                 "package-a": _node("task", "Import package A", "pending"),
+                 "package-b": _node("task", "Import package B", "pending"),
+                 "check": _node("task", "Check the shader", "pending"),
+                 "recovery": _node("issue", "Package A recovery pending", "open", facts="Recovery paused writes"),
+                 "shader": _node("issue", "Shader cannot be accessed", "open", facts="Readback did not return a shader"),
+                 "retry": _node("attempt", "Original import attempt", "failure", reason="Unity reloaded",
+                                evidence=[{"type": "receipt", "id": "older-call"}]),
+                 "order": _node("decision", "Import A before B", scope="graph"),
+             },
+             "edges": [["package-b", "depends_on", "package-a"], ["package-a", "blocked_by", "recovery"],
+                       ["check", "blocked_by", "shader"], ["retry", "attempt_of", "package-a"],
+                       ["order", "constrains", "package-a"], ["order", "constrains", "package-b"]]}
+    rows = [{"role": "tool", "text": "receipt-2: Package A import confirmed."}]
 
     def summarize(prompt):
         assert _prior_graph(prompt) == prior
-        assert _prior_graph(prompt)["nextSteps"][0]["id"] == "package-a"
-        return {"goal": None, "operations": [
-            _edit("remove", "blocked", "outfit-recovery"),
-            _edit("remove", "nextSteps", "package-a"),
-            _edit("add", "completed", "package-a", action="Import package A", result="Handler reported success",
-                  evidence="receipt-2"),
-        ]}
+        return _with_source(prompt, {"nodes": {
+            "package-a": {"status": "done"},
+            "recovery": {"status": "closed"},
+        }})
 
     result = compact_context(rows, handoff=True, prior_handoff=json.dumps(prior), summarizer=summarize)
     graph = parse_handoff_graph(result["summary"])
-    assert graph["goal"] == prior["goal"]
-    assert graph["decisions"] == prior["decisions"]
-    assert graph["attempted"] == prior["attempted"]
-    assert graph["completed"][0] == prior["completed"][0]
-    assert graph["completed"][1]["id"] == "package-a"
-    assert graph["blocked"] == prior["blocked"][1:]
-    assert graph["nextSteps"] == prior["nextSteps"][1:]
+    for node_id in ("goal", "package-b", "check", "shader", "order"):
+        assert graph["nodes"][node_id] == prior["nodes"][node_id]
+    assert graph["nodes"]["package-a"]["status"] == "done"
+    assert not {"retry", "recovery"} & graph["nodes"].keys()
+    assert {"type": "receipt", "id": "older-call"} in graph["nodes"]["package-a"]["evidence"]
+    assert graph["edges"] == [edge for edge in prior["edges"] if not {"retry", "recovery"} & set(edge)]
     assert result["recovery"]["sourceEntries"] == rows
 
-    partial = compact_context(rows, handoff=True, prior_handoff=result["summary"],
-        summarizer=lambda _: {"goal": None, "operations": [_edit("update", "completed", "package-a", evidence="Later readback")]})
-    final = parse_handoff_graph(partial["summary"])
-    assert final["completed"][1] == {**graph["completed"][1], "evidence": "Later readback"}
-    assert final["nextSteps"] == graph["nextSteps"]
-
-    invalid = compact_context(rows, handoff=True, prior_handoff=partial["summary"],
-        summarizer=lambda _: {"goal": None, "operations": [_edit("remove", "completed", "package-a")]})
-    assert not invalid["ok"] and not invalid["summary"] and invalid["fallbackReason"] == "schema_error"
+    from agent_runtime_session_state import native_model_history
+    message = {"role": "assistant", "content": MODEL_HANDOFF_PREFIX + result["summary"]}
+    projected, = native_model_history([message])
+    assert json.loads(projected["content"].removeprefix(MODEL_HANDOFF_PREFIX))["readyTaskIds"] == ["package-b"]
+    assert parse_handoff_graph(message["content"].removeprefix(MODEL_HANDOFF_PREFIX)) == graph
 
 
-def test_provider_quoted_phase_and_dependencies_become_typed_graph_fields():
-    result = compact_context([{"role": "tool", "text": "A partially received document required a new read."}], handoff=True,
-        summarizer=lambda _: {"goal": "Verify document", "operations": [
-            _edit("add", "completed", "find", action="Find document", result="Located", evidence="call-1"),
-            _edit("add", "nextSteps", "read", action="Read again", phase="1", dependsOn="find"),
-            _edit("add", "nextSteps", "verify", action="Verify document", phase="2", dependsOn="read, find"),
-            _edit("add", "attempted", "early-read", action="Read once", outcome="Missing page",
-                  reason="Network stalled"),
-        ]})
+def test_older_phase_graph_is_supplied_as_linked_prerequisites():
+    prior = {"schema": "vrcforge.agent_handoff_graph.v1", "goal": "Verify the document",
+             "completed": [{"id": "find", "action": "Find document", "result": "Located", "evidence": "call-1"}],
+             "attempted": [{"id": "early-read", "action": "Read document", "outcome": "failure", "reason": "Network stalled"}],
+             "decisions": [], "blocked": [], "nextSteps": [
+                 {"id": "read", "action": "Read again", "phase": 1, "dependsOn": ["find"]},
+                 {"id": "verify", "action": "Verify document", "phase": 2, "dependsOn": []},
+             ]}
+    prompts = []
+    result = compact_context([{"role": "tool", "text": "A partial document required a new read."}], handoff=True,
+        prior_handoff=json.dumps(prior), summarizer=lambda prompt: prompts.append(prompt) or {})
     graph = parse_handoff_graph(result["summary"])
-    assert [node["phase"] for node in graph["nextSteps"]] == [1, 2]
-    assert graph["nextSteps"][1]["dependsOn"] == ["read", "find"]
-    assert graph["attempted"] == [{
-        "id": "early-read", "action": "Read once", "outcome": "unknown", "reason": "Missing page Network stalled",
-    }]
+    assert _prior_graph(prompts[0]) == graph
+    assert ["read", "depends_on", "find"] in graph["edges"]
+    assert ["verify", "depends_on", "read"] in graph["edges"]
+    assert graph["nodes"]["early-read"] == _node("attempt", "Read document", "failure", reason="Network stalled")
 
 
 def test_retries_one_wrong_handoff_envelope_with_same_graph_and_same_records():
-    prior = {"schema": HANDOFF_GRAPH_SCHEMA, "goal": "Finish verification", "completed": [], "attempted": [],
-             "decisions": [], "blocked": [], "nextSteps": [{"id": "inspect", "action": "Read artifact",
-                                                             "phase": 0, "dependsOn": []}]}
+    prior = {"schema": HANDOFF_GRAPH_SCHEMA, "nodes": {
+        "goal": _node("goal", "Finish verification"),
+        "inspect": _node("task", "Read artifact", "pending"),
+    }, "edges": []}
     rows = [{"role": "assistant", "text": "Artifact review completed."}]
     prompts = []
 
     def summarize(prompt):
         prompts.append(prompt)
         if len(prompts) == 1:
-            return {"goal": "INVALID_PROVIDER_BODY", "operations": {"add": []}}
-        return {"goal": None, "operations": [
-            _edit("remove", "nextSteps", "inspect"),
-            _edit("add", "completed", "inspect", action="Read artifact", result="Verified", evidence="call-1"),
-        ]}
+            return {"nodes": []}
+        return _with_source(prompt, {"nodes": {"inspect": {"status": "done"}}})
 
     result = compact_context(rows, handoff=True, prior_handoff=json.dumps(prior), summarizer=summarize)
     assert result["ok"] and result["providerAttempts"] == 2
     assert len(prompts) == 2 and _prior_graph(prompts[0]) == _prior_graph(prompts[1]) == prior
     assert prompts[0].split("REDACTED_ENTRIES=", 1)[1] == prompts[1].split("REDACTED_ENTRIES=", 1)[1]
-    assert "operations as a JSON array" in prompts[1] and "INVALID_PROVIDER_BODY" not in prompts[1]
-    assert parse_handoff_graph(result["summary"])["completed"][0]["id"] == "inspect"
+    assert "Schema feedback" in prompts[1]
+    assert parse_handoff_graph(result["summary"])["nodes"]["inspect"]["status"] == "done"
 
-    invalid_prompts = []
-    invalid_edits = {"goal": None, "operations": [
-        _edit("update", "nextSteps", "inspect", dependsOn=["INVALID_PROVIDER_REFERENCE"]),
-    ]}
-    rejected = compact_context(rows, handoff=True, prior_handoff=json.dumps(prior),
-        summarizer=lambda prompt: invalid_prompts.append(prompt) or invalid_edits)
-    assert rejected["providerAttempts"] == 2 and rejected["fallbackReason"] == "schema_error"
-    assert not rejected["ok"] and not rejected["summary"]
-    assert "nextSteps[0].dependsOn" in invalid_prompts[1]
-    assert "INVALID_PROVIDER_REFERENCE" not in invalid_prompts[1]
+    def partial(prompt):
+        return _with_source(prompt, {"nodes": {"valid": _node("task", "Continue with evidence", "pending",
+                             metadata={"api_key": "credential fixture"}),
+                         "invented": _node("task", "Use invented evidence", "pending",
+                                           evidence=[{"type": "scan", "id": "made-up-reference"}])},
+                         "edges": [["valid", "depends_on", "INVALID_PROVIDER_REFERENCE"]]})
+
+    result = compact_context(rows, handoff=True, prior_handoff=json.dumps(prior), summarizer=partial)
+    assert result["ok"] and result["providerAttempts"] == 1
+    graph = parse_handoff_graph(result["summary"])
+    assert graph["nodes"]["valid"]["metadata"] == {"api_key": "[REDACTED_SECRET]"}
+    assert "invented" not in graph["nodes"] and graph["edges"] == []
 
 
 def test_verbatim_tail_is_never_cut_to_force_fit():
@@ -333,3 +347,43 @@ def test_verbatim_tail_is_never_cut_to_force_fit():
     assert guard["blocked"] is True
     assert turn.compaction["failureClass"] == "insufficient_summary_budget"
     assert turn.snapshot() == before and not compactor.prompts
+
+
+def test_native_handoff_projects_lossless_transactions_and_drops_registry_definitions_only():
+    definition = {"name": "inspect", "description": "A recreatable registry description", "parameters": {"type": "object"}}
+    observations = [{"actionId": "result-a", "loadedToolDefinitions": [definition],
+                     "observation": "argumentValidationIssues=limit:maximum->20", "outcome": {"status": "failed"}}]
+    calls = [{"id": key, "function": {"name": "call_tool", "arguments": json.dumps({"tool": tool, "arguments": {"target": key}})}}
+             for key, tool in (("load", "load_internal_tool_block"), ("read", "read_business_data"))]
+    group = [{"role": "assistant", "content": "Inspect both selected targets.", "tool_calls": calls},
+             *({"role": "tool", "tool_call_id": call["id"], "content": json.dumps({"observations": observations})} for call in calls)]
+    row = {"role": "tool", "text": NATIVE_TRANSACTION_PREFIX + json.dumps(group)}
+    seen = []
+
+    def summarize(prompt):
+        records = json.loads(prompt.split("\nREDACTED_ENTRIES=", 1)[1])
+        seen.extend(records)
+        return _with_source(prompt, {"nodes": {"goal": _node("goal", "Inspect the selected targets")}})
+
+    result = compact_context([row], summarizer=summarize, handoff=True)
+    assert result["ok"] and result["recovery"]["sourceEntries"] == [row]
+    projected_request, projected_catalog, projected_work = seen[0]["transaction"]
+    assert projected_request["content"] == group[0]["content"]
+    assert [item["function"]["arguments"]["arguments"]["target"] for item in projected_request["tool_calls"]] == ["load", "read"]
+    receipt, = projected_catalog["content"]["observations"]
+    assert receipt == {key: value for key, value in observations[0].items() if key != "loadedToolDefinitions"} | {"loadedToolNames": ["inspect"]}
+    assert projected_work["content"]["observations"] == observations
+
+
+def test_native_handoff_seeds_verbatim_legacy_decision_and_keeps_archive_pointer():
+    legacy = "Current goal:\n- Finish the batch.\n\nDecisions:\n- Inspect, then apply and verify.\n\nTodo:\n- Inspect."
+    old = {"role": "assistant", "text": LEGACY_HANDOFF_PREFIX + legacy}
+    record = {"role": "user", "text": "Keep the established order."}
+    prompts = []
+    result = compact_context([record], handoff=True, prior_handoff=legacy, recovery_history=[old, record],
+                             handoff_archive_indices=[1], summarizer=lambda prompt: prompts.append(prompt) or {})
+    assert result["ok"] and "LEGACY_HANDOFF_TEXT=" in prompts[0]
+    decision = parse_handoff_graph(result["summary"])["nodes"]["legacy-decision-1"]
+    assert decision == {"kind": "decision", "text": "Inspect, then apply and verify.",
+                        "evidence": [{"type": "archive", "id": result["recovery"]["sourceDigest"] + ":0"}]}
+    assert result["recovery"]["sourceEntries"][0] == old

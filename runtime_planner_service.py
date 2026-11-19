@@ -43,10 +43,11 @@ from agent_tool_result_contract import _views
 from agent_completion_verifier import _normalize_diagnostics
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_TOOL_SCHEMAS
 from agent_scan_result_policy import is_scan_result_policy_message, restored_scan_result_policy
-from agent_runtime_input import RuntimeInputSource
+from agent_runtime_input import RuntimeInputSource, classify_history
 from agent_runtime_session_state import (
     NATIVE_RUNTIME_CONTEXT_PREFIX, NATIVE_RUNTIME_STATE_PREFIX,
-    inject_native_handoff_context, model_handoff_payload, native_model_history, native_runtime_state_content,
+    inject_native_handoff_context, model_handoff_continuation, model_handoff_payload, native_handoff_message_sources,
+    native_model_history, native_runtime_state_content,
 )
 from native_request_composition import (
     attach_native_request_composition,
@@ -107,9 +108,12 @@ RUNTIME_AUTHORITY_INSTRUCTION = (
     "Follow the tool receipt for actual approval and execution status. "
 )
 RUNTIME_CONTEXT_INSTRUCTION = (
-    "Use earlier handoffs and memory as context. Resume the earliest unfinished phase and choose an action whose prerequisites are met. "
-    "Current user decisions and newer evidence about the same work can change its status or order. "
-    "A recent tool suggestion or successful read alone does not replace an established phase order or authorize a write. "
+    "When continuing a task, start with the handoff graph's readyTaskIds. Follow task dependencies, graph-wide decisions and "
+    "evidence to recover the exact target and prior outcomes. Use openIssueIds to find impediments. If anomaly is true, "
+    "resolve the unfinished work's impediments, including read-only checks that can supply missing facts. Reconcile against "
+    "current user decisions, the active TODO and newer receipts for the exact same operation. Keep the established order when "
+    "a newer receipt only suggests another action, previews a change, or confirms different work. Treat locating, importing, "
+    "mounting and checking appearance as distinct observations when the task requires them. "
     "For explicit remember or forget requests, use remember_memory or delete_memory in execution; list_memory is read-only. "
     "Save exact user wording in the active project or user scope, and report the returned memoryId. "
     "Use create_goal only for an explicit durable goal. "
@@ -1297,6 +1301,18 @@ def runtime_handoff_source(history: Sequence[Mapping[str, object]]) -> tuple[lis
     return entries, archive_indices, prior_handoff
 
 
+def _handoff_task_inputs(entries: Sequence[tuple[RuntimeInputSource, str, object]]) -> list[dict[str, str]]:
+    """Keep the original task and the latest recorded changes to its scope."""
+    inputs = [{"id": message_id, "source": source.value, "text": value} for source, message_id, value in entries
+              if source is not RuntimeInputSource.RUNTIME and isinstance(value, str) and value.strip()]
+    return inputs if len(inputs) <= 4 else [inputs[0], *inputs[-3:]]
+
+
+def _native_handoff_task_inputs(snapshot: dict[str, Any]) -> list[dict[str, str]]:
+    inputs = native_handoff_message_sources(snapshot)
+    return inputs if len(inputs) <= 4 else [inputs[0], *inputs[-3:]]
+
+
 def _handoff_tool_group(group: list[dict[str, object]]) -> list[dict[str, object]]:
     """The authoritative TODO list is supplied verbatim outside the handoff."""
     calls = group[0]["tool_calls"]
@@ -1323,6 +1339,7 @@ def native_handoff_retained_evidence(messages: list[dict[str, object]]) -> list[
     """Project tool-owned scope and outcome without copying the recent transcript."""
     calls = {}
     for entry in messages:
+        assistant_text = entry.get("content") if entry.get("role") == "assistant" else None
         for call in ensure_list(entry.get("tool_calls")):
             function = ensure_dict(call.get("function"))
             name = str(function.get("name") or "")
@@ -1337,12 +1354,17 @@ def native_handoff_retained_evidence(messages: list[dict[str, object]]) -> list[
                 continue
             selectors = {}
             for key, value in request.items():
-                if (len(selectors) < 6 and isinstance(value, str) and re.fullmatch(r"[A-Za-z]+(?:Path|Name|Guid|Id|Package)", key)
+                if (len(selectors) < 6 and isinstance(value, str)
+                        and re.fullmatch(r"[A-Za-z]+(?:Path|Name|Guid|Id|Package|Prefab|Mode|Target)", key)
                         and not re.search(r"(?:auth|secret|token|session|credential|password|projectPath)", key, re.I)):
-                    if key.endswith("Path") and (ntpath.isabs(value) or value.startswith("/")):
+                    if ntpath.isabs(value):
                         value = ntpath.basename(value)
                     selectors[key] = sanitize_planner_observation_text(value, 160)
-            calls[str(call.get("id"))] = {"callId": str(call.get("id")), "tool": name, "selectors": selectors}
+            row = {"callId": str(call.get("id")), "tool": name, "selectors": selectors}
+            if isinstance(assistant_text, str) and assistant_text.strip():
+                row["assistantText"] = assistant_text
+                assistant_text = None  # One narration for the whole parallel call group.
+            calls[str(call.get("id"))] = row
         if entry.get("role") != "tool" or str(entry.get("tool_call_id")) not in calls:
             continue
         row = calls[str(entry["tool_call_id"])]
@@ -1355,8 +1377,9 @@ def native_handoff_retained_evidence(messages: list[dict[str, object]]) -> list[
             item = ensure_dict(observation)
             outcome = ensure_dict(item.get("outcome"))
             fields = {key: str(value)[:160] for key, value in {
-                "tool": item.get("runtimeTool"), "actionId": item.get("actionId"), "status": outcome.get("status"),
-                "readbackState": outcome.get("readbackState"),
+                "tool": item.get("runtimeTool"), "actionId": item.get("actionId"),
+                "status": outcome.get("status") or item.get("status"), "readbackState": outcome.get("readbackState"),
+                "commitState": outcome.get("commitState"), "errorCode": outcome.get("errorCode"),
             }.items() if value}
             if fields:
                 outcomes.append(fields)
@@ -2524,6 +2547,7 @@ class RuntimePlannerService:
                 "_recoveryHistory": recovery_entries if recovery_entries != entries else None,
                 "_handoffArchiveIndices": handoff_archive_indices,
                 "_retainedEvidence": native_handoff_retained_evidence(retained_messages),
+                "_handoffTaskInputs": _native_handoff_task_inputs(snapshot),
                 "realContextLimit": guard["contextLimit"],
                 "_recordUsage": record_usage,
             }))
@@ -4158,6 +4182,12 @@ class RuntimePlannerService:
                         "_recoveryHistory": [*older_history, *recovery_loop_entries]
                         if prior_handoff is not None or recovery_loop_entries != loop_entries else None,
                         "_handoffArchiveIndices": handoff_archive_indices,
+                        "_handoffTaskInputs": _handoff_task_inputs([
+                            *((classify_history(item), str(item.get("messageId") or item.get("id") or f"history:{ordinal}"),
+                               item.get("text")) for ordinal, item in enumerate(history) if item in retained_history),
+                            (observe.get("runtimeInputSource") if isinstance(observe.get("runtimeInputSource"), RuntimeInputSource)
+                             else RuntimeInputSource.USER, str(params.get("clientTurnId") or f"history:{len(history)}"), message),
+                        ]),
                         "_recordUsage": lambda prompt, usage: self.record_context_usage(
                             context_usage, prompt, [], usage,
                             update_window=False, phase="compaction"),
@@ -5744,13 +5774,11 @@ class RuntimePlannerService:
                 )
             skill_index_block = ""
             history_lines: list[str] = []
-            from agent_runtime_input import RuntimeInputSource, classify_history
-
             for entry in history:
                 role = {"user": "用户", "runtime": "运行时"}.get(
                     str(entry.get("role") or "user").strip().lower(), "助手",
                 )
-                text = str(entry.get("text") or "").strip()
+                text = model_handoff_continuation(entry) or str(entry.get("text") or "").strip()
                 if text:
                     if role == "运行时":
                         text = classify_history(entry).model_text(text)

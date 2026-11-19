@@ -17498,6 +17498,7 @@ class _RuntimePlannerCompactor:
             recovery_history=metadata.get("_recoveryHistory"),
             handoff_archive_indices=metadata.get("_handoffArchiveIndices"),
             retained_evidence=metadata.get("_retainedEvidence") or (),
+            task_inputs=metadata.get("_handoffTaskInputs") or (),
         )
         if deadline_exceeded:
             result["fallbackReason"] = "compaction_deadline"
