@@ -36,6 +36,7 @@ export function RightRuntimeSidebar({
   externalAgentComponent,
   authorizationStatus,
   agentProgress,
+  activeTodoIds,
   projectWorkspace,
   subAgentPanel,
   userAttachmentSources,
@@ -71,6 +72,7 @@ export function RightRuntimeSidebar({
   externalAgentComponent: ComponentStatus;
   authorizationStatus: RuntimeAuthorizationStatus;
   agentProgress: AgentProgress[];
+  activeTodoIds?: ReadonlySet<string>;
   projectWorkspace: boolean;
   subAgentPanel?: ReactNode;
   userAttachmentSources: UserAttachmentSource[];
@@ -173,6 +175,7 @@ export function RightRuntimeSidebar({
             runtimeConnected={runtimeConnected}
             localizeHealthMessage={localizeHealthMessage}
             agentProgress={agentProgress}
+            activeTodoIds={activeTodoIds}
             subAgentPanel={subAgentPanel}
             userAttachmentSources={userAttachmentSources}
             onLocateUserAttachmentSource={onLocateUserAttachmentSource}
@@ -190,7 +193,7 @@ export function RightRuntimeSidebar({
         ) : (
           <>
             {subAgentPanel ? <div className="mb-3" data-vrcforge-chat-sub-agents>{subAgentPanel}</div> : null}
-            <AgentTodoPanel progress={agentProgress} />
+            <AgentTodoPanel progress={agentProgress} activeTodoIds={activeTodoIds} />
             <div className="rounded-xl border border-border/80 bg-background/65 px-3 py-2 shadow-sm">
               <div data-vrcforge-status="project">
                 <RuntimeInfoRow

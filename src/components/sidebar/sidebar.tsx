@@ -225,7 +225,6 @@ export function SidebarSection({
 
 export function SidebarProject({
   name,
-  detail,
   meta,
   active = false,
   collapsed = false,
@@ -242,7 +241,6 @@ export function SidebarProject({
   dragHandle,
 }: {
   name: string;
-  detail?: string;
   meta?: string;
   active?: boolean;
   collapsed?: boolean;
@@ -294,7 +292,6 @@ export function SidebarProject({
         {...(dragHandle && !dragHandle.disabled ? dragHandle.attributes : {})}
         {...(dragHandle && !dragHandle.disabled ? dragHandle.listeners : {})}
         data-vrcforge-project-drag-row={dragHandle && !dragHandle.disabled ? name : undefined}
-        data-app-tooltip={[name, detail, meta].filter(Boolean).join("\n")}
         onClick={onClick} disabled={!onClick}
         className="flex min-h-10 min-w-0 flex-1 touch-pan-y select-none items-center gap-2.5 rounded-md px-3 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing"
       >
@@ -411,7 +408,6 @@ export function SidebarChat({
         {...(dragHandle && !dragHandle.disabled ? dragHandle.attributes : {})}
         {...(dragHandle && !dragHandle.disabled ? dragHandle.listeners : {})}
         data-vrcforge-chat-drag-row={dragHandle && !dragHandle.disabled ? chatId : undefined}
-        data-app-tooltip={title}
         aria-current={active ? "page" : undefined}
         onClick={onClick} className="flex h-full min-w-0 flex-1 touch-pan-y select-none items-center gap-2 rounded-md px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing"
       >

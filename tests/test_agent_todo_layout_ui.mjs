@@ -25,7 +25,6 @@ assert.match(todo, /index \+ 1/);
 assert.match(todo, /<ol\b/);
 assert.match(todo, /<li/);
 assert.match(todo, /"blocked", \{ icon: Pause, label: "workspace\.progressBlocked"/);
-assert.match(todo, /active && "motion-safe:animate-pulse"/);
 assert.match(todo, /"failed", \{ icon: CircleAlert/);
 assert.match(todo, /"completed", \{ icon: Check/);
 assert.match(todo, /role="img" aria-label=\{label\}/);

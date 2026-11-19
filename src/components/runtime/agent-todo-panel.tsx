@@ -11,7 +11,9 @@ const todoMarkers = new Map([
   ["cancelled", { icon: Minus, label: "workspace.progressCancelled" }],
 ]);
 
-function TodoItems({ progress }: { progress: AgentProgress[] }) {
+type TodoPanelProps = { progress: AgentProgress[]; activeTodoIds?: ReadonlySet<string> };
+
+function TodoItems({ progress, activeTodoIds }: TodoPanelProps) {
   const { t } = useTranslation();
   return (
     <ol className="m-0 grid list-none gap-2 p-0">
@@ -33,7 +35,7 @@ function TodoItems({ progress }: { progress: AgentProgress[] }) {
               "flex h-6 w-6 items-center justify-center rounded-full text-xs tabular-nums text-muted-foreground",
               !active && !marker && "border border-primary/30",
               (active || status === "completed") && "bg-primary text-primary-foreground",
-              active && "motion-safe:animate-pulse",
+              activeTodoIds?.has(item.progressId) && "motion-safe:animate-pulse",
               status === "blocked" && "border border-muted-foreground/40 bg-muted/60",
               status === "failed" && "text-destructive",
             )}>
@@ -61,7 +63,7 @@ function TodoItems({ progress }: { progress: AgentProgress[] }) {
   );
 }
 
-export function AgentTodoPanel({ progress }: { progress: AgentProgress[] }) {
+export function AgentTodoPanel({ progress, activeTodoIds }: TodoPanelProps) {
   const { t } = useTranslation();
   if (!progress.length) return null;
 
@@ -76,13 +78,13 @@ export function AgentTodoPanel({ progress }: { progress: AgentProgress[] }) {
         <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{progress.length}</span>
       </div>
       <div className="app-scrollbar max-h-72 space-y-0.5 overflow-y-auto px-2 py-2">
-        <TodoItems progress={progress} />
+        <TodoItems progress={progress} activeTodoIds={activeTodoIds} />
       </div>
     </section>
   );
 }
 
-export function AgentTodoPanelEmbedded({ progress }: { progress: AgentProgress[] }) {
+export function AgentTodoPanelEmbedded({ progress, activeTodoIds }: TodoPanelProps) {
   if (!progress.length) return null;
 
   return (
@@ -90,7 +92,7 @@ export function AgentTodoPanelEmbedded({ progress }: { progress: AgentProgress[]
       className="space-y-0.5"
       data-vrcforge-agent-todo
     >
-      <TodoItems progress={progress} />
+      <TodoItems progress={progress} activeTodoIds={activeTodoIds} />
     </div>
   );
 }

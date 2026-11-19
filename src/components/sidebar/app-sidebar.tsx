@@ -60,7 +60,6 @@ type AppSidebarProps = {
   renamingChatId: string;
   renameDraft: string;
   projectDisplayName: (project?: SidebarProjectItem) => string;
-  projectDisplayDetail?: (project?: SidebarProjectItem) => string;
   desktopWindow?: boolean;
   onNewTemporaryChat: () => void;
   onOpenProjectPicker: () => void;
@@ -109,7 +108,6 @@ export function AppSidebar({
   renamingChatId,
   renameDraft,
   projectDisplayName,
-  projectDisplayDetail,
   desktopWindow = false,
   onNewTemporaryChat,
   onOpenProjectPicker,
@@ -239,7 +237,6 @@ export function AppSidebar({
                 <div key={key} className="min-w-0">
                   <SidebarProject
                     name={projectDisplayName(project)}
-                    detail={projectDisplayDetail?.(project)}
                     meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
                     active={activeView === "chat" && normalizeProjectPathKey(key) === normalizeProjectPathKey(activeProjectPath)}
                     collapsed={projectCollapsed}
@@ -318,7 +315,6 @@ export function AppSidebar({
                 <div key={key} className="min-w-0">
                   <SidebarProject
                     name={projectDisplayName(project)}
-                    detail={projectDisplayDetail?.(project)}
                     meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
                     active={activeView === "chat" && normalizeProjectPathKey(key) === normalizeProjectPathKey(activeProjectPath)}
                     collapsed={projectCollapsed}

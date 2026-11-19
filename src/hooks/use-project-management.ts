@@ -661,7 +661,6 @@ export function useProjectManagement({
     recycleProject,
     projectDisplayName,
     projectDisplayLabel,
-    projectDisplayDetail,
     togglePinProject,
     startRenameProject,
     commitRenameProject,

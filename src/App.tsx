@@ -85,6 +85,7 @@ import { parseGoalWakeDirective } from "./hooks/use-goal-wake";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
+import { activeRuntimeTodoIds } from "./lib/runtime-todo-activity";
 import { projectAgentQuestionContinuation, questionContinuationCancelTarget, questionContinuationDisplay, questionContinuationStatus, runtimeContinuationKey, type RuntimeTurnEvent, useQuestionContinuationActivity, useRuntimeTurnContinuationDelivery } from "./hooks/use-runtime-turn-continuation";
 import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
 import { useSessionHandoff } from "./hooks/use-session-handoff";
@@ -782,9 +783,7 @@ export default function App() {
     unhideProject,
     canRecycleProject,
     recycleProject,
-    projectDisplayName,
     projectDisplayLabel,
-    projectDisplayDetail,
     togglePinProject,
     startRenameProject,
     commitRenameProject,
@@ -1200,6 +1199,9 @@ export default function App() {
   const runtimeReviewItem = runtimeReviewItemForChat(activeChat || undefined, runtimeAttention, scopedAgentQuestions);
   const selectedForeground = foreground.find(({ turn }) => turn.chatId === activeChatId);
   const selectedForegroundTurn = selectedForeground?.turn;
+  const activeTodoIds = useMemo(() => runtimeConnected
+    ? activeRuntimeTodoIds(agentProgress, displayChat, runtimeRuns, selectedForegroundTurn?.clientTurnId)
+    : undefined, [runtimeConnected, agentProgress, displayChat, runtimeRuns, selectedForegroundTurn?.clientTurnId]);
   const selectedCompaction = compacting && activeChat?.compaction?.status === "compacting";
   const sending = Boolean(selectedForegroundTurn || selectedCompaction || activeRuntimeCancelTarget);
   const runtimeAwareChatSidebar = useMemo(() => {
@@ -4361,8 +4363,7 @@ export default function App() {
           projectRenameDraft={projectRenameDraft}
           renamingChatId={renamingChatId}
           renameDraft={renameDraft}
-          projectDisplayName={projectDisplayName}
-          projectDisplayDetail={projectDisplayDetail}
+          projectDisplayName={projectDisplayLabel}
           desktopWindow={desktopWindow}
           onNewTemporaryChat={openTemporaryChat}
           onOpenProjectPicker={() => {
@@ -4869,6 +4870,7 @@ export default function App() {
               externalAgentComponent={externalAgentComponent}
               authorizationStatus={authorizationStatus}
               agentProgress={agentProgress}
+              activeTodoIds={activeTodoIds}
               projectWorkspace={projectChatWorkspace}
               subAgentPanel={activeView === "chat" ? subAgentActivityPanel : undefined}
               userAttachmentSources={userAttachmentSources}

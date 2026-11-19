@@ -26,6 +26,7 @@ const bundle = await build({
       import { initReactI18next } from "react-i18next";
       import en from "./src/locales/en-US.json";
       import { SidebarChat, SidebarProject } from "./src/components/sidebar/sidebar";
+      import { AppTooltipLayer } from "./src/components/ui/app-tooltip";
       import { useProjectManagement } from "./src/hooks/use-project-management";
       i18n.use(initReactI18next).init({lng:"en-US",resources:{"en-US":{translation:en}}});
       const projects = [
@@ -57,14 +58,14 @@ const bundle = await build({
         const [activeChat, setActiveChat] = React.useState("a");
         return <main style={{ width: 190 }} data-project-prefs-ready={management.projectPrefsReady}>{management.projectItems.map((project) =>
           <div data-testid={project.path.includes("left") ? "left" : "right"} key={project.path}>
-            <span data-legacy-label>{management.projectDisplayLabel(project)}</span>
-            <SidebarProject name={management.projectDisplayName(project)} detail={management.projectDisplayDetail(project)}
-              meta="6000.0.1f1" onClick={noop} />
+            <SidebarProject name={management.projectDisplayLabel(project)} meta="6000.0.1f1" onClick={noop} />
           </div>
         )}{["a", "b"].map(id => <SidebarChat key={id} chatId={id} title={id.toUpperCase()} active={activeChat===id}
           onClick={() => setActiveChat(id)} />)}
-          <SidebarProject name={${JSON.stringify(longProjectName)}} onClick={noop} />
+          <SidebarProject name="Short project" onClick={noop} />
+          <SidebarProject name={${JSON.stringify(longProjectName)}} onClick={noop} onOpenMenu={noop} />
           <SidebarChat title={${JSON.stringify(longChatName)}} onClick={noop} />
+          <AppTooltipLayer />
         </main>;
       }
       createRoot(document.getElementById("root")).render(<Fixture/>);
@@ -119,19 +120,11 @@ try {
   await page.clock.install();
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.getByTestId("left").waitFor({ timeout: 3000 });
-  const left = await page.getByTestId("left").locator("[data-legacy-label]").innerText();
-  const right = await page.getByTestId("right").locator("[data-legacy-label]").innerText();
+  const left = await page.getByTestId("left").getByRole("button").innerText();
+  const right = await page.getByTestId("right").getByRole("button").innerText();
   assert.equal(left, "VRCForge (left/VRCForge)");
   assert.equal(right, "VRCForge (right/VRCForge)");
   assert.notEqual(left, right, "same-name projects must remain distinguishable");
-  const leftProject = page.getByTestId("left").getByRole("button");
-  const rightProject = page.getByTestId("right").getByRole("button");
-  assert.equal(await leftProject.innerText(), "VRCForge");
-  assert.equal(await rightProject.innerText(), "VRCForge");
-  assert.match(await leftProject.getAttribute("data-app-tooltip"), /left\/VRCForge/);
-  assert.match(await rightProject.getAttribute("data-app-tooltip"), /right\/VRCForge/);
-  assert.doesNotMatch(await page.getByTestId("right").innerText(), /6000/);
-  assert.match(await page.getByTestId("right").getByRole("button").getAttribute("data-app-tooltip"), /6000/);
   assert.equal(await page.locator('[aria-current="page"]').innerText(), "A");
   await page.getByRole("button", { name: "B", exact: true }).click();
   assert.equal(await page.locator('[aria-current="page"]').innerText(), "B");
@@ -147,11 +140,13 @@ try {
     await page.mouse.move(x + width / 2, y + height / 2);
   };
   const scroll = (label) => label.evaluate((node) => node.scrollLeft);
+  const visibleTooltip = page.locator('[data-app-tooltip-layer]:visible');
   const projectLabel = page.getByText(longProjectName, { exact: true });
   const chatLabel = page.getByText(longChatName, { exact: true });
   const projectOverflow = await projectLabel.evaluate((node) => node.scrollWidth - node.clientWidth);
   assert.ok(projectOverflow > 25, "the project test uses a clipped title");
   await moveTo(projectLabel);
+  assert.equal(await visibleTooltip.count(), 0, "hovering a project name shows no tooltip");
   await page.clock.runFor(450);
   assert.equal(await scroll(projectLabel), 0, "wait half a second before moving");
 
@@ -168,18 +163,41 @@ try {
   await page.clock.runFor(Math.ceil(projectOverflow / 0.036));
   assert.equal(await scroll(projectLabel), 0, "restore the leading characters after one cycle");
 
+  const restingChatWidth = await chatLabel.evaluate((node) => node.clientWidth);
   await moveTo(chatLabel);
+  assert.ok(await chatLabel.evaluate((node) => node.clientWidth) < restingChatWidth, "hovering shows the chat actions beside the title");
+  assert.equal(await visibleTooltip.count(), 0, "hovering a conversation name shows no tooltip");
   await page.clock.runFor(750);
   assert.ok(await scroll(chatLabel) > 0, "long chat titles use the same behavior");
-  const fittedLabel = page.getByText("B", { exact: true });
-  await moveTo(fittedLabel);
-  assert.equal(await scroll(chatLabel), 0, "leaving a title restores its normal view");
-  await page.clock.runFor(750);
-  assert.equal(await fittedLabel.evaluate((node) => node.style.textOverflow), "", "fitted names never animate");
+  for (const name of ["Short project", "B"]) {
+    const fittedLabel = page.getByText(name, { exact: true });
+    await moveTo(fittedLabel);
+    assert.equal(await visibleTooltip.count(), 0, "fitted names show no tooltip");
+    assert.equal(await scroll(chatLabel), 0, "leaving a title restores its normal view");
+    await page.clock.runFor(750);
+    assert.equal(await fittedLabel.evaluate((node) => node.style.textOverflow), "", "fitted names never animate");
+  }
+  await page.mouse.move(600, 50);
+  for (const name of [longProjectName, longChatName, "Short project", "B"]) {
+    await page.keyboard.press("Tab");
+    const button = page.getByRole("button", { name, exact: true });
+    await button.focus();
+    assert.equal(await button.evaluate((node) => node.matches(":focus-visible")), true);
+    assert.equal(await visibleTooltip.count(), 0, "focusing a name shows no tooltip");
+    assert.equal(await button.getAttribute("title"), null, "the name has no native tooltip");
+  }
+  for (const label of [projectLabel, chatLabel]) {
+    await moveTo(label);
+    const action = label.locator("../..").locator("button[data-app-tooltip]").first();
+    await moveTo(action);
+    assert.equal(await visibleTooltip.innerText(), await action.getAttribute("data-app-tooltip"));
+  }
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await moveTo(projectLabel);
-  await page.clock.runFor(750);
-  assert.equal(await scroll(projectLabel), 0, "reduced motion keeps the name still");
+  for (const label of [projectLabel, chatLabel]) {
+    await moveTo(label);
+    await page.clock.runFor(750);
+    assert.equal(await scroll(label), 0, "reduced motion keeps the name still");
+  }
   console.log("PASS clipped sidebar names scroll after a delay, pause, and return at the same speed");
 } finally {
   await browser?.close();

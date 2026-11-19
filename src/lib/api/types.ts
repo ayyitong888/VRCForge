@@ -814,6 +814,7 @@ export type AgentRuntimeRun = RuntimeTurnLineage & {
   resultSummary?: unknown;
   error?: string;
   startedAt?: string;
+  completedAt?: string;
   createdAt?: string;
   updatedAt?: string;
   steps?: Array<{

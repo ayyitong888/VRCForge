@@ -128,6 +128,7 @@ export function ProjectWorkbenchSections({
   runtimeConnected,
   localizeHealthMessage,
   agentProgress,
+  activeTodoIds,
   subAgentPanel,
   userAttachmentSources,
   onLocateUserAttachmentSource,
@@ -155,6 +156,7 @@ export function ProjectWorkbenchSections({
   runtimeConnected: boolean;
   localizeHealthMessage: (message?: string) => string;
   agentProgress: AgentProgress[];
+  activeTodoIds?: ReadonlySet<string>;
   subAgentPanel?: ReactNode;
   userAttachmentSources: UserAttachmentSource[];
   onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
@@ -269,7 +271,7 @@ export function ProjectWorkbenchSections({
       >
         <div data-vrcforge-project-workbench-activity>
           {agentProgress.length ? (
-            <AgentTodoPanelEmbedded progress={agentProgress} />
+            <AgentTodoPanelEmbedded progress={agentProgress} activeTodoIds={activeTodoIds} />
           ) : (
             <div className="px-2 py-2 text-xs text-muted-foreground">
               {t("workspace.noProgress")}
