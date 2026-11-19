@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from outfit_material_dependencies import installed_material_guids, prefab_material_references
-from outfit_package_inspector import inspect_outfit_package, is_single_fbx_folder
+from outfit_package_inspector import ArchiveInspectionIndex, inspect_outfit_package, is_single_fbx_folder
 
 
 IMPORT_PLAN_SCHEMA = "vrcforge.outfit_import_plan.v1"
@@ -238,11 +238,15 @@ def build_outfit_import_plan(
     base_avatar_name: str | None = None,
     max_entries: int = 5000,
     avatar_texture_paths: list[str] | None = None,
+    *, archive_index: ArchiveInspectionIndex | None = None,
 ) -> dict[str, Any]:
     dependency_mode = str(dependency_mode or "auto").strip().casefold()
     if dependency_mode not in {"auto", "selected_only"}:
         raise ValueError("dependency_mode must be 'auto' or 'selected_only'.")
-    inspection = inspect_outfit_package(package_path, max_entries=max_entries)
+    inspection = (
+        inspect_outfit_package(package_path, max_entries=max_entries, archive_index=archive_index)
+        if archive_index else inspect_outfit_package(package_path, max_entries=max_entries)
+    )
     if not inspection.get("ok"):
         return {
             "ok": False,

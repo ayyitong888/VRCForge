@@ -56,7 +56,8 @@ def fold_completed_subtrees(graph: dict) -> dict:
                 pending.append(neighbor)
 
         removed = (branch - {root}) | (details - shared)
-        if not removed or removed & order_sources:
+        if not removed or removed & order_sources or any(nodes[node].get("attemptReceiptId") or nodes[node].get("toolTask")
+                                                       for node in removed):
             continue
         pointers = []
         seen = set()

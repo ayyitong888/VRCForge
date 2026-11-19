@@ -15,7 +15,7 @@ _PENDING_STATES = {"pending", "in_progress"}
 _STATUSES = {
     "goal": (),
     "task": ("pending", "in_progress", "done", "abandoned"),
-    "attempt": ("success", "failure"),
+    "attempt": ("success", "failure", "partial", "unknown", "unverified", "interrupted", "awaiting_approval", "executing", "readback_pending"),
     "issue": ("open", "closed"),
     "decision": (),
 }
@@ -32,7 +32,9 @@ HANDOFF_EDIT_CONTRACT = (
     'Return one compact JSON delta with optional "nodes", "edges", and "removeEdges". '
     '"nodes" maps stable ASCII slug IDs to changed node fields. New nodes need kind and text. '
     'A goal copies the user’s actual wording verbatim. An existing TODO-backed task uses todoId from TODO_SOURCE '
-    'and has no status field. A task without a matching TODO has status pending, in_progress, done, or abandoned. '
+    'and has no status field. In host-backed handoffs, only the host can complete a tool task. '
+    'Refer to the existing host-owned tool task node for the exact matching tool and selectors. '
+    'A task without a matching TODO has status pending, in_progress, or abandoned. '
     'Attempt status: success or failure, with reason explaining the method and outcome. '
     'Issue status: open or closed, with facts explaining the obstacle. Decisions with scope "graph" apply to the full graph. '
     'To represent a phase, create a task with group=true and use belongs_to for its member tasks. Its completion comes from its members. '
@@ -357,22 +359,23 @@ def parse_handoff_graph(value: str) -> dict[str, Any] | None:
 def handoff_view(graph: dict[str, Any], todo_items=()) -> dict[str, Any]:
     """Derive the current task frontier and unresolved issues from typed edges."""
     nodes = graph["nodes"]
-    from agent_handoff_sources import index_todos
+    from agent_handoff_sources import index_todos, todo_completion_verified
 
     todos = index_todos(todo_items)
     todo_status = {
         "pending": "pending", "in_progress": "in_progress", "running": "in_progress", "blocked": "blocked",
         "completed": "done", "cancelled": "abandoned", "deleted": "abandoned",
     }
+    for todo_id, item in todos.items():
+        if item.get("status") == "completed" and not todo_completion_verified(item):
+            todos[todo_id] = {**item, "status": "pending"}
     statuses = {node_id: (None if node.get("group") else
                          todo_status.get(todos.get(node["todoId"], {}).get("status"), "unavailable")
                          if "todoId" in node else node.get("status"))
                 for node_id, node in nodes.items()}
-    ancestors = defaultdict(set)
     members = defaultdict(set)
     for source, relation, target, *_ in graph["edges"]:
         if relation == "belongs_to":
-            ancestors[source].add(target)
             members[target].add(source)
 
     def group_status(node_id):
@@ -401,15 +404,17 @@ def handoff_view(graph: dict[str, Any], todo_items=()) -> dict[str, Any]:
     ready = []
     recoveries = []
     goals = {node_id for node_id, node in nodes.items() if node["kind"] == "goal"}
-    completed_goals = set()
+    completed_goals = {
+        node_id for node_id in goals if isinstance(proof := nodes[node_id].get("goalAcceptance"), dict)
+        and proof.get("goalId") == node_id and _is_text(proof.get("receiptId"))
+        and {"type": "message", "id": proof.get("messageId")} in nodes[node_id].get("evidence", ())
+    }
     pending = False
     for node_id, node in nodes.items():
         if node["kind"] != "task":
             continue
         status = statuses[node_id]
-        if status == "done":
-            completed_goals.update(ancestors[node_id] & goals)
-        elif status != "abandoned":
+        if status not in {"done", "abandoned"}:
             pending = True
             if node.get("operationRef") and status == "in_progress":
                 recoveries.append(node_id)

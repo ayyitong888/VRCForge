@@ -5510,6 +5510,10 @@ class AgentGateway:
                 ensure_dict(applied.get("outcome")), status=str(applied.get("status") or ""),
             )
             if receipt:
+                goal_receipt_id = str(context.get("_nativeCallId") or applied.get("executionId") or "")
+                self.goal.record_acceptance(str(context.get("acceptanceGoalId") or ""), {
+                    **context, "chatId": context.get("parentChatId"),
+                }, {**receipt, "id": goal_receipt_id})
                 self._advance_runtime_todos(
                     str(context.get("sessionId") or ""), str(context.get("projectRoot") or ""), [receipt],
                 )
@@ -6760,11 +6764,22 @@ class AgentGateway:
         if saved_checkpoint_choice and saved_checkpoint_choice.get("mode") == "require":
             checkpoint_skip_authority = None
 
+        acceptance_scope = {"chatId": chat_id, "sessionId": session_id, "projectRoot": project_root}
+        current_acceptance_goal_id = self.goal.active_acceptance_goal_id(
+            chat_id=chat_id, session_id=session_id, project_root=project_root,
+        )
+        acceptance_goal_id = (
+            current_acceptance_goal_id if not resuming_task or
+            continuation_context.get("acceptanceGoalId") == current_acceptance_goal_id else ""
+        )
+
         def runtime_approval_seed(**kwargs: Any) -> dict[str, Any]:
             nonlocal checkpoint_skip_authority
             kwargs.setdefault("usage_parent_turn_id", turn_id)
             seed = native_turn.approval_seed(task_loop.approval_seed(**kwargs))
             seed["clientTurnId"] = client_turn_id
+            if acceptance_goal_id:
+                seed["acceptanceGoalId"] = acceptance_goal_id
             if chat_id:
                 seed["parentChatId"] = chat_id
             if attachment_owners:
@@ -9005,6 +9020,11 @@ class AgentGateway:
                 step_payload.get("result"), step_timeline_outcome, status=str(step_payload.get("status") or ""),
             )
             if receipt:
+                if acceptance_goal_id:
+                    goal_receipt_id = native_turn.receipt_call_id or str(
+                        step_timeline_outcome.get("executionId") or f"{turn_id}:{steps[-1]['index']}"
+                    )
+                    self.goal.record_acceptance(acceptance_goal_id, acceptance_scope, {**receipt, "id": goal_receipt_id})
                 todo_receipts.append(receipt)
                 if step_tool in todo_tools:
                     self._advance_runtime_todos(session_id, project_root, [receipt])
@@ -10769,10 +10789,16 @@ class AgentGateway:
             except ValueError as exc:
                 raise AgentGatewayError(str(exc), status_code=400) from exc
         if not checks:
+            if entry["status"] == "completed":
+                entry["status"] = "in_progress"
             return
         evidence = dict(previous.get("completionEvidence") or {}) if checks == previous.get("completionChecks") else {}
         entry.update(completionChecks=checks, completionEvidence=evidence)
-        if entry["status"] == "completed" and len(evidence) < len(checks):
+        if entry["status"] == "deleted":
+            return
+        if all(evidence.get(str(index)) for index in range(len(checks))):
+            entry["status"] = "completed"
+        elif entry["status"] == "completed":
             entry["status"] = "in_progress"
 
     def _scoped_runtime_todos(
@@ -10831,6 +10857,13 @@ class AgentGateway:
         tool = str(seed.get("requestedTool") or "")
         if not question_id or not tool:
             return
+        self.goal.record_acceptance(str(seed.get("acceptanceGoalId") or ""), {
+            "chatId": seed.get("parentChatId"), "sessionId": question.get("sessionId"),
+            "projectRoot": question.get("projectRoot"),
+        }, {"id": question_id, "tool": tool, "source": "authenticated_question_answer",
+            "arguments": ensure_dict(seed.get("requestedArguments")),
+            "result": {"questionId": question_id, "question": question.get("question"),
+                       "resolution": "pass", "answer": question.get("answer")}})
         self._advance_runtime_todos(
             str(question.get("sessionId") or ""), str(question.get("projectRoot") or ""), [{
                 "id": question_id,

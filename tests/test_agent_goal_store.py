@@ -191,9 +191,17 @@ class AgentGoalStoreTests(unittest.TestCase):
         self.assertEqual(resumed["agentBlockedAttempts"], 0)
         self.assertEqual(resumed["agentBlockedReason"], "")
 
-    def test_agent_can_complete_active_goal_with_evidence_only(self) -> None:
+    def test_agent_can_complete_active_goal_with_scoped_acceptance_receipts_only(self) -> None:
         store = self.make_store()
-        goal = store.create({"title": "Verify completion", "chatId": "chat-a"})
+        scope = {"chatId": "chat-a", "sessionId": "session-a", "projectRoot": str(self.root)}
+        goal = store.create({**scope, "title": "Verify completion", "sourceMessageId": "user-1",
+                             "acceptanceChecks": [
+            {"kind": "gesture_manager", "tool": "vrcforge_gesture_manager_status",
+             "arguments": {"avatarPath": "Avatar A"}, "result": {"managers": [{"avatarPath": "Avatar A"}]}},
+            {"kind": "subjective", "tool": "vrcforge_call_user", "result": {"question": "Do you like Avatar A?"}},
+        ]}, bind_acceptance=True)
+        goal_id = goal["goalId"]
+        complete = {"status": "complete", "reason": "All required checks passed.", **scope}
 
         with self.assertRaisesRegex(AgentGoalStoreError, "complete or blocked"):
             store.update_from_agent(
@@ -202,13 +210,27 @@ class AgentGoalStoreTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(AgentGoalStoreError, "evidence"):
             store.update_from_agent(goal["goalId"], {"status": "complete", "chatId": "chat-a"})
-        completed = store.update_from_agent(
-            goal["goalId"],
-            {"status": "complete", "reason": "All required checks passed.", "chatId": "chat-a"},
-        )
+        with self.assertRaisesRegex(AgentGoalStoreError, "acceptance receipts"):
+            store.update_from_agent(goal_id, complete)
+        subjective = {"id": "question-a", "tool": "vrcforge_call_user", "arguments": {},
+                      "result": {"question": "Do you like Avatar A?", "resolution": "pass"}}
+        store.record_acceptance(goal_id, scope, subjective)
+        self.assertEqual(store.project_goals()[goal_id]["acceptanceReceipts"], {})
+        store.record_acceptance(goal_id, scope, {**subjective, "source": "authenticated_question_answer"})
+        self.assertEqual(store.handoff_acceptances(session_id="session-a", project_root=str(self.root)), [])
+        gm = {"id": "gm-a", "tool": "vrcforge_gesture_manager_status", "arguments": {"avatarPath": "Avatar A"},
+              "result": {"isPlayMode": True, "managers": [{"avatarPath": "Avatar A", "moduleConnected": True}]}}
+        store.record_acceptance(goal_id, {**scope, "sessionId": "session-b"}, gm)
+        store.record_acceptance(goal_id, scope, {**gm, "arguments": {"avatarPath": "Avatar B"}})
+        with self.assertRaisesRegex(AgentGoalStoreError, "acceptance receipts"):
+            store.update_from_agent(goal_id, complete)
+        store.record_acceptance(goal_id, scope, gm)
+        completed = store.update_from_agent(goal_id, complete)
 
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["completionEvidence"], "All required checks passed.")
+        self.assertEqual(store.handoff_acceptances(session_id="session-a", project_root=str(self.root))[0]["receiptIds"],
+                         ["question-a", "gm-a"])
 
     def test_wake_does_not_consume_schedule_and_completion_is_restart_safe(self) -> None:
         store = self.make_store()

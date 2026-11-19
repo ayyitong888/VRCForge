@@ -300,8 +300,9 @@ def _unresolved_write_guidance(
     failure: Mapping[str, Any], recovery: Mapping[str, Any],
 ) -> dict[str, Any]:
     if (
-        failure.get("errorCode") != "unity_write_operation_unresolved"
-        or failure.get("commitState") != "unknown"
+        failure.get("commitState") != "partial"
+        and not (failure.get("errorCode") == "unity_write_operation_unresolved"
+                 and failure.get("commitState") == "unknown")
     ):
         return {}
     recovery_id = recovery.get("id")
@@ -444,7 +445,7 @@ def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
             receipt["readback"] = {"verifiedChanges": [dict(item) for item in verified_changes]}
             return receipt
         if (
-            current.get("preview") is False
+            current.get("preview") is not True
             and current.get("sceneSaved") is True
             and current.get("persistedReadback") is True
             and not any(_failed_view(view) for view in (*ancestors, current))
@@ -2092,8 +2093,10 @@ class AgentApprovalTransactionService:
                 blocked.update(_blocked_recovery_failure_facts(blocked))
                 return blocked
 
+            execution_id = f"exec_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
             self._ports.state.in_flight_apply_writes[approval_id] = {
                 "approvalId": approval_id,
+                "executionId": execution_id,
                 "targetTool": target_tool,
                 "projectRoot": project_root,
                 "projectLockKey": project_lock_key,
@@ -2101,6 +2104,7 @@ class AgentApprovalTransactionService:
             }
             try:
                 approval["status"] = "applying"
+                approval["executionId"] = execution_id
                 self._ports.state.approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
                 self._ports.append_audit({"event": "approval_applying", "approval": approval, **permission_context})
@@ -2109,6 +2113,7 @@ class AgentApprovalTransactionService:
                         "event": "approval_applying",
                         "status": "applying",
                         "approvalId": approval_id,
+                        "executionId": execution_id,
                         "approvalIds": [approval_id],
                         **permission_context,
                         "targetTool": target_tool,
@@ -2119,6 +2124,7 @@ class AgentApprovalTransactionService:
                 self._observe_apply_lifecycle("approval_started", approval)
             except Exception as exc:  # noqa: BLE001 - restore a retryable approval on transition I/O failure.
                 approval["status"] = "approved"
+                approval.pop("executionId", None)
                 self._ports.state.approvals[approval_id] = approval
                 self._ports.state.in_flight_apply_writes.pop(approval_id, None)
                 if project_lock_acquired:
@@ -2142,7 +2148,6 @@ class AgentApprovalTransactionService:
         recovery: dict[str, Any] | None = None
         no_write_conflict = False
         core_call_audits: list[dict[str, Any]] = []
-        execution_id = f"exec_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
         request_trace: dict[str, Any] | None = None
         result: Any = None
         completion_outcome: dict[str, Any] = {}
@@ -2401,6 +2406,9 @@ class AgentApprovalTransactionService:
                     )
                 )
             )
+            completion_outcome["executionId"] = execution_id
+            if checkpoint and checkpoint.get("id"):
+                completion_outcome["checkpointId"] = checkpoint["id"]
             task_completion = approval_completion(
                 ensure_dict(approval.get("taskContext")),
                 raw_result=result,
@@ -2457,8 +2465,8 @@ class AgentApprovalTransactionService:
                     observation = self._ports.native_result_observation({
                         "kind": "write", "status": "executed", "tool": target_tool,
                         "actionId": native_context.get("actionId") or "",
-                        "checkpointId": ensure_dict(checkpoint).get("id")
-                        if completion_status == "ok" else "",
+                        "executionId": execution_id,
+                        "checkpointId": ensure_dict(checkpoint).get("id") or "",
                         "result": result, "outcome": completion_outcome,
                     })
                     applied_audit["nativeResult"] = {
@@ -2513,6 +2521,7 @@ class AgentApprovalTransactionService:
                     if job_pending or observation_pending
                     else "needs_user_action" if completion_status == "needs_user_action" else "applied"
                 ),
+                "executionId": execution_id,
                 "approval": approval,
                 "result": result,
                 "outcome": completion_outcome,
@@ -2585,6 +2594,9 @@ class AgentApprovalTransactionService:
                     "summary": f"{write_handler.description} failed.",
                     "verification": {"state": "failed", "checks": []},
                 }
+            completion_outcome.update(executionId=execution_id, targetEffectVerified=False)
+            if checkpoint and checkpoint.get("id"):
+                completion_outcome["checkpointId"] = checkpoint["id"]
             task_completion = approval_completion(
                 ensure_dict(approval.get("taskContext")),
                 raw_result=failure_result,
@@ -2659,6 +2671,7 @@ class AgentApprovalTransactionService:
             payload = {
                 "ok": False,
                 "status": "failed",
+                "executionId": execution_id,
                 "approval": approval,
                 "result": redacted_failure_result,
                 "error": str(exc),
@@ -3079,6 +3092,7 @@ class AgentApprovalTransactionService:
             "createdAt": utc_now_iso(),
             "approvalId": str(approval.get("id") or ""),
             "operationId": str(approval.get("operationId") or approval.get("id") or ""),
+            **({"executionId": approval["executionId"]} if approval.get("executionId") else {}),
             "executionTarget": ensure_dict(arguments.get("executionTarget")),
             "targetTool": target_tool,
             "status": "unavailable",
@@ -3408,6 +3422,7 @@ class AgentApprovalTransactionService:
             "createdAt": utc_now_iso(),
             "approvalId": str(approval.get("id") or ""),
             "operationId": str(approval.get("operationId") or approval.get("id") or ""),
+            **({"executionId": approval["executionId"]} if approval.get("executionId") else {}),
             "executionTarget": ensure_dict(arguments.get("executionTarget")),
             "targetTool": target_tool,
             "riskLevel": str(approval.get("riskLevel") or ""),
@@ -3457,6 +3472,7 @@ class AgentApprovalTransactionService:
             "resolvedAt": utc_now_iso() if status not in APPLY_RECOVERY_ACTIVE_STATUSES else "",
             "approvalId": str(recovery.get("approvalId") or ""),
             "operationId": str(recovery.get("operationId") or recovery.get("approvalId") or ""),
+            **({"executionId": recovery["executionId"]} if recovery.get("executionId") else {}),
             "executionTarget": ensure_dict(recovery.get("executionTarget")),
             "targetTool": str(recovery.get("targetTool") or ""),
             "projectRoot": str(recovery.get("projectRoot") or ""),

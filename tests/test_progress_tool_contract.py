@@ -132,7 +132,7 @@ def test_update_delete_aliases_preserve_scope(tmp_path):
     identity = created["progress"]["progressId"]
     with pytest.raises(AgentGatewayError):
         gateway.update_agent_progress(identity, {"status": "completed", "sessionId": "other"})
-    assert gateway.update_agent_progress(identity, {"status": "completed", "sessionId": "owner"})["progress"]["status"] == "completed"
+    assert gateway.update_agent_progress(identity, {"status": "completed", "sessionId": "owner"})["progress"]["status"] == "in_progress"
     gateway.delete_agent_progress(identity, {"sessionId": "owner"})
     assert gateway.list_agent_progress(session_id="owner")["count"] == 0
 
@@ -188,7 +188,7 @@ def test_native_todo_uses_earlier_receipts_and_completes_before_next_model_reque
         after_scene,
     ])
     gateway.register_tool(read, "When to use: read. When NOT to use: write.", "plan/preview",
-                          lambda p: {"text": p["path"], "truncated": False})
+                          lambda p: {"text": p["path"], "truncated": False, "bytes": len(p["path"].encode())})
     gateway.register_tool("vrcforge_progress_replace", "When to use: plan. When NOT to use: write assets.",
                           "plan/preview", gateway.replace_agent_progress)
     gateway._runtime_progress_changed = snapshots.append
@@ -247,3 +247,17 @@ def test_todo_only_counts_committed_verified_writes_and_explicit_visual_pass(tmp
         status = gateway.list_agent_progress(session_id="owner")["items"][0]["status"]
         assert status == ("completed" if resolution == "pass" else "in_progress")
     assert gateway.list_agent_progress(session_id="other")["items"][0]["status"] == "pending"
+
+
+def test_progress_completion_is_owned_by_matching_receipts_across_replacement(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    scope = {"sessionId": "progress-owner", "projectRoot": str(tmp_path)}
+    item = {"id": "inspect", "title": "Inspect the selected object"}
+    fabricated = {**item, "status": "completed", "completionEvidence": {"0": "unverified"}}
+    assert gateway.replace_agent_progress({**scope, "items": [fabricated]})["items"][0]["status"] == "in_progress"
+    checks = [{"tool": "inspect", "result": {"object": "target"}}]
+    gateway.update_agent_progress("inspect", {**scope, "completionChecks": checks})
+    receipt = {"tool": "inspect", "id": "observed-action", "arguments": {}, "result": {"object": "target"}}
+    gateway._advance_runtime_todos(scope["sessionId"], scope["projectRoot"], [receipt])
+    saved = gateway.replace_agent_progress({**scope, "items": [{**item, "status": "in_progress"}]})["items"][0]
+    assert saved["status"] == "completed" and saved["completionEvidence"] == {"0": "observed-action"}

@@ -18,7 +18,10 @@ from agent_handoff_graph import (
     parse_handoff_graph,
     serialize_handoff_graph,
 )
-from agent_handoff_sources import index_todos, package_preflight_edits, source_attempt_edits, source_nodes
+from agent_handoff_sources import (
+    HOST_NODE_FIELDS, HOST_NODE_OWNERSHIP, bind_goal_acceptance, index_todos, package_preflight_edits, registered_goal_nodes,
+    source_attempt_edits, source_nodes, todo_completion_verified,
+)
 from agent_runtime_input import classify_history
 
 
@@ -656,10 +659,18 @@ def _bind_goal_quotes(graph: dict[str, Any], prior: dict[str, Any] | None,
 
 def _handoff_edit_sources(payload: Any, prior: dict[str, Any] | None,
                           task_inputs: Sequence[Mapping[str, Any]], known: set[tuple[str, str]],
-                          todo_ids: set[str], *, summary_refs: set[str] | None = None) -> Any:
+                          todo_ids: set[str], *, summary_refs: set[str] | None = None,
+                          tool_authority: bool = False) -> Any:
     if not isinstance(payload, dict) or not isinstance(payload.get("nodes", {}), dict):
         return payload
     edits = {**payload, "nodes": {}}
+    owned_attempts = {node_id for node_id, node in (prior or {}).get("nodes", {}).items()
+                      if node.get("attemptReceiptId")}
+    model_fields = {"kind", "text", "status", "scope", "reason", "facts", "evidence", "group", "order", "todoId"}
+    if isinstance(payload.get("removeEdges"), list):
+        edits["removeEdges"] = [edge for edge in payload["removeEdges"]
+                                if not isinstance(edge, list) or not edge or not isinstance(edge[0], str)
+                                or edge[0] not in owned_attempts]
     goal_edits = {"nodes": {}}
     source_types: dict[str, set[str]] = {}
     for kind, identity in known:
@@ -678,6 +689,11 @@ def _handoff_edit_sources(payload: Any, prior: dict[str, Any] | None,
     if isinstance(payload.get("edges"), list):
         edits["edges"] = []
         for edge in payload["edges"]:
+            if isinstance(edge, list) and edge and isinstance(edge[0], str) and edge[0] in owned_attempts:
+                continue
+            if (isinstance(edge, list) and len(edge) >= 3 and edge[1] == "replaced_by"
+                    and isinstance(edge[2], str) and edge[2] in owned_attempts):
+                continue
             if not isinstance(edge, list) or len(edge) < 2 or edge[1] not in ("depends_on", "blocked_by"):
                 edits["edges"].append(edge)
                 continue
@@ -689,7 +705,9 @@ def _handoff_edit_sources(payload: Any, prior: dict[str, Any] | None,
                     edits["edges"].append([*edge[:3], {"reason": edge[3].get("reason"), "evidence": direct}])
     for node_id, candidate in payload.get("nodes", {}).items():
         old = prior["nodes"].get(node_id, {}) if prior else {}
-        if old.get("operationRef") or old.get("attemptReceiptId") or old.get("packagePreflight"):
+        if tool_authority and not old and node_id.startswith(("tool-task-", "attempt-", "operation-")):
+            continue
+        if any(old.get(key) for key in HOST_NODE_OWNERSHIP):
             continue
         if old.get("userReplyId"):
             if isinstance(candidate, dict) and "order" in candidate:
@@ -697,10 +715,16 @@ def _handoff_edit_sources(payload: Any, prior: dict[str, Any] | None,
             continue
         if isinstance(candidate, dict):
             candidate = {key: value for key, value in candidate.items()
-                         if key not in {"operationRef", "userReplyId", "attemptReceiptId", "packagePreflight"}}
+                         if key in model_fields or not tool_authority and key not in HOST_NODE_FIELDS}
             todo_id = candidate.get("todoId")
             if not isinstance(todo_id, str) or todo_id not in todo_ids or old.get("todoId", todo_id) != todo_id:
                 candidate.pop("todoId", None)
+            if tool_authority:
+                kind = candidate.get("kind", old.get("kind"))
+                if kind == "task" and candidate.get("status") == "done":
+                    candidate["status"] = old.get("status", "pending")
+                if kind == "attempt" and "status" in candidate:
+                    candidate["status"] = old.get("status", "unknown")
         if isinstance(candidate, dict) and isinstance(candidate.get("evidence"), list):
             candidate = {**candidate, "evidence": source_pointers(candidate["evidence"])}
         if (isinstance(candidate, dict) and candidate.get("kind", old.get("kind")) == "goal"
@@ -709,6 +733,21 @@ def _handoff_edit_sources(payload: Any, prior: dict[str, Any] | None,
             goal_edits["nodes"][node_id] = candidate
         edits["nodes"][node_id] = candidate
     _bind_goal_quotes(goal_edits, prior, task_inputs)
+    registered = {}
+    for goal_id, node in (prior or {}).get("nodes", {}).items():
+        if source_id := node.get("goalSourceId"):
+            registered.setdefault(source_id, []).append(goal_id)
+    aliases = {}
+    for goal_id, node in list(goal_edits["nodes"].items()):
+        source = next((ref["id"] for ref in node.get("evidence", ()) if ref["type"] == "message"), None)
+        if len(matches := registered.get(source, ())) == 1 and matches[0] != goal_id:
+            aliases[goal_id] = matches[0]
+            goal_edits["nodes"].pop(goal_id)
+            edits["nodes"].pop(goal_id, None)
+    if aliases and isinstance(edits.get("edges"), list):
+        edits["edges"] = [[aliases.get(edge[0], edge[0]), edge[1], aliases.get(edge[2], edge[2]), *edge[3:]]
+                          if isinstance(edge, list) and len(edge) >= 3
+                          and isinstance(edge[0], str) and isinstance(edge[2], str) else edge for edge in edits["edges"]]
     if not (goal_edits["nodes"] or any(node["kind"] == "goal" for node in (prior or {}).get("nodes", {}).values())):
         source = next((row for row in task_inputs if row["goalSource"]), None)
         if source:
@@ -769,6 +808,8 @@ def _build_prompt(
             "Replace old source-less prerequisite edges with evidenced ones only where the records establish a dependency. Decisions already "
             "seeded from LEGACY_HANDOFF_TEXT retain their IDs. They describe historical "
             "plans and confer no approval or completion. Keep the relevant assistant's recorded plan next to its tool receipt. "
+            "Bind explicit user requirements to their original messages, including later corrections. An implementation choice "
+            "made by the assistant belongs to its action or receipt, even when it satisfies a user requirement. "
             "Current user decisions can revise the route. Material availability, a side observation or a tool suggestion alone cannot "
             "change it. Keep "
             "distinct tasks for locating, importing, mounting and checking appearance when they have different success criteria. "
@@ -779,8 +820,9 @@ def _build_prompt(
             "the verified resultRef as a scan pointer on the successful attempt and add replaced_by with the concrete reason for the change. "
             "Keep tool contracts, reusable parameter rules and limits out of the graph. Keep the failed method until its task finishes. "
             "RETAINED_STATUS indexes newer receipts. "
-            "Update the same task only when the receipt verifies the same operation and target, with readback/commit proof when "
-            "needed. A source-bound operationRef is already underway. Keep it and add depends_on edges from tasks that need its result, "
+            "Use host-owned toolTask and toolAttempt nodes for recorded tool work. A partial read only supports the observed portion. "
+            "Continue from its sourceRead.nextRequest when present. An interrupted invocation retains its original result and recovery IDs. "
+            "A source-bound operationRef is already underway. Keep it and add depends_on edges from tasks that need its result, "
             "using receipt lookup and readback for that operation. Do not create a second task to dispatch it again. "
             "Close only the issues that receipt clears. Attach evidence directly to the node: use exact message IDs, receipt "
             "call IDs, or scan result references. Use type archive and sourceDigest:recordIndex when only an archive row has the evidence. "
@@ -1057,6 +1099,8 @@ def compact_context(
     task_inputs: Sequence[Mapping[str, Any]] = (),
     todo_items: Sequence[Mapping[str, Any]] = (),
     outstanding_operations: Sequence[Mapping[str, Any]] | None = None,
+    goal_bindings: Sequence[Mapping[str, Any]] = (),
+    goal_acceptances: Sequence[Mapping[str, Any]] = (),
     prior_handoff: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
@@ -1122,21 +1166,34 @@ def compact_context(
     budget = _effective_budget(target_tokens, normalized_real_context_limit)
     estimated_tokens = sum(_estimate_entry_tokens(entry) for entry in entries)
     task_text_limit = min(2400, normalized_real_context_limit // 16) if normalized_real_context_limit else 2400
-    goal_source = next((row["id"] for row in task_inputs if row["source"] != "agent_relay"), None)
-    safe_task_inputs = [{**redactor.redact_json(dict(row)), "goalSource": row["id"] == goal_source}
+    goal_sources = {next((row["id"] for row in task_inputs if row["source"] != "agent_relay"), None)}
+    goal_sources.update(row.get("messageId") for row in goal_bindings)
+    safe_task_inputs = [{**redactor.redact_json(dict(row)), "goalSource": row["id"] in goal_sources}
                         for row in task_inputs] if handoff else []
     todo_source = [redactor.redact_json({"id": todo_id, "title": item.get("title") or item.get("text"),
-                                        "status": item.get("status")})
+                                        "status": "pending" if item.get("status") == "completed"
+                                        and not todo_completion_verified(item) else item.get("status")})
                    for todo_id, item in index_todos(todo_items).items()] if handoff else []
     safe_evidence = [redactor.redact_json(dict(row)) for row in retained_evidence] if handoff else []
+    safe_acceptances = [redactor.redact_json(dict(row)) for row in goal_acceptances] if handoff else []
     if handoff:
+        if handoff_graph and outstanding_operations is not None:
+            # Older summaries could describe a completion without binding a receipt to its target.
+            for node_id, node in handoff_graph["nodes"].items():
+                if node.get("kind") == "task" and node.get("status") == "done" and not any(
+                    node.get(key) for key in HOST_NODE_OWNERSHIP
+                ):
+                    handoff_graph["nodes"][node_id] = {**node, "status": "pending", "reportedStatus": "done"}
         safe_operations = [redactor.redact_json(dict(row)) for row in outstanding_operations or ()]
         bound_nodes = source_nodes(safe_task_inputs, safe_operations, handoff_graph)
         bound_nodes.update(package_preflight_edits(safe_evidence)["nodes"])
+        bound_nodes.update(registered_goal_nodes(safe_task_inputs, goal_bindings))
         if bound_nodes:
             handoff_graph = apply_handoff_edits(handoff_graph, {"nodes": bound_nodes}, fold=False)
+        if handoff_graph:
             handoff_graph = apply_handoff_edits(handoff_graph,
                                                 source_attempt_edits(handoff_graph["nodes"], safe_operations), fold=False)
+            handoff_graph = bind_goal_acceptance(handoff_graph, safe_acceptances)
             handoff_text = serialize_handoff_graph(handoff_graph)
     prompt_options = dict(
         language=normalized_language,
@@ -1308,11 +1365,13 @@ def compact_context(
                             and isinstance(payload.get("reply"), str) and "nodes" not in payload):
                         _, payload = _extract_provider_payload(payload["reply"])
                     payload = _handoff_edit_sources(payload, handoff_graph, safe_task_inputs, handoff_refs,
-                                                    {row["id"] for row in todo_source}, summary_refs=summary_refs)
+                                                    {row["id"] for row in todo_source}, summary_refs=summary_refs,
+                                                    tool_authority=outstanding_operations is not None)
                     sourced_prior = ({**handoff_graph, "edges": [edge for edge in handoff_graph["edges"]
                                       if edge[1] not in {"depends_on", "blocked_by"} or len(edge) == 4]}
                                      if handoff_graph else None)
                     candidate_graph = apply_handoff_edits(sourced_prior, payload, fold=False)
+                    candidate_graph = bind_goal_acceptance(candidate_graph, safe_acceptances)
                     candidate_graph = map_handoff_graph_text(candidate_graph, output_scanner.redact,
                                                             transform_properties=output_scanner.redact_json)
                     candidate = serialize_handoff_graph(candidate_graph)

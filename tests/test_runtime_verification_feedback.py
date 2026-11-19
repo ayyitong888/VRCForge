@@ -1,4 +1,4 @@
-from agent_task_loop import apply_declared_verification
+from agent_task_loop import AgentTaskLoop, apply_declared_verification
 from agent_tool_result_contract import normalize_agent_tool_result, completion_gate_plan
 from agent_gateway import visual_audit_correction_candidate
 
@@ -43,3 +43,23 @@ def test_terminal_verification_failure_keeps_structured_reason():
     gate = completion_gate_plan({"nextStep": "done"}, outcome)
     assert gate["nextStep"] == "tool_failed"
     assert gate["completionGate"] == {"status": "failed", "reason": "verification_failed"}
+
+
+def test_write_completion_claim_needs_the_exact_target_readback():
+    tool = "vrcforge_manage_fx_animator"
+    arguments = {"controllerPath": "Assets/FX.controller", "stateName": "Idle"}
+    loop = AgentTaskLoop("Change Idle in the FX controller")
+    loop.require_action(kind="write", tool=tool)
+    raw = {"ok": True, "committed": True, "commitState": "complete"}
+
+    def record(value):
+        outcome = normalize_agent_tool_result(value, fallback_summary="Write returned.", write=True)
+        return loop.record_action(kind="write", tool=tool, arguments=arguments, raw_result=value,
+                                  outcome=outcome)["actionId"]
+
+    plan = {"nextStep": "done", "planner": "llm", "completionClaim": {
+        "satisfied": True, "evidenceActionIds": [record(raw)],
+    }}
+    assert loop.gate_terminal(plan)["nextStep"] == "completion_unverified"
+    record({**raw, "verified": True, "readback": {"controllerPath": "Assets/FX.controller", "stateName": "Idle"}})
+    assert loop.gate_terminal(plan)["nextStep"] == "done"

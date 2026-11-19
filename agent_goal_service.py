@@ -99,8 +99,24 @@ class AgentGoalService:
         return self._store.project_deliveries()
 
     def create_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        goal = self._store_call(self._store.create, params or {})
+        goal = self._store_call(self._store.create, params or {}, bind_acceptance=True)
         return {"ok": True, "schema": "vrcforge.agent_goal.v2", "goal": self._redact(goal)}
+
+    def record_acceptance(self, goal_id: str, scope: dict[str, Any], receipt: dict[str, Any]) -> None:
+        if goal_id:
+            self._store_call(self._store.record_acceptance, goal_id, scope, receipt)
+
+    def handoff_acceptances(self, session_id: str, project_root: str) -> list[dict[str, Any]]:
+        return self._store.handoff_acceptances(session_id=session_id, project_root=project_root)
+
+    def handoff_goal_bindings(self, session_id: str, project_root: str) -> list[dict[str, Any]]:
+        return self._store.handoff_goal_bindings(session_id=session_id, project_root=project_root)
+
+    def active_acceptance_goal_id(self, *, chat_id: str, session_id: str, project_root: str) -> str:
+        if not chat_id or not session_id:
+            return ""
+        goal = self._store.current(chat_id=chat_id, session_id=session_id, project_root=project_root)
+        return str(goal["goalId"]) if goal and goal.get("status") == "active" and goal.get("acceptanceChecks") else ""
 
     def get_current_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         raw = params or {}

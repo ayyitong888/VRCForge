@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from agent_progress_evidence import goal_acceptance_checks, goal_acceptance_receipt
+
 from background_goal_runtime import (
     PHASE_TIMEOUT_SECONDS,
     PROVIDER_PREFLIGHT_CACHE_SECONDS,
@@ -552,7 +554,7 @@ class AgentGoalStore:
             wake_at=str(delivery.get("nextWakeAt") or ""),
         )
 
-    def create(self, params: dict[str, Any]) -> dict[str, Any]:
+    def create(self, params: dict[str, Any], *, bind_acceptance: bool = False) -> dict[str, Any]:
         title = _summarize(params.get("title") or params.get("goal"), 240)
         if not title:
             raise AgentGoalStoreError("Goal title is required.")
@@ -560,6 +562,17 @@ class AgentGoalStore:
         wake_fields = self.parse_wake_fields(params, now=now)
         scheduled = bool(str(wake_fields.get("wakeAt") or "").strip() or int(wake_fields.get("wakeEveryMinutes") or 0))
         chat_id = str(params.get("chatId") or params.get("chat_id") or "").strip()
+        session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
+        source_message_id = str(params.get("sourceMessageId") or "").strip() if bind_acceptance else ""
+        acceptance: dict[str, Any] = {}
+        if bind_acceptance and (source_message_id or "acceptanceChecks" in params):
+            if not (chat_id and session_id and source_message_id):
+                raise AgentGoalStoreError("Goal acceptance requires its owning chat, session and original user message ID.")
+            try:
+                checks = goal_acceptance_checks(params.get("acceptanceChecks"))
+            except ValueError as exc:
+                raise AgentGoalStoreError(str(exc)) from exc
+            acceptance = {"acceptanceChecks": checks, "sourceMessageId": source_message_id, "acceptanceReceipts": {}}
         if scheduled and not chat_id:
             raise AgentGoalStoreError("Scheduled goals require a durable owner chatId.")
         goal_id = f"goal_{now.strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
@@ -574,13 +587,14 @@ class AgentGoalStore:
                     "title": title,
                     "summary": _summarize(params.get("summary"), 1000),
                     "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
-                    "sessionId": str(params.get("sessionId") or params.get("session_id") or "").strip(),
+                    "sessionId": session_id,
                     "chatId": chat_id,
                     "approvalPolicy": "uses_vrcforge_approval_checkpoint_rollback",
                     "wakeCount": 0,
                     "lastActiveAt": _iso(now),
                     "elapsedSeconds": 0,
                     "createdBy": _summarize(params.get("createdBy"), 80),
+                    **acceptance,
                 }
             )
             return self.with_live_elapsed(self.project_goals()[goal_id])
@@ -622,6 +636,62 @@ class AgentGoalStore:
                 raise AgentGoalStoreError("An unfinished goal already exists for this conversation.", 409)
             return self.create({**params, "createdBy": "agent_tool"})
 
+    @staticmethod
+    def _accepted(goal: dict[str, Any]) -> bool:
+        checks = goal.get("acceptanceChecks") or []
+        receipts = goal.get("acceptanceReceipts") or {}
+        return bool(checks) and all(receipts.get(str(index)) for index in range(len(checks)))
+
+    def record_acceptance(self, goal_id: str, scope: dict[str, Any], receipt: dict[str, Any]) -> None:
+        with self._lock:
+            goals = self.project_goals()
+            goal = goals.get(goal_id)
+            if not goal or goal.get("status") != "active" or not goal.get("acceptanceChecks"):
+                return
+            if (scope.get("chatId") != goal.get("chatId") or scope.get("sessionId") != goal.get("sessionId")
+                    or self._normalize_path(scope.get("projectRoot") or "") != self._normalize_path(goal.get("projectRoot") or "")):
+                return
+            receipt_id = receipt.get("id")
+            if not receipt_id or any(
+                receipt_id in (other.get("acceptanceReceipts") or {}).values()
+                for other_id, other in goals.items() if other_id != goal_id
+            ):
+                return
+            previous = goal.get("acceptanceReceipts") or {}
+            receipts = {**previous, **{
+                str(index): receipt_id for index, check in enumerate(goal["acceptanceChecks"])
+                if str(index) not in previous and goal_acceptance_receipt(check, receipt)
+            }}
+            if receipts != previous:
+                self._append({"event": "goal_acceptance_observed", "goalId": goal_id,
+                              "acceptanceReceipts": receipts})
+
+    def handoff_acceptances(self, *, session_id: str, project_root: str) -> list[dict[str, Any]]:
+        if not session_id:
+            return []
+        expected_project = self._normalize_path(project_root or "")
+        return [
+            {"goalId": goal["goalId"], "messageId": goal["sourceMessageId"],
+             "receiptId": next(reversed(goal["acceptanceReceipts"].values())),
+             "receiptIds": list(dict.fromkeys(goal["acceptanceReceipts"].values()))}
+            for goal in self.project_goals().values()
+            if goal.get("sessionId") == session_id
+            and self._normalize_path(goal.get("projectRoot") or "") == expected_project
+            and goal.get("sourceMessageId") and self._accepted(goal) and goal.get("status") != "cancelled"
+        ]
+
+    def handoff_goal_bindings(self, *, session_id: str, project_root: str) -> list[dict[str, Any]]:
+        if not session_id:
+            return []
+        expected_project = self._normalize_path(project_root or "")
+        return [
+            {"goalId": goal["goalId"], "messageId": goal["sourceMessageId"], "text": goal["title"]}
+            for goal in self.project_goals().values()
+            if goal.get("sessionId") == session_id
+            and self._normalize_path(goal.get("projectRoot") or "") == expected_project
+            and goal.get("sourceMessageId") and goal.get("status") != "cancelled"
+        ]
+
     def update_from_agent(self, goal_id: str, params: dict[str, Any]) -> dict[str, Any]:
         """Apply the narrow model-owned Goal transitions used by Codex/Claude-style tools."""
 
@@ -640,6 +710,8 @@ class AgentGoalStore:
             if str(current.get("status") or "") != "active":
                 raise AgentGoalStoreError("Only an active goal can be completed or blocked by the Agent.", 409)
             if status == "complete":
+                if not self._accepted(current) and not (current.get("wakeAt") or current.get("wakeEveryMinutes")):
+                    raise AgentGoalStoreError("The Goal still needs its registered acceptance receipts.", 409)
                 return self.update(
                     goal_id,
                     {

@@ -72,12 +72,14 @@ RUNTIME_REPLY_LANGUAGE_INSTRUCTION = (
 )
 RUNTIME_TASK_WORKFLOW_INSTRUCTION = (
     "Complete the requested outcome through execution, verification and delivery. Start clear, authorized work immediately. "
-    "Resolve factual uncertainty with tools and use reasonable defaults for reversible details. "
+    "Carry forward the user's explicit requirements until the user changes them. Choose unspecified details yourself "
+    "within the authorized scope. Reuse your recorded selections when continuing and attribute them to their actual source. "
+    "Resolve factual uncertainty with tools. "
     "Treat follow-ups as updates to the current task unless the user replaces or stops it. "
     "For multi-stage work or a requested TODO list, call progress_replace before starting substantive work. "
     "For a simple task, work directly. Use progress_update as items change; if IDs are missing, read it with progress_list. "
     "Use completionChecks only for known tools and exact target arguments or result fields. Reuse matching receipts. "
-    "Update affected checks when the approach changes; explicitly complete other items after verification. "
+    "Name the tool's exact acceptance checks when they become known. Only matching receipts complete an item. "
     "Keep unfinished items pending or blocked and reconcile the list before delivery. "
 )
 RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
@@ -119,6 +121,8 @@ RUNTIME_CONTEXT_INSTRUCTION = (
     "current user decisions, the active TODO and newer receipts for the exact same operation. Keep the established order when "
     "a newer receipt only suggests another action, previews a change, or confirms different work. Treat locating, importing, "
     "mounting and checking appearance as distinct observations when the task requires them. "
+    "Use toolTask and toolAttempt for exact recorded outcomes. A verified tool task covers its own selectors. "
+    "Continue a partial sourceRead from its nextRequest when supplied. Use the original recovery coordinates for interrupted work. "
     "For explicit remember or forget requests, use remember_memory or delete_memory in execution; list_memory is read-only. "
     "Save exact user wording in the active project or user scope, and report the returned memoryId. "
     "Use create_goal only for an explicit durable goal. "
@@ -2494,6 +2498,8 @@ class RuntimePlannerService:
         try:
             if native_turn.cancelled():
                 raise ValueError("native compaction cancelled")
+            runtime_state_text = native_runtime_state_content(runtime_messages[0])
+            project_root = ensure_dict(json.loads(runtime_state_text[len(NATIVE_RUNTIME_STATE_PREFIX):])).get("projectPath", "") if runtime_state_text else ""
             current_digests = ensure_list(ensure_dict(request.get("_diagnosticOrigin")).get("currentRuntimeContextDigests"))
             current_context = []
             todo_items = []
@@ -2594,6 +2600,7 @@ class RuntimePlannerService:
                 "_handoffTaskInputs": blocks["taskInputs"],
                 "_handoffTodo": todo_items,
                 "_outstandingOperations": native_handoff_operations(snapshot),
+                "_handoffOwnerScope": {"sessionId": native_turn.session_id, "projectRoot": project_root},
                 "realContextLimit": guard["contextLimit"],
                 "_recordUsage": record_usage,
             }))
@@ -4264,6 +4271,8 @@ class RuntimePlannerService:
                     raise ValueError("no_compactable_history")
                 compaction_input = tuple(dict(entry) for entry in older_entries) + tuple(loop_entries)
                 metadata["attempts"] = 1
+                from agent_handoff_operations import legacy_handoff_operations
+
                 result = dict(compact_port.compact(
                     compaction_input,
                     {
@@ -4282,6 +4291,9 @@ class RuntimePlannerService:
                         "_handoffArchiveIndices": handoff_archive_indices,
                         "_handoffTaskInputs": blocks["taskInputs"],
                         "_handoffTodo": ensure_list(observe.get("activeTodo")),
+                        "_outstandingOperations": legacy_handoff_operations(loop_state or ()),
+                        "_handoffOwnerScope": {"sessionId": params.get("sessionId") or params.get("session_id") or "",
+                                               "projectRoot": params.get("projectRoot") or params.get("projectPath") or ""},
                         "_recordUsage": lambda prompt, usage: self.record_context_usage(
                             context_usage, prompt, [], usage,
                             update_window=False, phase="compaction"),
@@ -4554,6 +4566,11 @@ class RuntimePlannerService:
             }
             control_step["tool"] = "model_information_control"
             control = RuntimePlannerService.complete_model_information(self, control_step, native_contract=native_contract)
+            if not native_contract:
+                from agent_handoff_operations import archive_source_read_for_step
+
+                if archive_source_read := archive_source_read_for_step(step):
+                    control += "; archiveSourceRead=" + json.dumps(archive_source_read, ensure_ascii=False, separators=(",", ":"))
             # Structured navigation must not be buried at the tail of the
             # serialized text it is meant to avoid reading sequentially.
             from agent_tool_result_reader import eligible_result
@@ -4614,6 +4631,12 @@ class RuntimePlannerService:
                 step = self._planner_result_read_step(step)
             result = step.get("result")
             fields: list[str] = []
+            if not native_contract:
+                from agent_handoff_operations import archive_source_read_for_step
+
+                if archive_source_read := archive_source_read_for_step(step):
+                    fields.append("archiveSourceRead=" + json.dumps(
+                        archive_source_read, ensure_ascii=False, separators=(",", ":")))
             source_completeness = RuntimePlannerService.model_source_completeness(step)
             if source_completeness:
                 fields.append("sourceCompleteness=" + json.dumps(

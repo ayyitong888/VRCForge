@@ -688,6 +688,8 @@ class AgentGoalCreateRequest(BaseModel):
     chat_id: str | None = Field(default=None, alias="chatId")
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")
+    source_message_id: str | None = Field(default=None, alias="sourceMessageId")
+    acceptance_checks: list[dict[str, Any]] | None = Field(default=None, alias="acceptanceChecks")
 
     model_config = {"populate_by_name": True}
 
@@ -1146,8 +1148,9 @@ class ProjectIndexScanRequest(BaseModel):
 
 
 class OutfitPackageInspectRequest(BaseModel):
-    package_path: str = Field(alias="packagePath")
+    package_path: str | None = Field(default=None, alias="packagePath")
     max_entries: int = Field(default=5000, alias="maxEntries", ge=1, le=50000)
+    archive_cursor: str | None = Field(default=None, alias="archiveCursor", pattern=r"^archive_[0-9a-f]{32}_[1-9][0-9]*$")
 
     model_config = {"populate_by_name": True}
 

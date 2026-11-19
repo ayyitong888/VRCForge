@@ -49,7 +49,10 @@ def test_handoff_binds_answer_operation_and_todo_to_their_own_sources():
     assert handoff_view(parse_handoff_graph(revised["summary"]), [todo])["recoverTaskIds"] == [recovery_id]
     completed = compact(lambda _: {}, [{**operation, "state": "done"}], revised["summary"])
     done_graph = parse_handoff_graph(completed["summary"])
-    assert handoff_view(done_graph, [{**todo, "status": "completed"}])["readyTaskIds"] == ["mount"]
+    unsupported = {**todo, "status": "completed"}
+    assert handoff_view(done_graph, [unsupported])["readyTaskIds"] == ["import"]
+    verified = {**unsupported, "completionChecks": [{"kind": "write"}], "completionEvidence": {"0": "action-exact"}}
+    assert handoff_view(done_graph, [verified])["readyTaskIds"] == ["mount"]
 
 
 def test_source_order_expansion_and_phase_readiness_survive_round_trip():
@@ -77,7 +80,8 @@ def test_source_order_expansion_and_phase_readiness_survive_round_trip():
         ["mounts", "depends_on", "imports", {"decisionId": "order"}],
         ["verify", "depends_on", "imports", {"decisionId": "order"}],
     ]
-    completed = [{"progressId": "primary", "status": "completed"}, {"progressId": "phase-import", "status": "completed"}]
+    completed = [{"progressId": "primary", "status": "completed", "completionChecks": [{"kind": "write"}],
+                  "completionEvidence": {"0": "action-primary"}}, {"progressId": "phase-import", "status": "completed"}]
     assert handoff_view(restored, completed)["readyTaskIds"] == ["secondary", "inspect"]
     advanced = apply_handoff_edits(restored, {"nodes": {"secondary": {"status": "done"}}})
     assert handoff_view(advanced, completed)["readyTaskIds"] == ["mount", "verify", "inspect"]
@@ -211,6 +215,8 @@ def test_invalid_nodes_and_edges_are_local_and_keep_existing_valid_state():
 
 
 def test_only_incomplete_graph_with_no_runnable_tasks_is_anomalous():
+    from agent_handoff_sources import bind_goal_acceptance
+
     graph = apply_handoff_edits(None, {
         "nodes": {
             "goal": node("goal", "Deliver"),
@@ -231,7 +237,93 @@ def test_only_incomplete_graph_with_no_runnable_tasks_is_anomalous():
         "edges": [["alternate", "belongs_to", "goal"]],
     })
     assert handoff_view(finished) == {"readyTaskIds": [], "openIssueIds": [],
+                                     "incomplete": True, "anomaly": True}
+    bind_goal_acceptance(finished, [{"goalId": "goal", "messageId": "user-1", "receiptId": "verified-goal"}])
+    assert handoff_view(finished) == {"readyTaskIds": [], "openIssueIds": [],
                                      "incomplete": False, "anomaly": False}
+
+
+def test_tool_states_and_exact_results_survive_repeated_model_handoff():
+    user = {"id": "user-1", "source": "user", "text": "Read source archive and import exact selected package"}
+    source_ref = "result_" + "a" * 32
+    import_ref = "result_" + "b" * 32
+    partial = {"id": "archive-receipt", "kind": "receipt", "callId": "archive-receipt", "tool": "inspect_archive",
+               "operationKind": "read", "scopeId": "archive-scope", "state": "done", "outcomeStatus": "ok",
+               "resultRef": source_ref, "sourceRead": {"status": "partial", "processedCount": 12,
+                            "totalCount": 24, "nextRequest": {"offset": 12}}}
+    preview = {"id": "import-preview", "kind": "preview", "callId": "preview-receipt", "tool": "preview_import",
+               "operationKind": "preview", "scopeId": "preview-scope", "state": "done", "outcomeStatus": "ok"}
+    interrupted = {"id": "exec-1", "kind": "execution", "callId": "import-receipt", "tool": "import",
+                   "operationKind": "write", "scopeId": "import-scope", "state": "interrupted",
+                   "executionId": "exec-1", "checkpointId": "ckpt-1", "resultRef": import_ref}
+
+    def compact(operations, prior=None, summarize=lambda _: {}):
+        result = compact_context([{"role": "user", "text": user["text"]}], handoff=True, task_inputs=[user],
+                                 outstanding_operations=operations, prior_handoff=prior, summarizer=summarize)
+        return result["summary"], parse_handoff_graph(result["summary"])
+
+    summary, graph = compact([partial, preview, interrupted])
+    task_ids = {task["toolTask"]["scopeId"]: node_id for node_id, task in graph["nodes"].items() if "toolTask" in task}
+    attempt_ids = {task["attemptReceiptId"]: node_id for node_id, task in graph["nodes"].items() if "attemptReceiptId" in task}
+    archive_id, preview_id, import_id = (task_ids[key] for key in ("archive-scope", "preview-scope", "import-scope"))
+    assert graph["nodes"][archive_id]["toolTask"]["state"] == "partial"
+    assert graph["nodes"][archive_id]["status"] == "pending"
+    assert graph["nodes"][preview_id]["status"] == "done"
+    assert graph["nodes"][import_id]["status"] == "pending"
+    assert graph["nodes"][attempt_ids["import-receipt"]]["status"] == "interrupted"
+
+    def spoof(_):
+        return {"nodes": {
+            archive_id: {"status": "done", "resultRef": import_ref},
+            import_id: None,
+            attempt_ids["import-receipt"]: {"status": "success"},
+            "goal-copy": {"kind": "goal", "text": user["text"], "goalAcceptance": {"receiptId": "preview-receipt"},
+                          "evidence": [{"type": "message", "id": "user-1"}]},
+            "fake-import": {"kind": "task", "text": "Imported", "status": "done", "resultRef": import_ref,
+                           "toolTask": {"state": "verified"}, "evidence": [{"type": "receipt", "id": "preview-receipt"}]},
+        }, "edges": [[attempt_ids["import-receipt"], "attempt_of", preview_id]],
+           "removeEdges": [[attempt_ids["import-receipt"], "attempt_of", import_id]]}
+
+    summary, attacked = compact([], summary, spoof)
+    assert attacked["nodes"][archive_id] == graph["nodes"][archive_id]
+    assert attacked["nodes"][import_id] == graph["nodes"][import_id]
+    assert attacked["nodes"]["fake-import"]["status"] == "pending"
+    assert "resultRef" not in attacked["nodes"]["fake-import"] and "toolTask" not in attacked["nodes"]["fake-import"]
+    assert "goalAcceptance" not in attacked["nodes"]["goal-copy"] and handoff_view(attacked)["incomplete"]
+    assert attacked["edges"] == graph["edges"]
+
+    resumed = {**interrupted, "callId": "resumed-receipt", "state": "done", "commitState": "complete",
+               "readbackState": "verified", "outcomeStatus": "ok"}
+    complete_read = {**partial, "callId": "archive-finish", "sourceRead": {"status": "complete", "processedCount": 24}}
+    _, negative = compact([{**resumed, "targetEffectVerified": False}], summary)
+    assert negative["nodes"][import_id]["status"] == "pending"
+    assert negative["nodes"][import_id]["toolTask"]["state"] == "unverified"
+    _, finished = compact([resumed, complete_read], summary)
+    assert finished["nodes"][archive_id]["toolTask"]["sourceRead"] == complete_read["sourceRead"]
+    assert finished["nodes"][import_id]["status"] == "done"
+    assert finished["nodes"][import_id]["toolTask"]["resultRef"] == import_ref
+    assert finished["nodes"][attempt_ids["import-receipt"]]["status"] == "interrupted"
+
+
+def test_registered_goal_requires_an_acceptance_for_its_own_identifier_and_source():
+    user = {"id": "goal-message", "source": "user", "text": "Verify the requested final object"}
+    binding = {"goalId": "goal-registered", "messageId": user["id"]}
+    runs = []
+
+    def compact(records, prior=None):
+        result = compact_context([{"role": "user", "text": user["text"]}], handoff=True, task_inputs=[user],
+                                 goal_bindings=[binding], goal_acceptances=records, prior_handoff=prior,
+                                 summarizer=lambda _: {"nodes": {"alias": node("goal", user["text"])}})
+        runs.append(result["summary"])
+        return parse_handoff_graph(runs[-1])
+
+    other_goal = {**binding, "goalId": "goal-other", "receiptId": "passed-elsewhere"}
+    other_source = {**binding, "messageId": "another-message", "receiptId": "passed-elsewhere"}
+    pending = compact([other_goal, other_source])
+    assert set(pending["nodes"]) == {"goal-registered"}
+    assert handoff_view(pending)["incomplete"]
+    accepted = compact([{**binding, "receiptId": "exact-verified-receipt"}], runs[-1])
+    assert not handoff_view(accepted)["incomplete"]
 
 
 def test_legacy_phases_and_evidence_recover_without_synthetic_attempt_links():

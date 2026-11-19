@@ -398,7 +398,7 @@ def test_untrusted_question_cannot_queue_runtime_continuation(tmp_path: Path, mo
     assert calls == []
 
 
-def _scripted_question(tmp_path: Path, *, question_params=None, runtime_params=None, on_resume=None):
+def _scripted_question(tmp_path: Path, *, question_params=None, runtime_params=None, on_resume=None, on_gateway=None):
     completed = threading.Event()
     results: list[dict] = []
 
@@ -435,6 +435,8 @@ def _scripted_question(tmp_path: Path, *, question_params=None, runtime_params=N
         })}
 
     bind_test_runtime_planner(gateway, scripted)
+    if on_gateway is not None:
+        on_gateway(gateway)
     first = gateway.runtime_message({
         "message": "run scripted question",
         "sessionId": "runtime-session",
@@ -453,6 +455,35 @@ def _answer(gateway, question, tmp_path):
         "projectRoot": str(tmp_path),
         "answer": "yes",
     })
+
+
+def test_registered_subjective_goal_accepts_only_the_answer_to_its_runtime_question(tmp_path: Path) -> None:
+    ids = []
+
+    def register(gateway):
+        goal = gateway.goal.create_agent_goal({
+            "chatId": "appearance-chat", "sessionId": "runtime-session", "projectRoot": str(tmp_path),
+            "title": "Approve the appearance", "sourceMessageId": "user-appearance",
+            "acceptanceChecks": [{"kind": "subjective", "tool": "vrcforge_ask_user",
+                                  "result": {"question": "Does Avatar A's new appearance match your preference?"}}],
+        })["goal"]
+        ids.append(goal["goalId"])
+
+    gateway, _first, question, _prompts, _results, _completed = _scripted_question(
+        tmp_path, on_gateway=register, runtime_params={"chatId": "appearance-chat"},
+        question_params={"kind": "visual_checkpoint", "question": "Does Avatar A's new appearance match your preference?"},
+    )
+    assert gateway.goal.handoff_acceptances("runtime-session", str(tmp_path)) == []
+    answer = gateway.questions.answer(question["questionId"], {
+        "sessionId": "runtime-session", "projectRoot": str(tmp_path),
+        "answer": "pass", "resolution": "pass", "settleOnly": True,
+    })
+    assert answer["question"]["resolution"] == "pass"
+    assert gateway.goal.handoff_acceptances("runtime-session", str(tmp_path)) == [{
+        "goalId": ids[0], "messageId": "user-appearance", "receiptId": question["questionId"],
+        "receiptIds": [question["questionId"]],
+    }]
+    assert gateway.goal.handoff_acceptances("other-session", str(tmp_path)) == []
 
 
 def test_scripted_runtime_message_question_answer_resumes_same_task(tmp_path: Path) -> None:

@@ -1393,6 +1393,7 @@ class PreparedOutfitImportApprovedWriteService:
                 "committed": True,
                 "commitState": "complete",
                 "commitStateKnown": True,
+                "readbackVerified": True,
                 "kind": kind,
                 "unityImports": imports,
                 "assetDatabaseRefresh": refresh,

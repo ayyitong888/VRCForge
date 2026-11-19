@@ -344,11 +344,13 @@ def test_execute_uses_target_index_and_real_content_callback_after_import(
     assert result["commitStateKnown"] is True
     assert result["contentReadback"]["verified"] is True
     assert result["contentReadback"]["checked"] == 2
+    assert result["readbackVerified"] is True
     public = dashboard_server.AGENT_GATEWAY._external_mcp_write_result(  # noqa: SLF001 - public projection regression.
         "vrcforge_import_outfit_package", result
     )
     assert public["commitState"] == "complete"
     assert public["outcome"]["commitState"] == "complete"
+    assert public["outcome"]["targetEffectVerified"] is True
 
 
 def test_unitypackage_content_readback_normalizes_dot_prefixed_members(tmp_path: Path) -> None:

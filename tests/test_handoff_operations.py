@@ -33,6 +33,7 @@ def test_dispatch_receipt_is_recoverable_after_compaction_with_exact_execution_i
     assert native_handoff_operations(snapshot) == [{
         "kind": "execution", "id": "exec-1", "callId": "call-write", "tool": "unity_write",
         "state": "readback_pending", "actionId": "action-1", "outcomeStatus": "ok",
+        "operationKind": "write", "commitState": "pending", "readbackState": "pending", "executionId": "exec-1",
     }]
     assert lookup_native_handoff_receipt(snapshot, "exec-1")["handoffReceipt"]["readbackState"] == "pending"
     assert lookup_native_handoff_receipt(snapshot, "not-owned") is None
@@ -56,6 +57,19 @@ def test_execution_metadata_comes_from_owner_receipt():
         "result": {"requestTrace": {"executionId": "exec-real"}, "result": {"previewId": "preview-real"}},
         "outcome": {"readbackState": "pending", "summary": "executionId=exec-untrusted"},
     }) == {"executionId": "exec-real", "previewId": "preview-real", "readbackState": "pending"}
+
+
+def test_durable_archive_receipt_retains_scope_and_readback_without_recovery_slice():
+    call = {"role": "assistant", "tool_calls": [{"id": "call-write", "function": {
+        "name": "call_tool", "arguments": json.dumps({"tool": "vrcforge_write", "arguments": {"assetPath": "Assets/Exact"}}),
+    }}]}
+    result_ref = "result_" + "e" * 32
+    response = receipt("call-write", "action-1", tool="vrcforge_write", commitState="complete",
+                       readbackState="verified", resultRef=result_ref)
+    rows = native_handoff_operations({"handoffArchive": {"old:1": {"source": "tool", "text": json.dumps([call, response])}}})
+    row, = rows
+    assert row["scopeId"] and row["selectors"] == {"assetPath": "Assets/Exact"}
+    assert row["readbackState"] == "verified" and row["resultRef"] == result_ref
 
 
 def test_recorded_correction_binds_the_failed_call_and_exact_result_reference():
@@ -264,3 +278,40 @@ def test_exact_package_selection_survives_redacted_compaction_recovery_and_resta
     model_observation = planner.native_result_observation({"tool": TOOL_NAME, "status": "completed", "result": page})
     model_page = json.loads(model_observation["observation"].split("; retainedResultPage=", 1)[1])
     assert json.loads(model_page["text"])["sourceSelector"] == exact
+
+def test_archive_cursor_links_plan_source_to_receipts_after_compaction():
+    from outfit_package_inspector import INSPECTION_SCHEMA
+
+    cursor = "archive_" + "a" * 32 + "_1"
+    path = "D:/examples/MaterialPack.zip"
+    first_tool, next_tool = "vrcforge_plan_outfit_import", "vrcforge_inspect_outfit_package"
+
+    def call(identity, tool, arguments):
+        return {"role": "assistant", "tool_calls": [{"id": identity, "function": {
+            "name": "call_tool", "arguments": json.dumps({"tool": tool, "arguments": arguments}),
+        }}]}
+
+    partial = {"status": "partial", "processedCount": 111, "totalCount": 121, "remainingCount": 10,
+               "nextRequest": {"tool": next_tool, "arguments": {"archiveCursor": cursor}}}
+    first = native_handoff_receipt_fields({
+        "tool": first_tool, "result": {"inspection": {"schema": INSPECTION_SCHEMA, "sourceRead": partial}},
+    })
+    final_coverage = {"status": "complete", "processedCount": 121, "totalCount": 121, "remainingCount": 0}
+    final = native_handoff_receipt_fields({
+        "tool": next_tool, "result": {"schema": INSPECTION_SCHEMA, "sourceRead": final_coverage},
+    })
+    old = archived(
+        call("start", first_tool, {"packagePath": path, "maxEntries": 110}),
+        receipt("start", "plan-invocation", tool=first_tool, **first),
+    )
+    new = [
+        call("resume", next_tool, {"archiveCursor": cursor}),
+        receipt("resume", "read-invocation", tool=next_tool, **final),
+    ]
+
+    progress, completion = native_handoff_operations({"compactionRecovery": [old], "messages": new})
+    assert progress["scopeId"] == completion["scopeId"]
+    assert progress["selectors"] == completion["selectors"] == {"packagePath": path}
+    assert progress["sourceRead"] == partial
+    assert completion["sourceRead"] == final_coverage
+    assert cursor not in completion["selectors"].values()

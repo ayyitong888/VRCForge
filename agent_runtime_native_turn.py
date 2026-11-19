@@ -344,6 +344,10 @@ class NativeRuntimeTurn:
         return self._state.native_conversation(self._session_id, binding=self._binding) or {}
 
     @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
     def consumed_steer_input_ids(self) -> list[str]:
         """Exact receipts from successful insertion before a model boundary."""
         return list(self._consumed_steer_input_ids)

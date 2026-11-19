@@ -180,7 +180,7 @@ def execute_loose_outfit_import(plan: dict[str, Any]) -> dict[str, Any]:
         return {
             "ok": True, "copiedFiles": copied, "copiedFileCount": len(copied),
             "mutationStarted": True, "mutationApplied": True, "committed": True,
-            "commitState": "complete", "commitStateKnown": True,
+            "commitState": "complete", "commitStateKnown": True, "readbackVerified": True,
         }
     except Exception as exc:
         cleanup_errors: list[str] = []

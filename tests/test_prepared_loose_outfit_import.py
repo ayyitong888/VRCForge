@@ -115,6 +115,7 @@ def test_prepare_and_execute_copies_asmdef_and_companion_meta_with_readback(tmp_
     assert result["copiedFileCount"] == 2
     assert target.read_text(encoding="utf-8") == asmdef.read_text(encoding="utf-8")
     assert (target.with_name(target.name + ".meta")).read_bytes() == (asmdef.with_name(asmdef.name + ".meta")).read_bytes()
+    assert result["readbackVerified"] is True
     assert set(result["copiedFiles"]) == {
         "Assets/VRCForge/Imported/Wardrobe.Editor.asmdef",
         "Assets/VRCForge/Imported/Wardrobe.Editor.asmdef.meta",

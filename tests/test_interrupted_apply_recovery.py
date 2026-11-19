@@ -63,6 +63,11 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             recovery = recoveries["recoveries"][0]
             self.assertEqual(recovery["status"], "needs_recovery")
             self.assertEqual(recovery["checkpointId"], checkpoint_id)
+            self.assertTrue(applied["executionId"].startswith("exec_"))
+            self.assertEqual(applied["outcome"]["executionId"], applied["executionId"])
+            self.assertEqual(recovery["executionId"], applied["executionId"])
+            self.assertEqual(applied["outcome"]["checkpointId"], checkpoint_id)
+            self.assertFalse(applied["outcome"]["targetEffectVerified"])
 
             preview = gateway.checkpoint_recovery.preview_interrupted_apply_recovery({"recoveryId": recovery["id"]})
             self.assertTrue(preview["ok"])

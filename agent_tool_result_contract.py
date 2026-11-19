@@ -657,6 +657,22 @@ def normalize_agent_tool_result(
     )
     canonical_status = canonical_facts.pop("status", None)
     result.update(canonical_facts)
+    if write:
+        result["targetEffectVerified"] = bool(
+            status == "ok" and result.get("readbackState") == "verified"
+            and result.get("commitState") in {"complete", "no_change"}
+            and result.get("committed") is True
+            and not any(
+                view.get("verified") is False or view.get("persistedReadback") is False
+                or view.get("partial") is True or view.get("preview") is True
+                or _status(view.get("status")) in {"partial", "interrupted", "rolled_back"}
+                for view in causal_views
+            )
+        )
+        for key in ("executionId", "checkpointId"):
+            identity = _first_text(causal_views, (key,))
+            if identity:
+                result[key] = identity
     if error is not None and isinstance(result.get("safeToRetry"), bool):
         error["retryable"] = result["safeToRetry"]
     if execution_pending:

@@ -14,8 +14,8 @@ def test_outfit_import_plan_and_inspect_read_schemas_are_discoverable():
     inspect = canonical_unity_read_tool_input_schema("vrcforge_inspect_outfit_package")
     assert plan["required"] == ["packagePath"]
     assert "projectPath" in plan["properties"]
-    assert inspect["required"] == ["packagePath"]
-    assert set(inspect["properties"]) == {"packagePath", "maxEntries"}
+    assert inspect["anyOf"] == [{"required": ["packagePath"]}, {"required": ["archiveCursor"]}]
+    assert set(inspect["properties"]) == {"packagePath", "maxEntries", "archiveCursor"}
 
 
 def test_avatar_texture_selection_is_optional_in_plan_and_apply():

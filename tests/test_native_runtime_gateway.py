@@ -226,7 +226,10 @@ def test_native_resumed_approval_suppresses_queued_duplicate_write(tmp_path):
     args = {"projectRoot": str(tmp_path / "UnityProject"), "value": "same-effect"}
     first = call("first-write", "fixture_write", args)
     first["tool_calls"].extend(call("second-write", "fixture_write", args)["tool_calls"])
-    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [first, finish])
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [first, finish], handler_result={
+        "ok": True, "status": "written", "committed": True, "commitState": "complete",
+        "verified": True, "readback": {"value": args["value"]},
+    })
     _set_mode(gateway, "approval")
     initial = run(gateway, tmp_path, message="Write the fixture")
     approval_id = initial["approval_id"]

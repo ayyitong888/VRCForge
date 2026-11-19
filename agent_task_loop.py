@@ -458,6 +458,9 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
         "resultVerification",
         "persistenceState",
         "readbackState",
+        "targetEffectVerified",
+        "executionId",
+        "checkpointId",
         "jobId",
         "jobStatus",
         "committed",
@@ -910,6 +913,7 @@ def approval_task_context(
         "sessionId": _bounded_text(seed.get("sessionId"), 180),
         "turnId": _bounded_text(seed.get("turnId"), 180),
         "parentChatId": _bounded_text(seed.get("parentChatId"), 180),
+        "acceptanceGoalId": _bounded_text(seed.get("acceptanceGoalId"), 80),
         "usageParentTurnId": _bounded_text(seed.get("usageParentTurnId"), 180),
         "clientTurnId": _bounded_text(seed.get("clientTurnId"), MAX_RUNTIME_CLIENT_TURN_ID_LENGTH),
         "projectRoot": _bounded_text(seed.get("projectRoot"), 600),
@@ -2158,13 +2162,20 @@ class AgentTaskLoop:
         return [
             str(action.get("actionId") or "")
             for action in self._actions.values()
-            if _status(action.get("status")) == "completed"
+            if self._action_completion_confirmed(action)
         ]
+
+    @staticmethod
+    def _action_completion_confirmed(action: Mapping[str, Any]) -> bool:
+        return _status(action.get("status")) == "completed" and not (
+            action.get("kind") == "write"
+            and (action.get("outcome") or {}).get("targetEffectVerified") is False
+        )
 
     def _requirement_matched(self, requirement: Mapping[str, Any]) -> bool:
         required_action_id = str(requirement.get("actionId") or "")
         return any(
-            _status(action.get("status")) == "completed"
+            self._action_completion_confirmed(action)
             and (
                 (
                     str(requirement.get("kind") or "") == "action"

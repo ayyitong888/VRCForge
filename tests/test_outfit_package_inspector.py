@@ -357,3 +357,39 @@ def test_loose_outfit_inspection_exposes_editor_asmdef_as_copyable_dependency(tm
 
     assert result["summary"]["assemblyDefinitionCount"] == 1
     assert result["assemblyDefinitions"][0]["path"] == "Editor.asmdef"
+
+def test_nested_archive_source_cursor_reopens_private_index_and_does_not_reread_archive(tmp_path, monkeypatch):
+    from outfit_package_inspector import ArchiveInspectionIndex
+
+    package = tmp_path / "outfit.unitypackage"
+    make_unitypackage(package)
+    source = tmp_path / "outfit.zip"
+    with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.write(package, package.name)
+    database = tmp_path / "profile" / "archive-index.sqlite"
+    owner = ArchiveInspectionIndex(database, "first-session")
+    receipt = inspect_outfit_package(source, max_entries=1, archive_index=owner)
+    coverage = receipt["sourceRead"]
+    assert coverage["status"] == "partial"
+    assert coverage["processedCount"] == 2
+    assert coverage["remainingCount"] == 1
+    assert coverage["totalCount"] == 3
+    assert receipt["unityPackages"][0]["pathnamesEvidenceCount"] == 1
+
+    cursor = coverage["nextRequest"]["arguments"]["archiveCursor"]
+
+    def refuse_archive_open(*args, **kwargs):
+        raise AssertionError("reader rescanned source instead of using its index")
+
+    monkeypatch.setattr(zipfile, "ZipFile", refuse_archive_open)
+    other = ArchiveInspectionIndex(database, "different-session")
+    assert inspect_outfit_package(None, archive_index=other, archive_cursor=cursor)["ok"] is False
+    reopened = ArchiveInspectionIndex(database, "first-session")
+    resumed = inspect_outfit_package(None, archive_index=reopened, archive_cursor=cursor)
+    assert resumed["sourceRead"] == {
+        "countUnit": "archive_entries_and_pathnames", "status": "complete",
+        "processedCount": 3, "remainingCount": 0, "totalCount": 3,
+    }
+    assert resumed["unityPackages"][0]["pathnamesEvidenceCount"] == 2
+    assert inspect_outfit_package(None, archive_index=reopened, archive_cursor=cursor) == resumed
+    assert "SECRET_" not in json.dumps(resumed)

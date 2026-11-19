@@ -50,7 +50,7 @@ def test_handoff_orders_verbatim_messages_and_recovers_materials_after_restart(t
     compacted = _compact(state, before, budget=225, measure=lambda value: len(value) // 4, context=[context])
     projected = native_model_history(compacted["messages"])
     assert projected[0] == context
-    assert projected[1]["content"] == "[User message first]\n" + first
+    assert 'messageId="first"' in projected[1]["content"]
     assert 'messageId="middle"' in projected[2]["content"]
     assert projected[3]["content"].startswith("[User message latest]\nKeep exact whitespace.  \n\n")
     assert 'messageId="latest"' in projected[3]["content"]
@@ -59,6 +59,7 @@ def test_handoff_orders_verbatim_messages_and_recovers_materials_after_restart(t
     assert "Exact quoted material" not in str(projected)
     assert "tool_call_id" not in str(projected)
     restarted = _state(store)
+    assert restarted.native_handoff_archive("owner", binding="binding", message_id="first")["text"] == first
     record = restarted.native_handoff_archive("owner", binding="binding", message_id="latest")
     assert record["references"][0]["text"] == "Exact quoted material"
     stored_quote = restarted.native_handoff_archive("owner", binding="binding", message_id=record["attachments"][0]["messageId"])
@@ -67,6 +68,7 @@ def test_handoff_orders_verbatim_messages_and_recovers_materials_after_restart(t
     assert "data:image" not in str(record)
     assert restarted.native_handoff_archive("other", binding="binding", message_id="latest") is None
     again = _compact(restarted, compacted, budget=10000)
+    assert native_model_history(again["messages"])[0]["content"] == "[User message first]\n" + first
     assert again["messages"][again["activeTurnStart"]]["messageId"] == "first"
     assert again["handoffArchive"]["middle"]["text"] == "older message " * 160
     assert [entry["messageId"] for entry in again["messages"] if entry.get("handoffUser")] == ["first", "middle", "latest"]
@@ -100,6 +102,25 @@ def test_open_transaction_archive_keeps_results_paired_and_does_not_replay(tmp_p
     assert json.loads(archive["text"])[-1]["content"] == "Final result"
     assert not any(row.get("tool_calls") or row["role"] == "tool" for row in native_model_history(after["messages"]))
     assert [row["content"] for row in native_model_history(after["messages"]) if row["role"] == "assistant"][-1] == "Public"
+
+
+def test_over_budget_keeps_latest_instructions_in_order_after_restart(tmp_path):
+    store = NativeHistoryStore(tmp_path)
+    state = _state(store)
+    state.begin_native_turn("owner", binding="binding", turn_id="turn", input_id="first", message="Original task")
+    state.append_native_user("owner", binding="binding", input_id="middle", message="An older instruction. " * 40)
+    latest = "Keep the original selection. " * 12
+    state.append_native_user("owner", binding="binding", input_id="latest", message=latest)
+    before = state.native_conversation("owner", binding="binding")
+    for _ in range(2):
+        _compact(state, before, budget=200)
+        state = _state(store)
+        before = state.native_conversation("owner", binding="binding")
+        users = [item["content"] for item in native_model_history(before["messages"]) if item["role"] == "user"]
+        assert 'messageId="first"' in users[0]
+        assert 'messageId="middle"' in users[1]
+        assert users[-1] == "[User message latest]\n" + latest
+        assert state.native_handoff_archive("owner", binding="binding", message_id="first")["text"] == "Original task"
 
 
 def test_latest_unconsumed_group_is_indivisible_even_after_host_context(tmp_path):

@@ -156,21 +156,24 @@ def project_handoff_blocks(
     def user_cost(message_id: str, text: str) -> int:
         return measure(json.dumps({"role": "user", "content": headers[message_id] + text}, ensure_ascii=False))
 
-    available = budget - sum(user_cost(message_id, _pointer(message_id, "User message"))
-                             for message_id, _ in originals)
-    available -= sum(measure(json.dumps(messages[index], ensure_ascii=False)) for index in policy_indices | task_indices)
-    inline: set[str] = set()
-    if originals:
-        first_id, first_text = originals[0]
-        inline.add(first_id)
-        available -= user_cost(first_id, first_text) - user_cost(first_id, _pointer(first_id, "User message"))
+    costs = {message_id: user_cost(message_id, text) for message_id, text in originals}
+    used = sum(costs.values()) + sum(
+        measure(json.dumps(messages[index], ensure_ascii=False)) for index in policy_indices | task_indices
+    )
     if last_reply is not None:
-        available -= measure(json.dumps({"role": "assistant", "content": last_reply[1]}, ensure_ascii=False))
-    for message_id, content in reversed(originals[1:]):
-        extra = user_cost(message_id, content) - user_cost(message_id, _pointer(message_id, "User message"))
-        if extra <= max(available, 0):
-            inline.add(message_id)
-            available -= extra
+        used += measure(json.dumps({"role": "assistant", "content": last_reply[1]}, ensure_ascii=False))
+    # Fold oldest first, keeping the newest human message as the resumption anchor.
+    first_inline = 0
+    smallest = used
+    for index, (message_id, _) in enumerate(originals[:-1], start=1):
+        if used <= budget:
+            break
+        used += user_cost(message_id, _pointer(message_id, "User message")) - costs[message_id]
+        # A pointer can cost more than a short original. If even the minimum
+        # exceeds the block budget, use the smallest chronological projection.
+        if used < smallest:
+            first_inline, smallest = index, used
+    inline = {message_id for message_id, _ in originals[first_inline:]}
     raw_humans = {message_id: index for index, message_id in archive_indices.items()}
     for message_id, content in originals:
         raw_index = raw_humans.get(message_id)
@@ -210,7 +213,7 @@ def project_handoff_blocks(
     pending = messages[pending_from:transaction_end]
     if pending:
         anchor = _transaction_anchor(pending)
-        if measure(json.dumps(pending, ensure_ascii=False, separators=(",", ":"))) > available:
+        if measure(json.dumps(pending, ensure_ascii=False, separators=(",", ":"))) > budget - smallest:
             transaction_id = _identity("transaction", anchor)
             archive[transaction_id] = {"id": transaction_id, "source": "tool", "text": _transaction_text(pending)}
             projected.append({"role": "user", "content": _pointer(transaction_id, "Unfinished tool transaction"),

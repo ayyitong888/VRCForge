@@ -2057,7 +2057,7 @@ def build_setup_outfit_request(
 
 
 class InspectOutfitPackagePort(Protocol):
-    def __call__(self, package_path: str, *, max_entries: int = 5000) -> dict[str, Any]: ...
+    def __call__(self, package_path: str | None, *, max_entries: int = 5000, archive_cursor: str | None = None) -> dict[str, Any]: ...
 
 
 class BuildOutfitImportPlanPort(Protocol):
@@ -2171,9 +2171,12 @@ class WardrobeOutfitWorkflowService:
     def inspect_outfit_package(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized = self._params(params)
         package_path = self._text(normalized, "packagePath", "package_path")
-        if not package_path:
-            raise WardrobeOutfitWorkflowError("packagePath is required.")
+        cursor = self._text(normalized, "archiveCursor", "archive_cursor")
+        if not package_path and not cursor:
+            raise WardrobeOutfitWorkflowError("packagePath or archiveCursor is required.")
         max_entries = int(normalized.get("maxEntries") or normalized.get("max_entries") or 5000)
+        if cursor:
+            return self._ports.inspect_package(package_path or None, max_entries=max_entries, archive_cursor=cursor)
         return self._ports.inspect_package(package_path, max_entries=max_entries)
 
     def plan_outfit_import(self, params: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import gzip
+import json
 import re
+import sqlite3
+import time
 import tarfile
 import zipfile
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Generator, Iterable
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 INSPECTION_SCHEMA = "vrcforge.outfit_package_inspection.v1"
@@ -66,18 +72,180 @@ class _BoundedArchiveReader:
         return self.bytes_read
 
 
-def inspect_outfit_package(path_value: str | Path, max_entries: int = 5000) -> dict[str, Any]:
-    source_path = Path(path_value).expanduser().resolve()
-    if not source_path.exists():
+ARCHIVE_CURSOR_PATTERN = r"archive_[0-9a-f]{32}_[1-9][0-9]*"
+_ARCHIVE_INDEX_PAGE_SIZE = 50_000
+_RESUMABLE_ARCHIVE_REASONS = {"archive_entries", "pathname_entries"}
+_ARCHIVE_INDEX_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _source_read(processed, total, reason, *, remaining_at_least=0, unit="archive_entries_and_pathnames"):
+    return {
+        "status": "complete" if total == processed and reason is None else (
+            "partial" if remaining_at_least or reason in {"archive_members", "input_bytes"} else "unknown"
+        ),
+        "countUnit": unit,
+        "processedCount": processed,
+        "totalCount": total,
+        "remainingCount": total - processed if total is not None and processed is not None else None,
+        **({"remainingAtLeast": remaining_at_least} if total is None and remaining_at_least else {}),
+        **({"reason": reason} if reason else {}),
+    }
+
+
+def _source_identity(path: Path):
+    stat = path.stat()
+    return path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+class ArchiveInspectionIndex:
+    """Retain bounded metadata in the private app profile, scoped to its host-supplied owner."""
+
+    def __init__(self, database: Path, owner: str):
+        self._database = database
+        self._owner = owner
+
+    def _open(self):
+        self._database.parent.mkdir(parents=True, exist_ok=True)
+        return closing(sqlite3.connect(self._database, timeout=5))
+
+    def inspect(self, path: Path, max_entries: int):
+        generator = _page_zip if path.suffix.lower() == ".zip" else _page_unitypackage
+        identity = list(_source_identity(path)[1:])
+        token = uuid4().hex
+        saved = []
+        saved_size = 0
+        inspected_at = utc_now()
+
+        def continuation(offset):
+            return {
+                "tool": "vrcforge_inspect_outfit_package",
+                "arguments": {"archiveCursor": f"archive_{token}_{offset}"},
+            }
+
+        with closing(generator(path, max_entries, page_size=_ARCHIVE_INDEX_PAGE_SIZE)) as pages:
+            result, coverage = next(pages)
+            result["sourceRead"] = coverage
+            if coverage.get("reason") not in _RESUMABLE_ARCHIVE_REASONS:
+                return result
+            for offset, (page, facts) in enumerate(pages, 1):
+                if facts.get("reason") in _RESUMABLE_ARCHIVE_REASONS:
+                    facts["nextRequest"] = continuation(offset + 1)
+                page.update(sourceRead=facts, inspectedAt=inspected_at, privacy=privacy_policy())
+                payload = gzip.compress(json.dumps(page, ensure_ascii=False).encode("utf8"), compresslevel=1)
+                saved_size += len(payload)
+                if saved_size > _ARCHIVE_INDEX_MAX_BYTES:
+                    coverage["reason"] = "archive_index_capacity"
+                    return result
+                saved.append((token, offset, payload))
+            if identity != list(_source_identity(path)[1:]):
+                coverage["reason"] = "archive_changed_during_indexing"
+                return result
+
+        final_count = facts["totalCount"] if facts["status"] == "complete" else None
+        if final_count is not None:
+            coverage["totalCount"] = final_count
+            coverage["remainingCount"] = final_count - coverage["processedCount"]
+            coverage.pop("remainingAtLeast", None)
+        coverage["nextRequest"] = continuation(1)
+        try:
+            with self._open() as database, database:
+                database.execute("PRAGMA foreign_keys=ON")
+                database.execute(
+                    "CREATE TABLE IF NOT EXISTS inspections (id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+                    "path TEXT NOT NULL, identity TEXT NOT NULL, created REAL NOT NULL, size INTEGER NOT NULL, total INTEGER)"
+                )
+                database.execute(
+                    "CREATE TABLE IF NOT EXISTS pages (id TEXT REFERENCES inspections(id) ON DELETE CASCADE, "
+                    "offset INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY (id, offset))"
+                )
+                database.execute("DELETE FROM inspections WHERE created < ?", (time.time() - 7 * 24 * 3600,))
+                database.execute(
+                    "INSERT INTO inspections VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (token, self._owner, str(path), json.dumps(identity), time.time(), saved_size, final_count),
+                )
+                database.executemany("INSERT INTO pages VALUES (?, ?, ?)", saved)
+                database.execute(
+                    "DELETE FROM inspections WHERE id IN ("
+                    "SELECT id FROM (SELECT id, sum(size) OVER (ORDER BY created DESC, id DESC) AS used "
+                    "FROM inspections) WHERE used > ?)",
+                    (_ARCHIVE_INDEX_MAX_BYTES,),
+                )
+        except (OSError, sqlite3.Error):
+            coverage.pop("nextRequest", None)
+            coverage["reason"] = "archive_index_unavailable"
+        return result
+
+    def resume(self, cursor: str, path: Path | None):
+        if not re.fullmatch(ARCHIVE_CURSOR_PATTERN, cursor) or not self._database.is_file():
+            return _archive_cursor_error()
+        _, token, offset = cursor.split("_")
+        try:
+            with self._open() as database:
+                record = database.execute(
+                    "SELECT path, identity, payload, total FROM pages JOIN inspections USING(id) "
+                    "WHERE id = ? AND offset = ? AND owner = ?", (token, int(offset), self._owner),
+                ).fetchone()
+            if record:
+                source_path = Path(record[0])
+                if (path is None or path == source_path) and list(_source_identity(source_path)[1:]) == json.loads(record[1]):
+                    result = json.loads(gzip.decompress(record[2]))
+                    facts = result["sourceRead"]
+                    if record[3] is not None:
+                        facts["totalCount"] = record[3]
+                        facts["remainingCount"] = record[3] - facts["processedCount"]
+                        facts.pop("remainingAtLeast", None)
+                    return result
+        except (OSError, EOFError, ValueError, OverflowError, sqlite3.Error):
+            pass
+        return _archive_cursor_error()
+
+
+def _archive_cursor_error():
+    return {
+        "ok": False, "schema": INSPECTION_SCHEMA,
+        "error": "Archive cursor is unavailable for this owner or source.",
+        "sourceRead": _source_read(None, None, "archive_cursor_unavailable"),
+    }
+
+
+def _page_unitypackage(path, max_entries, *, page_size=None):
+    with path.open("rb") as package_file:
+        bounded = _BoundedArchiveReader(package_file, MAX_UNITYPACKAGE_SCAN_INPUT_BYTES)
+        with tarfile.open(fileobj=bounded, mode="r|*") as archive:
+            with closing(_page_unitypackage_members(archive, archive, max_entries, path.name, page_size=page_size)) as pages:
+                for parsed in pages:
+                    reason = parsed["scanLimit"]
+                    processed = parsed["processedPathnameCount"]
+                    reconciled = processed == (
+                        len(parsed["pathnamesEvidence"]) + parsed["folderPathnameCount"] + parsed["unsafePathnameCount"]
+                    )
+                    if not reason and not reconciled:
+                        reason = "incomplete_pathname_inventory"
+                    yield _build_unitypackage_result(path, parsed), _source_read(
+                        processed, processed if not reason else None, reason,
+                        remaining_at_least=int(reason in {"pathname_entries", "archive_members"}),
+                    )
+
+
+def inspect_outfit_package(
+    path_value: str | Path | None, max_entries: int = 5000, *,
+    archive_index: ArchiveInspectionIndex | None = None, archive_cursor: str | None = None,
+) -> dict[str, Any]:
+    source_path = Path(path_value).expanduser().resolve() if path_value else None
+    if archive_cursor:
+        return archive_index.resume(archive_cursor, source_path) if archive_index else _archive_cursor_error()
+    if source_path is None or not source_path.exists():
         return {
             "ok": False,
             "schema": INSPECTION_SCHEMA,
             "error": "Package path does not exist.",
-            "source": source_summary(source_path, "missing"),
+            "source": source_summary(source_path, "missing") if source_path else None,
             "privacy": privacy_policy(),
         }
     try:
-        if source_path.is_dir():
+        if archive_index and source_path.is_file() and source_path.suffix.lower() in {".zip", ".unitypackage"}:
+            result = archive_index.inspect(source_path, max_entries)
+        elif source_path.is_dir():
             result = inspect_folder(source_path, max_entries=max_entries)
         elif source_path.suffix.lower() == ".zip":
             result = inspect_zip(source_path, max_entries=max_entries)
@@ -93,8 +261,19 @@ def inspect_outfit_package(path_value: str | Path, max_entries: int = 5000) -> d
             "source": source_summary(source_path, "unknown"),
             "privacy": privacy_policy(),
         }
-    result["inspectedAt"] = utc_now()
-    result["privacy"] = privacy_policy()
+    if archive_index and "sourceRead" not in result:
+        summary = result.get("summary", {})
+        count = summary.get("entryCount")
+        if isinstance(count, int):
+            count += sum(row.get("processedPathnameCount", 0) for row in result.get("unityPackages", []))
+        incomplete = (not result.get("ok") or count is None or summary.get("truncated")
+                      or summary.get("nestedPathnamesTruncated") or summary.get("archiveCensusComplete") is False)
+        result["sourceRead"] = _source_read(
+            count, count if not incomplete else None, "source_coverage_unknown" if incomplete else None,
+            unit="inventory_entries",
+        )
+    result.setdefault("inspectedAt", utc_now())
+    result.setdefault("privacy", privacy_policy())
     return result
 
 
@@ -289,23 +468,62 @@ def _census_folder_archive(path: Path, relative: str, remaining: int) -> tuple[d
 
 
 def inspect_zip(path: Path, max_entries: int) -> dict[str, Any]:
+    with closing(_page_zip(path, max_entries)) as pages:
+        return next(pages)[0]
+
+
+def _page_zip(path: Path, max_entries: int, *, page_size: int | None = None) -> Generator[tuple[dict[str, Any], dict[str, Any]], None, None]:
     entries: list[dict[str, Any]] = []
-    truncated = False
     unsafe_entry_count = 0
     duplicate_entry_count = 0
     seen_paths: set[str] = set()
-    nested_pathnames: list[dict[str, Any]] = []
     nested_package_results: list[dict[str, Any]] = []
     nested_warnings: list[str] = []
-    parsed_nested_count = 0
-    nested_truncated = False
+
+    def snapshot(index: int, total: int, reason: str | None = None, has_unread_pathnames: bool = False):
+        result = _build_zip_result(
+            path, entries, index < total, unsafe_entry_count, duplicate_entry_count,
+            list(nested_package_results), list(nested_warnings),
+        )
+        processed = index + sum(row.get("processedPathnameCount", 0) for row in nested_package_results)
+        missing_inventory = result["summary"]["nestedPathnamesTruncated"]
+        remaining = total - index
+        reconciled_outer = index == len(entries) + unsafe_entry_count + duplicate_entry_count + directory_count
+        reconciled_nested = all(
+            row.get("processedPathnameCount") == (
+                row.get("pathnamesEvidenceCount", 0) + row.get("folderPathnameCount", 0)
+                + row.get("unsafePathnameCount", 0)
+            ) for row in nested_package_results
+        )
+        total_known = not missing_inventory and reconciled_outer and reconciled_nested and not has_unread_pathnames
+        if remaining:
+            total_known &= not any(
+                row.filename.lower().endswith(".unitypackage") for row in outer_entries[index:]
+            )
+        final_stop = next((row["scanLimit"] for row in nested_package_results if row.get("scanLimit")), None)
+        return result, _source_read(
+            processed, processed + remaining if total_known else None,
+            reason or final_stop or ("incomplete_nested_inventory" if not total_known else None),
+            remaining_at_least=remaining + int(has_unread_pathnames),
+        )
+
     with zipfile.ZipFile(path) as archive:
-        for index, info in enumerate(sorted(archive.infolist(), key=lambda item: item.filename.lower())):
-            if info.is_dir():
+        outer_entries = sorted(archive.infolist(), key=lambda item: item.filename.lower())
+        total_outer_entries = len(outer_entries)
+        next_outer_stop = max_entries
+        next_pathname_stop = max_entries
+        pathname_page_size = page_size if page_size is not None else max_entries
+        directory_count = 0
+        for index, info in enumerate(outer_entries):
+            if page_size is None and info.is_dir():
+                directory_count += 1
                 continue
-            if index >= max_entries:
-                truncated = True
-                break
+            if index >= next_outer_stop:
+                yield snapshot(index, total_outer_entries, "archive_entries")
+                next_outer_stop += max(1, page_size if page_size is not None else max_entries)
+            if info.is_dir():
+                directory_count += 1
+                continue
             normalized = normalize_archive_name(info.filename)
             if not is_safe_archive_path(normalized):
                 unsafe_entry_count += 1
@@ -316,57 +534,55 @@ def inspect_zip(path: Path, max_entries: int) -> dict[str, Any]:
                 continue
             seen_paths.add(lower)
             entries.append(file_entry(normalized, int(info.file_size)))
-            if normalized.lower().endswith(".unitypackage"):
-                remaining = max(0, max_entries - len(nested_pathnames))
-                try:
-                    with archive.open(info, "r") as nested_file:
-                        bounded_nested_file = _BoundedArchiveReader(
-                            nested_file,
-                            MAX_UNITYPACKAGE_SCAN_INPUT_BYTES,
-                        )
-                        parsed = inspect_unitypackage_stream(
-                            bounded_nested_file,
-                            max_entries=remaining,
-                            package_path=normalized,
-                        )
-                except (OSError, EOFError, tarfile.TarError, zipfile.BadZipFile) as exc:
-                    nested_truncated = True
-                    nested_warnings.append(f"Could not inspect nested UnityPackage {normalized}: {exc}")
-                    nested_package_results.append({
-                        "path": normalized,
-                        "size": int(info.file_size),
-                        "parsedPathnameCount": 0,
-                        "pathnamesEvidenceComplete": False,
-                        "inspectionSkipped": "invalid_nested_package",
-                    })
-                    continue
-                parsed_nested_count += 1
-                nested_pathnames.extend(parsed["pathnamesEvidence"])
-                nested_truncated = (
-                    nested_truncated
-                    or parsed["truncated"]
-                    or parsed["missingAssetPayloadCount"] > 0
-                )
-                nested_warnings.extend(parsed["warnings"])
-                nested_package_results.append({
+            if not lower.endswith(".unitypackage"):
+                continue
+            budget_field = "pathnamesEvidenceCount" if page_size is None else "processedPathnameCount"
+            remaining = max(0, next_pathname_stop - sum(
+                row.get(budget_field, 0) for row in nested_package_results
+            ))
+            try:
+                with archive.open(info, "r") as nested_file:
+                    bounded = _BoundedArchiveReader(nested_file, MAX_UNITYPACKAGE_SCAN_INPUT_BYTES)
+                    with tarfile.open(fileobj=bounded, mode="r|*") as nested_archive:
+                        with closing(_page_unitypackage_members(
+                            nested_archive, nested_archive, remaining, normalized, page_size=pathname_page_size,
+                        )) as nested_pages:
+                            # The same row is replaced on resumption, so totals and
+                            # entries are cumulative even when a GUID crosses pages.
+                            nested_package_results.append({})
+                            for parsed in nested_pages:
+                                nested_package_results[-1] = _unitypackage_record(normalized, info.file_size, parsed)
+                                if parsed["scanLimit"] == "pathname_entries":
+                                    receipt, coverage = snapshot(index + 1, total_outer_entries, "pathname_entries", True)
+                                    receipt["warnings"].extend(parsed["warnings"])
+                                    yield receipt, coverage
+                                    next_pathname_stop += max(1, pathname_page_size)
+                            nested_warnings.extend(parsed["warnings"])
+            except (OSError, EOFError, tarfile.TarError, zipfile.BadZipFile) as exc:
+                nested_warnings.append(f"Could not inspect nested UnityPackage {normalized}: {exc}")
+                skipped = {
                     "path": normalized,
                     "size": int(info.file_size),
-                    "parsedPathnameCount": len(parsed["pathnamesEvidence"]),
-                    "archiveMemberCount": parsed["archiveMemberCount"],
-                    "scanLimit": parsed["scanLimit"],
-                    "pathnames": parsed["pathnamesEvidence"][:200],
-                    "pathnamesEvidence": parsed["pathnamesEvidence"],
-                    "pathnamesEvidenceCount": len(parsed["pathnamesEvidence"]),
-                    "pathnamesEvidenceComplete": (
-                        not parsed["truncated"]
-                        and parsed["missingAssetPayloadCount"] == 0
-                    ),
-                    "pathnamesReturnedCount": min(len(parsed["pathnamesEvidence"]), 200),
-                    "pathnamesReturnedTruncated": len(parsed["pathnamesEvidence"]) > 200,
-                    "unsafePathnameCount": parsed["unsafePathnameCount"],
-                    "folderPathnameCount": parsed["folderPathnameCount"],
-                    "missingAssetPayloadCount": parsed["missingAssetPayloadCount"],
-                })
+                    "parsedPathnameCount": 0,
+                    "pathnamesEvidenceComplete": False,
+                    "inspectionSkipped": "invalid_nested_package",
+                }
+                if nested_package_results and nested_package_results[-1].get("path") in {normalized, None}:
+                    nested_package_results[-1] = skipped
+                else:
+                    nested_package_results.append(skipped)
+        yield snapshot(total_outer_entries, total_outer_entries)
+
+
+def _build_zip_result(
+    path: Path, entries: list[dict[str, Any]], truncated: bool, unsafe_entry_count: int,
+    duplicate_entry_count: int, nested_package_results: list[dict[str, Any]], nested_warnings: list[str],
+) -> dict[str, Any]:
+    nested_pathnames = [
+        item for row in nested_package_results for item in row.get("pathnamesEvidence", [])
+    ]
+    parsed_nested_count = sum("inspectionSkipped" not in row for row in nested_package_results)
+    nested_truncated = any(not row.get("pathnamesEvidenceComplete") for row in nested_package_results)
     result = build_container_result(
         path,
         "zip",
@@ -431,36 +647,39 @@ def inspect_unitypackage(path: Path, max_entries: int) -> dict[str, Any]:
 def _build_unitypackage_result(path: Path, parsed: dict[str, Any]) -> dict[str, Any]:
     pathnames = parsed["pathnamesEvidence"]
     truncated = parsed["truncated"]
-    member_count = parsed["archiveMemberCount"]
     unsafe_pathname_count = parsed["unsafePathnameCount"]
     entries = [file_entry(item["path"], 0) for item in pathnames]
     result = build_container_result(path, "unitypackage", entries, truncated, can_parse_unitypackage=True)
-    result["unityPackages"] = [
-        {
-            "path": path.name,
-            "size": path.stat().st_size,
-            "parsedPathnameCount": len(pathnames),
-            "archiveMemberCount": member_count,
-            "scanLimit": parsed["scanLimit"],
-            "pathnames": pathnames[:200],
-            "pathnamesEvidence": pathnames,
-            "pathnamesEvidenceCount": len(pathnames),
-            "pathnamesEvidenceComplete": (
-                not truncated and parsed["missingAssetPayloadCount"] == 0
-            ),
-            "pathnamesReturnedCount": min(len(pathnames), 200),
-            "pathnamesReturnedTruncated": len(pathnames) > 200,
-            "unsafePathnameCount": unsafe_pathname_count,
-            "folderPathnameCount": parsed["folderPathnameCount"],
-            "missingAssetPayloadCount": parsed["missingAssetPayloadCount"],
-        }
-    ]
+    result["unityPackages"] = [_unitypackage_record(path.name, path.stat().st_size, parsed)]
     result["summary"]["unityPackageCount"] = 1
     result["summary"]["entryCount"] = len(pathnames)
     result["summary"]["importPlanKind"] = "unitypackage_import"
     result["summary"]["unsafePathnameCount"] = unsafe_pathname_count
     result["warnings"] = parsed["warnings"]
     return result
+
+
+def _unitypackage_record(package_path: str, size: int, parsed: dict[str, Any]) -> dict[str, Any]:
+    pathnames = parsed["pathnamesEvidence"]
+    return {
+        "path": package_path,
+        "size": int(size),
+        "parsedPathnameCount": len(pathnames),
+        "archiveMemberCount": parsed["archiveMemberCount"],
+        "processedPathnameCount": parsed["processedPathnameCount"],
+        "scanLimit": parsed["scanLimit"],
+        "pathnames": pathnames[:200],
+        "pathnamesEvidence": pathnames,
+        "pathnamesEvidenceCount": len(pathnames),
+        "pathnamesEvidenceComplete": (
+            not parsed["truncated"] and parsed["missingAssetPayloadCount"] == 0
+        ),
+        "pathnamesReturnedCount": min(len(pathnames), 200),
+        "pathnamesReturnedTruncated": len(pathnames) > 200,
+        "unsafePathnameCount": parsed["unsafePathnameCount"],
+        "folderPathnameCount": parsed["folderPathnameCount"],
+        "missingAssetPayloadCount": parsed["missingAssetPayloadCount"],
+    }
 
 
 def inspect_unitypackage_stream(package_file: Any, max_entries: int, package_path: str) -> dict[str, Any]:
@@ -481,17 +700,24 @@ def inspect_open_unitypackage(
 def _collect_unitypackage_members(
     archive: tarfile.TarFile, members: Iterable[tarfile.TarInfo], max_entries: int, package_path: str,
 ) -> dict[str, Any]:
+    with closing(_page_unitypackage_members(archive, members, max_entries, package_path)) as pages:
+        return next(pages)
+
+
+def _page_unitypackage_members(
+    archive: tarfile.TarFile, members: Iterable[tarfile.TarInfo], max_entries: int, package_path: str,
+    *, page_size: int | None = None,
+) -> Generator[dict[str, Any], None, None]:
     records: dict[str, dict[str, Any]] = {}
-    truncated = False
     member_count = 0
     pathname_count = 0
+    page_stop = max_entries
     unsafe_pathname_count = 0
     scan_limit = None
     try:
         for member in members:
             member_count += 1
             if member_count > MAX_UNITYPACKAGE_MEMBERS:
-                truncated = True
                 scan_limit = "archive_members"
                 break
             if not member.isfile():
@@ -515,10 +741,12 @@ def _collect_unitypackage_members(
                     if len(guids) == 1 and guids[0].decode().casefold() == parts[0].casefold():
                         record["verifiedGuid"] = parts[0].casefold()
                 continue
-            if pathname_count >= max_entries:
-                truncated = True
-                scan_limit = "pathname_entries"
-                break
+            if pathname_count >= page_stop:
+                yield _summarize_unitypackage_members(
+                    records, package_path, "pathname_entries", member_count - 1,
+                    pathname_count, unsafe_pathname_count,
+                )
+                page_stop += max(1, page_size if page_size is not None else max_entries)
             pathname_count += 1
             extracted = archive.extractfile(member)
             if extracted is None:
@@ -540,8 +768,17 @@ def _collect_unitypackage_members(
     except tarfile.ReadError as exc:
         if "scan input byte limit exceeded" not in str(exc):
             raise
-        truncated = True
         scan_limit = "input_bytes"
+    yield _summarize_unitypackage_members(
+        records, package_path, scan_limit, member_count, pathname_count, unsafe_pathname_count,
+    )
+
+
+def _summarize_unitypackage_members(
+    records: dict[str, dict[str, Any]], package_path: str, scan_limit: str | None,
+    member_count: int, pathname_count: int, unsafe_pathname_count: int,
+) -> dict[str, Any]:
+    truncated = scan_limit is not None
     pathnames: list[dict[str, Any]] = []
     folder_pathname_count = 0
     missing_asset_payload_count = 0
@@ -575,6 +812,7 @@ def _collect_unitypackage_members(
     return {
         "pathnamesEvidence": pathnames,
         "archiveMemberCount": member_count,
+        "processedPathnameCount": pathname_count,
         "unsafePathnameCount": unsafe_pathname_count,
         "folderPathnameCount": folder_pathname_count,
         "missingAssetPayloadCount": missing_asset_payload_count,

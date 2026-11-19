@@ -3679,6 +3679,9 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
                 prior_handoff=prior_handoff, recovery_history=request.history if prior_handoff is not None else None,
                 handoff_archive_indices=archive_indices if prior_handoff is not None else None,
                 task_inputs=task_inputs,
+                outstanding_operations=(),
+                goal_bindings=AGENT_GATEWAY.goal.handoff_goal_bindings(request.session_id or "", request.project_root or ""),
+                goal_acceptances=AGENT_GATEWAY.goal.handoff_acceptances(request.session_id or "", request.project_root or ""),
             )
         result["providerUsage"] = aggregate_compact_provider_usage(
             provider_receipts, provider=settings.llm_provider, model=settings.llm_model
@@ -4037,6 +4040,9 @@ async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, An
         params["wakeAt"] = request.wake_at
     if "wake_every_minutes" in request.model_fields_set:
         params["wakeEveryMinutes"] = request.wake_every_minutes
+    if request.source_message_id or request.acceptance_checks is not None:
+        params["sourceMessageId"] = request.source_message_id
+        params["acceptanceChecks"] = request.acceptance_checks
     try:
         payload = AGENT_GATEWAY.goal.create_agent_goal(params)
     except AgentGoalServiceError as exc:
@@ -16436,6 +16442,7 @@ def audit_managed_avatar_multi_screenshot_sync(
             **failure_projection,
             "captureEvidenceVerified": True,
             "captureEvidenceId": evidence["captureEvidenceId"],
+            "avatarDigest": evidence["avatarDigest"],
             "evidence": evidence["evidence"],
             "retryable": transient_provider_failure,
             "retainImages": transient_provider_failure,
@@ -17542,6 +17549,9 @@ class _RuntimePlannerCompactor:
                     # retrying an already exhausted whole-compaction deadline.
                     raise RuntimeError("compaction deadline exceeded") from exc
             summarizer = summarize
+        goal_scope = ensure_dict(metadata.get("_handoffOwnerScope"))
+        session_id = str(goal_scope.get("sessionId") or "")
+        project_root = str(goal_scope.get("projectRoot") or "")
         result = compact_context(
             [dict(entry) for entry in history],
             summarizer=summarizer,
@@ -17563,6 +17573,8 @@ class _RuntimePlannerCompactor:
             task_inputs=metadata.get("_handoffTaskInputs") or (),
             todo_items=metadata.get("_handoffTodo") or (),
             outstanding_operations=metadata.get("_outstandingOperations"),
+            goal_bindings=AGENT_GATEWAY.goal.handoff_goal_bindings(session_id, project_root),
+            goal_acceptances=AGENT_GATEWAY.goal.handoff_acceptances(session_id, project_root),
         )
         if deadline_exceeded:
             result["fallbackReason"] = "compaction_deadline"
@@ -28620,7 +28632,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_update_goal",
-        "when-to-use: mark the current active Goal complete after evidence is verified, or report the same blocking condition; blocked is applied only after three distinct consecutive turns with the same reason. when-NOT-to-use: do not pause, resume, clear, cancel, or budget a Goal because those controls belong to the user. Negative example: do not mark complete because work merely started.",
+        "when-to-use: mark the current active Goal complete after the runtime records all its registered acceptance receipts, or report a blocking condition; blocked is applied after three distinct consecutive turns with the same reason. when-NOT-to-use: do not pause, resume, clear, cancel, or budget a Goal because those controls belong to the user. Negative example: a prose summary or a captured screenshot cannot complete a Goal.",
         "plan/preview",
         lambda params: AGENT_GATEWAY.goal.update_agent_goal_from_agent(params or {}),
     )
@@ -28806,7 +28818,13 @@ def register_agent_gateway_tools() -> None:
         PATH_TO_SKILL_PREVIEW.preview,
     )
     AGENT_GATEWAY.register_tool("vrcforge_scan_project_index", "Scan and update the local project index, returning only structural file deltas and scanner-family hints.", "read/debug", scan_project_index_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.inspect_outfit_package)
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_inspect_outfit_package",
+        "When to use: inspect a UnityPackage, Booth ZIP/folder, or loose outfit folder, or continue its sourceRead with the exact archiveCursor. "
+        "When NOT to use: do not read paid asset binary contents, apply an import, or page an already retained tool result with this source tool.",
+        "read/debug",
+        WARDROBE_OUTFIT_WORKFLOWS.inspect_outfit_package,
+    )
     AGENT_GATEWAY.register_tool(
         "vrcforge_inspect_chat_attachment",
         "when-to-use: inspect an attachment uploaded to the current chat by its exact payloadHash. Read physical PDF pages with startPage/maxPages, optionally render low-text pages with renderScannedPages, and follow nextRequest. Also supports guarded archive listings, single-entry text via entryPath, and image header metadata. when-NOT-to-use: do not use for direct paths, URLs, attachments from other chats, or writing into Unity. Negative example: use web_fetch for a linked PDF URL.",
@@ -30555,13 +30573,27 @@ CLOTHING_FX_APPROVED_WRITE = ClothingFxApprovedWriteService(
         handled_errors=(RuntimeError, UnityMcpError),
     )
 )
+def _outfit_archive_index() -> outfit_package_inspector_domain.ArchiveInspectionIndex:
+    try:
+        owner = AGENT_GATEWAY.execution_target_session_context()
+    except AgentGatewayError:
+        owner = "authenticated-dashboard"
+    return outfit_package_inspector_domain.ArchiveInspectionIndex(
+        runtime_paths.USER_DATA_DIR / "archive-inspections.sqlite3", owner,
+    )
+
+
 WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
     WardrobeOutfitWorkflowPorts(
         selected_project_path=lambda: (
             DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
         ),
-        inspect_package=outfit_package_inspector_domain.inspect_outfit_package,
-        build_import_plan=outfit_import_planner_domain.build_outfit_import_plan,
+        inspect_package=lambda path, **kwargs: outfit_package_inspector_domain.inspect_outfit_package(
+            path, archive_index=_outfit_archive_index(), **kwargs,
+        ),
+        build_import_plan=lambda **kwargs: outfit_import_planner_domain.build_outfit_import_plan(
+            archive_index=_outfit_archive_index(), **kwargs,
+        ),
         create_apply_request=AGENT_GATEWAY.approval_transactions.create_apply_request,
         request_supervised_write=request_supervised_unity_write,
         scan_avatar_items=WARDROBE_ARTIFACT_READ.scan_avatar_items,
