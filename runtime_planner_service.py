@@ -10,7 +10,7 @@ from context_compaction import MAX_SUMMARY_CHARS, normalize_compaction_recovery
 from chat_attachment_limits import MAX_MESSAGE_FILE_ATTACHMENTS
 from agent_task_loop import _running_state, CONVERSATION_HANDOFF_TOOLS, SUB_AGENT_TASK_TOOLS
 from planner_structured_tool_evidence import project_structured_tool_evidence
-from provider_runtime_adapters import ProviderTokenLimitError
+from provider_runtime_adapters import ProviderTokenLimitError, shell_poll_arguments
 from responses_native_protocol import public_assistant_messages
 import math
 import ntpath
@@ -114,6 +114,9 @@ RUNTIME_CONTEXT_INSTRUCTION = (
 RUNTIME_TOOL_USAGE_INSTRUCTION = (
     "Use a suitable visible tool directly; discover missing tools and relevant Skills on demand. "
     "Follow the current schema and obtain argument values from evidence. Finish prerequisite calls before dependent actions. "
+    "For an application the user wants to keep open, use its project launcher or an authorized desktop launch. "
+    "Shell processes belong to their command session. A launch receipt confirms startup; "
+    "use the target's readiness check when the next step depends on it. "
     "A successful built-in receipt with readbackState=verified completes the result it covers; check only the affected item once for a relevant warning, error or missing proof, and follow pending receipts to their owner. "
 )
 RUNTIME_EVIDENCE_COMPLETION_INSTRUCTION = (
@@ -236,6 +239,7 @@ RUNTIME_JSON_TOOL_PROTOCOL = (
     'Read tool: {"action":"skill","skill_tool":"<visible name>","skill_params":{...}}\n'
     'Write tool: {"action":"write","write_tool":"<visible name>","write_params":{...}}\n'
     'Host command: {"action":"shell","shell_command":"<command>","shell_params":{"cwd":"<directory>"}}\n'
+    'Poll an existing shell session with the advertised shell_process tool and its poll arguments.\n'
     'Expose write tools: {"action":"enter_execution","summary":"<authorized change>"}\n'
     'Final answer: {"action":"reply","reply":"<answer>"}\n'
     "If the final answer relies on labeled memories, put only their exact IDs in memory_ids. "
@@ -768,6 +772,34 @@ def resolve_catalog_tool(tools: tuple[PlannerTool, ...] | list[PlannerTool], nam
     # One implementation may have distinct capability projections (e.g. Shell).
     # An ambiguous runtime name must never pick one of those capabilities.
     return next(iter(aliases.values())) if len(aliases) == 1 else None
+
+
+def shell_poll_correction(arguments, visible_tools, catalog_tools, *, native):
+    runtime_name = "vrcforge_shell_process"
+    target = resolve_catalog_tool(visible_tools, runtime_name)
+    example = None
+    if target is not None:
+        poll = {"action": "poll", "sessionId": arguments["sessionId"]}
+        if native:
+            example = {"name": "call_tool", "arguments": {"tool": target.name, "arguments": poll}}
+        else:
+            kind = "write" if target.write else "skill"
+            example = {"action": kind, f"{kind}_tool": target.name, f"{kind}_params": poll}
+        summary = "Poll the existing shell session with the advertised process tool."
+    else:
+        target = resolve_catalog_tool(catalog_tools, runtime_name)
+        loader = resolve_catalog_tool(visible_tools, "vrcforge_load_internal_tool_block")
+        summary = "Polling an existing shell session requires the advertised process tool."
+        if target is not None and loader is not None:
+            load_args = {"block": target.block, "tools": [target.name]}
+            example = ({"name": "load_internal_tool_block", "arguments": load_args} if native
+                       else {"action": "skill", "skill_tool": loader.name, "skill_params": load_args})
+            summary = "Load the process tool first, then poll the existing shell session using the same sessionId."
+    if example is not None:
+        summary += " Next call: " + json.dumps(example, ensure_ascii=False, separators=(",", ":"))
+    return {"summary": summary, "issues": [{
+        "path": "shell_params", "code": "shell_poll_requires_process_tool",
+    }]}
 
 
 @dataclass(frozen=True, slots=True)
@@ -3545,6 +3577,17 @@ class RuntimePlannerService:
                         "expectedResult": "The supervised write result will be returned inline.",
                         "nextStep": "request_write",
                     }
+            elif action == "shell" and not shell_command and (poll_args := shell_poll_arguments(shell_params)):
+                catalog = self._read_catalog(exposure_layer, project_context_active=project_context_active)
+                _, visible_tools = self._select_plan_tools(
+                    catalog, internal_tool_blocks, observe, project_context_active=project_context_active,
+                    preloaded=self._role_tool_names.get() is not None,
+                )
+                return self._planner_argument_error_plan(
+                    base=base, action_kind="control", tool_name="shell", arguments=shell_params,
+                    validation=shell_poll_correction(poll_args, visible_tools, catalog.visible_tools, native=False),
+                    phase=phase,
+                )
             elif action == "shell" and shell_command:
                 return {
                     **base,
@@ -5050,7 +5093,7 @@ class RuntimePlannerService:
         control_actions = ["reply", "shell", "correct", "enter_execution"]
         action_descriptions = {
             "reply": "reply ends the turn with completion evidence.",
-            "shell": "shell runs an authorized host command.",
+            "shell": "shell runs an authorized host command with shell_command. Poll an existing shell session through call_tool and the advertised shell_process tool.",
             "correct": "correct resubmits a failed action with corrected arguments using its exact action ID and tool.",
             "enter_execution": "enter_execution exposes supervised write tools for a requested change; it performs no write and does not bypass approval.",
         }
@@ -5409,6 +5452,12 @@ class RuntimePlannerService:
             validation = validate_planner_tool_arguments(tool.input_schema, arguments)
             if not validation.get("ok"):
                 return None, {**validation, "kind": "control", "tool": name, "arguments": arguments}
+            if (arguments.get("action") == "shell" and not str(arguments.get("shell_command") or "").strip()
+                    and (poll_args := shell_poll_arguments(arguments.get("shell_params")))):
+                guidance = shell_poll_correction(
+                    poll_args, tools, catalog.visible_tools if catalog is not None else (), native=True,
+                )
+                return None, {**guidance, "kind": "control", "tool": name, "arguments": arguments}
             if (arguments.get("action") != "reply" and not arguments.get("reply")
                     and not public_assistant_messages(receipt) and receipt.get("content")):
                 arguments["reply"] = receipt["content"]

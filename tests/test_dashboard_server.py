@@ -15588,7 +15588,10 @@ class DashboardServerTests(unittest.TestCase):
 
             self.assertTrue(ok)
             self.assertEqual(error, "")
-            mock_popen.assert_called_once_with(
+            self.assertEqual(mock_popen.call_count, 1)
+            args, options = mock_popen.call_args
+            self.assertEqual(
+                args[0],
                 [
                     str(editor),
                     "-projectPath",
@@ -15596,10 +15599,11 @@ class DashboardServerTests(unittest.TestCase):
                     "-executeMethod",
                     "VRCForge.Editor.McpBridgeBootstrap.StartBridgeNow",
                 ],
-                cwd=str(editor_dir),
-                env=ANY,
             )
-            self.assertNotIn(internal_dir, mock_popen.call_args.kwargs["env"]["PATH"])
+            self.assertEqual(options["cwd"], str(editor_dir))
+            self.assertEqual(options.get("creationflags"),
+                             getattr(dashboard_server.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0))
+            self.assertNotIn(internal_dir, options["env"]["PATH"])
             self.assertEqual([call.args[0] for call in mock_set_dll_directory.call_args_list], [None, internal_dir])
 
     def test_editor_resolution_matches_project_version_and_rejects_stale_paths(self) -> None:

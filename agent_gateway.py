@@ -8414,11 +8414,12 @@ class AgentGateway:
                         fallback_summary=shell_failure_fallback,
                         write=False,
                     )
-                    if (
-                        shell_outcome.get("status") == "ok"
-                        and shell_outcome.get("summary") == shell_failure_fallback
-                    ):
-                        shell_outcome["summary"] = "Shell command completed successfully."
+                    if shell_outcome.get("status") == "ok" and shell_outcome.get("summary") == shell_failure_fallback:
+                        shell_outcome["summary"] = (
+                            "The shell process was still running when this result was recorded."
+                            if step_payload.get("status") == "running"
+                            else "Shell command completed successfully."
+                        )
                     step_payload["outcome"] = shell_outcome
                 shell_payload = step_payload
                 shell_observation = (

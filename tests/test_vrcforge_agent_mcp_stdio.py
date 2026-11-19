@@ -280,6 +280,45 @@ def test_runtime_launch_rejections_use_canonical_external_error(monkeypatch, tmp
     assert result["errorDetails"]["commitState"] == "not_started"
 
 
+def test_runtime_launch_requests_job_breakaway_and_preserves_host_denial(monkeypatch, tmp_path: Path) -> None:
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+    exe = tmp_path / "VRCForge.exe"
+    monkeypatch.setattr(module, "find_vrcforge_executable", lambda: exe)
+    bridge = module.VRCForgeBridge(
+        base_url="http://127.0.0.1:8757",
+        config_path=tmp_path / "missing.json",
+        timeout_seconds=0.1,
+        start_runtime=True,
+    )
+    monkeypatch.setattr(bridge, "runtime_port_open", lambda: True)
+    monkeypatch.setattr(module, "os", type("Windows", (), {"name": "nt"}))
+    monkeypatch.setattr(module.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(module.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000, raising=False)
+    calls = []
+
+    def popen(command, **kwargs):
+        calls.append((command, kwargs))
+        if len(calls) == 2:
+            raise PermissionError("Hosting job denied Windows breakaway")
+
+    monkeypatch.setattr(module.subprocess, "Popen", popen)
+
+    assert bridge.try_launch_runtime() == {"ok": True, "path": str(exe)}
+    assert calls == [([str(exe)], {
+        "cwd": str(exe.parent),
+        "stdin": module.subprocess.DEVNULL,
+        "stdout": module.subprocess.DEVNULL,
+        "stderr": module.subprocess.DEVNULL,
+        "creationflags": module.subprocess.CREATE_NO_WINDOW | module.subprocess.CREATE_BREAKAWAY_FROM_JOB,
+    })]
+
+    denied = bridge.try_launch_runtime()
+
+    assert denied["status"] == "runtime_launch_failed"
+    assert denied["error"] == "Hosting job denied Windows breakaway"
+    assert len(calls) == 2
+
+
 def test_stdio_bridge_start_runtime_is_explicit_opt_in() -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
 

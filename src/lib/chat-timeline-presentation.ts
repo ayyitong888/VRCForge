@@ -207,6 +207,11 @@ function assistantPhase(value: unknown): "commentary" | "final_answer" | undefin
     : undefined;
 }
 
+function isPendingShellResult(event: NonNullable<AgentRuntimeResponse["timeline"]>[number]): boolean {
+  return event.kind === "tool_result" && event.payload?.tool === "shell"
+    && event.payload.status === "pending";
+}
+
 export function isFinalAssistantTimelineEvent(event: { kind?: string; payload?: ChatTimelineEvent["payload"] }): boolean {
   if (event.kind !== "assistant") return false;
   if (event.payload?.status === "completion_unverified") return false;
@@ -313,6 +318,15 @@ export function projectRuntimeResponseForDisplay(
   retiredLoopPause?: boolean,
 ): AgentRuntimeResponse {
   response = projectApprovalWaitDialogue(response);
+  const events = response.timeline;
+  if (events?.some(isPendingShellResult)) {
+    response = {
+      ...response,
+      timeline: events.map(event => isPendingShellResult(event)
+        ? { ...event, payload: { ...event.payload, summary: translate("chat.runtimeTerminal.shellStillRunningReceipt") } }
+        : event),
+    };
+  }
   const loopStop = runtimeToolLoopMessageKey(response, retiredLoopPause);
   if (loopStop) {
     const displayText = translate(loopStop);
@@ -344,28 +358,32 @@ export function projectRuntimeResponseForDisplay(
     };
   }
   const failureCode = String(response.plan.plannerFailure?.code || "");
+  const phase = response.plan.plannerFailure?.phase;
+  const lastOperation = [...(response.timeline ?? [])].reverse().find(event =>
+    ["tool_call", "tool_result", "command", "file_edit", "subagent"].includes(event.kind || ""));
+  const waitingForShellResult = failureCode === "planner_invalid_response" && phase === "post_tool"
+    && lastOperation !== undefined && isPendingShellResult(lastOperation);
   const interruptedQuestion = response.continuationSource === "question_answered"
     && (response.turnId || response.turn_id)?.startsWith("interrupted:question:");
   let failureMessageKey = RUNTIME_FAILURE_MESSAGE_KEYS[failureCode];
   if (interruptedQuestion) {
     failureMessageKey = "chat.runtimeTerminal.questionContinuationInterruptedMessage";
+  } else if (waitingForShellResult) {
+    failureMessageKey = "chat.runtimeTerminal.shellResultInterruptedMessage";
   } else if (failureCode === "planner_invalid_response" && response.plan.unresolvedArgumentValidation?.actionId) {
     failureMessageKey = "chat.runtimeTerminal.invalidActionMessage";
   }
   if (!failureMessageKey) return response;
-  const phase = response.plan.plannerFailure?.phase;
   const terminalResult = /^(ok|done|completed|success|succeeded|executed|failed|error|rejected)$/i;
   const hasResult = response.timeline?.some((event) =>
     ["tool_result", "command", "file_edit"].includes(event.kind || "")
     && terminalResult.test(event.payload?.status || ""))
     || response.steps?.some((step) => !("historical" in step && step.historical === true)
       && step.result != null && terminalResult.test(step.status || ""));
-  const hasOperation = response.timeline?.some((event) =>
-    ["tool_call", "tool_result", "command", "file_edit", "subagent"].includes(event.kind || ""));
-  const showProgress = !interruptedQuestion && failureCode !== "checkpoint_restore_failed";
+  const showProgress = !interruptedQuestion && !waitingForShellResult && failureCode !== "checkpoint_restore_failed";
   const progressKey = !showProgress ? undefined
     : hasResult ? "chat.runtimeTerminal.previousResultsKept"
-    : phase === "post_tool" || hasOperation ? "chat.runtimeTerminal.checkPreviousOperations"
+    : phase === "post_tool" || lastOperation ? "chat.runtimeTerminal.checkPreviousOperations"
     : phase === "initial" || phase === "pre_tool" ? "chat.runtimeTerminal.noOperationsStarted"
     : undefined;
   const displayText = [progressKey && translate(progressKey), translate(failureMessageKey)].filter(Boolean).join(" ");

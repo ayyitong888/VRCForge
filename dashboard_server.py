@@ -11645,6 +11645,54 @@ def _latest_vrcforge_core_startup_diagnostic() -> dict[str, Any] | None:
         return None
 
 
+def _unity_core_startup_route(
+    project_path: str,
+    expected_identity: dict[str, Any],
+    status_args: dict[str, Any],
+    *,
+    startup_failed: bool = False,
+) -> dict[str, Any]:
+    project_root = Path(project_path)
+    core_assets = project_root / "Assets" / "VRCForge"
+    try:
+        installed_identity = _unity_core_compiled_identity(core_assets)
+    except (OSError, RuntimeError, UnicodeError):
+        return {}
+
+    if installed_identity != expected_identity:
+        return {
+            "recommendedAction": "diagnose_installed_core_mismatch",
+            "installedCoreIdentity": installed_identity,
+        }
+
+    editor_state = _unity_editor_process_state(project_root)
+    if editor_state == "closed":
+        return {
+            "recommendedAction": "open_matching_unity_editor",
+            "installedCoreIdentity": installed_identity,
+            "nextAction": {"tool": "unity_open_project", "arguments": {"projectPath": project_path}},
+        }
+    if startup_failed:
+        return {"recommendedAction": "inspect_unity_startup_error", "installedCoreIdentity": installed_identity}
+    return {
+        "recommendedAction": "recheck_core_after_editor_startup" if editor_state == "running" else "verify_editor_state",
+        "installedCoreIdentity": installed_identity,
+        **(_unity_core_status_retry(project_path, status_args) if editor_state == "running" else {}),
+    }
+
+
+def _unity_core_status_retry(project_path: str, status_args: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "nextAction": {
+            "tool": "unity_core_upgrade_status",
+            "arguments": {
+                "projectPath": project_path,
+                **{key: status_args[key] for key in ("installedAt", "timeoutSeconds", "maxErrors") if key in status_args},
+            },
+        },
+    }
+
+
 def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     """Return one pre-handshake runtime identity and Console compilation snapshot."""
 
@@ -11672,6 +11720,11 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
             "projectPath": project_path,
             "status": status,
             "ready": False,
+            **(
+                _unity_core_startup_route(project_path, expected, params, startup_failed=startup_diagnostic is not None)
+                if source_present
+                else {"recommendedAction": "install_missing_core"}
+            ),
             "expectedCompiledIdentity": expected,
             "runtimeCoreInfo": None,
             "runtimeIdentityMatchesTarget": False,
@@ -11741,12 +11794,23 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         status = "waiting_for_post_install_compile" if installed_at_value else "waiting_for_console_snapshot"
     else:
         status = "ready"
+    startup_route = {}
+    transport_error = str(diagnostics.get("transportError") or "").casefold()
+    connection_refused = any(text in transport_error for text in ("winerror 10061", "connection refused", "actively refused"))
+    if status == "waiting_for_domain_reload" or (status == "core_unreachable" and connection_refused):
+        startup_route = _unity_core_startup_route(project_path, expected, params)
+    elif status == "compiling":
+        startup_route = {
+            "recommendedAction": "recheck_core_after_compilation",
+            **_unity_core_status_retry(project_path, params),
+        }
     return {
         "ok": True,
         "schema": "vrcforge.core_upgrade_status.v1",
         "projectPath": project_path,
         "status": status,
         "ready": status == "ready",
+        **startup_route,
         "expectedCompiledIdentity": expected,
         "runtimeCoreInfo": core_info,
         "runtimeIdentityMatchesTarget": identity_matches,
@@ -20229,6 +20293,8 @@ def launch_unity_subprocess(command: list[str], editor_path: Path, project_root:
             command,
             cwd=unity_launch_working_directory(editor_path, project_root),
             env=unity_launch_environment(),
+            # The editor is user-owned and must survive closing the desktop's backend job.
+            creationflags=getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0),
         )
     finally:
         if internal_dir:
@@ -21857,17 +21923,21 @@ CHECKPOINT_RELOAD_READY_POLL_SECONDS = 0.5
 CHECKPOINT_RELOAD_CONNECTION_CLOSED_ERROR = "Unity MCP Core connection closed unexpectedly."
 
 
-def _checkpoint_restore_editor_is_definitely_closed(project_root: Path) -> bool:
-    """Return true only when strict process discovery proves the target Editor is gone."""
+def _unity_editor_process_state(project_root: Path) -> str:
+    """Only report a closed Editor when exact-project process discovery proves absence."""
     try:
         processes = list_running_unity_processes(require_discovery_evidence=True)
     except Exception:  # noqa: BLE001 - uncertain process state must preserve the original Core failure.
-        return False
-    unknown = [process for process in processes
-               if not extract_unity_project_path_from_command_line(str(process.get("commandLine") or ""))]
-    if unknown:
-        return False
-    return not any(unity_process_exactly_matches_project(process, project_root) for process in processes)
+        return "unknown"
+    if any(unity_process_exactly_matches_project(process, project_root) for process in processes):
+        return "running"
+    if any(not extract_unity_project_path_from_command_line(str(process.get("commandLine") or "")) for process in processes):
+        return "unknown"
+    return "closed"
+
+
+def _checkpoint_restore_editor_is_definitely_closed(project_root: Path) -> bool:
+    return _unity_editor_process_state(project_root) == "closed"
 
 
 def prepare_unity_checkpoint_restore_sync(project_root: Path, *, checkpoint_files: list[str] | None = None, **recovery_options: Any) -> dict[str, Any]:
@@ -28926,7 +28996,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_core_upgrade_status",
-        "When to use: after installing or upgrading VRCForge Unity Core, read one pre-handshake snapshot containing the running compiled Core identity and current Unity Console compilation result. When NOT to use: do not wait internally, retry automatically, modify the project, or treat an old reported Core version as success. Negative example: do not call it for ordinary avatar edits after Core is already ready.",
+        "When to use: after installing or upgrading VRCForge Unity Core, read one pre-handshake snapshot containing the running compiled Core identity and current Unity Console compilation result. Follow the suggested action to open the exact closed project or recheck it once when startup or compilation advances. Use the same project and freshness arguments. Never launch a Shell sleep or repeat an unchanged status continuously. Connection refusal alone does not diagnose missing or incompatible Core files. When NOT to use: do not wait internally, retry automatically, modify the project, or treat an old reported Core version as success. Negative example: do not call it for ordinary avatar edits after Core is already ready.",
         "read/debug",
         core_upgrade_status_sync,
     )
@@ -29112,7 +29182,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_install_unity_core",
-        "When to use: atomically install or upgrade the package-verified VRCForge Unity Core in one exact existing Unity project when Core is missing, its protocol cannot handshake, or diagnosis confirms incomplete or mixed-version official Core files that the bundled Core can repair. A previously loaded Core may still answer while its on-disk replacement fails compilation. Request approval for the exact project before writing; preserve the installation receipt and backup, then use vrcforge_core_upgrade_status and fresh compile diagnostics to verify the repair. When NOT to use: do not use it for avatar assets, arbitrary UnityPackages, more than one project, ordinary model edits, unrelated SDK/third-party compile errors, or automatic user-level rollback. Negative example: do not call it merely because Unity compilation is slow or an unidentified script fails to compile.",
+        "When to use: atomically install or upgrade the package-verified VRCForge Unity Core in one exact existing Unity project when Core is missing or diagnosis confirms an incompatible protocol or incomplete or mixed-version official Core files that the bundled Core can repair. A refused connection to an existing installation calls for checking whether the exact project is open, starting its matching Editor when closed, and rechecking Core after startup. A previously loaded Core may still answer while its on-disk replacement fails compilation. Request approval for the exact project before writing; preserve the installation receipt and backup, then use vrcforge_core_upgrade_status and fresh compile diagnostics to verify the repair. When NOT to use: do not use it for avatar assets, arbitrary UnityPackages, more than one project, ordinary model edits, unrelated SDK/third-party compile errors, or automatic user-level rollback. Negative example: do not reinstall an existing Core in response to connection refused, slow Unity startup, or an unidentified compile failure.",
         "high",
         install_verified_unity_core_sync,
         request_preparer=prepare_verified_unity_core_install_request,

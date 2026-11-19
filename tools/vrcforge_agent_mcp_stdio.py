@@ -931,6 +931,11 @@ class VRCForgeBridge:
                 failure_phase="executable_resolution",
                 operation_kind="runtime_bootstrap",
             )
+        creationflags = 0
+        if os.name == "nt":
+            # Desktop belongs to the user, not the connector's job. Windows
+            # honors the breakaway request only if the hosting job allows it.
+            creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_BREAKAWAY_FROM_JOB
         try:
             subprocess.Popen(
                 [str(exe)],
@@ -938,7 +943,7 @@ class VRCForgeBridge:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+                creationflags=creationflags,
             )
         except OSError as exc:
             return external_rejection(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -575,3 +576,74 @@ def test_core_status_does_not_read_install_tree_hashes(monkeypatch, tmp_path):
     assert result["status"] == "core_not_installed"
     assert result["expectedCompiledIdentity"]["versionSource"] == "compiled_constant"
     assert result["expectedCompiledIdentity"]["coreVersion"]
+
+
+@pytest.mark.parametrize(
+    ("editor_state", "installed_version", "expected_action"),
+    [
+        ("closed", "1.7.10", "open_matching_unity_editor"),
+        ("running", "1.7.10", "recheck_core_after_editor_startup"),
+        ("unknown", "1.7.10", "verify_editor_state"),
+        ("closed", "1.7.9", "diagnose_installed_core_mismatch"),
+    ],
+)
+def test_core_upgrade_status_routes_refused_connection(
+    monkeypatch, tmp_path, editor_state, installed_version, expected_action
+):
+    project = _write_project(tmp_path / "project")
+    source = _write_verified_payload(tmp_path / "bundle")
+    installed = project / "Assets" / "VRCForge"
+    shutil.copytree(source, installed, dirs_exist_ok=True)
+    contract = installed / "Editor" / "MCP" / "VRCForgeMcpToolContract.cs"
+    contract.write_text(
+        contract.read_text(encoding="utf-8").replace("1.7.10", installed_version),
+        encoding="utf-8",
+    )
+    descriptor = project / "Library" / "VRCForge" / "mcp-core.json"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(dashboard_server, "_resolve_install_source_assets", lambda: source)
+    monkeypatch.setattr(
+        dashboard_server,
+        "probe_unity_mcp_core_diagnostics",
+        lambda *_args, **_kwargs: {"transportError": "[WinError 10061] Connection refused"},
+    )
+    processes = {
+        "closed": [{"commandLine": f'Unity.exe -projectPath "{tmp_path / "other"}"'}],
+        "running": [{"commandLine": f'Unity.exe -projectPath "{project}"'}],
+        "unknown": [{"commandLine": "Unity.exe"}],
+    }
+    monkeypatch.setattr(
+        dashboard_server, "list_running_unity_processes",
+        lambda *, require_discovery_evidence: processes[editor_state],
+    )
+    monkeypatch.setattr(
+        dashboard_server, "install_vrcforge_into_unity_project",
+        lambda *_args, **_kwargs: pytest.fail("Core status must not write"),
+    )
+    monkeypatch.setattr(
+        dashboard_server, "launch_unity_subprocess",
+        lambda *_args, **_kwargs: pytest.fail("Core status must not launch an editor"),
+    )
+
+    installed_at = "2026-11-19T11:55:41.014275+00:00"
+    result = dashboard_server.core_upgrade_status_sync(
+        {"projectPath": str(project), "installedAt": installed_at},
+    )
+
+    assert result["status"] == "core_unreachable"
+    assert result["diagnostics"]["transportError"].startswith("[WinError 10061]")
+    assert result["recommendedAction"] == expected_action
+    assert result["installedCoreIdentity"]["coreVersion"] == installed_version
+    if expected_action == "open_matching_unity_editor":
+        assert result["nextAction"] == {
+            "tool": "unity_open_project",
+            "arguments": {"projectPath": result["projectPath"]},
+        }
+    elif editor_state == "running":
+        assert result["nextAction"] == {
+            "tool": "unity_core_upgrade_status",
+            "arguments": {"projectPath": result["projectPath"], "installedAt": installed_at},
+        }
+    else:
+        assert "nextAction" not in result

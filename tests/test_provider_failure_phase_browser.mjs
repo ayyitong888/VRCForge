@@ -12,6 +12,9 @@ const fixture=process.env.VRCFORGE_TERMINAL_REPLAY
  ? JSON.parse(await readFile(process.env.VRCFORGE_TERMINAL_REPLAY,'utf8'))
  : {continuationEvent:{turnId:'failure-turn',sessionId:'session-fixture',plan:{reply:"Raw backend failure text.",nextStep:'planner_failed',plannerFailure:{code:'provider_connection_failed',phase:'post_tool',providerError:{type:'RuntimeError'}}},timeline:[{id:'final',sequence:1,kind:'assistant',payload:{phase:'final_answer',status:'planner_failed',summary:"Raw backend failure text."}}]},steps:[{tool:'vrcforge_scene_save',status:'executed',result:{success:true}}]};
 const originalTimeout = fixture.chat?.items.find(item => item.response?.plan.plannerFailure?.code === 'provider_timeout')?.response;
+const originalShellRun = process.env.VRCFORGE_SHELL_TERMINAL_REPLAY
+  ? JSON.parse(await readFile(process.env.VRCFORGE_SHELL_TERMINAL_REPLAY,'utf8'))[0]
+  : null;
 const response={...(originalTimeout || fixture.continuationEvent),steps:fixture.steps || originalTimeout?.steps,ok:true,status:'failed'};
 const original=JSON.stringify(response);
 const projected=projectRuntimeResponseForDisplay(response,translate);
@@ -55,6 +58,19 @@ const toolError = "HTTP 500 raw tool failure sentinel";
 const invalidAction = structuredClone(response);
 invalidAction.plan.plannerFailure = { code: 'planner_invalid_response', phase: 'post_tool' };
 invalidAction.plan.unresolvedArgumentValidation = { actionId: 'rejected-inspection' };
+const pendingShell = originalShellRun ? { ...originalShellRun.continuationEvent, steps: originalShellRun.steps } : {
+  ...response, plan: { nextStep: 'planner_failed', plannerFailure: { code: 'planner_invalid_response', phase: 'post_tool' } },
+  timeline: [
+    { id: 'shell-result', sequence: 1, kind: 'tool_result', payload: { tool: 'shell', status: 'pending', summary: 'Shell command completed successfully.' } },
+    { id: 'shell-final', sequence: 2, kind: 'assistant', payload: { status: 'planner_failed', phase: 'final_answer' } },
+  ],
+};
+const shellBefore = JSON.stringify(pendingShell);
+const shellDisplay = projectRuntimeResponseForDisplay(pendingShell, translate);
+const pendingReceipt = shellDisplay.timeline.find(event => event.kind === 'tool_result' && event.payload.tool === 'shell');
+assert.equal(pendingReceipt.payload.summary, messages.chat.runtimeTerminal.shellStillRunningReceipt);
+assert.equal(shellDisplay.plan.reply, messages.chat.runtimeTerminal.shellResultInterruptedMessage);
+assert.equal(JSON.stringify(pendingShell), shellBefore);
 const legacyTool = {
   ...response, plan: { nextStep: "done" }, timeline: [], steps: [],
   shell: { status: "failed", error: toolError },
@@ -75,18 +91,20 @@ void initializeI18n().then(()=>setLocale('zh-CN')).then(()=>{
   for (const [id, response, developerOptionsEnabled] of [
     ['legacy-tool', ${JSON.stringify(legacyTool)}, false],
     ['invalid-action', ${JSON.stringify(invalidAction)}, false],
+    ['pending-shell', ${JSON.stringify(pendingShell)}, false],
     ['native-tool', ${JSON.stringify(nativeTool)}, true],
   ]) {
     createRoot(document.getElementById(id)).render(<ConversationCard item={{id,type:'agent',response}} developerOptionsEnabled={developerOptionsEnabled}/>);
   }
 });
 `},bundle:true,write:false,format:'iife',jsx:'automatic',platform:'browser'});
-const server=createServer((_req,res)=>{res.setHeader('Content-Type','text/html');res.end(`<div id="card"></div><div id="partial"></div><div id="legacy"></div><div id="legacy-tool"></div><div id="native-tool"></div><div id="invalid-action"></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`)});
+const server=createServer((_req,res)=>{res.setHeader('Content-Type','text/html');res.end(`<div id="card"></div><div id="partial"></div><div id="legacy"></div><div id="legacy-tool"></div><div id="native-tool"></div><div id="invalid-action"></div><div id="pending-shell"></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`)});
 let browser;
 try{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));browser=await chromium.launch({headless:true,channel:'msedge'});
  const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}`);
  await page.locator('#card [data-vrcforge-terminal-status]').waitFor();
+ await page.locator('#pending-shell [data-vrcforge-terminal-status]').getByText(messages.chat.runtimeTerminal.shellResultInterruptedMessage).waitFor();
  const invalidActionText = await page.locator('#invalid-action').innerText();
  assert.ok(invalidActionText.includes(messages.chat.runtimeTerminal.previousResultsKept));
  assert.match(invalidActionText, /助手没能修正下一步操作/);

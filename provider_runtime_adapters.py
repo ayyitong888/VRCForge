@@ -77,6 +77,17 @@ class ProviderRuntimeResponse:
 
 
 _TOOL_NAME = "vrcforge_plan_action"
+
+
+def shell_poll_arguments(value: object) -> dict[str, Any] | None:
+    """Identify a misplaced process poll so the planner can correct its envelope."""
+    if isinstance(value, dict) and value.get("action") == "poll":
+        session = value.get("sessionId")
+        if isinstance(session, str) and session.strip():
+            return value
+    return None
+
+
 _TOOL_SCHEMA = {
     "type": "function",
     "name": _TOOL_NAME,
@@ -95,7 +106,7 @@ _TOOL_SCHEMA = {
             "memory_ids": {"type": "array", "items": {"type": "string"}},
             "skill_tool": {"type": "string"},
             "skill_params": {"type": "object", "additionalProperties": True},
-            "shell_command": {"type": "string"},
+            "shell_command": {"type": "string", "description": "Required for a host command. Use the advertised process tool to poll an existing session."},
             "shell_params": {"type": "object", "additionalProperties": True},
             "write_tool": {"type": "string"},
             "write_params": {"type": "object", "additionalProperties": True},
@@ -436,7 +447,8 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
             raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         if action == "skill" and not str(arguments.get("skill_tool") or "").strip():
             raise RuntimeError(f"{self._provider_label} planner action is invalid.")
-        if action == "shell" and not str(arguments.get("shell_command") or "").strip():
+        if (action == "shell" and not str(arguments.get("shell_command") or "").strip()
+                and shell_poll_arguments(arguments.get("shell_params")) is None):
             raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         if action == "write" and not str(arguments.get("write_tool") or "").strip():
             raise RuntimeError(f"{self._provider_label} planner action is invalid.")
