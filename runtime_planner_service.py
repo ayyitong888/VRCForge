@@ -1352,6 +1352,8 @@ def _handoff_tool_group(group: list[dict[str, object]]) -> list[dict[str, object
 
 def native_handoff_retained_evidence(messages: list[dict[str, object]]) -> list[dict[str, object]]:
     """Project tool-owned scope and outcome without copying the recent transcript."""
+    from agent_handoff_package_preflight import native_package_preflight_evidence
+
     calls = {}
     for entry in messages:
         assistant_text = entry.get("content") if entry.get("role") == "assistant" else None
@@ -1403,7 +1405,10 @@ def native_handoff_retained_evidence(messages: list[dict[str, object]]) -> list[
             row["outcomes"] = outcomes[:6]
         elif isinstance(result.get("status"), str):
             row["status"] = sanitize_planner_observation_text(result["status"], 80)
-    return list(calls.values())[-16:]
+    preflights = {row["callId"]: row for row in native_package_preflight_evidence(messages)}
+    latest = set(list(calls)[-16:])
+    return [{**row, **preflights.get(call_id, {})} for call_id, row in calls.items()
+            if call_id in latest or call_id in preflights]
 
 
 def classify_runtime_compaction_failure(exc: Exception) -> str:
@@ -2238,6 +2243,12 @@ class RuntimePlannerService:
                 "observation": RuntimePlannerService._llm_loop_step_observation(self, dict(step), native_contract=True)}
         if recovery_receipt := native_handoff_receipt_fields(step):
             observation["handoffReceipt"] = recovery_receipt
+        if step.get("tool") == "vrcforge_plan_outfit_import":
+            from agent_handoff_package_preflight import native_package_preflight_record
+
+            preflight_record = native_package_preflight_record(result, ensure_dict(step.get("resultRead")).get("resultRef"))
+            if preflight_record is not None:
+                observation["packageImportPreflight"] = preflight_record
         if step.get("tool") == "vrcforge_load_internal_tool_block" and isinstance(result.get("legalBlocks"), list):
             observation["legalBlocks"] = [x for x in result["legalBlocks"] if isinstance(x, str)]
         if step.get("tool") == "vrcforge_load_internal_tool_block" and isinstance(result.get("loadCalls"), list):

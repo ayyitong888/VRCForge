@@ -1312,9 +1312,13 @@ class AgentRuntimeSessionState:
                         if item["role"] == "user" and not item.get("runtimeInputSource")]),
             }
             if handoff_blocks is not None:
+                from agent_handoff_operations import native_handoff_package_selector_archive
+
                 offset = len(current_context or [])
                 candidate["humanUserMessageIndices"] = [index + offset for index in handoff_blocks["humanUserMessageIndices"]]
-                candidate["handoffArchive"] = copy.deepcopy(handoff_blocks["messageArchive"])
+                candidate["handoffArchive"] = {
+                    **copy.deepcopy(handoff_blocks["messageArchive"]), **native_handoff_package_selector_archive(current),
+                }
                 if handoff_blocks["lastReplyId"]:
                     candidate["handoffLastReplyId"] = handoff_blocks["lastReplyId"]
                     candidate["handoffLastReplyIndex"] = handoff_blocks["lastReplyIndex"] + offset + 1

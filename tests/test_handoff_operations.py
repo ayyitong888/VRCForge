@@ -102,3 +102,165 @@ def test_readback_settles_only_the_same_job_with_commit_and_verification():
     verified = receipt("verified", "verified-action", tool="status", commitState="complete", readbackState="verified", jobId="job-1")
     restored = native_handoff_operations({"messages": [*messages, verified]})[0]
     assert restored["state"] == "done" and restored["settlementCallId"] == "verified"
+
+
+def test_consumed_correction_anchors_exact_attempts_and_keeps_expired_result_actionable():
+    from agent_handoff_graph import apply_handoff_edits, handoff_view
+    from agent_tool_result_reader import PAGE_SCHEMA, TOOL_NAME
+
+    ref = "result_" + "e" * 32
+    failed_call = {"role": "assistant", "tool_calls": [{"id": "failed", "function": {
+        "name": "call_tool", "arguments": json.dumps({
+            "tool": "read_tool_result", "arguments": {"resultRef": ref, "jsonPointer": "/bad", "limit": 500},
+        })}}]}
+    failed = receipt("failed", "failure-action", tool="read_tool_result", status="failed",
+                     errorCode="planner_invalid_response")
+    corrected_call = {"role": "assistant", "tool_calls": [{"id": "corrected", "function": {
+        "name": "vrcforge_runtime_action", "arguments": json.dumps({
+            "action": "correct", "tool": "read_tool_result", "correction_for_action_id": "failure-action",
+            "arguments": {"resultRef": ref, "jsonPointer": "/index", "limit": 20},
+        })}}]}
+    page = {"schema": PAGE_SCHEMA, "authority": "untrusted_tool_output", "ok": True,
+            "status": "needs_rescan", "expired": True, "reason": "core_scope_unavailable", "resultRef": ref,
+            "rescanScope": {"tool": "vrcforge_scan_materials", "assetPaths": [], "dependencyCoverage": "unverified"}}
+    corrected = receipt("corrected", "correction-action", tool=TOOL_NAME)
+    data = json.loads(corrected["content"])
+    data["observations"][0].pop("handoffReceipt")
+    data["observations"][0]["observation"] = "current tool data; retainedResultPage=" + json.dumps(page)
+    corrected["content"] = json.dumps(data)
+    snapshot = {"messages": [failed_call, failed, corrected_call, corrected, {"role": "assistant", "content": "Read it"}]}
+    operations = native_handoff_operations(snapshot)
+    assert [row["state"] for row in operations] == ["failed", "done"]
+    anchors = source_nodes([], operations)
+    assert len(anchors) == 1
+    task_id, task = next(iter(anchors.items()))
+    assert task["status"] == "pending" and not task.get("operationRef")
+    assert task["correctionResult"]["rescanScope"] == page["rescanScope"]
+    assert task["correctionResult"]["resultRef"] == ref
+    edits = source_attempt_edits(anchors, operations)
+    failure, success = edits["nodes"].values()
+    assert (failure["attemptReceiptId"], failure["attemptActionId"]) == ("failed", "failure-action")
+    assert (success["attemptReceiptId"], success["attemptActionId"]) == ("corrected", "correction-action")
+    assert success["resultPage"]["status"] == "needs_rescan"
+    assert success["reason"] == "The corrected call returned needs_rescan."
+    assert not any(text in str(anchors) + str(edits) for text in ("/bad", "500"))
+    assert task["requestedSelector"] == success["requestedSelector"] == {"resultRef": ref, "jsonPointer": "/index"}
+    assert "jsonPointer" not in task["correctionResult"] and "requestedSelector" not in failure
+    graph = apply_handoff_edits(None, {"nodes": anchors}, fold=False)
+    graph = apply_handoff_edits(graph, edits)
+    assert handoff_view(graph)["readyTaskIds"] == [task_id]
+    assert "recoverTaskIds" not in handoff_view(graph)
+    assert any(edge[1] == "replaced_by" for edge in graph["edges"])
+    archived_operations = native_handoff_operations({"messages": [], "compactionRecovery": [archived(
+        failed_call, failed, corrected_call, corrected,
+    )]})
+    assert list(source_nodes([], archived_operations, graph)) == [task_id]
+
+    usable = {**page, "status": "complete", "expired": False, "reason": ""}
+    corrected_ok = receipt("corrected", "correction-action", tool=TOOL_NAME, **native_handoff_receipt_fields(
+        {"tool": TOOL_NAME, "result": usable}))
+    rows = native_handoff_operations({**snapshot, "messages": [failed_call, failed, corrected_call,
+                                                               corrected_ok, {"role": "assistant"}]})
+    done = apply_handoff_edits(None, {"nodes": source_nodes([], rows)}, fold=False)
+    done = apply_handoff_edits(done, source_attempt_edits(done["nodes"], rows))
+    final_task = done["nodes"][task_id]
+    assert final_task["status"] == "done"
+    assert set((item["type"], item["id"]) for item in final_task["evidence"]) == {
+        ("receipt", "failed"), ("receipt", "corrected"), ("scan", ref),
+    }
+
+
+def test_owned_package_receipt_recovers_only_its_exact_selector_after_compaction():
+    from agent_tool_result_reader import bind_tool_result_context, read_tool_result
+    from runtime_planner_service import sanitize_planner_observation_text
+
+    def call(call_id, tool, **arguments):
+        return {"id": call_id, "function": {"name": "call_tool", "arguments": json.dumps({
+            "tool": tool, "arguments": arguments,
+        })}}
+
+    inspect = "unity_inspect_outfit_package"
+    plan = "unity_plan_outfit_import"
+    first = r"E:\packages\City Noir.unitypackage"
+    second = r"E:\packages\Knit.unitypackage"
+    prefab = "Assets/Outfits/City Noir Color18.prefab"
+    calls = {"role": "assistant", "tool_calls": [
+        call("inspect-a", inspect, packagePath=first, maxEntries=3),
+        call("inspect-b", inspect, packagePath=second, maxEntries=9),
+        call("plan-a", plan, packagePath=first, selectedPrefab=prefab, dependencyMode="selected_only",
+             projectPath="must not expose", arbitrary="must not expose"),
+        call("mismatch", "unity_import_outfit_package", packagePath=second, selectedPrefab=prefab),
+        call("credential", inspect, packagePath="E:/packages/sk-proj-secretvalue/City.unitypackage"),
+        call("failed", plan, packagePath=second),
+    ]}
+    responses = [
+        receipt("inspect-b", "action-b", tool="vrcforge_inspect_outfit_package"),
+        receipt("inspect-a", "action-a", tool="vrcforge_inspect_outfit_package"),
+        receipt("plan-a", "action-p", tool="vrcforge_plan_outfit_import"),
+        receipt("mismatch", "action-m", tool="vrcforge_plan_outfit_import"),
+        receipt("credential", "action-c", tool="vrcforge_inspect_outfit_package"),
+        receipt("failed", "action-f", tool="vrcforge_plan_outfit_import", status="failed"),
+    ]
+    plan_response = json.loads(responses[2]["content"])
+    plan_response["observations"][0]["observation"] = "Long old receipt " * 2100
+    responses[2]["content"] = json.dumps(plan_response)
+    for snapshot in (
+        {"messages": [], "compactionRecovery": [archived(calls, *responses)]},
+        {"messages": [], "handoffArchive": {"group": {"source": "tool", "text": json.dumps([calls, *responses])}}},
+    ):
+        read = lambda identity: lookup_native_handoff_receipt(snapshot, identity)
+        assert read("inspect-a")["sourceSelector"] == {"packagePath": first}
+        assert read("action-b")["sourceSelector"] == {"packagePath": second}
+        expected = {"packagePath": first, "selectedPrefab": prefab, "dependencyMode": "selected_only"}
+        assert read("plan-a")["sourceSelector"] == expected
+        assert all("sourceSelector" not in read(identity) for identity in ("mismatch", "credential", "failed"))
+        with bind_tool_result_context("owner", "turn", "project", [], handoff_lookup=lambda _kind, identity: read(identity)):
+            page = read_tool_result({"executionId": "plan-a"}, sanitize=sanitize_planner_observation_text)
+        assert page["hasMore"] is True and page["text"].startswith('{"sourceSelector":')
+        assert json.JSONDecoder().raw_decode(page["text"].split(":", 1)[1])[0] == expected
+
+
+def test_exact_package_selection_survives_redacted_compaction_recovery_and_restart(tmp_path):
+    from agent_native_history_store import NativeHistoryStore
+    from agent_tool_result_reader import TOOL_NAME, bind_tool_result_context, read_tool_result
+    from context_compaction import MODEL_HANDOFF_PREFIX, compact_context
+    from runtime_planner_service import sanitize_planner_observation_text
+    from tests.test_native_context_compaction import fixture
+    from tests.test_native_handoff_blocks import _state
+
+    store = NativeHistoryStore(tmp_path)
+    state = _state(store)
+    state.begin_native_turn("owner", binding="binding", turn_id="turn", message="Review the chosen outfit")
+    exact = {
+        "packagePath": r"E:\downloads\City Noir.unitypackage",
+        "selectedPrefab": "Assets/Outfits/Color18.prefab",
+        "dependencyMode": "selected_only",
+    }
+    assistant = {"role": "assistant", "tool_calls": [
+        {"id": "plan", "type": "function", "function": {"name": "call_tool", "arguments": json.dumps({
+            "tool": "unity_plan_outfit_import", "arguments": {**exact, "maxEntries": 900},
+        })}},
+    ]}
+    plan = receipt("plan", "action-plan", tool="vrcforge_plan_outfit_import")
+    state.append_native_assistant("owner", binding="binding", message=assistant)
+    state.settle_native_call("owner", binding="binding", call_id="plan", content=plan["content"])
+    state.append_native_assistant("owner", binding="binding", message={"role": "assistant", "content": "Previewed."})
+    before = state.native_conversation("owner", binding="binding")
+    _source, blocks = state.native_handoff_projection(before, character_budget=2000)
+    recovery = compact_context([{"role": "tool", "text": NATIVE_TRANSACTION_PREFIX + json.dumps([assistant, plan])}],
+                               summarizer=lambda _prompt: "Reviewed the chosen outfit.", input_mode="native")["recovery"]
+    assert "{{project:" in recovery["sourceEntries"][0]["text"]
+    assert "maxEntries" in recovery["sourceEntries"][0]["text"]
+    state.replace_native_compacted_history(
+        "owner", binding="binding", expected_snapshot=before, handoff_blocks=blocks,
+        summary=MODEL_HANDOFF_PREFIX + "Reviewed the chosen outfit.", recovery=recovery,
+    )
+    reloaded = _state(store).native_conversation("owner", binding="binding")
+    assert not any(row["role"] == "tool" for row in reloaded["messages"])
+    with bind_tool_result_context("owner", "turn", "project", [],
+                                  handoff_lookup=lambda _kind, identity: lookup_native_handoff_receipt(reloaded, identity)):
+        page = read_tool_result({"executionId": "plan"}, sanitize=sanitize_planner_observation_text)
+    _, planner, _, _ = fixture(prior=False)
+    model_observation = planner.native_result_observation({"tool": TOOL_NAME, "status": "completed", "result": page})
+    model_page = json.loads(model_observation["observation"].split("; retainedResultPage=", 1)[1])
+    assert json.loads(model_page["text"])["sourceSelector"] == exact
