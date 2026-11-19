@@ -199,8 +199,16 @@ class ProviderModelCatalogService:
         """Return catalog effort support, or None when metadata is unavailable."""
         if config.provider not in {"anthropic", "deepseek", "openrouter"}:
             return None
-        for model in self.fetch_provider_models(config):
-            if model.get("id") == config.model:
+        return self._catalog_reasoning_efforts(self.fetch_provider_models(config), config.model)
+
+    def cached_reasoning_efforts(self, config: ProviderApiConfig) -> list[str] | None:
+        """Read the configured model's previously fetched reasoning capabilities."""
+        return self._catalog_reasoning_efforts(self._model_cache.get(self._model_cache_key(config), []), config.model)
+
+    @staticmethod
+    def _catalog_reasoning_efforts(models: list[dict[str, Any]], model_id: str) -> list[str] | None:
+        for model in models:
+            if model.get("id") == model_id:
                 if "reasoningEfforts" in model:
                     efforts = list(model["reasoningEfforts"])
                     if model.get("reasoningDisabledSupported") and "none" not in efforts:

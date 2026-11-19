@@ -78,6 +78,7 @@ import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspa
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useChatSessions } from "./hooks/use-chat-sessions";
 import { useComposerDraft } from "./hooks/use-composer-draft";
+import { chatInputPredictionOwner, recentPredictionInputs, useChatInputPrediction } from "./hooks/use-chat-input-prediction";
 import { useConversationScroll } from "./hooks/use-conversation-scroll";
 import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
 import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
@@ -116,6 +117,8 @@ import {
   loadAutomaticUpdateCheckEnabled,
   loadDeveloperOptionsEnabled,
   loadRunningEnterAction,
+  loadInputPredictionEnabled,
+  persistInputPredictionEnabled,
   loadThemePreference,
   persistAutomaticUpdateCheckEnabled,
   persistRunningEnterAction,
@@ -352,6 +355,7 @@ export default function App() {
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [settingsSearchSelection, setSettingsSearchSelection] = useState<SettingsSearchSelection | null>(null);
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
+  const [inputPredictionEnabled, setInputPredictionEnabled] = useState(loadInputPredictionEnabled);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
   const actionErrorMessage = useCallback((key: string, cause: unknown, values?: Record<string, string>) => {
     if (developerOptionsEnabled) console.warn(key, cause);
@@ -953,6 +957,7 @@ export default function App() {
     projectPath ? projectTypeForPath(projectPath) : "general",
   );
   const settledQuestionContinuationKeysRef = useRef(new Set<string>());
+  const onPredictionResumeRef = useRef<(event: RuntimeTurnEvent, chatId: string) => void>();
   const deliverRuntimeTurnContinuation = useRuntimeTurnContinuationDelivery({
     chats,
     catalogChats: sidebarChats,
@@ -960,6 +965,7 @@ export default function App() {
     appendToChat,
     updateChat,
     onContinuation: (event: RuntimeTurnEvent, ownerChat) => {
+      onPredictionResumeRef.current?.(event, ownerChat.id);
       if (event.continuationSource !== "question_answered") return;
       const questionId = event.clientTurnId?.match(/:question:([^:]+)(?::feedback:[1-9]\d*)?$/)?.[1];
       if (!questionId) return;
@@ -1192,6 +1198,22 @@ export default function App() {
     : undefined, [runtimeConnected, agentProgress, displayChat, runtimeRuns, selectedForegroundTurn?.clientTurnId]);
   const selectedCompaction = compacting && activeChat?.compaction?.status === "compacting";
   const sending = Boolean(selectedForegroundTurn || selectedCompaction || activeRuntimeCancelTarget);
+  const inputPrediction = useChatInputPrediction(
+    endpoint,
+    chatInputPredictionOwner(endpoint, activeChatId, activeChat?.sessionId || "", providerSnapshot.provider, providerSnapshot.model),
+    inputPredictionEnabled && activeView === "chat" && runtimeConnected && providerConfigured
+      && Boolean(activeChat?.sessionId) && !activeChatPending && !sending && !visibleQueued.length
+      && !input && !attachments.length && !attachmentsLoading && !pendingReplyQuestionId && !editingMessage
+      && !pendingApprovalItems.length && !hasUnresolvedRuntimeState(activeChatId, activeChat?.sessionId || ""),
+  );
+  onPredictionResumeRef.current = (event, chatId) => {
+    if (!inputPredictionEnabled || activeView !== "chat" || activeChatId !== chatId) return;
+    const { provider, model } = providerSnapshot;
+    void inputPrediction.offerAfterResume(event, {
+      chatId, provider, model, getChatById,
+      refreshRuntime: () => Promise.all([refresh(endpoint), refreshRuntimeRuns(false, endpoint)]),
+    }).catch(() => undefined);
+  };
   const runtimeAwareChatSidebar = useMemo(() => {
     const visibleChatId = activeView === "chat" ? activeChatId : "";
     const activityByChat = new Map(chatSidebar.activityByChat);
@@ -3340,6 +3362,7 @@ export default function App() {
       return;
     }
     if (!validateMessageAttachmentCounts(attachments)) return;
+    const predictionGeneration = inputPrediction.dismiss();
     setError("");
     setChatRunError("", activeChatId);
     const owner = activeChatId ? await loadChat(activeChatId).catch(() => undefined) : undefined;
@@ -3472,6 +3495,23 @@ export default function App() {
       computerUseRequested,
       computerUseVisualTheme: computerUseRequested ? theme : undefined,
       computerUseVisualAccent: computerUseRequested ? resolveComputerUseAccentHex() || undefined : undefined,
+      onCompletedReply: inputPredictionEnabled && composerMessage && !composerMessage.startsWith("/")
+        ? (reply, sessionId, agentItemId) => {
+            const chat = getChatById(ownerChatId);
+            if (chat?.sessionId !== sessionId
+              || latestConversationItemId(chat.items, (item) => item.type === "agent") !== agentItemId) return;
+            inputPrediction.offer({
+              owner: chatInputPredictionOwner(endpoint, ownerChatId, sessionId, turn.provider, turn.model),
+              turnId: agentItemId,
+              context: {
+                recent_user_messages: recentPredictionInputs(chat.items, `user-${turn.id}`, composerMessage),
+                assistant_tail: Array.from(reply).slice(-2000).join(""),
+                provider: turn.provider,
+                model: turn.model,
+              },
+            }, predictionGeneration);
+          }
+        : undefined,
     };
     let accepted = false;
     try {
@@ -4377,6 +4417,11 @@ export default function App() {
               loading={loading}
               runtimeConnected={runtimeConnected}
               currentLanguage={i18n.language}
+              inputPredictionEnabled={inputPredictionEnabled}
+              onInputPredictionChange={(enabled) => {
+                setInputPredictionEnabled(enabled);
+                persistInputPredictionEnabled(enabled);
+              }}
               runningEnterAction={runningEnterAction}
               onRunningEnterActionChange={(action) => {
                 setRunningEnterAction(action);
@@ -4489,7 +4534,9 @@ export default function App() {
               conversationPending={activeChatPending}
               conversationPendingMessage={t("common.loading")}
               input={input}
-              setInput={setInput}
+              setInput={(value) => { inputPrediction.dismiss(); setInput(value); }}
+              inputSuggestion={inputPrediction.suggestion}
+              onDismissInputSuggestion={inputPrediction.dismiss}
               sending={sending}
               stopRequested={Boolean(selectedForeground?.stopRequested) || activeChat?.items.some((item) => item.type === "streaming" && item.stopRequested)}
               queueAllowed={(Boolean(selectedForegroundTurn) || pendingParentWorkSessionIds.has(activeChat?.sessionId || ""))

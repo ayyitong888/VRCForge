@@ -478,6 +478,11 @@ def test_access_token_refresh_is_serialized_and_models_keep_visible_order(tmp_pa
             {"id": "second", "name": "Second"},
         ]
         assert fake.get_calls[-1][0] == "https://api.openai.com/v1/models"
+        catalog_calls = len(fake.get_calls)
+        assert service1.cached_model_reasoning_efforts(result["accountId"], "first") == {"low", "max"}
+        assert service1.cached_model_reasoning_efforts(result["accountId"], "second") is None
+        assert service1.cached_model_reasoning_efforts("another-account", "first") is None
+        assert len(fake.get_calls) == catalog_calls
         fake.model_payload["models"][0]["default_reasoning_level"] = "ultra"
         projected = service1.models(result["accountId"])[0]
         assert "defaultReasoningLevel" not in projected

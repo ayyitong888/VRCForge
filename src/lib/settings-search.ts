@@ -36,7 +36,7 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["settings.themeBackgroundScope"], ["settings.themeBackgroundOpacity"], ["settings.themeReset"],
   ]),
   ...group("general", "language", [["settings.language", "settings.languageDesc"]]),
-  ...group("general", "enter", [["settings.runningEnterAction"], ["settings.runningEnterQueue"], ["settings.runningEnterSteer"]]),
+  ...group("general", "enter", [["settings.inputPrediction", "settings.inputPredictionDesc"], ["settings.runningEnterAction"], ["settings.runningEnterQueue"], ["settings.runningEnterSteer"]]),
   ...group("general", "notifications", [["settings.backgroundGoalNotifications", "settings.backgroundGoalNotificationsDesc"]]),
   ...group("general", "sounds", [
     ["settings.notificationSoundTitle", "settings.notificationSoundDesc"], ["settings.notificationSoundOrdinary"], ["settings.notificationSoundBlocking"],

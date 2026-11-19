@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AgentTurnDeliveryUnconfirmedError, ApiError } from "../lib/api/http";
+import type { AgentRuntimeResponse } from "../lib/api/types";
 import { useTranslation } from "react-i18next";
 import { markRuntimeStreamStopping } from "../lib/runtime-stream-owner";
 import {
@@ -90,6 +91,8 @@ export type QueuedTurn = {
   queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled";
   staleBranch?: boolean;
   queueTransition?: "enqueue" | "dispatch";
+  /** Live composer callback, omitted from persisted queue records. */
+  onCompletedReply?: (reply: string, sessionId: string, agentItemId: string) => void;
 };
 
 export type CurrentTurn = {
@@ -156,6 +159,11 @@ type InternalRunSingleTurnOptions = RunSingleTurnOptions & {
   abortController?: AbortController;
   onPendingChild?: (sessionId: string) => void;
 };
+
+function isCompletedPublicReply(response: AgentRuntimeResponse): boolean {
+  return response.ok && (response.turnStatus?.status || response.status) === "completed"
+    && !response.approvalId && !response.approval_id;
+}
 
 export type PrepareTurnContextInput = {
   endpoint: string;
@@ -404,6 +412,7 @@ export function useChatRunController({
           queueSequence: entry.sequence,
           queueStatus: status,
           staleBranch,
+          onCompletedReply: !staleBranch ? existingTurn?.onCompletedReply : undefined,
         };
         const oldIndex = existingTurn ? next.indexOf(existingTurn) : -1;
         if (oldIndex >= 0) next.splice(oldIndex, 1);
@@ -1363,6 +1372,7 @@ export function useChatRunController({
     let runtimeRequestStarted = false;
     let savingBeforeDispatch = false;
     let followup: FollowupAdmission | undefined;
+    let completedPublicReply: AgentRuntimeResponse | undefined;
     if (lane) {
       lane.controller = abortController;
       lane.turn = {
@@ -1741,6 +1751,10 @@ export function useChatRunController({
       }
       await refresh(targetEndpoint);
       await refreshRuntimeRuns(false, targetEndpoint);
+      if (turn.onCompletedReply && !lane?.stopping && !abortController.signal.aborted
+        && !owner.stopAcknowledgement && isCompletedPublicReply(response)) {
+        completedPublicReply = durableResponse;
+      }
       return true;
 
       function applyRuntimeResponseToChat(current: ChatThread): ChatThread {
@@ -2045,6 +2059,15 @@ export function useChatRunController({
         foregroundChanged();
       }
       finishPresentation();
+      if (completedPublicReply && turn.onCompletedReply) {
+        const response = completedPublicReply;
+        const onCompletedReply = turn.onCompletedReply;
+        // Let the owning lane settle before running the independent suggestion.
+        void Promise.resolve().then(() => {
+          const publicReply = visibleAgentDialogueText(response).trim();
+          if (publicReply) onCompletedReply(publicReply, chatSessionId, response.turnId || response.turn_id);
+        }).catch(() => undefined);
+      }
     }
   }
 

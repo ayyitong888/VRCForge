@@ -25,6 +25,23 @@ export const DEVELOPER_OPTIONS_ENABLED_KEY = "vrcforge_developer_options_enabled
 export const AUTOMATIC_UPDATE_CHECK_DISABLED_KEY = "vrcforge_automatic_update_check_disabled";
 const STARTUP_ANIMATION_KEY = "vrcforge_startup_animation";
 const RUNNING_ENTER_ACTION_KEY = "vrcforge_running_enter_action";
+const INPUT_PREDICTION_KEY = "vrcforge_input_prediction";
+
+export function loadInputPredictionEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(INPUT_PREDICTION_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function persistInputPredictionEnabled(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(INPUT_PREDICTION_KEY, String(enabled));
+  } catch {
+    // The preference still applies to the current window.
+  }
+}
 
 export const DEFAULT_LEFT_PANE_WIDTH = 280;
 export const DEFAULT_RIGHT_PANE_WIDTH = 320;

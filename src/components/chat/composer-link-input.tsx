@@ -5,6 +5,7 @@ import { ChatDeepLink } from "./chat-deep-link";
 type ComposerInputProps = Omit<ComponentPropsWithoutRef<"textarea">, "value" | "onChange"> & {
   inputRef: RefObject<HTMLTextAreaElement>;
   value: string;
+  ghost?: string;
   onChange: (value: string) => void;
 };
 
@@ -34,7 +35,7 @@ function restoreLinks(text: string, spans: ReturnType<typeof projectDraft>["span
   return result + text.slice(cursor, end);
 }
 
-export function ComposerLinkInput({ inputRef, value, className, onChange, ...props }: ComposerInputProps) {
+export function ComposerLinkInput({ inputRef, value, className, ghost, onChange, ...props }: ComposerInputProps) {
   const titles = useContext(ChatLinkTitlesContext);
   const { text, spans } = useMemo(() => projectDraft(value, titles), [value, titles]);
   const projected = spans.length > 0;
@@ -73,9 +74,9 @@ export function ComposerLinkInput({ inputRef, value, className, onChange, ...pro
     }
   }, [value, text, className, inputRef]);
   return <div className={className}>
-    <div className="relative">
+    <div className={ghost ? "relative grid" : "relative"}>
       <textarea {...props} ref={inputRef} value={text}
-        className={`app-scrollbar block min-h-7 w-full resize-none whitespace-pre-wrap break-words bg-transparent px-1 py-1 outline-none [overflow-wrap:anywhere] placeholder:text-muted-foreground ${projected ? "text-transparent caret-foreground" : ""}`}
+        className={`app-scrollbar block min-h-7 w-full resize-none whitespace-pre-wrap break-words bg-transparent px-1 py-1 outline-none [overflow-wrap:anywhere] placeholder:text-muted-foreground ${projected ? "text-transparent caret-foreground" : ""} ${ghost ? "z-10 col-start-1 row-start-1" : ""}`}
         onScroll={scrollOverlay}
         onChange={event => {
           const next = event.currentTarget.value;
@@ -123,6 +124,7 @@ export function ComposerLinkInput({ inputRef, value, className, onChange, ...pro
           onChange(restoreLinks(text, spans, 0, selectionStart) + restoreLinks(text, spans, selectionEnd, text.length));
         }}
       />
+      {ghost && <div aria-hidden="true" data-composer-input-suggestion className="pointer-events-none col-start-1 row-start-1 min-w-0 select-none whitespace-pre-wrap break-words px-1 py-1 text-muted-foreground [overflow-wrap:anywhere]">{ghost}</div>}
       {projected && <div ref={overlay} className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-1 py-1 [overflow-wrap:anywhere]">
         {spans.map((link, index) => <Fragment key={link.start}>
           <span aria-hidden>{text.slice(spans[index - 1]?.end ?? 0, link.start)}</span>

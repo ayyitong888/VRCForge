@@ -389,6 +389,8 @@
     "providerDesc": "プロバイダー接続後「モデルリスト更新」をクリックして、利用可能なモデルから選択できます。",
     "language": "表示言語",
     "languageDesc": "デスクトップUIの表示言語を切り替えます。エージェント通信やツールインターフェースには影響しません。",
+    "inputPrediction": "入力予測",
+    "inputPredictionDesc": "返信後に次のメッセージの候補を表示します。Tab で入力欄に反映し、編集してから送信できます。",
     "startupAnimation": "起動アニメーション",
     "startupAnimationDesc": "VRCForge を開くときにオープニングアニメーションを再生します。",
     "runningEnterAction": "実行中のメッセージショートカット",

@@ -53,6 +53,8 @@ type SettingsWorkspaceProps = {
   runtimeConnected: boolean;
   providerConfigurationLocked?: boolean;
   currentLanguage: string;
+  inputPredictionEnabled: boolean;
+  onInputPredictionChange: (enabled: boolean) => void;
   runningEnterAction: RunningEnterAction;
   onRunningEnterActionChange: (action: RunningEnterAction) => void;
   themeCustomization: ThemeCustomization;
@@ -161,6 +163,8 @@ export function SettingsWorkspace({
   runtimeConnected,
   providerConfigurationLocked = false,
   currentLanguage,
+  inputPredictionEnabled,
+  onInputPredictionChange,
   runningEnterAction,
   onRunningEnterActionChange,
   themeCustomization,
@@ -357,6 +361,16 @@ export function SettingsWorkspace({
             </section>
 
             <section className="mt-6" data-settings-panel="enter">
+              <label className="mb-6 flex items-center justify-between gap-5">
+                <span className="min-w-0">
+                  <span id="settings-input-prediction-label" className="block text-base font-semibold">{t("settings.inputPrediction")}</span>
+                  <span id="settings-input-prediction-description" className="mt-1 block text-sm text-muted-foreground">{t("settings.inputPredictionDesc")}</span>
+                </span>
+                <input type="checkbox" role="switch" className="peer sr-only"
+                  aria-labelledby="settings-input-prediction-label" aria-describedby="settings-input-prediction-description"
+                  checked={inputPredictionEnabled} onChange={(event) => onInputPredictionChange(event.currentTarget.checked)} />
+                <span aria-hidden="true" className="inline-flex h-7 w-12 shrink-0 items-center rounded-full border border-border bg-muted px-[calc(0.25rem-1px)] after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm peer-checked:border-primary peer-checked:bg-primary peer-checked:after:translate-x-5 peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2" />
+              </label>
               <label className="block text-sm font-semibold" htmlFor="settings-running-enter-action">
                 {t("settings.runningEnterAction")}
               </label>

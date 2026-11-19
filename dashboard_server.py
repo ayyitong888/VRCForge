@@ -641,6 +641,7 @@ from provider_test_integration_service import (
     ProviderTextProbeRunner,
 )
 from chat_title_service import ChatTitleService
+from chat_input_prediction import build_input_prediction_router
 from provider_vision_service import (
     ProviderVisionPolicyPorts,
     ProviderVisionSdkRunner,
@@ -1411,6 +1412,12 @@ CHAT_TITLE_SERVICE = ChatTitleService(
     PROVIDER_CONFIGURATION.bind_runtime_config,
     PROVIDER_TEXT_PROBE.probe,
 )
+app.include_router(build_input_prediction_router(
+    PROVIDER_CONFIGURATION,
+    PROVIDER_TEXT_PROBE.probe_settings,
+    lambda value: resolve_vertex_project_location(value),
+    PROVIDER_MODEL_CATALOG.cached_reasoning_efforts,
+))
 PROVIDER_TESTS = ProviderTestIntegrationService(
     ProviderTestServicePorts(
         resolve_api_request=PROVIDER_CONFIGURATION.resolve_api_request,

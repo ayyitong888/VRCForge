@@ -88,6 +88,7 @@ class ChatGPTAuthService:
         self._state_lock = threading.RLock()
         self._begin_lock = threading.Lock()
         self._pending: _PendingAuthorization | None = None
+        self._model_reasoning_efforts: dict[str, dict[str, frozenset[str]]] = {}
         self._last_error = ""
         self._closed = False
 
@@ -291,7 +292,17 @@ class ChatGPTAuthService:
                             model[target] = value
                             break
                 result.append(model)
+        with self._state_lock:
+            self._model_reasoning_efforts[account_id] = {
+                model["id"]: frozenset(entry["effort"] for entry in model["supportedReasoningLevels"])
+                for model in result if "supportedReasoningLevels" in model
+            }
         return result
+
+    def cached_model_reasoning_efforts(self, account_id: str, model: str) -> frozenset[str] | None:
+        """Read capabilities from a previously loaded account catalog without I/O."""
+        with self._state_lock:
+            return self._model_reasoning_efforts.get(account_id, {}).get(model)
 
     def logout(self, account_id: str) -> dict[str, bool]:
         with self._state_lock:
@@ -330,6 +341,7 @@ class ChatGPTAuthService:
                 self._last_error = "Local credentials could not be cleared."
             raise ChatGPTAuthError("Local credentials could not be cleared.") from None
         with self._state_lock:
+            self._model_reasoning_efforts.pop(account_id, None)
             self._last_error = "" if confirmed else "Remote sign-out could not be confirmed."
         return {"revoked": confirmed, "localCleared": True}
 

@@ -220,6 +220,11 @@ export function latestAgentContextUsage(items: ConversationItem[]): AgentContext
   return latestContextWindowUsage(items);
 }
 
+export function legacyGoalInputIds(items: ConversationItem[]) {
+  return new Set(items.flatMap((item) => item.type === "agent" && item.response.goalDeliveryId
+    ? [`goal-user-${item.response.goalDeliveryId}`] : []));
+}
+
 export function buildChatHistory(items: ConversationItem[], t: TFunction, sourceItems = items, keepUserStatements = false): ChatHistoryEntry[] {
   const history: ChatHistoryEntry[] = [];
   let boundary = items.length - 1;
@@ -232,10 +237,7 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction, source
   const summarizedItemIds = new Set(activeItems.flatMap((item) => (
     item.type === "compact" ? item.summarizedItemIds || [] : []
   )));
-  const goalInputIds = new Set(sourceItems.flatMap((item) => (
-    item.type === "agent" && item.response.goalDeliveryId
-      ? [`goal-user-${item.response.goalDeliveryId}`] : []
-  )));
+  const goalInputIds = legacyGoalInputIds(sourceItems);
   const before = boundary < 0 ? [] : items.slice(0, boundary);
   const marker = items[boundary];
   const lastPublic = marker?.type === "compact" ? before.find((item) => item.id === marker.lastPublicItemId) : undefined;

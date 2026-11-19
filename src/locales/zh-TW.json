@@ -389,6 +389,8 @@
     "providerDesc": "連接供應商後點擊「刷新模型列表」，即可從該帳號可用的模型中選擇。",
     "language": "顯示語言",
     "languageDesc": "切換桌面介面的顯示語言。此設定不影響智能體通訊與工具介面。",
+    "inputPrediction": "輸入預測",
+    "inputPredictionDesc": "回覆結束後預測你接下來想說的話。按 Tab 填入，編輯後再傳送。",
     "startupAnimation": "啟動動畫",
     "startupAnimationDesc": "開啟 VRCForge 時播放開場動畫。",
     "runningEnterAction": "執行中的訊息快捷鍵",

@@ -391,6 +391,8 @@
     "providerDesc": "After connecting a provider, click \"Refresh model list\" to select from available models.",
     "language": "Display Language",
     "languageDesc": "Switch the desktop UI language. This does not affect agent communication or tool interfaces.",
+    "inputPrediction": "Input prediction",
+    "inputPredictionDesc": "Suggest your next message after a reply. Press Tab to fill it in and edit before sending.",
     "startupAnimation": "Startup animation",
     "startupAnimationDesc": "Show the opening animation when VRCForge launches.",
     "runningEnterAction": "Message shortcuts during a run",

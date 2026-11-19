@@ -306,6 +306,8 @@ fn main() {
             fetch_avatars,
             fetch_chats,
             generate_chat_title,
+            generate_chat_input_prediction,
+            cancel_chat_input_prediction,
             fetch_data_root,
             fetch_diagnostics,
             fetch_doctor,

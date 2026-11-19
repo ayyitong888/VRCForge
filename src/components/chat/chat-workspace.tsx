@@ -138,6 +138,8 @@ export function ChatWorkspace({
   readOnlyHistory = false,
   input,
   setInput,
+  inputSuggestion,
+  onDismissInputSuggestion,
   sending,
   queueAllowed,
   stopRequested,
@@ -249,6 +251,8 @@ export function ChatWorkspace({
   readOnlyHistory?: boolean;
   input: string;
   setInput: (value: string) => void;
+  inputSuggestion?: string;
+  onDismissInputSuggestion?: () => void;
   sending: boolean;
   queueAllowed: boolean;
   stopRequested?: boolean;
@@ -595,6 +599,8 @@ export function ChatWorkspace({
     <Composer
       input={input}
       setInput={setInput}
+      inputSuggestion={inputSuggestion}
+      onDismissInputSuggestion={onDismissInputSuggestion}
       sending={composerSending}
       queueAllowed={queueAllowed}
       runningEnterAction={runningEnterAction}

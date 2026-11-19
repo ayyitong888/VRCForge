@@ -943,6 +943,26 @@ pub async fn generate_chat_title(
 }
 
 #[tauri::command]
+pub async fn generate_chat_input_prediction(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/chat/input-prediction", request, 12_000)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_chat_input_prediction(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/chat/input-prediction/cancel", request, 2_000)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn fetch_agent_resource_image(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
