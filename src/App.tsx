@@ -3082,7 +3082,7 @@ export default function App() {
     const text = item.type === "user" && agentRelaySource(item) !== undefined
       ? item.text : conversationItemText(item, t).trim();
     if (!text.trim()) {
-      showTransientNotice("error", "copy", t("chat.copyFailed", { reason: t("chat.copyNoText") }));
+      showTransientNotice("error", "copy", t("chat.copyNoText"));
       return;
     }
     copyChatText(text, t("chat.copiedMessage"));
@@ -3090,16 +3090,15 @@ export default function App() {
 
   function copyChatText(text: string, successMessage: string) {
     if (!navigator.clipboard?.writeText) {
-      showTransientNotice("error", "copy", t("chat.copyFailed", { reason: t("chat.copyClipboardUnavailable") }));
+      showTransientNotice("error", "copy", t("chat.copyClipboardUnavailable"));
       return;
     }
     void navigator.clipboard.writeText(text).then(
       () => {
         showTransientNotice("success", "copy", successMessage);
       },
-      (cause) => {
-        const reason = actionErrorMessage("chat.copyUnknownReason", cause);
-        showTransientNotice("error", "copy", t("chat.copyFailed", { reason }));
+      () => {
+        showTransientNotice("error", "copy", t("chat.copyUnknownReason"));
       },
     );
   }
@@ -4446,6 +4445,16 @@ export default function App() {
             onRetryChatStorage={() => { void reloadChatStorageState().catch(() => undefined); }}
           />
 
+          {transientFailure ? (
+            <TransientFailureToast
+              title={transientFailure.tone === "error" ? t(`notifications.${transientFailure.kind}Failed`) : undefined}
+              tone={transientFailure.tone}
+              message={transientFailure.message}
+              dismissLabel={t("notifications.dismiss")}
+              onDismiss={dismissTransientFailure}
+            />
+          ) : null}
+
           {activeView === "doctor" ? (
             <DoctorWorkspace
               key={activeProjectPath}
@@ -4929,8 +4938,7 @@ export default function App() {
       />
 
       <OnboardingOverlay
-        open={showOnboarding && !showOnboardingLanguageGate}
-        minimized={onboardingMinimized}
+        open={showOnboarding && !showOnboardingLanguageGate && !onboardingMinimized}
         stepIndex={onboardingStep}
         runtimeConnected={runtimeConnected}
         selectedProjectReady={onboardingSelectedProjectReady}
@@ -4960,7 +4968,6 @@ export default function App() {
           setProjectModalError("");
           setShowProjectModal(true);
         }}
-        onResume={returnFromOnboardingSettings}
         onFinish={finishOnboarding}
         onPreviousStep={() => setOnboardingStep((value) => Math.max(0, value - 1))}
         onNextStep={() => setOnboardingStep((value) => value + 1)}
@@ -5070,20 +5077,6 @@ export default function App() {
         refreshTrigger={connectorStatus?.gateway?.checkpointArchiveUsage}
         onManage={() => openSettingsSection("storage")}
       />
-
-      {transientFailure ? (
-        <TransientFailureToast
-          title={
-            transientFailure.tone === "success" && transientFailure.kind === "copy"
-              ? t("notifications.copySuccess")
-              : t(`notifications.${transientFailure.kind}Failed`)
-          }
-          tone={transientFailure.tone}
-          message={transientFailure.message}
-          dismissLabel={t("notifications.dismiss")}
-          onDismiss={dismissTransientFailure}
-        />
-      ) : null}
 
       <AppUpdatePopup
         prompt={appUpdatePrompt}

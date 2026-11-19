@@ -27,7 +27,7 @@ try {
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const origin = `http://127.0.0.1:${server.address().port}`;
   browser = await chromium.launch({ headless: true, channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge" });
-  const page = await browser.newPage();
+  const page = await browser.newPage({ viewport: { width: 1100, height: 720 }, reducedMotion: "reduce" });
   page.setDefaultTimeout(12_000);
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("console", (message) => {
@@ -62,7 +62,29 @@ try {
   await page.goto(origin, { waitUntil: "domcontentloaded" });
   const overlay = page.locator("[data-vrcforge-onboarding]");
   await overlay.getByRole("button", { name: "Set up internal AI" }).click();
-  // The provider spotlight is separate from the project step under test.
+  const continueChip = page.getByRole("button", { name: /Continue Onboarding/ });
+  const nextTour = page.locator(".driver-popover-next-btn");
+  const refreshModels = page.locator('[data-onboarding-provider="models-refresh"].driver-active-element');
+  for (const step of ["connection", "credentials", "endpoint"]) {
+    await page.locator(`[data-onboarding-provider="${step}"].driver-active-element`).waitFor();
+    await nextTour.click();
+  }
+  await refreshModels.waitFor();
+  for (const width of [1100, 900]) {
+    await page.setViewportSize({ width, height: 720 });
+    assert.equal(await continueChip.count(), 0, `floating onboarding chip overlays the highlighted refresh control at width ${width}`);
+    await refreshModels.click({ trial: true });
+  }
+  await nextTour.click();
+  const modelInput = page.locator('[data-onboarding-provider="model"].driver-active-element input').first();
+  for (const width of [1100, 900]) {
+    await page.setViewportSize({ width, height: 720 });
+    assert.equal(await continueChip.count(), 0, `floating onboarding chip overlays the highlighted model input at width ${width}`);
+    await modelInput.click({ trial: true });
+  }
+  await page.locator(".vrcforge-provider-tour-return").click();
+  await overlay.getByRole("button", { name: "Set up internal AI" }).click();
+  // Complete the independent provider check to reach the project picker.
   await page.getByRole("button", { name: "Test connection", exact: true }).evaluate((button) => button.click());
   await overlay.getByRole("button", { name: "Next", exact: true }).click();
   const selectProject = overlay.getByRole("button", { name: "Select Project", exact: true });

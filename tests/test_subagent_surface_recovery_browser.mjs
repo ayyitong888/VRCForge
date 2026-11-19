@@ -19,6 +19,9 @@ const date = "2026-10-28T10:00:00Z";
 const chatA = { id: "surface-A", sessionId: "surface-session-A", title: "Surface A", projectPath: "", projectType: "general", createdAt: date, updatedAt: date, revision: 0, items: [] };
 const chatB = { ...chatA, id: "surface-B", sessionId: "surface-session-B", title: "Surface B" };
 const chatC = { ...chatB, id: "surface-C", sessionId: "surface-session-C", title: "Surface C", projectPath: "E:/fixtures/other-project", projectType: "unity" };
+if (issue === "composer-notification") {
+  chatA.items = [{ id: "copy-source", type: "user", text: "Review the draft before sending.", createdAt: date }];
+}
 if (issue === "sidebar") {
   chatA.projectPath = "E:/fixtures/sidebar-workbench";
   chatA.items = [{ id: "parent-message", type: "user", text: "Original parent transcript", createdAt: date }];
@@ -90,7 +93,7 @@ const taskB = { ...done, id: "surface-task-B", parentChatId: chatB.id, parentSes
 const bootstrap = {
   ok: true, app: { name: "VRCForge" },
   health: { ok: true, version: "fixture", components: {} },
-  apiConfig: { provider: "custom", configured: true, base_url: "", model: "fixture", api_type: "auto" },
+  apiConfig: { provider: issue === "composer-notification" ? "chatgpt" : "custom", configured: true, base_url: "", model: "fixture", api_type: "auto" },
   permission: { pending: [] }, approvals: [],
 };
 let tasks = [taskA];
@@ -184,6 +187,7 @@ const baselineModules = new Set([
   "src/App.tsx", "src/components/subagents/sub-agent-sidebar.tsx", "src/hooks/use-composer-draft.ts",
   "src/lib/api/sub-agents.ts", "src/lib/subagent-delegate.ts", "src/lib/subagent-state.ts",
   ...(["chat-links", "external-chat-link"].includes(issue) ? ["src/components/chat/chat-markdown.tsx", "src/components/sidebar/sidebar-menus.tsx", "src/hooks/use-chat-deep-links.ts"] : []),
+  ...(issue === "composer-notification" ? ["src/components/ui/transient-failure-toast.tsx"] : []),
 ]);
 const scratch = await mkdtemp(resolve(tmpdir(), "vrcforge-subagent-surface-"));
 const frontend = resolve(scratch, "frontend");
@@ -227,7 +231,7 @@ try {
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Failed to load resource")) console.error(message.text());
     });
-    await page.addInitScript(({ desktop, base, startupUrl, linkProjectPath, composerLinkFixture, theme }) => {
+    await page.addInitScript(({ desktop, base, startupUrl, linkProjectPath, composerLinkFixture, noticeFixture, theme }) => {
       localStorage.setItem("vrcforge_onboarded", "true");
       localStorage.setItem("vrcforge-locale", "en-US");
       localStorage.setItem("vrcforge_startup_animation", "false");
@@ -253,6 +257,12 @@ try {
           if (command === "start_backend") return { mode: "attached", started: true, endpoint: base, message: "fixture" };
           if (command === "take_pending_vsk_paths") return [];
           if (command === "plugin:deep-link|get_current") return startupUrl ? [startupUrl] : [];
+          if (noticeFixture && command === "chatgpt_oauth_status") return {
+            accounts: [{ id: "fixture-account", connected: true }], activeAccountId: "fixture-account", activeModel: "fixture",
+          };
+          if (noticeFixture && command === "chatgpt_oauth_models") return {
+            models: [{ id: "fixture", supportedReasoningLevels: [{ effort: "low" }, { effort: "high" }] }],
+          };
           if (command === "open_codex_chat_url") { window.codexOpenUrls.push(args.url); return; }
           if (command === "fetch_project_prefs" && linkProjectPath) return { ok: true, customPaths: [linkProjectPath] };
           const request = args?.request || {};
@@ -289,7 +299,7 @@ try {
           return (await fetch(base + path)).json();
         },
       };
-    }, { desktop, base, startupUrl, composerLinkFixture: issue === "chat-composer-link",
+    }, { desktop, base, startupUrl, composerLinkFixture: issue === "chat-composer-link", noticeFixture: issue === "composer-notification",
       linkProjectPath: ["chat-links", "chat-composer-link"].includes(issue) ? chatC.projectPath : ["handoff-catalog", "sidebar"].includes(issue) ? chatA.projectPath : "",
       theme: options.theme });
     await page.route("**/*", async (route) => {
@@ -316,6 +326,69 @@ try {
     await list.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).click();
     return page.locator("[data-vrcforge-subagent-workspace-surface]");
   };
+
+  if (issue === "composer-notification") {
+    for (const [width, height, theme] of [[1600, 1000, "light"], [900, 640, "dark"]]) {
+      const page = await open(true, "", { viewport: { width, height }, theme });
+      await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+      const dock = page.locator("[data-chat-composer-dock]");
+      const composer = dock.locator("textarea");
+      const permission = dock.getByRole("button", { name: "Restricted", exact: true });
+      const reasoning = dock.getByRole("button", { name: "Reasoning effort" });
+      const copy = page.getByRole("button", { name: "Copy", exact: true });
+      const notice = page.locator(".transient-failure-toast");
+      const dismiss = notice.getByRole("button", { name: "Dismiss notification" });
+      await reasoning.waitFor();
+
+      async function assertComposerClear() {
+        const noticeBox = await notice.boundingBox();
+        const dockBox = await dock.boundingBox();
+        const overlaps = noticeBox.x < dockBox.x + dockBox.width && noticeBox.x + noticeBox.width > dockBox.x
+          && noticeBox.y < dockBox.y + dockBox.height && noticeBox.y + noticeBox.height > dockBox.y;
+        assert.equal(overlaps, false, `notification overlaps the composer (${JSON.stringify({ noticeBox, dockBox })})`);
+        assert.ok(noticeBox.x >= 0 && noticeBox.x + noticeBox.width <= width
+          && noticeBox.y >= 0 && noticeBox.y + noticeBox.height <= height, "notification fits the viewport");
+        for (const control of [composer, permission, reasoning, dock.getByRole("button", { name: "Send", exact: true })]) {
+          assert.equal(await control.evaluate(el => {
+            const { x, y, width, height } = el.getBoundingClientRect();
+            return el.contains(document.elementFromPoint(x + width / 2, y + height / 2));
+          }), true, "composer controls receive pointer events while the notice is visible");
+        }
+      }
+
+      await composer.fill("Draft preserved while copying");
+      await copy.click();
+      await notice.getByText("Message copied", { exact: true }).waitFor();
+      await assertComposerClear();
+      await notice.getByRole("status").getByText("Message copied", { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), chatA.items[0].text);
+      await permission.click();
+      const autoApprove = dock.getByRole("button", { name: /Auto Approve/ });
+      await autoApprove.waitFor();
+      await dock.getByRole("button", { name: /Restricted Approve writes/ }).click();
+      await autoApprove.waitFor({ state: "hidden" });
+      await reasoning.click();
+      await page.getByRole("menu", { name: "Reasoning effort" }).waitFor();
+      await page.keyboard.press("Escape");
+      await dismiss.click();
+      await notice.waitFor({ state: "hidden" });
+
+      await page.evaluate(() => {
+        navigator.clipboard.writeText = async () => { throw new Error("Fixture clipboard rejected"); };
+      });
+      await copy.click();
+      await notice.getByRole("alert").getByText("Copy failed", { exact: true }).waitFor();
+      await notice.getByRole("alert").getByText("The clipboard rejected the copy request.", { exact: true }).waitFor();
+      await assertComposerClear();
+      await composer.click();
+      await composer.press("End");
+      await page.keyboard.type("!");
+      assert.equal(await composer.inputValue(), "Draft preserved while copying!");
+      await dismiss.click();
+      await notice.waitFor({ state: "hidden" });
+      await page.close();
+    }
+  }
 
   if (issue === "sidebar") {
     const startedAt = new Date(Date.now() - 70_000).toISOString();

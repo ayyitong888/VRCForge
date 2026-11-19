@@ -9,7 +9,6 @@ import type { ProjectType } from "../../lib/chat-types";
 
 export function OnboardingOverlay({
   open,
-  minimized,
   stepIndex,
   runtimeConnected,
   selectedProjectReady,
@@ -25,14 +24,12 @@ export function OnboardingOverlay({
   onOpenSettings,
   onOpenExternalSettings,
   onOpenProjectPicker,
-  onResume,
   onFinish,
   onPreviousStep,
   onNextStep,
   onLocaleChange,
 }: {
   open: boolean;
-  minimized: boolean;
   stepIndex: number;
   runtimeConnected: boolean;
   selectedProjectReady: boolean;
@@ -48,7 +45,6 @@ export function OnboardingOverlay({
   onOpenSettings: () => void;
   onOpenExternalSettings: () => void;
   onOpenProjectPicker: () => void;
-  onResume: () => void;
   onFinish: () => void;
   onPreviousStep: () => void;
   onNextStep: () => void;
@@ -117,18 +113,6 @@ export function OnboardingOverlay({
   const steps = projectType === "unity"
     ? [providerStep, projectStep, unityStep]
     : [providerStep, projectStep];
-  if (minimized) {
-    return (
-      <button
-        type="button"
-        onClick={onResume}
-        className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2.5 text-sm shadow-panel transition-colors hover:bg-muted"
-      >
-        <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-        <span>{t("onboarding.continueOnboarding", { step: stepIndex + 1 })}</span>
-      </button>
-    );
-  }
   const step = steps[Math.min(stepIndex, steps.length - 1)];
   const isLast = stepIndex >= steps.length - 1;
   const projectNeedsAction = step === projectStep && !step.done;

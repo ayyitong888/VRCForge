@@ -27,17 +27,17 @@ const fixtureSource = `
         selectProject: "Select project", internalProviderTitle: "Internal", internalProviderDesc: "Internal provider",
         configureInternal: "Configure internal", externalAgentTitle: "External", externalAgentDesc: "External agent",
         configureExternal: "Configure external", done: "Done", actionNeeded: "Action needed", detecting: "Detecting",
-        continueOnboarding: "Continue", skipOnboarding: "Skip", prevStep: "Previous", nextStep: "Next",
+        skipOnboarding: "Skip", prevStep: "Previous", nextStep: "Next",
         startUsing: "Start using"
       }, settings: { language: "Language" }
     } } }, interpolation: { escapeValue: false }
   });
 
   const callbacks = { onRetryRuntime(){}, onOpenSettings(){}, onOpenExternalSettings(){},
-    onOpenProjectPicker(){}, onResume(){}, onFinish(){}, onPreviousStep(){}, onNextStep(){}, onLocaleChange(){} };
+    onOpenProjectPicker(){}, onFinish(){}, onPreviousStep(){}, onNextStep(){}, onLocaleChange(){} };
   const render = (providerConfigured, providerVerified, externalAgentReady = false) => renderToStaticMarkup(
     React.createElement(OnboardingOverlay, {
-      open: true, minimized: false, stepIndex: 0, runtimeConnected: true,
+      open: true, stepIndex: 0, runtimeConnected: true,
       selectedProjectReady: true, projectType: "non-unity", unityToolsReady: false,
       unityToolsCount: 0, providerConfigured, providerVerified, externalAgentReady,
       loadingRuntime: false, currentLanguage: "en-US", ...callbacks

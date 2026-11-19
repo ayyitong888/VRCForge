@@ -944,20 +944,20 @@ export function ChatWorkspace({
             <div ref={conversationEndRef} />
           </div>
         </div>
-        {showScrollToBottom ? (
-          <Button
-            type="button"
-            variant="outline"
-            className="absolute bottom-4 right-5 z-20 h-9 w-9 rounded-full bg-background/95 p-0 shadow-md backdrop-blur md:right-7"
-            aria-label={t("chat.scrollToBottom")}
-            title={t("chat.scrollToBottom")}
-            onClick={onScrollToBottom}
-            data-chat-scroll-to-bottom
-          >
-            <ArrowDown className="h-4 w-4" />
-          </Button>
-        ) : null}
       </div>
+      {showScrollToBottom ? (
+        <Button
+          type="button"
+          variant="outline"
+          className="mr-5 mt-1 h-8 w-8 shrink-0 self-end rounded-full bg-workspace p-0 text-muted-foreground md:mr-7"
+          aria-label={t("chat.scrollToBottom")}
+          title={t("chat.scrollToBottom")}
+          onClick={onScrollToBottom}
+          data-chat-scroll-to-bottom
+        >
+          <ArrowDown className="h-4 w-4" />
+        </Button>
+      ) : null}
       <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock data-chat-composer-has-queue={queued.length ? "" : undefined}>
         <div className="mx-auto max-w-3xl">
           {replyBanner}

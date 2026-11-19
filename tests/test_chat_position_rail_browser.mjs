@@ -122,6 +122,12 @@ try {
   await page.waitForFunction(() => document.getElementById("pinned").textContent === "false");
   await page.waitForFunction(key => document.querySelector('[data-chat-position-marker][aria-current="location"]')?.getAttribute('data-chat-position-marker') === key, key);
   const top = await scroller.evaluate(e => e.scrollTop);
+  const jump = page.locator('[data-chat-scroll-to-bottom]');
+  const jumpBox = await jump.boundingBox();
+  const historyBox = await scroller.boundingBox();
+  const composerBox = await page.locator('[data-chat-composer-dock]').boundingBox();
+  assert.ok(jumpBox.y >= historyBox.y + historyBox.height && jumpBox.y + jumpBox.height <= composerBox.y,
+    "return to latest leaves the history controls and composer unobstructed");
   await page.evaluate(() => window.grow());
   assert.ok(Math.abs(await scroller.evaluate(e => e.scrollTop) - top) < 3, "rail navigation must stop automatic follow of streamed replies");
   await scroller.evaluate(e => { e.scrollTop = 0; });
@@ -212,7 +218,8 @@ try {
   assert.equal(await steerFold.getAttribute('aria-expanded'), 'true', 'the same marker opens the fold again from the keyboard');
   await page.evaluate(() => window.long());
   await page.waitForFunction(() => document.querySelectorAll('[data-chat-position-marker]').length === 260);
-  await scroller.evaluate(e => { e.scrollTop = e.scrollHeight; });
+  await jump.click();
+  await jump.waitFor({ state: "hidden" });
   await page.waitForFunction(() => {
     const marker=document.querySelector('[data-chat-position-marker][aria-current="location"]');
     if(!marker)return false;const r=marker.getBoundingClientRect(),p=marker.parentElement.getBoundingClientRect();

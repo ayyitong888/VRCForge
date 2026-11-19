@@ -35,18 +35,20 @@ export function ChatGptOAuthComposerReasoningControl({
 
   useEffect(() => {
     if (!menuPosition) return;
-    const closeOutside = (event: PointerEvent) => {
+    const closeOutside = (event: PointerEvent | FocusEvent) => {
       const target = event.target as Node;
       if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) setMenuPosition(null);
     };
     const close = () => setMenuPosition(null);
     document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("focusin", closeOutside);
     window.addEventListener("resize", close);
     window.addEventListener("scroll", close, true);
     const selected = menuRef.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]');
     (selected || menuRef.current?.querySelector<HTMLButtonElement>("button"))?.focus();
     return () => {
       document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("focusin", closeOutside);
       window.removeEventListener("resize", close);
       window.removeEventListener("scroll", close, true);
     };
@@ -157,7 +159,7 @@ export function ChatGptOAuthComposerReasoningControl({
         <div ref={menuRef} id={menuId} role="menu" aria-label={t("provider.reasoningEffort")}
           style={{ left: menuPosition.left, bottom: menuPosition.bottom }}
           onKeyDown={navigateMenu}
-          className="fixed z-[80] min-w-36 rounded-xl border border-border/60 bg-card p-1 text-card-foreground shadow-lg shadow-black/10">
+          className="fixed z-40 min-w-36 rounded-xl border border-border/60 bg-card p-1 text-card-foreground shadow-lg shadow-black/10">
           {levels.map((item) => (
             <button key={item.effort} type="button" role="menuitemradio" aria-checked={value === item.effort}
               tabIndex={value === item.effort || (!value && item === levels[0]) ? 0 : -1}

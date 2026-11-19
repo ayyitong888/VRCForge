@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
+import { readFile } from "node:fs/promises";
 import { build } from "esbuild";
+import postcss from "postcss";
+import tailwind from "tailwindcss";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
+const css = (await postcss([tailwind("tailwind.config.ts")]).process(
+  "@tailwind base; @tailwind utilities;\n" + await readFile("src/theme.css", "utf8"),
+  { from: undefined },
+)).css;
 const fixtureSource = `
   import React, { useState } from "react";
   import { createRoot } from "react-dom/client";
@@ -12,16 +19,22 @@ const fixtureSource = `
   import { initReactI18next } from "react-i18next";
   import en from "./src/locales/en-US.json";
   import { Composer } from "./src/components/chat/composer";
+  import { AppUpdatePopup } from "./src/components/ui/app-update-popup";
   i18n.use(initReactI18next).init({ lng: "en-US", resources: { "en-US": { translation: en } } });
   function Fixture() {
     const [level, setLevel] = useState("");
-    return <><button data-set-ultra onClick={() => setLevel("ultra")}>ultra fixture</button>
+    const [updatePrompt, setUpdatePrompt] = useState(null);
+    window.deliverStartupUpdate = () => setUpdatePrompt({ source: "startup", result: { status: "update_available" } });
+    return <main className="relative flex h-screen flex-col overflow-hidden">
+      <div className="flex-1" data-fixture-outside><button data-set-ultra onClick={() => setLevel("ultra")}>ultra fixture</button></div>
       <Composer input="" setInput={() => {}} sending={true} queueAllowed={true}
         onSubmit={() => {}} onSwitchMode={() => {}} providerLabel="ChatGPT" model="gpt-6.1-sol"
         providerReasoningEndpoint={location.origin} providerReasoningLevel={level} onProviderReasoningActivated={async () => {
           const status = await fetch('/api/chatgpt/status').then(r => r.json());
           setLevel(status.activeThinkingLevel);
-        }} /></>;
+        }} />
+      <AppUpdatePopup prompt={updatePrompt} automaticCheckEnabled onAutomaticCheckEnabledChange={() => {}} onDismiss={() => setUpdatePrompt(null)} />
+    </main>;
   }
   createRoot(document.getElementById("root")).render(<Fixture />);
 `;
@@ -53,9 +66,12 @@ const server = createServer((req, res) => {
   } else if (req.url === "/fixture.js") {
     res.setHeader("Content-Type", "text/javascript");
     res.end(bundle.outputFiles[0].text);
+  } else if (req.url === "/fixture.css") {
+    res.setHeader("Content-Type", "text/css");
+    res.end(css);
   } else if (req.url === "/") {
     res.setHeader("Content-Type", "text/html");
-    res.end('<style>#root{position:fixed;bottom:0;left:0;right:0}svg{width:16px;height:16px}.fixed{position:fixed}</style><div id="root"></div><script src="/fixture.js"></script>');
+    res.end('<link rel="stylesheet" href="/fixture.css"><div id="root"></div><script src="/fixture.js"></script>');
   } else {
     res.statusCode = 404;
     res.end();
@@ -100,11 +116,26 @@ try {
   await wait(async () => (await trigger.getAttribute("data-reasoning-value")) === "high", "refreshed composer shows active level");
   await trigger.click();
   assert.equal(await menu.getByRole("menuitemradio", { checked: true }).innerText(), "High");
-  await page.locator("#root > button").click();
+  await page.locator("[data-fixture-outside]").click();
   assert.equal(await menu.count(), 0, "outside click dismisses the menu");
   await page.locator("[data-set-ultra]").click();
   await wait(async () => (await trigger.getAttribute("data-reasoning-value")) === "ultra", "ultra fixture selection displayed");
   assert.match(await trigger.getAttribute("class"), /text-violet-600 dark:text-violet-400/, "ultra uses theme-aware purple while normal levels remain muted");
+  await trigger.click();
+  const lowOption = menu.getByRole("menuitemradio", { name: "Low" });
+  const optionBox = await lowOption.boundingBox();
+  assert.ok(optionBox);
+  await page.evaluate(() => window.deliverStartupUpdate());
+  const update = page.locator("[data-vrcforge-app-update-popup]");
+  await update.waitFor();
+  assert.equal(await page.evaluate(({ x, y, width, height }) => (
+    Boolean(document.elementFromPoint(x + width / 2, y + height / 2)?.closest("[data-vrcforge-app-update-popup]"))
+  ), optionBox), true, "the update modal intercepts clicks at the former option's position");
+  assert.equal(await menu.count(), 0, "modal focus dismisses the workspace menu");
+  assert.equal(await update.locator("[data-vrcforge-app-update-dismiss]").evaluate(el => el === document.activeElement), true);
+  await page.keyboard.press("Enter");
+  assert.equal(await update.count(), 0, "keyboard input acts on the update dialog");
+  assert.equal(activations.length, 1, "the open menu cannot change a model setting after the modal takes focus");
   console.log("ChatGPT OAuth composer reasoning: no silent default, server levels displayed, selected level activated and reflected");
 } finally {
   if (browser) await browser.close();

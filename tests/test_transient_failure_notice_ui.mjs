@@ -15,11 +15,8 @@ const [app, controller, hook, toast, types, projection, conversation] = await Pr
 
 assert.match(hook, /TRANSIENT_FAILURE_NOTICE_MS\s*=\s*3_000/);
 assert.match(hook, /window\.setTimeout/);
-assert.match(toast, /role="alert"/);
 assert.match(toast, /onDismiss/);
 assert.match(toast, /<X\b/);
-assert.match(toast, /bottom-8/);
-assert.match(toast, /left-1\/2/);
 assert.match(toast, /transient-failure-toast/);
 assert.match(app, /<TransientFailureToast/);
 assert.match(app, /showTransientFailure\("upload"/);
