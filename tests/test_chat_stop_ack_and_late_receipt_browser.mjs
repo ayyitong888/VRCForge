@@ -230,10 +230,10 @@ try{
  assert.equal(await page.evaluate(()=>window.chats[0].items.some(i=>i.type==='agent'&&i.response.status==='cancelled')),false,'pending stop cannot invent a cancelled receipt');
  await page.evaluate(()=>window.cancelResolve({ok:false,status:'rejected'}));await page.waitForTimeout(30);
  assert.equal(await page.evaluate(()=>window.sendSignal.aborted),false,'rejected cancellation leaves the real turn and reader active');
- assert.ok(await page.evaluate(()=>window.errors.length>0),'rejected cancellation is visible instead of swallowed');
+ assert.deepEqual(await page.evaluate(()=>window.errors),['chat.stopUnconfirmed'],'rejected cancellation is visible instead of swallowed');
  await page.evaluate(()=>window.controller.stopCurrentRun());await page.evaluate(()=>window.cancelReject(new Error('fixture cancellation identity mismatch')));await page.waitForTimeout(30);
  assert.equal(await page.evaluate(()=>window.sendSignal.aborted),false,'failed cancellation request does not abort the reader');
- assert.ok(await page.evaluate(()=>window.errors.includes('fixture cancellation identity mismatch')),'HTTP cancellation failure remains visible');
+ assert.deepEqual(await page.evaluate(()=>window.errors),['chat.stopUnconfirmed','chat.stopUnconfirmed'],'HTTP cancellation failure shows the same next step without exposing the raw diagnostic');
  await page.evaluate(()=>window.controller.stopCurrentRun());await page.evaluate(()=>window.cancelResolve({ok:true,status:'cancel_requested'}));await page.waitForTimeout(30);
  assert.equal(await page.evaluate(()=>window.sendSignal.aborted),false,'accepted request is not a terminal stop acknowledgement');
  await page.evaluate(()=>window.sendResolve({ok:true,status:'cancelled',...window.identity,observe:{},plan:{reply:'',summary:'',nextStep:'cancelled',planner:'fixture',shellNeeded:false},timeline:[]}));

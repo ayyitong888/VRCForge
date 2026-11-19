@@ -34,8 +34,8 @@ const bundled = await build({
       const mutate = (...args) => window.mutations.push(args);
       return view === "workbench" ? <SubAgentPanel tasks={[task]} loading={false} error="" onOpen={()=>setView("list")}/>
         : <SubAgentSidebar tasks={[task]} openThread={view==="detail"} selected={task} onSelect={()=>setView("detail")}
-          loading={false} error="" onBack={()=>setView("list")} onCancel={mutate} onRetry={mutate} onMerge={mutate}
-          onAdoptNextAction={mutate} onResume={async()=>false}
+          loading={false} error="" onBack={()=>setView("list")} onCancel={mutate} onMerge={mutate}
+          onResume={async()=>false}
           busyTaskIds={new Set()} onClose={()=>setView("workbench")} onIgnoreNotification={current=>{
             const ids=loadSubAgentReviewNotificationIds();
             ids.add(current.id+':'+current.revision+':'+current.parentChatId);

@@ -17,7 +17,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval, AgentQuestion, AgentRuntimeResponse } from "../../lib/api";
 import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
-import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
+import { chatRunErrorKey, projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import { agentRelaySource, displayedUserMessageText } from "../../lib/chat-relay-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
 import { isSelectedTextAttachment } from "../../lib/chat-types";
@@ -36,16 +36,19 @@ import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
 import type { ChatResourceImageContext as ChatResourceImageContextValue } from "../../lib/api/chat-resource-image";
 import { AttachmentStrip } from "./composer";
-import { RunRow, SharedTurnProcessHeader, buildAgentTimelineRows, buildDurableTimelineRows, formatPayload, formatRuntimeModelLine, type SharedTurnProcess } from "./conversation-timeline";
+import { RunRow, SharedTurnProcessHeader, ToolDiagnosticsContext, buildAgentTimelineRows, buildDurableTimelineRows, formatPayload, formatRuntimeModelLine, type SharedTurnProcess } from "./conversation-timeline";
 
 export function ConversationCard({
   item,
+  developerOptionsEnabled = false,
   interleavedUserMessages = [],
   steeringNavAnchorKeys,
   steeringRevealSequence,
   initialUserContent,
   sharedProcess,
-  subAgentActivity,
+  agentReplySupplement,
+  compactAgentReply = false,
+  onOpenSubAgent,
   chatResourceImageContext,
   attachmentPayloads,
   approval,
@@ -76,12 +79,15 @@ export function ConversationCard({
   runtimeActive,
 }: {
   item: Exclude<ConversationItem, { type: "handoff_card" }>;
+  developerOptionsEnabled?: boolean;
   interleavedUserMessages?: Extract<ConversationItem, { type: "user" }>[];
   steeringNavAnchorKeys?: ReadonlyMap<string, string>;
   steeringRevealSequence?: number;
   initialUserContent?: ReactNode;
   sharedProcess?: SharedTurnProcess;
-  subAgentActivity?: ReactNode[];
+  agentReplySupplement?: ReactNode;
+  compactAgentReply?: boolean;
+  onOpenSubAgent?: (taskId: string) => void;
   chatResourceImageContext?: Pick<ChatResourceImageContextValue, "endpoint" | "chatId" | "projectPath">;
   attachmentPayloads?: AttachmentPayloadVault;
   approval?: AgentApproval | null;
@@ -337,14 +343,9 @@ export function ConversationCard({
   }
 
   if (item.type === "error") {
-    // Render by stable code first (localized copy); the bounded schema message
-    // is the fallback and legacy backends only ever supplied that text.
-    const codeKey = item.code ? `errors.runtime.${item.code}` : "";
-    const runtimeUnreachable = item.text === "VRCForge runtime is still starting."
-      || item.text === "Could not connect to the VRCForge runtime.";
-    const codeText = runtimeUnreachable
-      ? t("errors.runtime.runtime_unreachable")
-      : codeKey && t(codeKey) !== codeKey ? t(codeKey) : item.text;
+    const codeKey = chatRunErrorKey(item.code, item.text);
+    const runtimeUnreachable = codeKey === "errors.runtime.runtime_unreachable";
+    const codeText = t(codeKey, { defaultValue: t("chat.runError") });
     return (
       <div className="px-1 py-1 text-xs text-muted-foreground" data-chat-turn-error>
         <div className="flex items-start gap-1.5" role={canRetry ? "alert" : undefined}>
@@ -389,6 +390,7 @@ export function ConversationCard({
       onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
       renderInterleavedUserMessage: renderSteeringMessage,
       onOpenChatById,
+      onOpenSubAgent,
       renderQuestionActions,
     });
     const liveReply = showLiveText ? <div className="text-chat-body" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null;
@@ -399,9 +401,8 @@ export function ConversationCard({
         <div className="relative flex w-full flex-col gap-2.5 text-sm leading-relaxed">
           {initialUserContent}
           {sharedProcess?.first && <SharedTurnProcessHeader process={sharedProcess} />}
-          {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
+          {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline><ToolDiagnosticsContext.Provider value={developerOptionsEnabled}>{timelineRows}</ToolDiagnosticsContext.Provider></div> : null}
           {liveQuestionActions ? <div>{liveReply}{liveQuestionActions}</div> : liveReply}
-          {subAgentActivity}
           {[...unplacedQuestions].map((question) => renderQuestionEntry?.(question, true))}
         </div>
       </div>
@@ -475,12 +476,13 @@ export function ConversationCard({
   }
 
   if (item.type === "timeline_event") {
+    if (item.event.kind === "subagent") return null;
     const timelineRows = buildDurableTimelineRows([item.event], undefined, "", [], { live: true });
     if (!timelineRows.length) return null;
     return (
       <div className="group flex justify-start" data-vrcforge-timeline-event={item.event.kind}>
         <div className="relative w-full max-w-[85%] space-y-1.5">
-          {timelineRows}
+          <ToolDiagnosticsContext.Provider value={developerOptionsEnabled}>{timelineRows}</ToolDiagnosticsContext.Provider>
         </div>
       </div>
     );
@@ -501,7 +503,7 @@ export function ConversationCard({
   // The requested turn model is not proof of the model that answered. Keep
   // historical labels tied to response metadata and omit them when the
   // backend does not report an actual model.
-  const providerLine = formatRuntimeModelLine("", response.model);
+  const providerLine = compactAgentReply ? "" : formatRuntimeModelLine("", response.model);
   const replySource = providerLine;
   const showReplyActions = !sharedProcess || sharedProcess.last;
   const awaitingApproval = shell?.status === "pending_approval";
@@ -518,13 +520,15 @@ export function ConversationCard({
     providerLine,
     awaitingApproval,
     elapsedSeconds: item.elapsedSeconds,
+    hideTurnMetadata: compactAgentReply,
     sharedProcess,
-    hasSubAgentActivity: Boolean(subAgentActivity?.length),
     interleavedUserMessages,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
     renderInterleavedUserMessage: renderSteeringMessage,
     onOpenChatById,
+    onOpenSubAgent,
+    replySupplement: agentReplySupplement,
     renderQuestionActions,
     live: runtimeActive ?? false,
     t,
@@ -536,8 +540,7 @@ export function ConversationCard({
         <div className="relative flex w-full flex-col gap-2.5 text-sm leading-relaxed">
           {initialUserContent}
           {sharedProcess?.first && <SharedTurnProcessHeader process={sharedProcess} />}
-          {timelineRows}
-          {subAgentActivity}
+          <ToolDiagnosticsContext.Provider value={developerOptionsEnabled}>{timelineRows}</ToolDiagnosticsContext.Provider>
           {[...unplacedQuestions].map((question) => renderQuestionEntry?.(question, true))}
           {visionFailure ? (
             <p className="flex items-start gap-1.5 text-xs text-muted-foreground" data-chat-vision-error>
@@ -545,7 +548,7 @@ export function ConversationCard({
               <span className="break-words">{visionFailure.message}</span>
             </p>
           ) : null}
-          <MessageActions
+          {!compactAgentReply ? <MessageActions
             createdAt={showReplyActions ? assistantReplyTimestamp(item) : undefined}
             memoryUsage={response.memoryUsage}
             onCopy={showReplyActions && copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
@@ -554,7 +557,7 @@ export function ConversationCard({
             onSaveAsSkill={saveOperationSummary ? () => onSaveOperationAsSkill?.(saveOperationSummary) : undefined}
             saveOperationTool={saveOperationTool}
             saveOperationClientTurnId={response.clientTurnId}
-          />
+          /> : null}
         </div>
       </div>
     </ChatResourceImageContext.Provider>

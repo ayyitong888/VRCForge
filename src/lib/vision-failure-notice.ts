@@ -28,16 +28,18 @@ function renderFailure(
   failure: Record<string, unknown>,
   translate: TranslateNotice,
 ): VisionFailureNotice {
-  const provider = String(failure.providerLabel || failure.provider || "").trim();
-  const model = String(failure.model || "").trim();
-  const route = [provider, model].filter(Boolean).join(" · ");
-  const error = String(failure.error || translate("notifications.visionFailed")).trim();
-  const retry = failure.retryable === true
-    ? translate("notifications.visionRetryable")
-    : translate("notifications.visionReattach");
+  let reason = "notifications.visionFailed";
+  switch (failure.errorType) {
+    case "input_invalid": reason = "notifications.visionInput"; break;
+    case "provider_rejected": reason = "notifications.visionRejected"; break;
+    case "transient_provider_failure": reason = "notifications.visionBusy"; break;
+  }
+  const message = [translate(reason)];
+  if (failure.retainImages === false) message.push(translate("notifications.visionReattach"));
+  else if (failure.retainImages === true && failure.retryable === true) message.push(translate("notifications.visionRetryable"));
   return {
     kind: "vision",
-    message: `${route ? `${route}: ` : ""}${error} ${retry}`.trim(),
+    message: message.join(" "),
   };
 }
 

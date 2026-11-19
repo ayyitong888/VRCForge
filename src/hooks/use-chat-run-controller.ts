@@ -364,7 +364,7 @@ export function useChatRunController({
         if (chat) chat = getChatById(chat.id);
         if (!chat) {
           if (existingTurn) next.splice(next.indexOf(existingTurn), 1);
-          setError("Queued work could not be matched to one existing chat.");
+          setError(t("chat.queueOwnerNotFound"));
           continue;
         }
         const runtimeSessionId = entry.runtimeSessionId || chat.sessionId || laneId;
@@ -783,8 +783,8 @@ export function useChatRunController({
     if (loadChat && turn.chatId && !getChatById(turn.chatId)) {
       try {
         if (!await loadChat(turn.chatId)) throw new Error(t("chat.sessionRestoreFailed"));
-      } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause), turn.chatId);
+      } catch {
+        setError(t("chat.sessionRestoreFailed"), turn.chatId);
         return "not_accepted";
       }
     }
@@ -1932,7 +1932,9 @@ export function useChatRunController({
             : item),
         }));
         if (savingBeforeDispatch) reportChatSaveError(cause);
-        else if (!abortController.signal.aborted && !notReady) setError(queueFailure?.message || text, chatId);
+        else if (!abortController.signal.aborted && !notReady) {
+          setError(t(rejected ? "chat.queuedMessagePaused" : "chat.queuedDeliveryUnconfirmed"), chatId);
+        }
         void persistChatsNow().catch(reportChatSaveError);
         return false;
       }
@@ -2000,12 +2002,12 @@ export function useChatRunController({
         }));
         if (!savingBeforeDispatch && !sessionFailure) {
           if (options.onFailure) options.onFailure(text);
-          else setError(text, chatId);
+          else setError(t(runtimeRequestStarted ? "chat.runError" : "chat.sendNotStarted"), chatId);
         }
       } else {
         if (!savingBeforeDispatch && !sessionFailure) {
           appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text,
-            ...(cause instanceof ApiError && cause.code ? { code: cause.code } : {}) });
+            code: cause instanceof ApiError && cause.code ? cause.code : runtimeRequestStarted ? undefined : "send_not_started" });
         }
         updateChat(chatId, (current) => ({
           ...touchChat(current),
@@ -2060,12 +2062,12 @@ export function useChatRunController({
       const showStopping = (stopping: boolean) => updateChat(chatId, (chat) => chat.sessionId === sessionId
         ? markRuntimeStreamStopping(chat, clientTurnId, stopping) : chat);
       showStopping(true);
-      const rejectStop = (message: string) => {
+      const rejectStop = () => {
         if (lane.dispatched !== owner) return;
         lane.stopping = false;
         foregroundChanged();
         showStopping(false);
-        setError(message, chatId);
+        setError(t("chat.stopUnconfirmed"), chatId);
       };
       void requestAgentRunCancel(owner.endpoint, {
         sessionId,
@@ -2075,7 +2077,7 @@ export function useChatRunController({
       })
         .then((result) => {
           if (!result.ok) {
-            rejectStop(result.status || "Agent cancellation was not accepted.");
+            rejectStop();
           } else if (result.dispatchStopped && lane.dispatched === owner) {
             owner.stopAcknowledgement = { unityWriteMayHaveExecuted: result.unityWriteMayHaveExecuted === true };
             // The backend owns any submitted write through settlement. Stop
@@ -2083,7 +2085,7 @@ export function useChatRunController({
             controller?.abort();
           }
           void refreshRuntimeRuns(false, owner.endpoint).catch(() => undefined);
-        }, (cause) => rejectStop(cause instanceof Error ? cause.message : String(cause)));
+        }, rejectStop);
     }
     return true;
   }

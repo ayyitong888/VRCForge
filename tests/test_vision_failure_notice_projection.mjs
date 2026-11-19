@@ -17,6 +17,8 @@ const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toStrin
 const { projectVisionFailureNotice } = await import(moduleUrl);
 
 const translate = (key) => ({
+  "notifications.visionRejected": "The AI service didn’t accept this image.",
+  "notifications.visionBusy": "The AI service couldn’t analyze the image just now.",
   "notifications.visionFailed": "Vision failed.",
   "notifications.visionRetryable": "The captured images were retained for retry.",
   "notifications.visionReattach": "Attach or capture the images again before retrying.",
@@ -28,6 +30,7 @@ const permanent = projectVisionFailureNotice({
     provider: "deepseek",
     providerLabel: "DeepSeek",
     model: "deepseek-v4-flash",
+    errorType: "provider_rejected",
     error: "Selected provider rejected image input.",
     retryable: false,
     retainImages: false,
@@ -35,7 +38,7 @@ const permanent = projectVisionFailureNotice({
 }, translate);
 assert.deepEqual(permanent, {
   kind: "vision",
-  message: "DeepSeek · deepseek-v4-flash: Selected provider rejected image input. Attach or capture the images again before retrying.",
+  message: "The AI service didn’t accept this image. Attach or capture the images again before retrying.",
 });
 
 const transient = projectVisionFailureNotice({
@@ -47,6 +50,7 @@ const transient = projectVisionFailureNotice({
           provider: "openai",
           providerLabel: "OpenAI",
           model: "gpt-5.1",
+          errorType: "transient_provider_failure",
           error: "Rate limit.",
           retryable: true,
           retainImages: true,
@@ -57,7 +61,7 @@ const transient = projectVisionFailureNotice({
 }, translate);
 assert.deepEqual(transient, {
   kind: "vision",
-  message: "OpenAI · gpt-5.1: Rate limit. The captured images were retained for retry.",
+  message: "The AI service couldn’t analyze the image just now. The captured images were retained for retry.",
 });
 
 assert.equal(projectVisionFailureNotice({ vision: { status: "ok" } }, translate), null);

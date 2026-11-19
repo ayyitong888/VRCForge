@@ -1,5 +1,5 @@
-import { AlertTriangle, Check, ChevronDown, ChevronRight, CircleStop, Clock, ExternalLink, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
-import { ReactNode, useState } from "react";
+import { AlertTriangle, Bot, Check, ChevronDown, ChevronRight, CircleStop, Clock, ExternalLink, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
+import { createContext, Fragment, ReactNode, useContext, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { presentApproval } from "../../lib/approval-presentation";
@@ -7,12 +7,14 @@ import type { AgentApproval, AgentRuntimeResponse, AgentShellResult, AgentSkillR
 import {
   buildRuntimeStepResultQueues,
   buildTimelinePresentation,
+  chatRunErrorKey,
   hasDurableExecutionEvents,
   isCancellationMarkerTimelineEvent,
   isCancellationMarkerAssistantText,
   isFinalAssistantTimelineEvent,
   isFinalAssistantPresentationEntry,
   runtimeTerminalStatusKey,
+  subAgentTimelineTaskId,
   timelineInvocationDisplayLabel,
   type TimelineBatchKind,
   type TimelineInvocation,
@@ -23,6 +25,7 @@ import { cancelledAgentReplyText, isCancelledRuntimeResponse } from "../../lib/c
 import { isAgentShellResult } from "../../lib/runtime-parsing";
 import { isInterruptedRuntimeTurn, isWaitingForSubAgent } from "../../lib/runtime-run-status";
 import { formatLocalMessageTime } from "../../lib/message-time";
+import { displaySubAgentStatus } from "../../lib/subagent-ui";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -31,6 +34,8 @@ import { OutputBlock } from "../ui/output-block";
 import { ApprovalRevisionEditor } from "../approvals/approval-revision-editor";
 import { ChatCaptureResourcePreview, ChatCaptureThumbnail, ChatMarkdown } from "./chat-markdown";
 import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
+
+export const ToolDiagnosticsContext = createContext(false);
 
 type AgentTimelineStep = NonNullable<AgentRuntimeResponse["steps"]>[number] & {
   actionId?: string;
@@ -70,13 +75,15 @@ export function buildAgentTimelineRows({
   providerLine,
   awaitingApproval,
   elapsedSeconds,
+  hideTurnMetadata = false,
   sharedProcess,
-  hasSubAgentActivity,
   interleavedUserMessages = [],
   interleavedUsersExpanded = false,
   onInterleavedUsersExpandedChange,
   renderInterleavedUserMessage,
   onOpenChatById,
+  onOpenSubAgent,
+  replySupplement,
   renderQuestionActions,
   live = false,
   t,
@@ -93,13 +100,15 @@ export function buildAgentTimelineRows({
   providerLine: string;
   awaitingApproval: boolean;
   elapsedSeconds?: number;
+  hideTurnMetadata?: boolean;
   sharedProcess?: SharedTurnProcess;
-  hasSubAgentActivity?: boolean;
   interleavedUserMessages?: InterleavedUserMessage[];
   interleavedUsersExpanded?: boolean;
   onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
   renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
   onOpenChatById?: (chatId: string) => void;
+  onOpenSubAgent?: (taskId: string) => void;
+  replySupplement?: ReactNode;
   renderQuestionActions?: (reply: string) => ReactNode;
   live?: boolean;
   t: typeof i18n.t;
@@ -127,6 +136,20 @@ export function buildAgentTimelineRows({
           ? { ...step, status: "interrupted" } : step),
     };
   }
+  const failureCode = response.plan.plannerFailure?.code || "";
+  const failureWithoutFinal = Boolean(runtimeTerminalStatusKey(failureCode) && response.plan.reply
+    && !response.timeline?.some((event) => isFinalAssistantTimelineEvent(event)
+      || (event.kind === "assistant" && !event.payload?.phase && event.payload?.status !== "completion_unverified")));
+  const fallbackFailure = failureWithoutFinal ? renderFinalAssistantRow({
+    type: "assistant", id: "agent-terminal-failure", startedAt: "", status: "failed", text: response.plan.reply || "",
+  }, failureCode) : null;
+  if (failureWithoutFinal) {
+    response = {
+      ...response,
+      plan: { ...response.plan, reply: "", summary: "" },
+      steps: response.steps?.filter((step) => !isStepKindAnswer(step.kind)),
+    };
+  }
   const finishStatusRows = (rows: ReactNode[]): ReactNode[] => interrupted ? [...rows,
     ...(interruptedPartial && !response.timeline?.some((event) => event.kind === "assistant" && event.payload?.summary?.trim() === interruptedPartial) ? [
       <div key="interrupted-partial" data-agent-partial-reply className="space-y-1 px-1 text-chat-body" data-chat-quote-content>
@@ -143,7 +166,7 @@ export function buildAgentTimelineRows({
       <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t(response.unityWriteMayHaveExecuted ? "chat.stoppedUnityWriteUnconfirmed" : "chat.cancelled")}</span>
     </div>,
-  ] : (waitingForChild ? !hasSubAgentActivity : backgroundWait) && (!sharedProcess || sharedProcess.last) ? [...rows,
+  ] : (waitingForChild ? !response.timeline?.some((event) => event.kind === "subagent") : backgroundWait) && (!sharedProcess || sharedProcess.last) ? [...rows,
     <div key="waiting-for-tool" data-agent-waiting-for-subagent={waitingForChild || undefined} role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <Clock className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t(waitingForChild ? "subagent.parentWaiting" : "chat.runtimePhase.toolInBackground")}</span>
@@ -151,9 +174,10 @@ export function buildAgentTimelineRows({
   ] : rows;
   const durableTimeline = (response.timeline || []) as ChatTimelineEvent[];
   const finishRows = (rows: ReactNode[]): ReactNode[] => [
-    ...finishStatusRows(rows),
+    ...finishStatusRows(fallbackFailure ? [...rows, fallbackFailure] : rows),
     ...buildCaptureImageRows(response.steps, response.plan.reply, durableTimeline),
   ];
+  const supplement = replySupplement == null ? null : <Fragment key="agent-reply-supplement">{replySupplement}</Fragment>;
   const durableRows = buildDurableTimelineRows(
     durableTimeline,
     elapsedSeconds,
@@ -170,6 +194,7 @@ export function buildAgentTimelineRows({
       onInterleavedUsersExpandedChange,
       renderInterleavedUserMessage,
       onOpenChatById,
+      onOpenSubAgent,
       renderQuestionActions,
       captureText: response.plan.reply,
     },
@@ -223,7 +248,8 @@ export function buildAgentTimelineRows({
     } else if (!fallbackAnswer && shouldSurfaceModelIdentity && planLabel && hasDurableAssistant) {
       rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t, "assistant-model"));
     }
-    return finishStatusRows(rows);
+    if (fallbackFailure) rows.push(fallbackFailure);
+    return [...finishStatusRows(rows), supplement];
   }
   const orderedSteps = normalizeAgentSteps(response.steps);
   const legacyFallback = orderedSteps.length === 0;
@@ -244,7 +270,8 @@ export function buildAgentTimelineRows({
       renderQuestionActions,
       t,
     });
-    if (!sharedProcess && (Number.isFinite(elapsedSeconds) || providerLine)) legacyRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
+    if (supplement) legacyRows.push(supplement);
+    if (!hideTurnMetadata && !sharedProcess && (Number.isFinite(elapsedSeconds) || providerLine)) legacyRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
     if (missingFinalAnswer) legacyRows.push(renderMissingFinalAnswerNotice(t));
     return finishRows(legacyRows);
   }
@@ -311,7 +338,8 @@ export function buildAgentTimelineRows({
     renderQuestionActions,
     t,
   });
-  if (!sharedProcess && Number.isFinite(elapsedSeconds) && !fallbackRows.some((row) => row && typeof row === "object" && "key" in row && (row as { key?: string }).key === "agent-turn-metadata")) {
+  if (supplement) fallbackRows.push(supplement);
+  if (!hideTurnMetadata && !sharedProcess && Number.isFinite(elapsedSeconds) && !fallbackRows.some((row) => row && typeof row === "object" && "key" in row && (row as { key?: string }).key === "agent-turn-metadata")) {
     fallbackRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
   }
   return finishRows(fallbackRows);
@@ -445,15 +473,14 @@ export function buildDurableTimelineRows(
     onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
     renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
     onOpenChatById?: (chatId: string) => void;
+    onOpenSubAgent?: (taskId: string) => void;
     captureText?: string;
     renderQuestionActions?: (reply: string) => ReactNode;
   } = {},
 ): ReactNode[] {
-  // Lifecycle evidence stays durable; the right sidebar owns its presentation.
   // A dropped cancellation marker is replaced by the turn's status row.
   const presentation = buildTimelinePresentation(
-    events.filter((event) => event.kind !== "subagent"
-      && !(options.dropCancellationMarkers && (isCancellationMarkerTimelineEvent(event)
+    events.filter((event) => !(options.dropCancellationMarkers && (isCancellationMarkerTimelineEvent(event)
         || (event.kind === "assistant" && event.payload?.status === "completion_unverified")))),
     elapsedSeconds,
   );
@@ -524,6 +551,24 @@ export function buildDurableTimelineRows(
   ));
   for (const entry of presentation.entries) {
     appendMessagesBefore(entry.startedAt);
+    if (entry.type === "subagent") {
+      flushToolCalls();
+      processRows.push(<SubAgentTimelineRow key={entry.id} event={entry.event} onOpenSubAgent={options.onOpenSubAgent} />);
+      continue;
+    }
+    if (entry.type === "subagent_dispatch") {
+      flushToolCalls();
+      processInvocations.push(entry.invocation);
+      const resuming = entry.invocation.label === "vrcforge_resume_subagent";
+      const cannotResume = resuming && entry.invocation.summary === "this sub-agent role does not support history resume.";
+      processRows.push(<RunRow key={entry.id} icon="subagent"
+        title={i18n.t(resuming ? "chat.childResumeFailed" : "chat.childStartFailed")}
+        statusTone={stepStatusTone(entry.invocation.status)} statusLabel="">
+        <p>{i18n.t(cannotResume ? "chat.childCannotResume" : "chat.childDispatchHelp")}</p>
+        <ToolDiagnostics value={takeFullResult(entry.invocation) ?? entry.invocation.summary} />
+      </RunRow>);
+      continue;
+    }
     if (entry.type === "context_compaction") {
       flushToolCalls();
       processRows.push(
@@ -603,6 +648,31 @@ export function buildDurableTimelineRows(
   }
   rows.push(...buildCaptureImageRows(steps, publicText, events));
   return rows;
+}
+
+function SubAgentTimelineRow({ event, onOpenSubAgent }: {
+  event: ChatTimelineEvent;
+  onOpenSubAgent?: (taskId: string) => void;
+}) {
+  const taskId = subAgentTimelineTaskId(event);
+  const status = event.payload.status || event.payload.subagentStatus || "";
+  const displayStatus = status === "created" ? "queued" : status === "started" ? "running"
+    : status === "cancel_requested" ? "cancelling" : status;
+  const label = event.payload.label || i18n.t("agent.subagentTask");
+  return <div data-subagent-activity={taskId || event.id} data-subagent-status={status}>
+    {taskId && onOpenSubAgent ? (
+      <button type="button" onClick={() => onOpenSubAgent(taskId)}
+        className="flex min-h-8 w-fit max-w-full items-center gap-2 rounded-md px-1 py-1 text-left text-muted-foreground hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <Bot className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span className="min-w-0 truncate text-chat-detail">{label}</span>
+        <span className="shrink-0 text-xs">{displaySubAgentStatus(displayStatus)}</span>
+      </button>
+    ) : <RunRow icon="subagent" title={label} statusTone={stepStatusTone(displayStatus)}
+      statusLabel={displaySubAgentStatus(displayStatus)}>
+      {event.payload.summary && !["failed", "error", "cancelled", "interrupted"].includes(displayStatus)
+        ? <ChatMarkdown text={event.payload.summary} /> : null}
+    </RunRow>}
+  </div>;
 }
 
 function renderFinalAssistantRow(entry: Extract<TimelinePresentationEntry, { type: "assistant" }>, terminalFailureCode: string, questionActions?: ReactNode): ReactNode {
@@ -784,8 +854,9 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
     : ["cancelled", "canceled"].includes(normalizedStatus) ? i18n.t("subagent.statusCancelled")
     : normalizedStatus === "rejected" ? i18n.t("agent.rejected") : "";
   const succeeded = ["ok", "done", "completed", "success", "succeeded", "applied", "executed"].includes(normalizedStatus);
-  const content = detail !== undefined
-    ? formatPayload(detail)
+  const shellOutput = danger ? asAgentShellResult(detail) : undefined;
+  const detailValue = detail ?? invocation.summary;
+  const output = detail !== undefined ? formatPayload(detail)
     : invocation.summary || (invocation.kind === "command" ? `$ ${invocation.label}` : "-");
   const title = invocation.kind === "command"
     ? "Shell"
@@ -807,7 +878,14 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
       <div className="px-2 pb-1 pt-1.5 text-[13px] leading-5 text-muted-foreground">{title}</div>
       <div className="app-scrollbar max-h-[208px] overflow-auto overscroll-contain px-2 py-2 font-mono text-[13px] leading-5 text-muted-foreground select-text">
         <div className="whitespace-pre-wrap break-words">{invocation.label}</div>
-        <pre className="mt-3 whitespace-pre">{content}</pre>
+        {danger ? (
+          <>
+            <ToolFailure kind={shellOutput || invocation.kind === "command" ? "shell" : invocation.kind === "file_edit" ? "write" : "skill"}
+              diagnostic={detailValue} />
+            {shellOutput?.stdout ? <OutputBlock label={i18n.t("shell.output")} value={shellOutput.stdout} /> : null}
+            {shellOutput?.stderr ? <OutputBlock label={i18n.t("shell.errorOutput")} value={shellOutput.stderr} danger /> : null}
+          </>
+        ) : <pre className="mt-3 whitespace-pre">{output}</pre>}
       </div>
       <div
         className={cn(
@@ -820,6 +898,26 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
       </div>
     </div>
   );
+}
+
+function ToolDiagnostics({ value }: { value?: unknown }) {
+  const enabled = useContext(ToolDiagnosticsContext);
+  if (!enabled || value == null || value === "") return null;
+  return <details data-chat-tool-diagnostics className="text-xs">
+    <summary className="cursor-pointer">{i18n.t("chat.toolFailure.diagnostics")}</summary>
+    <pre className="whitespace-pre-wrap break-words">{formatPayload(value)}</pre>
+  </details>;
+}
+
+function ToolFailure({ kind, diagnostic }: { kind: "shell" | "vision" | "skill" | "write"; diagnostic?: unknown }) {
+  const record = diagnostic && typeof diagnostic === "object" ? diagnostic as { errorCode?: unknown; code?: unknown } : undefined;
+  const code = record?.errorCode ?? record?.code;
+  const fallback = i18n.t(`chat.toolFailure.${kind}`);
+  const explanation = typeof code === "string" ? i18n.t(chatRunErrorKey(code), { defaultValue: fallback }) : fallback;
+  return <>
+    <p className="my-2 whitespace-normal font-sans">{explanation}</p>
+    <ToolDiagnostics value={diagnostic} />
+  </>;
 }
 
 function workBatchIcon(kind: TimelineBatchKind): "shell" | "skill" | "plan" {
@@ -913,9 +1011,9 @@ function buildAgentTimelineRowsFromSteps({
             <DataLine label={t("vision.tokens")} value={String(step.usage?.totalTokens || detailedVision?.usage?.totalTokens)} />
           ) : null}
           {detailedVision?.text ? <OutputBlock label={t("vision.analysis")} value={detailedVision.text} /> : null}
-          {detailedVision?.error ? <DataLine label={t("skills.error")} value={detailedVision.error} /> : null}
-          {detailedVision?.reason && stepVisionStatus !== "analyzed" ? <DataLine label={t("vision.reason")} value={detailedVision.reason} /> : null}
-          {step.summary && <OutputBlock label={t("agent.stepSummary")} value={step.summary} />}
+          {detailedVision?.error ? <ToolFailure kind="vision" diagnostic={[detailedVision.error, detailedVision.reason, step.summary].filter(Boolean).join("\n")} /> : null}
+          {detailedVision?.reason && !detailedVision.error && stepVisionStatus !== "analyzed" ? <DataLine label={t("vision.reason")} value={detailedVision.reason} /> : null}
+          {step.summary && !detailedVision?.error && <OutputBlock label={t("agent.stepSummary")} value={step.summary} />}
         </RunRow>,
       );
       continue;
@@ -957,8 +1055,8 @@ function buildAgentTimelineRowsFromSteps({
               {stepShellResult.stderr ? <OutputBlock label={t("shell.errorOutput")} value={stepShellResult.stderr} danger /> : null}
             </>
           ) : stepResult !== undefined ? <PayloadOutputBlock label={t("skills.data")} value={stepResult} /> : null}
-          {step.error || detailedShell?.error ? <DataLine label={t("skills.error")} value={step.error || detailedShell?.error || ""} /> : null}
-          {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
+          {step.error || detailedShell?.error ? <ToolFailure kind="shell" diagnostic={[(step.error || detailedShell?.error), step.summary].filter(Boolean).join("\n")} /> : null}
+          {step.summary && !step.error && !detailedShell?.error ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
       );
       continue;
@@ -972,9 +1070,9 @@ function buildAgentTimelineRowsFromSteps({
         <RunRow key={rowKey} icon="skill" title={stepSkillTool} statusTone={detailedSkill ? skillTone(detailedSkill) : stepStatusTone(stepSkillStatus)} statusLabel={displaySkillStatus(stepSkillStatus)}>
           <DataLine label={t("skills.tool")} value={stepSkillTool} mono />
           {detailedSkill?.category ? <DataLine label={t("skills.category")} value={detailedSkill.category} /> : null}
-          {step.error || detailedSkill?.error ? <DataLine label={t("skills.error")} value={step.error || detailedSkill?.error || ""} /> : null}
+          {step.error || detailedSkill?.error ? <ToolFailure kind="skill" diagnostic={[(step.error || detailedSkill?.error), step.summary].filter(Boolean).join("\n")} /> : null}
           {stepResult !== undefined ? <PayloadOutputBlock label={t("skills.data")} value={stepResult} /> : null}
-          {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
+          {step.summary && !step.error && !detailedSkill?.error ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
       );
       continue;
@@ -990,8 +1088,8 @@ function buildAgentTimelineRowsFromSteps({
           {detailedWrite?.approvalId ? <DataLine label="Approval" value={detailedWrite.approvalId} mono /> : null}
           {detailedWrite?.paramsSummary ? <PayloadDataLine label={t("skills.data")} value={detailedWrite.paramsSummary} /> : null}
           {stepResult !== undefined ? <PayloadOutputBlock label={t("skills.data")} value={stepResult} /> : null}
-          {step.error || detailedWrite?.error ? <DataLine label={t("skills.error")} value={step.error || detailedWrite?.error || ""} /> : null}
-          {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
+          {step.error || detailedWrite?.error ? <ToolFailure kind="write" diagnostic={[(step.error || detailedWrite?.error), step.summary].filter(Boolean).join("\n")} /> : null}
+          {step.summary && !step.error && !detailedWrite?.error ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
       );
       continue;
@@ -1034,7 +1132,7 @@ function buildAgentTimelineRowsFromSteps({
     if (normalizedKind === "shellError" && shell?.error) {
       rows.push(
         <RunRow key={rowKey} icon="shell" title={t("shell.executionError")} statusTone="danger" statusLabel={t("skillStatus.failed")}>
-          <DataLine label={t("skills.error")} value={shell.error} />
+          <ToolFailure kind="shell" diagnostic={shell.error} />
         </RunRow>,
       );
       continue;
@@ -1050,7 +1148,7 @@ function buildAgentTimelineRowsFromSteps({
   if (shell?.error && !steps.some(({ step }) => isStepKindError(step.kind))) {
     rows.push(
       <RunRow key="shell-error-fallback" icon="shell" title={t("shell.executionError")} statusTone="danger" statusLabel={t("skillStatus.failed")}>
-        <DataLine label={t("skills.error")} value={shell.error} />
+        <ToolFailure kind="shell" diagnostic={shell.error} />
       </RunRow>,
     );
   }
@@ -1125,7 +1223,7 @@ function buildLegacyAgentTimelineRows({
         ) : null}
         {vision.status === "analyzed" && vision.usage?.totalTokens ? <DataLine label={t("vision.tokens")} value={String(vision.usage.totalTokens)} /> : null}
         {vision.text ? <OutputBlock label={t("vision.analysis")} value={vision.text} /> : null}
-        {vision.error ? <DataLine label={t("skills.error")} value={vision.error} /> : null}
+        {vision.error ? <ToolFailure kind="vision" diagnostic={vision.error} /> : null}
         {vision.reason && vision.status !== "analyzed" ? <DataLine label={t("vision.reason")} value={vision.reason} /> : null}
       </RunRow>,
     );
@@ -1179,7 +1277,7 @@ function buildLegacyAgentTimelineRows({
       >
         <DataLine label={t("skills.tool")} value={skill.tool || "-"} mono />
         {skill.category ? <DataLine label={t("skills.category")} value={skill.category} /> : null}
-        {skill.error ? <DataLine label={t("skills.error")} value={skill.error} /> : null}
+        {skill.error ? <ToolFailure kind="skill" diagnostic={skill.error} /> : null}
         {skill.result !== undefined ? <PayloadOutputBlock label={t("skills.data")} value={skill.result} /> : null}
       </RunRow>,
     );
@@ -1201,7 +1299,7 @@ function buildLegacyAgentTimelineRows({
   if (shell?.error) {
     rows.push(
       <RunRow key="shell-error" icon="shell" title={t("shell.executionError")} statusTone="danger" statusLabel={t("skillStatus.failed")}>
-        <DataLine label={t("skills.error")} value={shell.error} />
+        <ToolFailure kind="shell" diagnostic={shell.error} />
       </RunRow>,
     );
   }
@@ -1218,7 +1316,7 @@ function buildLegacyAgentTimelineRows({
         {write.approvalId ? <DataLine label="Approval" value={write.approvalId} mono /> : null}
         {write.paramsSummary ? <PayloadDataLine label={t("skills.data")} value={write.paramsSummary} /> : null}
         {write.result ? <PayloadOutputBlock label={t("skills.data")} value={write.result} /> : null}
-        {write.error ? <DataLine label={t("skills.error")} value={write.error} /> : null}
+        {write.error ? <ToolFailure kind="write" diagnostic={write.error} /> : null}
       </RunRow>,
     );
   }
@@ -1345,7 +1443,7 @@ export function RunRow({
   detailCard = false,
   showCompactStatus = false,
 }: {
-  icon: "shell" | "skill" | "plan" | "vision";
+  icon: "shell" | "skill" | "plan" | "vision" | "subagent";
   title: string;
   statusTone: "ok" | "warn" | "danger" | "muted";
   statusLabel: string;
@@ -1355,7 +1453,7 @@ export function RunRow({
   showCompactStatus?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : icon === "vision" ? Eye : ListChecks;
+  const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : icon === "vision" ? Eye : icon === "subagent" ? Bot : ListChecks;
   const compactExecution = icon === "shell" || icon === "skill";
   return (
     <div className="min-w-0 text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>

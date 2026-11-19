@@ -43,22 +43,23 @@ const response = {
 
 const translations = {
   "chat.runtimeTerminal.noProgressMessage": "LOCALIZED_NO_PROGRESS_FAILED_NOT_COMPLETE",
-  "chat.runtimeTerminal.providerPostToolFailureMessage": "LOCALIZED_POST_TOOL_FAILURE_RESULTS_RETAINED",
+  "chat.runtimeTerminal.previousResultsKept": "RESULTS_KEPT",
+  "chat.runtimeTerminal.noOperationsStarted": "NO_OPERATIONS_STARTED",
+  "chat.runtimeTerminal.checkPreviousOperations": "CHECK_PREVIOUS_OPERATIONS",
   "chat.runtimeTerminal.providerTimeoutStatus": "LOCALIZED_PROVIDER_TIMEOUT_STATUS",
   "chat.providerResponseTimedOut": "LOCALIZED_PROVIDER_TIMEOUT",
   "chat.runtimeTerminal.providerRateLimitedStatus": "LOCALIZED_PROVIDER_RATE_LIMITED_STATUS",
   "chat.runtimeTerminal.providerRateLimitedMessage": "LOCALIZED_PROVIDER_RATE_LIMITED",
   "chat.runtimeTerminal.providerCapacityStatus": "LOCALIZED_PROVIDER_CAPACITY_STATUS",
   "chat.runtimeTerminal.providerCapacityMessage": "LOCALIZED_PROVIDER_CAPACITY",
-  "chat.runtimeTerminal.providerPostToolCapacityMessage": "LOCALIZED_POST_TOOL_PROVIDER_CAPACITY",
   "chat.runtimeTerminal.providerRequestFailedStatus": "LOCALIZED_PROVIDER_REQUEST_FAILED_STATUS",
   "chat.runtimeTerminal.providerRequestFailedMessage": "LOCALIZED_PROVIDER_REQUEST_FAILED",
 };
 const localized = projectRuntimeResponseForDisplay(response, (key) => translations[key] || key);
-assert.equal(localized.plan.reply, translations["chat.runtimeTerminal.noProgressMessage"]);
+assert.equal(localized.plan.reply, (`RESULTS_KEPT ${translations["chat.runtimeTerminal.noProgressMessage"]}`));
 assert.equal(localized.timeline[0].payload.summary, response.timeline[0].payload.summary,
   "earlier execution evidence must remain intact");
-assert.equal(localized.timeline.at(-1).payload.summary, translations["chat.runtimeTerminal.noProgressMessage"],
+assert.equal(localized.timeline.at(-1).payload.summary, (`RESULTS_KEPT ${translations["chat.runtimeTerminal.noProgressMessage"]}`),
   "the final assistant display must use the structured reason code, not raw backend prose");
 assert.doesNotMatch(localized.timeline.at(-1).payload.summary, /no repeated command/i,
   "terminal presentation must not make a global claim contradicted by earlier timeline evidence");
@@ -86,8 +87,8 @@ const providerTimeout = projectRuntimeResponseForDisplay({
     plannerFailure: { code: "provider_timeout", phase: "post_tool", retryable: true },
   },
 }, (key) => translations[key] || key);
-assert.equal(providerTimeout.plan.reply, translations["chat.runtimeTerminal.providerPostToolFailureMessage"]);
-assert.equal(providerTimeout.timeline.at(-1).payload.summary, translations["chat.runtimeTerminal.providerPostToolFailureMessage"]);
+assert.equal(providerTimeout.plan.reply, "RESULTS_KEPT LOCALIZED_PROVIDER_TIMEOUT");
+assert.equal(providerTimeout.timeline.at(-1).payload.summary, "RESULTS_KEPT LOCALIZED_PROVIDER_TIMEOUT");
 assert.equal(runtimeTerminalStatusKey("provider_timeout"), "chat.runtimeTerminal.providerTimeoutStatus");
 
 const providerTerminals = [
@@ -111,10 +112,10 @@ for (const terminal of providerTerminals) {
       ...response.plan,
       plannerFailure: { code: terminal.code, phase: "pre_tool", providerError: terminal.providerError },
     },
+    timeline: response.timeline.slice(1),
   }, (key) => translations[key] || key);
-  const suffix = terminal.providerError.statusCode ? " (HTTP 429)" : "";
-  assert.equal(projected.plan.reply, `${translations[terminal.messageKey]}${suffix}`);
-  assert.equal(projected.timeline.at(-1).payload.summary, `${translations[terminal.messageKey]}${suffix}`);
+  assert.equal(projected.plan.reply, `NO_OPERATIONS_STARTED ${translations[terminal.messageKey]}`);
+  assert.equal(projected.timeline.at(-1).payload.summary, projected.plan.reply);
   assert.equal(runtimeTerminalStatusKey(terminal.code), terminal.statusKey);
 }
 
@@ -128,7 +129,7 @@ const genericProviderFailure = projectRuntimeResponseForDisplay({
   timeline: [response.timeline[0]],
 }, (key) => translations[key] || key);
 assert.equal(genericProviderFailure.plan.reply,
-  translations["chat.runtimeTerminal.providerPostToolFailureMessage"]);
+  "RESULTS_KEPT LOCALIZED_PROVIDER_REQUEST_FAILED");
 assert.equal(runtimeTerminalStatusKey("provider_request_failed"),
   "chat.runtimeTerminal.providerRequestFailedStatus");
 assert.equal(genericProviderFailure.timeline.length, 1,
@@ -151,9 +152,18 @@ const postToolCapacity = projectRuntimeResponseForDisplay({
   },
 }, (key) => translations[key] || key);
 assert.equal(postToolCapacity.plan.reply,
-  translations["chat.runtimeTerminal.providerPostToolCapacityMessage"]);
+  "RESULTS_KEPT LOCALIZED_PROVIDER_CAPACITY");
 assert.equal(postToolCapacity.timeline.at(-1).payload.summary,
-  translations["chat.runtimeTerminal.providerPostToolCapacityMessage"]);
+  "RESULTS_KEPT LOCALIZED_PROVIDER_CAPACITY");
+
+const withoutConfirmedResults = (phase) => projectRuntimeResponseForDisplay({
+  ...response,
+  plan: { ...response.plan, plannerFailure: { code: "provider_timeout", phase } },
+  timeline: [response.timeline[1]],
+}, (key) => translations[key] || key);
+assert.equal(withoutConfirmedResults("post_tool").plan.reply, "CHECK_PREVIOUS_OPERATIONS LOCALIZED_PROVIDER_TIMEOUT");
+assert.equal(withoutConfirmedResults(undefined).plan.reply, "LOCALIZED_PROVIDER_TIMEOUT");
+assert.equal(withoutConfirmedResults("initial").plan.reply, "NO_OPERATIONS_STARTED LOCALIZED_PROVIDER_TIMEOUT");
 
 const unknownResponse = {
   ...response,
@@ -204,7 +214,7 @@ const terminalBranch = timelineComponent.slice(
 assert.match(terminalBranch, /role="status"/,
   "no-progress semantics must render as a structured Runtime terminal card");
 assert.doesNotMatch(
-  terminalBranch.slice(terminalBranch.indexOf("terminalStatusKey ? ("), terminalBranch.indexOf(") : (")),
+  terminalBranch.slice(terminalBranch.indexOf("terminalStatusKey ? ("), terminalBranch.indexOf(") : questionActions")),
   /ChatMarkdown/,
   "the structured failure must stay outside the ordinary assistant-reply renderer",
 );

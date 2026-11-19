@@ -99,6 +99,8 @@ let holdNextList = false;
 let holdNextParent = "";
 let holdPost = false;
 let postFailure = true;
+let listFailure = false;
+let missingDetail = false;
 let catalogOnly = false;
 const backend = createHttpServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -118,12 +120,17 @@ const backend = createHttpServer(async (req, res) => {
     return respond({ ok: true, count: 2, path: "fixture.json", chatDigests, chatMetadataShapes });
   }
   if (url.pathname === "/api/app/chats/single") return respond({ ok: true, count: 1, path: "fixture.json", chatDigests, chatMetadataShapes });
+  if (issue === "app-action-errors" && req.method === "POST") {
+    if (url.pathname === "/api/app/agent/goals") return respond({ detail: "Fixture goal storage failure" }, 500);
+    if (url.pathname === "/api/app/chat-attachments/uploads") return respond({ detail: "Fixture attachment format rejected" }, 415);
+  }
   if (url.pathname === "/api/app/session-handoff/send" && req.method === "POST") {
     const handoff = JSON.parse(await readBody(req));
     handoffs.push(handoff);
     return respond({ ok: true, handoff: { id: "fixture-handoff", status: "delivered", source_chat_id: handoff.sourceChatId, target_chat_id: handoff.targetChatId } });
   }
   if (url.pathname === "/api/app/sub-agents" && req.method === "GET") {
+    if (listFailure) return respond({ detail: "Fixture failed listing workers" }, 500);
     const parent = url.searchParams.get("parentChatId");
     const rows = parent ? tasks.filter((task) => task.parentChatId === parent) : tasks.slice(0, 50);
     snapshots.push({ parent, revisions: rows.map((row) => row.revision) });
@@ -151,7 +158,10 @@ const backend = createHttpServer(async (req, res) => {
     merges.push(JSON.parse(await readBody(req)));
     return respond({ detail: "Fixture revision conflict" }, 409);
   }
-  if (url.pathname.startsWith("/api/app/sub-agents/")) return respond({ ok: true, task: detail });
+  if (url.pathname.startsWith("/api/app/sub-agents/")) {
+    if (missingDetail) return respond({ detail: "Fixture missing worker detail" }, 404);
+    return respond({ ok: true, task: detail });
+  }
   return respond({ ok: true, tasks: [], actions: [], questions: [], runs: [], items: [], sources: [], settings: {}, approvals: [] });
 });
 
@@ -372,12 +382,16 @@ try {
     const page = await open();
     const composer = page.locator("[data-chat-composer-dock] textarea:not([disabled])").first();
     await composer.fill("Draft kept in the parent chat");
-    const row = page.locator("[data-subagent-activity]");
+    const process = page.locator("[data-agent-turn-process-group]");
+    await process.waitFor();
+    assert.equal(await page.locator("[data-subagent-activity]").count(), 0);
+    await process.getByRole("button").click();
+    const row = page.locator('[data-subagent-status="completed"]');
     await row.getByText("Completed", { exact: true }).waitFor();
     assert.equal(await row.count(), 1);
     assert.match(await row.innerText(), /Surface worker A/);
     assert.equal(await page.locator("[data-agent-waiting-for-subagent]").count(), 0);
-    await row.click();
+    await row.getByRole("button").click();
     const panel = page.locator("[data-vrcforge-subagent-workspace-surface]");
     await panel.getByText("Surface worker A", { exact: true }).first().waitFor();
     assert.equal(await composer.inputValue(), "Draft kept in the parent chat");
@@ -573,7 +587,8 @@ try {
       assert.deepEqual(posts[0].selectedMaterials, [{ name: "manual-note.txt", content: { text: "manual material sentinel" } }]);
     } else {
       assert.equal(await composer.inputValue(), message, "draft must stay after sending");
-      await page.getByText("Fixture rejected delegation", { exact: true }).first().waitFor();
+      await page.getByText("Couldn't start the subagent. Try sending the request again.", { exact: true }).first().waitFor();
+      assert.equal(await page.getByText("Fixture rejected delegation", { exact: true }).count(), 0);
       assert.equal(await composer.inputValue(), message, "draft must stay after HTTP 400");
       await page.getByText("manual-note.txt", { exact: true }).waitFor();
       assert.deepEqual(posts[0].selectedMaterials, [{ name: "manual-note.txt", content: { text: "manual material sentinel" } }]);
@@ -612,8 +627,43 @@ try {
     await panel.getByRole("button", { name: "Merge into chat" }).click();
     await waitFor(() => merges.length === 1, "merge must reach HTTP");
     const sidebar = page.locator("[data-vrcforge-subagent-sidebar]");
-    await sidebar.getByRole("alert").getByText("Fixture revision conflict", { exact: true }).waitFor();
+    await sidebar.getByRole("alert").getByText("This action is unavailable for the task's current status. Reopen the task to see the latest state.", { exact: true }).waitFor();
+    assert.equal(await sidebar.getByText("Fixture revision conflict", { exact: true }).count(), 0);
     await panel.getByText("Completed", { exact: true }).waitFor();
+    await page.close();
+  }
+  if (issue === "all" || issue === "task-read-errors") {
+    tasks = [done];
+    detail = done;
+    listFailure = true;
+    const page = await open();
+    await openList(page);
+    const sidebar = page.locator("[data-vrcforge-subagent-sidebar]");
+    await sidebar.getByRole("alert").getByText("Couldn't load subagents. Reopen the list to try again.", { exact: true }).waitFor();
+    assert.equal(await sidebar.getByText("Fixture failed listing workers", { exact: true }).count(), 0);
+    listFailure = false;
+    await sidebar.locator("[data-vrcforge-close-subagent-sidebar]").click();
+    await openList(page);
+    missingDetail = true;
+    await openThread(page);
+    await sidebar.getByRole("alert").getByText("This task is unavailable. Return to the subagent list.", { exact: true }).waitFor();
+    assert.equal(await sidebar.getByText("Fixture missing worker detail", { exact: true }).count(), 0);
+    await page.close();
+  }
+  if (issue === "app-action-errors") {
+    const page = await open();
+    const composer = page.locator("[data-chat-composer-dock] textarea").first();
+    const request = "/goal Review the draft";
+    await composer.fill(request);
+    await composer.press("Enter");
+    await page.getByText("Couldn't create the goal. Send it again to retry.", { exact: true }).waitFor();
+    assert.equal(await page.getByText("Fixture goal storage failure", { exact: true }).count(), 0);
+    assert.equal(await composer.inputValue(), request);
+    const files = page.locator('[data-chat-composer-dock] input[type="file"]').first();
+    await files.setInputFiles({ name: "report.zip", mimeType: "application/zip", buffer: Buffer.from("fixture") });
+    await page.getByText("report.zip", { exact: true }).first().waitFor();
+    await page.locator('[title="Couldn\'t save the file because its contents don\'t match a supported format. Add a valid file."]').first().waitFor();
+    assert.equal(await page.locator('[title*="Fixture attachment format rejected"]').count(), 0);
     await page.close();
   }
   console.log(`PASS App browser and fixture HTTP: ${issue}`);

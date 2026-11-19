@@ -1,3 +1,4 @@
+import type { SubAgentTask } from "./api/sub-agents";
 import type { AgentQuestion, AgentRuntimeResponse } from "./api/types";
 import type { ChatTimelineEvent, ConversationItem } from "./chat-types";
 import { normalizeTimelineCaptures } from "./chat-streaming";
@@ -22,6 +23,18 @@ export type TimelinePresentationEntry =
       kind: TimelineBatchKind;
       startedAt: string;
       invocations: TimelineInvocation[];
+    }
+  | {
+      type: "subagent";
+      id: string;
+      startedAt: string;
+      event: ChatTimelineEvent;
+    }
+  | {
+      type: "subagent_dispatch";
+      id: string;
+      startedAt: string;
+      invocation: TimelineInvocation;
     }
   | {
       type: "context_compaction";
@@ -157,14 +170,25 @@ export function timelineInvocationDisplayLabel(label: string): string {
 
 type RuntimePresentationTranslator = (key: string) => string;
 
+export function chatRunErrorKey(code: string | undefined, legacyText?: string): string {
+  if (legacyText === "VRCForge runtime is still starting."
+    || legacyText === "Could not connect to the VRCForge runtime.") return "errors.runtime.runtime_unreachable";
+  if (code === "send_not_started") return "chat.sendNotStarted";
+  return code ? `errors.runtime.${code}` : "chat.runError";
+}
+
 const RUNTIME_FAILURE_MESSAGE_KEYS: Record<string, string> = {
   planner_no_progress: "chat.runtimeTerminal.noProgressMessage",
+  planner_invalid_response: "chat.runtimeTerminal.invalidResponseMessage",
+  turn_failed: "chat.runtimeTerminal.turnFailedMessage",
   provider_timeout: "chat.providerResponseTimedOut",
   provider_connection_failed: "chat.runtimeTerminal.providerConnectionFailedMessage",
   provider_rate_limited: "chat.runtimeTerminal.providerRateLimitedMessage",
   provider_capacity: "chat.runtimeTerminal.providerCapacityMessage",
   provider_auth_failed: "chat.runtimeTerminal.providerAuthFailedMessage",
   provider_request_failed: "chat.runtimeTerminal.providerRequestFailedMessage",
+  provider_not_configured: "chat.providerNotConfigured",
+  provider_token_limit: "chat.runtimeTerminal.inputTooLongMessage",
   checkpoint_restore_failed: "chat.runtimeTerminal.checkpointRestoreFailedMessage",
 };
 
@@ -219,6 +243,10 @@ export function isCancellationMarkerTimelineEvent(event: { kind?: string; payloa
 
 /** Resolve an explicit terminal label from structured Runtime state, never assistant prose. */
 export function runtimeTerminalStatusKey(failureCode = ""): string | undefined {
+  if (failureCode === "planner_invalid_response") return "chat.runtimeTerminal.invalidResponseStatus";
+  if (failureCode === "turn_failed") return "chat.runtimeTerminal.turnFailedStatus";
+  if (failureCode === "provider_not_configured") return "chat.runtimeTerminal.modelNotConnectedStatus";
+  if (failureCode === "provider_token_limit") return "chat.runtimeTerminal.inputTooLongStatus";
   if (failureCode === "planner_no_progress") {
     return "chat.runtimeTerminal.noProgressStatus";
   }
@@ -259,27 +287,30 @@ export function projectRuntimeResponseForDisplay(
     ? "chat.runtimeTerminal.questionContinuationInterruptedMessage"
     : RUNTIME_FAILURE_MESSAGE_KEYS[failureCode];
   if (!failureMessageKey) return response;
-  // A later planning failure cannot erase already executed tools. Missing phase
-  // is unknown, so the code-specific messages must not claim zero execution.
-  const messageKey = failureCode.startsWith("provider_")
-    && response.plan.plannerFailure?.phase === "post_tool"
-    ? failureCode === "provider_capacity"
-      ? "chat.runtimeTerminal.providerPostToolCapacityMessage"
-      : "chat.runtimeTerminal.providerPostToolFailureMessage"
-    : failureMessageKey;
-
-  const providerStatus = response.plan.plannerFailure?.providerError?.statusCode;
-  const displayText = `${translate(messageKey)}${typeof providerStatus === "number" ? ` (HTTP ${providerStatus})` : ""}`;
+  const phase = response.plan.plannerFailure?.phase;
+  const terminalResult = /^(ok|done|completed|success|succeeded|executed|failed|error|rejected)$/i;
+  const hasResult = response.timeline?.some((event) =>
+    ["tool_result", "command", "file_edit"].includes(event.kind || "")
+    && terminalResult.test(event.payload?.status || ""))
+    || response.steps?.some((step) => !("historical" in step && step.historical === true)
+      && step.result != null && terminalResult.test(step.status || ""));
+  const hasOperation = response.timeline?.some((event) =>
+    ["tool_call", "tool_result", "command", "file_edit", "subagent"].includes(event.kind || ""));
+  const showProgress = !interruptedQuestion && failureCode !== "checkpoint_restore_failed";
+  const progressKey = !showProgress ? undefined
+    : hasResult ? "chat.runtimeTerminal.previousResultsKept"
+    : phase === "post_tool" || hasOperation ? "chat.runtimeTerminal.checkPreviousOperations"
+    : phase === "initial" || phase === "pre_tool" ? "chat.runtimeTerminal.noOperationsStarted"
+    : undefined;
+  const displayText = [progressKey && translate(progressKey), translate(failureMessageKey)].filter(Boolean).join(" ");
   const timeline = response.timeline;
-  const hasPhaseTaggedAssistant = Array.isArray(timeline) && timeline.some((event) => (
-    event?.kind === "assistant" && Boolean(assistantPhase(event.payload?.phase))
-  ));
   let finalAssistantIndex = -1;
   if (Array.isArray(timeline)) {
     for (let index = timeline.length - 1; index >= 0; index -= 1) {
       const candidate = timeline[index] as ChatTimelineEvent | undefined;
       if (candidate && (isFinalAssistantTimelineEvent(candidate)
-        || (candidate.kind === "assistant" && !assistantPhase(candidate.payload?.phase) && Boolean(failureCode)))) {
+        || (candidate.kind === "assistant" && !assistantPhase(candidate.payload?.phase)
+          && candidate.payload?.status !== "completion_unverified" && Boolean(failureCode)))) {
         finalAssistantIndex = index;
         break;
       }
@@ -288,12 +319,7 @@ export function projectRuntimeResponseForDisplay(
 
   return {
     ...response,
-    ...(finalAssistantIndex >= 0 || !hasPhaseTaggedAssistant ? {
-      plan: {
-        ...response.plan,
-        reply: displayText,
-      },
-    } : {}),
+    plan: { ...response.plan, reply: displayText },
     ...(Array.isArray(timeline) && finalAssistantIndex >= 0
       ? {
           timeline: timeline.map((event, index) => index === finalAssistantIndex
@@ -363,25 +389,86 @@ function batchKind(event: ChatTimelineEvent): TimelineBatchKind {
   return "process";
 }
 
+export function subAgentTimelineTaskId(event: ChatTimelineEvent): string | undefined {
+  return event.kind === "subagent" ? event.id.match(/^subagent-event-(.+)-\d+$/)?.[1] : undefined;
+}
+
+export function isSubAgentTimelineTool(tool: string | undefined): boolean {
+  return tool === "vrcforge_delegate_subagent" || tool === "vrcforge_resume_subagent"
+    || tool === "vrcforge_wait_for_subagent";
+}
+
+export function subAgentLifecycleItems(task: SubAgentTask, fallbackLabel: string): Extract<ConversationItem, { type: "timeline_event" }>[] {
+  const publicEvents = (task.events || [])
+    .filter((event) => ["created", "started", "completed", "failed", "cancel_requested", "cancelled", "interrupted"].includes(String(event.event || "")))
+    .sort((left, right) => Number(left.revision || 0) - Number(right.revision || 0));
+  if (!publicEvents.length && Number(task.revision || 0) > 0) {
+    publicEvents.push({
+      timestamp: task.updatedAt || task.createdAt,
+      taskId: task.id,
+      event: task.status === "queued" ? "created" : task.status === "running" ? "started" : task.status === "cancelling" ? "cancel_requested" : task.status,
+      revision: task.revision,
+      data: {},
+    });
+  }
+  return publicEvents.map((event) => {
+    const eventName = String(event.event || task.status || "started");
+    const revision = Number(event.revision || task.revision || 0);
+    const timestamp = String(event.timestamp || task.updatedAt || task.createdAt || new Date().toISOString());
+    const eventData = event.data && typeof event.data === "object" ? event.data : {};
+    const summary = String(
+      eventData.summary
+      || eventData.error
+      || (eventName === "created" ? task.task : "")
+      || (eventName === "completed" ? task.summary : "")
+      || (["failed", "cancelled", "interrupted"].includes(eventName) ? task.error : "")
+      || "",
+    );
+    const subagentStatus = eventName === "created"
+      ? "created"
+      : eventName === "started" || eventName === "cancel_requested"
+        ? "started"
+        : eventName === "completed"
+          ? "completed"
+          : "failed";
+    return {
+      id: `subagent-event-${task.id}-${revision}`,
+      type: "timeline_event",
+      createdAt: timestamp,
+      event: {
+        id: `subagent-event-${task.id}-${revision}`,
+        sequence: revision,
+        timestamp,
+        kind: "subagent",
+        sessionId: String(task.parentSessionId || "").slice(0, 180) || undefined,
+        turnId: String(task.parentTurnId || "").slice(0, 180) || undefined,
+        clientTurnId: String(task.parentClientTurnId || "").slice(0, 240) || undefined,
+        payload: {
+          label: task.displayName || fallbackLabel,
+          summary: summary.slice(0, 1000),
+          status: eventName,
+          tool: task.role,
+          subagentStatus,
+        },
+      },
+    };
+  });
+}
+
 function invocationIdentity(event: ChatTimelineEvent): string {
   const actionId = String(event.payload?.actionId || "").trim();
-  if (actionId) return `${event.kind === "subagent" ? "subagent" : "tool"}:${actionId}`;
-  if (event.kind === "subagent") {
-    const lifecycleMatch = event.id.match(/^(subagent-event-.+)-\d+$/);
-    if (lifecycleMatch) return `subagent:${lifecycleMatch[1]}`;
-  }
+  if (actionId) return `tool:${actionId}`;
   return `${batchKind(event)}:${event.id}`;
 }
 
 function materializeInvocations(events: ChatTimelineEvent[]): TimelineInvocation[] {
   const invocations: Array<{ first: ChatTimelineEvent; last: ChatTimelineEvent }> = [];
   const openToolCalls = new Map<string, number[]>();
-  const openSubagents = new Map<string, number>();
   for (const event of events) {
     // Transport lifecycle phases belong to the single live status row. Once a
     // turn is durable they are neither Agent commentary nor user-meaningful
     // work, so do not replay them as four plain-text conversation messages.
-    if (event.kind === "assistant" || event.kind === "phase" || event.kind === "context_compaction") continue;
+    if (["assistant", "phase", "context_compaction", "subagent"].includes(event.kind)) continue;
     const identity = invocationIdentity(event);
 
     // Older supervised request records used file_edit/command before the
@@ -404,18 +491,6 @@ function materializeInvocations(events: ChatTimelineEvent[]): TimelineInvocation
       continue;
     }
 
-    if (event.kind === "subagent") {
-      const currentIndex = openSubagents.get(identity);
-      const index = currentIndex === undefined
-        ? invocations.push({ first: event, last: event }) - 1
-        : currentIndex;
-      invocations[index].last = event;
-      const lifecycle = String(event.payload?.subagentStatus || event.payload?.status || "").toLowerCase();
-      if (["completed", "failed", "cancelled", "canceled"].includes(lifecycle)) openSubagents.delete(identity);
-      else openSubagents.set(identity, index);
-      continue;
-    }
-
     invocations.push({ first: event, last: event });
   }
   return invocations
@@ -424,9 +499,9 @@ function materializeInvocations(events: ChatTimelineEvent[]): TimelineInvocation
       const firstPayload = first.payload || {};
       const lastPayload = last.payload || {};
       return {
-        id: first.id,
+        id: isSubAgentTimelineTool(firstPayload.tool || firstPayload.label) ? last.id : first.id,
         ...(firstPayload.actionId ? { actionId: firstPayload.actionId } : {}),
-        kind: batchKind(first),
+        kind: isSubAgentTimelineTool(firstPayload.tool || firstPayload.label) ? "subagent" : batchKind(first),
         label: firstPayload.label || firstPayload.tool || firstPayload.phase || first.kind,
         summary: lastPayload.summary || firstPayload.summary || "",
         status: lastPayload.status || firstPayload.status || last.kind,
@@ -441,6 +516,9 @@ function interleavedTimelineEntries(
   invocations: TimelineInvocation[],
 ): TimelinePresentationEntry[] {
   const entries: TimelinePresentationEntry[] = [];
+  const startedTaskIds = new Set(ordered
+    .filter((event) => (event.payload.status || event.payload.subagentStatus) === "started")
+    .map(subAgentTimelineTaskId).filter(Boolean));
   const invocationsByFirstEvent = new Map(invocations.map((invocation) => [invocation.id, invocation]));
   let currentBatch: Extract<TimelinePresentationEntry, { type: "batch" }> | undefined;
   const flushBatch = () => {
@@ -448,6 +526,13 @@ function interleavedTimelineEntries(
     currentBatch = undefined;
   };
   for (const event of ordered) {
+    if (event.kind === "subagent") {
+      const status = event.payload.status || event.payload.subagentStatus;
+      if (status === "created" && startedTaskIds.has(subAgentTimelineTaskId(event))) continue;
+      flushBatch();
+      entries.push({ type: "subagent", id: event.id, startedAt: event.timestamp, event });
+      continue;
+    }
     if (event.kind === "context_compaction") {
       if (event.payload.status === "completed") {
         flushBatch();
@@ -471,6 +556,13 @@ function interleavedTimelineEntries(
     }
     const invocation = invocationsByFirstEvent.get(event.id);
     if (!invocation) continue;
+    if (invocation.kind === "subagent") {
+      if (["failed", "error", "rejected", "cancelled", "canceled", "interrupted"].includes(invocation.status.toLowerCase())) {
+        flushBatch();
+        entries.push({ type: "subagent_dispatch", id: event.id, startedAt: event.timestamp, invocation });
+      }
+      continue;
+    }
     if (currentBatch?.kind !== invocation.kind) {
       flushBatch();
       currentBatch = {
@@ -499,7 +591,7 @@ export function buildTimelinePresentation(events: ChatTimelineEvent[] = [], elap
   const invocations = materializeInvocations(ordered);
   const entries = interleavedTimelineEntries(ordered, invocations);
   const hasProcess = invocations.length > 0 || entries.some((entry) => (
-    entry.type === "context_compaction" || (entry.type === "assistant" && entry.phase === "commentary")
+    entry.type === "subagent" || entry.type === "context_compaction" || (entry.type === "assistant" && entry.phase === "commentary")
   ));
   const firstTime = timestampValue(ordered[0].timestamp);
   const lastTime = timestampValue(ordered.at(-1)?.timestamp || "");
@@ -578,17 +670,24 @@ function timelineEventBelongsToAgent(
 ): boolean {
   if (!timelineEventHasOwner(event)) return true;
   const response = item.type === "agent" ? item.response : undefined;
-  const sessionId = response?.sessionId || response?.session_id || "";
-  const turnId = response?.turnId || response?.turn_id || "";
+  const sessionId = (item.type === "streaming" ? item.sessionId : undefined) || response?.sessionId || response?.session_id || "";
+  const turnId = (item.type === "streaming" ? item.turnId : undefined) || response?.turnId || response?.turn_id || "";
   const clientTurnId = (item.type === "streaming" ? item.clientTurnId : "") || response?.clientTurnId || "";
-  return (!event.sessionId || event.sessionId === sessionId)
-    && (!event.turnId || event.turnId === turnId)
+  const matchesStreamingClient = item.type === "streaming" && Boolean(clientTurnId && event.clientTurnId === clientTurnId);
+  return (!event.sessionId || event.sessionId === sessionId || (!sessionId && matchesStreamingClient))
+    && (!event.turnId || event.turnId === turnId || (!turnId && matchesStreamingClient))
     && (!event.clientTurnId || event.clientTurnId === clientTurnId);
 }
 
 /** Keep Runtime and registry facts inside their owning turn card. */
-export function mergeConversationTimelineItems(items: ConversationItem[]): ConversationItem[] {
-  const lifecycleItems = items
+export function mergeConversationTimelineItems(
+  items: ConversationItem[],
+  registryLifecycle: Extract<ConversationItem, { type: "timeline_event" }>[] = [],
+): ConversationItem[] {
+  const storedIds = new Set(items.flatMap((item) => item.type === "timeline_event" ? [item.event.id]
+    : item.type === "agent" ? [...(item.timeline || []), ...(item.response.timeline || [])].map((event) => event.id)
+    : item.type === "streaming" ? (item.timeline || []).map((event) => event.id) : []));
+  const lifecycleItems = items.concat(registryLifecycle.filter((item) => !storedIds.has(item.event.id)))
     .map((item, index) => ({ item, index }))
     .filter((entry): entry is { item: Extract<ConversationItem, { type: "timeline_event" }>; index: number } => entry.item.type === "timeline_event");
   const claimedLifecycleIds = new Set<string>();
@@ -599,9 +698,13 @@ export function mergeConversationTimelineItems(items: ConversationItem[]): Conve
   for (const { item: lifecycle } of lifecycleItems) {
     const timestamp = eventTime(lifecycle);
     const candidates: Array<{ index: number; width: number }> = [];
+    const exactSubAgentOwners: number[] = [];
     for (const [index, item] of items.entries()) {
       if (item.type !== "agent") continue;
       if (!timelineEventBelongsToAgent(lifecycle.event, item)) continue;
+      if (lifecycle.event.kind === "subagent" && (lifecycle.event.turnId || lifecycle.event.clientTurnId)) {
+        exactSubAgentOwners.push(index);
+      }
       const timeline = mergeRuntimeTimelines(materializeRuntimeTimeline(item.response), item.timeline || []);
       const times = timeline.map((event) => timestampValue(event.timestamp)).filter(Number.isFinite);
       if (!times.length) continue;
@@ -610,8 +713,11 @@ export function mergeConversationTimelineItems(items: ConversationItem[]): Conve
       if (timestamp >= start && timestamp <= end) candidates.push({ index, width: end - start });
     }
     const owner = candidates.sort((left, right) => left.width - right.width || left.index - right.index)[0];
-    if (!owner) continue;
-    lifecycleByTurnIndex.set(owner.index, [...(lifecycleByTurnIndex.get(owner.index) || []), lifecycle.event]);
+    // Child completion can follow the parent execution receipt but precede
+    // the linked continuation. Keep it in the owning execution's process.
+    const index = owner?.index ?? (exactSubAgentOwners.length === 1 ? exactSubAgentOwners[0] : undefined);
+    if (index === undefined) continue;
+    lifecycleByTurnIndex.set(index, [...(lifecycleByTurnIndex.get(index) || []), lifecycle.event]);
     claimedLifecycleIds.add(lifecycle.event.id);
   }
 
@@ -620,16 +726,20 @@ export function mergeConversationTimelineItems(items: ConversationItem[]): Conve
   // is replaced by its durable Agent card.
   for (const { item: lifecycle, index: lifecycleIndex } of lifecycleItems) {
     if (claimedLifecycleIds.has(lifecycle.event.id)) continue;
+    const exactSubAgentOwner = lifecycle.event.kind === "subagent" && Boolean(lifecycle.event.clientTurnId || lifecycle.event.turnId);
     for (let index = lifecycleIndex - 1; index >= 0; index -= 1) {
       const candidate = items[index];
-      if (candidate?.type === "agent") break;
+      if (candidate?.type === "agent" && !exactSubAgentOwner) break;
       if (candidate?.type !== "streaming") continue;
-      if (!timelineEventBelongsToAgent(lifecycle.event, candidate)) break;
+      if (!timelineEventBelongsToAgent(lifecycle.event, candidate)) {
+        if (exactSubAgentOwner) continue;
+        break;
+      }
       const timeline = candidate.timeline || [];
       const start = timeline.length
         ? Math.min(...timeline.map((event) => timestampValue(event.timestamp)))
         : timestampValue(candidate.createdAt || "");
-      if (eventTime(lifecycle) >= start) {
+      if (exactSubAgentOwner || eventTime(lifecycle) >= start) {
         lifecycleByTurnIndex.set(index, [...(lifecycleByTurnIndex.get(index) || []), lifecycle.event]);
         claimedLifecycleIds.add(lifecycle.event.id);
       }

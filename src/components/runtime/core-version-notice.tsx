@@ -58,12 +58,12 @@ export function CoreVersionNotice({ detail, bridgeStatus, toolsStatus }: {
         })}
       </p>
       <p className="mt-1 whitespace-normal break-words text-xs">{t(`coreVersion.${key}`, { version: notice.appVersion })}</p>
-      </> : connectionKey === "unknown" && hasConnectionStatus ? (
+      </> : (connectionKey === "unknown" || connectionKey === "connection") && hasConnectionStatus ? (
         <>
-          <p className="mt-1 whitespace-normal break-words text-xs">{t("coreConnection.reviewEditor")}</p>
+          <p className="mt-1 whitespace-normal break-words text-xs">{t(connectionKey === "connection" ? "coreConnection.connection" : "coreConnection.reviewEditor")}</p>
           <details className="mt-1.5 text-xs text-muted-foreground">
             <summary className="w-fit cursor-pointer">{t("coreConnection.moreGuidance")}</summary>
-            <p className="mt-1 whitespace-normal break-words">{t("coreConnection.unknown")}</p>
+            <p className="mt-1 whitespace-normal break-words">{t(connectionKey === "connection" ? "coreConnection.connectionHelp" : "coreConnection.unknown")}</p>
           </details>
         </>
       ) : <p className="mt-1 whitespace-normal break-words text-xs">{t(`coreConnection.${connectionKey}`)}</p>}

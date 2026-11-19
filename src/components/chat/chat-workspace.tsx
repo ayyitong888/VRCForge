@@ -19,16 +19,14 @@ import { projectAgentQuestionContinuation, questionContinuationCancelTarget, que
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
 import { ConversationCard, MessageDateSeparator, StreamingPhaseStatus } from "./conversation-card";
 import { ChatMarkdown } from "./chat-markdown";
-import { SubAgentMark } from "../subagents/sub-agent-panel";
-import { groupSubAgentThreads } from "../../lib/subagent-threads";
-import { displaySubAgentStatus, subAgentRoleLabel } from "../../lib/subagent-ui";
-import type { SubAgentTask } from "../../lib/api/sub-agents";
 import { SessionHandoffCard } from "./session-handoff-card";
 import { SessionHandoffSend, type SessionHandoffTargetChat } from "./session-handoff-send";
 import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-card";
 import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
+import { subAgentLifecycleItems } from "../../lib/chat-timeline-presentation";
+import type { SubAgentTask } from "../../lib/api/sub-agents";
 import { projectConversationSteeringMessages } from "../../lib/chat-steering-projection";
 import { agentReplyPreviewText, conversationItemRenderKey, copyableAgentDialogueText, includesQuestionText } from "../../lib/conversation-utils";
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
@@ -135,6 +133,7 @@ export function ChatWorkspace({
   projectPromptTitle,
   conversationPending = false,
   conversationPendingMessage,
+  developerOptionsEnabled,
   readOnlyHistory = false,
   input,
   setInput,
@@ -391,12 +390,15 @@ export function ChatWorkspace({
       <button type="button" className="shrink-0 rounded border border-border px-2 py-1 hover:bg-muted" onClick={onCancelReply}>{t("common.cancel")}</button>
     </div>
   ) : null;
+  const registryLifecycle = (subAgentTasks || [])
+    .filter((task) => task.parentClientTurnId || task.parentTurnId)
+    .flatMap((task) => subAgentLifecycleItems(task, t("agent.subagentTask")));
   const steeringProjection = projectConversationSteeringMessages(mergeConversationTimelineItems(conversation.filter(
     (item) => item.type !== "user" || !(item.composerQueued || (
       item.queuedFrom && (item.queueStatus === "queued" || item.queueStatus === "waiting_for_resources"
         || item.queueStatus === "paused" || item.queueStatus === "cancelled")
     )),
-  )));
+  ), registryLifecycle));
   const { items: conversationItems, rounds: processRounds } = projectProcessRounds(steeringProjection.items.map((item) => {
     if (item.type !== "question_answer") return item;
     if (item.question !== undefined && item.selectedOptionId !== undefined) return item;
@@ -427,30 +429,6 @@ export function ChatWorkspace({
     return turnOrigins.get(clientTurnId)
       || turnOrigins.get(question.originTurnId || "");
   };
-  const childThreads = useMemo(() => groupSubAgentThreads(subAgentTasks || []), [subAgentTasks]);
-  const childActivity = new Map<ConversationItem, React.ReactNode[]>();
-  if (onOpenSubAgent) childThreads.forEach(({ id, turns }) => {
-    // A follow-up can belong to a later parent turn. Show the latest run in each owning turn.
-    const owners = new Map<ConversationItem, SubAgentTask>();
-    for (const task of turns) {
-      const owner = turnOrigins.get(task.parentClientTurnId || "") || turnOrigins.get(task.parentTurnId || "");
-      if (!owner) continue;
-      const session = owner.type === "agent" ? owner.response.sessionId || owner.response.session_id : owner.sessionId;
-      if (task.parentSessionId && (session || runtimeSessionId) && task.parentSessionId !== (session || runtimeSessionId)) continue;
-      owners.set(owner, task);
-    }
-    for (const [owner, task] of owners) {
-      const row = (
-        <button key={task.id} type="button" data-subagent-activity={task.id} onClick={() => onOpenSubAgent(task.id)}
-          className="flex w-fit max-w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-sm text-muted-foreground hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <SubAgentMark threadId={id} />
-          <span className="truncate">{task.displayName || subAgentRoleLabel(task.role)}</span>
-          <span className="shrink-0 text-xs">{displaySubAgentStatus(task.status)}</span>
-        </button>
-      );
-      childActivity.set(owner, [...(childActivity.get(owner) || []), row]);
-    }
-  });
   const pendingQuestionsByOrigin = new Map<ConversationItem | undefined, AgentQuestion[]>();
   for (const question of pendingQuestionPrompts) {
     const origin = questionOrigin(question);
@@ -890,8 +868,9 @@ export function ChatWorkspace({
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <ConversationCard
                 item={item}
+                developerOptionsEnabled={developerOptionsEnabled}
                 sharedProcess={sharedProcess}
-                subAgentActivity={childActivity.get(item)}
+                onOpenSubAgent={onOpenSubAgent}
                 runtimeActive={itemRuntimeActive}
                 questionAlreadyShown={questionAlreadyShown}
                 pendingQuestions={pendingQuestionsByOrigin.get(item)}

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { build } from "esbuild";
 import { build as buildCss } from "vite";
 import { chromium } from "playwright";
@@ -14,11 +14,39 @@ if (evidence) await mkdir(evidence, { recursive: true });
 const tasks = [
   { id: "first", childSessionId: "child-a", role: "llm_readonly", displayName: "Wardrobe review", task: "Read the original wardrobe layers.", status: "completed", summary: "Short first summary.", createdAt: "2026-10-28T10:00:00Z", canResume: true },
   { id: "second", resumeOf: "first", childSessionId: "child-a", role: "llm_readonly", displayName: "Wardrobe review", task: "Compare the second outfit.", status: "completed", summary: "Short second summary.", createdAt: "2026-10-28T10:01:00Z", canResume: true },
-  { id: "failed", childSessionId: "child-b", role: "llm_readonly", displayName: "Failed inspection", task: "Read the unavailable file.", status: "failed", error: "Fixture file is unavailable.", createdAt: "2026-10-28T10:02:00Z" },
+  { id: "failed", childSessionId: "child-b", role: "llm_readonly", displayName: "Failed inspection", task: "Read the unavailable file.", status: "failed",
+    error: "OSError: invalid handle at fixture-internal-path", summary: "OSError: invalid handle at fixture-internal-path",
+    result: { finalReport: "The source didn’t include a test scene. I checked the material list.", providerRoute: { model: "unverified-route" } },
+    createdAt: "2026-10-28T10:02:00Z" },
   { id: "live", childSessionId: "child-c", role: "llm_readonly", displayName: "Live inspection", task: "Inspect the remaining sleeve.", status: "running", createdAt: "2026-10-28T10:03:00Z" },
   { id: "fixed", role: "outfit_package_inspection", displayName: "Package inspection", task: "Check the package type.",
-    status: "completed", summary: "Recorded package summary.", result: { packageKind: "unitypackage" }, createdAt: "2026-10-28T10:04:00Z" },
+    status: "completed", summary: "Recorded package summary.", result: { packageKind: "unitypackage", proposedNextAction: "Use the package." },
+    events: [{ event: "fixture-completed" }], createdAt: "2026-10-28T10:04:00Z",
+    startedAt: "2026-10-28T10:04:01Z", stoppedAt: "2026-10-28T10:04:04Z" },
 ];
+const realSidecarPath = process.env.VRCFORGE_SUBAGENT_INSPECTION_SIDECAR;
+const realSidecar = realSidecarPath
+  ? JSON.parse(await readFile(realSidecarPath, "utf8"))
+  : null;
+if (realSidecar) {
+  const recovery = JSON.parse(await readFile(resolve(dirname(realSidecarPath), "../sub-agent-recovery.json"), "utf8"));
+  const task = recovery.tasks.find((task) => task.id === realSidecar.taskId);
+  assert(task, "recorded inspection task must match the result sidecar");
+  tasks.push({ id: "recorded-inspection", role: task.role, displayName: task.displayName, task: task.task,
+    createdAt: task.createdAt, startedAt: task.startedAt, stoppedAt: task.stoppedAt,
+    status: task.status, summary: realSidecar.summary, result: realSidecar.result });
+}
+const actualModelPath = process.env.VRCFORGE_SUBAGENT_MODEL_SIDECAR;
+let realModelTask;
+if (actualModelPath) {
+  const sidecar = JSON.parse(await readFile(actualModelPath, "utf8"));
+  const response = sidecar.result.rawResult;
+  assert(response.model && response.clientTurnId === sidecar.taskId);
+  realModelTask = { id: sidecar.taskId, childSessionId: response.sessionId || response.session_id, role: sidecar.result.role,
+    displayName: "Recorded LLM review", task: "Review the existing project", status: "completed", result: sidecar.result,
+    createdAt: response.startedAt, startedAt: response.startedAt, stoppedAt: response.completedAt };
+  tasks.push(realModelTask);
+}
 const event = (sequence, kind, summary, extra = {}) => ({ id: `event-${sequence}`, sequence,
   timestamp: "2026-10-28T10:00:00Z", kind, payload: { summary, ...extra } });
 const first = [
@@ -61,12 +89,14 @@ const bundled = await build({ stdin: { resolveDir: root, loader: "tsx", contents
   import {SubAgentPanel} from './src/components/subagents/sub-agent-panel';
   import {Composer} from './src/components/chat/composer';
   import {ConversationCard} from './src/components/chat/conversation-card';
+  import {conversationItemText} from './src/lib/conversation-utils';
   import {SubAgentSidebar} from './src/components/subagents/sub-agent-sidebar';
   import {resumeSubAgent} from './src/lib/api/sub-agents';
   const initial=${JSON.stringify(tasks)},Sidebar=${baseline ? 'SubAgentPanel' : 'SubAgentSidebar'};
   const parentUser={id:"parent-initial",type:"user",text:initial[0].task,createdAt:initial[0].createdAt};
   const parentTurn={id:"parent-turn",type:"agent",response:{...${JSON.stringify(firstResult)},timeline:${JSON.stringify(first)}},elapsedSeconds:12};
-  function Fixture(){ const [tasks,setTasks]=useState(initial),[selected,setSelected]=useState(null),[open,setOpen]=useState(false),[visible,setVisible]=useState(true),[draft,setDraft]=useState('');
+  function Fixture(){ const [tasks,setTasks]=useState(initial),[selected,setSelected]=useState(null),[open,setOpen]=useState(false),[visible,setVisible]=useState(true),[draft,setDraft]=useState(''),[developer,setDeveloper]=useState(false);
+    window.setDeveloper=setDeveloper;
     window.onlyFailed=()=>setTasks([initial[2]]);window.resetTasks=()=>setTasks(initial);window.setLanguage=lng=>i18n.changeLanguage(lng);window.manyDone=()=>setTasks(Array.from({length:24},(_,n)=>({...initial[1],id:"history-"+n,childSessionId:"history-child-"+n,displayName:"Completed review "+n,resumeOf:undefined})));window.cancelled=[];
     const noop=()=>{};const choose=id=>{setSelected(tasks.find(t=>t.id===(id||tasks[0]?.id)));setOpen(true);setVisible(true)};
     async function resume(id,question){const p=await resumeSubAgent(location.origin,id,{task:question});setTasks(v=>[...v,p.task]);setSelected(p.task);return true}
@@ -79,8 +109,8 @@ const bundled = await build({ stdin: { resolveDir: root, loader: "tsx", contents
         <div className="p-4" data-main-composer><Composer input={draft} setInput={setDraft} sending={false} onSubmit={event=>event?.preventDefault()} onSwitchMode={noop} compact /></div>
       </section>
       <div className="min-h-0 overflow-hidden bg-workspace">{visible?<Sidebar endpoint={location.origin} tasks={tasks} selected={selected} roles={[{id:"llm_readonly",title:"Reviewer"}]}
-        openThread={open} loading={false} error="" onOpen={choose} onSelect={choose} onCancel={id=>window.cancelled.push(id)} onRetry={noop} onResume={resume}
-        onMerge={noop} onIgnoreNotification={noop} onAdoptNextAction={noop} busyTaskIds={new Set()}
+        openThread={open} developerOptionsEnabled={developer} loading={false} error="" onOpen={choose} onSelect={choose} onCancel={id=>window.cancelled.push(id)} onResume={resume}
+        onMerge={noop} onIgnoreNotification={noop} onCopyItem={item=>window.copiedReply=conversationItemText(item,i18n.t)} busyTaskIds={new Set()}
         onBack={()=>setOpen(false)} onClose={()=>setVisible(false)}/>:<button data-open-subagents onClick={()=>setVisible(true)}>Open subagents</button>}</div>
     </main>}
   document.documentElement.classList.remove('dark');
@@ -100,6 +130,11 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === "/api/app/agent/runs/timeline") {
     const turn = url.searchParams.get("clientTurnId");
+    if (turn === "failed") {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ detail: "Fixture timeline backend failure" }));
+      return;
+    }
     if (turn === "first" && failFirstTimeline) { failFirstTimeline = false; res.writeHead(503); res.end(); return; }
     let events = turn === "first" ? first : turn === "second" ? [event(0,"assistant","Full second-turn report.",{phase:"final_answer",status:"completed"})] : [];
     if (turn === "live") { liveReads++;events = [event(0,"assistant","Inspecting the sleeve."),...(liveReads>1?[event(1,"assistant","Fresh running update arrived.",{phase:"final_answer",status:"completed"})]:[])]; }
@@ -136,20 +171,73 @@ try {
   await page.locator('[data-vrcforge-subagent-sidebar-list]').waitFor();
   assert.equal(await page.locator('[data-vrcforge-open-subagent-thread]').count(),24,"Back preserves expanded history rather than resetting to ten rows");
   await page.evaluate(()=>window.onlyFailed());
-  assert.equal(await page.locator('[data-vrcforge-open-subagent-thread="child-b"]').count(),1,"failed-only child must remain reachable in sidebar");
-  await page.locator('[data-vrcforge-open-subagent-thread="child-b"]').click();
+  const failedThread = page.locator('[data-vrcforge-open-subagent-thread="child-b"]');
+  assert.equal(await failedThread.count(),1,"failed-only child must remain reachable in sidebar");
+  await failedThread.getByText("The sub-agent couldn’t finish this task. Try running it again.").waitFor();
+  assert.doesNotMatch(await failedThread.innerText(), /OSError|fixture-internal-path/);
+  await failedThread.click();
   const surface=page.locator('[data-vrcforge-subagent-workspace-surface]');
-  await surface.getByText("Fixture file is unavailable.",{exact:true}).waitFor();
+  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model not recorded");
+  assert.doesNotMatch(await surface.innerText(), /unverified-route/);
+  await surface.getByText("The sub-agent couldn’t finish this task. Try running it again.",{exact:true}).waitFor();
+  await surface.getByText("The source didn’t include a test scene. I checked the material list.", {exact:true}).waitFor();
+  await surface.getByText("Couldn’t load the conversation history. Refresh to try again.", {exact:true}).waitFor();
+  assert.doesNotMatch(await surface.innerText(), /OSError|fixture-internal-path|Fixture timeline backend failure/);
+  await page.evaluate(() => window.setDeveloper(true));
+  await surface.locator("[data-subagent-technical-details]").click();
+  await surface.getByText("OSError: invalid handle at fixture-internal-path", {exact:false}).waitFor();
+  await surface.getByText("Fixture timeline backend failure", {exact:false}).waitFor();
+  await page.evaluate(() => window.setDeveloper(false));
   await surface.locator('[data-vrcforge-subagent-back]').click();
   await page.locator('[data-vrcforge-subagent-sidebar-list]').waitFor();
   assert.equal(await page.locator("[data-main-composer] textarea").inputValue(),"Keep this parent draft","back must preserve parent draft");
   await page.evaluate(()=>window.resetTasks());
   await page.locator('[data-vrcforge-open-subagent-thread="fixed"]').click();
   await surface.getByText("Recorded package summary.", { exact: true }).waitFor();
+  assert.equal(await surface.getByText("Recorded package summary.", { exact: true }).count(), 1);
+  assert.equal(await surface.locator("details").count(), 0, "default child view has no native raw result disclosure");
+  const technicalDetails = surface.locator("[data-subagent-technical-details]");
+  assert.equal(await technicalDetails.count(), 0);
+  await page.evaluate(() => window.setDeveloper(true));
+  await technicalDetails.waitFor();
+  assert.equal(await technicalDetails.count(), 1, "result and event history share one entry");
+  assert.equal(await technicalDetails.getAttribute("aria-expanded"), "false");
+  assert.equal(await surface.getByText('"packageKind": "unitypackage"', { exact: false }).count(), 0);
+  await technicalDetails.click();
+  await surface.getByText('"packageKind": "unitypackage"', { exact: false }).waitFor();
+  await surface.getByText("fixture-completed", { exact: false }).waitFor();
+  await page.evaluate(() => window.setDeveloper(false));
+  await technicalDetails.waitFor({ state: "detached" });
+  assert.equal(await surface.getByText("fixture-completed", { exact: false }).count(), 0);
   assert.equal(await surface.getByRole("button", { name: "Ask a follow-up", exact: true }).count(), 0);
-  assert.equal(await surface.locator("[data-subagent-model]").count(), 0);
+  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Local file inspection");
+  assert.match(await surface.locator("[data-subagent-model]").getAttribute("title"), /No AI model used/);
+  assert.match(await surface.locator("[data-subagent-duration]").innerText(), /3s/);
+  assert.equal(await surface.locator("[data-agent-turn-metadata]").count(), 0);
+  await surface.locator("header [data-subagent-copy-reply]").click();
+  assert.equal(await page.evaluate(() => window.copiedReply), "Recorded package summary.");
+  assert.equal(await surface.getByRole("button", {name: "Retry as new task", exact: true}).count(), 0);
+  assert.equal(await surface.getByRole("button", {name: "Use as input", exact: true}).count(), 0);
   assert.equal(requests.some(request => request.turn === "fixed"), false);
   await surface.locator('[data-vrcforge-subagent-back]').click();
+  if (realSidecar) {
+    await page.locator('[data-vrcforge-open-subagent-thread="recorded-inspection"]').click();
+    const card = surface.locator('[data-vrcforge-agent-client-turn="recorded-inspection"]');
+    const inspection = card.locator("[data-subagent-inspection-report]");
+    await inspection.waitFor();
+    assert.equal(await card.locator("[data-agent-turn-metadata]").count(), 0, "elapsed belongs in the panel header");
+    assert.equal(await card.locator("[data-chat-message-actions]").count(), 1, "only the user's timestamp remains in the thread");
+    assert.match(await surface.locator("header [data-subagent-duration]").innerText(), /1s/);
+    assert.equal(await surface.locator("header [data-subagent-copy-reply]").count(), 1);
+    assert.equal(await card.locator("pre").count(), 0, "the real inspection receipt is not rendered as JSON");
+    assert.equal(await surface.locator("[data-subagent-technical-details]").count(), 0);
+    await surface.locator('[data-vrcforge-subagent-back]').click();
+  }
+  if (realModelTask) {
+    await page.locator(`[data-vrcforge-open-subagent-thread="${realModelTask.childSessionId}"]`).click();
+    assert.equal(await surface.locator("header [data-subagent-model]").innerText(), realModelTask.result.rawResult.model);
+    await surface.locator('[data-vrcforge-subagent-back]').click();
+  }
   assert.equal(await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').count(),1,"resume turns must share one sidebar row");
   await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').click();
   await surface.getByText("Full original report beyond page 200.",{exact:true}).waitFor();
@@ -182,7 +270,7 @@ try {
   const parentText = await parentCard.innerText();
   const childText = await childCard.innerText();
   contentOrder(parentText);
-  assert.equal(childText, parentText);
+  contentOrder(childText);
   assert(requests.some(request => request.path === "/api/app/sub-agents/first"), "prior turn details are read when the list omits its result");
   for(const mode of ['light','dark','wallpaper']) {
     await page.evaluate(mode=>{
@@ -218,6 +306,7 @@ try {
   await page.locator('[data-vrcforge-subagent-sidebar-list]').waitFor();
   assert.equal(await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').count(),1);
   await page.locator('[data-vrcforge-open-subagent-thread="child-c"]').click();
+  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model pending");
   await surface.getByText("Fresh running update arrived.",{exact:true}).waitFor();
   assert(liveReads>=2,"running conversation must refresh without reopening");
   await surface.locator('[data-vrcforge-subagent-back]').click();

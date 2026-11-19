@@ -14,31 +14,13 @@ const saveErrorHelper = ts.transpileModule(
 ).outputText;
 class HelperApiError extends Error { constructor(status, message, detail) { super(message); this.status = status; this.detail = detail; } }
 const chatSaveErrorMessage = new Function("ApiError", `${saveErrorHelper}\nreturn chatSaveErrorMessage;`)(HelperApiError);
-assert.equal(
-  chatSaveErrorMessage(new HelperApiError(413, "Chat payload exceeds the 16 MiB save limit."), "blocked"),
-  "Chat payload exceeds the 16 MiB save limit.",
-  "413 must expose an accurate retryable save error",
-);
-assert.equal(
-  chatSaveErrorMessage(new HelperApiError(500, "Runtime is temporarily unavailable."), "blocked"),
-  "Runtime is temporarily unavailable.",
-  "temporary failures must remain retryable and accurate",
-);
-assert.equal(
-  chatSaveErrorMessage(new HelperApiError(409, "HTTP 409", { code: "chat_snapshot_conflict" }), "blocked", "conflict"),
-  "conflict",
-  "ordinary CAS conflicts must not be reported as damaged storage",
-);
-assert.equal(
-  chatSaveErrorMessage(new HelperApiError(409, "HTTP 409", { detail: { code: "chat_store_recovery_required" } }), "blocked", "conflict"),
-  "blocked",
-  "only the recovery-required error opens Doctor guidance",
-);
-assert.equal(
-  chatSaveErrorMessage(new Error("Local bridge temporarily unavailable."), "blocked"),
-  "Local bridge temporarily unavailable.",
-  "bridge failures must not be mislabeled as source recovery",
-);
+const translate = key => key;
+const failureCopy = (cause) => chatSaveErrorMessage(cause, "chat.saveUnavailable", translate);
+assert.equal(failureCopy(new HelperApiError(413, "Chat payload exceeds the 16 MiB save limit.")), "chat.saveTooLarge");
+assert.equal(failureCopy(new HelperApiError(500, "Internal Server Error")), "chat.saveUnavailable");
+assert.equal(failureCopy(new HelperApiError(409, "HTTP 409", { code: "chat_snapshot_conflict" })), "chat.sessionSaveConflict");
+assert.equal(failureCopy(new HelperApiError(409, "HTTP 409", { detail: { code: "chat_store_recovery_required" } })), "chat.sessionSaveBlocked");
+assert.equal(failureCopy(new Error("Local bridge temporarily unavailable.")), "chat.saveUnavailable");
 // Reproduce a passive effect from an earlier render arriving between deltas.
 // Execute the real chats-only effects, if any, against that earlier snapshot.
 const chatsOnlyEffects = [];
@@ -89,6 +71,7 @@ assert.equal(mutatorPorts.chatsRef.current[0].items[0].text, "firstsecond", "rap
 assert.equal(mutatorPorts.savedSnapshot[0].items[0].text, "firstsecond", "the persisted snapshot must read the mutation-owned ref");
 assert.equal(mutatorPorts.dirty, 2);
 const functions = [
+  source.slice(source.indexOf("function isStableChatSaveRejection("), source.indexOf("type UseChatSessionsParams")),
   source.slice(source.indexOf("  async function saveWithOneReconcileRetryWithinStorageOperation("), source.indexOf("\n  useEffect(() => {", source.indexOf("  async function saveWithOneReconcileRetryWithinStorageOperation("))),
   source.slice(source.indexOf("  function enqueueChatSave("), source.indexOf("\n  function touchChat(", source.indexOf("  function enqueueChatSave("))),
 ].join("\n");
@@ -102,12 +85,13 @@ function fixture(status, failures = 1) {
   const chatsSaveVersionRef = { current: 1 };
   const error = new ApiError(status);
   const ports = {
+    chatAutosaveFailureVersionRef: { current: null },
     ApiError, chatsRef, chatsDirtyRef, chatsSaveVersionRef, chatServerDigestsRef: { current: undefined }, endpoint: "fixture",
     filterPersistableChats: value => value,
     collectChatStorageProjectPaths: () => [],
     enqueueChatStorageOperation: fn => fn(),
     saveChatSnapshotWithinStorageOperation: async () => { if (++calls.save <= failures) throw error; chatsDirtyRef.current = false; },
-    fetchChats: async () => { calls.fetch++; return {}; },
+    fetchLoadedChatSnapshot: async () => { calls.fetch++; return {}; },
     reconcileFetchedChatStorage: async () => { calls.reconcile++; return { status: "ready" }; },
   };
   const save = new Function(...Object.keys(ports), js + "\nreturn persistChatsNow;")(...Object.values(ports));

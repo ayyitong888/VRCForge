@@ -1,26 +1,19 @@
 import { AlertCircle, Loader2, Square, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { useTranslation } from "react-i18next";
+import type { SubAgentRole } from "../../lib/api";
 import { elapsedSecondsSince } from "../../lib/chat-streaming";
 import { canCancelSubAgentTask } from "../../lib/subagent-merge";
 import { groupSubAgentThreads } from "../../lib/subagent-threads";
-import { displaySubAgentStatus, isActiveSubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
+import { displaySubAgentStatus, isActiveSubAgentStatus, subAgentRoleLabel, subAgentStatusTone, subAgentTaskIssueText } from "../../lib/subagent-ui";
 import { SubAgentMark } from "./sub-agent-panel";
 import { SubAgentWorkspaceSurface } from "./sub-agent-workspace-surface";
 import { Button } from "../ui/button";
 
-function subAgentTaskErrorText(task: { error?: string; errorCode?: string }, t: (key: string) => string): string {
-  const code = task.errorCode?.trim() || "";
-  if (code) {
-    const localized = t(`subagent.errors.${code}`);
-    if (localized !== `subagent.errors.${code}`) return localized;
-  }
-  return task.error?.trim() ? task.error.trim().slice(0, 500) : "";
-}
-
 type SurfaceProps = ComponentProps<typeof SubAgentWorkspaceSurface>;
 
 export type SubAgentSidebarProps = Omit<SurfaceProps, "onClose" | "onCloseSidebar"> & {
+  roles?: SubAgentRole[];
   onSelect: (taskId: string) => void;
   openThread: boolean;
   onBack: () => void;
@@ -50,7 +43,7 @@ function ThreadListRow({
   onSelect: (taskId: string) => void;
   onCancel: (taskId: string) => void;
   busy: boolean;
-  roles: NonNullable<SurfaceProps["roles"]>;
+  roles: SubAgentRole[];
   now: number;
 }) {
   const { t, i18n } = useTranslation();
@@ -68,7 +61,7 @@ function ThreadListRow({
   const elapsed = Number.isFinite(end) ? elapsedSecondsSince(task.startedAt, end) : undefined;
   const timeLabel = compactDuration(elapsed, i18n.language);
   const name = task.displayName || subAgentRoleLabel(task.role, roles) || task.id;
-  const errorText = subAgentTaskErrorText(task, t);
+  const errorText = subAgentTaskIssueText(task);
   const summary = (errorText || task.summary || task.task || "").trim().split(/\r?\n/).filter((line) => line.trim()).at(-1)?.trim();
 
   return (
@@ -119,7 +112,7 @@ function ThreadSection({
   onSelect: (taskId: string) => void;
   onCancel: (taskId: string) => void;
   busyTaskIds: ReadonlySet<string>;
-  roles: NonNullable<SurfaceProps["roles"]>;
+  roles: SubAgentRole[];
   done?: boolean;
   now: number;
 }) {
@@ -193,7 +186,7 @@ export function SubAgentSidebar({
       </div> : null}
       {openThread ? (
         <div className="min-h-0 flex-1 overflow-hidden" data-vrcforge-subagent-sidebar-thread>
-          <SubAgentWorkspaceSurface {...surfaceProps} tasks={tasks} roles={roles} selected={surfaceProps.selected}
+          <SubAgentWorkspaceSurface {...surfaceProps} tasks={tasks} selected={surfaceProps.selected}
             onClose={onBack} onCloseSidebar={onClose} />
         </div>
       ) : null}

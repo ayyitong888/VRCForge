@@ -126,6 +126,7 @@ import {
 import { useDashboardProjectSelection } from "./hooks/use-dashboard-project-selection";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import { isUnstartedChat } from "./lib/chat-thread";
+import { subAgentLifecycleItems } from "./lib/chat-timeline-presentation";
 import { runtimeActivityCancelTarget, runtimeActivityOwner, useRuntimeTurnActivity } from "./hooks/use-runtime-turn-activity";
 import { isExternalRuntimeStream, markRuntimeStreamStopping } from "./lib/runtime-stream-owner";
 import {
@@ -175,7 +176,7 @@ import {
   isMarkdownSmokeMode,
 } from "./lib/markdown-smoke";
 import { delegateMaterials, parseDelegateCommand } from "./lib/subagent-delegate";
-import { isAwaitingMergeReview, isMergedAdopted, isParentDeliveryPending, subAgentAdoptedHistoryItem, subAgentProposedNextAction } from "./lib/subagent-merge";
+import { isAwaitingMergeReview, isMergedAdopted, isParentDeliveryPending, subAgentAdoptedHistoryItem } from "./lib/subagent-merge";
 import {
   AGENT_QUESTION_NOTIFICATION_ACTION_EVENT,
   parseAgentQuestionNotificationAction,
@@ -219,7 +220,6 @@ import {
   resumeSubAgent,
   refreshProjects,
   setAppSessionToken,
-  retrySubAgent,
   updateAgentGoal,
   updatePermission,
   updateAdvancedSettings,
@@ -358,6 +358,12 @@ export default function App() {
   const [settingsSearchSelection, setSettingsSearchSelection] = useState<SettingsSearchSelection | null>(null);
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
+  const actionErrorMessage = useCallback((key: string, cause: unknown, values?: Record<string, string>) => {
+    if (developerOptionsEnabled) console.warn(key, cause);
+    return t(key, values);
+  }, [developerOptionsEnabled, t]);
+  const actionErrorMessageRef = useRef(actionErrorMessage);
+  actionErrorMessageRef.current = actionErrorMessage;
   const [developerOptionsEverEnabled, setDeveloperOptionsEverEnabled] = useState(false);
   const [computerUseEnabled, setComputerUseEnabled] = useState(false);
   const [computerUseEverEnabled, setComputerUseEverEnabled] = useState(false);
@@ -1465,11 +1471,11 @@ export default function App() {
           .catch((cause) => {
             knownApprovalNotificationIdsRef.current.delete(approval.id);
             exhaustedApprovalNotificationIdsRef.current.add(approval.id);
-            setError(cause instanceof Error ? cause.message : String(cause));
+            setError(actionErrorMessage("appActionError.notifyApproval", cause));
           }),
         );
     }
-  }, [agentApprovals, pendingApprovalItems, t]);
+  }, [agentApprovals, pendingApprovalItems, actionErrorMessage, t]);
 
   useEffect(() => {
     if (!isTauriRuntime() || !runtimeConnected) {
@@ -1574,11 +1580,11 @@ export default function App() {
             knownSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
             inFlightSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
             exhaustedSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
-            setError(cause instanceof Error ? cause.message : String(cause));
+            setError(actionErrorMessage("appActionError.notifySubagent", cause));
           }),
       );
     }
-  }, [sidebarChats, runtimeConnected, subAgentList, t, toReviewNotificationId]);
+  }, [sidebarChats, runtimeConnected, subAgentList, actionErrorMessage, t, toReviewNotificationId]);
 
   useLayoutEffect(() => {
     subAgentReviewRuntimeConnectedRef.current = runtimeConnected;
@@ -1632,11 +1638,11 @@ export default function App() {
           setSelectedSubAgentPanelOpen(true);
         } catch (cause) {
           handledSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
-          setError(cause instanceof Error ? cause.message : String(cause));
+          setError(actionErrorMessage("appActionError.openSubagent", cause));
         }
       })();
     };
-  }, [endpoint, loadChat, openChat, runtimeConnected, t]);
+  }, [endpoint, loadChat, openChat, runtimeConnected, actionErrorMessage, t]);
 
   useEffect(() => {
     if (runtimeConnected) {
@@ -1683,7 +1689,7 @@ export default function App() {
           reopenAgentQuestion(question.questionId);
           setReviewQuestionReveal({ chatId: chat.id, questionId: question.questionId });
         }
-      })().catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)));
+      })().catch((cause) => active && setError(actionErrorMessage("appActionError.openQuestion", cause)));
     })
       .then((unlisten) => {
         if (active) {
@@ -1692,12 +1698,12 @@ export default function App() {
           unlisten();
         }
       })
-      .catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)));
+      .catch((cause) => active && setError(actionErrorMessage("appActionError.questionNotificationLink", cause)));
     return () => {
       active = false;
       unlistenQuestionAction?.();
     };
-  }, [agentQuestions, sidebarChats, endpoint, openChat, setActiveView, setError]);
+  }, [agentQuestions, sidebarChats, endpoint, openChat, setActiveView, setError, actionErrorMessage]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -1715,7 +1721,7 @@ export default function App() {
           unlisten();
         }
       })
-      .catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)));
+      .catch((cause) => active && setError(actionErrorMessageRef.current("appActionError.subagentNotificationLink", cause)));
 
     return () => {
       active = false;
@@ -1756,7 +1762,7 @@ export default function App() {
         }
       })().catch((cause) => {
         if (active) {
-          setError(cause instanceof Error ? cause.message : t("approval.notificationFailed"));
+          setError(actionErrorMessage("approval.notificationFailed", cause));
         }
       });
     })
@@ -1767,12 +1773,12 @@ export default function App() {
           unlisten();
         }
       })
-      .catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)));
+      .catch((cause) => active && setError(actionErrorMessage("appActionError.approvalNotificationLink", cause)));
     return () => {
       active = false;
       unlistenAction?.();
     };
-  }, [endpoint, openPendingApprovalOwner, t]);
+  }, [endpoint, openPendingApprovalOwner, actionErrorMessage, t]);
   const currentModelInfo = useMemo(
     () => {
       const modelScopeMatches =
@@ -2064,8 +2070,9 @@ export default function App() {
         persistQuestionAnswer(answerChat.id, answerItem);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      throw cause;
+      const message = actionErrorMessage("appActionError.sendAnswer", cause);
+      setError(message);
+      throw new Error(message);
     }
   };
   const replyToAgentQuestionInComposer = (questionId: string) => {
@@ -2983,12 +2990,12 @@ export default function App() {
       );
       setCachedProjectSnapshot(projectsPayload);
       cacheProjectSnapshot(projectsPayload);
-      setError((current) => (current.toLowerCase().includes("project") ? "" : current));
+      setError((current) => (current === t("appActionError.refreshProjects") ? "" : current));
     } catch (cause) {
       if (options.throwOnError) {
         throw cause;
       }
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(actionErrorMessage("appActionError.refreshProjects", cause));
     } finally {
       projectRefreshInFlightRef.current = false;
       setLoadingProjects(false);
@@ -3020,7 +3027,7 @@ export default function App() {
       setBootstrap((current) => (current ? { ...current, permission: payload.permission } : current));
       void refreshSilently();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(actionErrorMessage("appActionError.savePermission", cause));
     } finally {
       setLoading(false);
     }
@@ -3065,7 +3072,7 @@ export default function App() {
       setBackgroundGoalNotificationsEnabled(settings.backgroundGoalNotificationsEnabled !== false);
       setBootstrap((current) => (current ? { ...current, advancedSettings: settings } : current));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(actionErrorMessage("appActionError.saveSettings", cause));
     } finally {
       setSavingAdvancedSettings(false);
     }
@@ -3091,8 +3098,8 @@ export default function App() {
         showTransientNotice("success", "copy", successMessage);
       },
       (cause) => {
-        const reason = cause instanceof Error ? cause.message : String(cause || "");
-        showTransientNotice("error", "copy", t("chat.copyFailed", { reason: (reason || t("chat.copyUnknownReason")).slice(0, 500) }));
+        const reason = actionErrorMessage("chat.copyUnknownReason", cause);
+        showTransientNotice("error", "copy", t("chat.copyFailed", { reason }));
       },
     );
   }
@@ -3242,7 +3249,7 @@ export default function App() {
         },
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(actionErrorMessage("appActionError.editMessage", cause));
     } finally {
       messageEditSaveInFlightRef.current = false;
       setSavingMessageEdit(false);
@@ -3348,14 +3355,15 @@ export default function App() {
         const message =
           payload.status === "executed"
             ? t("notice.desktopActionExecuted", { action: action.label })
-            : payload.error || t("notice.desktopActionRecorded", { action: action.label, status: payload.status || "recorded" });
+            : payload.error ? actionErrorMessage("appActionError.runDesktopAction", payload.error, { action: action.label })
+              : t("notice.desktopActionRecorded", { action: action.label, status: payload.status || "recorded" });
         setRuntimeNotice(message);
         if (payload.event) {
           prependDesktopAction(payload.event);
         }
         void refreshRuntimeRuns(false);
       } catch (cause) {
-        const message = cause instanceof Error ? cause.message : String(cause);
+        const message = actionErrorMessage("appActionError.runDesktopAction", cause, { action: action.label });
         setRuntimeNotice(message);
         setError(message);
       }
@@ -3433,8 +3441,7 @@ export default function App() {
       setRuntimeNotice(t("goal.created"));
       setInput("");
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
+      setError(actionErrorMessage("appActionError.createGoal", cause));
     }
   }
 
@@ -3477,7 +3484,8 @@ export default function App() {
         setRuntimeNotice(t(command === "pause" ? "goal.paused" : command === "resume" ? "goal.resumed" : "goal.cleared"));
         setInput("");
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        const failureKey = command === "pause" ? "pauseGoal" : command === "resume" ? "resumeGoal" : "clearGoal";
+        setError(actionErrorMessage(`appActionError.${failureKey}`, cause));
       }
       return;
     }
@@ -3507,8 +3515,7 @@ export default function App() {
       setRuntimeNotice(t("memory.created"));
       setInput("");
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
+      setError(actionErrorMessage("appActionError.saveMemory", cause));
     }
   }
 
@@ -3563,7 +3570,7 @@ export default function App() {
         setAttachments([]);
         void refreshRuntimeRuns(false);
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(actionErrorMessage("appActionError.sendAnswer", cause));
       } finally {
         replySubmitInFlightRef.current = false;
       }
@@ -3664,7 +3671,7 @@ export default function App() {
       const result = await submitTurn(turn, { deliveryMode });
       accepted = result === "started" || result === "steered" || result === "queued";
     } catch (cause) {
-      setChatRunError(cause instanceof Error ? cause.message : String(cause), ownerChatId);
+      setChatRunError(actionErrorMessage("appActionError.sendMessage", cause), ownerChatId);
     } finally {
       const owner = getChatById(ownerChatId);
       finishSubmission(accepted, owner && !isUnstartedChat(owner) ? ownerChatId : undefined);
@@ -3702,7 +3709,7 @@ export default function App() {
       if (!result.ok) throw new Error(result.status || "Agent cancellation was not accepted.");
     } catch (cause) {
       if (owner && clientTurnId) updateChat(owner.id, (chat) => markRuntimeStreamStopping(chat, clientTurnId, false));
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(actionErrorMessage("appActionError.stopWork", cause));
       return false;
     }
     void refreshRuntimeRuns(false);
@@ -3740,11 +3747,10 @@ export default function App() {
     try {
       for (const file of selected) {
         try {
-          const attachment = await ingestChatAttachment(file, { endpoint, chatId }, t);
+          const attachment = await ingestChatAttachment(file, { endpoint, chatId, developerOptionsEnabled }, t);
           nextAttachments.push(attachment);
         } catch (cause) {
-          const message = cause instanceof Error ? cause.message : String(cause);
-          showTransientFailure("upload", message);
+          showTransientFailure("upload", actionErrorMessage("attachments.readFileFailed", cause));
         }
       }
       setAttachments((current) => {
@@ -3774,60 +3780,7 @@ export default function App() {
       if (!parentChat || subAgentHandoffBusyRef.current.has(task.id)) {
         continue;
       }
-      const publicEvents = (task.events || [])
-        .filter((event) => ["created", "started", "completed", "failed", "cancel_requested", "cancelled", "interrupted"].includes(String(event.event || "")))
-        .sort((left, right) => Number(left.revision || 0) - Number(right.revision || 0));
-      if (!publicEvents.length && Number(task.revision || 0) > 0) {
-        publicEvents.push({
-          timestamp: task.updatedAt || task.createdAt,
-          taskId: task.id,
-          event: task.status === "queued" ? "created" : task.status,
-          revision: task.revision,
-          data: {},
-        });
-      }
-      const eventItems: ConversationItem[] = publicEvents.map((event) => {
-        const eventName = String(event.event || task.status || "started");
-        const revision = Number(event.revision || task.revision || 0);
-        const timestamp = String(event.timestamp || task.updatedAt || task.createdAt || new Date().toISOString());
-        const eventData = event.data && typeof event.data === "object" ? event.data : {};
-        const summary = String(
-          eventData.summary
-          || eventData.error
-          || (eventName === "created" ? task.task : "")
-          || (eventName === "completed" ? task.summary : "")
-          || (["failed", "cancelled", "interrupted"].includes(eventName) ? task.error : "")
-          || "",
-        );
-        const subagentStatus = eventName === "created"
-          ? "created"
-          : eventName === "started" || eventName === "cancel_requested"
-            ? "started"
-            : eventName === "completed"
-              ? "completed"
-              : "failed";
-        return {
-          id: `subagent-event-${task.id}-${revision}`,
-          type: "timeline_event",
-          createdAt: timestamp,
-          event: {
-            id: `subagent-event-${task.id}-${revision}`,
-            sequence: revision,
-            timestamp,
-            kind: "subagent",
-            sessionId: String(task.parentSessionId || "").slice(0, 180) || undefined,
-            turnId: String(task.parentTurnId || "").slice(0, 180) || undefined,
-            clientTurnId: String(task.parentClientTurnId || "").slice(0, 240) || undefined,
-            payload: {
-              label: task.displayName || t("agent.subagentTask"),
-              summary: summary.slice(0, 1000),
-              status: eventName,
-              tool: task.role,
-              subagentStatus,
-            },
-          },
-        };
-      });
+      const eventItems = subAgentLifecycleItems(task, t("agent.subagentTask"));
       const knownIds = new Set(parentChat.items.map((item) => item.id));
       const newEventItems = eventItems.filter((item) => !knownIds.has(item.id));
       const adoptedItem = subAgentAdoptedHistoryItem(task);
@@ -3895,7 +3848,7 @@ export default function App() {
       setSubAgentListError("");
     } catch (cause) {
       if (requestId !== subAgentListRequestRef.current || parentChatId !== subAgentParentChatRef.current) return;
-      setSubAgentListError(cause instanceof Error ? cause.message : String(cause));
+      setSubAgentListError(subAgentActionMessage("list", cause));
     } finally {
       if (requestId === subAgentListRequestRef.current) setLoadingSubAgents(false);
     }
@@ -3932,7 +3885,10 @@ export default function App() {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) throw new Error("Runtime is not connected.");
+        if (!readyEndpoint) {
+          reportSubAgentActionError("disconnected", undefined, parentChatId, true);
+          return false;
+        }
         targetEndpoint = readyEndpoint;
       }
       await persistChatsNow();
@@ -3952,7 +3908,7 @@ export default function App() {
           ...(skillArguments?.trim() ? { skillArguments: skillArguments.trim() } : {}),
         },
       });
-      if (!payload.ok || !payload.task) throw new Error(t("subagent.delegateFailed"));
+      if (!payload.ok || !payload.task) throw new Error("Sub-agent creation returned no accepted task.");
       if (subAgentParentChatRef.current === parentChatId) {
         setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
         setSelectedSubAgentPanelOpen(true);
@@ -3961,11 +3917,7 @@ export default function App() {
       void loadSubAgents(false);
       return true;
     } catch (cause) {
-      if (parentChatId === subAgentParentChatRef.current) {
-        const message = cause instanceof Error ? cause.message : String(cause);
-        setError(message);
-        setSubAgentError(message);
-      }
+      reportSubAgentActionError("start", cause, parentChatId, true);
       return false;
     }
   }
@@ -3995,31 +3947,7 @@ export default function App() {
       setSelectedSubAgent((current) => (current?.id === payload.task.id ? latestSubAgentTask(current, payload.task) : current));
       await refreshSelectedSubAgentTask(taskId, "if-current");
     } catch (cause) {
-      reportSubAgentActionError(cause, subAgentParentChatId);
-    } finally {
-      endSubAgentAction(taskId);
-    }
-  }
-
-  async function retrySubAgentTask(taskId: string) {
-    if (!beginSubAgentAction(taskId)) {
-      return;
-    }
-    const selectionIntentAtStart = subAgentSelectionIntentRef.current;
-    try {
-      const payload = await retrySubAgent(endpoint, taskId);
-      setSubAgentList((current) => updateSubAgentList(current, payload.task));
-      if (
-        selectionIntentAtStart !== taskId
-        || subAgentSelectionIntentRef.current !== selectionIntentAtStart
-      ) {
-        return;
-      }
-      setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
-      subAgentSelectionIntentRef.current = payload.task.id;
-      await refreshSelectedSubAgentTask(payload.task.id, "if-current");
-    } catch (cause) {
-      reportSubAgentActionError(cause, subAgentParentChatId);
+      reportSubAgentActionError("cancel", cause, subAgentParentChatId);
     } finally {
       endSubAgentAction(taskId);
     }
@@ -4044,7 +3972,7 @@ export default function App() {
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
       return true;
     } catch (cause) {
-      reportSubAgentActionError(cause, subAgentParentChatId);
+      reportSubAgentActionError("followUp", cause, subAgentParentChatId);
       return false;
     } finally {
       endSubAgentAction(taskId);
@@ -4056,14 +3984,15 @@ export default function App() {
     if (mode === "select") {
       subAgentSelectionIntentRef.current = taskId;
     }
-    const payload = await fetchSubAgent(endpoint, taskId);
-    setSubAgentList((current) => updateSubAgentList(current, payload.task));
-    const selectionIsCurrent = subAgentSelectionIntentRef.current === taskId;
-    if ((mode === "select" && requestId !== subAgentInspectRequestRef.current) || !selectionIsCurrent) {
-      return payload.task;
+    const isCurrent = () => requestId === subAgentInspectRequestRef.current
+      && subAgentSelectionIntentRef.current === taskId;
+    try {
+      const payload = await fetchSubAgent(endpoint, taskId);
+      setSubAgentList((current) => updateSubAgentList(current, payload.task));
+      if (isCurrent()) setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
+    } catch (cause) {
+      if (isCurrent()) reportSubAgentActionError("detail", cause, subAgentParentChatId);
     }
-    setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
-    return payload.task;
   }
 
   async function inspectSubAgentTask(taskId: string) {
@@ -4071,22 +4000,37 @@ export default function App() {
     if (task) setSelectedSubAgent((current) => latestSubAgentTask(current, task));
     setSubAgentError("");
     setSelectedSubAgentPanelOpen(true);
-    try {
-      await refreshSelectedSubAgentTask(taskId);
-    } catch (cause) {
-      reportSubAgentActionError(cause, subAgentParentChatId);
-    }
+    await refreshSelectedSubAgentTask(taskId);
   }
 
   async function openSubAgentWorkspace() {
     setSubAgentSidebarOpen(true);
     setSelectedSubAgentPanelOpen(false);
     setRightSidebarCollapsed(false);
+    if (subAgentListError) void loadSubAgents(true);
   }
 
-  function reportSubAgentActionError(cause: unknown, parentChatId: string) {
+  function subAgentActionMessage(
+    action: "start" | "list" | "detail" | "cancel" | "followUp" | "adopt" | "dismiss" | "selection" | "disconnected" | "parentUnavailable",
+    cause?: unknown,
+  ) {
+    if (developerOptionsEnabled && cause !== undefined) console.warn(`Sub-agent action failed: ${action}`, cause);
+    if (cause instanceof ApiError) {
+      if (cause.status === 409) return t("subagent.actionErrors.stateChanged");
+      if (cause.status === 404 && (action === "detail" || action === "cancel" || action === "adopt" || action === "dismiss")) {
+        return t("subagent.actionErrors.taskUnavailable");
+      }
+    }
+    return t(`subagent.actionErrors.${action}`);
+  }
+
+  function reportSubAgentActionError(
+    action: Parameters<typeof subAgentActionMessage>[0], cause: unknown, parentChatId: string, showInChat = false,
+  ) {
     if (parentChatId === subAgentParentChatRef.current) {
-      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      const message = subAgentActionMessage(action, cause);
+      if (showInChat) setError(message);
+      setSubAgentError(message);
     }
   }
 
@@ -4096,7 +4040,8 @@ export default function App() {
     }
     try {
       if (!task.parentChatId || !(await loadChat(task.parentChatId))) {
-        throw new Error("Sub-agent parent chat is unavailable.");
+        reportSubAgentActionError("parentUnavailable", undefined, subAgentParentChatId);
+        return;
       }
       const latest = await fetchSubAgent(endpoint, task.id);
       const payload = await mergeSubAgent(endpoint, task.id, {
@@ -4111,7 +4056,7 @@ export default function App() {
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
       setActiveView("chat");
     } catch (cause) {
-      reportSubAgentActionError(cause, subAgentParentChatId);
+      reportSubAgentActionError(decision === "adopted" ? "adopt" : "dismiss", cause, subAgentParentChatId);
       void loadSubAgents(false);
     } finally {
       endSubAgentAction(task.id);
@@ -4130,15 +4075,6 @@ export default function App() {
     setSelectedSubAgent(null);
     setSelectedSubAgentPanelOpen(false);
     setSubAgentError("");
-  }
-
-  function adoptSubAgentNextAction(task: SubAgentTask) {
-    const nextAction = subAgentProposedNextAction(task);
-    if (!nextAction) {
-      return;
-    }
-    setActiveView("chat");
-    setInput(nextAction);
   }
 
   function handleConversationMouseUp() {
@@ -4181,17 +4117,18 @@ export default function App() {
     clearSelectionMenu();
     setSelectedSubAgentPanelOpen(true);
     setSubAgentError("");
+    let parentChatId = subAgentParentChatRef.current;
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
         if (!readyEndpoint) {
-          setSubAgentError("Runtime is not connected.");
+          reportSubAgentActionError("disconnected", undefined, parentChatId);
           return;
         }
         targetEndpoint = readyEndpoint;
       }
-      const parentChatId = ensureActiveChat();
+      parentChatId = ensureActiveChat();
       updateChat(parentChatId, (chat) => touchChat({
         ...chat,
         title: chat.title || selectedText.slice(0, 80),
@@ -4211,12 +4148,13 @@ export default function App() {
           source: "selection-menu",
         },
       });
+      if (!payload.ok || !payload.task) throw new Error("Sub-agent creation returned no accepted task.");
       setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
       await reconcileSubAgentHandoffs([payload.task]);
       void loadSubAgents(false);
     } catch (cause) {
-      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      reportSubAgentActionError("selection", cause, parentChatId);
     }
   }
 
@@ -4305,7 +4243,7 @@ export default function App() {
       setDoctorReport(payload);
       setStartupIssue("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(actionErrorMessage("appActionError.loadDoctor", cause));
     } finally {
       setLoadingDoctor(false);
     }
@@ -4370,11 +4308,9 @@ export default function App() {
           selected={activeSubAgentTasks.some((task) => task.id === selectedSubAgent?.id) ? selectedSubAgent : null}
           onSelect={(taskId) => void inspectSubAgentTask(taskId)}
           onCancel={(taskId) => void cancelSubAgentTask(taskId)}
-          onRetry={(taskId) => void retrySubAgentTask(taskId)}
           onResume={resumeSubAgentTask}
           onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
           onIgnoreNotification={ignoreSubAgentReviewNotification}
-          onAdoptNextAction={adoptSubAgentNextAction}
           onCopyItem={copyConversationItem}
           onOpenChatById={openChatById}
           busyTaskIds={subAgentActionBusyTaskIds}
@@ -4542,7 +4478,7 @@ export default function App() {
                     setDoctorMessage(t("doctor.copiedSummary"));
                     setDoctorMessageTone("ok");
                   })
-                  .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+                  .catch((cause) => setError(actionErrorMessage("appActionError.copyDoctor", cause)));
               }}
               formatPayload={formatPayload}
             />

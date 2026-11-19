@@ -1,5 +1,5 @@
 import i18n from "../i18n";
-import type { SubAgentRole } from "./api/sub-agents";
+import type { SubAgentRole, SubAgentTask } from "./api/sub-agents";
 
 const BUILT_IN_ROLES = new Set([
   "project_index_review",
@@ -74,4 +74,13 @@ export function displaySubAgentStatus(status: string): string {
     default:
       return status || i18n.t("subagent.statusReady");
   }
+}
+
+export function subAgentTaskIssueText(task: Pick<SubAgentTask, "status" | "errorCode" | "error" | "resultUnavailable">): string {
+  if (task.resultUnavailable) return i18n.t("subagent.resultUnavailable");
+  if (task.status === "cancelled") return i18n.t("subagent.errors.sub_agent_task_cancelled");
+  if (task.status === "interrupted") return displaySubAgentStatus(task.status);
+  if (task.errorCode === "sub_agent_task_timeout") return i18n.t("subagent.errors.sub_agent_task_timeout");
+  if (task.status === "failed" || task.error) return i18n.t("subagent.errors.sub_agent_task_failed");
+  return "";
 }

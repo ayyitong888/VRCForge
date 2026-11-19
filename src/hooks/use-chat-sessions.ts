@@ -77,7 +77,7 @@ type PendingChatSave = {
   submit: () => Promise<ChatSaveReceipt>;
 };
 
-export function chatSaveErrorMessage(cause: unknown, recoveryFallback: string, conflictFallback = "Chat storage changed in another window. Retry the save."): string {
+export function chatSaveErrorMessage(cause: unknown, fallback: string, translate: (key: string) => string): string {
   if (cause instanceof ApiError && cause.status === 409) {
     const detail = cause.detail;
     let code = "";
@@ -93,14 +93,11 @@ export function chatSaveErrorMessage(cause: unknown, recoveryFallback: string, c
       }
     }
     if (code === "chat_store_recovery_required") {
-      return recoveryFallback;
+      return translate("chat.sessionSaveBlocked");
     }
-    return conflictFallback;
+    return translate("chat.sessionSaveConflict");
   }
-  if (cause instanceof Error) {
-    return cause.message.trim() || recoveryFallback;
-  }
-  return recoveryFallback;
+  return cause instanceof ApiError && cause.status === 413 ? translate("chat.saveTooLarge") : fallback;
 }
 
 function projectDurableChatFingerprint(chat: ChatThread): unknown {
@@ -464,7 +461,7 @@ export function useChatSessions({
     }
     setChatStorageError({
       kind: "save",
-      message: chatSaveErrorMessage(cause, fallback, t("chat.sessionSaveConflict")),
+      message: chatSaveErrorMessage(cause, fallback, t),
     });
   }
 
@@ -790,7 +787,7 @@ export function useChatSessions({
                 return;
               }
               void enqueueChatSave(false)
-                .catch((cause) => setChatSaveError(cause, t("chat.sessionSaveBlocked")));
+                .catch((cause) => setChatSaveError(cause, t("chat.saveUnavailable")));
             }, 3000);
           }
         }
@@ -834,7 +831,7 @@ export function useChatSessions({
       if (reloaded) clearResolvedChatStorageError();
       return reloaded;
     } catch (cause) {
-      setChatSaveError(cause, t("chat.sessionSaveBlocked"));
+      setChatSaveError(cause, t("chat.saveUnavailable"));
       throw cause;
     }
   }, [activeProjectPath, customProjectPaths, endpoint, projectPaths, projectPrefsReady, runtimeConnected, t]);
@@ -1020,7 +1017,7 @@ export function useChatSessions({
   }
 
   function reportChatSaveError(cause: unknown) {
-    setChatSaveError(cause, t("chat.sessionSaveBlocked"));
+    setChatSaveError(cause, t("chat.saveUnavailable"));
   }
 
   function enqueueDebouncedChatSave(): void {
@@ -1034,7 +1031,7 @@ export function useChatSessions({
     void pending.then(() => {
       finishAutosave(pending, true);
     }, (cause) => {
-      setChatSaveError(cause, t("chat.sessionSaveBlocked"));
+      setChatSaveError(cause, t("chat.saveUnavailable"));
       finishAutosave(pending, false);
     });
   }
@@ -1205,8 +1202,7 @@ export function useChatSessions({
         }
       }
       if (durableDeletionCommitted) {
-        const detail = cause instanceof Error ? cause.message : String(cause ?? "Runtime cleanup did not complete.");
-        setError(t("chat.deletePermanentlyPartialSuccess", { error: detail }));
+        setError(t("chat.deletePermanentlyPartialSuccess"));
       } else {
         setChatSaveError(cause, t("chat.deletePermanentlyFailed"));
       }

@@ -21,10 +21,6 @@ export function canCancelSubAgentTask(task: SubAgentTask): boolean {
   return task.status === "queued" || task.status === "running";
 }
 
-export function canRetrySubAgentTask(task: SubAgentTask): boolean {
-  return ["completed", "failed", "cancelled", "interrupted"].includes(task.status);
-}
-
 export function canResumeSubAgentTask(task: SubAgentTask): boolean {
   return task.canResume === true && !["queued", "running", "cancelling"].includes(task.status);
 }

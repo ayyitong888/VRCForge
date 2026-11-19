@@ -36,7 +36,24 @@ const bundle = await build({
     }} />);
     export const paused = renderToStaticMarkup(<SubAgentConversation endpoint="" turns={[{
       id: "child", childSessionId: "session", status: "paused", reason: "model_turn_budget_exhausted",
-      task: "Inspect project", summary: "Short preview", result: { finalReport: "Verified two bindings. Check remaining outfit." },
+      task: "Inspect project", summary: "Short preview", result: {
+        finalReport: "Verified two bindings. Check remaining outfit.",
+        rawResult: { sessionId: "session", clientTurnId: "child", turnId: "run-child",
+          plan: { planner: "llm", reply: "Old planner reply", summary: "" },
+          timeline: [event(1, "commentary", "running", "Checking the bindings"),
+            event(2, "final_answer", "completed", "Old planner reply")],
+        },
+      },
+    }]} />);
+    const legacyReply = "The folder contains five textures." + String.fromCharCode(10, 10)
+      + "（已暂停：达到本轮显式配置的 4 次模型轮次上限，任务尚未完成。已有进展和会话记录已保留；可在当前聊天发送“继续”接着处理。）";
+    export const legacyBudget = renderToStaticMarkup(<SubAgentConversation endpoint="" turns={[{
+      id: "old-child", childSessionId: "old-session", status: "failed", task: "Inspect the textures",
+      error: legacyReply, result: { finalReport: legacyReply, rawResult: {
+        sessionId: "old-session", clientTurnId: "old-child", turnId: "old-run",
+        plan: { planner: "llm", reply: legacyReply, reason: "model_turn_budget_exhausted", nextStep: "paused" },
+        timeline: [event(1, "final_answer", "completed", legacyReply)],
+      } },
     }]} />);
   ` },
   bundle: true, write: false, platform: "node", format: "cjs", jsx: "automatic",
@@ -46,7 +63,7 @@ const filename = fileURLToPath(new URL("./sub-agent-waiting-fixture.cjs", import
 const compiled = new Module(filename);
 compiled.paths = Module._nodeModulePaths(process.cwd());
 compiled._compile(bundle.outputFiles[0].text, filename);
-const { childWait, shellWait, humanWait, paused, restoredQuestion } = compiled.exports;
+const { childWait, shellWait, humanWait, paused, legacyBudget, restoredQuestion } = compiled.exports;
 for (const {card, events} of shellWait) {
   assert.doesNotMatch(card, /internal process polling instruction|internal shell summary/);
   assert.deepEqual(events.map(e => e.payload.summary), ["Waiting for Unity to reload."]);
@@ -59,5 +76,10 @@ assert.match(restoredQuestion, /Choose an avatar/);
 assert.doesNotMatch(restoredQuestion, /data-agent-transport-interrupted/);
 assert.match(paused, /data-subagent-paused-report/);
 assert.match(paused, /Verified two bindings\. Check remaining outfit\./);
+assert.equal(paused.match(/Verified two bindings\. Check remaining outfit\./g)?.length, 1);
+assert.doesNotMatch(paused, /Old planner reply/);
 assert.doesNotMatch(paused, /Short preview/);
+assert.match(legacyBudget, /The folder contains five textures\./);
+assert.match(legacyBudget, /data-subagent-paused-report/);
+assert.doesNotMatch(legacyBudget, /在当前聊天发送/);
 console.log("sub-agent waits and paused report: ok");

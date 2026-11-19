@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { TFunction } from "i18next";
-import { appSessionAuthHeaders, hasTauriInternals, requestJson } from "./api/http";
+import { ApiError, appSessionAuthHeaders, hasTauriInternals, normalizeTauriInvokeError, requestJson } from "./api/http";
 import type { ChatAttachment } from "./chat-types";
 import { MAX_ATTACHMENT_PAYLOAD_BYTES, readChatAttachment } from "./conversation-utils";
 
@@ -23,7 +23,7 @@ const VAULT_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"];
 type VaultUploadResponse = {
   ok?: boolean;
   reason?: string;
-  error?: string;
+  error?: unknown;
   attachment?: {
     payloadHash?: string;
     name?: string;
@@ -45,26 +45,35 @@ export function isVaultEligibleFile(file: File): boolean {
 
 export async function ingestChatAttachment(
   file: File,
-  options: { endpoint: string; chatId: string },
+  options: { endpoint: string; chatId: string; developerOptionsEnabled?: boolean },
   t: TFunction,
 ): Promise<ChatAttachment> {
   if (!isVaultEligibleFile(file) || !options.chatId) {
     return readChatAttachment(file, t);
   }
-  let response: VaultUploadResponse;
-  try {
-    response = await uploadToVault(file, options);
-  } catch (error) {
+  function metadataOnly(cause: unknown, reason?: string): ChatAttachment {
+    if (options.developerOptionsEnabled) console.warn("Attachment storage failed", cause, reason);
+    const normalized = normalizeTauriInvokeError(cause);
+    const status = normalized instanceof ApiError ? normalized.status : undefined;
+    const key = status === 415 || reason === "format_not_allowed" || reason === "magic_mismatch"
+      ? "attachments.vaultUploadFormatRejected"
+      : status === 413 || reason === "over_cap" || reason === "quota_exceeded" || reason === "global_quota_exceeded"
+        ? "attachments.vaultUploadLimitReached"
+        : "attachments.vaultUploadFailed";
     return {
       id: `att-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       name: file.name,
       size: file.size,
       type: file.type || "application/octet-stream",
       payloadKind: "metadata",
-      error: t("attachments.vaultUploadFailed", {
-        reason: error instanceof Error ? error.message : String(error),
-      }),
+      error: t(key),
     };
+  }
+  let response: VaultUploadResponse;
+  try {
+    response = await uploadToVault(file, options);
+  } catch (error) {
+    return metadataOnly(error);
   }
   const stored = response.attachment;
   if (response.ok && stored && typeof stored.payloadHash === "string" && /^[a-f0-9]{64}$/.test(stored.payloadHash)) {
@@ -86,14 +95,7 @@ export async function ingestChatAttachment(
       vaultKind: typeof stored.kind === "string" ? stored.kind : undefined,
     };
   }
-  return {
-    id: `att-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    name: file.name,
-    size: file.size,
-    type: file.type || "application/octet-stream",
-    payloadKind: "metadata",
-    error: t("attachments.vaultUploadFailed", { reason: response.reason || response.error || "unknown" }),
-  };
+  return metadataOnly(response.error, response.reason);
 }
 
 async function uploadToVault(
@@ -171,7 +173,7 @@ async function uploadToVault(
         },
       );
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        throw new ApiError(`HTTP ${response.status}`, response.status);
       }
     }
     return await requestJson<VaultUploadResponse>(`${options.endpoint}/api/app/chat-attachments/uploads/finish`, {
