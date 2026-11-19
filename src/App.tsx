@@ -1023,7 +1023,7 @@ export default function App() {
     setApprovalReveal({ chatId: owner.id, approvalId: approval.id });
     return true;
   }, [openChat, sidebarChats]);
-  const hasUnresolvedRuntimeState = (chatId: string, targetSessionId: string): boolean => {
+  const hasUnresolvedRuntimeState = (chatId: string, targetSessionId: string, allowPendingApproval = false): boolean => {
     const asRecord = (value: unknown): Record<string, unknown> | undefined => (
       typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined
     );
@@ -1042,7 +1042,9 @@ export default function App() {
       ].filter((value): value is string => typeof value === "string");
       return scopedValues.includes(chatId) || (Boolean(targetSessionId) && scopedValues.includes(targetSessionId));
     };
-    if ((agentApprovals ?? []).some((item) => ["pending", "approved", "applying"].includes(item.status) && owns(item))) return true;
+    if ((agentApprovals ?? []).some((item) => (
+      item.status === "approved" || item.status === "applying" || (!allowPendingApproval && item.status === "pending")
+    ) && owns(item))) return true;
     if (agentQuestions.some((item) => item.status === "pending"
       && questionBelongsToRuntimeScope(item, runtimeScope, { requireSession: true })
       && owns(item))) return true;
@@ -3181,7 +3183,7 @@ export default function App() {
       return;
     }
     const owner = await loadChat(activeChatId).catch(() => undefined);
-    if (!owner || owner.items.length === 0) {
+    if (!owner || (!owner.items.length && !owner.sessionId)) {
       setError(t("compact.noContent"));
       return;
     }

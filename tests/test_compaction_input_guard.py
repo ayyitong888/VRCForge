@@ -4,6 +4,7 @@ import pytest
 
 from tests.test_native_context_compaction import Compactor, fixture
 from tests.test_native_context_compaction import Compactor, fixture, plan
+from context_compaction import MODEL_HANDOFF_PREFIX
 
 
 class IncompleteCompactor(Compactor):
@@ -27,7 +28,9 @@ def test_native_keeps_history_when_summarizer_did_not_read_all_input():
 
 def test_legacy_keeps_history_when_summarizer_did_not_read_all_input():
     _, planner, _, _ = fixture(IncompleteCompactor())
-    history = [{"role": "user", "text": "retained history " * 5000}]
+    history = [{"role": "user", "text": "Original task"}, {"role": "agent", "text": "older observations " * 5000},
+               {"role": "user", "text": "Recent first input"}, {"role": "agent", "text": "Recent first reply"},
+               {"role": "user", "text": "Recent second input"}, {"role": "agent", "text": "Recent second reply"}]
     with planner.bind_turn({}):
         changed, metadata, blocked = planner.maybe_compact_runtime_history(
             message="continue", params={"_contextCompactionLimit": 8000}, observe={},
@@ -52,11 +55,11 @@ def test_legacy_compacts_current_turn_observations_without_changing_execution_st
     observe = {}
     with planner.bind_turn({}):
         changed, metadata, blocked = planner.maybe_compact_runtime_history(
-            message="continue", params={"_contextCompactionLimit": 10_000}, observe=observe,
+            message="continue", params={"_contextCompactionLimit": 18_000}, observe=observe,
             history=[], loop_state=loop_state, context_usage={})
     assert metadata["applied"] is True
     assert blocked is False
-    assert changed == [{"role": "agent", "text": "verified current-turn summary"}]
+    assert changed == [{"role": "agent", "text": MODEL_HANDOFF_PREFIX + "verified current-turn summary"}]
     assert 0 < metadata["compactedLoopStepCount"] < 30
     assert observe == {}
     assert loop_state[-1]["result"]["questionId"] == "q-1"
@@ -73,7 +76,7 @@ def test_legacy_compacts_returned_failed_results_but_preserves_unresolved_suffix
             "outcome": {"status": "ok", "success": True},
             "modelInformation": {
                 "retainedBy": "agent_tool_result_reader",
-                "payload": {"text": "settled observation " + "x" * 5000},
+                "payload": {"text": "settled observation " + "x" * 15000},
             },
             "modelInformationRead": {"source": "owner_model", "page": {"ok": True, "hasMore": False}},
         },
@@ -140,15 +143,15 @@ def test_legacy_compacts_returned_failed_results_but_preserves_unresolved_suffix
         },
     ]
     before = deepcopy(loop_state)
-    history = [{"role": "user", "text": "earlier conversation " * 4000}]
+    history = [{"role": "user", "text": "Original task retained exactly"}]
     with planner.bind_turn({}):
         changed, metadata, blocked = planner.maybe_compact_runtime_history(
-            message="Continue after the read.", params={"_contextCompactionLimit": 10_000},
+            message="Continue after the read.", params={"_contextCompactionLimit": 12_000},
             observe={}, history=history, loop_state=loop_state, context_usage={})
 
     assert metadata["applied"] is True
     assert blocked is False
-    assert changed == [{"role": "agent", "text": compactor.summary}]
+    assert changed == [{"role": "agent", "text": MODEL_HANDOFF_PREFIX + compactor.summary}, *history]
     assert loop_state == before
     passed = "\n".join(entry["text"] for entry in compactor.calls[0][0])
     assert "returned-failure" in passed
@@ -207,8 +210,8 @@ def test_legacy_compaction_distinguishes_running_jobs_from_returned_failures(bar
     before = deepcopy(loop_state)
     with planner.bind_turn({}):
         changed, metadata, blocked = planner.maybe_compact_runtime_history(
-            message="Continue the task.", params={"_contextCompactionLimit": 10_000},
-            observe={}, history=[{"role": "user", "text": "prior context " * 4000}],
+            message="Continue the task.", params={"_contextCompactionLimit": 18_000},
+            observe={}, history=[{"role": "user", "text": "Original task retained exactly"}],
             loop_state=loop_state, context_usage={})
 
     assert metadata["applied"] is True

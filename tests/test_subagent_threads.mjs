@@ -11,9 +11,11 @@ const compiled = await build({
       import React from "react";
       import { renderToStaticMarkup } from "react-dom/server";
       import i18n from "./src/i18n";
+      import english from "./src/locales/en-US.json";
       import { initReactI18next } from "react-i18next";
       import { groupSubAgentThreads } from "./src/lib/subagent-threads";
       import { SubAgentPanel } from "./src/components/subagents/sub-agent-panel";
+      import { SubAgentSidebar } from "./src/components/subagents/sub-agent-sidebar";
 
       const tasks = [
         { id:"follow-2", childSessionId:"child-a", resumeOf:"follow-1", displayName:"Research", role:"explorer", task:"Continue review", status:"running" },
@@ -32,17 +34,18 @@ const compiled = await build({
       export async function run() {
         await i18n.use(initReactI18next).init({
           lng:"en-US",
-          resources:{"en-US":{translation:{
-            workspace:{subAgents:"Subagents"},
-            subagent:{active:"Active",done:"Done",statusRunning:"{{count}} active",statusDone:"{{count}} done",inspect:"Inspect",noTasks:"No tasks",statusRunningOne:"Running",statusInterrupted:"Interrupted",statusFailed:"Failed",statusCancelled:"Cancelled",statusCompleted:"Completed"}
-          }}},
+          resources:{"en-US":{translation:english}},
           interpolation:{escapeValue:false}
         });
         const groups = groupSubAgentThreads(tasks);
-        const markup = renderToStaticMarkup(<SubAgentPanel tasks={tasks} loading={false} error="Could not refresh tasks" onOpen={()=>{}}/>);
+        const panel = renderToStaticMarkup(<SubAgentPanel tasks={tasks} loading={false} error="Could not refresh tasks" onOpen={()=>{}}/>);
+        const sidebar = renderToStaticMarkup(<SubAgentSidebar tasks={tasks} selected={null}
+          openThread={false} loading={false} error="Could not refresh tasks" busyTaskIds={new Set()}
+          onSelect={()=>{}} onBack={()=>{}} onClose={()=>{}} onCancel={()=>{}} onMerge={()=>{}} onResume={async()=>false}/>);
         return {
           groups: groups.map(({id,task,turns})=>({id,taskId:task.id,turnIds:turns.map(turn=>turn.id)})),
-          markup,
+          panel,
+          sidebar,
         };
       }
     `,
@@ -59,7 +62,7 @@ const filename = fileURLToPath(new URL("./subagent-threads-fixture.cjs", import.
 const fixture = new Module(filename);
 fixture.paths = Module._nodeModulePaths(process.cwd());
 fixture._compile(compiled.outputFiles[0].text, filename);
-const { groups, markup } = await fixture.exports.run();
+const { groups, panel, sidebar } = await fixture.exports.run();
 
 assert.deepEqual(groups[0], {
   id: "child-a",
@@ -73,11 +76,13 @@ assert.deepEqual(groups.find((group) => group.id === "child-branch"), {
 }, "complete creation times order resume branches globally and an older tip's later update does not make it newest");
 assert.ok(groups.some((group) => group.id === "child-retry" && group.taskId === "retry"), "retry uses its distinct child session");
 assert.ok(groups.some((group) => group.id === "child-failed"), "failed-only child remains a thread");
-assert.match(markup, /data-vrcforge-open-subagent-surface/);
+assert.match(panel, /data-vrcforge-open-subagent-surface/);
+assert.doesNotMatch(panel, /data-vrcforge-open-subagent-thread/);
 for (const id of ["child-a", "child-failed", "child-cancelled", "child-interrupted", "child-retry"]) {
-  assert.match(markup, new RegExp(`data-vrcforge-open-subagent-thread="${id}"`), `${id} remains openable from the sidebar`);
+  assert.match(sidebar, new RegExp(`data-vrcforge-open-subagent-thread="${id}"`), `${id} remains openable from the sidebar`);
 }
-assert.doesNotMatch(markup, /Provider stopped unexpectedly/, "a resumed thread does not advertise an earlier failure as its current state");
-assert.match(markup, /No result was produced/);
-assert.match(markup, /Could not refresh tasks/);
+assert.doesNotMatch(sidebar, /Provider stopped unexpectedly/, "a resumed thread does not advertise an earlier failure as its current state");
+assert.match(sidebar, /couldn’t finish this task/);
+assert.doesNotMatch(sidebar, /No result was produced/, "raw errors stay out of sidebar rows");
+assert.match(sidebar, /Could not refresh tasks/);
 console.log("subagent thread grouping and sidebar states: ok");

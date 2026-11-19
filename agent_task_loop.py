@@ -220,6 +220,42 @@ def canonical_action_id(kind: str, tool: str, arguments: Any) -> str:
     return f"action_{digest[:24]}"
 
 
+def native_call_action_id(turn_id: str, call_id: str) -> str:
+    digest = hashlib.sha256(_canonical_json([turn_id, call_id]).encode("utf-8")).hexdigest()
+    return f"action_{digest[:24]}"
+
+
+def repair_legacy_subagent_batch_identities(members: list[dict[str, Any]]) -> None:
+    """Recover each child from a durable batch whose old semantic IDs collided."""
+    by_action_id: dict[str, list[dict[str, Any]]] = {}
+    for member in members:
+        context = member["context"]
+        if context.get("_nativeCallId") and context.get("requestedActionId"):
+            by_action_id.setdefault(context["requestedActionId"], []).append(member)
+    latest_context = members[-1]["context"]
+    for action_id, duplicates in by_action_id.items():
+        if len(duplicates) < 2:
+            continue
+        prior_requirements = latest_context.get("priorRequirements", [])
+        templates = [item for item in prior_requirements if item.get("actionId") == action_id]
+        latest_context["priorRequirements"] = [
+            item for item in prior_requirements if item.get("actionId") != action_id
+        ]
+        latest_context["priorActions"] = [
+            item for item in latest_context.get("priorActions", []) if item.get("actionId") != action_id
+        ]
+        for member in duplicates:
+            context = member["context"]
+            turn_id = context.get("usageParentTurnId") or context["turnId"]
+            occurrence_id = native_call_action_id(turn_id, context["_nativeCallId"])
+            context.update(requestedActionId=occurrence_id, actionId=occurrence_id)
+            member["completion"]["actionId"] = occurrence_id
+            for requirement in templates:
+                restored = _bounded_requirement({**requirement, "requirementId": "", "actionId": occurrence_id})
+                if restored is not None:
+                    latest_context["priorRequirements"].append(restored)
+
+
 def _action_identity_arguments(value: Any, _active: set[int] | None = None) -> Any:
     """Copy public action arguments without runtime task-seed backreferences."""
     if _active is None:
@@ -595,6 +631,9 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         result["preProvider"] = True
     if value.get("_nativeReadObservation") is True:
         result["_nativeReadObservation"] = True
+    for key in ("_readSemanticId", "_readReceiptId"):
+        if identifier := _bounded_text(value.get(key), 180):
+            result[key] = identifier
     if isinstance(value.get("_conversationFollowup"), Mapping):
         result["_conversationFollowup"] = dict(value["_conversationFollowup"])
     if isinstance(value.get("_runtimeObservation"), Mapping):
@@ -1764,6 +1803,7 @@ class AgentTaskLoop:
         correction_for_action_id: str = "",
         pre_provider: bool = False,
         native_read_observation: bool = False,
+        native_read_identity: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
         action_id = _bounded_text(action_id, 80) or canonical_action_id(kind, tool, arguments)
         reader_target = None
@@ -1863,6 +1903,8 @@ class AgentTaskLoop:
             "attempts": attempts,
             "outcome": effective,
         }
+        if native_read_identity:
+            record["_readSemanticId"], record["_readReceiptId"] = native_read_identity
         target = action_target(arguments)
         if target:
             record["target"] = target
@@ -1945,6 +1987,21 @@ class AgentTaskLoop:
                             completionReadActionId=action_id)
         self._actions[action_id] = record
         corrected_ids = [accepted_correction_id] if accepted_correction_id else []
+        if native_read_identity and not accepted_correction_id and lifecycle == "completed" and outcome_status == "ok":
+            semantic_id, receipt_id = native_read_identity
+            previous_ids = [
+                previous_id for previous_id, previous_branch in self._actions.items()
+                if previous_branch.get("status") == "failed"
+                and previous_branch.get("_readSemanticId") == semantic_id
+                and previous_branch.get("_readReceiptId") != receipt_id
+            ]
+            if len(previous_ids) == 1:
+                previous_id = previous_ids[0]
+                self._actions[previous_id].update(status="superseded", supersededBy=action_id)
+                corrected_ids.append(previous_id)
+                for requirement in self._requirements.values():
+                    if requirement.get("actionId") == previous_id:
+                        requirement["actionId"] = action_id
         if tool == "vrcforge_load_internal_tool_block" and lifecycle == "completed" and outcome_status == "ok":
             # A rejected discovery request has no execution obligation. The
             # model may replace its requested tool set rather than repeat it.
@@ -1995,6 +2052,7 @@ class AgentTaskLoop:
         kind: str,
         tool: str,
         arguments: Any | None = None,
+        action_id: str = "",
         verification_profile: str = "",
         inherited: bool = False,
         generation: int = 0,
@@ -2008,7 +2066,7 @@ class AgentTaskLoop:
             {
                 "kind": kind,
                 "tool": tool,
-                "actionId": (
+                "actionId": _bounded_text(action_id, 80) or (
                     canonical_action_id(kind, tool, arguments)
                     if arguments is not None
                     else ""

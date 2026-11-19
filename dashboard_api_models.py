@@ -1257,6 +1257,9 @@ class AgentCompactRequest(BaseModel):
     language: str = ""
     provider: str = ""
     model: str = ""
+    session_id: str = Field(default="", alias="sessionId")
+    project_root: str = Field(default="", alias="projectRoot")
+    require_native: bool = Field(default=False, alias="requireNative")
     target_tokens: int | None = Field(default=None, alias="targetTokens")
     real_context_limit: int | None = Field(default=None, alias="realContextLimit")
 

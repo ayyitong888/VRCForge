@@ -540,6 +540,59 @@ def _matches_name_or_path(key: object, child: object, target: str,
     )
 
 
+def _lookup_source_controls(
+    root: object, tool: str, pointer: str, sanitize: Callable[[object, int], str],
+) -> dict[str, Any]:
+    if not isinstance(root, dict):
+        return {}
+    if tool == "vrcforge_scan_avatar_items" and pointer == "/items":
+        total, offset, has_more = (root.get(key) for key in ("totalCount", "offset", "hasMore"))
+        if type(total) is not int or type(offset) is not int or type(has_more) is not bool:
+            return {}
+        controls: dict[str, Any] = {"sourceCoverage": {
+            "scope": "source_page", "offset": offset, "totalItems": total, "hasMore": has_more,
+        }}
+        request = root.get("nextRequest")
+        if has_more and isinstance(request, dict):
+            next_offset = request.get("offset")
+            limit = request.get("maxItems")
+            digest = request.get("expectedSnapshotDigest")
+            avatar = request.get("avatarPath")
+            if (type(next_offset) is int and offset < next_offset < total
+                    and type(limit) is int and 1 <= limit <= 2000
+                    and isinstance(digest, str) and re.fullmatch(r"[0-9a-fA-F]{64}", digest)
+                    and isinstance(avatar, str) and sanitize(avatar, 1024) == avatar):
+                controls["sourceNextRequest"] = {"tool": tool, "arguments": {
+                    "avatarPath": avatar, "offset": next_offset, "maxItems": limit,
+                    "expectedSnapshotDigest": digest,
+                }}
+        return controls
+    if tool == "vrcforge_scan_blendshapes" and pointer in {"/blendshapes", "/unknownBlendshapes"}:
+        scope = root.get("filterScope")
+        if scope not in ("all", "face", "face_static", "face_unknown"):
+            return {}
+        arguments: dict[str, Any] = {}
+        for key in ("rendererPaths", "blendshapeNames"):
+            value = root.get(key)
+            if (isinstance(value, list) and 1 <= len(value) <= 32
+                    and all(isinstance(item, str) and item.strip() and sanitize(item, 1024) == item
+                            for item in value)):
+                arguments[key] = value
+        controls = {"sourceCoverage": {"scope": "selected_avatar", "filterScope": scope, **arguments}}
+        avatar = root.get("selectedAvatar")
+        avatar_path = avatar.get("avatarPath") if isinstance(avatar, dict) else None
+        if (scope != "all" and (pointer != "/unknownBlendshapes" or scope == "face_static")
+                and isinstance(avatar_path, str) and avatar_path.strip() and sanitize(avatar_path, 1024) == avatar_path
+                and all(key not in root or key in arguments for key in ("rendererPaths", "blendshapeNames"))):
+            controls["sourceRequery"] = {"tool": tool, "arguments": {
+                "avatarPath": avatar_path, "scope": "face_unknown" if pointer == "/unknownBlendshapes" else "all",
+                **arguments,
+            }}
+        if _size(controls) <= 3000:
+            return controls
+    return {}
+
+
 def _source_constraints(root: object, pointer: str, sanitize: Callable[[object, int], str]) -> tuple[list[dict[str, Any]], bool]:
     """Carry source uncertainty into narrow reads without traversing sibling data."""
     keys = ("classification", "resolutionStatus", "candidateCount", "analysisRequired",
@@ -693,11 +746,18 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
             if public and _matches_name_or_path(key, child, target, sanitize)
             and len(_pointer(pointer, key)) <= 1024 and pointer.count("/") < 32
         ]
-        lookup = {"scope": "retained_direct_members", "retainedItems": retained_count,
-                  "interpretation": "Matches cover addressable public direct members retained here. They do not establish source coverage or a confirmed mapping."}
+        lookup = {"scope": "retained_direct_members", "retainedItems": retained_count, "matchMode": "exact",
+                  "interpretation": "Exact matches cover public direct members in this retained collection. For a partial name or path, browse the retained entries. Use the producing tool's source continuation or requery for data outside this page or filter."}
         if members:
             lookup["matchNameOrPath"] = target
             continuation_filters["matchNameOrPath"] = target
+        elif public:
+            if retained_count:
+                lookup["browseRequest"] = {"tool": TOOL_NAME, "arguments": {
+                    "resultRef": ref, "source": source, "jsonPointer": pointer, "offset": 0, "limit": limit,
+                }}
+            if source == "result":
+                lookup.update(_lookup_source_controls(root, step["tool"], pointer, sanitize))
     if offset > len(members):
         raise ValueError("offset is outside the retained result")
     field_name = pointer.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")

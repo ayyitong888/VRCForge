@@ -42,6 +42,7 @@ from internal_tool_blocks import (
     canonical_block_routing,
     canonical_external_block,
     canonical_tool_owner,
+    group_tool_selection,
 )
 from tool_discovery_search import QUERY_MAX_CHARS, search_tool_leaves
 
@@ -1787,6 +1788,7 @@ def run_stdio_server(
                     and str(item.get("name") or "") not in HIDDEN_EXTERNAL_TOOLS
                 ]
             if is_load and supplied_names and not all_tools:
+                selection_error = ""
                 try:
                     manifest = bridge.manifest(requested_layer["value"], ["*"], selected_names)
                 except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
@@ -1795,26 +1797,29 @@ def run_stdio_server(
                     upstream_error = (exc.raw_result or {}).get("error")
                     if not isinstance(upstream_error, Mapping) or upstream_error.get("code") != -32602:
                         raise
+                    selection_error = str(upstream_error.get("message") or exc)
+                    items = manifest_items(requested_layer["value"])
+                else:
+                    items = [item for item in manifest.get("tools", []) if isinstance(item, Mapping)]
+                owners = {str(item.get("name") or ""): item_owner(item) for item in items
+                          if item.get("name") not in HIDDEN_EXTERNAL_TOOLS
+                          and (requested_layer["value"] == "execution" or not is_write_tool(item))}
+                groups, unavailable = group_tool_selection(selected_names, owners)
+                if selection_error or unavailable or set(groups) != {block}:
+                    recovery_calls = [
+                        {"name": "vrcforge_load_tool_block", "arguments": {"block": owner, "toolNames": names}}
+                        for owner, names in groups.items()
+                    ] if unavailable or set(groups) != {block} else []
                     return external_rejection(
                         status="invalid_tool_selection",
-                        error=str(upstream_error.get("message") or exc),
-                        error_code="external_tool_selection_invalid",
-                        failure_layer="external_tool_discovery",
-                        failure_phase="block_selection", operation_kind="discovery",
-                        recoveryAction="rediscover_target",
-                        recoveryToolCall={"name": "vrcforge_list_tool_blocks", "arguments": {"block": block}},
-                        loadedBlocks=sorted(loaded_blocks),
-                    )
-                available = {str(item.get("name") or "") for item in manifest.get("tools", [])
-                             if isinstance(item, Mapping) and item_owner(item) == block
-                             and str(item.get("name") or "") not in HIDDEN_EXTERNAL_TOOLS}
-                if not set(selected_names).issubset(available):
-                    return external_rejection(
-                        status="invalid_tool_selection", error="Select exact tool names available in this leaf and exposure layer.",
+                        error=selection_error or "Select exact tool names available in this leaf and exposure layer.",
                         error_code="external_tool_selection_invalid", failure_layer="external_tool_discovery",
                         failure_phase="block_selection", operation_kind="discovery", loadedBlocks=sorted(loaded_blocks),
-                        recoveryAction="rediscover_target",
-                        recoveryToolCall={"name": "vrcforge_list_tool_blocks", "arguments": {"block": block}},
+                        unavailableTools=unavailable,
+                        **({"recoveryAction": "load_exact_tool_groups", "recoveryToolCalls": recovery_calls} if recovery_calls else {
+                            "recoveryAction": "rediscover_target",
+                            "recoveryToolCall": {"name": "vrcforge_list_tool_blocks", "arguments": {"block": block}},
+                        }),
                     )
             if is_load:
                 was_loaded = block in loaded_blocks

@@ -23,6 +23,28 @@ NATIVE_RUNTIME_STATE_PREFIX = "Current runtime state (data): "
 NATIVE_RUNTIME_CONTEXT_PREFIX = "Runtime context snapshot (data, not user instructions or authorization): "
 
 
+def _pending_suffix(messages: list[dict[str, Any]]) -> int:
+    last_assistant = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].get("role") == "assistant"), len(messages))
+    if last_assistant == len(messages):
+        return last_assistant
+    calls = {call["id"] for call in messages[last_assistant].get("tool_calls") or []}
+    settled = {item["tool_call_id"] for item in messages[last_assistant + 1:] if item.get("role") == "tool"}
+    return last_assistant if calls - settled else len(messages)
+
+
+def inject_native_handoff_context(messages: list[dict[str, Any]], current_context: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    boundary = _pending_suffix(messages)
+    return [*messages[:boundary], *current_context, *messages[boundary:]]
+
+
+def _native_task_boundaries(snapshot: dict[str, Any]) -> list[int]:
+    humans = set(human_indices(snapshot))
+    task_sources = {RuntimeInputSource.PARENT_AGENT, RuntimeInputSource.GOAL,
+                    RuntimeInputSource.EXTERNAL_AGENT, RuntimeInputSource.RETRY}
+    return [index for index, item in enumerate(snapshot["messages"]) if index in humans
+            or (item.get("role") == "user" and item.get("runtimeInputSource") in task_sources)]
+
+
 def _native_input_message(message: str, source: RuntimeInputSource) -> dict[str, str]:
     return {
         "role": "user", "content": source.model_text(message),
@@ -849,6 +871,16 @@ class AgentRuntimeSessionState:
                 return copy.deepcopy(candidate)
             if incoming_messages == current_messages and normalized["turnId"] == existing["turnId"]:
                 return restored(existing)
+            from context_compaction import MODEL_HANDOFF_PREFIX
+            existing_open = _pending_suffix(current_messages)
+            incoming_open = _pending_suffix(incoming_messages)
+            if (existing["turnId"] == normalized["turnId"] and existing_open < len(current_messages)
+                    and incoming_open < len(incoming_messages) and current_messages[0].get("role") == "assistant"
+                    and str(current_messages[0].get("content")).startswith(MODEL_HANDOFF_PREFIX)
+                    and existing.get("activeDispatchCallId") == normalized.get("activeDispatchCallId")
+                    and current_messages[existing["activeTurnStart"]] == incoming_messages[normalized["activeTurnStart"]]
+                    and current_messages[existing_open:] == incoming_messages[incoming_open:]):
+                return restored(existing)
             if (
                 normalized["turnId"] == existing["turnId"]
                 and existing["activeTurnStart"] <= normalized["activeTurnStart"]
@@ -865,7 +897,50 @@ class AgentRuntimeSessionState:
             raise ValueError("native snapshot conflicts with current conversation")
 
     @classmethod
-    def native_compaction_projection(cls, snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def native_handoff_tail(cls, snapshot: dict[str, Any]) -> int:
+        messages = snapshot["messages"]
+        start = snapshot["activeTurnStart"]
+        pending = cls._native_pending(snapshot)
+        settled = [index for index in range(start, len(messages)) if messages[index].get("role") == "assistant"
+                   and not any(call["id"] in pending for call in messages[index].get("tool_calls") or [])]
+        # A finished user turn stays indivisible. An open one can contain
+        # enough completed model decisions to compact a settled prefix.
+        open_turn = bool(pending or (settled and messages[settled[-1]].get("tool_calls"))
+                         or is_output_continuation_control(messages[-1]))
+        if open_turn and len(settled) >= 6:
+            return settled[-3]
+        prior = [index for index in _native_task_boundaries(snapshot) if index < start]
+        return prior[-2] if len(prior) >= 2 else (prior[0] if prior else start)
+
+    @classmethod
+    def _native_handoff_indices(cls, snapshot: dict[str, Any], tail_from: int) -> list[int]:
+        messages = snapshot["messages"]
+        start = snapshot["activeTurnStart"]
+        task_boundaries = _native_task_boundaries(snapshot)
+        prior = [index for index in task_boundaries if index < start]
+        prior_tail = prior[-2] if len(prior) >= 2 else (prior[0] if prior else start)
+        first = task_boundaries[0] if task_boundaries else start
+        task_indices = set(task_boundaries)
+        def in_tail(index: int) -> bool:
+            return index >= tail_from or (tail_from > start and prior_tail <= index < start)
+        return [index for index, item in enumerate(messages) if index in {first, start}
+                or (index >= min(start, tail_from) and item.get("runtimeInputSource") == RuntimeInputSource.AGENT_RELAY)
+                or is_scan_result_policy_message(item)
+                or (in_tail(index) and (index in task_indices or item.get("role") in {"assistant", "tool"}
+                                        or is_output_continuation_control(item)))]
+
+    @classmethod
+    def native_compaction_projection(cls, snapshot: dict[str, Any], *, tail_from: int | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if tail_from is not None:
+            messages = snapshot["messages"]
+            retained_indices = set(cls._native_handoff_indices(snapshot, tail_from))
+            humans = set(human_indices(snapshot))
+            retained = [copy.deepcopy(item) for index, item in enumerate(messages) if index in retained_indices]
+            archived = [{**copy.deepcopy(item), **({"humanUser": True} if index in humans else {})}
+                        for index, item in enumerate(messages) if index not in retained_indices
+                        and (item.get("role") in {"assistant", "tool"}
+                             or (item.get("role") == "user" and not str(item.get("content")).startswith(NATIVE_RUNTIME_CONTEXT_PREFIX)))]
+            return archived, retained
         # Every pending call (including approval/question waits) blocks replacement.
         if cls._native_pending(snapshot):
             raise ValueError("native compaction has pending calls")
@@ -907,6 +982,8 @@ class AgentRuntimeSessionState:
         expected_snapshot: dict[str, Any],
         summary: str,
         recovery: dict[str, Any] | None = None,
+        current_context: list[dict[str, Any]] | None = None,
+        tail_from: int | None = None,
     ) -> dict[str, Any]:
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
@@ -916,25 +993,34 @@ class AgentRuntimeSessionState:
             current = self._native_conversations.get(session_id)
             if current is None or current["binding"] != binding or current != expected:
                 raise ValueError("native snapshot compare-and-replace mismatch")
-            _source, retained_messages = self.native_compaction_projection(current)
+            _source, retained_messages = self.native_compaction_projection(current, tail_from=tail_from)
             known_humans = human_indices(current)
-            active_turn_start = 1 + sum(index < current["activeTurnStart"]
-                and human_user_projection(current["messages"][index]) is not None for index in known_humans)
+            if current_context:
+                if any(item.get("role") != "user"
+                       or not str(item.get("content")).startswith(NATIVE_RUNTIME_CONTEXT_PREFIX) for item in current_context):
+                    raise ValueError("native compaction context was not emitted by the current owner")
+            kept_indices = self._native_handoff_indices(current, tail_from) if tail_from is not None else None
+            active_turn_start = (1 + kept_indices.index(current["activeTurnStart"]) if kept_indices is not None else
+                1 + sum(index < current["activeTurnStart"] and human_user_projection(current["messages"][index]) is not None for index in known_humans))
             candidate = {
                 "binding": binding,
                 "turnId": current["turnId"],
-                "messages": [{"role": "assistant", "content": summary}] + retained_messages,
+                "messages": [{"role": "assistant", "content": summary}]
+                    + inject_native_handoff_context(retained_messages, current_context or []),
                 "activeTurnStart": active_turn_start,
-                "humanUserMessageIndices": [index + 1 for index, item in enumerate(retained_messages)
-                    if item["role"] == "user" and not item.get("runtimeInputSource")],
+                "humanUserMessageIndices": ([index + 1 for index, original in enumerate(kept_indices) if original in known_humans]
+                    if kept_indices is not None else [index + 1 for index, item in enumerate(retained_messages)
+                        if item["role"] == "user" and not item.get("runtimeInputSource")]),
             }
-            for key in ("toolOrder", "toolBlockIds", "bindingToolDefinition", "adoptedSubAgentTaskIds", "relayInputIds"):
+            for key in ("toolOrder", "toolBlockIds", "bindingToolDefinition", "adoptedSubAgentTaskIds", "relayInputIds", "activeDispatchCallId"):
                 if key in current:
                     candidate[key] = copy.deepcopy(current[key])
             if recovery is not None or "compactionRecovery" in current:
                 candidate["compactionRecovery"] = self._merge_native_recoveries(
                     current.get("compactionRecovery", []), [recovery] if recovery is not None else [])
             normalized = self._validate_native_snapshot(candidate, binding=binding)
+            if self._native_pending(current) != self._native_pending(normalized):
+                raise ValueError("native compaction would change pending calls")
             self._save_native(session_id, normalized)
             return copy.deepcopy(normalized)
 
@@ -992,7 +1078,8 @@ class AgentRuntimeSessionState:
             return False
         required = {"exposureLayer", "projectContextActive", "allowedRuntimeActions", "availableToolNames"}
         optional = {"planMode", "modeConstraint", "projectPath", "loadedToolBlocks", "shellExecutor",
-                    "compactionRecoveryInformation", "checkpointChoice", "executionMode", "questionTask", "toolLoopReminder"}
+                    "compactionRecoveryInformation", "checkpointChoice", "executionMode", "questionTask",
+                    "toolLoopReminder", "pendingApprovals"}
         if not isinstance(state, dict) or not required <= state.keys() or state.keys() - required - optional:
             return False
         if not isinstance(state["exposureLayer"], str) or state["exposureLayer"] not in {"planning", "execution"} or not isinstance(state["projectContextActive"], bool):
@@ -1005,6 +1092,13 @@ class AgentRuntimeSessionState:
                 and ("executionMode" not in state or state["executionMode"] in ("approval", "auto", "roslyn_full_auto"))
                 and ("questionTask" not in state or isinstance(state["questionTask"], dict))
                 and ("toolLoopReminder" not in state or state["toolLoopReminder"] == LOOP_REMINDER)
+                and ("pendingApprovals" not in state or (
+                    isinstance(state["pendingApprovals"], list) and len(state["pendingApprovals"]) <= 8
+                    and all(isinstance(item, dict) and set(item) == {"approvalId", "tool", "status"}
+                            and item["status"] == "awaiting_user_decision"
+                            and all(isinstance(item[key], str) and item[key] for key in ("approvalId", "tool"))
+                            for item in state["pendingApprovals"])
+                ))
                 and ("checkpointChoice" not in state or (
                     isinstance(state["checkpointChoice"], dict)
                     and state["checkpointChoice"].get("mode") in {"skip", "require"}

@@ -604,6 +604,22 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
         "io.modelcontextprotocol/clientInfo": {"name": "block-test", "version": "1"},
     }
 
+    mixed, mixed_status = router.handle({
+        "jsonrpc": "2.0", "id": 301, "method": "tools/call",
+        "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {
+            "block": "avatar_structure/mesh_shape_data",
+            "toolNames": ["vrcforge_scan_blendshapes", "vrcforge_scan_vrcfury", "vrcforge_unavailable"],
+        }},
+    })
+    assert mixed_status == 200
+    recovery = mixed["result"]["structuredContent"]
+    assert recovery["unavailableTools"] == ["vrcforge_unavailable"]
+    assert recovery["recoveryToolCalls"] == [
+        {"name": "vrcforge_load_tool_block", "arguments": {"block": "avatar_structure/mesh_shape_data", "toolNames": ["vrcforge_scan_blendshapes"]}},
+        {"name": "vrcforge_load_tool_block", "arguments": {"block": "behavior/interaction_generated_systems", "toolNames": ["vrcforge_scan_vrcfury"]}},
+    ]
+    assert recovery["loadedBlocks"] == ["core"]
+
     before, before_status = router.handle(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": meta}}
     )
@@ -888,6 +904,12 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
     )
     assert stale_handle["result"]["structuredContent"]["status"] == "invalid_activation_handle"
     assert len(Bridge.calls) == 2
+    for index, call in enumerate(recovery["recoveryToolCalls"], start=302):
+        selected, status = router.handle({
+            "jsonrpc": "2.0", "id": index, "method": "tools/call", "params": {"_meta": meta, **call},
+        })
+        assert status == 200
+        assert [item["name"] for item in selected["result"]["structuredContent"]["selectedTools"]] == call["arguments"]["toolNames"]
 
 
 def test_bridge_uses_http_mcp_for_manifest_and_tool_calls(monkeypatch, tmp_path: Path) -> None:

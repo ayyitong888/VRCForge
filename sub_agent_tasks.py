@@ -17,7 +17,7 @@ from typing import Any, BinaryIO, Callable
 
 from agent_command_safety import normalize_filesystem_path
 from agent_runtime_input import child_task_source
-from agent_subagent_runtime import project_child_budget_pause
+from agent_subagent_runtime import project_child_budget_pause, redact_child_result_references
 from background_goal_runtime import RuntimeLaneBudget
 from runtime_planner_service import public_runtime_payload
 
@@ -1157,6 +1157,7 @@ class SubAgentTaskRegistry:
         if task.handler == "llm_readonly":
             # The registry owns child identity and the persisted execution
             # choices; arbitrary task params cannot redirect it into a parent.
+            payload.pop("_resumeContext", None)
             payload.update(
                 taskId=task.id,
                 task=task.task,
@@ -1172,11 +1173,44 @@ class SubAgentTaskRegistry:
                 resumeOf=task.resume_of,
                 isResume=bool(task.resume_of),
             )
-            if task.role == "outfit_package_inspection":
+            if task.resume_of:
                 with self._lock:
                     source = self._tasks.get(task.resume_of)
-                    previous = source.result if source and source.child_session_id == task.child_session_id else None
-                    payload["_priorOutfitInspection"] = copy.deepcopy(previous.get("plannerEvidence")) if previous else None
+                    if source and source.child_session_id == task.child_session_id:
+                        previous = source.result or {}
+                        origin = source
+                        seen = {task.id, source.id}
+                        while origin.resume_of and origin.resume_of not in seen:
+                            older = self._tasks.get(origin.resume_of)
+                            if not older or older.child_session_id != task.child_session_id:
+                                break
+                            seen.add(older.id)
+                            origin = older
+                        payload["_resumeContext"] = {
+                            "label": "Historical child scope and status for this resume",
+                            "originalTaskId": origin.id,
+                            "originalObjective": redact_child_result_references(origin.task)[:1000],
+                            "previousTaskId": source.id,
+                            "previousObjective": redact_child_result_references(source.task)[:1000],
+                            "previousTaskSource": source.task_source,
+                            "previousStatus": source.status,
+                        }
+                        if source.status == "paused" and previous.get("remainingTask"):
+                            payload["_resumeContext"]["previousRemainingObjective"] = redact_child_result_references(
+                                str(previous["remainingTask"])
+                            )[:1000]
+                            evidence = previous.get("evidenceCoverage") or (previous.get("plannerEvidence") or {}).get("evidenceCoverage")
+                            stored_excerpts = previous.get("partialEvidence")
+                            if not isinstance(evidence, dict) and isinstance(stored_excerpts, list):
+                                evidence = {"reportedReceipts": len(stored_excerpts), "excerptedReceipts": sum(
+                                    isinstance(item, dict) and item.get("excerpt") is True for item in stored_excerpts
+                                )}
+                            if isinstance(evidence, dict):
+                                payload["_resumeContext"]["previousEvidenceCoverage"] = {
+                                    key: value for key, value in evidence.items() if type(value) is int
+                                }
+                        if task.role == "outfit_package_inspection":
+                            payload["_priorOutfitInspection"] = copy.deepcopy(previous.get("plannerEvidence"))
         else:
             # Preserve the fixed handler contracts; their arguments can
             # still supply explicit per-task values as before.

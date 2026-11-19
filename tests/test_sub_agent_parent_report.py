@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_gateway import AgentGateway
+from agent_subagent_runtime import project_child_budget_pause
 from agent_task_loop import TASK_LOOP_SCHEMA, canonical_action_id
 from runtime_planner_service import PlannerModelResult, PlannerTurnMetadata, RuntimePlannerService
 from sub_agent_delegate import run_readonly_llm_agent
@@ -118,12 +119,13 @@ class _ParentModel:
         self.first_continuation = None
         self.saw_full_report = False
         self.initial_delegate_sent = False
+        self.delegate_action_id = DELEGATE_ACTION_ID
 
     def _next_action(self, request_view):
         if REPORT_MARKER in json.dumps(request_view, ensure_ascii=False):
             self.saw_full_report = True
             return {"action": "reply", "reply": "The child report contains the requested finding.",
-                    "completion_claim": {"satisfied": True, "evidence_action_ids": [DELEGATE_ACTION_ID]}}
+                    "completion_claim": {"satisfied": True, "evidence_action_ids": [self.delegate_action_id]}}
         next_request = _owner_page_next_request(request_view)
         assert next_request is not None, "parent did not receive an owner_model page cursor"
         arguments = next_request["arguments"]
@@ -140,6 +142,10 @@ class _ParentModel:
         if self.first_continuation is None:
             self.first_continuation = deepcopy(request)
             assert REPORT_MARKER not in json.dumps(request, ensure_ascii=False)
+            delegate_receipt = next(message for message in request["messages"]
+                                    if message.get("tool_call_id") == "delegate-child")
+            self.delegate_action_id = json.loads(delegate_receipt["content"])["actionId"]
+            assert self.delegate_action_id
         action = self._next_action(request)
         if action["action"] == "read":
             receipt = call(f"read-child-report-{len(self.page_requests)}", "vrcforge_read_tool_result", action["arguments"])
@@ -251,3 +257,38 @@ def test_parent_pages_child_final_report_through_owner_model_reader(tmp_path, na
     assert offsets == sorted(set(offsets))
     assert REPORT_MARKER not in json.dumps(model.first_continuation, ensure_ascii=False)
     assert RAW_SCAN_MARKER not in json.dumps(model.requests, ensure_ascii=False)
+
+
+def test_parent_reads_paused_child_coverage_and_owned_report(tmp_path):
+    gateway, model = _gateway_case(tmp_path, native=True)
+    child_ref = "result_" + "b" * 32
+    raw = {
+        "plan": {"nextStep": "paused", "reason": "model_turn_budget_exhausted"},
+        "steps": [{"actionId": f"child-read-{index}", "tool": "vrcforge_scan_avatar_items",
+                   "result": {"summary": {"truncated": index < 9}, "text": "covered item " * 38,
+                              "name": (REPORT_MARKER if index == 22 else f"Item {index}"),
+                              "description": "selected scoped data " * 8,
+                              "resultRef": child_ref}, "outcome": {"status": "ok"}} for index in range(23)],
+    }
+    pause = project_child_budget_pause(raw, DELEGATE_ARGUMENTS["task"])
+    child = run_readonly_llm_agent(
+        SimpleNamespace(run_sub_agent_llm=lambda **_: {**pause, "ok": False, "resumable": True,
+                                                      "rawResult": raw, "stepCount": len(raw["steps"])}),
+        {"task": DELEGATE_ARGUMENTS["task"], "childSessionId": "offline-child-session",
+         "maxSteps": 4, "tools": []}, threading.Event(),
+    )
+    try:
+        gateway.runtime_message({"message": "Review the delegated specialist report.",
+                                 "sessionId": "child-report-parent-session", "clientTurnId": "child-report-parent-turn",
+                                 "projectRoot": str(tmp_path), "maxAgenticTurns": 8})
+        gateway.resume_runtime_task_after_sub_agent({
+            "subAgentTaskId": "child-report-task", "status": "paused", "canResume": True,
+            "taskSeed": gateway._parent_report_seed["seed"], "summary": child["summaryText"], "result": child,
+        })
+    finally:
+        gateway.shutdown_runtime_continuations(0)
+    initial = json.dumps(model.first_continuation, ensure_ascii=False)
+    assert "excerptedReceipts" in initial and "sourceIncompleteReceipts" in initial
+    assert model.saw_full_report
+    assert model.page_requests and all(item["resultRef"] != child_ref for item in model.page_requests)
+    assert child_ref not in json.dumps(model.requests, ensure_ascii=False)

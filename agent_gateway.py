@@ -126,6 +126,8 @@ from agent_runtime_skill_executor import (
 from internal_tool_blocks import CONVERSATION_TOOL_NAMES
 from agent_task_loop import (
     SUB_AGENT_TASK_TOOLS,
+    native_call_action_id,
+    repair_legacy_subagent_batch_identities,
     CONVERSATION_HANDOFF_TOOLS,
     AgentTaskLoop,
     approval_task_context,
@@ -2253,6 +2255,43 @@ class AgentGateway:
     @property
     def runtime_sessions(self) -> AgentRuntimeSessionState:
         return self._runtime_session_state
+
+    def compact_native_session(
+        self, session_id: str, project_root: str, *, trigger: str, phase: str,
+        record_provider_usage: Callable[[Mapping[str, Any]], None],
+    ) -> dict[str, Any] | None:
+        from project_instruction_context import load_project_instructions
+
+        planner = self.runtime_planner
+        state = self.runtime_sessions
+        binding = planner.native_conversation_binding(project_root)
+        snapshot = state.native_conversation(session_id, binding=binding) if binding and session_id else None
+        if snapshot is None:
+            return None
+        if state.session_busy(session_id):
+            raise AgentGatewayError("Wait for the active model or tool to finish before compacting this session.", status_code=409)
+        todo = self.list_agent_progress(limit=AGENT_GOAL_MAX_ITEMS, session_id=session_id, project_root=project_root)["items"]
+        observe = {"activeTodo": todo, "internalToolSelections": state.internal_tool_selections(session_id)}
+        turn = NativeRuntimeTurn(
+            state, planner, session_id, snapshot["turnId"], binding, "", [], None, None, None,
+            project_context_active=bool(project_root), compaction_only=True,
+        )
+        request, _ = planner._build_native_plan_request(
+            snapshot["messages"], observe=observe, exposure_layer="planning",
+            project_context_active=bool(project_root), project_path=project_root,
+            internal_tool_blocks=state.internal_tool_blocks(session_id),
+            global_instructions=planner._read_global_instructions(),
+            project_instructions=load_project_instructions(project_root).content,
+        )
+        replacement, _ = planner.maybe_compact_native_context(
+            request, turn, force=trigger == "manual", preserve_pending=trigger == "manual", has_todo=bool(todo),
+            phase=phase, provider_receipt=record_provider_usage, expected_snapshot=snapshot,
+        )
+        audit = dict(turn.compaction or {})
+        if audit.get("applied") is not True:
+            return {"ok": False, "summary": "", **audit,
+                    **({"status": "no_content"} if audit.get("failureClass") == "no_compactable_history" else {})}
+        return {"ok": True, "nativeApplied": True, **audit, "summary": replacement["messages"][0]["content"]}
 
     def bind_runtime_subagent_control(
         self,
@@ -5017,6 +5056,17 @@ class AgentGateway:
             )
         if isinstance(payload.get("outcome"), Mapping):
             outcome_projection = dict(payload["outcome"])
+            retryable = outcome_projection.get("safeToRetry")
+            if isinstance(retryable, bool):
+                retry_fields = {"retryable": retryable, "safeToRetry": retryable}
+                payload.update(retry_fields)
+                for key in ("errorDetails", "writeFailure"):
+                    if isinstance(payload.get(key), Mapping):
+                        payload[key] = {**payload[key], **retry_fields}
+                        if isinstance(payload[key].get("error"), Mapping):
+                            payload[key]["error"] = {**payload[key]["error"], "retryable": retryable}
+                if isinstance(payload.get("error"), Mapping):
+                    payload["error"] = {**payload["error"], "retryable": retryable}
             for key in (
                 "commitState",
                 "mutationStarted",
@@ -5024,7 +5074,6 @@ class AgentGateway:
                 "persistenceState",
                 "readbackState",
                 "cleanupState",
-                "retryable",
                 "nextAction",
             ):
                 if key in payload:
@@ -5465,6 +5514,15 @@ class AgentGateway:
             return None
         params = ensure_dict(prepared.get("params"))
         continuation = ensure_dict(prepared.get("taskContinuation"))
+        session_id = str(params.get("session_id") or "")
+        client_turn_id = str(params.get("clientTurnId") or "")
+        if self._runtime_session_state.final_response(
+            session_id=session_id, client_turn_id=client_turn_id,
+        )["status"] != "missing" or self._runtime_run_ledger.read_terminal_continuation(
+            session_id=session_id, client_turn_id=client_turn_id,
+        ) is not None:
+            # This exact approval already delivered its callback.
+            return None
         self._signal_background_activity("approval_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
@@ -5479,6 +5537,10 @@ class AgentGateway:
                     )
         except DesktopActionBrokerError as exc:
             raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        except AgentGatewayError as exc:
+            if exc.cause_code == "duplicate_runtime_turn":
+                return None
+            raise
 
     def resume_runtime_task_after_shell(
         self,
@@ -5767,6 +5829,7 @@ class AgentGateway:
             continuation["_subAgentBatch"] = [
                 ensure_dict(member.get("taskContinuation")) for member in prepared_members[:-1]
             ]
+            repair_legacy_subagent_batch_identities([*continuation["_subAgentBatch"], continuation])
             # A child cancelled on its own is independent evidence. If the
             # parent already consumed Stop while launching children, recover
             # that disposition from its original durable turn.
@@ -6138,7 +6201,10 @@ class AgentGateway:
                 subagent_parent_turn=subagent_parent_turn,
             )
             if waiting_cancelled is None:
-                raise AgentGatewayError("A runtime turn with this sessionId and clientTurnId is already active.", status_code=409)
+                raise AgentGatewayError(
+                    "A runtime turn with this sessionId and clientTurnId is already active.",
+                    status_code=409, cause_code="duplicate_runtime_turn",
+                )
             try:
                 while True:
                     if waiting_cancelled.is_set() or not self._runtime_continuation_accepting:
@@ -6254,6 +6320,7 @@ class AgentGateway:
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
             is_continuation=resuming_task, plan_mode=plan_mode, subagent_parent_turn=subagent_parent_turn,
         )
+        approval_continuation = continuation_source in {"approval_finished", "approval_revision_requested"}
         params["_runtimeAdmitted"] = True
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
         self._mcp_resource_context.set(f"runtime:{session_id}")
@@ -6607,6 +6674,7 @@ class AgentGateway:
                 initial_history=history, client_turn_id=client_turn_id,
                 input_source=input_source,
                 project_context_active=project_context_active,
+                late_approval_id=str(continuation.get("approvalId") or "") if approval_continuation else "",
                 subagent_batch=([*batch_continuations, continuation] if "_subAgentBatch" in continuation else None),
                 on_steer_consumed=lambda ids: (self._settle_async_question_steers(ids, session_id=session_id, client_turn_id=client_turn_id, turn_id=turn_id), self._runtime_status_changed({
                     **identity,
@@ -7156,7 +7224,9 @@ class AgentGateway:
         loop_reminder_pending = ""
         last_directory: tuple[str, str, str] | None = None
         last_effect_receipt: tuple[str, str | None] | None = None
-        if continuation_completion.get("status") == "completed" and continuation_context.get("requestedKind") in {"write", "shell"}:
+        continued_execution = ensure_dict(continuation.get("execution"))
+        continued_kind = continuation_context.get("kind")
+        if continuation_completion.get("status") == "completed" and continued_kind in {"write", "shell"}:
             # A resumed receipt only needs a digest if the model asks to replay it.
             last_effect_receipt = (str(continuation_context.get("requestedActionId") or ""), None)
 
@@ -7176,9 +7246,8 @@ class AgentGateway:
         recoverable_failure_refeeds = 0
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
-        continued_execution = ensure_dict(ensure_dict(task_continuation).get("execution"))
         write_payload: dict[str, Any] | None = (
-            (continued_execution or None) if continuation_context.get("requestedKind") == "write" else None
+            (continued_execution or None) if continued_kind == "write" else None
         )
         resumed_approval_id = (
             str(ensure_dict(task_continuation).get("approvalId") or "").strip()
@@ -7694,6 +7763,10 @@ class AgentGateway:
                 planner_observe["skippedNativeQuestions"] = self.questions.skipped_native_questions(
                     session_id=session_id, project_root=project_root, binding=native_binding,
                 )
+            if session_id and not queued_native_action:
+                planner_observe["activeTodo"] = self.list_agent_progress(
+                    limit=AGENT_GOAL_MAX_ITEMS, session_id=session_id, project_root=project_root,
+                )["items"]
             if pending_legacy_steer_ids:
                 consumed_steer_input_ids.extend(pending_legacy_steer_ids)
                 self._settle_async_question_steers(
@@ -8266,7 +8339,7 @@ class AgentGateway:
                     receipt_digest = last_effect_receipt[1]
                     if receipt_digest is None:
                         receipt_digest = tool_result_digest(
-                            ensure_dict(continuation_context.get("execution")).get("result"),
+                            continued_execution.get("result"),
                             diagnostic_fields=planned_definition.progress_diagnostic_fields if planned_definition else (),
                         )
                         last_effect_receipt = (planned_action_id, receipt_digest)
@@ -8279,6 +8352,22 @@ class AgentGateway:
                     last_plan = pause_plan
                     break
                 continue
+            # Keep semantic identity for loop detection and effect suppression.
+            # Each native read/delegation has its own task record and obligation.
+            occurrence_id = ""
+            ordinary_native_read = bool(
+                native_turn.active_call_id and action_kind == "skill"
+                and planned_definition and not planned_definition.write
+                and planned_definition.category == "read/debug"
+                and not planned_definition.advanced
+                and not planned_definition.requires_user_activation
+                and (planned_tool != "vrcforge_browser" or planned_arguments.get("operation") == "read")
+                and not self._write_handlers.get(planned_tool)
+            )
+            if ordinary_native_read or (
+                native_turn.active_call_id and action_kind == "skill" and planned_tool in SUB_AGENT_TASK_TOOLS
+            ):
+                occurrence_id = native_call_action_id(turn_id, native_turn.active_call_id)
             # Delegation remains an ordinary Runtime tool call. Its separate
             # created/started/completed/failed lifecycle is projected only by
             # the durable Sub Agent registry, so no synthetic lifecycle event
@@ -8293,7 +8382,7 @@ class AgentGateway:
                 summary=str(plan.get("summary") or ""),
                 status="prepared" if action_kind in {"write", "shell"} else "started",
                 tool=planned_tool,
-                action_id=planned_action_id,
+                action_id=occurrence_id or planned_action_id,
                 timing={
                     "queuedNativeCall": queued_native_action,
                     "iterationStartMs": round((iteration_started - timeline_clock_start) * 1000, 3),
@@ -8324,6 +8413,13 @@ class AgentGateway:
                         completion_requirement.get("arguments")
                         if isinstance(completion_requirement.get("arguments"), dict)
                         else None
+                    ),
+                    action_id=(
+                        occurrence_id
+                        if completion_requirement.get("kind", action_kind) == action_kind
+                        and completion_requirement.get("tool", planned_tool) == planned_tool
+                        and completion_requirement.get("arguments") == planned_arguments
+                        else ""
                     ),
                     verification_profile=str(
                         completion_requirement.get("verificationProfile") or ""
@@ -8561,6 +8657,7 @@ class AgentGateway:
                         kind="skill",
                         tool=step_tool,
                         arguments=action_arguments,
+                        action_id=occurrence_id,
                     )
                     step_params["_runtimeSessionId"] = session_id
                     step_params["_runtimeClientTurnId"] = client_turn_id
@@ -8571,6 +8668,7 @@ class AgentGateway:
                         requested_kind="skill",
                         requested_tool=step_tool,
                         requested_arguments=action_arguments,
+                        requested_action_id=occurrence_id,
                         provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
                         provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
@@ -8784,6 +8882,7 @@ class AgentGateway:
                         kind=action_kind,
                         tool=task_record_tool,
                         arguments=requirement_arguments,
+                        action_id=occurrence_id,
                     )
                 action_outcome = ensure_dict(step_payload.get("outcome"))
                 if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL, "vrcforge_browser"} and str(
@@ -8802,14 +8901,17 @@ class AgentGateway:
                     raw_result=step_payload,
                     outcome=action_outcome,
                     action_id=(
-                        ""
-                        if task_record_tool != step_tool
-                        else str(step_payload.get("taskActionId") or planned_action_id)
+                        occurrence_id if task_record_tool != step_tool
+                        else str(step_payload.get("taskActionId") or occurrence_id or planned_action_id)
                     ),
                     correction_for_action_id=(
                         str(plan.get("correctionForActionId") or "")
                     ),
                     native_read_observation=native_read_observation,
+                    native_read_identity=(
+                        (loop_action_id, native_turn.receipt_call_id)
+                        if ordinary_native_read and task_record_tool == step_tool else None
+                    ),
                 )
                 step_payload["outcome"] = task_action["outcome"]
                 if action_kind == "skill":
@@ -8985,7 +9087,7 @@ class AgentGateway:
                 summary=result_summary,
                 status=result_status,
                 tool=step_tool,
-                action_id=planned_action_id,
+                action_id=task_action["actionId"] or planned_action_id,
                 capture_result=steps[-1].get("result"),
                 timing={"toolPhaseMs": round((time.perf_counter() - tool_phase_started) * 1000, 3)},
             )
@@ -9261,9 +9363,10 @@ class AgentGateway:
                     unresolved_planner_argument_failure is not None
                     and task_action.get("status") == "completed"
                     and (
-                        native_binding
+                        (native_binding and not queued_native_action)
                         or (
-                            action_kind
+                            not native_binding
+                            and action_kind
                             == str(unresolved_planner_argument_failure.get("actionKind") or "")
                             and str(unresolved_planner_argument_failure.get("tool") or "")
                             in {
@@ -10001,6 +10104,16 @@ class AgentGateway:
             for item in self.approval_transactions.list_approvals(include_expired=False, project_root=project_root)
             if item.get("status") == "pending"
         ]
+        scope_key = command_safety.normalize_filesystem_path(project_root) if project_root else ""
+        owned_pending = [
+            {"approvalId": item["id"], "tool": item["targetTool"], "status": "awaiting_user_decision"}
+            for item in pending
+            if session_id and ensure_dict(item.get("taskContext")).get("sessionId") == session_id
+            and (command_safety.normalize_filesystem_path(owner_root) if (
+                owner_root := str(ensure_dict(item.get("taskContext")).get("projectRoot") or "").strip()
+            ) else "") == scope_key
+            and item.get("id") and item.get("targetTool")
+        ][:8]
         goals = [
             goal
             for goal in self._goal.list_agent_goals(
@@ -10069,6 +10182,7 @@ class AgentGateway:
             "userConstraints": self._serialize_user_constraints(user_constraints, include_error=True),
             "approvalQueue": {
                 "pendingCount": len(pending),
+                **({"ownedPending": owned_pending} if owned_pending else {}),
             },
             "shellExecutor": {
                 "available": True,
@@ -10924,7 +11038,7 @@ class AgentGateway:
                     status="ok",
                     message="User AGENTS.md is not configured.",
                 )
-            content = path.read_text(encoding="utf-8-sig").strip()
+            content = path.read_bytes().decode("utf-8")
         except (OSError, UnicodeError) as exc:
             return UserConstraintsSnapshot(
                 path=path,
@@ -10937,7 +11051,7 @@ class AgentGateway:
             path=path,
             content=content,
             status="ok",
-            message="User constraints are active." if content else "User AGENTS.md is empty.",
+            message="User constraints are active." if content.lstrip("\ufeff").strip() else "User AGENTS.md is empty.",
         )
 
     @property

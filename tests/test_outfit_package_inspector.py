@@ -30,6 +30,32 @@ def make_unitypackage(path: Path) -> None:
         write_tar_member(archive, "0002/asset", b"SECRET_TEXTURE_PAYLOAD_SHOULD_NOT_APPEAR")
 
 
+def test_folder_censuses_zip_entries_without_opening_contents_and_discloses_rar(tmp_path):
+    from outfit_import_receipt import package_preview_receipt
+
+    for archive_name, names in {"a.zip": ["sub/One.unitypackage", "Two.unitypackage"],
+                                "b.zip": ["Three.unitypackage"], "c.zip": ["Four.unitypackage", "Five.unitypackage"]}.items():
+        with zipfile.ZipFile(tmp_path / archive_name, "w") as archive:
+            for name in names:
+                archive.writestr(name, "payload-is-not-inspected")
+    (tmp_path / "unopened.rar").write_bytes(b"rar")
+    result = inspect_outfit_package(tmp_path)
+    summary = result["summary"]
+    assert summary["unityPackageCount"] == 0
+    assert summary["archiveUnityPackageCount"] == 5
+    assert summary["archiveCensusComplete"] is False
+    assert "No UnityPackage or loose outfit assets were detected." not in result["warnings"]
+    archives = {item["path"]: item for item in result["archives"]}
+    assert archives["a.zip"]["status"] == "listed"
+    assert archives["a.zip"]["unityPackagePaths"] == ["sub/One.unitypackage", "Two.unitypackage"]
+    assert archives["unopened.rar"]["status"] == "unsupported"
+    assert "unityPackageCount" not in archives["unopened.rar"]
+    receipt = package_preview_receipt(result)
+    assert receipt["inventory"]["archiveUnityPackageCount"] == 5
+    assert receipt["inventory"]["missingMatchProvesAbsence"] is False
+    assert receipt["nextTool"] == "vrcforge_inspect_outfit_package"
+
+
 def test_unitypackage_inspection_reads_pathnames_not_asset_payload(tmp_path: Path) -> None:
     package = tmp_path / "dress.unitypackage"
     make_unitypackage(package)

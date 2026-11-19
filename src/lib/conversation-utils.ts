@@ -234,8 +234,8 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction, source
       continue;
     }
     if (item.type === "user") {
-      const text = appendAttachmentSummary(userMessageTextForHistory(item), item.attachments || [], t).trim();
-      if (text) {
+      const text = appendAttachmentSummary(userMessageTextForHistory(item), item.attachments || [], t);
+      if (text.trim()) {
         const authorRole = agentRelaySource(item) !== undefined ? "agent_relay"
           : item.goalDeliveryId || goalInputIds.has(item.id) ? "goal" : undefined;
         history.push({
@@ -246,13 +246,13 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction, source
         });
       }
     } else if (item.type === "question_answer") {
-      const text = appendAttachmentSummary(item.text, item.attachments || [], t).trim();
-      if (text) {
+      const text = appendAttachmentSummary(item.text, item.attachments || [], t);
+      if (text.trim()) {
         history.push({ role: "user", text });
       }
     } else if (item.type === "agent") {
-      const text = visibleAgentDialogueText(item.response).trim();
-      if (text) {
+      const text = visibleAgentDialogueText(item.response);
+      if (text.trim()) {
         history.push({ role: "agent", text });
       }
     } else if (item.type === "compact") {

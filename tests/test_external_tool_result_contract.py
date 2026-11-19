@@ -93,10 +93,49 @@ def test_canonical_facts_preserve_dispatch_retry_and_exact_recovery_flags() -> N
     )
 
     assert facts["toolRoutingStarted"] is True
-    assert facts["retryable"] is True
+    assert facts["retryable"] is False
     assert facts["safeToRetry"] is False
     assert facts["checkpointRecoveryRequired"] is True
     assert facts["temporaryCleanupRequired"] is False
+
+
+def test_external_retry_disposition_is_consistent_with_effect_evidence():
+    cases = [
+        ("unknown", True, True, False),
+        ("partial", True, True, False),
+        ("complete", True, True, False),
+        ("not_started", True, False, False),
+        ("not_started", True, True, True),
+    ]
+    for state, technical_retry, raw_safe, expected in cases:
+        raw = {"ok": False, "error": {"code": "unity_retry_probe", "retryable": technical_retry},
+               "retryable": technical_retry, "safeToRetry": raw_safe, "commitState": state,
+               "mutationStarted": False if state == "not_started" else None, "committed": False if state == "not_started" else None}
+        error = build_external_tool_error(raw_result=raw, operation_kind="write")
+        view = external_write_failure_view(error)
+        outcome = normalize_agent_tool_result({**raw, "errorDetails": error}, fallback_summary="Write failed.", write=True)
+        for projection in (error, view, outcome):
+            assert projection["safeToRetry"] is expected, state
+            assert projection["retryable"] is expected, state
+        assert outcome["error"]["retryable"] is expected, state
+
+
+def test_mcp_write_projection_does_not_reapply_stale_outer_retryability(tmp_path):
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    response = gateway._external_mcp_write_result("vrcforge_write_asset", {
+        "status": "failed", "ok": False, "commitState": "unknown",
+        "retryable": True, "safeToRetry": False,
+        "errorDetails": {"retryable": True, "commitState": "unknown"},
+        "writeFailure": {"retryable": True, "commitState": "unknown"},
+        "error": {"code": "write_response_timeout", "retryable": True},
+    })
+    for projection in (response, response["outcome"], response["errorDetails"], response["writeFailure"]):
+        assert projection["retryable"] is False
+        assert projection["safeToRetry"] is False
+    assert response["outcome"]["error"]["retryable"] is False
+    assert response["error"]["retryable"] is False
 
 
 def test_no_write_commit_facts_clear_stale_unknown_recovery_projection() -> None:

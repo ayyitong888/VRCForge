@@ -132,9 +132,15 @@ def test_small_window_compaction_emits_one_durable_child_timeline_marker(tmp_pat
     from tests.test_native_context_compaction import Compactor
 
     old_report = "Earlier child evidence: " + " historical observation excerpt" * 6400
-    gateway, _, invoked = _child_gateway(tmp_path, [{"role": "assistant", "content": old_report}])
+    gateway, _, invoked = _child_gateway(tmp_path, [
+        {"role": "assistant", "content": old_report},
+        {"role": "assistant", "content": "Recent settled inspection."},
+        {"role": "assistant", "content": "Another settled inspection."},
+    ])
     gateway.runtime_planner._turn = RoutedTurn()
     assert _run(gateway, tmp_path, task="Inspect the old evidence", turn_id="first")["ok"]
+    assert _run(gateway, tmp_path, task="Inspect the first recent scope", turn_id="recent-1", is_resume=True)["ok"]
+    assert _run(gateway, tmp_path, task="Inspect the second recent scope", turn_id="recent-2", is_resume=True)["ok"]
 
     reopened, model, new_calls = _child_gateway(tmp_path, [
         {"role": "assistant", "content": "Continued with the summary after compaction."},
@@ -152,3 +158,49 @@ def test_small_window_compaction_emits_one_durable_child_timeline_marker(tmp_pat
     assert len(markers) == 1
     assert markers[0]["payload"] == {"status": "completed"}
     assert timeline[-1]["kind"] == "assistant"
+
+
+def test_registry_resume_retains_authoritative_child_scope_after_compaction(tmp_path):
+    from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
+    from sub_agent_tasks import SubAgentTaskRegistry
+    from tests.test_native_context_compaction import Compactor
+
+    runtime, initial_model, _ = _child_gateway(tmp_path / "runtime", [
+        {"role": "assistant", "content": " historical observation excerpt" * 6400},
+        {"role": "assistant", "content": "The first recent child turn is complete."},
+        {"role": "assistant", "content": "The second recent child turn is complete."},
+    ])
+    runtime.runtime_planner._turn = RoutedTurn()
+    root = tmp_path / "registry"
+    roles = build_sub_agent_roles()
+    registry = SubAgentTaskRegistry(root, roles, build_sub_agent_role_handlers(runtime))
+    original = "Recover all EX-menu bindings from the delegated avatar scope."
+    source = registry.create_task(role="llm_readonly", task=original, display_name="Reviewer",
+                                  parent_session_id="parent", project_path=str(tmp_path / "runtime"))["task"]
+    registry._threads[source["id"]].join(5)
+    latest = source
+    for message in ("Review the first recent case.", "Review the second recent case."):
+        latest = registry.resume_task(latest["id"], task=message)["task"]
+        registry._threads[latest["id"]].join(5)
+    assert len(initial_model.requests) == 3
+
+    reopened, model, _ = _child_gateway(tmp_path / "runtime", [{"role": "assistant", "content": "Continued."}])
+    reopened.runtime_planner._turn = RoutedTurn(8000)
+    compactor = Compactor("Prior content compressed without the delegated objective.")
+    reopened.runtime_planner._compactor = compactor
+    restored = SubAgentTaskRegistry(root, roles, build_sub_agent_role_handlers(reopened))
+    resumed = restored.resume_task(latest["id"], task="Continue using the same scope.")["task"]
+    restored._threads[resumed["id"]].join(5)
+    assert len(compactor.calls) == len(model.requests) == 1
+    messages = json.dumps(model.requests[0]["messages"])
+    assert "Prior content compressed" in messages
+    assert "Continue using the same scope." in messages
+    active_context = [item["content"] for item in model.requests[0]["messages"]
+                      if "Historical child scope and status for this resume" in item.get("content", "")]
+    assert len(active_context) == 1
+    assert original in active_context[0]
+    assert source["id"] in active_context[0]
+    assert latest["id"] in active_context[0]
+    assert "The first recent child turn is complete." in messages
+    assert "The second recent child turn is complete." in messages
+    assert "previousStatus" in active_context[0] and "completed" in active_context[0]

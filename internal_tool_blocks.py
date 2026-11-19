@@ -11,6 +11,21 @@ from typing import Any, Iterable, Mapping
 from agent_memory_tool_contract import MEMORY_TOOL_NAMES
 
 
+def group_tool_selection(
+    requested: Iterable[str], owners: Mapping[str, str],
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Group exact visible names by loadable owner; retain unresolved names separately."""
+    groups: dict[str, list[str]] = {}
+    unavailable: list[str] = []
+    for name in dict.fromkeys(requested):
+        owner = owners.get(name)
+        if owner in CANONICAL_TOOL_LEAVES:
+            groups.setdefault(owner, []).append(name)
+        else:
+            unavailable.append(name)
+    return groups, unavailable
+
+
 INTERNAL_DEFAULT_TOOL_BLOCK = "core"
 
 ROUTING_FIELDS = ("useWhen", "doNotUse", "provides", "planningExposure", "executionExposure")

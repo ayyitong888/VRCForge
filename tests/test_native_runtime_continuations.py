@@ -4,6 +4,7 @@ import json
 import hashlib
 import ntpath
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from unittest.mock import patch
 
@@ -299,6 +300,83 @@ def test_native_approval_reject_keeps_call_id_and_never_runs_handler(tmp_path):
     ]
     assert len(settled_messages) == 1
     assert "rejected" in json.dumps(json.loads(settled_messages[0]["content"]))
+
+
+@pytest.mark.parametrize("reject", [False, True])
+def test_native_approval_after_new_owner_message_keeps_exact_receipt(tmp_path, reject):
+    from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
+    from tests.test_native_runtime_gateway import run
+
+    project = tmp_path / "UnityProject"
+    proposal = call("older-write", "fixture_write", {"projectRoot": str(project), "value": "first"})
+    proposal["tool_calls"].extend(call("older-unapproved", "fixture_write", {
+        "projectRoot": str(project), "value": "must not replay",
+    })["tool_calls"])
+    correction = "A later correction: keep the current conversation and do not automatically run further writes."
+    resume_started, resume_release = threading.Event(), threading.Event()
+
+    def finish_resume(_request):
+        resume_started.set()
+        assert resume_release.wait(5)
+        return {"role": "assistant", "content": "The earlier approval result was received."}
+
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [
+        proposal, {"role": "assistant", "content": "Correction acknowledged."},
+        finish_resume,
+    ])
+    _set_mode(gateway, "approval")
+    initial = run(gateway, tmp_path, projectRoot=str(project), message="Prepare the first operation.")
+    approval_id = initial["approval_id"]
+    binding = gateway._approvals[approval_id]["taskContext"]["_nativeConversation"]["binding"]
+    later = run(
+        gateway, tmp_path, projectRoot=str(project), clientTurnId="later-owner-input", message=correction,
+        _humanUserMessageSource={
+            "source": "app_user_message", "sessionId": initial["sessionId"],
+            "clientTurnId": "later-owner-input", "projectRoot": str(project), "message": correction,
+        },
+    )
+    assert later["plan"]["reply"] == "Correction acknowledged."
+    assert gateway._approvals[approval_id]["status"] == "pending" and not invoked
+    assert runtime_state(model.requests[-1])["pendingApprovals"] == [
+        {"approvalId": approval_id, "tool": "fixture_write", "status": "awaiting_user_decision"},
+    ]
+    assert "ownedPending" not in gateway.runtime_observe("different-session", str(project))["approvalQueue"]
+    old_results = {row["tool_call_id"]: json.loads(row["content"])
+                   for row in model.requests[-1]["messages"] if row["role"] == "tool"}
+    assert old_results["older-write"]["status"] == "approval_pending"
+    assert old_results["older-unapproved"]["status"] == "not_executed"
+
+    if reject:
+        approval = gateway.approval_transactions.reject(approval_id)["approval"]
+        execution = {}
+        result = gateway.resume_runtime_task_after_approval(approval, execution, rejected=True)
+    else:
+        gateway.approval_transactions.approve(approval_id)
+        execution = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+        approval = execution["approval"]
+        assert execution["status"] == "applied"
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(gateway.resume_runtime_task_after_approval, approval, execution)
+            try:
+                assert resume_started.wait(5)
+                assert gateway.resume_runtime_task_after_approval(approval, execution) is None
+            finally:
+                resume_release.set()
+            result = pending.result(timeout=5)
+    assert result["resumedApprovalId"] == approval_id
+    assert result["parentClientTurnId"] == initial["clientTurnId"]
+    assert result["plan"]["nextStep"] == ("needs_user_action" if reject else "done")
+    assert gateway.resume_runtime_task_after_approval(approval, execution, rejected=reject) is None
+    assert [args["value"] for args in invoked] == ([] if reject else ["first"])
+    latest = gateway.runtime_sessions.native_conversation(initial["sessionId"], binding=binding)
+    messages = latest["messages"]
+    human_correction = next(index for index, row in enumerate(messages) if row.get("content") == correction)
+    receipt = next(index for index, row in enumerate(messages)
+                   if "Earlier approval result" in str(row.get("content")))
+    assert human_correction < receipt
+    assert messages[receipt]["runtimeInputSource"] == "runtime"
+    assert approval_id in messages[receipt]["content"] and "older-write" in messages[receipt]["content"]
+    assert len(model.requests) == (2 if reject else 3)
 
 
 def test_native_approval_pending_survives_gateway_restart_and_reject_resume_pairs_same_call(tmp_path):

@@ -48,7 +48,11 @@ def test_native_child_budget_pause_persists_receipts_and_resumes_same_session(tm
     assert finished["status"] == "completed"
     assert finished["childSessionId"] == source["childSessionId"]
     assert len(model.requests) == 2
-    assert "fixture-body" in json.dumps(model.requests[1]["messages"])
+    resumed_messages = json.dumps(model.requests[1]["messages"])
+    assert "fixture-body" in resumed_messages
+    assert "previousRemainingObjective" in resumed_messages and source["task"] in resumed_messages
+    assert "previousStatus" in resumed_messages and "paused" in resumed_messages
+    assert "previousEvidenceCoverage" in resumed_messages and source["id"] in resumed_messages
     assert [event["subAgentTaskId"] for event in delivered] == [source["id"]]
 
 
@@ -107,3 +111,19 @@ def test_budget_pause_bounds_report_to_sampled_receipts():
     assert pause["partialEvidence"][0]["actionId"] == "0"
     assert pause["partialEvidence"][-1]["actionId"] == "39"
     assert len(pause["finalReport"]) < 16_000
+
+
+def test_budget_pause_reports_source_and_excerpt_counts_without_child_owned_refs():
+    child_ref = "result_" + "a" * 32
+    def result(index):
+        return {"items": [{"name": "Item", "resultRef": child_ref}],
+                "summary": {"truncated": index < 9, "assetCountScope": "selected folder"}}
+    raw = {"plan": {"nextStep": "paused", "reason": "model_turn_budget_exhausted"},
+           "steps": [{"actionId": str(index), "tool": "inspect", "outcome": {"status": "ok"},
+                      "result": result(index)} for index in range(13)]}
+    report = project_child_budget_pause(raw, "Review the selected folder.")
+    assert report["evidenceCoverage"]["successfulReceipts"] == 13
+    assert report["evidenceCoverage"]["reportedReceipts"] == 13
+    assert report["evidenceCoverage"]["sourceIncompleteReceipts"] == 9
+    assert child_ref not in report["finalReport"]
+    assert "selected folder" in report["finalReport"]

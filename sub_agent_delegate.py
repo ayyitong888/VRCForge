@@ -9,11 +9,13 @@ skills fail visibly through the durable task registry.
 from __future__ import annotations
 
 from contextvars import ContextVar
+import json
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from agent_command_safety import normalize_filesystem_path
 from agent_runtime_skill_executor import ReadScope, RuntimeSkillTool
+from agent_subagent_runtime import project_child_handoff_evidence, redact_child_result_references
 from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL
 from agent_task_loop import SUB_AGENT_TASK_TOOLS
 from general_agent_tools import _authorized_path
@@ -349,17 +351,26 @@ def run_skill_delegate(
     summary_source = result.get("summary") if isinstance(result.get("summary"), dict) else {}
     summary_hint = str(result.get("summaryText") or summary_source.get("summaryText") or "").strip()
     summary_text = summary_hint or f"Delegated skill {tool_name} {'finished' if ok else 'reported a problem'}."
+    evidence = project_child_handoff_evidence(tool_name, result, max_chars=12000)
+    coverage = {
+        "excerpt": evidence.get("truncated") is True,
+        "sourceIncomplete": evidence["sourceIncomplete"],
+    }
+    report = {"toolName": tool_name, "evidenceCoverage": coverage,
+              "sourceCompleteness": evidence.get("sourceCompleteness", []), "facts": evidence.get("data", {})}
     return {
         "ok": ok,
         "schema": "vrcforge.sub_agent.skill_delegate.v1",
         "role": "skill_delegate",
         "readOnly": True,
         "toolName": tool_name,
-        "summaryText": summary_text,
+        "summaryText": redact_child_result_references(summary_text),
+        "finalReport": "Delegated read evidence:\n" + json.dumps(report, ensure_ascii=False, separators=(",", ":")),
         "plannerEvidence": {
             "role": "skill_delegate",
             "toolName": tool_name[:160],
-            "summary": summary_text[:600],
+            "evidenceCoverage": coverage,
+            "sourceCompleteness": report["sourceCompleteness"],
         },
         "result": result,
         "proposedNextAction": "Review the delegated skill output in the parent thread before planning any write.",
@@ -368,7 +379,8 @@ def run_skill_delegate(
 
 _OUTFIT_INSPECTION_TOOL = "vrcforge_inspect_outfit_package"
 _OUTFIT_COUNTS = ("unityPackageCount", "prefabCandidateCount", "textureCount")
-_OUTFIT_COVERAGE = ("assetCountScope", "truncated", "nestedPathnamesTruncated", "warningCount")
+_OUTFIT_COVERAGE = ("assetCountScope", "truncated", "nestedPathnamesTruncated", "warningCount",
+                    "archiveCount", "archiveUnityPackageCount", "archiveCensusComplete")
 # Scoped to the native child turn. Tool execution is synchronous on this worker.
 _OUTFIT_INSPECTION = ContextVar("child_outfit_inspection", default=None)
 
@@ -477,6 +489,8 @@ def run_readonly_llm_agent(
         raise RuntimeError("selectedMaterials must be a list of objects.")
     # Deliberately never forward parent native history, task seed, or arbitrary params.
     materials = [dict(item) for item in raw_materials]
+    if payload.get("isResume") and isinstance(payload.get("_resumeContext"), dict):
+        materials.insert(0, payload["_resumeContext"])
     if scope_material is not None:
         materials.insert(0, scope_material)
     # The registry projects this private value from its typed task record.
@@ -519,10 +533,12 @@ def run_readonly_llm_agent(
         "role": role_id,
         "readOnly": True,
         "childSessionId": child_session_id,
-        "summaryText": str(response.get("summaryText") or response["finalReport"])[:1000],
-        "finalReport": response["finalReport"],
+        "summaryText": redact_child_result_references(str(response.get("summaryText") or response["finalReport"]))[:1000],
+        "finalReport": redact_child_result_references(response["finalReport"]),
         "plannerEvidence": {"role": role_id, "childSessionId": child_session_id,
-                            "stepCount": int(response.get("stepCount") or 0)},
+                            "stepCount": int(response.get("stepCount") or 0),
+                            **({"evidenceCoverage": response["evidenceCoverage"]}
+                               if isinstance(response.get("evidenceCoverage"), dict) else {})},
         "rawResult": response.get("rawResult", response),
         "providerRoute": provider_route,
         "resumable": response.get("resumable") is True,

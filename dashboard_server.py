@@ -48,7 +48,7 @@ import urllib.request
 import zipfile
 from ctypes import wintypes
 from collections import deque
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -119,6 +119,7 @@ from internal_tool_blocks import (
     build_internal_tool_block_tree,
     canonical_tool_owner,
     canonical_tool_tree,
+    group_tool_selection,
     internal_tool_block_for_name,
     project_internal_tool_block_level,
     resolve_internal_tool_block_selector,
@@ -3589,42 +3590,71 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
         record_compact_provider_receipt,
     )
 
-    settings = load_dashboard_settings(ConnectionRequest())
-    summarizer: Callable[[str], Any] | None = None
     provider_receipts: list[Mapping[str, Any]] = []
-
-    if not provider_requires_api_key(settings.llm_provider) or str(settings.llm_api_key or "").strip():
-        def summarize(prompt: str) -> str:
-            try:
-                response = request_llm_plan_with_metadata(settings, prompt)
-            except Exception as exc:  # Provider errors are swallowed by compact_context after this receipt.
-                record_compact_provider_receipt(
-                    provider_receipts, getattr(exc, "provider_usage", None), "provider_error"
-                )
-                raise
-            record_compact_provider_receipt(provider_receipts, getattr(response, "usage", None))
-            return str(getattr(response, "text", "") or "")
-
-        summarizer = summarize
+    bind_turn = RUNTIME_PLANNER.bind_turn({
+        "provider": request.provider, "model": request.model, "_requestedContextLimit": request.real_context_limit,
+    }) if request.provider or request.model or request.session_id else nullcontext()
     try:
-        result = compact_context(
-            request.history,
-            summarizer=summarizer,
-            source_digest=request.source_digest,
-            trigger=request.trigger,
-            phase=request.phase,
-            language=request.language,
-            provider=settings.llm_provider,
-            model=settings.llm_model,
-            target_tokens=request.target_tokens,
-            real_context_limit=request.real_context_limit,
-        )
+        with ExitStack() as stack:
+            try:
+                route = stack.enter_context(bind_turn)
+            except ProviderConfigurationBusyError:
+                raise
+            except (RuntimeError, ValueError) as exc:
+                raise runtime_http_error(
+                    "agent_runtime_request_failed", 400,
+                    message="The requested provider and model could not be selected for compaction.",
+                ) from exc
+            if route is not None and request.session_id:
+                result = AGENT_GATEWAY.compact_native_session(
+                    request.session_id, request.project_root, trigger=request.trigger, phase=request.phase,
+                    record_provider_usage=lambda usage: record_compact_provider_receipt(provider_receipts, usage),
+                )
+                if result is not None:
+                    result["providerUsage"] = aggregate_compact_provider_usage(
+                        provider_receipts, provider=route.provider, model=route.model,
+                    )
+                    return result
+            if request.require_native:
+                raise AgentGatewayError("Select the provider and model that own this approval before compacting.", status_code=409)
+            if not request.history:
+                return {"ok": False, "status": "no_content", "summary": ""}
+            settings = load_dashboard_settings(ConnectionRequest())
+            if route is not None:
+                config = _RUNTIME_PLANNER_TURN.current_config()
+                settings = replace(settings, llm_provider=config.provider, llm_model=config.model,
+                                   llm_api_key=config.api_key, llm_base_url=config.base_url,
+                                   llm_api_type=config.api_type, gemini_thinking_level=config.thinking_level)
+            summarizer: Callable[[str], Any] | None = None
+            if not provider_requires_api_key(settings.llm_provider) or str(settings.llm_api_key or "").strip():
+                def summarize(prompt: str) -> str:
+                    try:
+                        response = request_llm_plan_with_metadata(settings, prompt)
+                    except Exception as exc:  # Provider errors are handled by the shared compactor.
+                        record_compact_provider_receipt(provider_receipts, getattr(exc, "provider_usage", None), "provider_error")
+                        raise
+                    record_compact_provider_receipt(provider_receipts, getattr(response, "usage", None))
+                    return str(getattr(response, "text", "") or "")
+                summarizer = summarize
+            has_todo = bool(request.session_id and AGENT_GATEWAY.list_agent_progress(
+                limit=1, project_root=request.project_root, session_id=request.session_id,
+            )["items"])
+            result = compact_context(
+                request.history, summarizer=summarizer, source_digest=request.source_digest,
+                trigger=request.trigger, phase=request.phase, language=request.language,
+                provider=settings.llm_provider, model=settings.llm_model, target_tokens=request.target_tokens,
+                real_context_limit=request.real_context_limit, handoff=True, has_todo=has_todo,
+            )
         result["providerUsage"] = aggregate_compact_provider_usage(
             provider_receipts, provider=settings.llm_provider, model=settings.llm_model
         )
         return result
     except ContextCompactionInputError as exc:
         raise runtime_http_error("agent_runtime_request_failed", 400, exc) from exc
+    except AgentGatewayError as exc:
+        raise runtime_http_error("agent_runtime_request_failed", exc.status_code, exc) from exc
+    except ProviderConfigurationBusyError as exc:
+        raise runtime_http_error("agent_runtime_request_failed", 409, exc) from exc
 
 
 @app.get("/api/app/agent/session/{session_id}")
@@ -17449,8 +17479,8 @@ class _RuntimePlannerCompactor:
         result = compact_context(
             [dict(entry) for entry in history],
             summarizer=summarizer,
-            trigger="auto",
-            phase="mid_turn",
+            trigger=str(metadata.get("trigger") or "auto"),
+            phase=str(metadata.get("phase") or "mid_turn"),
             language=str(metadata.get("language") or ""),
             provider=config.provider,
             model=config.model,
@@ -17458,6 +17488,11 @@ class _RuntimePlannerCompactor:
             real_context_limit=metadata.get("realContextLimit"),
             input_mode=str(metadata.get("inputMode") or "complete"),
             input_estimate_ratio=ratio,
+            handoff=metadata.get("handoff") is True,
+            has_todo=metadata.get("hasTodo") is True,
+            recovery_history=metadata.get("_recoveryHistory"),
+            handoff_archive_indices=metadata.get("_handoffArchiveIndices"),
+            retained_evidence=metadata.get("_retainedEvidence") or (),
         )
         if deadline_exceeded:
             result["fallbackReason"] = "compaction_deadline"
@@ -17675,6 +17710,8 @@ def _internal_tool_block_leaves(
         project_context_active=project_context_active,
     )
     for tool in catalog.visible_tools:
+        if getattr(tool, "requires_user_activation", False) and not catalog.computer_use_model_invocable:
+            continue
         if getattr(tool, "runtime_name", "") == "vrcforge_list_internal_tool_blocks":
             continue
         if tool.name in seen:
@@ -17802,7 +17839,7 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
                 "expectedBlock": expected_block,
                 "commitState": "not_started",
             }
-            if exposure_layer != RUNTIME_PLANNER_EXECUTION_LAYER:
+            if exposure_layer != RUNTIME_PLANNER_EXECUTION_LAYER and len(requested_tools) == 1:
                 routable_catalog = _RuntimePlannerCatalog().read(
                     exposure_layer,
                     project_context_active=params.get("projectContextActive") is True,
@@ -17833,11 +17870,15 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
                         "mutationStarted": False,
                         "commitState": "not_started",
                     }
-            if expected_block:
-                # Keep the exact-block permission boundary, but return enough
-                # routing evidence for the planner to correct a model-selected
-                # block on its next turn.  The previous response gave no way to
-                # distinguish a typo from a valid tool owned by another leaf.
+            groups, unavailable = group_tool_selection(requested_tools, by_name)
+            if unavailable:
+                response["unavailableTools"] = unavailable
+            if groups:
+                response["loadCalls"] = [
+                    {"name": "load_internal_tool_block", "arguments": {"block": owner, "tools": names}}
+                    for owner, names in groups.items()
+                ]
+            if expected_block and len(groups) == 1 and not unavailable:
                 response["data"] = {
                     "expectedBlock": expected_block,
                     "tool": invalid_name,
@@ -17846,23 +17887,28 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
                 response["nextActions"] = [
                     f"Retry load_internal_tool_block with block={expected_block} and the exact requested tools."
                 ]
+            elif groups:
+                response["expectedBlock"] = ""
+                response["error"] = "The requested selection needs separate leaf calls or includes unavailable tools."
+                response["nextActions"] = [
+                    "Submit each loadCalls entry separately with its exact block and tool names."
+                ]
             return response
     existing = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
     if block in existing and (existing[block] is None or set(requested_tools) <= set(existing[block])):
         return {"ok": True, "status": "reused", "block": block,
                 "exposureLayer": normalize_exposure_layer(params.get("exposureLayer")),
                 "loadedBlocks": sorted(AGENT_GATEWAY.runtime_sessions.internal_tool_blocks(session_id)),
-                "selectedTools": existing[block], "definitionSource": "existing_session_history"}
+                "selectedTools": requested_tools, "definitionSource": "existing_session_history"}
     loaded = AGENT_GATEWAY.runtime_sessions.load_internal_tool_block_selected(session_id, block, requested_tools)
-    selections = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
     return {
         "ok": True,
         "status": "loaded",
         "block": block,
         "exposureLayer": normalize_exposure_layer(params.get("exposureLayer")),
         "loadedBlocks": sorted(loaded),
-        "selectionMode": "whole" if selections.get(block) is None else "subset",
-        "selectedTools": selections.get(block),
+        "selectionMode": "subset",
+        "selectedTools": requested_tools,
     }
 
 

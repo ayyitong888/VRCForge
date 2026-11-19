@@ -432,7 +432,7 @@ class ContextCompactionTests(unittest.TestCase):
 
 class ContextCompactionRouteTests(unittest.TestCase):
     @patch("dashboard_server.load_dashboard_settings")
-    def test_manual_route_falls_back_without_api_key(self, mock_load_settings) -> None:
+    def test_manual_route_without_api_key_keeps_original_history(self, mock_load_settings) -> None:
         mock_load_settings.return_value = SimpleNamespace(
             llm_provider="deepseek",
             llm_api_key="",
@@ -450,8 +450,6 @@ class ContextCompactionRouteTests(unittest.TestCase):
                         "trigger": "manual",
                         "phase": "standalone",
                         "language": "en",
-                        "provider": "untrusted-client-provider",
-                        "model": "untrusted-client-model",
                         "targetTokens": 512,
                         "realContextLimit": 8_192,
                         "sourceDigest": "bad-client-digest",
@@ -466,7 +464,20 @@ class ContextCompactionRouteTests(unittest.TestCase):
         self.assertFalse(payload["clientDigestMatched"])
         self.assertEqual(payload["provider"], "deepseek")
         self.assertEqual(payload["model"], "deepseek-chat")
-        self.assertIn("Preserve this goal", payload["summary"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["summary"], "")
+        self.assertFalse(payload.get("nativeApplied"))
+        self.assertEqual(payload["providerUsage"]["requestCount"], 0)
+
+    def test_manual_route_rejects_invalid_requested_route_without_model_call(self) -> None:
+        with patch("dashboard_server.request_llm_plan_with_metadata") as provider:
+            response = TestClient(dashboard_server.app).post("/api/app/agent/compact", json={
+                "history": [{"role": "user", "text": "Preserve this goal"}],
+                "provider": "untrusted-client-provider", "model": "untrusted-client-model",
+            })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("could not be selected", response.text)
+        provider.assert_not_called()
 
 
 if __name__ == "__main__":

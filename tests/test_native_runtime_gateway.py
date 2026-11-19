@@ -132,6 +132,117 @@ def test_normal_turn_direct_image_reaches_native_provider_without_vision_runner(
         assert user["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
+@pytest.mark.parametrize("invalid_index", [0, 4])
+def test_native_mixed_batch_keeps_schema_error_on_its_call(tmp_path, invalid_index):
+    calls = [call(f"read-{i}", "vrcforge_read_text_file", {"path": f"{i}.txt"})["tool_calls"][0]
+             for i in range(5)]
+    calls[invalid_index]["function"]["arguments"] = json.dumps({
+        "tool": "vrcforge_read_text_file", "parameters": {"path": "invalid.txt"},
+    })
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        {"role": "assistant", "content": None, "tool_calls": calls}, finish,
+    ])
+    gateway._tools["vrcforge_read_text_file"].category = "read/debug"
+    result = run(gateway, tmp_path)
+
+    assert [item["path"] for item in invoked] == [f"{i}.txt" for i in range(5) if i != invalid_index]
+    receipts = {msg["tool_call_id"]: json.loads(msg["content"])
+                for msg in model.requests[-1]["messages"] if msg["role"] == "tool"}
+    for index in range(5):
+        observation, = receipts[f"read-{index}"]["observations"]
+        if index == invalid_index:
+            assert "Rename parameters to arguments" in observation["admissionError"]
+            assert "parameters" in json.dumps(observation)
+        else:
+            assert observation["outcome"]["status"] == "ok"
+            assert "admissionError" not in observation
+    assert "taskCompletion" not in result["plan"]
+
+
+def test_native_malformed_batch_fences_preceding_supervised_write(tmp_path):
+    from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
+
+    project = str(tmp_path / "UnityProject")
+    batch = call("first-write", "fixture_write", {"projectRoot": project, "value": "not-approved"})
+    batch["tool_calls"].extend(call("bad-read", "call_tool", {
+        "tool": "vrcforge_read_text_file", "parameters": {"path": "a.txt"},
+    })["tool_calls"])
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [batch, {"role": "assistant", "content": "Invalid read."}])
+    _set_mode(gateway, "approval")
+    run(gateway, tmp_path)
+
+    assert not invoked and not gateway.approval_transactions.list_approvals()
+    receipts = {msg["tool_call_id"]: json.loads(msg["content"])
+                for msg in model.requests[-1]["messages"] if msg["role"] == "tool"}
+    assert receipts["first-write"]["status"] == "not_executed"
+    assert "Rename parameters to arguments" in receipts["bad-read"]["observations"][0]["admissionError"]
+
+
+def test_native_same_arguments_reads_have_separate_action_records(tmp_path):
+    first = call("first-read", "vrcforge_read_text_file", {"path": "a.txt"})
+    second = call("second-read", "vrcforge_read_text_file", {"path": "a.txt"})
+    first["tool_calls"].extend(second["tool_calls"])
+    gateway, model, invoked = setup_gateway(tmp_path, [first, finish])
+    gateway._tools["vrcforge_read_text_file"].category = "read/debug"
+    result = run(gateway, tmp_path)
+
+    reads = [step for step in result["steps"] if step["tool"] == "vrcforge_read_text_file"]
+    assert len(reads) == len(invoked) == 2
+    assert len({step["actionId"] for step in reads}) == 2
+    receipts = [json.loads(msg["content"]) for msg in model.requests[-1]["messages"]
+                if msg.get("tool_call_id") in {"first-read", "second-read"}]
+    assert [receipt["observations"][0]["actionId"] for receipt in receipts] == [
+        step["actionId"] for step in reads
+    ]
+
+
+@pytest.mark.parametrize("same_receipt", [False, True])
+def test_native_same_arguments_read_correction_requires_new_receipt(tmp_path, same_receipt):
+    first = call("initial", "vrcforge_read_text_file", {"path": "a.txt"})
+    second = call("repeat", "vrcforge_read_text_file", {"path": "a.txt"})
+    receipts = [first, second]
+    if same_receipt:
+        first["tool_calls"].extend(second["tool_calls"])
+        receipts = [first]
+    gateway, _, invoked = setup_gateway(tmp_path, [*receipts, finish])
+    def read(params):
+        invoked.append(params)
+        return {"ok": True, "text": "valid"} if len(invoked) == 2 else {"ok": False, "error": "read failed"}
+    gateway._tools["vrcforge_read_text_file"].handler = read
+    gateway._tools["vrcforge_read_text_file"].category = "read/debug"
+    result = run(gateway, tmp_path)
+
+    reads = [action for action in result["plan"]["task"]["actions"] if action["tool"] == "vrcforge_read_text_file"]
+    assert len(reads) == len(invoked) == 2
+    assert [action["status"] for action in reads] == ["failed" if same_receipt else "superseded", "completed"]
+    if not same_receipt:
+        assert reads[0]["supersededBy"] == reads[1]["actionId"]
+        assert result["plan"]["nextStep"] == "done"
+
+
+def test_native_resumed_approval_suppresses_queued_duplicate_write(tmp_path):
+    from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
+
+    args = {"projectRoot": str(tmp_path / "UnityProject"), "value": "same-effect"}
+    first = call("first-write", "fixture_write", args)
+    first["tool_calls"].extend(call("second-write", "fixture_write", args)["tool_calls"])
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [first, finish])
+    _set_mode(gateway, "approval")
+    initial = run(gateway, tmp_path, message="Write the fixture")
+    approval_id = initial["approval_id"]
+    approval = gateway._approvals[approval_id]
+    gateway.approval_transactions.approve(approval_id)
+    applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+    result = gateway.resume_runtime_task_after_approval(approval, applied)
+
+    assert result["plan"]["nextStep"] == "done"
+    assert len(invoked) == 1
+    receipts = {msg["tool_call_id"]: json.loads(msg["content"])
+                for msg in model.requests[-1]["messages"] if msg["role"] == "tool"}
+    assert receipts["first-write"]["status"] == "completed"
+    assert receipts["second-write"]["observations"][0]["status"] == "suppressed"
+
+
 def test_native_default_exposes_write_immediately_and_preserves_approval(tmp_path):
     from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
 
@@ -248,27 +359,26 @@ def test_native_gateway_rejects_every_call_without_dispatch(tmp_path, kind):
     assert all("failed" in m["content"] or "invalid" in m["content"] for m in results)
 
 
-def test_native_rejected_batch_can_resubmit_ordinary_calls_and_finish(tmp_path):
+def test_native_mixed_batch_can_resubmit_only_rejected_call_and_finish(tmp_path):
     name = "vrcforge_read_text_file"
     malformed = call("first-bad", "call_tool", {"tool": name, "parameters": {"path": "a.txt"}})
-    malformed["tool_calls"].extend(call("second-skipped", name, {"path": "b.txt"})["tool_calls"])
+    malformed["tool_calls"].extend(call("second-valid", name, {"path": "b.txt"})["tool_calls"])
     corrected = call("first-retry", name, {"path": "a.txt"})
-    corrected["tool_calls"].extend(call("second-retry", name, {"path": "b.txt"})["tool_calls"])
 
     def resubmit(request):
-        assert not invoked
+        assert [entry["path"] for entry in invoked] == ["b.txt"]
         rejected_results = [m for m in request["messages"] if m["role"] == "tool"]
-        assert [m["tool_call_id"] for m in rejected_results] == ["first-bad", "second-skipped"]
-        for reply in rejected_results:
-            observation, = json.loads(reply["content"])["observations"]
-            assert "runtimeTool" not in observation
-            assert "Send ordinary tool calls directly" in observation["admissionError"]
-            assert '{"tool":"<visible tool>","arguments":{...}}' in observation["admissionError"]
+        assert [m["tool_call_id"] for m in rejected_results] == ["first-bad", "second-valid"]
+        rejection, = json.loads(rejected_results[0]["content"])["observations"]
+        assert '{"tool":"<visible tool>","arguments":{...}}' in rejection["admissionError"]
+        completed, = json.loads(rejected_results[1]["content"])["observations"]
+        assert completed["outcome"]["status"] == "ok"
         return corrected
 
     gateway, model, invoked = setup_gateway(tmp_path, [malformed, resubmit, finish])
+    gateway._tools[name].category = "read/debug"
     result = run(gateway, tmp_path)
-    assert [entry["path"] for entry in invoked] == ["a.txt", "b.txt"]
+    assert [entry["path"] for entry in invoked] == ["b.txt", "a.txt"]
     assert len(model.requests) == 3
     assert result["plan"]["nextStep"] == "done", result["plan"]
     assert "unresolvedArgumentValidation" not in result["plan"]

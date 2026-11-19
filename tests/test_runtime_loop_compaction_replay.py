@@ -1,4 +1,5 @@
 import json
+import re
 from unittest.mock import patch
 
 from runtime_planner_service import PlannerModelResult, PlannerTurnMetadata, estimate_runtime_context_tokens
@@ -13,14 +14,19 @@ class SequentialLegacyModel:
             {"action": "shell", "shell_command": "fixture action one", "summary": "Run first fixture action."},
             {"action": "shell", "shell_command": "fixture action two", "summary": "Run second fixture action."},
             {"action": "shell", "shell_command": "fixture action three", "summary": "Run third fixture action."},
-            {"action": "reply", "reply": "All three fixture actions completed.", "completion_claim": {"satisfied": True}},
+            {"action": "shell", "shell_command": "fixture action four", "summary": "Run fourth fixture action."},
+            {"action": "shell", "shell_command": "fixture action five", "summary": "Run fifth fixture action."},
+            {"action": "reply", "reply": "All five fixture actions completed.", "completion_claim": {"satisfied": True}},
         ]
 
     def plan(self, prompt):
         index = len(self.prompts)
         self.prompts.append(prompt)
         prompt_tokens = estimate_runtime_context_tokens(prompt)
-        response = self.responses[index]
+        response = self.responses[min(index, len(self.responses) - 1)]
+        if response["action"] == "reply":
+            response = {**response, "completion_claim": {"satisfied": True,
+                        "evidence_action_ids": list(dict.fromkeys(re.findall(r"\bactionId=([\w.-]+)", prompt)))}}
         return PlannerModelResult(json.dumps(response), usage={"exact": False})
 
 
@@ -52,7 +58,7 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
     def capture_compaction_state(**kwargs):
         loop_state = [dict(step) for step in kwargs.get("loop_state", [])]
         compaction_inputs.append(loop_state)
-        if len(loop_state) < 2:
+        if len(loop_state) < 4:
             return kwargs["history"], None, False
         # This integration test fixes the compaction boundary to isolate gateway
         # prompt-offset wiring; automatic threshold behavior is covered by the
@@ -69,9 +75,14 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
     shell_results = [
         {"ok": True, "exitCode": 0, "stdout": "FIRST_OBSERVATION_MARKER " + "a" * 10_000},
         {"ok": True, "exitCode": 0, "stdout": "LATEST_OBSERVATION_MARKER " + "b" * 10_000},
+        {"ok": True, "exitCode": 0, "stdout": "retained decision three"},
+        {"ok": True, "exitCode": 0, "stdout": "retained decision four"},
         {"ok": True, "exitCode": 0, "stdout": "APPENDED_AFTER_OFFSET_MARKER " + "c" * 200},
     ]
-    history = [{"role": "user", "text": "LONG_PRIOR_HISTORY_MARKER " * 2200}]
+    history = [{"role": "user", "text": "VERBATIM_ORIGINAL_REQUEST"},
+               {"role": "agent", "text": "LONG_PRIOR_HISTORY_MARKER " * 2200},
+               {"role": "user", "text": "VERBATIM_RECENT_TURN_1"}, {"role": "agent", "text": "retained response 1"},
+               {"role": "user", "text": "VERBATIM_RECENT_TURN_2"}, {"role": "agent", "text": "retained response 2"}]
     try:
         with patch.object(gateway.shell, "execute", side_effect=[
             {"ok": True, "status": "executed", "sessionId": f"compact-shell-{i}",
@@ -81,7 +92,7 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
             for i, result in enumerate(shell_results, 1)
         ]) as shell_execute:
             result = gateway.runtime_message({
-                "message": "Run the three fixture actions and report their observations.",
+                "message": "Run the five fixture actions and report their observations.",
                 "history": history,
                 "session_id": "legacy-compaction-replay-session",
                 "clientTurnId": "legacy-compaction-replay-client",
@@ -98,18 +109,19 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
         }
         compaction_input, compaction_request = compactor.calls[0]
         assert compaction_request["phase"] == "mid_turn"
-        assert len(compaction_input) == len(history) + 1, [
+        assert len(compaction_input) == 2, [
             [(step.get("status"), step.get("tool")) for step in state]
             for state in compaction_inputs
         ]
         assert "LONG_PRIOR_HISTORY_MARKER" in compaction_input[0]["text"]
         assert "FIRST_OBSERVATION_MARKER" in "\n".join(item["text"] for item in compaction_input)
         assert "LATEST_OBSERVATION_MARKER" not in "\n".join(item["text"] for item in compaction_input)
-        assert shell_execute.call_count == 3
+        assert not any("VERBATIM_" in item["text"] for item in compaction_input)
+        assert shell_execute.call_count == 5
 
-        assert len(model.prompts) == 4
-        third_prompt = model.prompts[2]
-        fourth_prompt = model.prompts[3]
+        compacted_prompts = [prompt for prompt in model.prompts if "COMPACTED_LEGACY_PREFIX_SUMMARY" in prompt]
+        assert len(compacted_prompts) >= 2
+        third_prompt, fourth_prompt = compacted_prompts[:2]
         assert "COMPACTED_LEGACY_PREFIX_SUMMARY" in third_prompt
         assert "LATEST_OBSERVATION_MARKER" in third_prompt
         assert "FIRST_OBSERVATION_MARKER" not in third_prompt
@@ -117,21 +129,22 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
         assert "LATEST_OBSERVATION_MARKER" in fourth_prompt
         assert "APPENDED_AFTER_OFFSET_MARKER" in fourth_prompt
         assert "FIRST_OBSERVATION_MARKER" not in fourth_prompt
+        assert all(f"VERBATIM_{suffix}" in fourth_prompt for suffix in ("ORIGINAL_REQUEST", "RECENT_TURN_1", "RECENT_TURN_2"))
 
-        assert result["plan"]["reply"] == "All three fixture actions completed."
+        assert result["plan"]["reply"] == "All five fixture actions completed."
         assert result["contextCompaction"]["compactedLoopStepCount"] == 1
         markers = [item for item in result["timeline"] if item["kind"] == "context_compaction"]
         assert len(markers) == 1
         assert markers[0]["payload"] == {"status": "completed"}
         assert result["timeline"][markers[0]["sequence"] - 1]["kind"] == "tool_result"
-        assert len(result["steps"]) == 3
+        assert len(result["steps"]) == 5
         assert all(step.get("status") == "executed" for step in result["steps"])
         completed = [event for event in gateway.runtime_runs.read_events(
             predicate=lambda event: event.get("event") == "runtime_turn_completed"
             and event.get("sessionId") == "legacy-compaction-replay-session"
         )]
         assert len(completed) == 1
-        assert completed[0]["stepCount"] == 3
+        assert completed[0]["stepCount"] == 5
     finally:
         planner._model, planner._compactor, planner._turn, planner._desktop = original
         planner.maybe_compact_runtime_history = original_maybe_compact

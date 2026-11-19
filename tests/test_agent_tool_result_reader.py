@@ -56,6 +56,36 @@ def test_lookup_pages_exact_public_members_and_preserves_source_coordinates():
             read(step, jsonPointer="/prefabCandidates", matchNameOrPath="Target")
 
 
+def test_exact_lookup_miss_preserves_source_paging_and_filter_scope():
+    scan = retained({"items": [{"name": f"Item{index}"} for index in range(10)],
+                     "totalCount": 726, "offset": 0, "hasMore": True,
+                     "nextRequest": {"avatarPath": "Avatar", "offset": 10, "maxItems": 10,
+                                     "expectedSnapshotDigest": "a" * 64, "outputPath": "", "refreshAssets": False}},
+                    tool="vrcforge_scan_avatar_items")
+    face = retained({"blendshapes": [], "filterScope": "face", "selectedAvatar": {"avatarPath": "Avatar"},
+                     "blendshapeNames": ["SomeShape"], "rendererPaths": ["Avatar/Body"]},
+                    tool="vrcforge_scan_blendshapes", index=1)
+    outfit = retained({"prefabCandidates": [{"path": f"Assets/Urban Grace/Color {index}.prefab"} for index in range(36)]},
+                      tool="vrcforge_inspect_outfit_package", index=2)
+    with bind_tool_result_context("session", "turn", "project", [scan, face, outfit]):
+        head = read(scan, jsonPointer="/items", matchNameOrPath="Head")
+        assert head["totalItems"] == 0 and head["hasMore"] is False
+        assert head["lookup"]["sourceCoverage"] == {"scope": "source_page", "offset": 0, "totalItems": 726, "hasMore": True}
+        assert head["lookup"]["sourceNextRequest"] == {
+            "tool": scan["tool"], "arguments": {"avatarPath": "Avatar", "offset": 10, "maxItems": 10, "expectedSnapshotDigest": "a" * 64},
+        }
+        shapes = read(face, jsonPointer="/blendshapes", matchNameOrPath="SomeShape")
+        assert shapes["lookup"]["sourceCoverage"]["filterScope"] == "face"
+        assert shapes["lookup"]["sourceRequery"] == {
+            "tool": face["tool"], "arguments": {"avatarPath": "Avatar", "scope": "all", "blendshapeNames": ["SomeShape"], "rendererPaths": ["Avatar/Body"]},
+        }
+        dresses = read(outfit, jsonPointer="/prefabCandidates", matchNameOrPath="Urban Grace")
+        assert dresses["totalItems"] == 0
+        assert dresses["lookup"]["matchMode"] == "exact"
+        browse = dresses["lookup"]["browseRequest"]
+        assert read_tool_result(browse["arguments"], sanitize=sanitize)["totalItems"] == 36
+
+
 @pytest.mark.parametrize(("tool", "field"), [
     ("vrcforge_scan_blendshapes", "blendshapes"),
     ("vrcforge_scan_fx_animator", "parameters"),

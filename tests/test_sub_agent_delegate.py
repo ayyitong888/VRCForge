@@ -251,6 +251,21 @@ def test_skill_delegate_prefers_explicit_skill_params_and_falls_back_summary():
     assert result["summaryText"].startswith("Delegated skill VRCForge_Scan_Project_Index finished")
 
 
+def test_generic_skill_handoff_has_bounded_evidence_and_coverage():
+    child_ref = "result_" + "a" * 32
+    result = run_skill_delegate(FakeGateway({
+        "ok": True, "summary": {"assetCountScope": "selected folder", "truncated": True},
+        "items": [{"name": "Delegated item", "privatePath": "opaque", "resultRef": child_ref}],
+    }), {"toolName": "vrcforge_scan_project_index", "skillParams": {"maxFiles": 5}}, _idle_event())
+    evidence = result["plannerEvidence"]
+    assert evidence["evidenceCoverage"]["sourceIncomplete"] is True
+    assert evidence["sourceCompleteness"] == [{"jsonPointer": "/summary", "facts": {"truncated": True}}]
+    assert "selected folder" in result["finalReport"]
+    assert "Delegated item" in result["finalReport"]
+    assert child_ref not in result["finalReport"]
+    assert "opaque" not in result["finalReport"]
+
+
 def test_skill_delegate_maps_registry_skill_arguments_without_leaking_control_keys():
     gateway = FakeGateway({"ok": True, "arguments": "inspect avatar"})
     run_skill_delegate(

@@ -5601,7 +5601,7 @@ class AgentApprovalTransactionService:
         return None
 
     def recover_native_results(self, session_id: str, snapshot: dict[str, Any], pending: set[str]) -> dict[str, str]:
-        """Read result evidence only; never recreate executable approvals."""
+        """Read applied results and live approval dispositions without executing them."""
         from atomic_file_replace import iter_jsonl_generations
 
         if not pending:
@@ -5614,6 +5614,23 @@ class AgentApprovalTransactionService:
             for value in (session_id, binding, turn_id)
         ]
         recovered: dict[str, str] = {}
+        for approval in self._ports.state.approvals.values():
+            context = ensure_dict(approval.get("taskContext"))
+            owner = ensure_dict(context.get("_nativeConversation"))
+            ref = ensure_dict(context.get("_nativeConversationRef"))
+            call_id = context.get("_nativeCallId")
+            if (
+                approval.get("status") in {"pending", "approved"}
+                and isinstance(call_id, str) and call_id in pending
+                and context.get("sessionId") == session_id
+                and (owner.get("turnId") or context.get("turnId")) == turn_id
+                and (owner.get("binding") or ref.get("binding")) == binding
+            ):
+                recovered[call_id] = json.dumps({
+                    "status": "approval_pending",
+                    "reason": "awaiting_approval_decision",
+                    "observations": [],
+                })
         for path in iter_jsonl_generations(self._ports.audit_log_path()):
             try:
                 handle = path.open("rb")

@@ -657,6 +657,8 @@ def normalize_agent_tool_result(
     )
     canonical_status = canonical_facts.pop("status", None)
     result.update(canonical_facts)
+    if error is not None and isinstance(result.get("safeToRetry"), bool):
+        error["retryable"] = result["safeToRetry"]
     if execution_pending:
         result.update({
             "persistenceState": "pending",

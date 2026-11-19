@@ -1140,10 +1140,15 @@ def test_preparer_rejects_empty_inventory_for_one_queued_package(tmp_path: Path)
         )
 
 
-def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("asset_suffix,next_tool", [
+    (".prefab", "vrcforge_add_outfit"),
+    (".mat", "vrcforge_get_asset_info"),
+])
+def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asset_suffix: str, next_tool: str) -> None:
     project = _project(tmp_path)
     bundle = tmp_path / "bundle.zip"
-    nested_package = _unitypackage_bytes("Assets/Outfits/Dress.prefab", b"prefab bytes")
+    asset_path = "Assets/Outfits/Dress" + asset_suffix
+    nested_package = _unitypackage_bytes(asset_path, b"asset bytes")
     with zipfile.ZipFile(bundle, "w") as archive:
         archive.writestr("x.unitypackage", nested_package)
     zip_plan = build_outfit_import_plan(
@@ -1159,7 +1164,7 @@ def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path
     )
     nested_call = build_prepared_execution_plan(prepared)[0]
     assert nested_call[0] == "vrc_import_unitypackage"
-    assert nested_call[1]["expectedAssetPaths"] == ["Assets/Outfits/Dress.prefab"]
+    assert nested_call[1]["expectedAssetPaths"] == [asset_path]
     assert nested_call[1]["expectedSha256"] == hashlib.sha256(nested_package).hexdigest()
     temporary_package = Path(nested_call[1]["unityPackagePath"])
     assert not temporary_package.exists()
@@ -1178,7 +1183,11 @@ def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path
         return dashboard_server.McpResult(0, "", "", {"ok": True})
 
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
-    assert _approved().execute(prepared)["ok"] is True
+    result = _approved().execute(prepared)
+    assert result["ok"] is True
+    assert result["nextTool"] == next_tool
+    assert result["importedPrefabCount"] == int(asset_suffix == ".prefab")
+    assert result["importedMaterialCount"] == int(asset_suffix == ".mat")
     assert not temporary_package.exists()
 
     loose = tmp_path / "loose"

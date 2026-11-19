@@ -26,7 +26,7 @@ def test_skill_registration_retains_planned_identity(entrypoint, explicit):
                         and node.func.attr == "require_action")
     assert ast.unparse(require_call) == (
         "task_loop.require_action(kind=action_kind, tool=task_record_tool, "
-        "arguments=requirement_arguments)"
+        "arguments=requirement_arguments, action_id=occurrence_id)"
     )
     tool = "vrcforge_get_compile_errors"
     planned = {}
@@ -62,6 +62,8 @@ def test_skill_registration_retains_planned_identity(entrypoint, explicit):
         "action_outcome": {"status": "ok", "success": True},
         "task_loop": loop,
         "planned_action_id": planned_id,
+        "occurrence_id": "",
+        "ordinary_native_read": False,
         "plan": {},
         "ensure_dict": lambda value: value if isinstance(value, dict) else {},
         "str": str,

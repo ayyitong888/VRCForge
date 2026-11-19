@@ -16,7 +16,7 @@ from prepared_unity_execution import (
     prepared_call,
     prepared_evidence,
 )
-from outfit_package_inspector import unitypackage_member_parts
+from outfit_package_inspector import TEXTURE_EXTENSIONS, unitypackage_member_parts
 from outfit_import_planner import select_loose_avatar_texture_assets
 
 
@@ -1378,6 +1378,11 @@ class PreparedOutfitImportApprovedWriteService:
                     "assetDatabaseRefresh": refresh,
                     "error": cleanup_error,
                 }
+            imported_assets = evidence.get("expectedAssetPaths") or []
+            prefab_assets = [path for path in imported_assets if str(path).lower().endswith(".prefab")]
+            material_assets = [path for path in imported_assets if str(path).lower().endswith(".mat")]
+            texture_assets = [path for path in imported_assets if Path(path).suffix.lower() in TEXTURE_EXTENSIONS]
+            readback_asset = next(iter(material_assets or texture_assets or imported_assets), None)
             return {
                 "ok": True,
                 # Every entry in ``imports`` has passed _job_receipt and the
@@ -1391,12 +1396,14 @@ class PreparedOutfitImportApprovedWriteService:
                 "kind": kind,
                 "unityImports": imports,
                 "assetDatabaseRefresh": refresh,
-                "importedPrefabCandidates": [
-                    path
-                    for path in evidence.get("expectedAssetPaths") or []
-                    if str(path).lower().endswith(".prefab")
-                ],
-                "nextTool": "vrcforge_add_outfit",
+                "importedPrefabCandidates": prefab_assets,
+                "importedPrefabCount": len(prefab_assets),
+                "importedMaterialCount": len(material_assets),
+                "importedTextureCount": len(texture_assets),
+                "importedMaterialAssets": material_assets,
+                "nextTool": "vrcforge_add_outfit" if prefab_assets else "vrcforge_get_asset_info",
+                **({"nextAction": {"tool": "vrcforge_get_asset_info", "arguments": {"assetPath": readback_asset}}}
+                   if not prefab_assets and readback_asset else {}),
                 **({"contentReadback": content_readback} if content_readback is not None else {}),
             }
         except self._ports.handled_errors as exc:

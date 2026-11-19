@@ -6,13 +6,14 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
-from context_compaction import MAX_SUMMARY_CHARS, normalize_compaction_recovery
+from context_compaction import MODEL_HANDOFF_PREFIX, normalize_compaction_recovery
 from chat_attachment_limits import MAX_MESSAGE_FILE_ATTACHMENTS
 from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL
 from agent_task_loop import _running_state, CONVERSATION_HANDOFF_TOOLS, SUB_AGENT_TASK_TOOLS
 from planner_structured_tool_evidence import project_structured_tool_evidence
 from provider_runtime_adapters import ProviderTokenLimitError, shell_poll_arguments
 from responses_native_protocol import public_assistant_messages
+from profiled_tool_registry import UNITY_PROJECT_ACCESS
 import math
 import ntpath
 from pathlib import Path
@@ -45,7 +46,7 @@ from agent_scan_result_policy import is_scan_result_policy_message, restored_sca
 from agent_runtime_input import RuntimeInputSource
 from agent_runtime_session_state import (
     NATIVE_RUNTIME_CONTEXT_PREFIX, NATIVE_RUNTIME_STATE_PREFIX,
-    native_model_history, native_runtime_state_content,
+    inject_native_handoff_context, native_model_history, native_runtime_state_content,
 )
 from native_request_composition import (
     attach_native_request_composition,
@@ -218,7 +219,14 @@ RUNTIME_NATIVE_TOOL_PROTOCOL = (
     "Batch ready independent reads, including supplied non-overlapping windows of the same resultRef. "
     "Independent writes may share a response; the host dispatches strictly serially through approval, checkpoint and readback. "
     "A failed call stops the remaining proposals; pending approval waits. Keep dependent calls and runtime control actions in separate responses.\n"
+    "The current runtime state's pendingApprovals are live decisions owned by this conversation. "
+    "When the user continues work gated by one of them, tell the user it is waiting for that existing decision. "
+    "Do not reissue the operation, rediscover its tools, or open a second question or approval. "
+    "A regular message does not decide an approval. Independent new work can continue.\n"
     "Copy supplied resultRef, window and nextRequest arguments exactly. Wait for a page when it determines the next cursor. "
+    "When resuming, use the latest settled tool round to choose the next action. "
+    "If it contains a correctable failure and the latest user input continues that work, "
+    "apply its specific correction with the already available tool before starting other discovery.\n"
     "For the same target and parameters, read a validated_scope reference before rescanning; the host revalidates it across turns. "
     "These references stay within the same session and project. Page replacementRef when returned; "
     "otherwise rescan an expired scope as needed. Other references expire with their turn.\n"
@@ -328,10 +336,12 @@ def runtime_operation_state(observe: Mapping[str, object]) -> dict[str, object]:
 
     mode = ensure_dict(observe.get("runtime")).get("executionMode")
     choice = ensure_dict(observe.get("checkpointChoice")).get("mode")
+    pending = ensure_dict(observe.get("approvalQueue")).get("ownedPending")
     return {
         "checkpointChoice": {"mode": choice if choice in ("skip", "require") else "require"},
         **({"executionMode": mode} if mode in ("approval", "auto", "roslyn_full_auto") else {}),
         **({"toolLoopReminder": LOOP_REMINDER} if observe.get("toolLoopDetected") is True else {}),
+        **({"pendingApprovals": pending} if isinstance(pending, list) and pending else {}),
     }
 
 
@@ -1268,10 +1278,86 @@ def _refresh_native_provenance(request: Mapping[str, object]) -> dict[str, objec
     origin["generatedMessageDigests"] = generated
     return origin
 
+def _handoff_excludes_tool(name: object) -> bool:
+    return str(name or "").removeprefix("vrcforge_").removeprefix("unity_") in {"progress_list", "progress_replace", "progress_update"}
+
+
+def _handoff_tool_group(group: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The authoritative TODO list is supplied verbatim outside the handoff."""
+    calls = group[0]["tool_calls"]
+    kept = []
+    for call in calls:
+        function = call["function"]
+        name = function["name"]
+        if name == "call_tool":
+            try:
+                requested = json.loads(function["arguments"])
+            except (TypeError, ValueError):
+                requested = {}
+            if isinstance(requested, dict):
+                name = requested.get("tool", name)
+        if not _handoff_excludes_tool(name):
+            kept.append(call)
+    if not kept:
+        return []
+    ids = {call["id"] for call in kept}
+    return [{**group[0], "tool_calls": kept}, *[item for item in group[1:] if item.get("tool_call_id") in ids]]
+
+
+def native_handoff_retained_evidence(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Project tool-owned scope and outcome without copying the recent transcript."""
+    calls = {}
+    for entry in messages:
+        for call in ensure_list(entry.get("tool_calls")):
+            function = ensure_dict(call.get("function"))
+            name = str(function.get("name") or "")
+            try:
+                request = ensure_dict(json.loads(str(function.get("arguments") or "{}")))
+            except ValueError:
+                request = {}
+            if name == "call_tool":
+                name = str(request.get("tool") or name)
+                request = ensure_dict(request.get("arguments"))
+            if not name or _handoff_excludes_tool(name):
+                continue
+            selectors = {}
+            for key, value in request.items():
+                if (len(selectors) < 6 and isinstance(value, str) and re.fullmatch(r"[A-Za-z]+(?:Path|Name|Guid|Id|Package)", key)
+                        and not re.search(r"(?:auth|secret|token|session|credential|password|projectPath)", key, re.I)):
+                    if key.endswith("Path") and (ntpath.isabs(value) or value.startswith("/")):
+                        value = ntpath.basename(value)
+                    selectors[key] = sanitize_planner_observation_text(value, 160)
+            calls[str(call.get("id"))] = {"callId": str(call.get("id")), "tool": name, "selectors": selectors}
+        if entry.get("role") != "tool" or str(entry.get("tool_call_id")) not in calls:
+            continue
+        row = calls[str(entry["tool_call_id"])]
+        try:
+            result = ensure_dict(json.loads(str(entry.get("content") or "{}")))
+        except ValueError:
+            continue
+        outcomes = []
+        for observation in ensure_list(result.get("observations")):
+            item = ensure_dict(observation)
+            outcome = ensure_dict(item.get("outcome"))
+            fields = {key: str(value)[:160] for key, value in {
+                "tool": item.get("runtimeTool"), "actionId": item.get("actionId"), "status": outcome.get("status"),
+                "readbackState": outcome.get("readbackState"),
+            }.items() if value}
+            if fields:
+                outcomes.append(fields)
+        if outcomes:
+            row["outcomes"] = outcomes[:6]
+        elif isinstance(result.get("status"), str):
+            row["status"] = sanitize_planner_observation_text(result["status"], 80)
+    return list(calls.values())[-16:]
+
+
 def classify_runtime_compaction_failure(exc: Exception) -> str:
     message = str(exc or "").casefold()
     if message == "insufficient_summary_budget":
         return "insufficient_summary_budget"
+    if message == "no_compactable_history":
+        return "no_compactable_history"
     if "incomplete_summarizer_input" in message:
         return "incomplete_input"
     if "empty_summary" in message or "schema" in message or "privacy" in message:
@@ -2061,10 +2147,10 @@ class RuntimePlannerService:
 
     def _read_global_instructions(self) -> str:
         try:
-            base = str(self._global_instructions() or "").strip() if self._global_instructions else ""
+            base = str(self._global_instructions() or "") if self._global_instructions else ""
         except (OSError, RuntimeError, UnicodeError, ValueError):
             base = ""
-        return "\n\n".join(part for part in (base, self._role_instructions.get()) if part)
+        return base
 
     @contextmanager
     def bind_turn(self, request: Mapping[str, object]):
@@ -2096,6 +2182,8 @@ class RuntimePlannerService:
                 "observation": RuntimePlannerService._llm_loop_step_observation(self, dict(step), native_contract=True)}
         if step.get("tool") == "vrcforge_load_internal_tool_block" and isinstance(result.get("legalBlocks"), list):
             observation["legalBlocks"] = [x for x in result["legalBlocks"] if isinstance(x, str)]
+        if step.get("tool") == "vrcforge_load_internal_tool_block" and isinstance(result.get("loadCalls"), list):
+            observation["loadCalls"] = deepcopy(result["loadCalls"])
         if step.get("tool") == "vrcforge_load_internal_tool_block" and result.get("schema") == "vrcforge.internal_tool_search.v1":
             observation["toolSearch"] = deepcopy(result)
         if step.get("tool") == "vrcforge_load_internal_tool_block" and result.get("status") == "reused":
@@ -2121,8 +2209,7 @@ class RuntimePlannerService:
                     "description": planner_tool_usage_description(tool.name, tool.description, write=tool.write),
                     "parameters": deepcopy(dict(tool.input_schema)),
                 }
-                # A loaded response can carry the whole monotonic leaf
-                # selection.  Only an exact retained definition is omitted;
+                # Only an exact retained definition is omitted;
                 # a same-name schema/description change is re-projected.
                 if retained_definitions.get(tool.name) == definition:
                     continue
@@ -2295,17 +2382,22 @@ class RuntimePlannerService:
 
     def maybe_compact_native_context(
         self, request: dict[str, object], native_turn: NativeRuntimeTurn,
-        *, context_usage: dict[str, object] | None = None,
+        *, context_usage: dict[str, object] | None = None, preserve_pending: bool = False, has_todo: bool = False,
+        force: bool = False, phase: str = "mid_turn", provider_receipt: Callable[[Mapping[str, object]], None] | None = None,
+        expected_snapshot: dict[str, object] | None = None,
     ) -> tuple[dict[str, object], dict[str, object] | None]:
         """Compress settled history while retaining current user instructions exactly."""
         guard = self.native_context_guard(request, context_usage=context_usage)
-        if guard is None or (
+        if guard is None or (not force and
             not guard["blocked"]
             and guard.get("softProjectedTokens", guard["beforeTokens"]) < guard["triggerTokens"]
         ):
             return request, guard
         snapshot = native_turn.snapshot()
-        metadata = {**guard, "attempts": 0}
+        metadata = {**guard, "attempts": 0, "trigger": "manual" if force else "auto", "phase": phase}
+        if expected_snapshot is not None and expected_snapshot != snapshot:
+            native_turn.compaction = runtime_compaction_audit_view({**metadata, "failureClass": "snapshot_changed"})
+            return request, guard
         # Only the history and its projection boundaries affect compaction;
         # tool exposure/recovery metadata must not restart a failed attempt.
         compaction_snapshot = {key: snapshot.get(key) for key in (
@@ -2320,7 +2412,7 @@ class RuntimePlannerService:
             if native_turn.compaction is None:
                 native_turn.compaction = metadata
             return request, guard
-        if native_turn.has_pending_tool_calls(snapshot):
+        if native_turn.has_pending_tool_calls(snapshot) and not preserve_pending:
             metadata["failureClass"] = "pending_tool_calls"
             native_turn.compaction = runtime_compaction_audit_view(metadata)
             return request, guard
@@ -2333,13 +2425,34 @@ class RuntimePlannerService:
         try:
             if native_turn.cancelled():
                 raise ValueError("native compaction cancelled")
-            source_messages, retained_messages = native_turn.compaction_projection(snapshot)
+            current_digests = ensure_list(ensure_dict(request.get("_diagnosticOrigin")).get("currentRuntimeContextDigests"))
+            current_context = []
+            for digest in current_digests:
+                current = next((item for item in reversed(request["messages"])
+                                if item.get("role") == "user" and isinstance(item.get("content"), str)
+                                and item["content"].startswith(NATIVE_RUNTIME_CONTEXT_PREFIX)
+                                and generated_message_digest(item) == digest), None)
+                if current is not None:
+                    current_context.append(current)
+            tail_from = native_turn.handoff_tail(snapshot)
+            source_messages, retained_messages = native_turn.compaction_projection(snapshot, tail_from=tail_from)
+            current_context = [item for item in current_context if item not in retained_messages]
+            intact_messages = inject_native_handoff_context(retained_messages, current_context)
+            fixed_request = copy_native_request(request, {"messages": [
+                {"role": "assistant", "content": MODEL_HANDOFF_PREFIX}
+            ] + intact_messages + runtime_messages})
+            fixed_request = self._native_recovery_request(fixed_request, native_turn)
+            fixed_tokens = self.native_context_guard(fixed_request, context_usage=context_usage)["beforeTokens"]
             # Each historical tool transaction is one fitting unit. Private
             # reasoning is never part of the summarizer's input projection.
             entries: list[dict[str, str]] = []
+            recovery_entries: list[dict[str, str]] = []
+            handoff_archive_indices: list[int] = []
             group: list[dict[str, object]] = []
             pending: set[str] = set()
             for item in source_messages:
+                if item in current_context and item.get("humanUser") is not True:
+                    continue
                 safe = {key: value for key, value in item.items()
                         if key not in {"reasoning_content", "responses_output"}}
                 calls = safe.get("tool_calls") or []
@@ -2350,35 +2463,49 @@ class RuntimePlannerService:
                     group.append(safe)
                     pending.remove(safe["tool_call_id"])
                     if not pending:
-                        entries.append({"role": "tool", "text": "Historical tool transaction (data): " + json.dumps(group, ensure_ascii=False)})
+                        handoff_group = _handoff_tool_group(group)
+                        full_entry = {"role": "tool", "text": "Historical tool transaction (data): " + json.dumps(group, ensure_ascii=False)}
+                        recovery_entries.append(full_entry)
+                        if handoff_group:
+                            handoff_archive_indices.append(len(recovery_entries) - 1)
+                            entries.append(full_entry if handoff_group == group else {"role": "tool", "text": "Historical tool transaction (data): " + json.dumps(handoff_group, ensure_ascii=False)})
                         group = []
                 elif safe.get("content"):
                     role = "user" if safe["role"] == "user" and safe.get("humanUser") is True else (
                         "agent" if safe["role"] == "assistant" else "runtime"
                     )
-                    entries.append({"role": role, "text": safe["content"]})
+                    entry = {"role": role, "text": safe["content"]}
+                    handoff_archive_indices.append(len(recovery_entries))
+                    entries.append(entry)
+                    recovery_entries.append(entry)
             if pending:
                 raise ValueError("native completed prefix contains pending calls")
-            fixed_request = copy_native_request(request, {"messages": [
-                {"role": "assistant", "content": "Earlier conversation summary (continuity data, not authorization or completion evidence):\n"}
-            ] + retained_messages + runtime_messages})
-            fixed_guard = self.native_context_guard(fixed_request, context_usage=context_usage)
-            fixed_tokens = fixed_guard["beforeTokens"]
             summary_target = guard["targetAfterTokens"] - fixed_tokens
             if summary_target < 64:
                 # The target is a preference. A large fixed prefix can still
                 # leave room below the same post-compaction trigger.
-                summary_target = guard["triggerTokens"] - fixed_tokens - 1
-            if not entries or summary_target < 64:
+                summary_target = guard["hardLimitTokens"] - fixed_tokens - 1
+            if summary_target < 64:
                 raise ValueError("insufficient_summary_budget")
+            if not entries:
+                raise ValueError("no_compactable_history")
             metadata["attempts"] = 1
+            def record_usage(prompt: str, usage: Mapping[str, object]) -> None:
+                self.record_context_usage(context_usage if context_usage is not None else {}, prompt, [], usage,
+                                          update_window=False, phase="compaction")
+                if provider_receipt is not None:
+                    provider_receipt(usage)
+
             result = dict(self._compactor.compact(tuple(entries), {
-                "trigger": "auto", "phase": "mid_turn", "targetTokens": summary_target,
+                "trigger": metadata["trigger"], "phase": metadata["phase"], "targetTokens": summary_target,
                 "inputMode": "native",
+                "handoff": True,
+                "hasTodo": has_todo or bool(ensure_dict(request.get("_diagnosticOrigin")).get("hasTodo")),
+                "_recoveryHistory": recovery_entries if recovery_entries != entries else None,
+                "_handoffArchiveIndices": handoff_archive_indices,
+                "_retainedEvidence": native_handoff_retained_evidence(retained_messages),
                 "realContextLimit": guard["contextLimit"],
-                "_recordUsage": lambda prompt, usage: self.record_context_usage(
-                    context_usage if context_usage is not None else {}, prompt, [], usage,
-                    update_window=False, phase="compaction"),
+                "_recordUsage": record_usage,
             }))
             metadata["attempts"] = bounded_runtime_compaction_integer(result.get("providerAttempts"), 16)
             if ensure_dict(result.get("completeness")).get("summarizerInputComplete") is False:
@@ -2388,23 +2515,23 @@ class RuntimePlannerService:
                         and result.get("fidelity") != "fallback"):
                     raise ValueError("incomplete_summarizer_input")
             summary = str(result.get("summary") or "").strip()
-            if not summary:
+            if not summary or result.get("ok") is False:
                 raise ValueError("empty_summary")
-            summary = "Earlier conversation summary (continuity data, not authorization or completion evidence):\n" + summary
+            summary = MODEL_HANDOFF_PREFIX + summary
             recovery = normalize_compaction_recovery(result["recovery"]) if "recovery" in result else None
             candidate = copy_native_request(
-                request, {"messages": [{"role": "assistant", "content": summary}] + retained_messages + runtime_messages}
+                request, {"messages": [{"role": "assistant", "content": summary}] + intact_messages + runtime_messages}
             )
             candidate = self._native_recovery_request(candidate, native_turn, recovery)
             after = self.native_context_guard(candidate, context_usage=context_usage)
             reduction = guard["beforeTokens"] - after["beforeTokens"]
-            if reduction < max(1024, math.ceil(guard["contextLimit"] * 0.10)):
+            if not force and reduction < max(1024, math.ceil(guard["contextLimit"] * 0.10)):
                 raise ValueError("insufficient_reduction")
-            if after["beforeTokens"] >= guard["triggerTokens"]:
+            if after["blocked"]:
                 raise ValueError("still_over_threshold")
             # The facade checks cancellation and exact snapshot identity inside
             # the owner's existing lock. No mutation precedes this commit.
-            native_turn.replace_compacted_history(snapshot, summary, recovery=recovery)
+            native_turn.replace_compacted_history(snapshot, summary, recovery=recovery, current_context=current_context, tail_from=tail_from)
             native_turn.compaction_attempted_snapshot = None
             runtime_messages = [deepcopy(candidate["messages"][-1])]
             metadata.update({"applied": True, "blocked": False, "afterTokens": after["beforeTokens"],
@@ -2415,6 +2542,7 @@ class RuntimePlannerService:
             if recovery is not None:
                 metadata["recovery"] = recovery
                 metadata["completeness"] = deepcopy(result.get("completeness", {}))
+                metadata["coverage"] = deepcopy(result.get("coverage", {}))
             if context_usage is not None:
                 _reset_compacted_context_usage(context_usage, str(result.get("summaryDigest") or summary))
         except Exception as exc:  # noqa: BLE001 - keep the existing transcript on provider/CAS failure.
@@ -2424,8 +2552,9 @@ class RuntimePlannerService:
         metadata["latencyMs"] = bounded_runtime_compaction_integer((time.perf_counter() - started) * 1000, 86_400_000)
         native_turn.compaction = runtime_compaction_audit_view(metadata)
         if metadata.get("applied") and "recovery" in metadata:
-            native_turn.compaction.update({key: metadata[key] for key in ("recovery", "completeness")})
-        request = copy_native_request(request, {"messages": native_turn.messages() + runtime_messages})
+            native_turn.compaction.update({key: metadata[key] for key in ("recovery", "completeness", "coverage")})
+        persisted = native_turn.snapshot()["messages"] if preserve_pending else native_turn.messages()
+        request = copy_native_request(request, {"messages": persisted + runtime_messages})
         return request, self.native_context_guard(request, context_usage=context_usage)
 
 
@@ -2937,7 +3066,7 @@ class RuntimePlannerService:
                         native_request = bind_tool_images(native_request, tool_image_content, active_turn_start=active_turn_start)
                     original_projection = native_request
                     native_request, native_guard = self.maybe_compact_native_context(
-                        native_request, native_turn, context_usage=context_usage,
+                        native_request, native_turn, context_usage=context_usage, has_todo=bool(ensure_list(observe.get("activeTodo"))),
                     )
                     if native_request is not original_projection:
                         _, active_turn_start = native_turn.request_history()
@@ -3109,43 +3238,18 @@ class RuntimePlannerService:
                             )
                             if not truncated and not empty_continuation_final:
                                 native_turn.admit(receipt, tool_names=[tool.name for tool in native_tools])
-                            if rejected_native_batch:
-                                native_turn.reject_queued_receipt()
-                                rejection = {"kind": "control", "tool": "native_batch", "arguments": None,
-                                    "summary": (
-                                        "No call in this batch was executed. Resubmit using the current advertised "
-                                        "tools and wait for loader results before invoking newly loaded tools. "
-                                        "Send ordinary tool calls directly; native_batch is not callable."
-                                    ),
-                                    "issues": [{"path": "tool_calls", "code": "tool_not_visible"}]}
-                                return self._planner_argument_error_plan(
-                                    base={"planner": "llm", "nativeCallIds": native_call_ids,
-                                          **({"publicMessages": public_assistant_messages(receipt)} if public_assistant_messages(receipt) else {}),
-                                          "skillNeeded": False, "writeNeeded": False, "shellNeeded": False},
-                                    action_kind="control", tool_name="native_batch", arguments=None,
-                                    validation=rejection, phase=phase,
-                                )
-                            # Resolve the wrapped target before admission; the fixed
-                            # transport itself is never evidence that a call is read-only.
-                            proposals = [self._native_action_payload({"tool_calls": [call]}, native_tools)
-                                         for call in calls]
-                            invalid_proposal = next((error for _, error in proposals if error), None)
                             # A bounded proposal queue, never concurrent side-effect dispatch.
                             # Control envelopes are not ordinary read tools; keep their existing single-call contract.
-                            if len(calls) > 1 and (invalid_proposal or any(
+                            if len(calls) > 1 and any(
                                 call.get("function", {}).get("name") == "vrcforge_runtime_action" for call in calls
-                            )):
+                            ):
                                 native_turn.reject_queued_receipt()
                                 rejection = {"kind": "control", "tool": "native_batch", "arguments": None,
                                     "summary": (
-                                        "No call in this batch was executed. Resubmit the corrected calls using "
-                                        "currently advertised tool names. Send ordinary tool calls directly; "
-                                        "native_batch is not callable. " + str(invalid_proposal["summary"])
-                                        if invalid_proposal else
                                         "No call in this batch was executed. Submit the control action in its own "
                                         "response. Send it directly; native_batch is not callable."
                                     ),
-                                    "issues": (invalid_proposal.get("issues") or [{"path": "tool_calls", "code": "native_batch_not_admitted"}]) if invalid_proposal else [{"path": "tool_calls", "code": "native_batch_not_admitted"}]}
+                                    "issues": [{"path": "tool_calls", "code": "native_batch_not_admitted"}]}
                                 return self._planner_argument_error_plan(
                                     base={"planner": "llm", "nativeCallIds": native_call_ids,
                                           **({"publicMessages": public_assistant_messages(receipt)} if public_assistant_messages(receipt) else {}),
@@ -3153,21 +3257,17 @@ class RuntimePlannerService:
                                     action_kind="control", tool_name="native_batch", arguments=None,
                                     validation=rejection, phase=phase,
                                 )
-                            if len(calls) > 1:
-                                delegate_names = {
-                                    tool.name for tool in native_tools
-                                    if tool.runtime_name in SUB_AGENT_TASK_TOOLS and not tool.write
-                                }
-                                if all(payload and payload.get("skill_tool") in delegate_names
-                                       for payload, _ in proposals):
-                                    native_turn.subagent_batch_call_ids = tuple(native_call_ids)
                             if calls:
+                                if len(calls) > 1:
+                                    native_turn.prepare_admitted_batch(native_tools)
                                 receipt = native_turn.next_receipt()
                                 native_call_ids = [receipt["tool_calls"][0]["id"]]
                         # Re-read current authority for every dispatch, but never grant a tool
                         # absent from this receipt's original advertised scope.
                         native_tools = [tool for tool in native_tools
                                         if tool.name in (native_turn.admitted_tool_names or set())]
+                        if native_turn.has_queued_calls:
+                            native_turn.classify_queued_calls(native_tools)
                         payload, rejection = self._native_action_payload(
                             receipt, native_tools, catalog=self._read_catalog(
                                 exposure_layer, project_context_active=project_context_active,
@@ -3946,7 +4046,7 @@ class RuntimePlannerService:
                 metadata["blocked"] = projected_tokens >= hard_limit_tokens
                 return history, metadata, bool(metadata["blocked"])
             compaction_started = time.perf_counter()
-            metadata["attempts"] = 1
+            metadata["attempts"] = 0
             try:
                 terminal_statuses = {"executed", "completed", "ok", "success", "succeeded", "applied"}
                 completed_prefix = 0
@@ -3970,10 +4070,16 @@ class RuntimePlannerService:
                     if not settled:
                         break
                     completed_prefix += 1
-                # Reserve the existing summary contract and fixed prompt blocks;
-                # spend only the remaining target budget on recent observations.
+                human_turns = [index for index, entry in enumerate(history) if entry.get("role") == "user"]
+                tail_start = human_turns[-2] if len(human_turns) >= 2 else (human_turns[0] if human_turns else len(history))
+                pinned = {human_turns[0]} if human_turns else set()
+                retained_history = [entry for index, entry in enumerate(history) if index in pinned or index >= tail_start]
+                older_history = [entry for index, entry in enumerate(history) if index not in pinned and index < tail_start]
+                compacted_loop_steps = max(0, completed_prefix - 3)
+                compacted_loop_state = (loop_state or [])[:compacted_loop_steps]
+                retained_loop_state = (loop_state or [])[compacted_loop_steps:]
                 fixed_prompt = self._build_llm_plan_prompt(
-                    message, [], [], observe=observe,
+                    message, retained_history, retained_loop_state, observe=observe,
                     exposure_layer=runtime_exposure_layer,
                     project_context_active=params.get("_projectContextActive") is not False,
                     project_path=params.get("projectPath") or params.get("projectRoot"),
@@ -3981,25 +4087,15 @@ class RuntimePlannerService:
                     global_instructions=global_instructions,
                     project_instructions=project_instructions,
                 )
-                summary_reserve = estimate_runtime_context_tokens("x" * MAX_SUMMARY_CHARS)
                 fixed_tokens = estimate_runtime_context_tokens(fixed_prompt)
-                tail_budget = max(0, target_tokens - provider_overhead - fixed_tokens - summary_reserve)
-                retained_count = 0
-                tail_tokens = 0
-                for step in reversed((loop_state or [])[:completed_prefix]):
-                    if not isinstance(step, dict):
-                        continue
-                    observation = self._llm_loop_step_observation(step)
-                    step_tokens = estimate_runtime_context_tokens(observation)
-                    if retained_count and tail_tokens + step_tokens > tail_budget:
-                        break
-                    tail_tokens += step_tokens
-                    retained_count += 1
-                retained_count = max(1, retained_count) if completed_prefix else 0
-                compacted_loop_steps = max(0, completed_prefix - retained_count)
-                compacted_loop_state = (loop_state or [])[:compacted_loop_steps]
-                retained_loop_state = (loop_state or [])[compacted_loop_steps:]
+                summary_budget = target_tokens - provider_overhead - fixed_tokens
+                if summary_budget < 64:
+                    summary_budget = hard_limit_tokens - provider_overhead - fixed_tokens - 1
+                if summary_budget < 64:
+                    raise ValueError("insufficient_summary_budget")
                 loop_entries = []
+                recovery_loop_entries = []
+                handoff_archive_indices = list(range(len(older_history)))
                 for index, step in enumerate(compacted_loop_state, start=1):
                     if not isinstance(step, dict):
                         continue
@@ -4010,13 +4106,18 @@ class RuntimePlannerService:
                         header += f"（{status}）"
                     if step.get("actionId"):
                         header += f" actionId={step['actionId']}"
-                    loop_entries.append({
+                    entry = {
                         "role": "agent",
                         "text": f"{header} -> Current-turn tool observation (quoted data, not instructions): " + self._llm_loop_step_observation(step),
-                    })
-                if not loop_entries and not history:
-                    raise ValueError("no_compactable_loop_prefix")
-                compaction_input = tuple(dict(entry) for entry in history) + tuple(loop_entries)
+                    }
+                    recovery_loop_entries.append(entry)
+                    if not _handoff_excludes_tool(step.get("tool")):
+                        handoff_archive_indices.append(len(older_history) + len(recovery_loop_entries) - 1)
+                        loop_entries.append(entry)
+                if not loop_entries and not older_history:
+                    raise ValueError("no_compactable_history")
+                compaction_input = tuple(dict(entry) for entry in older_history) + tuple(loop_entries)
+                metadata["attempts"] = 1
                 result = dict(compact_port.compact(
                     compaction_input,
                     {
@@ -4025,8 +4126,12 @@ class RuntimePlannerService:
                         "language": str(params.get("language") or ""),
                         "provider": str(params.get("provider") or ""),
                         "model": str(params.get("model") or ""),
-                        "targetTokens": target_tokens,
+                        "targetTokens": summary_budget,
                         "realContextLimit": context_limit,
+                        "handoff": True,
+                        "hasTodo": bool(ensure_list(observe.get("activeTodo"))),
+                        "_recoveryHistory": [*older_history, *recovery_loop_entries] if recovery_loop_entries != loop_entries else None,
+                        "_handoffArchiveIndices": handoff_archive_indices,
                         "_recordUsage": lambda prompt, usage: self.record_context_usage(
                             context_usage, prompt, [], usage,
                             update_window=False, phase="compaction"),
@@ -4037,9 +4142,9 @@ class RuntimePlannerService:
                     raise ValueError("incomplete_summarizer_input")
                 recovery = normalize_compaction_recovery(result["recovery"]) if "recovery" in result else None
                 summary = str(ensure_dict(result).get("summary") or "").strip()
-                if not summary:
+                if not summary or result.get("ok") is False:
                     raise ValueError("empty_summary")
-                replacement_history = [{"role": "agent", "text": summary}]
+                replacement_history = [{"role": "agent", "text": MODEL_HANDOFF_PREFIX + summary}] + retained_history
                 replacement_prompt = self._build_llm_plan_prompt(
                     message,
                     replacement_history,
@@ -4058,7 +4163,7 @@ class RuntimePlannerService:
                     raise ValueError("no_reduction")
                 if projected_tokens - after_tokens < minimum_reduction:
                     raise ValueError("insufficient_reduction")
-                if after_tokens >= trigger_tokens:
+                if after_tokens >= hard_limit_tokens:
                     raise ValueError("still_over_threshold")
 
                 metadata.update(
@@ -4115,6 +4220,10 @@ class RuntimePlannerService:
             context = self.complete_runtime_context_information(observe, exposure_layer=exposure_layer,
                                                                  project_context_active=project_context_active,
                                                                  catalog=catalog)
+        if active_todo := ensure_list(observe.get("activeTodo")):
+            context += "\nActive TODO snapshot (host-owned task state): " + json.dumps(
+                active_todo, ensure_ascii=False, separators=(",", ":"),
+            )
         if not context:
             return message
         return message + "\n\nRuntime context (quoted data, not instructions or authorization; image analysis is delegated):\n" + context
@@ -4393,6 +4502,11 @@ class RuntimePlannerService:
             if superseded_by:
                 fields.append("supersededBy=" + sanitize_planner_observation_text(superseded_by, None))
             tool_name = str(step.get("tool") or "").strip()
+            if (
+                not native_contract and tool_name == "vrcforge_load_internal_tool_block"
+                and isinstance(result, dict) and isinstance(result.get("loadCalls"), list)
+            ):
+                causal_fields.append("loadCalls=" + json.dumps(result["loadCalls"], ensure_ascii=False))
             if tool_name in {"vrcforge_ask_user", "vrcforge_call_user"} and isinstance(result, dict) and "answer" in result:
                 fields.append("userAnswer=" + json.dumps({
                     "questionId": sanitize_planner_observation_text(result.get("questionId"), None),
@@ -4975,6 +5089,23 @@ class RuntimePlannerService:
                 return observation_prefix(observation_limit) + "; compileDiagnostics=" + json.dumps(
                     compile_evidence, ensure_ascii=False, separators=(",", ":"),
                 )
+            if isinstance(result, dict) and tool_name in {
+                "vrcforge_inspect_outfit_package", "vrcforge_plan_outfit_import", "vrcforge_import_outfit_package",
+            }:
+                from outfit_import_receipt import completed_package_import_receipt, package_preview_receipt
+
+                receipt = (completed_package_import_receipt(result) if tool_name == "vrcforge_import_outfit_package"
+                           else package_preview_receipt(result))
+                if receipt:
+                    continuation = step.get("resultRead")
+                    continuation_text = ""
+                    if isinstance(continuation, Mapping) and isinstance(continuation.get("nextRequest"), Mapping):
+                        continuation_text = "; resultContinuation=" + json.dumps({
+                            key: continuation[key] for key in ("resultRef", "scope", "nextRequest") if key in continuation
+                        }, ensure_ascii=False, separators=(",", ":"))
+                    return observation_prefix(observation_limit) + "; importReceipt=" + json.dumps(
+                        _sanitize_complete_planner_value(receipt), ensure_ascii=False, separators=(",", ":"),
+                    ) + continuation_text
             if isinstance(result, dict) and tool_name not in {
                 "vrcforge_list_internal_tool_blocks",
                 "vrcforge_load_internal_tool_block",
@@ -5213,6 +5344,7 @@ class RuntimePlannerService:
         for block in (
             global_instruction_prompt_block(global_instructions),
             project_instruction_prompt_block(project_instructions),
+            self._role_instructions.get(),
         ):
             if block:
                 instructions += "\n\n" + block
@@ -5287,9 +5419,13 @@ class RuntimePlannerService:
         if stable_added:
             projected_messages.append({"role": "user", "content": stable_context_message})
             stable_position = len(projected_messages) - 1
+        if "activeTodo" in observe:
+            active_todo = ensure_list(observe["activeTodo"])
+            if active_todo or last_slot_context("activeTodo"):
+                turn_context["activeTodo"] = active_todo
         turn_context_message = (
             marker + json.dumps(turn_context, ensure_ascii=False, separators=(",", ":"))
-            if any(turn_context.values()) else ""
+            if "activeTodo" in turn_context or any(turn_context.values()) else ""
         )
         turn_added = bool(turn_context_message) and (
             last_slot_context("runtimeContextTurn") != turn_context_message
@@ -5304,6 +5440,8 @@ class RuntimePlannerService:
         }
         projected_messages.append(state_message)
         origin = {
+            "currentRuntimeContextDigests": [generated_message_digest({"role": "user", "content": value})
+                                             for value in (stable_context_message, turn_context_message) if value],
             # Only a context message created in this projection is classified.
             # An arbitrary old user message containing the marker remains history.
             "generatedMessageDigests": {
@@ -5345,6 +5483,31 @@ class RuntimePlannerService:
             for tool in [*selected, *navigation, dispatcher, control]
         }}
         return request, [*selected, dispatcher, control]
+
+    @staticmethod
+    def queued_call_failure_scope(call, tools) -> str:
+        payload, rejection = RuntimePlannerService._native_action_payload({"tool_calls": [call]}, tools)
+        if rejection:
+            return "validation"
+        if payload.get("action") != "skill":
+            return ""
+        tool = next((item for item in tools if item.name == payload.get("skill_tool")), None)
+        if tool is None or tool.write or tool.advanced or tool.requires_user_activation:
+            return ""
+        if call["function"]["name"] == "load_internal_tool_block":
+            # This control only loads schemas. The same receipt remains bound
+            # to its original advertised names.
+            return "discovery"
+        # Delegation's registered contract allows only a read-only child.
+        if tool.runtime_name in SUB_AGENT_TASK_TOOLS:
+            return "delegation"
+        if tool.category != "read/debug":
+            return ""
+        # Browser dispatch also accepts navigation, interaction and disconnect.
+        # Only its read operation qualifies as an observation.
+        if tool.runtime_name == "vrcforge_browser" and payload["skill_params"].get("operation") != "read":
+            return ""
+        return "project_read" if UNITY_PROJECT_ACCESS in tool.capabilities else "local_read"
 
     @staticmethod
     def _native_action_payload(receipt, tools, *, catalog=None):
@@ -5621,7 +5784,7 @@ class RuntimePlannerService:
                 )
             project_instructions_block = project_instruction_prompt_block(project_instructions)
             instruction_blocks = "\n\n".join(
-                block for block in (global_instructions_block, project_instructions_block) if block
+                block for block in (global_instructions_block, project_instructions_block, self._role_instructions.get()) if block
             )
             mode_constraint = _read_only_runtime_constraint(observe)
             input_source = observe.get("runtimeInputSource")

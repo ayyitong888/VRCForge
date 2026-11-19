@@ -35,6 +35,9 @@ export type CompactAgentHistoryOptions = {
   language?: string;
   provider?: string;
   model?: string;
+  sessionId?: string;
+  projectRoot?: string;
+  requireNative?: boolean;
   targetTokens?: number;
   realContextLimit?: number;
   contextBudget?: AgentHistoryContextBudget;
@@ -74,6 +77,8 @@ export type AgentHistoryCompactionDetails = {
 };
 
 export type CompactAgentHistoryResponse = AgentHistoryCompactionDetails & {
+  nativeApplied?: boolean;
+  status?: "no_content";
   ok: boolean;
   provider?: string;
   model?: string;

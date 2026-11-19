@@ -42,6 +42,9 @@ def fixture(compactor=None, *, prior=True, current="Continue checking", limit=80
             state.append_native_scan_result_policy_once("s", binding="b", message={
                 "role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY,
             })
+        for sequence in (1, 2):
+            state.begin_native_turn("s", binding="b", turn_id=f"recent-{sequence}", message=f"Recent user message {sequence}")
+            state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": f"Recent assistant reply {sequence}"})
     turn = NativeRuntimeTurn(state, planner, "s", "current", "b", current, [], None, None, None, client_turn_id="ui-current")
     return state, planner, model, turn
 
@@ -73,7 +76,7 @@ def test_native_compaction_after_dispatched_tool_applies_summary():
     assert state._native_pending(turn.snapshot()) == set()
 
 
-def test_native_compaction_reuses_port_and_summarizes_settled_current_receipts():
+def test_native_compaction_reuses_port_and_retains_recent_settled_receipts():
     compactor = Compactor()
     state, planner, model, turn = fixture(compactor)
     state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": "checking",
@@ -94,11 +97,13 @@ def test_native_compaction_reuses_port_and_summarizes_settled_current_receipts()
     grouped = [entry["text"] for entry in compactor.calls[0][0] if "read-old" in entry["text"]]
     assert len(grouped) == 1 and "readback-old" in grouped[0] and "fixture.txt" in grouped[0]
     current_group = [entry["text"] for entry in compactor.calls[0][0] if "current-read" in entry["text"]]
-    assert len(current_group) == 1 and '"status":"ok"' in current_group[0].replace('\\"', '"')
+    assert not current_group
     assert "CURRENT_EXACT_REPLAY" not in str(compactor.calls[0][0])
-    assert model.requests[0]["messages"][1:-1] == suffix
+    assert [item for item in model.requests[0]["messages"] if item["role"] == "user"] == suffix
+    assert {"role": "tool", "tool_call_id": "current-read", "content": '{"status":"ok"}'} in model.requests[0]["messages"]
     assert model.requests[0]["messages"][-1]["role"] == "system"
-    assert state.native_conversation("s", binding="b")["activeTurnStart"] == 2
+    compacted = state.native_conversation("s", binding="b")
+    assert compacted["messages"][compacted["activeTurnStart"]]["content"] == "Continue checking"
     assert turn.compaction["applied"] is True and turn.compaction["afterTokens"] < turn.compaction["beforeTokens"]
     assert "summary" not in turn.compaction and "PRIVATE_REASONING_SENTINEL" not in json.dumps(turn.compaction)
     assert usage["cumulativeInputTokens"] >= 9000 and usage["compactionCount"] == 1
@@ -117,7 +122,7 @@ def test_compaction_preserves_only_confirmed_human_provenance_and_active_output_
     plan(planner, turn)
     assert turn.compaction["applied"] is True
     entries = compactor.calls[0][0]
-    assert [entry["role"] for entry in entries if entry["text"] == original_goal] == ["user", "runtime"]
+    assert [entry["role"] for entry in entries if entry["text"] == original_goal] == ["runtime"]
     assert {"role": "runtime", "text": "runtime-generated reference data"} in entries
     assert any(entry["role"] == "tool" and "read-old" in entry["text"] for entry in entries)
     assert {"role": "system", "content": CONTINUE_MESSAGE} in model.requests[-1]["messages"]
@@ -358,7 +363,7 @@ def test_native_compaction_restores_exact_prefix_policy_once_without_touching_su
     assert model.requests[0]["messages"].count(policy) == 1
     assert state.native_conversation("s", binding="b")["messages"].count(policy) == 1
     candidate = next(messages for messages in measured if messages and messages[0].get("role") == "assistant"
-                     and str(messages[0].get("content", "")).startswith("Earlier conversation summary"))
+                     and str(messages[0].get("content", "")).startswith("Earlier model handoff"))
     original_request = measured[0]
     assert candidate.count(policy) == 1
     assert [message for message in candidate if message.get("role") == "system" and message != policy] == [
@@ -366,11 +371,10 @@ def test_native_compaction_restores_exact_prefix_policy_once_without_touching_su
     ]
     assert model.requests[0]["tools"] == measured_tools[0]
     assert turn.compaction["applied"] is True
-    assert model.requests[0]["messages"][1:1 + len(suffix)] == suffix
-    assert state.native_conversation("s", binding="b")["messages"][1:1 + len(suffix)] == suffix
-    persisted = state.native_conversation("s", binding="b")["messages"]
-    assert persisted[1 + len(suffix)] == policy
-    assert state.native_conversation("s", binding="b")["activeTurnStart"] == 2
+    assert [item for item in model.requests[0]["messages"] if item["role"] == "user"] == suffix
+    persisted = state.native_conversation("s", binding="b")
+    assert [item for item in persisted["messages"] if item["role"] == "user"] == suffix
+    assert persisted["messages"][persisted["activeTurnStart"]]["content"] == "Continue checking"
 
 
 def test_native_retained_suffix_policy_is_not_duplicated_and_untrusted_summary_is_not_policy():
@@ -413,7 +417,8 @@ def test_persisted_policy_survives_store_restart_and_compaction_without_new_scan
     assert sum(is_scan_result_policy_message(message) for message in resumed_turn.snapshot()["messages"]) == 1
     assert sum(is_scan_result_policy_message(message) for message in model.requests[0]["messages"]) == 1
     assert resumed_turn.snapshot()["messages"].count(policy) == 1
-    assert len(compactor.calls) == 1 and resumed_turn.snapshot()["activeTurnStart"] == 2
+    snapshot = resumed_turn.snapshot()
+    assert len(compactor.calls) == 1 and snapshot["messages"][snapshot["activeTurnStart"]]["content"] == "Continue checking"
 
 
 def test_pending_current_call_settles_at_assembly_then_compacts():
@@ -451,13 +456,9 @@ def test_pending_current_call_settles_at_assembly_then_compacts():
     assert settlement["reason"] == "runtime_interrupted"
 
     grouped = [entry["text"] for entry in compactor.calls[0][0] if "pending-current" in entry["text"]]
-    assert len(grouped) == 1
-    transaction = json.loads(grouped[0].split(": ", 1)[1])
-    assert len(transaction) == 2
-    assert transaction[0]["tool_calls"][0]["id"] == "pending-current"
-    assert transaction[1]["tool_call_id"] == "pending-current"
-    assert json.loads(transaction[1]["content"])["status"] == "execution_unknown"
-    assert not any(
+    assert not grouped
+    assert pending_results[0] in model.requests[0]["messages"]
+    assert any(
         call.get("id") == "pending-current"
         for message in model.requests[0]["messages"]
         for call in message.get("tool_calls", [])
@@ -529,7 +530,7 @@ def test_native_cas_race_rebuilds_history_before_send_without_replay():
     # Keep this fixture between trigger and hard limit as the real prompt grows;
     # only historical filler changes, never the runtime's context limit.
     snapshot = turn.snapshot()
-    snapshot["messages"][1]["content"] = "old context " * 4400
+    snapshot["messages"][1]["content"] = "old context " * 3900
     state._native_conversations["s"] = snapshot
 
     def race_update() -> None:

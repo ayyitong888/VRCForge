@@ -171,7 +171,10 @@ def test_gateway_cancel_restores_window_but_keeps_compaction_cost(tmp_path):
                 "completeness": {"summarizerInputComplete": True}, "summaryDigest": "test-digest"}
     bind_test_runtime_planner(gateway, plan, compact=compact)
     response = gateway.runtime_message({"message": "continue", "sessionId": "billing-cancel", "clientTurnId": "billing-ui",
-        "history": [{"role": "user", "text": "original"}], "_contextCompactionLimit": 20000})
+        "history": [{"role": "user", "text": "original"}, {"role": "agent", "text": "older reply"},
+                    {"role": "user", "text": "Recent first input"}, {"role": "agent", "text": "Recent first reply"},
+                    {"role": "user", "text": "Recent second input"}, {"role": "agent", "text": "Recent second reply"}],
+        "_contextCompactionLimit": 20000})
     assert response["plan"]["nextStep"] == "cancelled"
     assert response["contextUsage"]["inputTokens"] == 18100
     assert response["contextUsage"]["requestCount"] == 2

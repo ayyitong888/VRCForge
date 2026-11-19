@@ -15,6 +15,8 @@ const pending = [];
 const posts = [];
 const merges = [];
 const handoffs = [];
+const resumes = [];
+const detailReads = [];
 const date = "2026-10-28T10:00:00Z";
 const chatA = { id: "surface-A", sessionId: "surface-session-A", title: "Surface A", projectPath: "", projectType: "general", createdAt: date, updatedAt: date, revision: 0, items: [] };
 const chatB = { ...chatA, id: "surface-B", sessionId: "surface-session-B", title: "Surface B" };
@@ -110,6 +112,9 @@ const bootstrap = {
 };
 let tasks = [taskA];
 let detail = taskA;
+let alternateDetail = null;
+let heldResume = null;
+let resumeResult = null;
 let holdNextList = false;
 let holdNextParent = "";
 let holdPost = false;
@@ -173,9 +178,17 @@ const backend = createHttpServer(async (req, res) => {
     merges.push(JSON.parse(await readBody(req)));
     return respond({ detail: "Fixture revision conflict" }, 409);
   }
+  if (url.pathname.endsWith("/resume")) {
+    resumes.push(JSON.parse(await readBody(req)));
+    heldResume = () => respond({ ok: true, task: resumeResult });
+    return;
+  }
   if (url.pathname.startsWith("/api/app/sub-agents/")) {
     if (missingDetail) return respond({ detail: "Fixture missing worker detail" }, 404);
-    return respond({ ok: true, task: detail });
+    const id = url.pathname.split("/").at(-1);
+    detailReads.push(id);
+    const matching = [alternateDetail, resumeResult].find((task) => task?.id === id);
+    return respond({ ok: true, task: matching || detail });
   }
   return respond({ ok: true, tasks: [], actions: [], questions: [], runs: [], items: [], sources: [], settings: {}, approvals: [] });
 });
@@ -335,9 +348,9 @@ try {
     await list.waitFor();
     return list;
   };
-  const openThread = async (page) => {
+  const openThread = async (page, threadId = taskA.id) => {
     const list = await openList(page);
-    await list.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).click();
+    await list.locator(`[data-vrcforge-open-subagent-thread="${threadId}"]`).click();
     return page.locator("[data-vrcforge-subagent-workspace-surface]");
   };
 
@@ -742,6 +755,39 @@ try {
     assert.equal(await panel.getByText("Completed", { exact: true }).count(), 1, "late running reply regressed detail");
     await page.locator("[data-vrcforge-subagent-back]").click();
     assert.equal(await page.locator(`[data-vrcforge-subagent-thread-row="${taskA.id}"]`).getByText("Completed", { exact: true }).count(), 1);
+    await page.close();
+  }
+
+  if (issue === "all" || issue === "resume-selection") {
+    detail = { ...done, childSessionId: "surface-child-A", canResume: true };
+    alternateDetail = { ...done, id: "other-worker", displayName: "Other worker", childSessionId: "surface-child-other" };
+    resumeResult = {
+      ...detail, id: "resumed-worker", resumeOf: detail.id, task: "Check a second source", revision: 4,
+    };
+    tasks = [detail, alternateDetail];
+    const page = await open();
+    const panel = await openThread(page, detail.childSessionId);
+    const question = panel.locator("[data-vrcforge-subagent-resume-question]");
+    const submit = panel.locator("[data-vrcforge-subagent-resume]");
+    await question.fill(resumeResult.task);
+    await question.press("Enter");
+    await waitFor(() => heldResume, "follow-up request must be pending");
+    assert.equal(await submit.isDisabled(), true, "the pending submission prevents a duplicate");
+    await panel.locator("form").dispatchEvent("submit");
+    assert.deepEqual(resumes, [{ task: resumeResult.task }]);
+    await panel.locator("[data-vrcforge-subagent-back]").click();
+    await (await openList(page)).locator('[data-vrcforge-open-subagent-thread="surface-child-other"]').click();
+    await panel.getByText(alternateDetail.displayName, { exact: true }).waitFor();
+    const response = page.waitForResponse((entry) => entry.url().endsWith("/resume"));
+    heldResume();
+    await response;
+    await page.evaluate(() => new Promise((frame) => requestAnimationFrame(() => requestAnimationFrame(frame))));
+    assert.equal(await panel.getByText(alternateDetail.displayName, { exact: true }).count(), 1);
+    assert.equal(detailReads.includes(resumeResult.id), false, "late follow-up must not refresh a different selection");
+    assert.equal(resumes.length, 1);
+    tasks = [done];
+    detail = done;
+    alternateDetail = resumeResult = heldResume = null;
     await page.close();
   }
 

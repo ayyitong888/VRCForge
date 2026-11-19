@@ -150,6 +150,8 @@ class NativeRuntimeTurn:
         on_steer_consumed: Callable[[list[str]], None] | None = None,
         subagent_batch: list[dict[str, Any]] | None = None,
         input_source: RuntimeInputSource = RuntimeInputSource.USER,
+        late_approval_id: str = "",
+        compaction_only: bool = False,
     ) -> None:
         self._state = owner
         self._planner = planner
@@ -170,6 +172,8 @@ class NativeRuntimeTurn:
         self._consumed_steer_input_ids: list[str] = []
         self._on_steer_consumed = on_steer_consumed
         self._queued_calls: list[dict[str, Any]] = []
+        self._queued_failure_scopes: dict[str, str] = {}
+        self.receipt_call_id = ""
         self.subagent_batch_call_ids: tuple[str, ...] = ()
         self._parked_subagent_calls = False
         self._terminal_runtime_notice_written = False
@@ -183,6 +187,8 @@ class NativeRuntimeTurn:
         # The gateway owns reader scope and lifecycle; the turn owns no store.
         self.retain_recovery = retain_recovery
         self.retain_recovery_catalog: Callable[[list[dict[str, Any]]], str] | None = None
+        if compaction_only:
+            return
         state = self._state
         continuation_context = continuation_context or {}
         continuation_completion = continuation_completion or {}
@@ -191,16 +197,25 @@ class NativeRuntimeTurn:
             return
         if isinstance(saved_native, Mapping):
             saved_binding = str(saved_native.get("binding") or "")
-            restored = state.restore_native_conversation(
-                session_id,
-                binding=saved_binding,
-                snapshot=copy.deepcopy(dict(saved_native)),
+            latest = state.native_conversation(session_id, binding=saved_binding)
+            call_id = continuation_context.get("_nativeCallId")
+            late_approval = bool(
+                late_approval_id and latest is not None
+                and latest["turnId"] != saved_native["turnId"]
+                and call_id and call_id in state._native_pending(saved_native)
             )
-            if restored["turnId"] != saved_native["turnId"]:
-                raise ValueError("Native continuation belongs to an earlier user turn.")
+
+            if late_approval:
+                if saved_binding != binding or state._native_pending(latest):
+                    raise ValueError("The approval result was recorded while the newer conversation has a different route or pending action.")
+                restored = latest
+            else:
+                restored = state.restore_native_conversation(
+                    session_id, binding=saved_binding, snapshot=copy.deepcopy(dict(saved_native)),
+                )
+                if restored["turnId"] != saved_native["turnId"]:
+                    raise ValueError("Native continuation belongs to an earlier user turn.")
             pending_ids = state._native_pending(saved_native) & state._native_pending(restored)
-            if not pending_ids and subagent_batch is None:
-                raise ValueError("Native continuation has already been settled.")
             retained = self._retained_tool_definitions(restored["messages"])
 
             def result_content(
@@ -208,6 +223,11 @@ class NativeRuntimeTurn:
                 observation: Mapping[str, Any] | None,
             ) -> str:
                 action_id = context.get("requestedActionId")
+                observations = (
+                    [{**observation, "actionId": action_id}]
+                    if observation
+                    else [item for item in loop_state if action_id and item.get("actionId") == action_id]
+                )
                 return json.dumps({
                     "status": completion.get("status") or "completed",
                     "observations": [
@@ -215,11 +235,29 @@ class NativeRuntimeTurn:
                             item, project_context_active=self._project_context_active,
                             retained_tool_definitions=retained,
                         )
-                        for item in loop_state if item.get("actionId") == action_id or item is observation
+                        for item in observations
                     ],
                     "actionId": action_id or "",
                 }, ensure_ascii=False)
 
+            if late_approval:
+                # The old assistant proposal has already been closed for wire
+                # ordering. Deliver its terminal evidence against current human
+                # history without reissuing the original tool call or its queue.
+                state.begin_native_turn(
+                    session_id, binding=binding, turn_id=turn_id,
+                    message="Earlier approval result: " + json.dumps({
+                        "approvalId": late_approval_id,
+                        "toolCallId": call_id,
+                        **json.loads(result_content(
+                            continuation_context, continuation_completion, continuation_observation,
+                        )),
+                    }, ensure_ascii=False),
+                    input_source=RuntimeInputSource.RUNTIME, input_id=client_turn_id,
+                )
+                return
+            if not pending_ids and subagent_batch is None:
+                raise ValueError("Native continuation has already been settled.")
             if subagent_batch is not None:
                 receipts = {}
                 for member in subagent_batch:
@@ -236,8 +274,14 @@ class NativeRuntimeTurn:
                 # later calls remain proposals in the immutable assistant receipt.
                 pending_calls = [call for item in restored["messages"]
                                  for call in item.get("tool_calls", []) if call["id"] in pending_ids]
-                active_id = pending_calls[0]["id"]
-                self._queued_calls = copy.deepcopy(pending_calls[1:])
+                active_id = continuation_context.get("_nativeCallId") or pending_calls[0]["id"]
+                if active_id not in pending_ids:
+                    raise ValueError("Native continuation call has already been settled.")
+                self.receipt_call_id = next(
+                    item["tool_calls"][0]["id"] for item in restored["messages"]
+                    if any(call["id"] == active_id for call in item.get("tool_calls", []))
+                )
+                self._queued_calls = copy.deepcopy([call for call in pending_calls if call["id"] != active_id])
                 admitted_names = continuation_context.get("_nativeAdmittedToolNames", [])
                 if not isinstance(admitted_names, list) or any(not isinstance(name, str) or not name for name in admitted_names):
                     raise ValueError("Invalid native receipt tool scope.")
@@ -383,24 +427,30 @@ class NativeRuntimeTurn:
     def has_pending_tool_calls(self, snapshot: dict[str, Any]) -> bool:
         return bool(self._state._native_pending(snapshot))
 
-    def compaction_projection(self, snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def handoff_tail(self, snapshot: dict[str, Any]) -> int:
+        return self._state.native_handoff_tail(snapshot)
+
+    def compaction_projection(self, snapshot: dict[str, Any], *, tail_from: int | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Read-only projection; installation still revalidates snapshot identity."""
-        return self._state.native_compaction_projection(snapshot)
+        return self._state.native_compaction_projection(snapshot, tail_from=tail_from)
 
     def replace_compacted_history(self, expected_snapshot: dict[str, Any], summary: str,
-                                 *, recovery: dict[str, Any] | None = None) -> None:
+                                 *, recovery: dict[str, Any] | None = None,
+                                 current_context: list[dict[str, Any]] | None = None,
+                                 tail_from: int | None = None) -> None:
         # Check Stop and compare-and-replace under the same existing state lock.
         with self._state.shared_state_lock:
             if self.cancelled():
                 raise ValueError("native compaction cancelled")
             compacted = self._state.replace_native_compacted_history(
                 self._session_id, binding=self._binding,
-                expected_snapshot=expected_snapshot, summary=summary, recovery=recovery,
+                expected_snapshot=expected_snapshot, summary=summary, recovery=recovery, current_context=current_context, tail_from=tail_from,
             )
             if self.steer_attachments:
                 retained_indices = (
                     index for index in human_indices(expected_snapshot)
-                    if human_user_projection(expected_snapshot["messages"][index]) is not None
+                    if (index in self._state._native_handoff_indices(expected_snapshot, tail_from) if tail_from is not None
+                        else human_user_projection(expected_snapshot["messages"][index]) is not None)
                 )
                 self.steer_attachments = {
                     new_index: self.steer_attachments[old_index]
@@ -420,6 +470,8 @@ class NativeRuntimeTurn:
         if receipt.get("tool_calls"):
             self._state.mark_native_dispatch(self._session_id, binding=self._binding, call_id="")
         self._queued_calls = copy.deepcopy(receipt.get("tool_calls") or [])
+        self.receipt_call_id = self._queued_calls[0]["id"] if self._queued_calls else ""
+        self._queued_failure_scopes.clear()
         public_content = receipt.get("content")
         self._queued_public_content = public_content if isinstance(public_content, str) else None
         self._queued_public_messages = public_assistant_messages(receipt)
@@ -438,6 +490,11 @@ class NativeRuntimeTurn:
     @property
     def has_queued_calls(self) -> bool:
         return bool(self._queued_calls)
+
+    @property
+    def active_call_id(self) -> str:
+        ids = self._native_decision["ids"] if self._native_decision else []
+        return ids[0] if len(ids) == 1 else ""
 
     def next_receipt(self) -> dict[str, Any]:
         if self._native_decision is not None or not self._queued_calls:
@@ -468,11 +525,31 @@ class NativeRuntimeTurn:
         self._native_decision = {"ids": [call["id"] for call in self._queued_calls], "cursor": len(self._loop_state)}
         self._queued_calls.clear()
 
-    def _settle_unexecuted(self, reason: str) -> None:
+    def classify_queued_calls(self, tools) -> None:
         for call in self._queued_calls:
+            if call["id"] not in self._queued_failure_scopes:
+                self._queued_failure_scopes[call["id"]] = self._planner.queued_call_failure_scope(call, tools)
+
+    def prepare_admitted_batch(self, tools) -> None:
+        self.classify_queued_calls(tools)
+        scopes = self._queued_failure_scopes.values()
+        if all(scope == "delegation" for scope in scopes):
+            self.subagent_batch_call_ids = tuple(call["id"] for call in self._queued_calls)
+        elif "validation" in scopes:
+            self._settle_unexecuted(
+                "batch_contains_invalid_call",
+                keep_scopes=("validation", "discovery", "delegation", "local_read", "project_read"),
+            )
+
+    def _settle_unexecuted(self, reason: str, *, keep_scopes: tuple[str, ...] = ()) -> None:
+        remaining = []
+        for call in self._queued_calls:
+            if self._queued_failure_scopes.get(call["id"]) in keep_scopes:
+                remaining.append(call)
+                continue
             self._state.settle_native_call(self._session_id, binding=self._binding, call_id=call["id"],
                 content=json.dumps({"status": "not_executed", "reason": reason, "observations": []}))
-        self._queued_calls.clear()
+        self._queued_calls = remaining
 
     def settle(self, terminal: Mapping[str, Any] | None = None, *, flush_steers: bool = True) -> None:
         """Settle native calls only after all canonical observations are final."""
@@ -598,16 +675,23 @@ class NativeRuntimeTurn:
                     ),
                 )
             self._native_decision = None
-            # A receipt is a serial proposal, not permission to run its remaining
-            # side effects after a predecessor fails. Return every cancelled ID
-            # before asking the model to decide what to do with the new evidence.
             if any(
                 str((item.get("outcome") or {}).get("status") or item.get("status") or "")
                 in {"failed", "denied", "rejected", "cancelled", "not_executed", "needs_user_action"}
                 for item in observations if isinstance(item, Mapping)
                 and isinstance(item.get("outcome", {}), Mapping)
             ):
-                self._settle_unexecuted("predecessor_not_successful")
+                # Known reads can proceed after a bad proposal. After a tool
+                # failed during execution, keep project-bound work fenced.
+                admission_error = any(
+                    isinstance(item.get("result"), Mapping)
+                    and item["result"].get("code") == "planner_invalid_response"
+                    for item in observations if isinstance(item, Mapping)
+                )
+                keep_scopes = ("validation", "delegation", "local_read")
+                if admission_error:
+                    keep_scopes += ("discovery", "project_read")
+                self._settle_unexecuted("predecessor_not_successful", keep_scopes=keep_scopes)
         if terminal is not None:
             self._settle_unexecuted(str(terminal.get("nextStep") or "terminal"))
             self._append_terminal_runtime_notice(terminal)
@@ -726,8 +810,8 @@ class NativeRuntimeTurn:
             if snapshot is not None:
                 seed["_nativeConversation"] = snapshot
                 seed["_nativeAdmittedToolNames"] = sorted(self.admitted_tool_names or ())
-                if self._native_decision and len(self._native_decision["ids"]) == 1:
-                    seed["_nativeCallId"] = self._native_decision["ids"][0]
+                if call_id := self.active_call_id:
+                    seed["_nativeCallId"] = call_id
         return seed
 
     def messages(self) -> list[dict[str, Any]]:

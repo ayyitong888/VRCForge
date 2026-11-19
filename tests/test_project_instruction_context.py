@@ -9,12 +9,27 @@ from project_instruction_context import (
 
 
 def test_loads_only_bounded_root_agents_file(tmp_path) -> None:
-    (tmp_path / "AGENTS.md").write_text("- Inspect before editing.\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_bytes(b"- Inspect before editing.\n")
 
     snapshot = load_project_instructions(tmp_path)
 
     assert snapshot.status == "loaded"
-    assert snapshot.content == "- Inspect before editing."
+    assert snapshot.content == "- Inspect before editing.\n"
+
+
+def test_agents_source_and_prompt_preserve_bom_crlf_and_surrounding_whitespace(tmp_path):
+    from agent_gateway import AgentGateway
+
+    original = "\ufeff\r\n  AGENTS 中文 🐾  \r\n\r\n".encode("utf-8")
+    (tmp_path / "AGENTS.md").write_bytes(original)
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    for content, tag, render in (
+        (load_project_instructions(tmp_path).content, "project_instructions", project_instruction_prompt_block),
+        (gateway.read_user_constraints().content, "global_user_instructions", global_instruction_prompt_block),
+    ):
+        assert content.encode("utf-8") == original
+        body = render(content).split(f"<{tag}>\n", 1)[1].rsplit(f"\n</{tag}>", 1)[0]
+        assert body.encode("utf-8") == original
 
 
 def test_missing_invalid_and_oversized_project_instructions_fail_closed(tmp_path) -> None:
@@ -42,7 +57,7 @@ def test_prompt_block_keeps_project_rules_below_runtime_and_current_user_intent(
 
 def test_loaded_instruction_tail_reaches_prompt_without_the_old_32000_char_cut(tmp_path) -> None:
     content = "A" * 31_990 + "\nTAIL_RULE_MUST_REACH_THE_MODEL"
-    (tmp_path / "AGENTS.md").write_text(content, encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_bytes(content.encode("utf-8"))
 
     snapshot = load_project_instructions(tmp_path)
     block = project_instruction_prompt_block(snapshot.content)

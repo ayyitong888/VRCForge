@@ -342,12 +342,23 @@ def canonical_result_facts(
     elif commit_state:
         facts["commitStateKnown"] = commit_state != "unknown"
 
-    raw_safe_to_retry = _first_present(expanded_sources, "safeToRetry")
+    raw_safe_to_retry = _first_bool(expanded_sources, "safeToRetry")
+    retryable = facts.get("retryable")
     if isinstance(raw_safe_to_retry, bool):
-        facts["safeToRetry"] = raw_safe_to_retry
+        retryable = raw_safe_to_retry and retryable is not False
+    if commit_state == "unknown" or (
+        failed and write and (
+            commit_state in {"partial", "complete"}
+            or any(facts.get(key) is True for key in (
+                "committed", "recoveryRequired", "checkpointRecoveryRequired", "temporaryCleanupRequired",
+            ))
+        )
+    ):
+        retryable = False
+    if isinstance(retryable, bool):
+        facts["retryable"] = facts["safeToRetry"] = retryable
     if commit_state == "unknown":
         facts["commitStateKnown"] = False
-        facts["safeToRetry"] = False
         # A completed job (for example a non-saving AssetDatabase refresh)
         # need not establish asset persistence. Do not invent recovery work
         # from that missing fact; explicit recovery instructions stay intact.
@@ -880,9 +891,15 @@ def build_external_tool_error(
         "commitStateKnown": resolved_commit_state != "unknown",
     }
     if isinstance(resolved_retryable, bool):
-        resolved_contract_source["safeToRetry"] = (
-            False if resolved_commit_state == "unknown" else resolved_retryable
-        )
+        resolved_contract_source["retryable"] = resolved_retryable
+    source_safe_to_retry = _first_bool(sources, "safeToRetry")
+    if isinstance(source_safe_to_retry, bool):
+        resolved_contract_source["safeToRetry"] = source_safe_to_retry
+    for key in ("checkpointRecoveryRequired", "temporaryCleanupRequired"):
+        if isinstance(result[key], bool):
+            resolved_contract_source[key] = result[key]
+    if _first_bool(sources, "recoveryRequired") is True:
+        resolved_contract_source["recoveryRequired"] = True
     # Facts explicitly known by this boundary (for example
     # write_preparation/before_write_handler) participate in the same cause
     # ordering as nested payloads. This prevents an exception's generic
@@ -897,13 +914,14 @@ def build_external_tool_error(
         [resolved_contract_source],
         success=False,
         status="failed",
-        write=True,
+        write=operation_kind.casefold() == "write",
     )
     for key in (
         "mutationStarted",
         "committed",
         "commitState",
         "commitStateKnown",
+        "retryable",
         "safeToRetry",
         "persistenceState",
         "readbackState",
@@ -916,6 +934,8 @@ def build_external_tool_error(
         shared_facts.setdefault("nextAction", resolved_write_facts.get("nextAction"))
         shared_facts.setdefault("recovery", resolved_write_facts.get("recovery"))
     result.update(shared_facts)
+    if isinstance(result.get("error"), dict) and isinstance(result.get("retryable"), bool):
+        result["error"]["retryable"] = result["retryable"]
     # One structured cause is enough: rootCause duplicates failureCause
     # whenever both come from the same boundary source.
     if result.get("rootCause") == result.get("failureCause"):

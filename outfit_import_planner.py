@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from outfit_material_dependencies import installed_material_guids, prefab_material_references
 from outfit_package_inspector import inspect_outfit_package, is_single_fbx_folder
 
 
@@ -36,6 +37,7 @@ SUPPORT_PACKAGE_PATTERNS = [
     r"matetial[_ -]?pack",
     r"texture(?:s)?",
     r"\btex(?:ture)?[_ -]?pack\b",
+    r"tex[_ -]?mat",
     r"\bcommon[_ -]?material\b",
     r"\bfirst[_ -]?import\b",
     r"\bshader(?:s)?\b",
@@ -291,6 +293,7 @@ def build_outfit_import_plan(
         else None
     )
     effective_base_avatar_name = (base_avatar_name or "").strip() or infer_avatar_name_from_project(project_root)
+    package_cache: dict[tuple[str, str], dict[str, Any]] = {}
     package_order_preflight = build_package_order_preflight(
         inspection=inspection,
         source_path=source_path,
@@ -300,6 +303,8 @@ def build_outfit_import_plan(
         base_avatar_name=effective_base_avatar_name,
         explicit_selected_package=selected_package_for_queue,
         dependency_mode=dependency_mode,
+        selected_prefab_path=str((selected_prefab_entry or {}).get("path") or "") if explicit_selected_prefab else "",
+        package_cache=package_cache,
     )
     compatibility_preflight = build_avatar_compatibility_preflight(
         inspection=inspection,
@@ -343,6 +348,7 @@ def build_outfit_import_plan(
             warnings=warnings,
             dependency_preflight=dependency_preflight,
             selected_prefab_path=str((selected_prefab_entry or {}).get("path") or ""),
+            package_cache=package_cache,
         )
     elif selected_loose_entry or complete_texture_folder or single_fbx_folder:
         plan = build_loose_prefab_plan(
@@ -395,7 +401,7 @@ def build_outfit_import_plan(
         "dependencyPreflight": dependency_preflight,
         "plan": plan,
         "warnings": plan.get("warnings") or warnings,
-        "privacy": privacy_policy(),
+        "privacy": {**privacy_policy(), "readsPrefabMaterialReferences": True},
     }
 
 
@@ -410,6 +416,7 @@ def build_unitypackage_plan(
     warnings: list[str],
     dependency_preflight: dict[str, Any],
     selected_prefab_path: str = "",
+    package_cache: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     package_entry_path = str(selected_package.get("path") or "").replace("\\", "/").strip("/")
     actual_package_path = resolve_selected_unitypackage_path(source_path, source_type, package_entry_path)
@@ -433,7 +440,9 @@ def build_unitypackage_plan(
     expected_assets_complete = inspection_complete and bool(import_queue)
     expected_assets: list[str] = []
     for item in import_queue:
-        package = _inspection_for_import_queue_item(item, inspection, source_path)
+        package = (package_cache or {}).get(_package_cache_key(item, source_path))
+        if package is None:
+            package = _inspection_for_import_queue_item(item, inspection, source_path)
         paths = expected_asset_paths_from_package(package) if package else []
         complete = bool(
             package
@@ -444,6 +453,12 @@ def build_unitypackage_plan(
         item["expectedAssetPaths"] = paths
         item["expectedAssetPathsComplete"] = complete
         item["unsafePathnameCount"] = int(package.get("unsafePathnameCount") or 0) if package else 0
+        if package and package.get("scanLimit"):
+            item["scanLimit"] = package["scanLimit"]
+        container = item.get("containerPath")
+        item["owner"] = {"sourceName": Path(container).name if container else (
+            source_path.name if item.get("sourceType") == "folder" else item["path"]),
+                         "packagePath": item["path"]}
         expected_assets_complete = expected_assets_complete and complete
         expected_assets.extend(paths)
     expected_assets = sorted(dict.fromkeys(expected_assets), key=str.casefold)
@@ -457,9 +472,7 @@ def build_unitypackage_plan(
     )
     plan_warnings = list(warnings)
     if not inspection_complete:
-        plan_warnings.append(
-            "Package inspection evidence was truncated; increase max_entries and inspect the complete package before apply."
-        )
+        plan_warnings.append("Package inspection evidence was truncated; obtain a complete inspection before apply.")
     if nested_queue_present and not nested_size_verified:
         plan_warnings.append(
             "Nested UnityPackage sizes could not be verified from the ZIP central directory; inspect the source before applying."
@@ -949,6 +962,7 @@ def build_dependency_preflight(
         "entries": entries,
         "packageOrder": package_order_preflight,
         "compatibility": compatibility_preflight,
+        "materialAppearance": package_order_preflight.get("materialAppearance"),
         "warnings": warnings,
         "recommendedOrder": [
             "inspect_package_pathnames",
@@ -993,6 +1007,8 @@ def build_package_order_preflight(
     base_avatar_name: str | None = None,
     explicit_selected_package: bool = False,
     dependency_mode: str = "auto",
+    selected_prefab_path: str = "",
+    package_cache: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     source = inspection.get("source") if isinstance(inspection.get("source"), dict) else {}
     source_type = str(source.get("type") or "")
@@ -1002,8 +1018,6 @@ def build_package_order_preflight(
 
     selected_only = dependency_mode == "selected_only"
     if source_type == "unitypackage":
-        if not selected_only:
-            import_queue.extend(companion_support_queue(source_path))
         import_queue.append(import_queue_item(source_path.name, "direct", "target", "Selected UnityPackage.", actual_path=source_path, selected=True))
     elif source_type == "folder":
         for entry in inspection.get("unityPackages") or []:
@@ -1019,8 +1033,6 @@ def build_package_order_preflight(
         if explicit_selected_package and selected_rel:
             import_queue = [item for item in import_queue if item.get("selected") or (item.get("role") == "support" and not selected_only)]
     elif source_type == "zip":
-        if not selected_only:
-            import_queue.extend(companion_support_queue(source_path))
         for entry in inspection.get("unityPackages") or []:
             if not isinstance(entry, dict):
                 continue
@@ -1046,6 +1058,11 @@ def build_package_order_preflight(
 
     ordered, avatar_skipped = filter_queue_for_base_avatar(order_import_queue(import_queue), base_avatar_name)
     ordered, dependency_skipped = filter_installed_dependency_packages(ordered, project_root)
+    ordered, appearance = resolve_material_appearance(
+        ordered, inspection, source_path, project_root, selected_prefab_path,
+        search_siblings=not selected_only and source_type in {"unitypackage", "zip"},
+        package_cache=package_cache if package_cache is not None else {},
+    )
     for index, item in enumerate(ordered, start=1):
         item["order"] = index
     support_count = sum(1 for item in ordered if item.get("role") == "support")
@@ -1071,56 +1088,129 @@ def build_package_order_preflight(
         "supportPackageCount": support_count,
         "requiresManualExtract": source_type == "zip" and not ordered,
         "blockingBeforeImport": source_type == "zip" and not ordered,
+        "materialAppearance": appearance,
         "warnings": warnings,
     }
 
 
-def companion_support_queue(source_path: Path) -> list[dict[str, Any]]:
-    if not source_path.is_file():
-        return []
-    parent = source_path.parent
-    selected_key = source_path.resolve().as_posix().casefold()
-    items: list[dict[str, Any]] = []
+def resolve_material_appearance(
+    queue: list[dict[str, Any]], inspection: dict[str, Any], source: Path,
+    project: Path | None, selected_prefab_path: str, *, search_siblings: bool,
+    package_cache: dict[tuple[str, str], dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """An automatically discovered sibling needs a material GUID edge into the selected outfit."""
+    references: set[str] = set()
+    bundled_by_source: list[tuple[dict[str, Any], dict[str, str]]] = []
+    scanned_count = prefab_count = 0
+    manifest_complete = True
+    for item in queue:
+        package = _inspection_for_import_queue_item(item, inspection, source)
+        if package:
+            package_cache[_package_cache_key(item, source)] = package
+        manifest_complete = manifest_complete and bool(package and package.get("pathnamesEvidenceComplete"))
+        rows = package_pathname_evidence(package or {})
+        bundled_by_source.append((item, {row["assetGuid"]: row["path"] for row in rows if row.get("assetGuid")}))
+        prefabs = [row for row in rows if row.get("category") == "prefab"
+                   and (not selected_prefab_path or row.get("path") in {selected_prefab_path, selected_prefab_path.split("!/", 1)[-1]})]
+        prefab_count += len(prefabs)
+        found, scanned = prefab_material_references(item, source, {row["archiveGroup"] for row in prefabs if row.get("archiveGroup")})
+        references.update(found)
+        scanned_count += scanned
+
+    material_sources = []
+    bundled: set[str] = set()
+    for item, materials in bundled_by_source:
+        matched = materials.keys() & references
+        if matched:
+            bundled.update(matched)
+            material_sources.append(material_source_proof("bundled", item, source, materials, matched))
+    installed_paths = installed_material_guids(project, references - bundled)
+    installed = set(installed_paths)
+    if installed:
+        material_sources.append({"kind": "installed", "materialCount": len(installed),
+                                 "materialExamples": [{"guid": guid, "assetPath": installed_paths[guid]} for guid in sorted(installed)[:3]]})
+    remaining = references - bundled - installed
+    support, queued, search_status = (find_material_companions(source, remaining, package_cache)
+                                      if search_siblings and remaining else ([], set(), "not_needed" if not remaining else "selection_only"))
+    for item in support:
+        materials = {row["assetGuid"]: row["path"] for row in package_pathname_evidence(package_cache[_package_cache_key(item, source)])
+                     if row.get("assetGuid")}
+        material_sources.append(material_source_proof("companion", item, source, materials, set(item["suppliedMaterialGuids"])))
+    unresolved = references - bundled - installed - queued
+    if not manifest_complete or scanned_count < prefab_count:
+        appearance_status = "partial"
+    elif prefab_count == 0:
+        appearance_status = "not_applicable"
+    elif unresolved:
+        appearance_status = "unresolved" if project is not None else "project_unchecked"
+    elif queued:
+        appearance_status = "supplied_by_queue"
+    else:
+        appearance_status = "resolved"
+    return order_import_queue([*queue, *support]), {
+        "status": appearance_status,
+        "scope": "native material GUID references in scanned UnityPackage prefab YAML; installed .mat files under Assets",
+        "prefabCount": prefab_count,
+        "scannedPrefabCount": scanned_count,
+        "bundledMaterialCount": len(bundled),
+        "installedMaterialCount": len(installed),
+        "queuedMaterialCount": len(queued),
+        "unresolvedMaterialCount": len(unresolved),
+        "unresolvedMaterialGuids": sorted(unresolved),
+        "projectChecked": project is not None,
+        "companionSearchStatus": search_status,
+        "selectedPrefabPath": selected_prefab_path or None,
+        "materialSources": material_sources,
+    }
+
+
+def material_source_proof(kind: str, item: dict[str, Any], source: Path,
+                          assets: dict[str, str], guids: set[str]) -> dict[str, Any]:
+    return {"kind": kind, "sourceName": Path(item.get("containerPath") or item.get("actualPackagePath") or source).name,
+            "packagePath": item["path"], "materialCount": len(guids),
+            "materialExamples": [{"guid": guid, "assetPath": assets[guid]} for guid in sorted(guids)[:3]]}
+
+
+def _package_cache_key(item: dict[str, Any], source: Path) -> tuple[str, str]:
+    return str(item.get("actualPackagePath") or item.get("containerPath") or source), item["path"]
+
+
+def find_material_companions(
+    source: Path, wanted: set[str], package_cache: dict[tuple[str, str], dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str], str]:
+    """Use names only to prioritize work, then require an actual material GUID match."""
     try:
-        candidates = sorted(parent.iterdir(), key=lambda item: item.name.casefold())
+        candidates = sorted((item for item in source.parent.iterdir()
+            if item != source and not item.is_symlink() and item.suffix.lower() in IMPORTABLE_COMPANION_EXTENSIONS and item.is_file()),
+            key=lambda item: (classify_package_role(item.name) != "support", item.name.casefold()))
     except OSError:
-        return []
-    for candidate in candidates:
-        if not candidate.is_file() or candidate.resolve().as_posix().casefold() == selected_key:
-            continue
-        suffix = candidate.suffix.lower()
-        if suffix not in IMPORTABLE_COMPANION_EXTENSIONS:
-            continue
-        if classify_package_role(candidate.name) != "support":
-            continue
-        if suffix == ".unitypackage":
-            items.append(import_queue_item(candidate.name, "direct", "support", "Sibling support UnityPackage should be imported first.", actual_path=candidate))
-        elif suffix == ".zip":
-            nested = nested_unitypackage_entries(candidate)
-            if nested:
-                for rel_path in nested:
-                    role = classify_package_role(rel_path)
-                    items.append(
-                        import_queue_item(
-                            rel_path,
-                            "zip",
-                            "support" if role != "target" else role,
-                            "Sibling support ZIP contains UnityPackage files that should be imported first.",
-                            container_path=candidate,
-                        )
-                    )
-    return items[:20]
-
-
-def nested_unitypackage_entries(zip_path: Path) -> list[str]:
-    try:
-        import zipfile
-
-        with zipfile.ZipFile(zip_path) as archive:
-            names = [name.replace("\\", "/").strip("/") for name in archive.namelist() if name.lower().endswith(".unitypackage")]
-    except Exception:
-        return []
-    return sorted(dict.fromkeys(name for name in names if name), key=str.lower)
+        return [], set(), "partial"
+    kept: list[dict[str, Any]] = []
+    matched: set[str] = set()
+    complete = len(candidates) <= 20
+    for candidate in candidates[:20]:
+        inspected = inspect_outfit_package(candidate)
+        summary = inspected.get("summary") or {}
+        complete = complete and inspected.get("ok") is True and not (
+            summary.get("truncated") or summary.get("nestedPathnamesTruncated"))
+        for package in inspected.get("unityPackages") or []:
+            if package.get("pathnamesEvidenceComplete") is not True or package.get("unsafePathnameCount"):
+                complete = False
+                continue
+            supplied = {row["assetGuid"] for row in package_pathname_evidence(package) if row.get("assetGuid")} & (wanted - matched)
+            if not supplied:
+                continue
+            is_zip = candidate.suffix.lower() == ".zip"
+            item = import_queue_item(package["path"], "zip" if is_zip else "direct", "support",
+                                     "Provides verified material GUIDs used by the outfit prefab.",
+                                     container_path=candidate if is_zip else None, actual_path=None if is_zip else candidate)
+            item["suppliedMaterialGuids"] = sorted(supplied)
+            package_cache[_package_cache_key(item, source)] = package
+            kept.append(item)
+            matched.update(supplied)
+            if matched == wanted:
+                return kept, matched, "matched_all"
+    return kept, matched, "exhausted" if complete else "partial"
 
 
 def import_queue_item(
@@ -1440,7 +1530,8 @@ def build_post_import_outfit_validation(
 def infer_avatar_name_from_project(project_root: Path | None) -> str:
     if project_root is None:
         return ""
-    return canonical_avatar_name(project_root.name)
+    aliases = detect_avatar_aliases([project_root.name])
+    return next(iter(aliases)) if len(aliases) == 1 else ""
 
 
 def read_project_manifest_dependencies(project_root: Path | None) -> dict[str, Any]:

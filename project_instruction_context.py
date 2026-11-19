@@ -37,20 +37,19 @@ def load_project_instructions(project_root: object) -> ProjectInstructionSnapsho
         size = resolved.stat().st_size
         if size > MAX_PROJECT_INSTRUCTIONS_BYTES:
             return ProjectInstructionSnapshot(status="too_large")
-        content = resolved.read_bytes().decode("utf-8-sig").strip()
+        content = resolved.read_bytes().decode("utf-8")
     except FileNotFoundError:
         return ProjectInstructionSnapshot()
     except (OSError, RuntimeError, UnicodeError, ValueError):
         return ProjectInstructionSnapshot(status="unreadable")
-    return ProjectInstructionSnapshot(content=content, status="loaded" if content else "empty")
+    return ProjectInstructionSnapshot(content=content, status="loaded" if content.lstrip("\ufeff").strip() else "empty")
 
 
 def _instruction_prompt_block(content: str, *, preamble: str, tag: str) -> str:
     """Render the complete allowed instruction body while keeping its policy."""
-    normalized = str(content or "").strip()
-    if not normalized:
+    if not content:
         return ""
-    return f"{preamble}\n<{tag}>\n{normalized}\n</{tag}>"
+    return f"{preamble}\n<{tag}>\n{content}\n</{tag}>"
 
 
 def project_instruction_prompt_block(content: str) -> str:

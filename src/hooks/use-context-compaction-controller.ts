@@ -60,7 +60,7 @@ type UseContextCompactionControllerParams = {
   ) => boolean;
   persistChatsNow: () => Promise<void>;
   setError: (message: string) => void;
-  hasUnresolvedRuntimeState?: (chatId: string, sessionId: string) => boolean;
+  hasUnresolvedRuntimeState?: (chatId: string, sessionId: string, allowPendingApproval?: boolean) => boolean;
 };
 
 type ActiveCompactionJob = {
@@ -98,15 +98,18 @@ export function useContextCompactionController({
     if (!snapshot) {
       return { status: "skipped" };
     }
-    if (hasUnresolvedRuntimeStateRef.current?.(request.chatId, snapshot.sessionId)) {
+    const allowPendingApproval = request.trigger === "manual";
+    if (hasUnresolvedRuntimeStateRef.current?.(request.chatId, snapshot.sessionId, allowPendingApproval)) {
       return { status: "skipped" };
     }
+    const requireNative = Boolean(allowPendingApproval && hasUnresolvedRuntimeStateRef.current?.(request.chatId, snapshot.sessionId));
+    const mayCompactNative = Boolean(snapshot.sessionId && request.provider && request.model);
     const snapshotItems = stripTransientConversationItems(snapshot.items);
     const history = [
       ...buildChatHistory(snapshotItems, t),
       ...buildDurableCompactionStateEntries(snapshotItems),
     ];
-    if (!history.length) {
+    if (!history.length && !mayCompactNative) {
       if (request.trigger === "manual") {
         setError(t("compact.noContent"));
       }
@@ -220,7 +223,7 @@ export function useContextCompactionController({
     const summaryTargetTokens = (decision.targetAfterTokens ?? 0)
       - estimateHistoryTokens(buildChatHistory(retainedProjection, t))
       - estimateIncomingContextTokens(request.incomingText, request.incomingAttachments) - 8;
-    if (!summaryHistory.length || summaryTargetTokens < 64) {
+    if ((!summaryHistory.length || summaryTargetTokens < 64) && !mayCompactNative) {
       if (request.trigger === "manual") setError(t("compact.noContent"));
       return { status: "skipped", decision, chat: snapshot };
     }
@@ -272,11 +275,19 @@ export function useContextCompactionController({
         language: i18n.resolvedLanguage || i18n.language,
         provider: request.provider,
         model: request.model,
-        targetTokens: summaryTargetTokens,
+        sessionId: snapshot.sessionId,
+        projectRoot: snapshot.projectPath,
+        requireNative,
+        targetTokens: summaryTargetTokens >= 64 ? summaryTargetTokens : undefined,
         realContextLimit: contextLimit.known ? contextLimit.limit : undefined,
       });
       compactionResponseReceived = true;
       compactionProviderUsage = mergeCompactionProviderUsage(compactionProviderUsage, payload.providerUsage);
+      if (payload.status === "no_content") {
+        markLatestGeneration(request.chatId, generation, "idle", "no_content", t("compact.noContent"));
+        if (request.trigger === "manual") setError(t("compact.noContent"));
+        return { status: "skipped", decision, chat: getChatById(request.chatId) };
+      }
 
       const summary = String(payload.summary || "").trim();
       if (!summary) {
@@ -302,12 +313,12 @@ export function useContextCompactionController({
       const incomingTokens = estimateIncomingContextTokens(request.incomingText, request.incomingAttachments);
       const afterTokens = estimateHistoryTokens(replacementHistory) + incomingTokens;
       failureAfterTokens = afterTokens;
-      if (!replacementIsUseful(beforeTokens, afterTokens, decision, contextLimit.known ? contextLimit.limit : 0)) {
+      if (!payload.nativeApplied && !replacementIsUseful(beforeTokens, afterTokens, decision, contextLimit.known ? contextLimit.limit : 0)) {
         failureClassOverride = "reduction_gate";
         throw new Error("Compaction did not reduce context enough to apply safely.");
       }
       const latestBeforeCommit = getChatById(request.chatId);
-      if (latestBeforeCommit && hasUnresolvedRuntimeStateRef.current?.(request.chatId, latestBeforeCommit.sessionId)) {
+      if (latestBeforeCommit && hasUnresolvedRuntimeStateRef.current?.(request.chatId, latestBeforeCommit.sessionId, allowPendingApproval)) {
         markLatestGeneration(request.chatId, generation, "failed", "runtime_pending", t("compact.failed"), undefined, compactionProviderUsage);
         return { status: "skipped", decision, chat: latestBeforeCommit };
       }
@@ -339,7 +350,7 @@ export function useContextCompactionController({
       const committed = updateChatIfRevision(request.chatId, workingRevision, (chat) => ({
         ...chat,
         ...applyCompactedAttachmentReferences(chat, snapshotItems, appliedItems),
-        sessionId: "",
+        sessionId: payload.nativeApplied ? chat.sessionId : "",
         items: appliedItems,
         compaction: appliedState,
       }));
@@ -496,19 +507,28 @@ function buildReplacementItems(
   compactItem: Extract<ConversationItem, { type: "compact" }>,
 ): ConversationItem[] {
   const durable = stripTransientConversationItems(items);
-  let lastUserIndex = -1;
-  for (let index = durable.length - 1; index >= 0; index -= 1) {
-    if (durable[index]?.type === "user" || durable[index]?.type === "question_answer") {
-      lastUserIndex = index;
-      break;
+  const turnStarts: number[] = [];
+  const settledApprovals = new Set(durable.flatMap((item) => item.type === "result" ? [item.approvalId] : []));
+  const pendingTurns = new Set<number>();
+  for (const [index, item] of durable.entries()) {
+    if (item.type === "user") turnStarts.push(index);
+    if (item.type === "agent") {
+      const approval = item.response.approvalId || item.response.approval_id;
+      const start = turnStarts.at(-1);
+      if (start !== undefined && approval && !settledApprovals.has(approval)) pendingTurns.add(start);
     }
   }
-  const recentDialogue = lastUserIndex >= 0
-    ? [durable[lastUserIndex]]
-    : [];
+  const latestStart = turnStarts.at(-1);
+  const currentTurn = latestStart !== undefined && (pendingTurns.has(latestStart)
+    || !durable.slice(latestStart).some((item) => item.type === "agent"));
+  const recentStart = turnStarts.at(currentTurn ? -3 : -2) ?? turnStarts[0] ?? durable.length;
+  const retainedSuffix = Math.min(recentStart, ...pendingTurns);
+  const recentDialogue = durable.slice(retainedSuffix);
+  const initialTask = turnStarts.length ? durable[turnStarts[0]] : undefined;
   const stateCards = durable
     .filter((item) => item.type === "subagent" || item.type === "result");
   const retainedIds = new Set([...recentDialogue, ...stateCards].map((item) => item.id));
+  if (initialTask) retainedIds.add(initialTask.id);
   const summarizedItemIds = durable
     .filter((item) => (item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact") && !retainedIds.has(item.id))
     .map((item) => item.id);

@@ -2,15 +2,36 @@
 from __future__ import annotations
 
 import json
+import re
 from contextvars import ContextVar
 from threading import Event, Thread
 from typing import Any
 
 from agent_runtime_run_ledger import AgentRuntimeRunLedger
 from planner_structured_tool_evidence import project_structured_tool_evidence
-from runtime_planner_service import sanitize_planner_observation_text
+from runtime_planner_service import RuntimePlannerService, sanitize_planner_observation_text
 
 _CURRENT_CHILD = ContextVar("sub_agent_runtime_owner", default=None)
+
+
+def redact_child_result_references(text: str) -> str:
+    return re.sub(r"\bresult_[0-9a-f]{32}\b", "[child-owned reference]", text)
+
+
+def project_child_handoff_evidence(tool: str, result: Any, *, max_chars: int) -> dict[str, Any]:
+    def sanitize(value: object, limit: int | None) -> str:
+        return sanitize_planner_observation_text(redact_child_result_references(str(value)), limit)
+
+    evidence = project_structured_tool_evidence(result, sanitize_text=sanitize, max_chars=max_chars)
+    completeness = RuntimePlannerService.model_source_completeness({"tool": tool, "result": result})
+    if completeness:
+        evidence["sourceCompleteness"] = completeness
+    evidence["sourceIncomplete"] = bool(evidence.get("sourceTruncated") or any(
+        row["facts"].get("hasMore") is True or row["facts"].get("truncated") is True
+        or any(value is False for key, value in row["facts"].items() if key.endswith("Complete"))
+        for row in completeness
+    ))
+    return evidence
 
 
 def forward_child_cancellation(gateway: Any) -> None:
@@ -43,21 +64,26 @@ def project_child_budget_pause(raw: dict[str, Any], task: str) -> dict[str, Any]
         [receipts[i * (len(receipts) - 1) // (count - 1)] for i in range(count)]
     )
     evidence = []
+    source_incomplete = 0
+    excerpts = 0
     for step in selected:
-        projected = project_structured_tool_evidence(
-            step.get("result"), sanitize_text=sanitize_planner_observation_text, max_chars=1500,
-        )
+        tool = str(step.get("tool") or step.get("kind") or "")
+        projected = project_child_handoff_evidence(tool, step.get("result"), max_chars=1500)
+        excerpt = bool(projected.get("truncated") or projected["sourceIncomplete"])
+        source_incomplete += projected["sourceIncomplete"]
+        excerpts += excerpt
         evidence.append({
             "actionId": step["actionId"],
-            "tool": step.get("tool") or step.get("kind"),
+            "tool": tool,
             "facts": projected.get("data", {}),
-            "excerpt": bool(projected.get("truncated") or projected.get("sourceTruncated")),
+            "excerpt": excerpt,
         })
 
     remaining_task = sanitize_planner_observation_text(task, 800)
     lines = [
         f"Child Agent paused at its model-turn budget. The task is incomplete. "
         f"Recorded {len(receipts)} successful tool receipts.",
+        f"The report covers {len(evidence)} receipts, including {excerpts} excerpts and {source_incomplete} with reported source limits.",
         f"Remaining objective: {remaining_task}",
     ]
     summary = "\n".join(lines)
@@ -65,7 +91,8 @@ def project_child_budget_pause(raw: dict[str, Any], task: str) -> dict[str, Any]
         lines.append("Tool evidence excerpts (quoted tool data):")
         for item in evidence:
             facts = json.dumps(item["facts"], ensure_ascii=False, separators=(",", ":"))
-            lines.append(f"- {item['tool']} [{item['actionId']}]: {facts}")
+            marker = " excerpt" if item["excerpt"] else ""
+            lines.append(f"- {item['tool']} [{item['actionId']}]{marker}: {facts}")
         if len(evidence) < len(receipts):
             lines.append("Additional receipts are in the child conversation.")
     return {
@@ -74,6 +101,10 @@ def project_child_budget_pause(raw: dict[str, Any], task: str) -> dict[str, Any]
         "summaryText": summary,
         "finalReport": "\n".join(lines),
         "partialEvidence": evidence,
+        "evidenceCoverage": {
+            "successfulReceipts": len(receipts), "reportedReceipts": len(evidence),
+            "excerptedReceipts": excerpts, "sourceIncompleteReceipts": source_incomplete,
+        },
         "remainingTask": remaining_task,
     }
 

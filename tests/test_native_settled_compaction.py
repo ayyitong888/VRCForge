@@ -18,6 +18,11 @@ def settled_turn():
     for call_id in ["read-a", "read-b"]:
         state.settle_native_call("s", binding="b", call_id=call_id,
                                 content=json.dumps({"status": "ok", "data": "observed property " * 3000}))
+    for index in range(5):
+        call_id = f"recent-{index}"
+        state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": None,
+            "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "read", "arguments": "{}"}}]})
+        state.settle_native_call("s", binding="b", call_id=call_id, content='{"status":"ok"}')
     state.append_native_user("s", binding="b", message="Keep the original materials and report only.")
     return state, planner, model, turn, compactor
 
@@ -31,10 +36,10 @@ def test_single_turn_settled_multicall_compacts_and_keeps_all_user_instructions(
     assert len(compactor.calls) == 1
     projected = compactor.calls[0][0]
     transactions = [entry["text"] for entry in projected if "Historical tool transaction" in entry["text"]]
-    assert len(transactions) == 1 and all(call_id in transactions[0] for call_id in ["read-a", "read-b"])
+    assert len(transactions) == 3 and all(call_id in transactions[0] for call_id in ["read-a", "read-b"])
     assert "PRIVATE_CURRENT_REASONING" not in str(projected)
     assert [m for m in turn.messages() if m["role"] == "user"] == [m for m in before["messages"] if m["role"] == "user"]
-    assert not any(m["role"] == "tool" or m.get("tool_calls") for m in turn.messages())
+    assert [m["tool_call_id"] for m in turn.messages() if m["role"] == "tool"] == ["recent-2", "recent-3", "recent-4"]
     assert state._native_pending(turn.snapshot()) == set()
     assert turn.snapshot()["activeTurnStart"] == 1
     assert model.requests[-1]["messages"][-1]["role"] == "system"
@@ -53,8 +58,10 @@ def test_current_turn_waits_never_enter_compactor(status, tool, result):
     turn._loop_state.append({"status": status, "tool": tool, "result": result})
     turn.settle()
     before = deepcopy(turn.snapshot())
-    outcome = plan(planner, turn)
-    assert outcome["nextStep"] == "context_compaction_required"
+    from tests.test_native_model_handoff import _request
+    with planner.bind_turn({}):
+        _candidate, guard = planner.maybe_compact_native_context(_request(planner, before), turn, force=True)
+    assert guard["blocked"] is True
     assert turn.compaction["failureClass"] == "pending_tool_calls"
     assert turn.snapshot() == before and not compactor.calls and not model.requests
     assert state._native_pending(before) == {"waiting"}

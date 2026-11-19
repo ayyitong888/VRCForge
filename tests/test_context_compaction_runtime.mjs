@@ -105,19 +105,27 @@ const { buildChatHistory: actualBuildChatHistory } = await import(
   `data:text/javascript;base64,${Buffer.from(historyCompiled).toString("base64")}`,
 );
 
-function makeChat() {
+function makeChat(tiny = false) {
   return {
     id: "chat-1",
     sessionId: "session-old",
     revision: 0,
     title: "test",
     items: [
-      { id: "user-1", type: "user", text: "A long user request that should be compacted.", createdAt: "2026-01-01T00:00:00Z" },
-      { id: "agent-1", type: "agent", response: "A long assistant response that should be compacted.", timeline: [], createdAt: "2026-01-01T00:00:01Z" },
+      { id: "user-1", type: "user", text: "A long user request that starts the work.", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "agent-1", type: "agent", response: "A long assistant response that should be compacted.".repeat(tiny ? 1 : 16), timeline: [], createdAt: "2026-01-01T00:00:01Z" },
+      ...(tiny ? [] : [
+        { id: "user-recent-1", type: "user", text: "First recent request" },
+        { id: "agent-recent-1", type: "agent", response: "First recent answer ".repeat(12) },
+        { id: "user-recent-2", type: "user", text: "Second recent request" },
+        { id: "agent-recent-2", type: "agent", response: "Second recent answer" },
+      ]),
       { id: "user-2", type: "user", text: "Keep this newest user turn.", createdAt: "2026-01-01T00:00:02Z" },
     ],
   };
 }
+
+const rawIds = makeChat().items.map((item) => item.id);
 
 function makeHarness(chat, persistChatsNow) {
   let cursor = 0;
@@ -161,6 +169,52 @@ function request() {
   return { chatId: "chat-1", endpoint: "http://test", trigger: "manual", phase: "standalone", provider: "test", model: "test" };
 }
 
+test("manual native compaction keeps a pending approval on its original session and sends only complete older turns", async () => {
+  const chat = makeChat(true);
+  chat.projectPath = "D:/Fixture";
+  chat.items.push(
+    { id: "agent-2", type: "agent", response: "Historical completed response ".repeat(80) },
+    { id: "user-3", type: "user", text: "First recent complete turn" },
+    { id: "agent-3", type: "agent", response: "First recent complete answer" },
+    { id: "user-4", type: "user", text: "Second recent complete turn" },
+    { id: "agent-4", type: "agent", response: "Second recent complete answer" },
+    { id: "user-pending", type: "user", text: "Latest write requires approval" },
+    { id: "agent-pending", type: "agent", response: { approvalId: "pending-ref", plan: { reply: "Await approval" } } },
+  );
+  const exactTail = structuredClone(chat.items.slice(-6));
+  const harness = makeHarness(chat, async () => undefined);
+  harness.compactAgentHistoryState.promise = async (_endpoint, payload) => {
+    assert.equal(payload.sessionId, "session-old");
+    assert.equal(payload.requireNative, true);
+    assert.equal(payload.projectRoot, "D:/Fixture");
+    const sent = JSON.stringify(payload.history);
+    assert.match(sent, /Historical completed response/);
+    assert.doesNotMatch(sent, /First recent|Second recent|pending-ref|A long user request/);
+    return { nativeApplied: true, summary: "handoff", summaryDigest: "digest" };
+  };
+  const outcome = await harness.render((_chatId, _sessionId, allowPendingApproval) => !allowPendingApproval).compactChat(request());
+  assert.equal(outcome.status, "applied");
+  assert.equal(chat.sessionId, "session-old");
+  assert.deepEqual(chat.items.slice(-6), exactTail);
+  assert.deepEqual(chat.items.find(item => item.type === "compact").summarizedItemIds, ["agent-1", "user-2", "agent-2"]);
+});
+
+test("manual compaction checks the server when the owning session has no local history", async () => {
+  const chat = makeChat();
+  chat.items = [];
+  const harness = makeHarness(chat, async () => undefined);
+  harness.compactAgentHistoryState.promise = async (_endpoint, payload) => {
+    assert.equal(payload.sessionId, "session-old");
+    assert.deepEqual(payload.history, []);
+    return { ok: false, status: "no_content", summary: "" };
+  };
+  const result = await harness.render(() => false).compactChat(request());
+  assert.equal(result.status, "skipped");
+  assert.equal(harness.lastError, "compact.noContent");
+  assert.equal(chat.sessionId, "session-old");
+  assert.deepEqual(chat.items, []);
+});
+
 test("manual compact of a small conversation does not require saving ten percent of model capacity", async () => {
   const chat = makeChat();
   const harness = makeHarness(chat, async () => undefined);
@@ -173,7 +227,7 @@ test("manual compact of a small conversation does not require saving ten percent
   assert.ok(chat.compaction.afterTokens < chat.compaction.beforeTokens);
   assert.deepEqual(chat.compaction.providerUsage, { exact: true, inputTokens: 100, outputTokens: 10, totalTokens: 110 });
   assert.equal(chat.contextUsageCache, undefined);
-  assert.deepEqual(chat.items.filter(item => item.type !== "compact").map(item => item.id), ["user-1", "agent-1", "user-2"]);
+  assert.deepEqual(chat.items.filter(item => item.type !== "compact").map(item => item.id), rawIds);
 });
 
 test("manual compact preserves usage on every retained agent item", async () => {
@@ -183,6 +237,8 @@ test("manual compact preserves usage on every retained agent item", async () => 
   chat.items = [
     { id: "old-user", type: "user", text: "old history ".repeat(80), createdAt: "2026-10-14T02:20:00.000Z" },
     { id: "old-agent", type: "agent", response: "old answer ".repeat(80), timeline: [], createdAt: "2026-10-14T02:20:01.000Z" },
+    { id: "mid-user", type: "user", text: "Recent completed turn" },
+    { id: "mid-agent", type: "agent", response: "Recent completed answer" },
     { id: "current-user", type: "user", text: "keep this turn", createdAt: "2026-10-14T02:23:00.000Z" },
     { id: "agent-one", type: "agent", response: { plan: { reply: "one" }, contextUsage: firstUsage }, timeline: [], createdAt: "2026-10-14T02:23:01.000Z" },
     { id: "agent-two", type: "agent", response: { plan: { reply: "two" }, contextUsage: secondUsage }, timeline: [], createdAt: "2026-10-14T02:23:02.000Z" },
@@ -211,7 +267,7 @@ test("latest guard callback observed during compaction await prevents replacemen
   const outcome = await pending;
   assert.equal(outcome.status, "skipped");
   assert.equal(chat.sessionId, "session-old");
-  assert.deepEqual(chat.items.map((item) => item.id), ["user-1", "agent-1", "user-2"]);
+  assert.deepEqual(chat.items.map((item) => item.id), rawIds);
 });
 
 test("successful replacement clears session and persistence failure restores it", async () => {
@@ -223,10 +279,9 @@ test("successful replacement clears session and persistence failure restores it"
   const outcome = await controller.compactChat(request());
   assert.equal(outcome.status, "applied");
   assert.equal(chat.sessionId, "");
-  assert.deepEqual(chat.items.map((item) => item.id), ["compact-", "user-1", "agent-1", "user-2"].map((id) => id === "compact-" ? chat.items[0].id : id));
-  assert.deepEqual(chat.items[0].summarizedItemIds, ["user-1", "agent-1"]);
-  assert.equal(chat.items[1].text, "A long user request that should be compacted.");
-  assert.equal(chat.items[2].response, "A long assistant response that should be compacted.");
+  assert.deepEqual(chat.items.filter(item => item.type !== "compact").map(item => item.id), rawIds);
+  assert.deepEqual(chat.items.find(item => item.type === "compact").summarizedItemIds, ["agent-1"]);
+  assert.equal(chat.items[0].text, "A long user request that starts the work.");
   // A fresh completed turn supplies real material for the second summary;
   // an immediate re-summary of seven characters has no 64-token budget.
   chat.items.push(
@@ -235,11 +290,11 @@ test("successful replacement clears session and persistence failure restores it"
   );
   harness.compactAgentHistoryState.promise = async () => ({ summary: "s", summaryDigest: "digest-2", entryCount: 2,
     providerUsage: { exact: true, inputTokens: 50, outputTokens: 5, totalTokens: 55 } });
-  const second = await controller.compactChat(request());
+  const second = await controller.compactChat({ ...request(), contextLimit: 500000 });
   assert.equal(second.status, "applied");
   assert.deepEqual(chat.compaction.providerUsage, { exact: true, inputTokens: 150, outputTokens: 15, totalTokens: 165 });
   assert.equal(chat.items.filter((item) => item.type === "compact").length, 2);
-  assert.equal(chat.items.some((item) => item.type === "user" && item.text === "A long user request that should be compacted."), true);
+  assert.equal(chat.items.some((item) => item.type === "user" && item.text === "A long user request that starts the work."), true);
 
   const restoredChat = makeChat();
   const failingHarness = makeHarness(restoredChat, async () => { throw new Error("disk unavailable"); });
@@ -249,7 +304,7 @@ test("successful replacement clears session and persistence failure restores it"
   const failed = await failing.compactChat(request());
   assert.equal(failed.status, "failed");
   assert.equal(restoredChat.sessionId, "session-old");
-  assert.deepEqual(restoredChat.items.map((item) => item.id), ["user-1", "agent-1", "user-2"]);
+  assert.deepEqual(restoredChat.items.map((item) => item.id), rawIds);
   assert.equal(restoredChat.compaction.failureClass, "persistence");
   assert.deepEqual(restoredChat.compaction.providerUsage, { exact: true, inputTokens: 100, outputTokens: 10, totalTokens: 110 });
 });
@@ -264,7 +319,7 @@ test("empty compaction summary keeps an explicit failure class and original hist
   assert.equal(chat.compaction.failureClass, "empty_summary");
   assert.deepEqual(chat.compaction.providerUsage, { exact: true, inputTokens: 70, outputTokens: 4, totalTokens: 74 });
   assert.equal(chat.sessionId, "session-old");
-  assert.deepEqual(chat.items.map((item) => item.id), ["user-1", "agent-1", "user-2"]);
+  assert.deepEqual(chat.items.map((item) => item.id), rawIds);
 });
 
 test("missing compact usage stays unknown and does not synthesize zero tokens", async () => {
@@ -316,7 +371,7 @@ test("reduction rejection keeps an explicit stage, token evidence, and original 
   const chat = makeChat();
   const harness = makeHarness(chat, async () => undefined);
   harness.compactAgentHistoryState.promise = async () => ({
-    summary: "x".repeat(200),
+    summary: "x".repeat(2000),
     summaryDigest: "digest",
     entryCount: 2,
   });
@@ -327,7 +382,7 @@ test("reduction rejection keeps an explicit stage, token evidence, and original 
   assert.equal(typeof chat.compaction.afterTokens, "number");
   assert.ok(chat.compaction.afterTokens > chat.compaction.beforeTokens);
   assert.equal(chat.sessionId, "session-old");
-  assert.deepEqual(chat.items.map((item) => item.id), ["user-1", "agent-1", "user-2"]);
+  assert.deepEqual(chat.items.map((item) => item.id), rawIds);
 });
 
 test("actual conversation projection survives JSON reload and second compact without replaying old dialogue", async () => {
@@ -335,11 +390,11 @@ test("actual conversation projection survives JSON reload and second compact wit
   const harness = makeHarness(chat, async () => undefined);
   harness.compactAgentHistoryState.promise = async () => ({ summary: "summary", summaryDigest: "digest", entryCount: 2 });
   const controller = harness.render(() => false);
-  assert.equal((await controller.compactChat(request())).status, "applied");
+  assert.equal((await controller.compactChat({ ...request(), contextLimit: 500000 })).status, "applied");
   const firstRoundTrip = JSON.parse(JSON.stringify(chat.items));
-  assert.equal(firstRoundTrip.filter((item) => item.type === "user").length, 2);
+  assert.equal(firstRoundTrip.filter((item) => item.type === "user").length, 4);
   assert.deepEqual(actualBuildChatHistory(firstRoundTrip, (value) => value).map((entry) => entry.text), [
-    "summary", "Keep this newest user turn.",
+    "A long user request that starts the work.", "summary", "First recent request", "Second recent request", "Keep this newest user turn.",
   ]);
   // A fresh completed turn supplies real material for the second summary;
   // an immediate re-summary of seven characters has no 64-token budget.
@@ -348,11 +403,11 @@ test("actual conversation projection survives JSON reload and second compact wit
     { id: "user-new", type: "user", text: "Keep this newest user turn." },
   );
   harness.compactAgentHistoryState.promise = async () => ({ summary: "s", summaryDigest: "digest-2", entryCount: 2 });
-  assert.equal((await controller.compactChat(request())).status, "applied");
+  assert.equal((await controller.compactChat({ ...request(), contextLimit: 500000 })).status, "applied");
   const secondRoundTrip = JSON.parse(JSON.stringify(chat.items));
   assert.equal(secondRoundTrip.filter((item) => item.type === "user" && item.text.includes("long user request")).length, 1);
   assert.deepEqual(actualBuildChatHistory(secondRoundTrip, (value) => value).map((entry) => entry.text), [
-    "s", "Keep this newest user turn.",
+    "A long user request that starts the work.", "s", "Second recent request", "Keep this newest user turn.", "Keep this newest user turn.",
   ]);
 });
 
@@ -368,5 +423,5 @@ test("late abort after compactor response prevents the commit", async () => {
   const outcome = await controller.compactChat({ ...request(), signal: abort.signal });
   assert.equal(outcome.status, "cancelled");
   assert.equal(chat.sessionId, "session-old");
-  assert.deepEqual(chat.items.map((item) => item.id), ["user-1", "agent-1", "user-2"]);
+  assert.deepEqual(chat.items.map((item) => item.id), rawIds);
 });

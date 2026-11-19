@@ -43,6 +43,22 @@ def unitypackage_bytes(*path_payloads: tuple[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
+def material_fixture_package(asset_path: str, guid: str, payload: bytes) -> bytes:
+    import io
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        write_tar_member(archive, f"{guid}/asset", payload)
+        write_tar_member(archive, f"{guid}/pathname", asset_path.encode())
+        write_tar_member(archive, f"{guid}/asset.meta", f"guid: {guid}\n".encode())
+    return buffer.getvalue()
+
+
+def prefab_fixture_package(asset_path: str, material_guid: str) -> bytes:
+    prefab = ("%YAML 1.1\nMeshRenderer:\n  m_Materials:\n"
+              f"  - {{fileID: 2100000, guid: {material_guid}, type: 2}}\n").encode()
+    return material_fixture_package(asset_path, "c" * 32, prefab)
+
+
 def make_liltoon_hint_unitypackage(path: Path) -> None:
     with tarfile.open(path, mode="w:gz") as archive:
         write_tar_member(archive, "0001/pathname", b"Assets/Outfits/lilToon_Dress.prefab")
@@ -514,18 +530,19 @@ def test_zip_container_queues_sibling_material_zip_first(tmp_path: Path) -> None
     project = tmp_path / "milltina"
     make_project(project)
     package = tmp_path / "Dress_Milltina.zip"
-    material_zip = tmp_path / "Dress_MaterialPack.zip"
+    material_zip = tmp_path / "Extras.zip"
+    material_guid = "a" * 32
     with zipfile.ZipFile(package, mode="w") as archive:
-        archive.writestr("Dress_Milltina.unitypackage", unitypackage_bytes(("Assets/Dress.prefab", b"SECRET_DRESS_PACKAGE")))
+        archive.writestr("Dress_Milltina.unitypackage", prefab_fixture_package("Assets/Dress.prefab", material_guid))
     with zipfile.ZipFile(material_zip, mode="w") as archive:
-        archive.writestr("Dress_MaterialPack.unitypackage", unitypackage_bytes(("Assets/Materials/Dress.mat", b"SECRET_MATERIAL_PACKAGE")))
+        archive.writestr("Dress_MaterialPack.unitypackage", material_fixture_package("Assets/Materials/Dress.mat", material_guid, b"SECRET_MATERIAL_PACKAGE"))
 
     result = build_outfit_import_plan(package, project_path=project, base_avatar_name="Milltina")
     queue = result["plan"]["source"]["importQueue"]
 
     assert result["plan"]["kind"] == "unitypackage_import_sequence"
     assert [item["role"] for item in queue] == ["support", "target"]
-    assert queue[0]["containerPath"].endswith("Dress_MaterialPack.zip")
+    assert queue[0]["containerPath"].endswith("Extras.zip")
     assert queue[0]["path"] == "Dress_MaterialPack.unitypackage"
     assert queue[0]["expectedAssetPaths"] == ["Assets/Materials/Dress.mat"]
     assert queue[0]["expectedAssetPathsComplete"] is True
@@ -538,10 +555,8 @@ def test_shader_unitypackage_inside_support_zip_is_support_role(tmp_path: Path) 
     project = tmp_path / "milltina"
     make_project(project)
     package = tmp_path / "Dress_Milltina.zip"
-    material_zip = tmp_path / "Dress_MaterialPack.zip"
     with zipfile.ZipFile(package, mode="w") as archive:
         archive.writestr("Dress_Milltina.unitypackage", unitypackage_bytes(("Assets/Dress.prefab", b"SECRET_DRESS_PACKAGE")))
-    with zipfile.ZipFile(material_zip, mode="w") as archive:
         archive.writestr("lilToon_1.7.3.unitypackage", unitypackage_bytes(("Assets/lilToon/Shader.shader", b"SECRET_SHADER_PACKAGE")))
         archive.writestr("Dress_Textures.unitypackage", unitypackage_bytes(("Assets/Materials/Body.mat", b"SECRET_MATERIAL_PACKAGE")))
 
@@ -557,12 +572,10 @@ def test_installed_shader_dependency_support_package_is_skipped_from_zip_queue(t
     make_project(project)
     (project / "Packages" / "jp.lilxyzw.liltoon").mkdir()
     package = tmp_path / "Milltina_Slingshot_Swimsuit.zip"
-    material_zip = tmp_path / "Slingshot_Material_and_textures.zip"
     with zipfile.ZipFile(package, mode="w") as archive:
         archive.writestr("Milltina Slingshot Swimsuit.unitypackage", unitypackage_bytes(("Assets/Dress.prefab", b"SECRET_DRESS_PACKAGE")))
-    with zipfile.ZipFile(material_zip, mode="w") as archive:
-        archive.writestr("lilToon_1.7.3.unitypackage", unitypackage_bytes(("Assets/lilToon/Shader.shader", b"SECRET_SHADER_PACKAGE")))
         archive.writestr("Slingshot textures.unitypackage", unitypackage_bytes(("Assets/Textures/Body.png", b"SECRET_MATERIAL_PACKAGE")))
+        archive.writestr("lilToon_1.7.3.unitypackage", unitypackage_bytes(("Assets/lilToon/Shader.shader", b"SECRET_SHADER_PACKAGE")))
 
     result = build_outfit_import_plan(package, project_path=project, base_avatar_name="Milltina")
     package_order = result["dependencyPreflight"]["packageOrder"]
@@ -586,8 +599,9 @@ def test_sibling_material_package_is_queued_before_direct_outfit(tmp_path: Path)
     make_project(project)
     package = tmp_path / "Dress_Milltina.unitypackage"
     material_package = tmp_path / "Dress_Materials.unitypackage"
-    make_unitypackage(package)
-    make_unitypackage(material_package)
+    material_guid = "a" * 32
+    package.write_bytes(prefab_fixture_package("Assets/Outfits/Dress.prefab", material_guid))
+    material_package.write_bytes(material_fixture_package("Assets/Outfits/Dress.mat", material_guid, b"material"))
 
     result = build_outfit_import_plan(package, project_path=project, base_avatar_name="Milltina")
     queue = result["plan"]["source"]["importQueue"]
@@ -596,9 +610,10 @@ def test_sibling_material_package_is_queued_before_direct_outfit(tmp_path: Path)
     assert result["plan"]["readyToApply"] is True
     assert [Path(item.get("actualPackagePath", "")).name for item in queue] == ["Dress_Materials.unitypackage", "Dress_Milltina.unitypackage"]
     assert [item["expectedAssetPaths"] for item in queue] == [
-        ["Assets/Outfits/Dress.prefab", "Assets/Outfits/Textures/body.png"],
-        ["Assets/Outfits/Dress.prefab", "Assets/Outfits/Textures/body.png"],
+        ["Assets/Outfits/Dress.mat"],
+        ["Assets/Outfits/Dress.prefab"],
     ]
+    assert result["dependencyPreflight"]["materialAppearance"]["queuedMaterialCount"] == 1
 
 
 def test_selected_only_direct_package_excludes_filename_heuristic_sibling(tmp_path: Path) -> None:
@@ -619,6 +634,32 @@ def test_selected_only_direct_package_excludes_filename_heuristic_sibling(tmp_pa
     queue = result["plan"]["source"]["importQueue"]
     assert [Path(item["actualPackagePath"]).name for item in queue] == ["Dress_Milltina.unitypackage"]
     assert result["dependencyPreflight"]["packageOrder"]["supportPackageCount"] == 0
+
+
+def test_material_references_keep_appearance_separate_from_import_eligibility(tmp_path: Path) -> None:
+    project = tmp_path / "Milltina"
+    make_project(project)
+    main = tmp_path / "Dress_Milltina.unitypackage"
+    support = tmp_path / "Unrelated_Materials.unitypackage"
+    material_guid = "a" * 32
+    unrelated_guid = "b" * 32
+    main.write_bytes(prefab_fixture_package("Assets/Dress.prefab", material_guid))
+    support.write_bytes(material_fixture_package("Assets/Unrelated.mat", unrelated_guid, b"material"))
+
+    result = build_outfit_import_plan(main, project_path=project)
+    assert result["plan"]["readyToApply"] is True
+    assert [item["path"] for item in result["plan"]["source"]["importQueue"]] == [main.name]
+    appearance = result["dependencyPreflight"]["materialAppearance"]
+    assert appearance["status"] == "unresolved"
+    assert appearance["unresolvedMaterialGuids"] == [material_guid]
+
+    (project / "Assets" / "Dress.mat").write_bytes(b"material")
+    (project / "Assets" / "Dress.mat.meta").write_text(f"guid: {material_guid}\n")
+    result = build_outfit_import_plan(main, project_path=project)
+    assert result["plan"]["readyToApply"] is True
+    appearance = result["dependencyPreflight"]["materialAppearance"]
+    assert appearance["status"] == "resolved"
+    assert appearance["installedMaterialCount"] == 1
 
 
 def test_selected_only_folder_requires_explicit_or_unique_package(tmp_path: Path) -> None:
@@ -714,6 +755,25 @@ def test_avatar_compatibility_mismatch_blocks_import_request(tmp_path: Path) -> 
     assert result["plan"]["writeTarget"] == ""
     assert compatibility["status"] == "mismatch"
     assert compatibility["blockingBeforeImport"] is True
+
+
+def test_unknown_project_folder_name_does_not_assert_avatar_mismatch(tmp_path: Path) -> None:
+    package = tmp_path / "Dress_Milltina.unitypackage"
+    make_unitypackage(package)
+    project = tmp_path / "test"
+    make_project(project)
+
+    preview = build_outfit_import_plan(package, project_path=project)
+    assert preview["plan"]["readyToApply"] is True
+    assert preview["plan"]["baseAvatarName"] == ""
+    assert preview["plan"]["requiresApproval"] is True
+    assert preview["dependencyPreflight"]["compatibility"]["status"] == "needs_confirmation"
+
+    known_project = tmp_path / "Manuka-Workshop"
+    make_project(known_project)
+    preview = build_outfit_import_plan(package, project_path=known_project)
+    assert preview["plan"]["readyToApply"] is False
+    assert preview["dependencyPreflight"]["compatibility"]["status"] == "mismatch"
 
 
 def test_avatar_compatibility_does_not_match_short_alias_inside_words(tmp_path: Path) -> None:
